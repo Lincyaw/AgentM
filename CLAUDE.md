@@ -9,7 +9,7 @@ AgentM is an agent framework written in Python. It is in early development (v0.1
 ## Language Rules
 
 - All code, comments, commit messages, design documents, and file content: **English**
-- Communication with the user (conversation, explanations, questions): **English**
+- Communication with the user (conversation, explanations, questions): **Chinese**
 
 ## Current Phase: Architecture Design
 
