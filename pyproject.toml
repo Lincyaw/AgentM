@@ -3,9 +3,7 @@ name = "agentm"
 version = "0.1.0"
 description = "AgentM - an agent framework"
 readme = "README.md"
-authors = [
-    { name = "copilot-swe-agent[bot]", email = "198982749+Copilot@users.noreply.github.com" }
-]
+authors = [{ name = "Aoyang Fang", email = "aoyangfang@gmail.com" }]
 requires-python = ">=3.12"
 dependencies = []
 
