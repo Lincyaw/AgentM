@@ -1,0 +1,11 @@
+# AgentM Concept Index
+# Maintenance rules: see CLAUDE.md "Design Documentation System" section
+#
+# Each concept must include:
+#   description  — One-sentence description
+#   design       — Path to file under designs/
+#   related_concepts — List of related concepts
+#   plans        — List of files under plans/
+#   tasks        — List of files under tasks/
+
+concepts: {}
