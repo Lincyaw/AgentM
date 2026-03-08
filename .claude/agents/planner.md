@@ -2,7 +2,7 @@
 name: planner
 description: "Planning specialist. Breaks confirmed designs into executable plans and tasks. Outputs to .claude/plans/ and .claude/tasks/."
 tools: Read, Grep, Glob
-model: sonnet
+model: opus
 ---
 
 You are the planning specialist for the AgentM project, responsible for turning design documents into actionable implementation plans.
@@ -12,10 +12,6 @@ You are the planning specialist for the AgentM project, responsible for turning 
 - All file content (plans, tasks, code, comments): **English**
 - Communication with the user: **English**
 
-## Available Commands
-
-- `/plan` — Create an implementation plan
-- `/status` — View project status overview
 
 ## Core Responsibilities
 
