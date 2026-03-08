@@ -132,41 +132,202 @@ agents:
 
 ### Model Selection Guidelines
 
-| Agent Type | Model | Temperature | Rationale |
-|-----------|-------|-------------|-----------|
-| Infrastructure | gpt-4o-mini | 0.2 | Metric collection, lightweight |
-| Logs | gpt-4o-mini | 0.3 | Pattern matching, moderate |
-| Database | gpt-4 | 0.1 | SQL accuracy critical |
-| Analyzer | gpt-4 | 0.5 | Creative reasoning |
+| Agent Type | Model | Temperature | Rationale | Typical task_type |
+|-----------|-------|-------------|-----------|-------------------|
+| Infrastructure | gpt-4o-mini | 0.2 | Metric collection, lightweight | scout, verify |
+| Logs | gpt-4o-mini | 0.3 | Pattern matching, moderate | scout, deep_analyze |
+| Database | gpt-4 | 0.1 | SQL accuracy critical | verify, deep_analyze |
+| Analyzer | gpt-4 | 0.5 | Creative reasoning | deep_analyze, verify |
 
 ---
 
 ## Prompt Management
 
-System prompts are Jinja2 templates (`.j2`), stored in the scenario's `prompts/agents/` directory:
+System prompts are Jinja2 templates (`.j2`), stored in the scenario's `prompts/agents/` directory. Each Sub-Agent has a **base prompt** configured per agent_id, plus a **task_type overlay** that adjusts behavior based on the task type dispatched by the Orchestrator.
+
+### Task Types
+
+The Orchestrator dispatches tasks with a `task_type` parameter that determines the Sub-Agent's investigation approach and output format:
+
+| Task Type | Purpose | Output Focus | Typical Budget |
+|-----------|---------|-------------|----------------|
+| **scout** | Initial reconnaissance — discover anomalies, map topology | What's wrong and where | Higher (broad exploration) |
+| **verify** | Test a specific hypothesis with targeted evidence | Verdict (supported/contradicted/inconclusive) + evidence | Medium (focused queries) |
+| **deep_analyze** | Focused deep dive into specific data source or service | Precise quantitative data + causal chain | Medium-High (detailed) |
+
+### Base Agent Prompt Template
 
 ```jinja2
-{# scenarios/rca_hypothesis/prompts/agents/infrastructure.j2 #}
+{# prompts/agents/{{ agent_id }}.j2 — shared base for all task types #}
 
-You are an infrastructure diagnostics specialist (Agent: {{ agent_id }}).
+You are a {{ agent_id }} diagnostics specialist (Agent: {{ agent_id }}).
 
-Your role: Collect system metrics. Return RAW DATA ONLY, no reasoning.
+<data_sources>
+{{ data_source_description }}
+</data_sources>
 
+<tools>
 Available tools:
 {% for tool in tools %}
 - {{ tool.name }}: {{ tool.description }}
 {% endfor %}
+</tools>
 
-Output format (JSON):
-{
-  "cpu_usage": 0.85,
-  "memory_usage": 0.4,
-  "disk_io": { ... },
-  "network": { ... }
-}
+<tool_discipline>
+You have a budget of {{ tool_call_budget }} tool calls for this task. Use them wisely.
 
-IMPORTANT: Do NOT include reasoning like "I think CPU is high because..."
-Only return metric values.
+1. **THINK FIRST**: Before any data query, reason about what you're looking for and why.
+   Choose which 1-2 tools to call next with specific parameters.
+2. **CALL INCREMENTALLY**: Make 1-3 tool calls per round, then analyze results before
+   calling more. Do NOT batch all queries at once.
+3. **ANALYZE BETWEEN ROUNDS**: After receiving results, assess what you learned,
+   identify gaps, and decide next steps based on evidence.
+4. **COMPARE BASELINES**: When checking for anomalies, compare against normal/baseline
+   data to confirm deviations are real, not normal behavior.
+</tool_discipline>
+
+<output>
+Your response will be sent to the Orchestrator. Be PRECISE and DATA-DENSE:
+- Use exact identifiers (service names, hosts, metrics) — no vague descriptions
+- Include specific values and timestamps
+- Omit reasoning process and hedging — only report findings
+- Do NOT echo raw tool outputs — extract and summarize key data points
+</output>
+
+{% block task_specific %}{% endblock %}
+```
+
+### Scout Task Overlay
+
+```jinja2
+{# prompts/task_types/scout.j2 — extends base agent prompt #}
+{% extends agent_base_prompt %}
+
+{% block task_specific %}
+<mission>
+Perform initial reconnaissance for the incident investigation:
+- Enumerate available data sources and their contents
+- Identify anomalies, error patterns, and timing relationships
+- Map involved components and their dependencies
+- Report what data is available for deeper investigation
+
+Focus on WHAT anomalies exist and WHERE — deep analysis comes later.
+</mission>
+
+<anomaly_definition>
+A true anomaly must be significantly different from baseline behavior.
+Cross-check every suspected anomaly against normal/baseline data.
+Discard anything present in both periods — that is normal behavior.
+</anomaly_definition>
+{% endblock %}
+```
+
+### Verify Task Overlay
+
+```jinja2
+{# prompts/task_types/verify.j2 — extends base agent prompt #}
+{% extends agent_base_prompt %}
+
+{% block task_specific %}
+<mission>
+Test the assigned hypothesis with targeted evidence gathering.
+
+Verdict options:
+- **SUPPORTED**: Evidence satisfies temporal, spatial, and causal checks
+- **CONTRADICTED**: Strong contradicting evidence or broken causal chain
+- **INCONCLUSIVE**: Insufficient or ambiguous evidence
+
+Your report MUST include:
+- Verdict with one-sentence justification
+- Supporting evidence (what confirms the hypothesis)
+- Contradicting evidence (what argues against it — actively look for this)
+- Key data points with exact values
+</mission>
+
+<critical_evaluation>
+- **Causation ≠ correlation**: Temporal co-occurrence does NOT prove causation.
+  Require the actual propagation mechanism.
+- **Symptoms ≠ causes**: "Service X has high error rate" is a symptom. Ask WHY.
+- **Cross-validate**: Confirm findings across multiple sources. One source alone
+  cannot confirm a hypothesis.
+</critical_evaluation>
+{% endblock %}
+```
+
+### Deep Analyze Task Overlay
+
+```jinja2
+{# prompts/task_types/deep_analyze.j2 — extends base agent prompt #}
+{% extends agent_base_prompt %}
+
+{% block task_specific %}
+<mission>
+Perform a focused, in-depth investigation of the specific data source,
+time range, or component you've been assigned.
+
+- Extract precise timing, correlation, and causation information
+- Surface patterns that high-level analysis might miss
+- Quantify anomalies with exact data points and baseline comparisons
+- Quantify everything: "CPU 85% abnormal vs 12% normal", not "CPU was high"
+</mission>
+{% endblock %}
+```
+
+### Compression Prompt Template
+
+When Sub-Agent message history is compressed (via `pre_model_hook`), this prompt guides the compression:
+
+```jinja2
+{# prompts/compression/sub_agent_compress.j2 #}
+
+Compress this agent's execution history into a concise findings summary.
+
+<instructions>
+- Preserve exact identifiers (service names, hosts, metric names) verbatim
+- Quantify anomalies with specific values and baseline comparisons
+- Keep the summary under 500 words — every sentence must carry data
+- Omit reasoning process, caveats, and verbose explanations
+- Do NOT echo raw tool outputs — extract only key data points
+</instructions>
+
+<filtering_rules>
+ONLY include information relevant to the investigation:
+- **Include**: confirmed anomalies, error patterns, key metrics, causal chains
+- **Exclude**: normal/healthy observations, empty query results, failed tool calls
+- **Exclude**: speculative observations with no supporting data
+
+If a query found nothing unusual, do NOT report it. The Orchestrator only needs
+to see what is WRONG, not what is RIGHT.
+</filtering_rules>
+```
+
+### Context Briefing Rule
+
+> **Critical**: Sub-Agents run in isolation — they ONLY see what the Orchestrator writes in the `task` instruction. The Orchestrator's system prompt enforces that every dispatch instruction must include relevant prior findings, specific signals to investigate, and which hypothesis is being tested. See [orchestrator.md](orchestrator.md#system-prompt-guidelines-not-enforced-by-graph) for the context briefing rules.
+
+### Configuration
+
+```yaml
+# scenarios/rca_hypothesis/scenario.yaml (agents section)
+agents:
+  infrastructure:
+    model: "gpt-4o-mini"
+    temperature: 0.2
+    prompt: "prompts/agents/infrastructure.j2"
+    task_type_prompts:                          # Task type overlays
+      scout: "prompts/task_types/scout.j2"
+      verify: "prompts/task_types/verify.j2"
+      deep_analyze: "prompts/task_types/deep_analyze.j2"
+    tools: [check_cpu, check_memory, check_disk, check_network]
+    execution:
+      tool_call_budget: 20                      # Per-task tool call budget
+      timeout: 120
+      retry:
+        max_attempts: 3
+        initial_interval: 1.0
+    compression:
+      prompt: "prompts/compression/sub_agent_compress.j2"
+      compression_model: "gpt-4o-mini"
 ```
 
 Loading:

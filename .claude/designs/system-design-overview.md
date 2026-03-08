@@ -268,6 +268,8 @@ orchestrator:
   tools:
     - dispatch_agent
     - check_tasks
+    - update_hypothesis
+    - remove_hypothesis
     - inject_instruction
     - abort_task
     - knowledge_search
