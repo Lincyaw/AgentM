@@ -98,6 +98,34 @@ When any design concept changes, execute the following workflow:
 5. **Update index.yaml** — If adding/removing concepts or relationships, update the index
 6. **Create new plan/task** — If changes need an implementation plan, append new files in `plans/` and `tasks/` (never modify existing files)
 
+## Testing Philosophy
+
+Every test must be deliberate. Adding, modifying, or removing a test requires careful justification.
+
+### Principles
+
+1. **Test behavior, not structure** — Ask "what does this code do" not "what fields does it have". Never test language guarantees (enum values exist, dataclass defaults work, imports succeed).
+2. **Every test must answer: "what bug does this prevent?"** — If you can't articulate a realistic failure scenario, don't write the test.
+3. **Boundaries over happy paths** — Edge cases, invalid inputs, and state transitions are where bugs live. A single well-chosen boundary test beats ten happy-path assertions.
+4. **One scenario per test, multiple asserts are fine** — Group related assertions that verify the same logical scenario. Don't split `assert a` and `assert b` into separate tests if they test the same thing.
+5. **Don't test other people's code** — Pydantic validation, Python dataclass semantics, enum membership, `isinstance` checks — these are framework guarantees, not our responsibility.
+
+### What to Test
+
+- **State transitions and rules** — PhaseManager valid/invalid transitions
+- **Immutability contracts** — Notebook operations return new instances, originals unchanged
+- **Boundary conditions** — Empty inputs, missing keys, malformed paths
+- **Cross-module contracts** — State registry resolves correct types, config validation rejects bad references
+- **Invariants the design doc mandates** — e.g., HypothesisStatus values match the tool's Literal constraint
+
+### What NOT to Test
+
+- Field existence or default values on dataclasses/TypedDicts/Pydantic models
+- Enum value counts or individual member existence
+- Import success (`assert X is not None`)
+- Type inheritance (`isinstance` checks)
+- Stub functions that only `raise NotImplementedError`
+
 ## Slash Commands
 
 Project-specific commands are located in `.claude/commands/`:
