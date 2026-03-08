@@ -124,7 +124,7 @@ Even with Mode 2, long-running RCA tasks can exhaust context windows. Two-layer 
 - **Sub-Agent layer**: When tool call count exceeds threshold, compress message history into a structured 8-section summary via `pre_model_hook`. Full history remains in checkpoints.
 - **Orchestrator layer**: On phase transition, compress completed phase's `exploration_history` into a `PhaseSummary`. Active phase retains full detail.
 
-Compression is a **prompt optimization only** — checkpoints retain full uncompressed data for trajectory export, replay, and observability. Each compression creates a `CompressionRef` in checkpoint metadata recording the compressed range (`from_id`, `to_id`), enabling O(1) drill-down.
+Compression is a **prompt optimization only** — checkpoints retain full uncompressed data for trajectory export, replay, and observability. Each compression appends a `CompressionRef` to the `compression_refs` field in state, recording the compressed range (`from_id`, `to_id`) for O(1) drill-down.
 
 **History Recall**: After compression, Agents can call a `recall_history` tool to query their pre-compression checkpoint messages on demand — retrieving raw metric data, tool call parameters, and intermediate reasoning that the summary omitted. This shares the same conceptual interface as cross-task knowledge retrieval (natural language query → relevant data).
 
@@ -244,6 +244,16 @@ A scenario is a complete, runnable configuration — Orchestrator settings, agen
 # scenarios/rca_hypothesis/scenario.yaml
 system:
   type: "hypothesis_driven"
+
+phases:
+  exploration:
+    next_phases: [generation]
+  generation:
+    next_phases: [verification]
+  verification:
+    next_phases: [verification, confirmation, generation]
+  confirmation:
+    next_phases: []
 
 orchestrator:
   model: "gpt-4"

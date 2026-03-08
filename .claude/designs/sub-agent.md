@@ -34,7 +34,7 @@ Since Sub-Agents are invoked by TaskManager (not as graph nodes), their state is
 
 ## Implementation via create_react_agent
 
-> **⚠️ API Migration Note**: `create_react_agent` has been deprecated in recent LangGraph versions and moved to `langchain.agents` as `create_agent`. The import path should be updated to `from langchain.agents import create_agent`. Core functionality (state_schema, pre_model_hook, interrupt_before) remains the same. Verify the exact API at implementation time.
+> **⚠️ API Note**: At design time, `create_react_agent` is in `langgraph.prebuilt`. Verify the current import path at implementation time, as the API may have been reorganized.
 
 ```python
 from langgraph.prebuilt import create_react_agent
@@ -359,7 +359,7 @@ Error types and handling:
 
 | Decision | Rationale |
 |----------|-----------|
-| create_react_agent | Pre-built ReAct loop, works out of the box. **⚠️ Deprecated — use `create_agent` from `langchain.agents`** |
+| create_react_agent | Pre-built ReAct loop, verify import path at implementation time |
 | Independent State Schema | Full isolation; Sub-Agents are compiled independently, not graph nodes. No state mapping — communication via tools only |
 | Independent Sub-Agent checkpointer | Each Sub-Agent has its own thread_id via TaskManager; enables `update_state()` for injection |
 | Config-driven tools/prompts | New agents via YAML only, no code changes |

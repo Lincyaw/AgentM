@@ -83,11 +83,11 @@ The Orchestrator uses **minimal messages** (2-3) combined with a structured **No
 ### ExecutorState
 
 ```python
-from dataclasses import dataclass, field
-from typing import Annotated, Optional
+from typing import Annotated, Optional, TypedDict
 from enum import Enum
 from langchain_core.messages import BaseMessage
 from langgraph.prebuilt import add_messages
+from dataclasses import dataclass, field
 
 
 class Phase(str, Enum):
@@ -126,17 +126,19 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
 
 
-@dataclass
-class ExecutorState:
+class ExecutorState(TypedDict):
     # Minimal message list (2-3 messages, managed via RemoveMessage)
-    messages: Annotated[list[BaseMessage], add_messages] = field(default_factory=list)
+    messages: Annotated[list[BaseMessage], add_messages]
 
-    # Primary working memory
-    notebook: DiagnosticNotebook = field(default_factory=DiagnosticNotebook)
+    # Primary working memory (DiagnosticNotebook is a @dataclass, used as field value)
+    notebook: DiagnosticNotebook
 
     # Auxiliary
-    task_id: str = ""
-    current_phase: Phase = Phase.EXPLORATION
+    task_id: str
+    current_phase: Phase
+
+    # Compression tracking (for recall_history tool)
+    compression_refs: list[CompressionRef]
 ```
 
 Key properties:
@@ -397,47 +399,45 @@ Checkpoint chain (append-only, never modified):
 S0 → S1 → S2 → ... → S14 → S15(compression happens here)→ S16 → ...
 │                      │     │
 │  fine-grained        │     ├─ messages: [summary, latest]
-│  history preserved   │     └─ metadata.compression_ref: {from: S0.id, to: S14.id}
+│  history preserved   │     └─ state.compression_refs: [{from: S0.id, to: S14.id}]
 │  in S0~S14           │
 │                      └─ last full state before compression (recovery point)
 ```
 
 **Properties**:
 - `S0` through `S14`: Fine-grained checkpoints, each a complete state snapshot. Already stored, never modified (append-only).
-- `S15`: The post-compression checkpoint. Its `messages` contain the summary instead of full history. Its metadata records `compression_ref` pointing to the compressed range.
+- `S15`: The post-compression checkpoint. Its `messages` contain the summary instead of full history. Its `compression_refs` state field records the compressed range.
 - `S14`: The natural recovery point — invoke `graph.invoke(None, S14.config)` to resume from the last pre-compression state with full detail.
 - Trajectory export and debug replay use checkpoints `S0~S14` directly; they are not affected by compression.
 
 ### Compression Reference in Metadata
 
-> **✅ LangGraph Verified**: `CheckpointMetadata` is a `TypedDict` with `total=False`, which accepts arbitrary extra keys. Custom fields like `compression_ref` will be preserved in checkpoint storage and retrievable via `get_state_history()`. The `JsonPlusSerializer` (default) handles standard Python types and dataclasses.
-
-When compression occurs, the new checkpoint's metadata records the compressed range for future analysis and drill-down:
+When compression occurs, the `CompressionRef` is appended to the `compression_refs` field in state:
 
 ```python
 @dataclass
 class CompressionRef:
-    """Reference from a compressed checkpoint to its source range."""
+    """Reference from a compressed state to its source checkpoint range."""
     from_checkpoint_id: str   # First checkpoint in the compressed range
     to_checkpoint_id: str     # Last checkpoint before compression
     layer: Literal["sub_agent", "orchestrator"]  # Which layer compressed
     step_count: int           # Number of checkpoints in the range
-    reason: str               # "tool_call_threshold" | "phase_transition" | "max_history"
+    reason: str               # "token_threshold"
 ```
 
 Usage:
 ```python
-# After compression, record reference in checkpoint metadata
+# After compression, append to state's compression_refs
 compression_ref = CompressionRef(
     from_checkpoint_id=first_checkpoint.id,
     to_checkpoint_id=last_checkpoint.id,
     layer="sub_agent",
     step_count=15,
-    reason="tool_call_threshold",
+    reason="token_threshold",
 )
 
-# Store in metadata (via custom metadata field)
-# LangGraph's CheckpointMetadata supports arbitrary fields (TypedDict with total=False)
+# Stored in state (ExecutorState.compression_refs or SubAgentState.compression_refs)
+# Accessible via state["compression_refs"] — no metadata hacks needed
 ```
 
 ### Drill-Down from Compressed Checkpoint
@@ -523,12 +523,7 @@ def recall_history(
 
 ### Implementation
 
-> **⚠️ LangGraph Verification — Custom Metadata Write Path**: While `CheckpointMetadata` supports arbitrary keys for reading, LangGraph does NOT provide a direct API for nodes to **write** custom metadata to their own checkpoint. Metadata is set internally by the Pregel engine (source, step, parents, etc.). To store `CompressionRef` in metadata, we need one of:
-> 1. **Store in state**: Add a `compression_refs: list[CompressionRef]` field to the state schema (simplest, fully supported)
-> 2. **Custom checkpointer wrapper**: Subclass the checkpointer to inject custom metadata on `put()`
-> 3. **Checkpoint metadata via `update_state()`**: Call `update_state()` from outside the graph to attach metadata (but this creates a new checkpoint)
->
-> **Recommendation**: Option 1 (store in state) is the most pragmatic. The `CompressionRef` data is small and logically belongs to the agent's working context. The recall_history tool can read it directly from state.
+> **Decision**: `CompressionRef` is stored in state (`compression_refs: list[CompressionRef]` field in `ExecutorState` / `SubAgentState`). This is the simplest approach — no custom metadata hacks needed. The `recall_history` tool reads `state["compression_refs"]` directly.
 
 ```python
 def recall_history_impl(
@@ -537,8 +532,8 @@ def recall_history_impl(
     config: RunnableConfig,
     graph: CompiledGraph,
 ) -> str:
-    # 1. Find compression references in checkpoint metadata
-    compression_refs = find_compression_refs(graph, config, scope)
+    # 1. Find compression references in state
+    compression_refs = state.get("compression_refs", [])
 
     if not compression_refs:
         raise ToolException(
@@ -602,7 +597,7 @@ Agent (post-compression)
   │
   ├─ Needs detail → calls recall_history("What was CPU breakdown by process?")
   │                       │
-  │                       ├─ 1. Find compression_ref in checkpoint metadata
+  │                       ├─ 1. Find compression_refs in state
   │                       ├─ 2. Load checkpoints S0~S14 (fine-grained history)
   │                       ├─ 3. Extract all messages from those checkpoints
   │                       ├─ 4. LLM retrieval: find relevant data for query
@@ -816,7 +811,7 @@ def phase_exploration(state: ExecutorState) -> dict:
 
     return {
         "notebook": notebook,
-        "current_phase": "generation",
+        "current_phase": Phase.GENERATION,
         "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)]  # Clean up messages
         # ✅ LangGraph Verified: REMOVE_ALL_MESSAGES is a constant in langgraph.graph.message
         # that clears all messages at once. No need to specify individual IDs.
@@ -861,7 +856,7 @@ def phase_hypothesis_generation(state: ExecutorState) -> dict:
     notebook.current_phase = Phase.VERIFICATION
     notebook.current_step += 1
 
-    return {"notebook": notebook, "current_phase": "verification"}
+    return {"notebook": notebook, "current_phase": Phase.VERIFICATION}
 ```
 
 ### Phase 3: Hypothesis Verification
@@ -914,7 +909,7 @@ def phase_hypothesis_verification(state: ExecutorState) -> dict:
         notebook.current_step += 1
 
     notebook.current_phase = Phase.CONFIRMATION
-    return {"notebook": notebook, "current_phase": "confirmation"}
+    return {"notebook": notebook, "current_phase": Phase.CONFIRMATION}
 ```
 
 ### Phase 4: Confirmation
@@ -1749,7 +1744,7 @@ orchestrator:
 | Minimal messages (Mode 2) | Avoids context window explosion; Notebook is the real memory |
 | Three-block verification result | Cleanly separates raw data / reasoning / verdict |
 | Two-layer context compression | Sub-Agent (pre_model_hook) + Orchestrator (phase summaries); prompt optimization only, checkpoints retain full data |
-| Compression ref in checkpoint metadata | `from_id` / `to_id` enables O(1) drill-down to fine-grained history; supports analysis and debug |
+| Compression ref in state | `compression_refs` field in state; `from_id` / `to_id` enables O(1) drill-down to fine-grained history |
 | recall_history tool | Post-compression Agents can query their own pre-compression messages; retrieves raw data, tool params, and reasoning from checkpoint chain |
 | Unified retrieval interface | Intra-task recall and cross-task knowledge share the same conceptual interface (natural language query → relevant data) |
 | Prompt templates (Jinja2) | Scenario switching with zero code changes |

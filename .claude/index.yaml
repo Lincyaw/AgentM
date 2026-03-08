@@ -24,7 +24,7 @@ concepts:
     tasks: []
 
   generic_state_wrapper:
-    description: "Generic SDK wrapper supporting multiple agent system types (hypothesis-driven, sequential, memory-extraction, decision-tree) via configuration. Shared BaseOrchestrator, PhaseManager, StateSchemaFactory"
+    description: "Generic SDK wrapper supporting multiple agent system types (hypothesis-driven, sequential, memory-extraction, decision-tree) via configuration. Shared BaseOrchestrator, PhaseManager, State Schema Registry"
     design: "designs/generic-state-wrapper.md"
     related_concepts: [orchestrator, configuration_system, memory_system]
     plans: []
@@ -45,8 +45,8 @@ concepts:
     tasks: []
 
   trajectory_system:
-    description: "Hierarchical trace capture via Checkpoint chain and stream(subgraphs=True). Export to RL training format (state, action, reward, next_state). CompressionRef stored in state (not metadata)"
-    design: null
+    description: "Hierarchical trace capture via TaskManager registry (TaskTraceRef). Independent checkpoint chains per agent, linked by task_id. Export to RL training format. CompressionRef stored in state"
+    design: "designs/orchestrator.md"
     related_concepts: [system_architecture, orchestrator, recovery_system, memory_system, execution_runner]
     plans: []
     tasks: []

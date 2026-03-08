@@ -106,7 +106,7 @@ To add a new system type: define a new State class inheriting from `BaseExecutor
 
 ```python
 @dataclass
-class Phase:
+class PhaseDefinition:
     name: str
     description: str
     handler: Callable
@@ -115,7 +115,7 @@ class Phase:
     on_exit: Optional[Callable] = None
 
 class PhaseManager:
-    def __init__(self, phases: dict[str, Phase], initial_phase: str):
+    def __init__(self, phases: dict[str, PhaseDefinition], initial_phase: str):
         self.phases = phases
         self.current_phase = initial_phase
 
