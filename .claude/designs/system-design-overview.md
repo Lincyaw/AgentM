@@ -138,7 +138,16 @@ Three-layer configuration, all YAML-based:
 system:
   type: "hypothesis_driven"  # or "sequential", "decision_tree"
   models:
-    gpt-4: { api_key: "${OPENAI_API_KEY}" }
+    gpt-4:
+      api_key: "${OPENAI_API_KEY}"
+      rate_limit:                      # Per-model rate limiting
+        requests_per_second: 5
+        max_bucket_size: 10            # Max burst size
+    gpt-4o-mini:
+      api_key: "${OPENAI_API_KEY}"
+      rate_limit:
+        requests_per_second: 20        # Lighter model, higher TPS
+        max_bucket_size: 30
   storage:
     checkpointer: { backend: "postgresql", url: "${DB_URL}" }
 ```
@@ -244,25 +253,198 @@ Export as JSONL — one transition per line.
 
 ## Failure Recovery & Debug Replay
 
-```python
-# Resume from failure
-result = graph.invoke(None, config)  # None = resume from last checkpoint
+### Error Handling Layers
 
-# Fix state and retry
-graph.update_state(config, {"messages": [...]})
+Errors are handled at four layers, each with a different actor and strategy:
+
+| Layer | Actor | Trigger | Strategy | Example |
+|-------|-------|---------|----------|---------|
+| **1. Sub-Agent self-heal** | Sub-Agent LLM | Tool returns error as `ToolMessage` | LLM reasons about the error and tries an alternative approach | API returns 404 → agent tries a different endpoint |
+| **2. RetryPolicy** | LangGraph engine | Node execution raises exception | Automatic retry with exponential backoff | Rate limit 429 → retry after 1s, 2s, 4s |
+| **3. Orchestrator decision** | Orchestrator LLM | Sub-Agent reports failure via `check_agents` | Re-dispatch, switch agent, adjust task, or skip | Database agent fails → try infrastructure agent |
+| **4. System recovery** | Human operator | Process crash, OOM, infrastructure failure | Manual resume from checkpoint | Service restarts → operator resumes thread |
+
+Layer 1-2 are automatic. Layer 3 is LLM-driven. Layer 4 is manual.
+
+### API Rate Limiting
+
+When using API endpoints with limited TPS, rate limiting prevents 429 errors before they happen — reducing Layer 2 retry overhead.
+
+> **✅ LangChain Native**: `BaseChatModel` supports a `rate_limiter` parameter. `InMemoryRateLimiter` from `langchain_core` implements a token bucket algorithm — thread-safe, in-process.
+
+```python
+from langchain_core.rate_limiters import InMemoryRateLimiter
+from langchain_openai import ChatOpenAI
+
+# Shared rate limiter — all model instances using the same API share one limiter
+rate_limiter = InMemoryRateLimiter(
+    requests_per_second=5,        # Steady-state rate
+    check_every_n_seconds=0.1,    # Check interval
+    max_bucket_size=10,           # Max burst (handles parallel Send fan-out)
+)
+
+# All agents using gpt-4 share this rate limiter
+gpt4_model = ChatOpenAI(model="gpt-4", rate_limiter=rate_limiter)
+```
+
+**Key design point**: When multiple Sub-Agents are dispatched in parallel via `Send`, they all call the LLM concurrently. A **shared** `InMemoryRateLimiter` instance across all model instances using the same API key ensures global throttling. The framework creates one rate limiter per model config entry and injects it into all agents using that model.
+
+Configuration in `system.yaml`:
+
+```yaml
+system:
+  models:
+    gpt-4:
+      api_key: "${OPENAI_API_KEY}"
+      rate_limit:
+        requests_per_second: 5     # Adjust to your API tier
+        max_bucket_size: 10
+    gpt-4o-mini:
+      api_key: "${OPENAI_API_KEY}"
+      rate_limit:
+        requests_per_second: 20
+        max_bucket_size: 30
+```
+
+> **Note**: `InMemoryRateLimiter` is single-process only. For multi-process deployments, a distributed rate limiter (e.g., Redis-based) would be needed — not in scope for v1.
+
+### Layer 1: Sub-Agent Self-Healing
+
+Handled natively by `create_react_agent` with `handle_tool_errors=True`. Tool errors are returned as `ToolMessage` and the LLM can self-correct:
+
+```python
+# Tool raises an exception → returned to LLM as error ToolMessage
+# LLM sees: "Error: Connection refused to replica-db:5432"
+# LLM decides: "I'll try the primary database instead"
+```
+
+### Layer 2: RetryPolicy
+
+Configured per agent node for transient errors:
+
+```python
+workflow.add_node(
+    "database_agent",
+    database_agent,
+    retry_policy=RetryPolicy(
+        max_attempts=3,
+        initial_interval=1.0,      # 1s, 2s, 4s backoff
+        backoff_factor=2.0,
+        retry_on=is_transient_error,  # Custom predicate
+    ),
+)
+```
+
+Configuration in YAML:
+
+```yaml
+# agents/database.yaml
+agent:
+  execution:
+    retry:
+      max_attempts: 3
+      initial_interval: 1.0
+      backoff_factor: 2.0
+      retry_on:
+        - rate_limit       # HTTP 429
+        - timeout           # Connection/read timeout
+        - server_error      # HTTP 5xx
+```
+
+### Layer 3: Orchestrator Decision on Sub-Agent Failure
+
+When a Sub-Agent fails (exhausts retries or hits a fatal error), its status appears as `failed` in the `check_agents` result. The failure report includes both an error summary and the last few execution steps, giving the Orchestrator enough context to decide next steps.
+
+```python
+# check_agents() returns:
+{
+    "failed": [{
+        "agent_id": "database",
+        "error_summary": "Connection refused after 3 retries to replica-db:5432",
+        "last_steps": [
+            {"step": 12, "action": "check_connections", "result": "timeout"},
+            {"step": 13, "action": "check_connections (retry)", "result": "connection refused"},
+            {"step": 14, "action": "check_connections (retry)", "result": "connection refused"},
+        ],
+    }]
+}
+```
+
+The Orchestrator's options:
+- **Re-dispatch same agent** with adjusted instructions (e.g., "use primary DB instead of replica")
+- **Switch to a different agent** (e.g., infrastructure agent to check network connectivity)
+- **Skip the task** if it's non-critical and move to next phase
+- **Abort the RCA** if the failure is unrecoverable
+
+### Layer 4: System-Level Recovery (Manual)
+
+When the entire process crashes (OOM, infrastructure failure, etc.), recovery is **manual** — a human operator decides whether to resume.
+
+```python
+# Operator resumes a crashed task from the last checkpoint
+config = {"configurable": {"thread_id": "rca-task-042"}}
+
+# Inspect state at crash point
+state = graph.get_state(config)
+print(f"Crashed at phase: {state.values['current_phase']}")
+print(f"Next node: {state.next}")
+
+# Option 1: Resume from where it stopped
 result = graph.invoke(None, config)
 
-# Fork from a past checkpoint for debugging
+# Option 2: Fix state and resume
+graph.update_state(config, {
+    "messages": [HumanMessage(content="[System] Resuming after crash. Re-check all connections.")],
+})
+result = graph.invoke(None, config)
+
+# Option 3: Rollback to a known-good checkpoint
 history = list(graph.get_state_history(config))
-fork_config = graph.update_state(history[3].config, {"messages": [...]})
+good_checkpoint = find_last_good_checkpoint(history)
+result = graph.invoke(None, good_checkpoint.config)
+```
+
+Configuration for system recovery:
+
+```yaml
+# system.yaml
+system:
+  recovery:
+    mode: "manual"                    # "manual" — operator decides
+    expose_api: true                  # Expose recovery endpoints in REST API
+    # Recovery API endpoints:
+    #   GET  /api/tasks/{thread_id}/state       — inspect state at crash point
+    #   GET  /api/tasks/{thread_id}/history     — browse checkpoint history
+    #   POST /api/tasks/{thread_id}/resume      — resume from last checkpoint
+    #   POST /api/tasks/{thread_id}/rollback    — rollback to specific checkpoint
+```
+
+### Debug Replay
+
+For development and debugging — fork from any checkpoint to try alternative approaches:
+
+```python
+config = {"configurable": {"thread_id": "debug-session"}}
+
+# Browse execution history
+history = list(graph.get_state_history(config))
+for i, snapshot in enumerate(history):
+    step = snapshot.metadata.get("step", "?")
+    source = snapshot.metadata.get("source", "?")
+    print(f"[{i}] Step {step} ({source}): next={snapshot.next}")
+
+# Fork from a specific checkpoint
+target = history[3]
+fork_config = graph.update_state(
+    target.config,
+    {"messages": [HumanMessage(content="[Debug] Trying alternative approach...")]},
+)
+
+# New execution branch — original history preserved
 debug_result = graph.invoke(None, fork_config)
 ```
 
-Error handling strategy by type:
-- Rate limit → exponential backoff retry
-- Timeout → simple retry
-- Validation error → fix state and retry
-- Fatal error → rollback to last good checkpoint
+> Detail: See [orchestrator.md](orchestrator.md#compression-and-checkpoint-chain) for how compression interacts with checkpoint chain and recovery.
 
 ---
 
