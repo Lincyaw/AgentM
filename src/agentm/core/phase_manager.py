@@ -1,7 +1,6 @@
 """Phase management for StateGraph-based agent systems.
 
-PhaseManager.__init__ and transition_to contain real logic (value object behavior).
-from_config is a stub — raise NotImplementedError.
+PhaseManager.__init__, transition_to, and from_config contain real logic.
 """
 
 from __future__ import annotations

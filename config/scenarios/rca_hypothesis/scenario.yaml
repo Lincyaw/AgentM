@@ -24,10 +24,16 @@ orchestrator:
     system: "prompts/orchestrator_system.j2"
 
   tools:
-    - spawn_worker
-    - wait_for_workers
+    - dispatch_agent
+    - check_tasks
     - update_hypothesis
     - remove_hypothesis
+    - inject_instruction
+    - abort_task
+    - knowledge_search
+    - knowledge_list
+    - knowledge_read
+    - recall_history
 
   feature_gates:
     adversarial_review: false

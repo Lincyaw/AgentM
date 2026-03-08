@@ -2,24 +2,24 @@ tools:
   - name: knowledge_search
     module: agentm.tools.knowledge
     function: knowledge_search
-    params: {}
+    parameters: {}
 
   - name: knowledge_list
     module: agentm.tools.knowledge
     function: knowledge_list
-    params: {}
+    parameters: {}
 
   - name: knowledge_read
     module: agentm.tools.knowledge
     function: knowledge_read
-    params: {}
+    parameters: {}
 
   - name: knowledge_write
     module: agentm.tools.knowledge
     function: knowledge_write
-    params: {}
+    parameters: {}
 
   - name: knowledge_delete
     module: agentm.tools.knowledge
     function: knowledge_delete
-    params: {}
+    parameters: {}

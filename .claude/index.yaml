@@ -17,6 +17,26 @@ concepts:
         layer: "L1 — Deterministic Invariants"
       - file: "tests/unit/test_config_validation.py"
         layer: "L1 — Deterministic Invariants"
+      - file: "tests/unit/test_hypothesis_state_machine.py"
+        layer: "L1 — Deterministic Invariants"
+      - file: "tests/unit/test_notebook_immutability.py"
+        layer: "L1 — Deterministic Invariants"
+      - file: "tests/unit/test_managed_task.py"
+        layer: "L1 — Deterministic Invariants"
+      - file: "tests/unit/test_interface_consistency.py"
+        layer: "L1 — Deterministic Invariants"
+      - file: "tests/unit/test_tool_signatures.py"
+        layer: "L1 — Deterministic Invariants"
+      - file: "tests/unit/test_task_manager_retry.py"
+        layer: "L1 — Deterministic Invariants"
+      - file: "tests/snapshot/test_tool_pipeline.py"
+        layer: "L2 — Snapshot Pipeline"
+      - file: "tests/snapshot/test_error_recovery.py"
+        layer: "L2 — Snapshot Pipeline"
+      - file: "tests/snapshot/test_hypothesis_lifecycle.py"
+        layer: "L2 — Snapshot Pipeline"
+      - file: "tests/snapshot/test_compression_recall.py"
+        layer: "L2 — Snapshot Pipeline"
 
   system_architecture:
     description: "LangGraph Supervisor+Subgraph multi-agent orchestration system with config-driven design, trajectory recording, monitoring, and failure recovery"
@@ -39,6 +59,19 @@ concepts:
           - "Phase enum matches four diagnostic phases (§ Overview)"
           - "DiagnosticNotebook instance isolation (§ Data Structures)"
           - "ExecutorState has all required fields (§ Data Structures)"
+      - file: "tests/unit/test_hypothesis_state_machine.py"
+        covers:
+          - "Every HypothesisStatus has a transition entry (§ State Machine)"
+          - "Only confirmed is a terminal state (§ State Machine)"
+          - "Rejected cannot directly confirm (§ State Machine)"
+      - file: "tests/unit/test_notebook_immutability.py"
+        covers:
+          - "Notebook operations return new instances (§ Data Structures)"
+          - "Original notebook unchanged after mutation (§ Data Structures)"
+      - file: "tests/snapshot/test_hypothesis_lifecycle.py"
+        covers:
+          - "Illegal transitions rejected (§ State Machine)"
+          - "Set confirmed hypothesis consistency (§ Orchestrator Tools)"
 
   sub_agent:
     description: "Independently compiled subgraphs via create_react_agent. Isolated State Schema, config-driven tools/prompts, pre_model_hook compression (llm_input_messages), data-only constraint in RCA mode, static agent pool compiled at startup. Launched as asyncio.Tasks by TaskManager"
@@ -102,6 +135,13 @@ concepts:
     related_concepts: [system_architecture, trajectory_system, orchestrator, sub_agent, execution_runner]
     plans: []
     tasks: []
+    tests:
+      - file: "tests/unit/test_task_manager_retry.py"
+        covers:
+          - "Exponential backoff retry in TaskManager (§ Recovery Layer 2)"
+      - file: "tests/snapshot/test_error_recovery.py"
+        covers:
+          - "Inject/abort workflows (§ Recovery Layer 3)"
 
   execution_runner:
     description: "TaskManager: manages async Sub-Agent execution as asyncio.Tasks. Provides backing for dispatch_agent/check_tasks/inject_instruction/abort_task tools. Injects instructions via interrupt+Command(resume). Streams events to frontend WebSocket"
@@ -109,6 +149,26 @@ concepts:
     related_concepts: [orchestrator, sub_agent, frontend_architecture, trajectory_system]
     plans: []
     tasks: []
+    tests:
+      - file: "tests/unit/test_managed_task.py"
+        covers:
+          - "ManagedTask instruction isolation (§ TaskManager)"
+          - "ManagedTask required workflow fields (§ TaskManager)"
+          - "ManagedTask checkpoint linking fields (§ Trajectory)"
+      - file: "tests/unit/test_task_manager_retry.py"
+        covers:
+          - "Retry success after transient failure (§ Recovery Layer 2)"
+          - "Exhausted retries mark FAILED (§ Recovery Layer 2)"
+          - "CancelledError not retried (§ Recovery Layer 2)"
+          - "Exponential backoff schedule (§ Recovery Layer 2)"
+      - file: "tests/snapshot/test_tool_pipeline.py"
+        covers:
+          - "dispatch_agent creates managed task (§ Orchestrator Tools)"
+          - "check_tasks returns completed/failed results (§ Orchestrator Tools)"
+      - file: "tests/snapshot/test_error_recovery.py"
+        covers:
+          - "inject_instruction rejected for non-running tasks (§ Instruction Injection)"
+          - "abort_task sets FAILED status and cancels asyncio.Task (§ TaskManager)"
 
   frontend_architecture:
     description: "Read-only observation dashboard: Agent Topology (d3.js), Execution Monitor (timeline+detail), Conversation View (scenario plugin), Debug Panel (checkpoint browser). Single HTML file, React + WebSocket + d3.js. Scenario plugin architecture for extensibility"

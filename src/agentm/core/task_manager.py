@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Literal, Optional
 
+from agentm.config.schema import RetryConfig
 from agentm.models.data import ManagedTask
 from agentm.models.enums import AgentRunStatus
 
@@ -23,8 +24,6 @@ class TaskManager:
 
     def __init__(self) -> None:
         self._tasks: dict[str, ManagedTask] = {}
-        self._broadcast_callback: Callable[..., Any] | None = None
-        self._trajectory: Any | None = None  # Set by builder
 
     async def submit(
         self,
@@ -39,6 +38,7 @@ class TaskManager:
 
         subgraph = kwargs.get("subgraph")
         config: dict[str, Any] = kwargs.get("config", {})
+        retry_config: RetryConfig = kwargs.get("retry_config", RetryConfig())
 
         managed = ManagedTask(
             task_id=task_id,
@@ -51,26 +51,10 @@ class TaskManager:
 
         if subgraph is not None:
             managed.asyncio_task = asyncio.create_task(
-                self._execute_agent(managed, subgraph, config)
+                self._execute_agent(managed, subgraph, config, retry_config)
             )
 
         self._tasks[task_id] = managed
-
-        # Record task dispatch to trajectory
-        if self._trajectory is not None:
-            await self._trajectory.record(
-                event_type="task_dispatch",
-                agent_path=[agent_id],
-                data={
-                    "task_id": task_id,
-                    "agent_id": agent_id,
-                    "task_type": task_type,
-                    "instruction_preview": instruction[:200],
-                    "hypothesis_id": hypothesis_id,
-                },
-                task_id=task_id,
-            )
-
         return task_id
 
     async def get_all_status(self, wait_seconds: float = 0) -> dict[str, Any]:
@@ -149,74 +133,51 @@ class TaskManager:
         managed: ManagedTask,
         subgraph: Any,
         config: dict[str, Any],
+        retry_config: RetryConfig = RetryConfig(),
     ) -> None:
         """Core async execution loop for a Sub-Agent subgraph.
 
         Streams events from the subgraph, updates managed task status,
-        and stores results upon completion.
+        and stores results upon completion.  Retries on failure with
+        exponential backoff as specified by *retry_config*.
         """
         from langchain_core.messages import HumanMessage
 
         input_data = {"messages": [HumanMessage(content=managed.instruction)]}
+        last_error: Exception | None = None
 
-        try:
-            async for namespace, mode, data in subgraph.astream(
-                input_data,
-                config,
-                stream_mode=["updates", "custom"],
-                subgraphs=True,
-            ):
-                managed.events_buffer.append(data)
-                if len(managed.events_buffer) > 20:
-                    managed.events_buffer = managed.events_buffer[-20:]
+        for attempt in range(1, retry_config.max_attempts + 1):
+            try:
+                managed.events_buffer = []
+                async for namespace, mode, data in subgraph.astream(
+                    input_data,
+                    config,
+                    stream_mode=["updates", "custom"],
+                    subgraphs=True,
+                ):
+                    managed.events_buffer.append(data)
+                    if len(managed.events_buffer) > 20:
+                        managed.events_buffer = managed.events_buffer[-20:]
 
-                if self._broadcast_callback is not None:
-                    await self._broadcast_callback({
-                        "agent_path": [managed.agent_id],
-                        "mode": mode if isinstance(mode, str) else "updates",
-                        "data": data,
-                        "timestamp": datetime.now().isoformat(),
-                    })
+                managed.status = AgentRunStatus.COMPLETED
+                managed.result = {"events": managed.events_buffer}
+                managed.completed_at = datetime.now().isoformat()
+                return
 
-            managed.status = AgentRunStatus.COMPLETED
-            managed.result = {"events": managed.events_buffer}
-            managed.completed_at = datetime.now().isoformat()
-            if managed.started_at:
-                started = datetime.fromisoformat(managed.started_at)
-                managed.duration_seconds = (
-                    datetime.now() - started
-                ).total_seconds()
+            except asyncio.CancelledError:
+                managed.completed_at = datetime.now().isoformat()
+                raise
 
-            if self._trajectory is not None:
-                await self._trajectory.record(
-                    event_type="task_complete",
-                    agent_path=[managed.agent_id],
-                    data={
-                        "task_id": managed.task_id,
-                        "agent_id": managed.agent_id,
-                        "duration_seconds": managed.duration_seconds,
-                    },
-                    task_id=managed.task_id,
-                )
+            except Exception as e:
+                last_error = e
+                if attempt < retry_config.max_attempts:
+                    delay = retry_config.initial_interval * (
+                        retry_config.backoff_factor ** (attempt - 1)
+                    )
+                    await asyncio.sleep(delay)
 
-        except asyncio.CancelledError:
-            managed.completed_at = datetime.now().isoformat()
-            raise
-
-        except Exception as e:
-            managed.status = AgentRunStatus.FAILED
-            managed.error_summary = str(e)
-            managed.last_steps = managed.events_buffer[-5:]
-            managed.completed_at = datetime.now().isoformat()
-
-            if self._trajectory is not None:
-                await self._trajectory.record(
-                    event_type="task_fail",
-                    agent_path=[managed.agent_id],
-                    data={
-                        "task_id": managed.task_id,
-                        "agent_id": managed.agent_id,
-                        "error_summary": str(e),
-                    },
-                    task_id=managed.task_id,
-                )
+        # All retries exhausted
+        managed.status = AgentRunStatus.FAILED
+        managed.error_summary = str(last_error)
+        managed.last_steps = managed.events_buffer[-5:]
+        managed.completed_at = datetime.now().isoformat()

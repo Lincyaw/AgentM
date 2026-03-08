@@ -172,36 +172,36 @@ config/
 
 ### Layer 1: System Config (`system.yaml`)
 
-Global infrastructure configuration. Shared by all scenarios.
+Global infrastructure configuration. Shared by all scenarios. Top-level keys are `models`, `storage`, `recovery` — no wrapper key.
 
 ```yaml
-system:
-  models:
-    gpt-4:
-      api_key: "${OPENAI_API_KEY}"
-      rate_limit:
-        requests_per_second: 5
-        max_bucket_size: 10
-    gpt-4o-mini:
-      api_key: "${OPENAI_API_KEY}"
-      rate_limit:
-        requests_per_second: 20
-        max_bucket_size: 30
+# system.yaml — top-level keys map directly to SystemConfig fields
+models:
+  gpt-4:
+    api_key: "${OPENAI_API_KEY}"
+    rate_limit:
+      requests_per_second: 5
+      max_bucket_size: 10
+  gpt-4o-mini:
+    api_key: "${OPENAI_API_KEY}"
+    rate_limit:
+      requests_per_second: 20
+      max_bucket_size: 30
 
-  storage:
-    checkpointer:
-      backend: "postgresql"
-      url: "${DB_URL}"
-    store:
-      backend: "postgresql"
-      url: "${DB_URL}"
-      index:
-        dims: 1536
-        embed: "openai:text-embedding-3-small"
+storage:
+  checkpointer:
+    backend: "postgresql"
+    url: "${DB_URL}"
+  store:
+    backend: "postgresql"
+    url: "${DB_URL}"
+    index:
+      dims: 1536
+      embed: "openai:text-embedding-3-small"
 
-  recovery:
-    mode: "manual"
-    expose_api: true
+recovery:
+  mode: "manual"
+  expose_api: true
 ```
 
 Environment variables (`${VAR}`) are resolved at config load time.
@@ -542,18 +542,18 @@ gpt4_model = ChatOpenAI(model="gpt-4", rate_limiter=rate_limiter)
 Configuration in `system.yaml`:
 
 ```yaml
-system:
-  models:
-    gpt-4:
-      api_key: "${OPENAI_API_KEY}"
-      rate_limit:
-        requests_per_second: 5     # Adjust to your API tier
-        max_bucket_size: 10
-    gpt-4o-mini:
-      api_key: "${OPENAI_API_KEY}"
-      rate_limit:
-        requests_per_second: 20
-        max_bucket_size: 30
+# system.yaml — top-level keys (no wrapper)
+models:
+  gpt-4:
+    api_key: "${OPENAI_API_KEY}"
+    rate_limit:
+      requests_per_second: 5     # Adjust to your API tier
+      max_bucket_size: 10
+  gpt-4o-mini:
+    api_key: "${OPENAI_API_KEY}"
+    rate_limit:
+      requests_per_second: 20
+      max_bucket_size: 30
 ```
 
 > **Note**: `InMemoryRateLimiter` is single-process only. For multi-process deployments, a distributed rate limiter (e.g., Redis-based) would be needed — not in scope for v1.
@@ -659,11 +659,10 @@ result = graph.invoke(None, good_checkpoint.config)
 Configuration for system recovery:
 
 ```yaml
-# system.yaml
-system:
-  recovery:
-    mode: "manual"                    # "manual" — operator decides
-    expose_api: true                  # Expose recovery endpoints in REST API
+# system.yaml — top-level keys (no wrapper)
+recovery:
+  mode: "manual"                    # "manual" — operator decides
+  expose_api: true                  # Expose recovery endpoints in REST API
     # Recovery API endpoints (consistent with frontend dashboard API):
     #   GET  /api/tasks/{thread_id}/state        — inspect state at crash point
     #   GET  /api/tasks/{thread_id}/history       — browse checkpoint history
