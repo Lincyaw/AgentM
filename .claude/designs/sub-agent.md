@@ -5,36 +5,30 @@
 
 ---
 
+> **Code conventions**: Same as [orchestrator.md](orchestrator.md#code-conventions-in-this-document). Data structures (dataclass, TypedDict) are **normative**; function logic is **illustrative**.
+
 ## Overview
 
-Sub-Agents are **Subgraph nodes** in the Root StateGraph. Each Sub-Agent is an independently compiled LangGraph, created via `create_react_agent`. Sub-Agents receive tasks from the Orchestrator, execute tool calls, and return results to the Root graph.
+Sub-Agents are **independently compiled subgraphs**, created via `create_react_agent`. They are launched asynchronously by the **TaskManager** as `asyncio.Task`s — they are NOT nodes in the Root StateGraph. Sub-Agents receive tasks from the Orchestrator (via `dispatch_agent` tool), execute tool calls, and return results (via `get_result` tool).
 
 **Key constraint**: In hypothesis-driven RCA, Sub-Agents act as **data collectors** — they return raw data and structured verification results, not independent reasoning.
 
 ---
 
-## State Schema Isolation
+## State Schema
 
-Each Sub-Agent has its own State Schema. Only fields with the **same name** as the parent are automatically mapped.
+Each Sub-Agent has its own State Schema. Since Sub-Agents are independently compiled subgraphs (not nodes in the Root graph), there is **no automatic state mapping** between parent and child. Communication happens exclusively through the Orchestrator's tools (`dispatch_agent` sends instructions, `get_result` retrieves results).
 
 ```python
-# Root graph state
-class ExecutorState(TypedDict):
-    messages: Annotated[list, operator.add]   # Shared
-    notebook: DiagnosticNotebook              # Orchestrator-only
-
-# Sub-Agent state (private)
+# Sub-Agent state (fully independent, not mapped to Root graph)
 class SubAgentState(TypedDict):
-    messages: Annotated[list, operator.add]   # Mapped to/from Root
-    scratchpad: list[str]                     # Private — invisible to Root
-    observations: list[str]                   # Private
-    tool_call_count: int = 0                  # Private
+    messages: Annotated[list, operator.add]   # Agent's own message history
+    scratchpad: list[str]                     # Private working notes
+    observations: list[str]                   # Private observations
+    tool_call_count: int = 0                  # Tracked for progress reporting
 ```
 
-Rules:
-- Same-name fields auto-map between parent and child
-- Child-only fields are **invisible** to the parent
-- Child's return is filtered to only include parent-matching fields
+Since Sub-Agents are invoked by TaskManager (not as graph nodes), their state is fully private. The Orchestrator receives results through `get_result` tool — it never sees the Sub-Agent's internal state directly.
 
 ---
 
@@ -68,7 +62,7 @@ def create_sub_agent(agent_id: str, config: AgentConfig, tool_registry: ToolRegi
     )
 ```
 
-> **Context compression**: The `pre_model_hook` compresses message history when tool call count exceeds the configured threshold. Full history remains in state for trajectory export. See [orchestrator.md](orchestrator.md#context-compression-intra-task-memory) for the compression data structures and configuration.
+> **Context compression**: The `pre_model_hook` compresses message history when token count reaches 80% of the model's context limit. Full history remains in state for trajectory export. See [orchestrator.md](orchestrator.md#context-compression-intra-task-memory) for the compression data structures and configuration.
 
 ### ReAct Execution Loop
 
@@ -112,7 +106,6 @@ agents:
         max_attempts: 3
         initial_interval: 1.0
     compression:
-      max_uncompressed_steps: 10
       compression_model: "gpt-4o-mini"
 
   database:
@@ -131,7 +124,6 @@ agents:
         max_attempts: 3
         initial_interval: 1.0
     compression:
-      max_uncompressed_steps: 15
       compression_model: "gpt-4o-mini"
 ```
 
@@ -215,44 +207,45 @@ class ToolDefinition:
 ### Data Collection (Phase 1)
 
 ```python
-# Orchestrator → Sub-Agent (via messages)
-HumanMessage(content=json.dumps({
-    "task": "Quick scan infrastructure",
-    "depth": "overview",
-}))
+# Orchestrator dispatches via tool
+# dispatch_agent("infrastructure", "Scan infrastructure metrics: CPU, memory, disk, network")
 
-# Sub-Agent → Orchestrator (raw data only)
-AIMessage(content=json.dumps({
-    "cpu": 0.85,
-    "memory": 0.4,
-    "disk_io": {"read": 120, "write": 80},
-}))
+# Sub-Agent returns a diagnostic report (natural language with inline data)
+AIMessage(content="""Scanned infrastructure metrics for initial assessment.
+
+CPU usage at 85% — elevated, primarily from postgres (45%) and java service (28%).
+Memory at 40% — within normal range, no swap activity.
+Disk I/O: read 120 MB/s, write 80 MB/s — moderate, no saturation.
+Network: latency 2ms avg, no packet loss, bandwidth utilization 30%.
+
+Notable: CPU spike correlates with the incident start time (14:30 UTC).
+inode usage at 92% on /var/log — not critical yet but worth monitoring.
+
+Raw: cpu=0.85, memory=0.40, disk_read=120MB/s, disk_write=80MB/s, net_latency=2ms""")
 ```
 
 ### Hypothesis Verification (Phase 3)
 
 ```python
-# Orchestrator → Sub-Agent
-HumanMessage(content=json.dumps({
-    "task": "Verify H1: Database connection pool exhaustion",
-    "focus_areas": ["pool_size", "active_connections", "wait_time"],
-    "depth": "detail",
-}))
+# Orchestrator dispatches via tool
+# dispatch_agent("database", "Verify H1: Database connection pool exhaustion.
+#   Focus on pool_size, active connections, wait queue, slow queries.")
 
-# Sub-Agent → Orchestrator (three-block VerificationResult)
+# Sub-Agent returns VerificationResult as JSON with verdict + natural language report
 AIMessage(content=json.dumps({
-    "investigation_data": {
-        "pool_size": 100,
-        "active_connections": 100,
-        "waiting_connections": 45,
-    },
-    "reasoning": {
-        "supporting_reasons": ["Pool full (100/100)", "45 waiting"],
-        "rejecting_reasons": ["CPU acceptable"],
-        "neutral_observations": ["Network normal"],
-        "key_findings": ["Pool config insufficient"],
-    },
     "verdict": "confirmed",
+    "report": """Investigated database connection pool status for H1 (pool exhaustion).
+
+Connection pool is at capacity: 100/100 active connections, 45 requests in wait queue.
+Slow query analysis found 3 queries exceeding 2s, the worst being a JOIN on orders table (4.2s).
+Lock wait time averages 320ms across active transactions.
+
+Supporting: Pool completely saturated, significant wait queue, slow queries holding connections.
+Contradicting: Primary CPU at 42% (not a CPU bottleneck), replica lag only 0.8s.
+Unexpected: Connection timeout errors spiked from 0 to 12 in the last 15 minutes.
+
+Key conclusion: Connection pool exhaustion is the primary bottleneck.
+Raw: pool_size=100, active=100, waiting=45, slow_queries_count=3, primary_cpu=42%, replica_lag=0.8s"""
 }))
 ```
 
@@ -260,7 +253,7 @@ AIMessage(content=json.dumps({
 
 ## Orchestrator Intervention
 
-> **Design Decision**: Sub-Agents run **uninterrupted** by default. The Orchestrator monitors them via a pull-based `check_agents` tool and intervenes only when necessary — see [orchestrator.md](orchestrator.md#monitoring--intervention).
+> **Design Decision**: Sub-Agents run asynchronously as `asyncio.Task`s managed by the TaskManager. The Orchestrator monitors them via `check_tasks` tool and intervenes via `inject_instruction` or `abort_task` when necessary — see [orchestrator.md](orchestrator.md#taskmanager--orchestrator-tools).
 >
 > The `interrupt_before` mechanism is reserved for **safety-critical agents** (e.g., database agents executing destructive queries) where external review is mandatory before tool execution.
 
@@ -284,16 +277,16 @@ graph.invoke(Command(resume=True), config)
 For non-safety scenarios, the Orchestrator uses tools to intervene:
 
 ```python
-# Orchestrator detects agent is stuck (via check_agents tool)
+# Orchestrator detects agent is stuck (via check_tasks tool)
 # → Injects new instruction
-inject_instruction("database", "Skip replica, focus on primary pool metrics")
+inject_instruction("task-001", "Skip replica, focus on primary pool metrics")
 
 # Orchestrator determines agent's task is no longer needed
 # → Aborts agent
-abort_agent("infrastructure", "H1 already confirmed by database agent")
+abort_task("task-002", "H1 already confirmed by database agent")
 ```
 
-These tools are backed by the `ExecutionRunner` which calls `graph.update_state()` on the sub-agent's namespace externally.
+These tools are backed by the `TaskManager` which calls `subgraph.aupdate_state()` for injection and `asyncio.Task.cancel()` for abort.
 
 ---
 
@@ -307,26 +300,25 @@ Agent pool is built at startup from config:
 
 ```python
 class AgentPool:
-    def __init__(self, config_dir: str, tool_registry: ToolRegistry):
-        self.agents = {}
-        for config_file in Path(config_dir).glob("*.yaml"):
-            agent_config = load_agent_config(config_file)
-            self.agents[agent_config.name] = create_sub_agent(
-                agent_config.name, agent_config, tool_registry
+    """Collection of independently compiled Sub-Agent subgraphs.
+
+    Sub-Agents are NOT added as graph nodes. They are compiled independently
+    and managed by the TaskManager, which launches them as asyncio.Tasks.
+    """
+
+    def __init__(self, scenario_config: ScenarioConfig, tool_registry: ToolRegistry):
+        self.agents: dict[str, CompiledGraph] = {}
+        for agent_id, agent_config in scenario_config.agents.items():
+            self.agents[agent_id] = create_sub_agent(
+                agent_id, agent_config, tool_registry
             )
 
-    def build_graph(self, orchestrator_node) -> CompiledGraph:
-        """Build and compile the complete graph with all agents."""
-        builder = StateGraph(ExecutorState)
-        builder.add_node("orchestrator", orchestrator_node)
-
-        for agent_id, agent in self.agents.items():
-            builder.add_node(agent_id, agent)
-            builder.add_edge(agent_id, "orchestrator")
-
-        builder.add_edge(START, "orchestrator")
-        return builder.compile(checkpointer=checkpointer)
+    def get_agent(self, agent_id: str) -> CompiledGraph:
+        """Get a compiled sub-agent subgraph by ID."""
+        return self.agents[agent_id]
 ```
+
+The Orchestrator graph is built separately — it contains only the Orchestrator `create_react_agent` as its sole node. Sub-Agents are passed to the `TaskManager` for async invocation.
 
 ---
 
@@ -351,7 +343,7 @@ workflow.add_node(
 Error types and handling:
 - Tool error → Layer 1: returned as ToolMessage for LLM self-correction
 - Rate limit / timeout / server error → Layer 2: RetryPolicy automatic retry
-- Fatal (all retries exhausted) → Layer 3: bubble up to Orchestrator via `check_agents` with error summary + last steps
+- Fatal (all retries exhausted) → Layer 3: bubble up to Orchestrator via `check_tasks` with error summary + last steps
 
 ---
 
@@ -368,12 +360,11 @@ Error types and handling:
 | Decision | Rationale |
 |----------|-----------|
 | create_react_agent | Pre-built ReAct loop, works out of the box. **⚠️ Deprecated — use `create_agent` from `langchain.agents`** |
-| Independent State Schema | Full isolation; avoids state pollution. **✅ Verified: `state_schema` param supported, same-name field auto-mapping works** |
-| Same-name field mapping | Automatic, no explicit mapping code needed. **✅ Verified** |
-| No Sub-Agent checkpointer | Root manages all checkpoints; simpler architecture |
+| Independent State Schema | Full isolation; Sub-Agents are compiled independently, not graph nodes. No state mapping — communication via tools only |
+| Independent Sub-Agent checkpointer | Each Sub-Agent has its own thread_id via TaskManager; enables `update_state()` for injection |
 | Config-driven tools/prompts | New agents via YAML only, no code changes |
 | Data-only constraint (RCA) | All reasoning centralized in Orchestrator for traceability |
-| pre_model_hook compression | **✅ Verified: `llm_input_messages` return key preserves full state in checkpoints** |
+| pre_model_hook compression | **✅ Verified: `llm_input_messages` return key preserves full state in checkpoints. Triggered at 80% context limit** |
 | Static agent pool | Graph compiled once at startup. No runtime hot-reload — simplicity over dynamism |
-| Pull-based monitoring | Orchestrator uses `check_agents` tool, sub-agents run uninterrupted |
+| Pull-based monitoring | Orchestrator uses `check_tasks` tool in ReAct loop; sub-agents run as asyncio.Tasks via TaskManager |
 | recursion_limit for step control | **⚠️ No native `max_steps` param — must translate to `recursion_limit` in config** |
