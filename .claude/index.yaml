@@ -2,33 +2,66 @@
 # Maintenance rules: see CLAUDE.md "Design Documentation System"
 
 concepts:
+  testing_strategy:
+    description: "Four-layer testing architecture: deterministic invariants, snapshot-based pipeline integration (Mock LLM), LLM-as-Judge decision eval, and E2E scenario eval. Checkpoint-driven snapshot injection for mid-flow behavioral testing."
+    design: "designs/testing-strategy.md"
+    related_concepts: [orchestrator, sub_agent, configuration_system, recovery_system, memory_system, execution_runner]
+    plans: []
+    tasks: []
+    tests:
+      - file: "tests/unit/test_design_contracts.py"
+        layer: "L1 — Deterministic Invariants"
+      - file: "tests/unit/test_knowledge_path_utils.py"
+        layer: "L1 — Deterministic Invariants"
+      - file: "tests/unit/test_state_registry.py"
+        layer: "L1 — Deterministic Invariants"
+      - file: "tests/unit/test_config_validation.py"
+        layer: "L1 — Deterministic Invariants"
+
   system_architecture:
     description: "LangGraph Supervisor+Subgraph multi-agent orchestration system with config-driven design, trajectory recording, monitoring, and failure recovery"
     design: "designs/system-design-overview.md"
     related_concepts: [orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner]
-    plans: []
+    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
     tasks: []
 
   orchestrator:
     description: "create_react_agent acting as hypothesis reasoner. Maintains DiagnosticNotebook, drives RCA flow in ReAct loop (phases are Notebook state markers, not graph nodes), context compression with checkpoint-backed recall. Dispatches Sub-Agents asynchronously via TaskManager, monitors/injects/aborts via tools"
     design: "designs/orchestrator.md"
     related_concepts: [system_architecture, sub_agent, trajectory_system, memory_system, execution_runner]
-    plans: []
+    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
     tasks: []
+    tests:
+      - file: "tests/unit/test_design_contracts.py"
+        covers:
+          - "HypothesisStatus enum matches update_hypothesis tool Literal (§ Orchestrator Tools)"
+          - "Verdict enum matches VerificationResult.verdict (§ Data Structures)"
+          - "Phase enum matches four diagnostic phases (§ Overview)"
+          - "DiagnosticNotebook instance isolation (§ Data Structures)"
+          - "ExecutorState has all required fields (§ Data Structures)"
 
   sub_agent:
     description: "Independently compiled subgraphs via create_react_agent. Isolated State Schema, config-driven tools/prompts, pre_model_hook compression (llm_input_messages), data-only constraint in RCA mode, static agent pool compiled at startup. Launched as asyncio.Tasks by TaskManager"
     design: "designs/sub-agent.md"
     related_concepts: [system_architecture, orchestrator, configuration_system, execution_runner]
-    plans: []
+    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
     tasks: []
+    tests:
+      - file: "tests/unit/test_design_contracts.py"
+        covers:
+          - "SubAgentState has all required fields (§ State Schema)"
 
   generic_state_wrapper:
     description: "Generic SDK wrapper supporting multiple agent system types (hypothesis-driven, sequential, memory-extraction, decision-tree) via configuration. Shared BaseOrchestrator, PhaseManager, State Schema Registry"
     design: "designs/generic-state-wrapper.md"
     related_concepts: [orchestrator, configuration_system, memory_system]
-    plans: []
+    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
     tasks: []
+    tests:
+      - file: "tests/unit/test_state_registry.py"
+        covers:
+          - "State Schema Registry resolves all 4 system types to correct TypedDict (§ State Schema Registry)"
+          - "Unknown/partial system_type raises helpful error (§ State Schema Registry)"
 
   memory_system:
     description: "Two-layer memory: intra-task (context compression + recall_history tool backed by checkpoint chain, see orchestrator.md) and cross-task (Memory Extraction agent system producing KnowledgeEntry items with three confidence levels — FACT/PATTERN/HEURISTIC — in LangGraph Store, see generic-state-wrapper.md)"
@@ -37,13 +70,24 @@ concepts:
     related_designs: ["designs/generic-state-wrapper.md"]
     plans: []
     tasks: []
+    tests:
+      - file: "tests/unit/test_knowledge_path_utils.py"
+        covers:
+          - "path_to_namespace — root, deep, trailing slash, empty string (§ Knowledge Store namespace)"
+          - "path_to_namespace_and_key — key extraction, single segment (§ Knowledge Store)"
+          - "Round-trip path↔namespace idempotency and normalization (§ Knowledge Store)"
 
   configuration_system:
     description: "Config system: system.yaml (global), tools/*.yaml (reusable tool defs), scenarios/<name>/ (scenario.yaml + prompts/*.j2). Pydantic schema validation + cross-reference validation at startup. Environment variable substitution"
     design: "designs/system-design-overview.md"
     related_concepts: [system_architecture, sub_agent, orchestrator]
-    plans: []
+    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
     tasks: []
+    tests:
+      - file: "tests/unit/test_config_validation.py"
+        covers:
+          - "Mandatory field rejection — SystemConfig, AgentConfig, OrchestratorConfig, ScenarioConfig (§ Configuration — startup validation)"
+          - "ScenarioConfig composition — accepts complete valid scenario (§ Configuration — scenario.yaml)"
 
   trajectory_system:
     description: "Hierarchical trace capture via TaskManager registry (TaskTraceRef). Independent checkpoint chains per agent, linked by task_id. Export to RL training format. CompressionRef stored in state"
