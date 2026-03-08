@@ -353,10 +353,15 @@ class AgentPool:
 
 ## Error Handling
 
-```python
-# create_react_agent handles tool errors via handle_tool_errors=True
-# For transient errors, use RetryPolicy:
+Errors are handled at four layers — see [system-design-overview.md](system-design-overview.md#error-handling-layers) for the full model.
 
+Sub-Agent level (Layer 1 + 2):
+
+```python
+# Layer 1: LLM self-correction via handle_tool_errors=True (default in create_react_agent)
+# Tool errors are returned as ToolMessage, LLM reasons about them and tries alternatives
+
+# Layer 2: Transient errors handled via RetryPolicy
 workflow.add_node(
     "sub_agent",
     sub_agent,
@@ -364,11 +369,10 @@ workflow.add_node(
 )
 ```
 
-Error types:
-- Rate limit → exponential backoff
-- Timeout → simple retry
-- Tool error → returned as ToolMessage for LLM self-correction
-- Fatal → bubble up to Orchestrator for decision
+Error types and handling:
+- Tool error → Layer 1: returned as ToolMessage for LLM self-correction
+- Rate limit / timeout / server error → Layer 2: RetryPolicy automatic retry
+- Fatal (all retries exhausted) → Layer 3: bubble up to Orchestrator via `check_agents` with error summary + last steps
 
 ---
 

@@ -52,9 +52,9 @@ concepts:
     tasks: []
 
   recovery_system:
-    description: "Failure recovery via get_state_history and update_state. Supports retry, state fix, rollback, and debug replay from any checkpoint"
-    design: null
-    related_concepts: [system_architecture, trajectory_system]
+    description: "Four-layer error handling: Sub-Agent self-heal, RetryPolicy, Orchestrator decision (with error summary + last steps), manual system recovery via checkpoint resume. Debug replay via checkpoint fork"
+    design: "designs/system-design-overview.md"
+    related_concepts: [system_architecture, trajectory_system, orchestrator, sub_agent, execution_runner]
     plans: []
     tasks: []
 

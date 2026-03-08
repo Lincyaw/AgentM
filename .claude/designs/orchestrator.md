@@ -1137,6 +1137,10 @@ class AgentStatus:
     result: Optional[dict] = None
     completed_at: Optional[str] = None
 
+    # For failed agents: error context (consumed once)
+    error_summary: Optional[str] = None           # "Connection refused after 3 retries"
+    last_steps: Optional[list[dict]] = None       # Last N execution steps for Orchestrator context
+
 class AgentDashboard:
     """In-memory dashboard tracking all dispatched Sub-Agents.
 
@@ -1201,7 +1205,8 @@ class AgentDashboard:
             elif agent.status == "failed" and agent_id not in self._consumed_results:
                 result["failed"].append({
                     "agent_id": agent_id,
-                    "error": agent.result,
+                    "error_summary": agent.error_summary,
+                    "last_steps": agent.last_steps,  # Last N execution steps for context
                 })
                 self._consumed_results.add(agent_id)
 
