@@ -93,67 +93,46 @@ Each iteration continues until:
 
 ## Configuration
 
-### Agent Config (`agents/*.yaml`)
+Sub-Agent configuration is defined **inline in the scenario file** (`scenarios/<name>/scenario.yaml`). See [system-design-overview.md](system-design-overview.md#configuration-system) for the full config system.
+
+### Agent Config Example
 
 ```yaml
-# agents/infrastructure.yaml
-agent:
-  name: "infrastructure"
-  description: "Collect infrastructure metrics (CPU, memory, disk, network)"
+# scenarios/rca_hypothesis/scenario.yaml (agents section)
+agents:
+  infrastructure:
+    model: "gpt-4o-mini"
+    temperature: 0.2
+    prompt: "prompts/agents/infrastructure.j2"    # Relative to scenario dir
+    tools: [check_cpu, check_memory, check_disk, check_network]
+    execution:
+      max_steps: 20
+      timeout: 120
+      retry:
+        max_attempts: 3
+        initial_interval: 1.0
+    compression:
+      max_uncompressed_steps: 10
+      compression_model: "gpt-4o-mini"
 
-  model: "gpt-4o-mini"
-  temperature: 0.2
-
-  tools:
-    - check_cpu
-    - check_memory
-    - check_disk
-    - check_network
-
-  tool_settings:
-    check_cpu:
-      interval: "5m"
-      granularity: "1m"
-    check_memory:
-      include_gc_stats: true
-
-  prompt:
-    template: "templates/agents/infrastructure_system.txt"
-
-  execution:
-    max_steps: 20
-    timeout: 120
-    interrupt_before: []  # No interrupts for infra checks
-```
-
-```yaml
-# agents/database.yaml
-agent:
-  name: "database"
-  description: "Check database performance, queries, connections"
-
-  model: "gpt-4"
-  temperature: 0.1  # Lowest — SQL must be accurate
-
-  tools:
-    - get_db_metrics
-    - analyze_slow_queries
-    - check_connections
-    - check_locks
-    - explain_query
-
-  tool_settings:
-    analyze_slow_queries:
-      threshold_ms: 1000
-      top_n: 5
-
-  prompt:
-    template: "templates/agents/db_system.txt"
-
-  execution:
-    max_steps: 30
-    timeout: 300
-    interrupt_before: ["tools"]  # Orchestrator reviews DB queries
+  database:
+    model: "gpt-4"
+    temperature: 0.1
+    prompt: "prompts/agents/database.j2"
+    tools: [get_db_metrics, analyze_slow_queries, check_connections, check_locks]
+    tool_settings:
+      analyze_slow_queries:
+        threshold_ms: 500
+    execution:
+      max_steps: 30
+      timeout: 300
+      interrupt_before: ["tools"]
+      retry:
+        max_attempts: 3
+        initial_interval: 1.0
+    compression:
+      max_uncompressed_steps: 15
+      compression_model: "gpt-4o-mini"
 ```
 
 ### Model Selection Guidelines
@@ -169,10 +148,10 @@ agent:
 
 ## Prompt Management
 
-System prompts are loaded from external template files (Jinja2):
+System prompts are Jinja2 templates (`.j2`), stored in the scenario's `prompts/agents/` directory:
 
-```
-# templates/agents/infrastructure_system.txt
+```jinja2
+{# scenarios/rca_hypothesis/prompts/agents/infrastructure.j2 #}
 
 You are an infrastructure diagnostics specialist (Agent: {{ agent_id }}).
 

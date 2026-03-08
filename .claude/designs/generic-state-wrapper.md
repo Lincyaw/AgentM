@@ -601,7 +601,7 @@ RCA Orchestrator (Phase 2: Hypothesis Generation)
 ### Configuration
 
 ```yaml
-# config/scenarios/memory_extraction.yaml
+# scenarios/memory_extraction/scenario.yaml
 system:
   type: "memory_extraction"
 
@@ -609,22 +609,26 @@ orchestrator:
   model: "gpt-4o"
   temperature: 0.3
 
+  prompts:
+    system: "prompts/orchestrator_system.j2"
+
   feature_gates:
-    # RCA-specific gates — all OFF
     adversarial_review: false
     parallel_verification: false
     auto_refine_partial: false
-    # Memory-specific gates
     dedup_against_existing: true
     auto_merge_similar: true
-    min_evidence_for_pattern: 2   # Require N occurrences before creating a pattern
+    min_evidence_for_pattern: 2
 
   tools:
-    - search_knowledge_store
-    - update_knowledge_store
+    - knowledge_search
+    - knowledge_list
+    - knowledge_read
+    - knowledge_write
+    - knowledge_delete
 
   compression:
-    enabled: false    # Memory extraction tasks are typically short
+    enabled: false
 
 phases:
   collect:
@@ -632,7 +636,7 @@ phases:
     next_phases: [analyze]
   analyze:
     handler: "phase_analyze_trajectories"
-    next_phases: [analyze, extract]   # May loop for more analysis
+    next_phases: [analyze, extract]
   extract:
     handler: "phase_extract_knowledge"
     next_phases: [refine]
@@ -640,39 +644,36 @@ phases:
     handler: "phase_refine_knowledge"
     next_phases: []
 
-sub_agents:
+agents:
   trajectory_analyst:
     model: "gpt-4o-mini"
+    prompt: "prompts/agents/trajectory_analyst.j2"
     tools:
-      - read_trajectory          # Read checkpoint history from completed RCA threads
+      - read_trajectory
       - get_checkpoint_history
-      - knowledge_search          # Search existing knowledge (read-only)
+      - knowledge_search
       - knowledge_list
   pattern_extractor:
     model: "gpt-4o"
+    prompt: "prompts/agents/pattern_extractor.j2"
     tools:
-      - knowledge_search          # Search for dedup / cross-reference
-      - knowledge_list            # Browse structure
-      - knowledge_read            # Read full entries
+      - knowledge_search
+      - knowledge_list
+      - knowledge_read
       - compare_trajectories
   knowledge_writer:
     model: "gpt-4o"
+    prompt: "prompts/agents/knowledge_writer.j2"
     tools:
-      - knowledge_search          # Check before writing
+      - knowledge_search
       - knowledge_list
       - knowledge_read
-      - knowledge_write           # Create / update entries
-      - knowledge_delete          # Remove obsolete entries
+      - knowledge_write
+      - knowledge_delete
 
-knowledge_store:
-  backend: "langgraph_store"
-  namespace_root: "knowledge"
-  persistence: "postgres"           # "memory" | "sqlite" | "postgres"
-  index:
-    dims: 1536
-    embed: "openai:text-embedding-3-small"
-    fields: ["title", "description"]  # Fields to embed for semantic search
 ```
+
+> **Note**: Knowledge Store configuration (backend, embedding, index) is in `system.yaml` under `storage.store`, not in the scenario file. The scenario only references knowledge tools — the store itself is global infrastructure.
 
 ### Usage
 
