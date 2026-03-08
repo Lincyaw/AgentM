@@ -803,8 +803,6 @@ The LLM is free to interleave phases naturally — e.g., it might start forming 
 
 ### Notebook I/O: How the Orchestrator Reads and Writes Notebook
 
-The Orchestrator LLM needs to see Notebook content (read) and tools need to update it (write). Two mechanisms handle this:
-
 **Read**: `prompt` callable injects Notebook content before every LLM call.
 
 ```python
@@ -829,40 +827,33 @@ orchestrator = create_react_agent(
 )
 ```
 
-**Write**: Tools return `Command(update={"notebook": ...})` to transparently update Notebook.
+**Write**: Two modes, split by what's being updated:
+
+| Notebook field | Update mode | Who controls | Why |
+|---|---|---|---|
+| `collected_data` | **Transparent** (tool internal) | check_tasks tool | Factual data — no judgment needed |
+| `exploration_history` | **Transparent** (tool internal) | dispatch_agent / check_tasks | Action recording — mechanical |
+| `hypotheses` | **LLM explicit** (update_hypothesis tool) | Orchestrator LLM | Reasoning judgment — LLM decides what hypotheses to form/update/reject |
+| `current_phase` | **LLM explicit** (update_hypothesis tool) | Orchestrator LLM | LLM knows its own focus |
+
+**Transparent updates** happen inside tools via `Command(update={"notebook": ...})` — LLM never sees this:
 
 ```python
-@tool
-def check_tasks(tool_call_id: Annotated[str, InjectedToolCallId],
-                wait_seconds: int = 10) -> Command:
-    results = task_manager.get_all_status(wait_seconds=wait_seconds)
-
-    # Transparently update Notebook with completed results
-    notebook = current_notebook()  # Read from state via closure or InjectedState
-    for completed in results["completed"]:
-        notebook.collected_data[completed["agent_id"]] = completed["result"]
-        notebook.exploration_history.append(ExplorationStep(
-            step_number=notebook.current_step,
-            phase=notebook.current_phase,
-            action=f"Collected results from {completed['agent_id']}",
-            timestamp=datetime.now().isoformat(),
-            content=str(completed["result"]),
-            agent_outcomes={completed["agent_id"]: AgentOutcome(
-                agent_id=completed["agent_id"],
-                task_id=completed["task_id"],
-                status=AgentRunStatus.COMPLETED,
-                duration_seconds=completed.get("duration_seconds"),
-            )},
-        ))
-        notebook.current_step += 1
-
-    return Command(update={
-        "notebook": notebook,
-        "messages": [ToolMessage(content=json.dumps(results), tool_call_id=tool_call_id)],
-    })
+# Inside check_tasks tool: auto-record completed results
+notebook.collected_data[completed["agent_id"]] = completed["result"]
+notebook.exploration_history.append(ExplorationStep(...))
 ```
 
-**LLM perspective**: The LLM calls `check_tasks()`, sees results in the ToolMessage, and continues reasoning. The Notebook is updated transparently — the LLM sees the updated Notebook in the next prompt injection. It never needs to explicitly manage Notebook state.
+**Explicit updates** happen via dedicated tools — LLM actively calls these as a reasoning step:
+
+```python
+# LLM explicitly manages hypotheses
+update_hypothesis(id="H1", description="Connection pool exhaustion",
+                  status="formed", evidence_summary="Pool 100/100, 45 waiting")
+update_hypothesis(id="H1", status="confirmed",
+                  evidence_summary="Slow queries holding connections confirmed")
+remove_hypothesis(id="H3")  # Discard irrelevant hypothesis
+```
 
 ### System Prompt Guidelines (Not Enforced by Graph)
 
@@ -873,46 +864,95 @@ The Orchestrator's system prompt provides diagnostic discipline without rigid en
 
 You are an RCA specialist investigating a production incident.
 
-Your working memory is the DiagnosticNotebook. Record all findings there.
+Your working memory is the DiagnosticNotebook. It is shown to you at the beginning of each reasoning step.
 
-## Diagnostic Approach
-
-1. **Start broad**: Dispatch multiple agents to collect initial data across infrastructure,
-   database, logs, and network. Don't deep-dive before you've scanned the landscape.
-
-2. **Form hypotheses early**: As data comes in, start forming hypotheses. Don't wait
-   for all agents to finish before thinking.
-
-3. **Verify with evidence**: For each hypothesis, dispatch targeted investigations.
-   Actively look for BOTH supporting AND contradicting evidence.
-
-4. **Consider alternatives**: Before confirming a root cause, ensure you've considered
-   at least 2 alternative explanations and found evidence to rule them out.
-
-5. **Conclude decisively**: When evidence strongly supports one hypothesis and alternatives
-   are eliminated, confirm the root cause and provide actionable recommendations.
-
-## Tools Available
-- dispatch_agent(agent_id, task): Send a task to a Sub-Agent (async, returns immediately)
-- check_tasks(wait_seconds=10): See status of all dispatched tasks + results of completed ones.
+<tools>
+- **dispatch_agent(agent_id, task, task_type)**: Launch a background Sub-Agent.
+  task_type: scout (initial recon), verify (test hypothesis), deep_analyze (focused deep dive).
+  Results are NOT delivered automatically — call `check_tasks` to collect them.
+- **check_tasks(wait_seconds=10)**: Check status of all dispatched tasks + collect completed results.
   If all tasks are still running, waits internally up to wait_seconds before returning.
-- inject_instruction(task_id, msg): Redirect a running agent
-- abort_task(task_id, reason): Stop a running agent
-- knowledge_search/list/read: Query historical knowledge base
-- recall_history: Retrieve compressed history details
+- **update_hypothesis(id, description, status, evidence_summary?, parent_id?)**: Create
+  or update a hypothesis. Status: formed, investigating, confirmed, rejected, refined, inconclusive.
+- **remove_hypothesis(id)**: Remove a hypothesis from the board.
+- **inject_instruction(task_id, msg)**: Redirect a running agent.
+- **abort_task(task_id, reason)**: Stop a running agent.
+- **knowledge_search/list/read**: Query historical knowledge base.
+- **recall_history**: Retrieve compressed history details.
+</tools>
 
-## Patience & Thoroughness
-- Agent investigations are long-running tasks (10s to minutes). This is normal.
-- When check_tasks shows all agents still running, review your existing data and refine
-  your thinking. Do NOT repeatedly check without doing analysis in between.
+<hypothesis_lifecycle>
+- **formed**: Not yet investigated
+- **investigating**: Sub-agent is gathering evidence
+- **confirmed**: Strong evidence supports this hypothesis
+- **rejected**: Strong evidence contradicts this hypothesis
+- **refined**: Updated based on evidence (spawns child hypothesis via parent_id)
+- **inconclusive**: Investigated but evidence is ambiguous
+</hypothesis_lifecycle>
+
+<task_types>
+- **scout**: Initial reconnaissance — discover data sources, identify anomalies, map topology
+- **verify**: Test a specific hypothesis — gather supporting or contradicting evidence
+- **deep_analyze**: Focused deep dive into a specific data source, time range, or service
+</task_types>
+
+<diagnostic_approach>
+1. **Start broad**: Round 1 MUST dispatch scout tasks to multiple agents. Don't deep-dive
+   before you've scanned the landscape.
+2. **Form hypotheses early**: As data comes in, use `update_hypothesis` to record them.
+   Don't wait for all agents to finish before thinking.
+3. **Verify with evidence**: For each hypothesis, dispatch verify tasks. Actively look
+   for BOTH supporting AND contradicting evidence.
+4. **Consider alternatives**: Before confirming, ensure you've investigated at least 2
+   alternative explanations. Keep hypotheses bounded (max 10) — reject or merge weak ones.
+5. **Conclude decisively**: When evidence strongly supports one hypothesis and alternatives
+   are eliminated, set status to confirmed and stop.
+</diagnostic_approach>
+
+<critical_evaluation>
+Sub-agent reports may be partial, biased, or incorrect. You MUST:
+
+- **Cross-validate**: Confirm findings across multiple sources. One source alone cannot
+  confirm a hypothesis.
+- **Causation ≠ correlation**: Temporal co-occurrence does NOT prove causation. Require
+  the actual propagation mechanism.
+- **Symptoms ≠ causes**: "Service X has high error rate" is a symptom. Ask WHY one level deeper.
+- **Evidence hierarchy**: Infrastructure failures precede application effects; upstream
+  failures cause downstream ones; config changes and deployments are common root causes.
+
+Treat sub-agent reports as data points, not verdicts — each agent sees only a narrow slice.
+</critical_evaluation>
+
+<context_briefing>
+Sub-agents run in isolation — they ONLY see what you write in the `task` instruction.
+
+Every dispatch_agent task MUST include:
+- Key prior findings (service names, timestamps, anomalies)
+- Specific signals to investigate (time range, components, anomaly types)
+- Which hypothesis is being tested and current evidence status
+
+BAD: "Check if the database has errors"
+GOOD: "DB connection pool was 100/100 with 45 waiting at 14:30 UTC. Check slow queries
+holding connections, lock wait times, and connection sources. Testing H2 (pool exhaustion)."
+</context_briefing>
+
+<per_round_task>
+Each time you reason, follow this sequence:
+
+1. **Analyze**: Review evidence from the latest sub-agent reports (from check_tasks results).
+2. **Update hypotheses**: Use `update_hypothesis` to add new ones, change status, record evidence.
+   Use `remove_hypothesis` to discard irrelevant ones.
+3. **Decide**: Continue investigating or finalize.
+   - **Continue**: Dispatch new tasks (scout/verify/deep_analyze), then check_tasks to collect.
+   - **Finalize**: Set the confirmed hypothesis and provide root cause + recommendations.
+</per_round_task>
+
+<patience>
+Agent investigations are long-running tasks (10s to minutes). This is normal.
 - Do NOT abort a task unless you see clear failure signals (errors, stuck at same step).
-  Agents progressing through steps are working normally.
+- When check_tasks shows all agents still running, review existing data and refine thinking.
 - Do NOT rush to conclusions. Thorough investigation beats fast guessing.
-
-## Notebook Management
-- The Notebook is updated automatically when you use tools (you don't need to manage it).
-- Update current_phase to reflect your focus: exploration / generation / verification / confirmation
-- The Notebook content is shown to you at the beginning of each reasoning step.
+</patience>
 ```
 
 ### Example: Realistic RCA Flow
@@ -922,62 +962,66 @@ This shows how the Orchestrator naturally interleaves phases in a ReAct loop:
 ```
 Orchestrator LLM (ReAct loop)
   │
-  │ # Broad scan first
-  ├─ "Let me scan the landscape"
-  │  dispatch_agent("infrastructure", "Scan CPU, memory, disk, network")
-  │  dispatch_agent("database", "Check connection pool, slow queries")
-  │  dispatch_agent("logs", "Collect error logs from last hour")
-  │  → Notebook: current_phase = exploration
+  │ # Round 1: Scout
+  ├─ dispatch_agent("infrastructure", "Scan CPU, memory, disk, network for anomalies",
+  │    task_type="scout")
+  ├─ dispatch_agent("database", "Check connection pool, slow queries, replication",
+  │    task_type="scout")
+  ├─ dispatch_agent("logs", "Collect error logs from last hour, identify spikes",
+  │    task_type="scout")
   │
-  │ # Check progress — infra is done, others still running
-  ├─ check_tasks()
-  │  → infra completed: "CPU 85%, memory 40%, disk ok"
-  │  → db: running (step 3/30)
-  │  → logs: running (step 2/20)
+  │ # Wait for results
+  ├─ check_tasks(wait_seconds=30)
+  │  → infra completed: "CPU 85% (postgres 45%, java 28%). Memory 40%. Disk ok."
+  │  → db: running (step 3/20)
+  │  → logs: running (step 2/15)
   │
-  │ # Already forming a hypothesis from partial data
-  ├─ "CPU is high. Might be related. Let me wait for DB results."
-  │  → Notebook: hypotheses["H1"] = {description: "High CPU causing slow responses", status: FORMED}
-  │  → Notebook: current_phase = generation (already thinking while exploring)
+  │ # Form first hypothesis from partial data
+  ├─ update_hypothesis(id="H1", description="High CPU causing slow responses",
+  │    status="formed", evidence_summary="CPU 85%, postgres 45%")
   │
-  │ # More results in
-  ├─ check_tasks()
-  │  → db completed: "Connection pool 100/100, 45 waiting, 3 slow queries > 2s"
-  │  → logs completed: "12 connection timeout errors in last 15 min"
+  │ # Collect remaining results
+  ├─ check_tasks(wait_seconds=30)
+  │  → db completed: "Pool 100/100, 45 waiting. 3 slow queries > 2s."
+  │  → logs completed: "12 connection timeout errors in last 15 min."
   │
-  │ # Revise hypothesis based on new data
-  ├─ "Connection pool exhaustion looks more likely than CPU."
-  │  → Notebook: hypotheses["H1"].status = REJECTED (CPU is symptom, not cause)
-  │  → Notebook: hypotheses["H2"] = {description: "DB connection pool exhaustion", status: FORMED}
-  │  → Notebook: current_phase = verification
+  │ # Revise hypothesis board
+  ├─ update_hypothesis(id="H1", status="rejected",
+  │    evidence_summary="CPU is symptom. DB pool is full — more likely cause.")
+  ├─ update_hypothesis(id="H2", description="DB connection pool exhaustion",
+  │    status="formed", evidence_summary="Pool 100/100, 45 waiting, timeout errors")
   │
-  │ # Deep investigation
-  ├─ dispatch_agent("database", "Deep dive: connection sources, lock wait times,
-  │    which queries hold connections longest")
+  │ # Round 2: Verify H2 + check alternative
+  ├─ dispatch_agent("database",
+  │    "H2: DB connection pool exhaustion. Pool was 100/100 with 45 waiting. "
+  │    "Investigate: connection sources, lock wait times, which queries hold "
+  │    "connections longest. Check if slow queries are the cause.",
+  │    task_type="verify", hypothesis_id="H2")
+  ├─ dispatch_agent("infrastructure",
+  │    "Check if CPU spike is from postgres or app. Any recent deployments? "
+  │    "Testing whether CPU is root cause or symptom of DB issue.",
+  │    task_type="verify", hypothesis_id="H1")
   │
-  │ # Meanwhile, check alternative
-  ├─ dispatch_agent("infrastructure", "Check if CPU spike is from postgres processes
-  │    or application. Check recent deployments.")
+  ├─ check_tasks(wait_seconds=30)
+  │  → db completed: "Top connection holder: JOIN on orders (4.2s). Lock wait 320ms.
+  │    All 100 connections from app-server-01. Verdict: SUPPORTED."
+  │  → infra completed: "CPU from postgres (slow queries). No deployments.
+  │    Verdict: CONTRADICTED — CPU is effect, not cause."
   │
-  ├─ check_tasks()
-  │  → db completed: "Top connection holder: JOIN on orders table (4.2s avg).
-  │    Lock wait 320ms. All 100 connections from app-server-01 pool."
-  │  → infra completed: "CPU: postgres 45%, java 28%. No recent deployments."
+  │ # Update hypotheses with verification evidence
+  ├─ update_hypothesis(id="H2", status="confirmed",
+  │    evidence_summary="Slow queries holding all 100 connections. Verified causal chain.")
   │
-  │ # Confirm with counter-evidence check
-  ├─ "Strong evidence for H2. But let me check: could it be the app server, not the DB?"
-  │  → Notebook: hypotheses["H2"].evidence += ["pool full", "slow queries holding connections"]
-  │  → Notebook: hypotheses["H2"].counter_evidence += ["CPU is effect not cause"]
-  │
-  │ # Final confirmation
-  ├─ "Root cause: Connection pool exhaustion caused by slow queries.
-  │    Recommendations: increase pool_size, add query timeout, optimize orders JOIN."
-  │  → Notebook: confirmed_hypothesis = "H2"
-  │  → Notebook: current_phase = confirmation
-  └─ done
+  └─ done: "Root cause: Connection pool exhaustion from slow queries (orders JOIN).
+     Recommendations: increase pool_size, add 30s query timeout, optimize JOIN."
 ```
 
-**Key observation**: The LLM naturally moved from exploration → generation → verification → confirmation, but it didn't follow a rigid sequence. It formed H1 while still exploring, rejected it when new data arrived, and interleaved verification with alternative checking. This is how humans actually do RCA.
+**Key observations**:
+- LLM explicitly manages hypotheses via `update_hypothesis` (reasoning step)
+- `task_type` guides Sub-Agent behavior (scout → broad, verify → focused)
+- Context briefing in dispatch instructions includes prior findings and hypothesis
+- Notebook data collection happens transparently via check_tasks
+- The flow is natural, not rigidly phased — H1 formed during exploration, rejected immediately
 
 ---
 
@@ -1541,13 +1585,14 @@ agent = create_react_agent(
 
 ### Orchestrator Tools
 
-The Orchestrator has four task management tools, all backed by the TaskManager:
+The Orchestrator has six tools for task management and hypothesis management:
 
 ```python
 @tool
 async def dispatch_agent(
     agent_id: str,
     task: str,
+    task_type: Literal["scout", "verify", "deep_analyze"] = "scout",
     hypothesis_id: Optional[str] = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = None,
 ) -> Command:
@@ -1555,15 +1600,19 @@ async def dispatch_agent(
     in the background and this tool returns right away with a task_id.
 
     Use check_tasks() to monitor progress and collect results when completed.
-
     Multiple agents can be dispatched concurrently — call this tool multiple times.
 
     Args:
         agent_id: Which Sub-Agent to dispatch (e.g., "infrastructure", "database", "logs")
-        task: Natural language instruction for the agent.
+        task: Natural language instruction for the agent. MUST include relevant prior
+            findings, specific signals to investigate, and which hypothesis is being tested.
+        task_type: Investigation approach:
+            - "scout": Initial recon — discover anomalies, map topology
+            - "verify": Test a specific hypothesis with targeted evidence
+            - "deep_analyze": Focused deep dive into specific data source/service
         hypothesis_id: Optional hypothesis being investigated (for tracing)
     """
-    managed = await task_manager.submit(agent_id, task, hypothesis_id)
+    managed = await task_manager.submit(agent_id, task, task_type, hypothesis_id)
 
     # Transparently update Notebook: record the dispatch
     notebook = get_current_notebook()
@@ -1649,6 +1698,80 @@ async def check_tasks(
     return Command(update={
         "notebook": notebook,
         "messages": [ToolMessage(content=json.dumps(results), tool_call_id=tool_call_id)],
+    })
+
+
+@tool
+def update_hypothesis(
+    id: str,
+    description: str,
+    status: Literal["formed", "investigating", "confirmed", "rejected", "refined", "inconclusive"],
+    evidence_summary: Optional[str] = None,
+    parent_id: Optional[str] = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = None,
+) -> Command:
+    """Create or update a hypothesis in the DiagnosticNotebook.
+
+    Call this every round to maintain your hypothesis board:
+    - Create new hypotheses as they emerge from evidence
+    - Update status as verification progresses
+    - Record evidence summaries for traceability
+    - Use parent_id when refining a hypothesis (creates child hypothesis)
+
+    Args:
+        id: Hypothesis ID (e.g., "H1", "H2"). Reuse ID to update existing.
+        description: What the hypothesis claims (e.g., "DB connection pool exhaustion")
+        status: Current status in the lifecycle
+        evidence_summary: Key evidence supporting this status change
+        parent_id: If this is a refinement, the parent hypothesis ID
+    """
+    notebook = get_current_notebook()
+    now = datetime.now().isoformat()
+
+    if id in notebook.hypotheses:
+        h = notebook.hypotheses[id]
+        h.description = description
+        h.status = HypothesisStatus(status)
+        if evidence_summary:
+            h.evidence.append(evidence_summary)
+        h.last_updated = now
+    else:
+        notebook.hypotheses[id] = Hypothesis(
+            id=id, description=description,
+            status=HypothesisStatus(status),
+            evidence=[evidence_summary] if evidence_summary else [],
+            counter_evidence=[],
+            created_at=now, last_updated=now,
+        )
+    if parent_id:
+        notebook.hypotheses[id].parent_id = parent_id
+
+    return Command(update={
+        "notebook": notebook,
+        "messages": [ToolMessage(
+            content=f"Hypothesis {id} updated: {status} — {description}",
+            tool_call_id=tool_call_id,
+        )],
+    })
+
+
+@tool
+def remove_hypothesis(
+    id: str,
+    tool_call_id: Annotated[str, InjectedToolCallId] = None,
+) -> Command:
+    """Remove a hypothesis from the board. Use when a hypothesis is irrelevant
+    or has been merged into another.
+
+    Args:
+        id: Hypothesis ID to remove
+    """
+    notebook = get_current_notebook()
+    if id in notebook.hypotheses:
+        del notebook.hypotheses[id]
+    return Command(update={
+        "notebook": notebook,
+        "messages": [ToolMessage(content=f"Hypothesis {id} removed", tool_call_id=tool_call_id)],
     })
 
 
@@ -1795,8 +1918,10 @@ orchestrator:
     adversarial_review: "prompts/adversarial_review.j2"
 
   tools:
-    - dispatch_agent          # Async dispatch to Sub-Agent (non-blocking)
-    - check_tasks             # Monitor all task status + collect results
+    - dispatch_agent          # Async dispatch to Sub-Agent (non-blocking, with task_type)
+    - check_tasks             # Monitor all task status + collect results (with wait)
+    - update_hypothesis       # LLM explicitly manages hypothesis board
+    - remove_hypothesis       # LLM removes irrelevant hypotheses
     - inject_instruction      # Inject instruction into running task
     - abort_task              # Abort running task
 
