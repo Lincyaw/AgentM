@@ -5,16 +5,29 @@
 
 ---
 
+### Code Conventions in This Document
+
+This document contains two kinds of code:
+
+- **Normative** (data structures) — `dataclass`, `Enum`, `TypedDict`, and interface contracts (tool signatures, WebSocket event schemas). Implementations **must** conform to these definitions: field names, types, and enum values are binding.
+- **Illustrative** (logic) — Functions, algorithms, and flow examples showing one possible implementation approach. Implementations **may** use different code organization (e.g. class methods instead of free functions, different control flow, richer abstractions) as long as the **behavior and data contracts** are preserved.
+
+**Rule of thumb**: If a code block defines a `class` with fields or an `@tool` signature, it's normative. If it defines a `def` with logic, it's illustrative.
+
+---
+
 ## Overview
 
-The Orchestrator is the **Supervisor node** in the Root StateGraph, acting as a **Team Leader / Hypothesis Reasoner**. It maintains a `DiagnosticNotebook` as working memory, drives hypothesis-driven reasoning, and dispatches tasks to Sub-Agents who only collect data.
+The Orchestrator is a **`create_react_agent`** instance acting as the **Team Leader / Hypothesis Reasoner**. It operates in a ReAct loop (LLM → tool call → observe → repeat), using tools to dispatch Sub-Agents asynchronously, monitor their progress, and intervene when needed.
+
+Sub-Agents are **independently compiled subgraphs**, launched as background `asyncio.Task`s by a **TaskManager**. The Orchestrator interacts with Sub-Agents exclusively through tools — never directly as graph nodes.
 
 ### Core Responsibilities
 
 1. **Hypothesis reasoning** — Generate and verify hypotheses using LLM
-2. **Async task dispatch** — Submit multiple concurrent tasks to Sub-Agents (time-multiplexing)
-3. **Notebook management** — Track hypotheses, evidence, and exploration history
-4. **Monitoring & intervention** — Stream Sub-Agent execution, interrupt, inject instructions
+2. **Async task dispatch** — Submit concurrent tasks to Sub-Agents via `dispatch_agent` tool (non-blocking)
+3. **Monitoring & intervention** — Check task progress, inject instructions, abort stuck agents via tools
+4. **Notebook management** — Track hypotheses, evidence, and exploration history
 5. **Phase orchestration** — Drive the Hypothetico-Deductive state machine
 
 ---
@@ -57,7 +70,7 @@ LLMs are prone to **confirmation bias** — they tend to find evidence supportin
 
 2. **Adversarial review** (feature-gated) — After verification, a separate Sub-Agent with a "Devil's Advocate" role attempts to refute the conclusion. This uses LLM's divergent capability against its own confirmation bias. See [Feature Gates](#feature-gates).
 
-3. **Mandatory counter-evidence** — The three-block VerificationResult requires `rejecting_reasons` as a non-optional field. Sub-Agents must actively look for evidence AGAINST the hypothesis.
+3. **Mandatory counter-evidence** — The VerificationResult prompt guideline requires Sub-Agents to include observations that CONTRADICT the hypothesis, not just supporting evidence.
 
 4. **Role separation** — The entity that generates hypotheses (Orchestrator) is different from the entity that collects evidence (Sub-Agent), reducing self-reinforcing loops.
 
@@ -71,9 +84,47 @@ The Orchestrator uses **minimal messages** (2-3) combined with a structured **No
 
 ```python
 from dataclasses import dataclass, field
-from typing import Annotated, Optional, Literal
+from typing import Annotated, Optional
+from enum import Enum
 from langchain_core.messages import BaseMessage
 from langgraph.prebuilt import add_messages
+
+
+class Phase(str, Enum):
+    EXPLORATION = "exploration"
+    GENERATION = "generation"
+    VERIFICATION = "verification"
+    CONFIRMATION = "confirmation"
+
+
+class HypothesisStatus(str, Enum):
+    FORMED = "formed"               # Generated but not yet verified
+    INVESTIGATING = "investigating" # Verification in progress (Sub-Agent dispatched)
+    CONFIRMED = "confirmed"         # Verification verdict: confirmed
+    REJECTED = "rejected"           # Verification verdict: rejected
+    PARTIAL = "partial"             # Verification verdict: partially confirmed
+
+
+class Verdict(str, Enum):
+    CONFIRMED = "confirmed"
+    REJECTED = "rejected"
+    PARTIAL = "partial"
+
+
+class AgentRunStatus(str, Enum):
+    """Runtime status of a Sub-Agent execution (used by TaskManager)."""
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class TaskStatus(str, Enum):
+    """Status of a dispatched task in PendingTask."""
+    PENDING = "pending"
+    DISPATCHED = "dispatched"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
 
 @dataclass
 class ExecutorState:
@@ -85,7 +136,7 @@ class ExecutorState:
 
     # Auxiliary
     task_id: str = ""
-    current_phase: str = "exploration"
+    current_phase: Phase = Phase.EXPLORATION
 ```
 
 Key properties:
@@ -104,9 +155,9 @@ Even with Mode 2's minimal messages, the context window can still be exhausted d
 
 | Layer | What Grows | Trigger |
 |-------|-----------|---------|
-| **Sub-Agent** | ReAct loop messages (tool calls + responses) accumulate across many iterations | Tool call count exceeds threshold |
-| **Orchestrator Notebook** | `exploration_history` entries accumulate across all phases and hypothesis cycles | History entry count exceeds threshold |
-| **Orchestrator Prompt** | The formatted Notebook injected into the LLM prompt grows as data and hypotheses accumulate | Prompt token count approaches limit |
+| **Sub-Agent** | ReAct loop messages (tool calls + responses) accumulate across many iterations | Token count reaches 80% of model context limit |
+| **Orchestrator Notebook** | `exploration_history` entries accumulate across all phases and hypothesis cycles | Token count reaches 80% of model context limit |
+| **Orchestrator Prompt** | The formatted Notebook injected into the LLM prompt grows as data and hypotheses accumulate | Token count reaches 80% of model context limit |
 
 ### Compression Architecture
 
@@ -116,7 +167,8 @@ Even with Mode 2's minimal messages, the context window can still be exhausted d
 │                                                   │
 │   DiagnosticNotebook                             │
 │   ├─ exploration_history: [...]  ← compress when │
-│   │                                 len > threshold│
+│   │                                 tokens ≥ 80% │
+│   │                                 context limit │
 │   ├─ collected_data: {...}       ← summarize      │
 │   │                                 completed phases│
 │   └─ phase_summaries: [...]      ← compressed     │
@@ -129,8 +181,8 @@ Even with Mode 2's minimal messages, the context window can still be exhausted d
 │                                                   │
 │   SubAgentState                                  │
 │   ├─ messages: [...]             ← compress when │
-│   │                                 tool_call_count│
-│   │                                 > threshold    │
+│   │                                 tokens ≥ 80% │
+│   │                                 context limit │
 │   └─ message_summary: str        ← compressed    │
 │                                     output stored │
 │                                     here          │
@@ -139,42 +191,35 @@ Even with Mode 2's minimal messages, the context window can still be exhausted d
 
 ### Layer 1: Sub-Agent Message Compression
 
-Sub-Agents run a ReAct loop that can generate many tool call → tool response cycles. When the cycle count exceeds a configurable threshold, the accumulated messages are compressed into a structured summary before the next LLM call.
+Sub-Agents run a ReAct loop that can generate many tool call → tool response cycles. When the accumulated messages approach the model's context window limit, they are compressed into a structured summary before the next LLM call.
 
-**Trigger**: `tool_call_count > max_uncompressed_steps` (configurable per agent, default: 10)
+**Trigger**: Token count of current messages ≥ 80% of model context limit (`context_limit * compression_threshold`)
 
-**Compression Method**: 8-section structured summary via LLM call.
+**Compression Method**: LLM-generated summary with prompt guidelines.
 
 ```python
 @dataclass
 class SubAgentMessageSummary:
-    """Structured summary of compressed Sub-Agent message history."""
+    """Compressed summary of Sub-Agent message history.
 
-    # 1. Task & Instructions
-    original_task: str               # What was the agent asked to do
-    orchestrator_instructions: str   # Any injected instructions from Orchestrator
+    The summary field is natural language — the compression model decides
+    what to emphasize based on the prompt guideline. The latest_raw_data
+    field preserves the most recent tool output uncompressed for immediate use.
+    """
+    summary: str                     # Natural language summary of the agent's work so far
+    latest_raw_data: dict            # Most recent tool output (uncompressed, for continuity)
+```
 
-    # 2. Tools Used
-    tools_called: list[dict]         # [{name, call_count, last_args}]
-
-    # 3. Key Data Collected
-    key_findings: list[str]          # Most important data points found
-
-    # 4. Errors Encountered
-    errors: list[str]                # Tool errors, retries, failures
-
-    # 5. Current Progress
-    completed_steps: list[str]       # What has been done
-    pending_steps: list[str]         # What remains to do
-
-    # 6. Running Observations
-    observations: list[str]          # Notable patterns or anomalies
-
-    # 7. Decisions Made
-    decisions: list[str]             # Why certain tools/paths were chosen
-
-    # 8. Raw Data Snapshot
-    latest_raw_data: dict            # Most recent tool output (uncompressed)
+Compression prompt guideline (not a rigid schema):
+```
+Summarize this agent's execution history. Include:
+- What task was assigned and any instructions from the Orchestrator
+- What tools were called and what key data was collected
+- Any errors encountered and how they were handled
+- Current progress: what's done and what remains
+- Notable observations or anomalies
+- Key decisions and reasoning
+Keep it concise but preserve critical data points.
 ```
 
 **Implementation via `pre_model_hook`**:
@@ -183,8 +228,11 @@ class SubAgentMessageSummary:
 
 ```python
 def sub_agent_compression_hook(state: SubAgentState) -> dict:
-    """pre_model_hook: compress messages before LLM call when threshold exceeded."""
-    if state["tool_call_count"] <= config.max_uncompressed_steps:
+    """pre_model_hook: compress messages before LLM call when token limit approached."""
+    token_count = count_tokens(state["messages"], model=config.model)
+    context_limit = get_model_context_limit(config.model)
+
+    if token_count < context_limit * config.compression_threshold:  # default: 0.8
         return {"messages": state["messages"]}  # No compression needed
 
     # Compress all messages except the latest tool response
@@ -220,9 +268,9 @@ agent = create_react_agent(
 
 ### Layer 2: Orchestrator Notebook Compression
 
-The Orchestrator's Notebook accumulates `exploration_history` entries and `collected_data` across all phases. When a phase completes, its detailed records can be compressed into a phase summary.
+The Orchestrator's Notebook accumulates `exploration_history` entries and `collected_data` across all phases. When the formatted Notebook content approaches the model's context window limit, completed phase records are compressed into phase summaries.
 
-**Trigger**: Phase transition (exploration → generation → verification → confirmation)
+**Trigger**: Token count of formatted Notebook ≥ 80% of model context limit
 
 **What gets compressed**: Completed phase's entries in `exploration_history` and corresponding `collected_data`.
 
@@ -281,7 +329,7 @@ def compress_completed_phase(notebook: DiagnosticNotebook, completed_phase: str)
     ]
 
     # Slim down collected_data for completed exploration phase
-    if completed_phase == "exploration":
+    if completed_phase == Phase.EXPLORATION:
         notebook.collected_data = extract_key_metrics(notebook.collected_data)
 
     return notebook
@@ -325,17 +373,15 @@ def format_notebook_for_llm(notebook: DiagnosticNotebook) -> str:
 orchestrator:
   compression:
     enabled: true
+    compression_threshold: 0.8      # Compress when token usage ≥ 80% of context limit
 
     # Sub-Agent compression
     sub_agent:
-      max_uncompressed_steps: 10        # Compress after N tool calls
       compression_model: "gpt-4o-mini"  # Cheaper model for compression
       preserve_latest_n: 2              # Keep last N messages uncompressed
 
     # Orchestrator Notebook compression
     notebook:
-      compress_on_phase_transition: true  # Auto-compress when phase changes
-      max_history_entries: 20             # Force compress if history exceeds this
       compression_model: "gpt-4o-mini"
 ```
 
@@ -625,7 +671,7 @@ class DiagnosticNotebook:
     exploration_history: list[ExplorationStep] = field(default_factory=list)
 
     # Current state
-    current_phase: Literal["exploration", "generation", "verification", "confirmation"] = "exploration"
+    current_phase: Phase = Phase.EXPLORATION
     current_step: int = 0
 ```
 
@@ -640,103 +686,106 @@ class Hypothesis:
     description: str                     # "Database connection pool exhaustion"
     evidence: list[str]                  # Supporting evidence
     counter_evidence: list[str]          # Rejecting evidence
-    status: Literal["active", "confirmed", "rejected", "partial"]
+    status: HypothesisStatus = HypothesisStatus.FORMED
+    # Lifecycle: FORMED → INVESTIGATING → CONFIRMED / REJECTED / PARTIAL
     created_at: str
     last_updated: str
 ```
 
 ### ExplorationStep
 
-Records each step across all phases, with full context for trajectory export.
+Records each step across all phases. Structured fields for indexing and routing, natural language `content` for the actual diagnostic information.
+
+> **Design principle**: `phase`, `action`, `verdict`, `target_hypothesis_id` are structured — the system uses them for state machine logic, filtering, and trajectory indexing. `content` is natural language — it carries the rich diagnostic narrative from Sub-Agents or the Orchestrator's reasoning.
 
 ```python
 @dataclass
 class ExplorationStep:
+    # Structured index fields (for routing, filtering, trajectory)
     step_number: int
-    phase: Literal["exploration", "generation", "verification", "confirmation"]
-    action: str                                      # "Initial investigation", "Verify H1"
+    phase: Phase
+    action: str                                      # "Explore: infra, db, logs", "Verify H1", "Generate hypotheses"
     timestamp: str
 
-    # Phase 1: Exploration
-    target_agents: Optional[list[str]] = None
+    # Content (natural language — Sub-Agent reports, Orchestrator reasoning, etc.)
+    content: str                                     # The diagnostic narrative for this step
 
-    # Phase 2: Generation
-    generated_hypotheses: Optional[list[Hypothesis]] = None
+    # Structured fields for specific phases (used by system logic)
+    target_agents: Optional[list[str]] = None        # Phase 1: which agents were dispatched
+    target_hypothesis_id: Optional[str] = None       # Phase 3: which hypothesis is being verified
+    verdict: Optional[Verdict] = None                # Phase 3: verification outcome (for state machine)
+    confirmed_root_cause: Optional[str] = None       # Phase 4: hypothesis ID of confirmed root cause
 
-    # Phase 3: Verification (three-block record)
-    target_hypothesis_id: Optional[str] = None
-    investigation_data: Optional[dict] = None        # Block 1: Raw data
-    reasoning: Optional[VerificationReasoning] = None # Block 2: Analysis
-    verdict: Optional[Literal["confirmed", "rejected", "partial"]] = None  # Block 3
+    # Agent execution metadata (structured, for monitoring/timeline)
+    agent_outcomes: Optional[dict[str, AgentOutcome]] = None  # Per-agent completion info
 
-    hypothesis_before: Optional[Hypothesis] = None
-    hypothesis_after: Optional[Hypothesis] = None
-
-    # Phase 4: Confirmation
-    confirmed_root_cause: Optional[str] = None
-    recommendations: Optional[list[str]] = None
+@dataclass
+class AgentOutcome:
+    """Execution metadata for a Sub-Agent within an ExplorationStep."""
+    agent_id: str
+    task_id: str                          # TaskManager task_id (for trajectory linking)
+    status: AgentRunStatus                # COMPLETED or FAILED
+    duration_seconds: Optional[float] = None
+    error: Optional[str] = None           # Error message if failed
 ```
 
 ---
 
-## Sub-Agent Verification Result (Three-Block Structure)
+## Sub-Agent Verification Result
 
-When a Sub-Agent verifies a hypothesis, it returns **three distinct blocks**:
+When a Sub-Agent verifies a hypothesis, it returns a `VerificationResult` with a structured `verdict` for system logic and a natural language `report` for diagnostic content:
 
 ### VerificationResult
+
+> **Design principle**: Structured fields for routing/judgment, natural language for content. The `verdict` field is structured so the Orchestrator can branch on it programmatically. The `report` field is natural language so the Sub-Agent can express rich diagnostic reasoning without being constrained to predefined field lists.
 
 ```python
 @dataclass
 class VerificationResult:
-    # Block 1: Raw investigation data (uninterpreted)
-    investigation_data: dict[str, any]
-    # Example: {"connection_pool_status": "100/100", "waiting_connections": 45, ...}
-
-    # Block 2: Reasoning analysis
-    reasoning: VerificationReasoning
-
-    # Block 3: Final verdict
-    verdict: Literal["confirmed", "rejected", "partial"]
+    verdict: Verdict                    # Structured — for Orchestrator branching logic
+    report: str                         # Natural language — full diagnostic report
+    refined_description: Optional[str] = None  # When verdict == PARTIAL: refined hypothesis text
 ```
 
-### VerificationReasoning
+The `report` field contains the Sub-Agent's complete diagnostic narrative. The prompt guides Sub-Agents to include investigation data, supporting/rejecting observations, and key findings — but the exact structure is up to the agent.
 
-```python
-@dataclass
-class VerificationReasoning:
-    supporting_reasons: list[str]
-    # ["Connection pool full (100/100)", "45 connections waiting", ...]
+### Prompt Guideline for Verification Report
 
-    rejecting_reasons: list[str]
-    # ["CPU usage acceptable (45%)", "Memory sufficient (60% free)"]
+Sub-Agent prompts (Jinja2 templates) include a reporting guideline, not a rigid schema:
 
-    neutral_observations: list[str]
-    # ["Network latency within normal range"]
+```
+Write a diagnostic report for this verification task. Include:
+- What you investigated and what data you collected
+- Observations that SUPPORT the hypothesis
+- Observations that CONTRADICT the hypothesis
+- Any neutral or unexpected findings
+- Your overall assessment and key conclusions
+- Relevant raw data points (inline, not as a separate section)
 
-    refined_description: Optional[str] = None
-    # Used when verdict == "partial": refined hypothesis text
-
-    key_findings: list[str]
-    # ["Root cause is pool config (max=100)", "Recommend increasing to 150-200"]
+End with a verdict: confirmed / rejected / partial
 ```
 
 ### Usage Example
 
 ```python
 result = VerificationResult(
-    investigation_data={
-        "connection_pool_status": "100/100",
-        "active_connections": 100,
-        "waiting_connections": 45,
-        "query_timeout_errors": 12,
-    },
-    reasoning=VerificationReasoning(
-        supporting_reasons=["Pool full (100/100)", "45 connections waiting"],
-        rejecting_reasons=["CPU acceptable (45%)"],
-        neutral_observations=["Network latency normal (<5ms)"],
-        key_findings=["Pool config insufficient", "Recommend increase to 150-200"]
-    ),
-    verdict="confirmed"
+    verdict=Verdict.CONFIRMED,
+    report="""Investigated database connection pool status for H1 (pool exhaustion).
+
+Connection pool is at capacity: 100/100 active connections, 45 requests in wait queue.
+Slow query analysis found 3 queries exceeding 2s, the worst being a JOIN on orders table (4.2s).
+Lock wait time averages 320ms across active transactions.
+
+Supporting: Pool completely saturated, significant wait queue, slow queries holding connections.
+Contradicting: Primary CPU at 42% (not a CPU bottleneck), replica lag only 0.8s (acceptable).
+Unexpected: Connection timeout errors spiked from 0 to 12 in the last 15 minutes — suggests recent onset.
+
+Key conclusion: Connection pool exhaustion is the primary bottleneck. Slow queries are holding
+connections too long, causing queue buildup. Recommend increasing pool_size to 150-200 and
+adding a connection timeout of 30s.
+
+Raw data: pool_size=100, active=100, waiting=45, slow_queries=[{sql: "SELECT * FROM orders JOIN ...",
+time: 4.2s}, {sql: "...", time: 2.8s}, {sql: "...", time: 2.1s}], primary_cpu=42%, replica_lag=0.8s""",
 )
 ```
 
@@ -762,7 +811,7 @@ def phase_exploration(state: ExecutorState) -> dict:
         result = await dispatch_to_agent(task.agent, task)
         notebook.collected_data[task.agent] = result.data  # Raw data only
 
-    notebook.current_phase = "generation"
+    notebook.current_phase = Phase.GENERATION
     notebook.current_step += 1
 
     return {
@@ -800,16 +849,16 @@ def phase_hypothesis_generation(state: ExecutorState) -> dict:
         hypothesis = Hypothesis(
             id=f"H{i+1}",
             description=h["description"],
-            evidence=h.get("supporting_reasons", []),
-            counter_evidence=h.get("rejecting_reasons", []),
-            status="active",
+            evidence=h.get("evidence", []),
+            counter_evidence=h.get("counter_evidence", []),
+            status=HypothesisStatus.FORMED,
             created_at=datetime.now().isoformat(),
             last_updated=datetime.now().isoformat(),
         )
         notebook.hypotheses[hypothesis.id] = hypothesis
 
     notebook.hypothesis_verification_order = list(notebook.hypotheses.keys())
-    notebook.current_phase = "verification"
+    notebook.current_phase = Phase.VERIFICATION
     notebook.current_step += 1
 
     return {"notebook": notebook, "current_phase": "verification"}
@@ -817,7 +866,7 @@ def phase_hypothesis_generation(state: ExecutorState) -> dict:
 
 ### Phase 3: Hypothesis Verification
 
-Verify hypotheses one-by-one. Sub-Agent returns the three-block VerificationResult.
+Verify hypotheses one-by-one. Sub-Agent returns a VerificationResult (verdict + natural language report).
 
 ```python
 def phase_hypothesis_verification(state: ExecutorState) -> dict:
@@ -825,43 +874,46 @@ def phase_hypothesis_verification(state: ExecutorState) -> dict:
 
     for hypothesis_id in notebook.hypothesis_verification_order:
         hypothesis = notebook.hypotheses[hypothesis_id]
-        if hypothesis.status != "active":
+        if hypothesis.status != HypothesisStatus.FORMED:
             continue
+
+        # Mark as investigating before dispatch
+        hypothesis.status = HypothesisStatus.INVESTIGATING
+        hypothesis.last_updated = datetime.now().isoformat()
 
         agent_name = select_agent_for_verification(hypothesis)
         result = await dispatch_to_agent(agent_name, f"Verify {hypothesis_id}")
-        # result is a VerificationResult (three blocks)
+        # result is a VerificationResult (verdict + report)
 
-        if result.verdict == "confirmed":
-            hypothesis.status = "confirmed"
-            hypothesis.evidence.extend(result.reasoning.supporting_reasons)
+        if result.verdict == Verdict.CONFIRMED:
+            hypothesis.status = HypothesisStatus.CONFIRMED
             notebook.confirmed_hypothesis = hypothesis_id
             break
 
-        elif result.verdict == "rejected":
-            hypothesis.status = "rejected"
-            hypothesis.counter_evidence.extend(result.reasoning.rejecting_reasons)
+        elif result.verdict == Verdict.REJECTED:
+            hypothesis.status = HypothesisStatus.REJECTED
 
-        elif result.verdict == "partial":
-            hypothesis.status = "partial"
-            hypothesis.description = result.reasoning.refined_description or hypothesis.description
-            hypothesis.evidence.extend(result.reasoning.supporting_reasons)
-            hypothesis.counter_evidence.extend(result.reasoning.rejecting_reasons)
+        elif result.verdict == Verdict.PARTIAL:
+            hypothesis.status = HypothesisStatus.PARTIAL
+            hypothesis.description = result.refined_description or hypothesis.description
 
-        # Record exploration step with all three blocks
+        # Orchestrator extracts key evidence from the report into hypothesis
+        # (This is Orchestrator's own reasoning, not automatic field mapping)
+        update_hypothesis_evidence(hypothesis, result.report)
+
+        # Record exploration step
         notebook.exploration_history.append(ExplorationStep(
             step_number=notebook.current_step,
-            phase="verification",
+            phase=Phase.VERIFICATION,
             action=f"Verify {hypothesis_id}",
             timestamp=datetime.now().isoformat(),
+            content=result.report,                    # Natural language diagnostic report
             target_hypothesis_id=hypothesis_id,
-            investigation_data=result.investigation_data,
-            reasoning=result.reasoning,
-            verdict=result.verdict,
+            verdict=result.verdict,                   # Structured — for state machine
         ))
         notebook.current_step += 1
 
-    notebook.current_phase = "confirmation"
+    notebook.current_phase = Phase.CONFIRMATION
     return {"notebook": notebook, "current_phase": "confirmation"}
 ```
 
@@ -886,80 +938,225 @@ def phase_confirmation(state: ExecutorState) -> dict:
             "status": "INCONCLUSIVE",
             "hypotheses_eliminated": [
                 h.description for h in notebook.hypotheses.values()
-                if h.status == "rejected"
+                if h.status == HypothesisStatus.REJECTED
             ],
         }
 
-    return {"notebook": notebook, "current_phase": "confirmation"}
+    return {"notebook": notebook, "current_phase": Phase.CONFIRMATION}
 ```
 
 ---
 
-## Async Task Dispatch
+## Execution Model: Async TaskManager
 
-The Orchestrator operates like a real team leader — it can **submit multiple concurrent tasks** and collect results asynchronously, rather than waiting for each task to complete sequentially.
+The Orchestrator operates like a real team leader — it **submits tasks asynchronously** and **monitors progress** while Sub-Agents execute concurrently. This is implemented via a **TaskManager** that runs Sub-Agent subgraphs as background `asyncio.Task`s.
 
-### Dispatch Model
+### Architecture
 
-```python
-# Orchestrator submits multiple tasks concurrently via LangGraph Send API
-def orchestrator_dispatch(state: ExecutorState):
-    notebook = state.notebook
-    pending_tasks = plan_next_tasks(notebook)
-
-    # Fan-out: dispatch all tasks in parallel
-    return [
-        Send(task.agent, {
-            "task_id": task.id,
-            "hypothesis_id": task.hypothesis_id,
-            "instruction": task.instruction,
-        })
-        for task in pending_tasks
-    ]
 ```
+┌──────────────────────────────────────────────────────────┐
+│  Root StateGraph                                           │
+│                                                            │
+│  ┌──────────────────────────────────────────────────────┐ │
+│  │  Orchestrator (create_react_agent, ReAct loop)       │ │
+│  │                                                       │ │
+│  │  LLM → dispatch_agent("db", task) → {task_id: "t1"} │ │
+│  │  LLM → check_tasks() → {running: [...],             │ │
+│  │         completed: [{t2, result: {cpu: 0.85}}]}      │ │
+│  │  LLM → inject_instruction("t1", "skip replica")     │ │
+│  │  LLM → abort_task("t3", "no longer needed")         │ │
+│  └──────────────────────────────────────────────────────┘ │
+│           ↕ (tool calls)                                   │
+│  ┌──────────────────────────────────────────────────────┐ │
+│  │  TaskManager (shared, injected into tools)            │ │
+│  │                                                       │ │
+│  │  _tasks: dict[str, ManagedTask]                       │ │
+│  │                                                       │ │
+│  │  submit() → asyncio.create_task(subgraph.ainvoke())  │ │
+│  │  get_all_status() → status + completed results        │ │
+│  │  inject() → subgraph update_state()                   │ │
+│  │  abort() → asyncio.Task.cancel()                      │ │
+│  │                                                       │ │
+│  │  Also: stream events → WebSocket for frontend         │ │
+│  └──────────────────────────────────────────────────────┘ │
+│           ↕ (asyncio.Tasks)                                │
+│  ┌────────┬────────┬────────┐                              │
+│  │ infra  │   db   │  logs  │  independently compiled      │
+│  │ agent  │ agent  │ agent  │  subgraphs                   │
+│  └────────┴────────┴────────┘                              │
+└──────────────────────────────────────────────────────────┘
+            ↓ stream events
+     WebSocket → Frontend
+```
+
+### Why Not `Send()` API
+
+The `Send()` API dispatches parallel workers but the Supervisor node **cannot execute during fan-out** — it returns `[Send(...)]` and is inactive until all workers complete. This prevents the Orchestrator from monitoring progress, injecting instructions, or aborting agents mid-execution.
+
+The Async TaskManager model solves this: Sub-Agents run as independent `asyncio.Task`s, while the Orchestrator remains active in its ReAct loop, calling tools to check status and intervene.
 
 ### Concurrency Patterns
 
-| Pattern | When | LangGraph Mechanism |
-|---------|------|-------------------|
-| **Parallel fan-out** | Phase 1 (explore all agents at once) | `Send()` from conditional edge |
-| **Parallel verification** | Multiple independent hypotheses | `Send()` to different agents |
-| **Sequential with review** | Verification + adversarial review | Agent → Orchestrator → Review Agent |
-| **Fire and forget** | Low-priority background checks | `Send()` with results aggregated later |
+| Pattern | When | Mechanism |
+|---------|------|-----------|
+| **Parallel dispatch** | Phase 1 (explore all agents at once) | Multiple `dispatch_agent` tool calls in one LLM turn |
+| **Parallel verification** | Multiple independent hypotheses | Multiple `dispatch_agent` calls for different hypotheses |
+| **Monitor and intervene** | Agent stuck or off-track | `check_tasks` → `inject_instruction` or `abort_task` |
+| **Sequential with review** | Verification + adversarial review | `dispatch_agent` → `check_tasks` → `dispatch_agent` (adversarial) |
 
-### Task Queue in Notebook
+### Sub-Agent Lifecycle
+
+```
+dispatch_agent("db", task)
+  → TaskManager.submit("db", task)
+  → asyncio.create_task(db_subgraph.ainvoke(input, config))
+  → return {task_id: "t1", status: "running"}
+
+# Sub-Agent executes asynchronously...
+# Orchestrator continues its ReAct loop, calling other tools
+
+check_tasks()
+  → TaskManager.get_all_status()
+  → return {
+      running: [{task_id: "t1", step: 5, max_steps: 30, summary: "..."}],
+      completed: [],
+      failed: []
+    }
+
+# Later...
+check_tasks()
+  → return {
+      running: [],
+      completed: [{task_id: "t1", duration: 18.3,
+                    result: {pool_size: 100, active: 100, waiting: 45}}],
+      failed: []
+    }
+# Orchestrator LLM now has the full result directly
+```
+
+---
+
+## Trajectory Registry
+
+Since Sub-Agents run as independent subgraphs with their own `thread_id`s, the Orchestrator and Sub-Agent checkpoint chains are **separate**. The TaskManager maintains a **trajectory registry** that records the parent-child relationship, enabling hierarchical trajectory reconstruction at export time.
+
+### Registry Data
 
 ```python
 @dataclass
-class PendingTask:
-    id: str
-    agent: str
-    hypothesis_id: Optional[str]
-    instruction: str
-    status: Literal["pending", "dispatched", "completed", "failed"]
-    dispatched_at: Optional[str] = None
-    completed_at: Optional[str] = None
-    result: Optional[dict] = None
-
-# DiagnosticNotebook gains a task queue
-@dataclass
-class DiagnosticNotebook:
-    # ... existing fields ...
-    pending_tasks: list[PendingTask] = field(default_factory=list)
+class TaskTraceRef:
+    """Links a Sub-Agent's checkpoint chain to the Orchestrator's timeline."""
+    task_id: str
+    agent_id: str
+    agent_thread_id: str           # Sub-Agent's own thread_id for get_state_history()
+    parent_thread_id: str          # Orchestrator's thread_id
+    parent_dispatch_step: int      # Orchestrator checkpoint step when dispatch_agent was called
+    parent_result_step: Optional[int] = None  # Orchestrator step when get_result was called
+    hypothesis_id: Optional[str] = None
 ```
 
-The Orchestrator checks pending_tasks at each decision point, dispatches ready tasks, and processes completed results — **time-multiplexing** like a human manager.
+The TaskManager populates this on `submit()` and updates `parent_result_step` when `get_result()` is called.
 
-### Results Aggregation
+### Trajectory Export
+
+At export time, the hierarchical trajectory is reconstructed by combining:
+
+1. **Orchestrator trace**: `get_state_history(orchestrator_thread_id)` — the main decision trace
+2. **Sub-Agent traces**: `get_state_history(agent_thread_id)` per task — fine-grained tool call traces
+3. **Registry**: Links each Sub-Agent trace to its dispatch point in the Orchestrator trace
 
 ```python
-class ExecutorState(TypedDict):
-    # ... existing fields ...
-    # Reducer accumulates results from parallel Sub-Agents
-    agent_results: Annotated[list[dict], operator.add]
+# Export format (JSONL)
+{
+    "orchestrator": {
+        "thread_id": "rca-042",
+        "steps": [...]                    # From get_state_history
+    },
+    "sub_agents": {
+        "task-001": {
+            "thread_id": "task-001-database",
+            "agent_id": "database",
+            "parent_dispatch_step": 1,
+            "parent_result_step": 7,
+            "hypothesis_id": "H1",
+            "steps": [...]                # From get_state_history
+        },
+        "task-002": { ... }
+    }
+}
 ```
 
-When multiple Sub-Agents complete, their results are accumulated via the reducer. The Orchestrator processes them in the next decision cycle.
+**RL Training Export**: For (state, action, reward, next_state) transitions, the Orchestrator trace provides the high-level decision trace (dispatch → check → get_result → reason). Each Sub-Agent trace provides the low-level execution trace (tool call → observe → reason → tool call). These can be exported separately or merged by aligning on dispatch/result steps.
+
+**Replay**: Orchestrator and Sub-Agent traces can be replayed independently. To replay from a specific point:
+- Orchestrator: `graph.invoke(None, {thread_id: "rca-042", checkpoint_id: "..."})`
+- Sub-Agent: `subgraph.invoke(None, {thread_id: "task-001-database", checkpoint_id: "..."})`
+
+---
+
+## Message Passing: ToolMessage Protocol
+
+Sub-Agent results are passed back to the Orchestrator as **ToolMessage content** through the `get_result` tool. The Orchestrator never sees Sub-Agent internal state directly.
+
+### Flow
+
+```
+1. Orchestrator calls dispatch_agent("database", "Verify H1: check pool")
+   → ToolMessage: {task_id: "task-001", status: "running"}
+
+2. Sub-Agent executes asynchronously (ReAct loop with its own tools)
+   → Final AIMessage: '{"pool_size": 100, "active": 100, "waiting": 45}'
+
+3. TaskManager extracts result:
+   result_state = await subgraph.ainvoke(input, config)
+   final_msg = result_state["messages"][-1]  # Last AIMessage
+   managed.result = parse_agent_output(final_msg.content)
+
+4. Orchestrator calls get_result("task-001")
+   → ToolMessage: {pool_size: 100, active: 100, waiting: 45}
+
+5. Orchestrator LLM reasons about the result
+```
+
+### Result Extraction
+
+```python
+def _extract_final_result(self, managed: ManagedTask) -> dict:
+    """Extract the Sub-Agent's final output from its completed state.
+
+    The Sub-Agent's last AIMessage contains the result as JSON.
+    For Phase 1 (exploration): raw data dict
+    For Phase 3 (verification): VerificationResult structure
+    """
+    # Get the final state from the completed subgraph
+    config = managed.subgraph_config
+    state = self._agents[managed.agent_id].get_state(config)
+    messages = state.values.get("messages", [])
+
+    # Find the last AIMessage (the agent's final response)
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and msg.content:
+            try:
+                return json.loads(msg.content)
+            except json.JSONDecodeError:
+                return {"raw_response": msg.content}
+
+    return {"error": "No final response from agent"}
+```
+
+### What the Orchestrator Sees
+
+The Orchestrator only interacts with Sub-Agent data through ToolMessages:
+
+| Tool | ToolMessage Content |
+|------|-------------------|
+| `dispatch_agent` | `{task_id, agent_id, status: "running"}` |
+| `check_tasks` | `{running: [...], completed: [...], failed: [...]}` |
+| `get_result` | Sub-Agent's final output (raw data or VerificationResult) |
+| `inject_instruction` | `"Instruction injected into task-001"` |
+| `abort_task` | `"Aborted task-001: reason"` |
+
+The Orchestrator then writes results into DiagnosticNotebook (collected_data, exploration_history, etc.) based on its own reasoning — this is part of the Orchestrator's ReAct loop logic, not automatic state mapping.
 
 ---
 
@@ -1020,7 +1217,7 @@ class ChallengeResult:
     counter_arguments: list[str]     # Arguments against the verdict
     alternative_explanations: list[str]  # Other possible causes
     overlooked_evidence: list[str]   # Data points that were ignored
-    challenge_strength: Literal["weak", "moderate", "strong"]
+    challenge_strength: Literal["weak", "moderate", "strong"]  # Domain-specific, not reused elsewhere
     # "strong" challenge forces verdict downgrade (confirmed → partial)
 ```
 
@@ -1047,17 +1244,17 @@ def process_verification_result(state, result, config):
     verdict = result.verdict
 
     # Adversarial review if enabled
-    if features.get("adversarial_review") and verdict == "confirmed":
+    if features.get("adversarial_review") and verdict == Verdict.CONFIRMED:
         challenge = await dispatch_adversarial_review(result)
         if challenge.challenge_strength == "strong":
-            verdict = "partial"  # Downgrade
+            verdict = Verdict.PARTIAL  # Downgrade
 
     # Minimum verification check
     min_checks = features.get("min_verifications_before_confirm", 1)
     verified_count = count_verified_hypotheses(state.notebook)
-    if verdict == "confirmed" and verified_count < min_checks:
+    if verdict == Verdict.CONFIRMED and verified_count < min_checks:
         # Don't confirm yet, continue verifying others
-        verdict = "partial"
+        verdict = Verdict.PARTIAL
 
     return verdict
 ```
@@ -1089,269 +1286,314 @@ Prompt templates are external files — switching scenarios requires **only new 
 
 ---
 
-## Monitoring & Intervention
+## TaskManager & Orchestrator Tools
 
-The Orchestrator monitors Sub-Agents via a **`check_agents` tool** — a dashboard-style interface that returns the current status of all dispatched agents. This is a pull-based design: the Orchestrator decides when to check, rather than being interrupted.
+The TaskManager is the bridge between the Orchestrator's tools and the asynchronously executing Sub-Agent subgraphs. It manages the lifecycle of all dispatched tasks and provides the backing implementation for the Orchestrator's monitoring and intervention tools.
 
-### Design Rationale
-
-The Orchestrator dispatches multiple Sub-Agents in parallel (via `Send`). While waiting for results, it needs situational awareness:
-- Which agents are still running?
-- What are they doing right now?
-- Which agents have finished, and what did they return?
-
-Rather than interrupting Sub-Agents periodically (which adds latency and wastes cycles when agents are progressing normally), the Orchestrator has a tool it can call at any time during its own reasoning loop.
-
-### Architecture
-
-```
-External Runner (async)
-  │
-  ├─ graph.astream(input, config, subgraphs=True)
-  │       │
-  │       ├─ Sub-Agent events ──→ AgentDashboard (in-memory)
-  │       │                       ├─ running agents: latest events buffer
-  │       │                       └─ completed agents: result queue (consume-once)
-  │       │
-  │       └─ Sub-Agents execute uninterrupted
-  │
-  └─ Orchestrator node:
-       ├─ Calls check_agents() tool → reads AgentDashboard
-       ├─ Sees: running agents' progress + completed agents' results
-       └─ Decides: wait / inject instruction / abort
-```
-
-### AgentDashboard
+### ManagedTask
 
 ```python
 @dataclass
-class AgentStatus:
+class ManagedTask:
+    """A single Sub-Agent execution managed by TaskManager."""
+    task_id: str
     agent_id: str
-    status: Literal["running", "completed", "failed"]
+    instruction: str
+    hypothesis_id: Optional[str] = None
 
-    # For running agents: progress summary (generated on-demand by lightweight model)
-    current_summary: Optional[str] = None         # "Checking connection pool, 3 tools called so far"
-    latest_events: Optional[list[dict]] = None    # Raw recent events buffer (for summary generation)
-
-    # For completed agents: final result (consumed once)
-    result: Optional[dict] = None
+    status: AgentRunStatus = AgentRunStatus.RUNNING
+    current_step: int = 0
+    max_steps: Optional[int] = None
+    started_at: Optional[str] = None
     completed_at: Optional[str] = None
+    duration_seconds: Optional[float] = None
 
-    # For failed agents: error context (consumed once)
-    error_summary: Optional[str] = None           # "Connection refused after 3 retries"
-    last_steps: Optional[list[dict]] = None       # Last N execution steps for Orchestrator context
+    # Result (available when completed)
+    result: Optional[dict] = None
 
-class AgentDashboard:
-    """In-memory dashboard tracking all dispatched Sub-Agents.
+    # Error (available when failed)
+    error_summary: Optional[str] = None
+    last_steps: Optional[list[dict]] = None
 
-    Updated by the external runner via stream events.
-    Read by the Orchestrator via check_agents tool.
+    # Internal
+    asyncio_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    events_buffer: list[dict] = field(default_factory=list)  # Recent events for summary
+    subgraph_config: Optional[dict] = field(default=None, repr=False)  # For update_state
+
+    # Trajectory registry (for hierarchical trace reconstruction)
+    parent_thread_id: Optional[str] = None    # Orchestrator's thread_id
+    parent_dispatch_step: Optional[int] = None  # Orchestrator step at dispatch time
+    parent_result_step: Optional[int] = None    # Orchestrator step at get_result time
+```
+
+### TaskManager
+
+```python
+class TaskManager:
+    """Manages asynchronously executing Sub-Agent subgraphs.
+
+    Provides the backing implementation for Orchestrator tools:
+    - dispatch_agent → submit()
+    - check_tasks   → get_all_status()
+    - get_result    → get_result()
+    - inject_instruction → inject()
+    - abort_task    → abort()
+
+    Also forwards stream events to WebSocket for frontend display.
     """
 
-    def __init__(self, summary_model: str = "gpt-4o-mini"):
-        self._agents: dict[str, AgentStatus] = {}
-        self._consumed_results: set[str] = set()  # Track consumed completed results
-        self._summary_model = load_model(summary_model)  # Lightweight model for summaries
+    def __init__(self, agents: dict[str, CompiledGraph], config: ScenarioConfig,
+                 summary_model: Optional[BaseChatModel] = None,
+                 websockets: Optional[set[WebSocket]] = None):
+        self._agents = agents                    # agent_id → compiled subgraph
+        self._config = config                    # For max_steps, timeout, etc.
+        self._tasks: dict[str, ManagedTask] = {}
+        self._summary_model = summary_model      # Lightweight model for progress summaries
+        self._websockets = websockets or set()   # Connected frontend clients
+        self._task_counter = 0
 
-    def update_from_event(self, namespace: tuple, event_data: dict):
-        """Called by external runner for each stream event."""
-        agent_id = namespace[-1] if namespace else None
-        if not agent_id or agent_id == "orchestrator":
-            return
+    async def submit(self, agent_id: str, instruction: str,
+                     hypothesis_id: Optional[str] = None) -> ManagedTask:
+        """Launch a Sub-Agent subgraph as a background asyncio.Task."""
+        self._task_counter += 1
+        task_id = f"task-{self._task_counter:03d}"
 
-        if agent_id not in self._agents:
-            self._agents[agent_id] = AgentStatus(agent_id=agent_id, status="running")
+        agent_config = self._config.agents[agent_id]
+        subgraph = self._agents[agent_id]
 
-        agent = self._agents[agent_id]
+        # Unique thread for each task execution
+        subgraph_config = {
+            "configurable": {"thread_id": f"{task_id}-{agent_id}"},
+            "recursion_limit": agent_config.execution.max_steps * 2,  # ReAct loop ≈ 2x steps
+        }
 
-        # Buffer latest events for summary generation
-        if agent.latest_events is None:
-            agent.latest_events = []
-        agent.latest_events.append(event_data)
+        managed = ManagedTask(
+            task_id=task_id,
+            agent_id=agent_id,
+            instruction=instruction,
+            hypothesis_id=hypothesis_id,
+            max_steps=agent_config.execution.max_steps,
+            started_at=datetime.now().isoformat(),
+            subgraph_config=subgraph_config,
+        )
 
-        # Detect completion
-        if is_terminal_event(event_data):
-            agent.status = "completed"
-            agent.result = extract_result(event_data)
-            agent.completed_at = datetime.now().isoformat()
+        # Launch as background task with streaming
+        managed.asyncio_task = asyncio.create_task(
+            self._execute_agent(managed, subgraph, subgraph_config)
+        )
+        self._tasks[task_id] = managed
+        return managed
 
-    def get_status(self) -> dict:
-        """Called by check_agents tool. Returns status snapshot.
+    async def _execute_agent(self, managed: ManagedTask,
+                              subgraph: CompiledGraph, config: dict):
+        """Execute a subgraph, streaming events to WebSocket and tracking progress."""
+        input_data = {"messages": [HumanMessage(content=managed.instruction)]}
 
-        Completed results are returned ONCE — subsequent calls won't include them.
-        Running agents get an on-demand summary via lightweight model.
+        try:
+            async for namespace, mode, data in subgraph.astream(
+                input_data, config,
+                stream_mode=["updates", "custom"],
+                subgraphs=True,
+            ):
+                # Track step progress
+                if is_tool_call_event(data):
+                    managed.current_step += 1
+
+                # Buffer recent events (for summary generation)
+                managed.events_buffer.append(data)
+                if len(managed.events_buffer) > 20:
+                    managed.events_buffer = managed.events_buffer[-20:]
+
+                # Forward to WebSocket for frontend
+                await self._forward_to_websocket(managed.agent_id, namespace, mode, data)
+
+            # Completed successfully
+            managed.status = AgentRunStatus.COMPLETED
+            managed.result = self._extract_final_result(managed)
+            managed.completed_at = datetime.now().isoformat()
+            managed.duration_seconds = self._calc_duration(managed)
+
+        except asyncio.CancelledError:
+            managed.status = AgentRunStatus.FAILED
+            managed.error_summary = "Aborted by Orchestrator"
+            managed.completed_at = datetime.now().isoformat()
+            managed.duration_seconds = self._calc_duration(managed)
+
+        except Exception as e:
+            managed.status = AgentRunStatus.FAILED
+            managed.error_summary = str(e)
+            managed.last_steps = managed.events_buffer[-5:]
+            managed.completed_at = datetime.now().isoformat()
+            managed.duration_seconds = self._calc_duration(managed)
+
+    def get_all_status(self) -> dict:
+        """Return status snapshot of all tasks, including full results for completed tasks.
+
+        Called by check_tasks tool. Completed task results are included inline
+        so the Orchestrator gets everything in one call — no need for a separate get_result.
         """
         result = {"running": [], "completed": [], "failed": []}
-
-        for agent_id, agent in self._agents.items():
-            if agent.status == "running":
-                # Generate summary on-demand (only when Orchestrator asks)
-                if agent.latest_events:
-                    agent.current_summary = self._summarize(agent)
-                result["running"].append({
-                    "agent_id": agent_id,
-                    "summary": agent.current_summary,
-                })
-
-            elif agent.status == "completed" and agent_id not in self._consumed_results:
-                # Return result once, then mark as consumed
-                result["completed"].append({
-                    "agent_id": agent_id,
-                    "result": agent.result,
-                    "completed_at": agent.completed_at,
-                })
-                self._consumed_results.add(agent_id)
-
-            elif agent.status == "failed" and agent_id not in self._consumed_results:
-                result["failed"].append({
-                    "agent_id": agent_id,
-                    "error_summary": agent.error_summary,
-                    "last_steps": agent.last_steps,  # Last N execution steps for context
-                })
-                self._consumed_results.add(agent_id)
-
+        for task_id, task in self._tasks.items():
+            entry = {
+                "task_id": task_id,
+                "agent_id": task.agent_id,
+                "hypothesis_id": task.hypothesis_id,
+            }
+            if task.status == AgentRunStatus.RUNNING:
+                entry["step"] = task.current_step
+                entry["max_steps"] = task.max_steps
+                entry["summary"] = self._summarize(task) if self._summary_model else None
+                result["running"].append(entry)
+            elif task.status == AgentRunStatus.COMPLETED:
+                entry["duration_seconds"] = task.duration_seconds
+                entry["result"] = task.result  # Full result inline
+                result["completed"].append(entry)
+            elif task.status == AgentRunStatus.FAILED:
+                entry["error_summary"] = task.error_summary
+                entry["last_steps"] = task.last_steps
+                result["failed"].append(entry)
         return result
 
-    def _summarize(self, agent: AgentStatus) -> str:
+    async def inject(self, task_id: str, instruction: str):
+        """Inject instruction into a running Sub-Agent via update_state()."""
+        task = self._tasks.get(task_id)
+        if not task or task.status != AgentRunStatus.RUNNING:
+            raise ToolException(f"Task {task_id} is not running")
+        subgraph = self._agents[task.agent_id]
+        await subgraph.aupdate_state(task.subgraph_config, {
+            "messages": [HumanMessage(content=f"[Orchestrator] {instruction}")],
+        })
+
+    async def abort(self, task_id: str, reason: str):
+        """Abort a running Sub-Agent by cancelling its asyncio.Task."""
+        task = self._tasks.get(task_id)
+        if not task or task.status != AgentRunStatus.RUNNING:
+            raise ToolException(f"Task {task_id} is not running")
+        task.asyncio_task.cancel()
+        # CancelledError handler in _execute_agent sets status to FAILED
+
+    async def _forward_to_websocket(self, agent_id: str, namespace: tuple,
+                                      mode: str, data: dict):
+        """Forward stream events to all connected WebSocket clients."""
+        event = {
+            "agent_path": [agent_id] + list(namespace),
+            "mode": mode,
+            "data": data,
+            "timestamp": datetime.now().isoformat(),
+        }
+        disconnected = set()
+        for ws in self._websockets:
+            try:
+                await ws.send_json(event)
+            except Exception:
+                disconnected.add(ws)
+        self._websockets -= disconnected
+
+    def _summarize(self, task: ManagedTask) -> str:
         """Use lightweight model to summarize agent's recent activity."""
-        events_text = format_events_for_summary(agent.latest_events[-10:])  # Last 10 events
+        if not task.events_buffer:
+            return f"Starting {task.agent_id}..."
+        events_text = format_events_for_summary(task.events_buffer[-10:])
         summary = self._summary_model.invoke(
             f"Summarize this agent's current activity in 1-2 sentences:\n{events_text}"
         )
         return summary.content
 ```
 
-### check_agents Tool
+### Orchestrator Tools
+
+The Orchestrator has five task management tools, all backed by the TaskManager:
 
 ```python
 @tool
-def check_agents() -> dict:
-    """Check the current status of all dispatched Sub-Agents.
+def dispatch_agent(agent_id: str, task: str, hypothesis_id: Optional[str] = None) -> dict:
+    """Dispatch a task to a Sub-Agent. The agent starts executing immediately
+    in the background and this tool returns right away with a task_id.
+
+    Use check_tasks() to monitor progress and get_result() to collect results.
+
+    Multiple agents can be dispatched concurrently — call this tool multiple times.
+
+    Args:
+        agent_id: Which Sub-Agent to dispatch (e.g., "infrastructure", "database", "logs")
+        task: Natural language instruction for the agent.
+            Phase 1 example: "Scan infrastructure metrics: CPU, memory, disk, network"
+            Phase 3 example: "Verify H1: Check connection pool size, active connections, wait queue"
+        hypothesis_id: Optional hypothesis being investigated (for tracing)
+    """
+    managed = await task_manager.submit(agent_id, task, hypothesis_id)
+    return {
+        "task_id": managed.task_id,
+        "agent_id": agent_id,
+        "status": "running",
+    }
+
+
+@tool
+def check_tasks() -> dict:
+    """Check the current status of all dispatched tasks.
 
     Returns a dashboard with three sections:
-    - running: Agents still executing, with a brief summary of their current activity
-    - completed: Agents that have finished since the last check (results shown ONCE)
-    - failed: Agents that encountered errors since the last check (shown ONCE)
+    - running: Tasks still executing, with step progress and activity summary
+    - completed: Tasks that have finished (use get_result to fetch full results)
+    - failed: Tasks that encountered errors
 
     Use this to:
     - Monitor progress of long-running agents
-    - Collect results from completed agents
-    - Detect agents that are stuck or blocked
-    - Decide whether to wait, inject new instructions, or abort an agent
+    - Decide whether to wait, inject new instructions, or abort
+    - Know when to call get_result() for completed tasks
     """
-    return dashboard.get_status()
-```
+    return task_manager.get_all_status()
 
-### Intervention: inject_instruction and abort_agent
 
-When the Orchestrator determines (from `check_agents` results) that a Sub-Agent needs intervention:
-
-```python
 @tool
-def inject_instruction(agent_id: str, instruction: str) -> str:
+def get_result(task_id: str) -> dict:
+    """Get the full result of a completed task.
+
+    Call this after check_tasks() shows a task as completed.
+    Returns the Sub-Agent's final output data.
+
+    Args:
+        task_id: The task_id returned by dispatch_agent
+    """
+    return task_manager.get_result(task_id)
+
+
+@tool
+def inject_instruction(task_id: str, instruction: str) -> str:
     """Inject a new instruction into a running Sub-Agent.
 
-    The instruction will be added to the agent's message history as a HumanMessage.
+    The instruction is added to the agent's message history as a HumanMessage.
     The agent will see it on its next reasoning step.
 
     Use when:
-    - Agent seems stuck on a wrong path
+    - Agent seems stuck on a wrong path (from check_tasks summary)
     - New information from another agent should redirect this agent's focus
     - You want to narrow or expand the agent's investigation scope
 
     Args:
-        agent_id: The Sub-Agent to instruct
+        task_id: The task to instruct
         instruction: The instruction text
     """
-    # Implemented via external runner's update_state()
-    runner.inject_instruction(agent_id, instruction)
-    return f"Instruction injected into {agent_id}"
+    await task_manager.inject(task_id, instruction)
+    return f"Instruction injected into {task_id}"
 
 
 @tool
-def abort_agent(agent_id: str, reason: str) -> str:
-    """Abort a running Sub-Agent's execution.
+def abort_task(task_id: str, reason: str) -> str:
+    """Abort a running task.
 
     Use when:
-    - Agent is clearly stuck or in a loop
-    - Another agent's results have made this agent's task unnecessary
-    - Timeout exceeded
+    - Agent is clearly stuck or in a loop (visible from check_tasks step count)
+    - Another agent's results have made this task unnecessary
+    - Timeout approaching
 
     Args:
-        agent_id: The Sub-Agent to abort
-        reason: Why the agent is being aborted (recorded in trajectory)
+        task_id: The task to abort
+        reason: Why the task is being aborted (recorded in trajectory)
     """
-    runner.abort_agent(agent_id, reason)
-    return f"Aborted {agent_id}: {reason}"
-```
-
-### External Runner
-
-The Runner is the bridge between the Orchestrator's tools and LangGraph's external APIs:
-
-```python
-class ExecutionRunner:
-    """Drives graph execution and maintains the AgentDashboard.
-
-    Runs outside the graph — uses stream() and update_state() APIs.
-    Provides the backing implementation for check_agents, inject_instruction, abort_agent tools.
-    """
-
-    def __init__(self, graph: CompiledGraph, dashboard: AgentDashboard):
-        self.graph = graph
-        self.dashboard = dashboard
-
-    async def execute(self, input_data: dict, config: dict):
-        """Run the graph, feeding stream events into the dashboard."""
-        async for namespace, mode, data in self.graph.astream(
-            input_data, config,
-            stream_mode=["updates", "custom"],
-            subgraphs=True,
-        ):
-            # Feed events to dashboard
-            self.dashboard.update_from_event(namespace, data)
-
-            # Also forward to WebSocket for frontend (if connected)
-            if self.websocket:
-                await self.websocket.send_json({
-                    "agent_path": list(namespace),
-                    "mode": mode,
-                    "data": data,
-                })
-
-    def inject_instruction(self, agent_id: str, instruction: str):
-        """Inject instruction into a running sub-agent via update_state."""
-        subgraph_config = self._get_subgraph_config(agent_id)
-        self.graph.update_state(subgraph_config, {
-            "messages": [HumanMessage(content=f"[Orchestrator] {instruction}")],
-        })
-
-    def abort_agent(self, agent_id: str, reason: str):
-        """Abort a sub-agent by injecting a termination instruction."""
-        subgraph_config = self._get_subgraph_config(agent_id)
-        self.graph.update_state(subgraph_config, {
-            "messages": [HumanMessage(
-                content=f"[Orchestrator] ABORT: {reason}. Return your current findings immediately."
-            )],
-        })
-```
-
-### Configuration
-
-```yaml
-# orchestrator.yaml
-orchestrator:
-  monitoring:
-    summary_model: "gpt-4o-mini"          # Lightweight model for progress summaries
-    max_events_for_summary: 10            # Number of recent events to summarize
-    stream_mode: ["updates", "custom"]    # What to capture from sub-agents
-    stream_to_frontend: true              # Forward events to WebSocket
-
-  tools:
-    - check_agents          # Monitor sub-agent status
-    - inject_instruction    # Inject new instructions into running agent
-    - abort_agent           # Abort a running agent
-    - dispatch_task         # Submit new task (existing)
+    await task_manager.abort(task_id, reason)
+    return f"Aborted {task_id}: {reason}"
 ```
 
 ### Example Flow
@@ -1359,35 +1601,48 @@ orchestrator:
 ```
 Orchestrator (Phase 3: Verification)
   │
-  ├─ dispatch_task("database", "Verify H1: connection pool exhaustion")
-  ├─ dispatch_task("infrastructure", "Verify H1: check resource limits")
+  ├─ dispatch_agent("database", "Verify H1: connection pool exhaustion")
+  │   → {task_id: "task-001", status: "running"}
+  ├─ dispatch_agent("infrastructure", "Verify H1: check resource limits")
+  │   → {task_id: "task-002", status: "running"}
   │
-  ├─ ... Orchestrator continues reasoning ...
+  ├─ ... Orchestrator continues reasoning (ReAct loop) ...
   │
-  ├─ check_agents()
+  ├─ check_tasks()
   │   → running: [
-  │       {agent: "database", summary: "Querying slow query log, 3 queries analyzed so far"},
-  │       {agent: "infrastructure", summary: "Checking memory usage, disk I/O collected"},
+  │       {task_id: "task-001", agent: "database",
+  │        step: 3, max_steps: 30, summary: "Querying slow query log"},
+  │       {task_id: "task-002", agent: "infrastructure",
+  │        step: 5, max_steps: 20, summary: "Checking memory, disk I/O collected"},
   │     ]
   │   → completed: []
   │   Decision: Both progressing normally, continue waiting.
   │
-  ├─ check_agents()
+  ├─ check_tasks()
   │   → running: [
-  │       {agent: "database", summary: "Retrying connection to replica, 3 failed attempts"},
+  │       {task_id: "task-001", agent: "database",
+  │        step: 8, max_steps: 30, summary: "Retrying connection to replica, 3 failed attempts"},
   │     ]
   │   → completed: [
-  │       {agent: "infrastructure", result: {cpu: 0.45, memory: 0.6, ...}},
+  │       {task_id: "task-002", agent: "infrastructure", duration: 12.3},
   │     ]
-  │   Decision: Infrastructure done (consume result). Database struggling with replica.
+  │   Decision: Infrastructure done. Database struggling with replica.
   │
-  ├─ inject_instruction("database", "Skip replica, focus on primary connection pool metrics")
+  ├─ get_result("task-002")
+  │   → {cpu: 0.45, memory: 0.6, disk_io: {...}, network: {...}}
   │
-  ├─ check_agents()
+  ├─ inject_instruction("task-001", "Skip replica, focus on primary pool metrics")
+  │   → "Instruction injected into task-001"
+  │
+  ├─ check_tasks()
   │   → completed: [
-  │       {agent: "database", result: {pool_size: 100, active: 100, waiting: 45}},
+  │       {task_id: "task-001", agent: "database", duration: 18.0},
   │     ]
-  │   Decision: All agents done. Proceed to verdict.
+  │
+  ├─ get_result("task-001")
+  │   → {pool_size: 100, active: 100, waiting: 45}
+  │
+  └─ All results collected. Orchestrator reasons about verdict...
 ```
 
 ---
@@ -1401,32 +1656,30 @@ function rebuildConversation(messages: Message[], notebook: DiagnosticNotebook):
   const conversation = [...messages];
 
   for (const step of notebook.exploration_history) {
+    // All phases: render phase tag + natural language content
+    // Structured fields (target_agents, verdict) add context; content carries the narrative
     if (step.phase === "exploration") {
+      const agents = step.target_agents?.join(", ") || "unknown";
       conversation.push({
         role: "assistant",
-        content: `[Phase 1] Dispatched to: ${step.target_agents?.join(", ")}`,
+        content: `[Phase 1: Exploration] Dispatched to: ${agents}\n\n${step.content}`,
       });
     } else if (step.phase === "generation") {
       conversation.push({
         role: "assistant",
-        content: `[Phase 2] Generated hypotheses:\n${
-          step.generated_hypotheses?.map(h => `- ${h.description}`).join("\n")
-        }`,
+        content: `[Phase 2: Hypothesis Generation]\n\n${step.content}`,
       });
     } else if (step.phase === "verification") {
       conversation.push({
         role: "assistant",
         content: `[Phase 3] Verify ${step.target_hypothesis_id}\n` +
-          `Supporting: ${step.reasoning?.supporting_reasons?.join("; ")}\n` +
-          `Rejecting: ${step.reasoning?.rejecting_reasons?.join("; ")}\n` +
+          `${step.content}\n` +              // Natural language report
           `Verdict: ${step.verdict}`,
       });
     } else if (step.phase === "confirmation") {
       conversation.push({
         role: "assistant",
-        content: `[Phase 4] Root cause: ${
-          notebook.hypotheses[step.confirmed_root_cause!]?.description
-        }`,
+        content: `[Phase 4] ${step.content}`,  // Natural language conclusion
       });
     }
   }
@@ -1452,19 +1705,16 @@ orchestrator:
     adversarial_review: "prompts/adversarial_review.j2"
 
   tools:
-    - check_agents
-    - inject_instruction
-    - abort_agent
-    - dispatch_task
+    - dispatch_agent          # Async dispatch to Sub-Agent (non-blocking)
+    - check_tasks             # Monitor all task status
+    - get_result              # Fetch completed task result
+    - inject_instruction      # Inject instruction into running task
+    - abort_task              # Abort running task
 
-  monitoring:
-    enabled: true
-    stream_mode: ["updates", "custom"]
-    max_execution_time: 3600
-
-  intervention:
-    allow_interruption: true
-    allow_instruction_injection: true
+  task_manager:
+    summary_model: "gpt-4o-mini"         # Lightweight model for progress summaries
+    max_events_for_summary: 10           # Recent events to include in summary
+    stream_to_frontend: true             # Forward events to WebSocket
 
   feature_gates:
     adversarial_review: true
