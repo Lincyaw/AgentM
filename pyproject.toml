@@ -13,6 +13,14 @@ dependencies = [
     "jinja2>=3.1",
     "pyyaml>=6.0",
     "tiktoken>=0.12.0",
+    "duckdb>=1.4.4",
+    "pytz>=2026.1.post1",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "rich>=13.0",
+    "typer>=0.15",
+    "langgraph-checkpoint-sqlite>=2.0",
+    "aiosqlite>=0.22.1",
 ]
 
 [dependency-groups]
