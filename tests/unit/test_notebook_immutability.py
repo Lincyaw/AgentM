@@ -31,7 +31,6 @@ def _make_notebook(**overrides) -> DiagnosticNotebook:
     return DiagnosticNotebook(**defaults)
 
 
-@pytest.mark.skip(reason="stub not implemented — enable when notebook operations are implemented")
 class TestAddHypothesisImmutability:
     """add_hypothesis must return a new notebook; original unchanged.
 
@@ -66,7 +65,6 @@ class TestAddHypothesisImmutability:
         assert result.hypotheses["H1"].description == "Pool exhaustion"
 
 
-@pytest.mark.skip(reason="stub not implemented — enable when notebook operations are implemented")
 class TestUpdateHypothesisStatusImmutability:
     """update_hypothesis_status must return a new notebook; original unchanged.
 
@@ -98,7 +96,6 @@ class TestUpdateHypothesisStatusImmutability:
         assert nb.hypotheses["H1"].status == HypothesisStatus.FORMED
 
 
-@pytest.mark.skip(reason="stub not implemented — enable when notebook operations are implemented")
 class TestAddExplorationStepImmutability:
     """add_exploration_step must return a new notebook; original unchanged.
 
@@ -138,7 +135,6 @@ class TestAddExplorationStepImmutability:
         assert len(original.exploration_history) == original_count
 
 
-@pytest.mark.skip(reason="stub not implemented — enable when notebook operations are implemented")
 class TestAddCollectedDataImmutability:
     """add_collected_data must return a new notebook; original unchanged.
 
@@ -164,7 +160,6 @@ class TestAddCollectedDataImmutability:
         assert "db-agent" not in original.collected_data
 
 
-@pytest.mark.skip(reason="stub not implemented — enable when notebook operations are implemented")
 class TestSetConfirmedHypothesisImmutability:
     """set_confirmed_hypothesis must return a new notebook; original unchanged.
 

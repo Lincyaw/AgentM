@@ -1,13 +1,14 @@
-"""TaskManager for async Sub-Agent lifecycle management.
-
-All methods are stubs — raise NotImplementedError.
-"""
+"""TaskManager for async Sub-Agent lifecycle management."""
 
 from __future__ import annotations
 
+import asyncio
+import uuid
+from datetime import datetime
 from typing import Any, Literal, Optional
 
 from agentm.models.data import ManagedTask
+from agentm.models.enums import AgentRunStatus
 
 
 class TaskManager:
@@ -32,19 +33,80 @@ class TaskManager:
         **kwargs: Any,
     ) -> str:
         """Submit a new task for a Sub-Agent. Returns task_id."""
-        raise NotImplementedError
+        task_id = str(uuid.uuid4())
+
+        subgraph = kwargs.get("subgraph")
+        config: dict[str, Any] = kwargs.get("config", {})
+
+        managed = ManagedTask(
+            task_id=task_id,
+            agent_id=agent_id,
+            instruction=instruction,
+            hypothesis_id=hypothesis_id,
+            started_at=datetime.now().isoformat(),
+            subgraph_config=config,
+        )
+
+        if subgraph is not None:
+            managed.asyncio_task = asyncio.create_task(
+                self._execute_agent(managed, subgraph, config)
+            )
+
+        self._tasks[task_id] = managed
+        return task_id
 
     async def get_all_status(self, wait_seconds: float = 0) -> dict[str, Any]:
         """Get status of all managed tasks. Optionally wait if all are still running."""
-        raise NotImplementedError
+        if wait_seconds > 0 and all(
+            t.status == AgentRunStatus.RUNNING for t in self._tasks.values()
+        ):
+            done, _ = await asyncio.wait(
+                [t.asyncio_task for t in self._tasks.values() if t.asyncio_task],
+                timeout=wait_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+        result: dict[str, Any] = {"running": [], "completed": [], "failed": []}
+        for task_id, task in self._tasks.items():
+            entry: dict[str, Any] = {
+                "task_id": task_id,
+                "agent_id": task.agent_id,
+                "hypothesis_id": task.hypothesis_id,
+            }
+            if task.status == AgentRunStatus.RUNNING:
+                entry["step"] = task.current_step
+                entry["max_steps"] = task.max_steps
+                result["running"].append(entry)
+            elif task.status == AgentRunStatus.COMPLETED:
+                entry["duration_seconds"] = task.duration_seconds
+                entry["result"] = task.result
+                result["completed"].append(entry)
+            elif task.status == AgentRunStatus.FAILED:
+                entry["error_summary"] = task.error_summary
+                entry["last_steps"] = task.last_steps
+                result["failed"].append(entry)
+        return result
 
     async def inject(self, task_id: str, instruction: str) -> None:
         """Inject a new instruction into a running Sub-Agent."""
-        raise NotImplementedError
+        task = self._tasks[task_id]
+        if task.status != AgentRunStatus.RUNNING:
+            raise ValueError(
+                f"Task {task_id!r} is not running (status={task.status!r})"
+            )
+        task.pending_instructions.append(instruction)
 
     async def abort(self, task_id: str, reason: str) -> None:
         """Abort a running Sub-Agent task."""
-        raise NotImplementedError
+        task = self._tasks[task_id]
+        if task.status != AgentRunStatus.RUNNING:
+            raise ValueError(
+                f"Task {task_id!r} is not running (status={task.status!r})"
+            )
+        if task.asyncio_task is not None:
+            task.asyncio_task.cancel()
+        task.status = AgentRunStatus.FAILED
+        task.error_summary = f"Aborted: {reason}"
 
     def consume_instructions(self, task_id: str) -> list[str]:
         """Dequeue and return all pending instructions for a task.
@@ -52,14 +114,17 @@ class TaskManager:
         Called by the instruction hook before each LLM invocation.
         Returns the list of pending instructions and clears them from the task.
         """
-        raise NotImplementedError
+        task = self._tasks[task_id]
+        instructions = list(task.pending_instructions)
+        task.pending_instructions.clear()
+        return instructions
 
     def get_task(self, task_id: str) -> ManagedTask:
         """Look up a single managed task by ID.
 
         Raises KeyError if task_id is not found.
         """
-        raise NotImplementedError
+        return self._tasks[task_id]
 
     async def _execute_agent(
         self,
@@ -72,4 +137,31 @@ class TaskManager:
         Streams events from the subgraph, updates managed task status,
         and stores results upon completion.
         """
-        raise NotImplementedError
+        from langchain_core.messages import HumanMessage
+
+        input_data = {"messages": [HumanMessage(content=managed.instruction)]}
+
+        try:
+            async for namespace, mode, data in subgraph.astream(
+                input_data,
+                config,
+                stream_mode=["updates", "custom"],
+                subgraphs=True,
+            ):
+                managed.events_buffer.append(data)
+                if len(managed.events_buffer) > 20:
+                    managed.events_buffer = managed.events_buffer[-20:]
+
+            managed.status = AgentRunStatus.COMPLETED
+            managed.result = {"events": managed.events_buffer}
+            managed.completed_at = datetime.now().isoformat()
+
+        except asyncio.CancelledError:
+            managed.completed_at = datetime.now().isoformat()
+            raise
+
+        except Exception as e:
+            managed.status = AgentRunStatus.FAILED
+            managed.error_summary = str(e)
+            managed.last_steps = managed.events_buffer[-5:]
+            managed.completed_at = datetime.now().isoformat()
