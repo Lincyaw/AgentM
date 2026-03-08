@@ -102,9 +102,10 @@ class Phase(str, Enum):
 class HypothesisStatus(str, Enum):
     FORMED = "formed"               # Generated but not yet verified
     INVESTIGATING = "investigating" # Verification in progress (Sub-Agent dispatched)
-    CONFIRMED = "confirmed"         # Verification verdict: confirmed
-    REJECTED = "rejected"           # Verification verdict: rejected
-    PARTIAL = "partial"             # Verification verdict: partially confirmed
+    CONFIRMED = "confirmed"         # Verification: strong supporting evidence
+    REJECTED = "rejected"           # Verification: strong contradicting evidence
+    REFINED = "refined"             # Updated based on evidence (spawns child via parent_id)
+    INCONCLUSIVE = "inconclusive"   # Investigated but evidence is ambiguous
 
 
 class Verdict(str, Enum):
@@ -684,7 +685,7 @@ class Hypothesis:
     evidence: list[str]                  # Supporting evidence
     counter_evidence: list[str]          # Rejecting evidence
     status: HypothesisStatus = HypothesisStatus.FORMED
-    # Lifecycle: FORMED → INVESTIGATING → CONFIRMED / REJECTED / PARTIAL
+    # Lifecycle: FORMED → INVESTIGATING → CONFIRMED / REJECTED / REFINED / INCONCLUSIVE
     created_at: str
     last_updated: str
 ```
@@ -741,7 +742,7 @@ When a Sub-Agent verifies a hypothesis, it returns a `VerificationResult` with a
 class VerificationResult:
     verdict: Verdict                    # Structured — for Orchestrator branching logic
     report: str                         # Natural language — full diagnostic report
-    refined_description: Optional[str] = None  # When verdict == PARTIAL: refined hypothesis text
+    refined_description: Optional[str] = None  # When verdict == PARTIAL: suggested refinement
 ```
 
 The `report` field contains the Sub-Agent's complete diagnostic narrative. The prompt guides Sub-Agents to include investigation data, supporting/rejecting observations, and key findings — but the exact structure is up to the agent.
