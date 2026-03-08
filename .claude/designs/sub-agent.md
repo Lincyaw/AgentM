@@ -262,17 +262,23 @@ Raw: pool_size=100, active=100, waiting=45, slow_queries_count=3, primary_cpu=42
 
 ### Safety Interrupts (Optional, Per-Agent)
 
-For agents that execute potentially dangerous operations, `interrupt_before: ["tools"]` can be configured to require external approval:
+For agents that execute potentially dangerous operations (e.g., database DDL, production config changes), `interrupt_before: ["tools"]` pauses the agent before every tool call for **human operator approval**.
 
-```python
-# In config: interrupt_before: ["tools"]
-# → Agent pauses before executing any tool call
-# → External runner (not Orchestrator node) reviews and resumes
+> **Design Decision**: Safety interrupts are a **Layer 4 (manual)** concern — they require human judgment, not LLM automation. The Orchestrator is not involved in the approval flow. Instead, the external operator (via frontend Debug Panel or REST API) reviews pending tool calls and resumes execution.
 
-# External runner reviews pending tool calls
-state = graph.get_state(config, subgraphs=True)
-# ... inspect sub-agent's pending tool calls ...
-graph.invoke(Command(resume=True), config)
+Workflow:
+1. Sub-Agent's `create_react_agent` is compiled with `interrupt_before=["tools"]`
+2. Agent pauses before each tool call → checkpoint saved
+3. Operator reviews pending tool call via `GET /api/tasks/{thread_id}/state`
+4. Operator approves → `POST /api/tasks/{thread_id}/resume` with `Command(resume=True)`
+5. Or operator rejects → `POST /api/tasks/{thread_id}/resume` with modified instructions
+
+Configuration:
+```yaml
+agents:
+  database:
+    execution:
+      interrupt_before: ["tools"]   # Requires human approval for all tool calls
 ```
 
 ### Orchestrator-Driven Intervention
@@ -320,6 +326,8 @@ class AgentPool:
         """Get a compiled sub-agent subgraph by ID."""
         return self.agents[agent_id]
 ```
+
+> **Integration with AgentSystemBuilder**: `AgentPool` is created during `AgentSystemBuilder.build()`. The builder loads scenario config, creates the pool of compiled Sub-Agent subgraphs, and passes them to the `TaskManager`. See [generic-state-wrapper.md](generic-state-wrapper.md#agentsystembuilder) for the full build process.
 
 The Orchestrator graph is built separately — it contains only the Orchestrator `create_react_agent` as its sole node. Sub-Agents are passed to the `TaskManager` for async invocation.
 
