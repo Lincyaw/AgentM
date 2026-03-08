@@ -1,11 +1,59 @@
 # AgentM Concept Index
-# Maintenance rules: see CLAUDE.md "Design Documentation System" section
-#
-# Each concept must include:
-#   description  — One-sentence description
-#   design       — Path to file under designs/
-#   related_concepts — List of related concepts
-#   plans        — List of files under plans/
-#   tasks        — List of files under tasks/
+# Maintenance rules: see CLAUDE.md "Design Documentation System"
 
-concepts: {}
+concepts:
+  system_architecture:
+    description: "LangGraph Supervisor+Subgraph multi-agent orchestration system with config-driven design, trajectory recording, monitoring, and failure recovery"
+    design: "designs/system-design-overview.md"
+    related_concepts: [orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, frontend_architecture]
+    plans: []
+    tasks: []
+
+  orchestrator:
+    description: "Supervisor node acting as hypothesis reasoner. Maintains DiagnosticNotebook, drives four-phase RCA flow, monitors and intervenes Sub-Agents"
+    design: "designs/orchestrator.md"
+    related_concepts: [system_architecture, sub_agent, trajectory_system]
+    plans: []
+    tasks: []
+
+  sub_agent:
+    description: "Independent Subgraph nodes via create_react_agent. Isolated State Schema, config-driven tools/prompts, data-only constraint in RCA mode"
+    design: "designs/sub-agent.md"
+    related_concepts: [system_architecture, orchestrator, configuration_system]
+    plans: []
+    tasks: []
+
+  generic_state_wrapper:
+    description: "Generic SDK wrapper supporting multiple agent system types (hypothesis-driven, sequential, decision-tree) via configuration"
+    design: "designs/generic-state-wrapper.md"
+    related_concepts: [orchestrator, configuration_system]
+    plans: []
+    tasks: []
+
+  configuration_system:
+    description: "Three-layer YAML config: system-level, orchestrator-level, agent-level. Jinja2 prompt templates, runtime context_schema, hot-reload support"
+    design: null
+    related_concepts: [system_architecture, sub_agent, orchestrator]
+    plans: []
+    tasks: []
+
+  trajectory_system:
+    description: "Hierarchical trace capture via Checkpoint chain and stream(subgraphs=True). Export to RL training format (state, action, reward, next_state)"
+    design: null
+    related_concepts: [system_architecture, orchestrator, recovery_system]
+    plans: []
+    tasks: []
+
+  recovery_system:
+    description: "Failure recovery via get_state_history and update_state. Supports retry, state fix, rollback, and debug replay from any checkpoint"
+    design: null
+    related_concepts: [system_architecture, trajectory_system]
+    plans: []
+    tasks: []
+
+  frontend_architecture:
+    description: "Web dashboard: agent topology, execution monitor, conversation view (rebuilt from Notebook), hypothesis tracker, debug panel. React + WebSocket"
+    design: null
+    related_concepts: [system_architecture, trajectory_system, orchestrator]
+    plans: []
+    tasks: []
