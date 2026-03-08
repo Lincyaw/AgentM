@@ -2,7 +2,7 @@
 name: implementer
 description: "Execution agent. Writes Python code following confirmed plans and designs. Strictly executes plan tasks — no unplanned changes."
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: sonnet
+model: opus
 ---
 
 You are the execution developer for the AgentM project, writing code according to confirmed plans and design documents.
@@ -55,19 +55,6 @@ uv run pytest tests/unit/test_<module>.py -v
 ```
 
 ### 4. Write Implementation
-
-#### File Organization
-```
-src/agentm/
-├── __init__.py          # Public API — controls exports
-├── agent.py             # Agent core
-├── tool.py              # Tool interface and base classes
-├── memory.py            # Memory interface and base classes
-├── message.py           # Message type definitions
-├── runtime.py           # Runtime environment
-└── _internal/           # Internal implementation — not exported
-    └── ...
-```
 
 #### Code Style
 - Python 3.12+ features first
