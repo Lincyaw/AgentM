@@ -5,21 +5,21 @@ concepts:
   system_architecture:
     description: "LangGraph Supervisor+Subgraph multi-agent orchestration system with config-driven design, trajectory recording, monitoring, and failure recovery"
     design: "designs/system-design-overview.md"
-    related_concepts: [orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture]
+    related_concepts: [orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner]
     plans: []
     tasks: []
 
   orchestrator:
-    description: "Supervisor node acting as hypothesis reasoner. Maintains DiagnosticNotebook, drives four-phase RCA flow, context compression with checkpoint-backed recall, monitors and intervenes Sub-Agents"
+    description: "Supervisor node acting as hypothesis reasoner. Maintains DiagnosticNotebook, drives four-phase RCA flow, context compression with checkpoint-backed recall, monitors Sub-Agents via pull-based check_agents tool backed by ExecutionRunner"
     design: "designs/orchestrator.md"
-    related_concepts: [system_architecture, sub_agent, trajectory_system, memory_system]
+    related_concepts: [system_architecture, sub_agent, trajectory_system, memory_system, execution_runner]
     plans: []
     tasks: []
 
   sub_agent:
-    description: "Independent Subgraph nodes via create_react_agent. Isolated State Schema, config-driven tools/prompts, pre_model_hook compression, data-only constraint in RCA mode"
+    description: "Independent Subgraph nodes via create_react_agent. Isolated State Schema, config-driven tools/prompts, pre_model_hook compression (llm_input_messages), data-only constraint in RCA mode, static agent pool compiled at startup"
     design: "designs/sub-agent.md"
-    related_concepts: [system_architecture, orchestrator, configuration_system]
+    related_concepts: [system_architecture, orchestrator, configuration_system, execution_runner]
     plans: []
     tasks: []
 
@@ -38,16 +38,16 @@ concepts:
     tasks: []
 
   configuration_system:
-    description: "Three-layer YAML config: system-level, orchestrator-level, agent-level. Jinja2 prompt templates, runtime context_schema, hot-reload support"
+    description: "Three-layer YAML config: system-level, orchestrator-level, agent-level. Jinja2 prompt templates, runtime context_schema. Static agent pool — restart to apply config changes"
     design: null
     related_concepts: [system_architecture, sub_agent, orchestrator]
     plans: []
     tasks: []
 
   trajectory_system:
-    description: "Hierarchical trace capture via Checkpoint chain and stream(subgraphs=True). Export to RL training format (state, action, reward, next_state). CompressionRef preserves fine-grained history"
+    description: "Hierarchical trace capture via Checkpoint chain and stream(subgraphs=True). Export to RL training format (state, action, reward, next_state). CompressionRef stored in state (not metadata)"
     design: null
-    related_concepts: [system_architecture, orchestrator, recovery_system, memory_system]
+    related_concepts: [system_architecture, orchestrator, recovery_system, memory_system, execution_runner]
     plans: []
     tasks: []
 
@@ -58,9 +58,16 @@ concepts:
     plans: []
     tasks: []
 
+  execution_runner:
+    description: "External async process driving graph execution. Streams subgraph events into AgentDashboard, provides backing for check_agents/inject_instruction/abort_agent tools, forwards events to frontend WebSocket"
+    design: "designs/orchestrator.md"
+    related_concepts: [orchestrator, sub_agent, frontend_architecture, trajectory_system]
+    plans: []
+    tasks: []
+
   frontend_architecture:
-    description: "Web dashboard: agent topology, execution monitor, conversation view (rebuilt from Notebook), hypothesis tracker, debug panel. React + WebSocket"
+    description: "Web dashboard: agent topology, execution monitor, conversation view (rebuilt from Notebook), hypothesis tracker, debug panel. React + WebSocket. Events fed by ExecutionRunner"
     design: null
-    related_concepts: [system_architecture, trajectory_system, orchestrator]
+    related_concepts: [system_architecture, trajectory_system, orchestrator, execution_runner]
     plans: []
     tasks: []

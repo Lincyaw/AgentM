@@ -79,6 +79,10 @@ class DecisionTreeState(BaseExecutorState):
 
 ### StateSchemaFactory
 
+> **⚠️ LangGraph Verification — Dynamic TypedDict Creation**: Python's `TypedDict` function-call syntax (`TypedDict("Name", fields)`) works for creating dynamic schemas, but **`Annotated` types with reducers** may not propagate correctly when using this approach. The `create_react_agent` and `StateGraph` expect proper type annotations.
+>
+> **Recommendation**: Test that `Annotated[list, operator.add]` reducers work when passed through `TypedDict()` dynamic creation. If not, use a class-based approach with `type()` metaclass or pre-define the concrete state classes and select via config mapping (simpler, more explicit).
+
 ```python
 class StateSchemaFactory:
     """Generate state schemas from config."""
@@ -325,6 +329,15 @@ knowledge/                              ← root namespace
 ```
 
 #### Mapping to LangGraph Store
+
+> **✅ LangGraph Verified**: All Store operations used in this design are natively supported:
+> - `store.put(namespace, key, value, index=[...])` — Writes with embedding index ✅
+> - `store.get(namespace, key)` — Direct read by path ✅
+> - `store.search(namespace_prefix, query, filter, limit)` — Semantic search + structured filter ✅
+> - `store.list_namespaces(prefix, max_depth, limit)` — Filesystem-like browsing ✅
+> - `store.delete(namespace, key)` — Delete entry ✅
+>
+> **Note on `list_namespaces` usage**: The `max_depth` parameter truncates namespace paths to the specified depth. For listing immediate children of `("knowledge", "failure_pattern")`, use `max_depth=3` (prefix length + 1). The design's `max_depth=len(namespace) + 1` is correct.
 
 LangGraph Store uses namespace tuples. The path maps directly:
 
