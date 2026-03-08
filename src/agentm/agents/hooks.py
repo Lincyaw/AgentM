@@ -1,11 +1,10 @@
-"""Pre-model hook builders for Sub-Agent instruction injection and chaining.
-
-All functions are stubs — raise NotImplementedError.
-"""
+"""Pre-model hook builders for Sub-Agent instruction injection and chaining."""
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable
+
+from langchain_core.messages import HumanMessage
 
 from agentm.core.task_manager import TaskManager
 
@@ -19,7 +18,15 @@ def build_instruction_hook(task_manager: TaskManager, task_id: str) -> Callable:
 
     Ref: designs/sub-agent.md § Instruction Queue
     """
-    raise NotImplementedError
+    def hook(state: dict[str, Any]) -> dict[str, Any]:
+        instructions = task_manager.consume_instructions(task_id)
+        original_messages = state.get("messages", [])
+        if not instructions:
+            return {"messages": original_messages}
+        injected = [HumanMessage(content=instr) for instr in instructions]
+        return {"messages": [*injected, *original_messages]}
+
+    return hook
 
 
 def build_combined_hook(instruction_hook: Callable, compression_hook: Callable) -> Callable:
@@ -31,4 +38,11 @@ def build_combined_hook(instruction_hook: Callable, compression_hook: Callable) 
 
     Ref: designs/orchestrator.md § Instruction Injection
     """
-    raise NotImplementedError
+    def hook(state: dict[str, Any]) -> dict[str, Any]:
+        intermediate = instruction_hook(state)
+        result = compression_hook(intermediate)
+        if "llm_input_messages" in result:
+            return {"llm_input_messages": result["llm_input_messages"]}
+        return {"messages": result["messages"]}
+
+    return hook
