@@ -104,7 +104,6 @@ class TestHypothesisStateMachineDesign:
         assert LEGAL_TRANSITIONS[HypothesisStatus.CONFIRMED] == set()
 
 
-@pytest.mark.skip(reason="stub not implemented — enable when validate_hypothesis_transition is implemented")
 class TestValidateHypothesisTransition:
     """Tests for the validate_hypothesis_transition() function.
 
