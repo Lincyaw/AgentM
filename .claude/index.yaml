@@ -5,28 +5,35 @@ concepts:
   system_architecture:
     description: "LangGraph Supervisor+Subgraph multi-agent orchestration system with config-driven design, trajectory recording, monitoring, and failure recovery"
     design: "designs/system-design-overview.md"
-    related_concepts: [orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, frontend_architecture]
+    related_concepts: [orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture]
     plans: []
     tasks: []
 
   orchestrator:
-    description: "Supervisor node acting as hypothesis reasoner. Maintains DiagnosticNotebook, drives four-phase RCA flow, monitors and intervenes Sub-Agents"
+    description: "Supervisor node acting as hypothesis reasoner. Maintains DiagnosticNotebook, drives four-phase RCA flow, context compression with checkpoint-backed recall, monitors and intervenes Sub-Agents"
     design: "designs/orchestrator.md"
-    related_concepts: [system_architecture, sub_agent, trajectory_system]
+    related_concepts: [system_architecture, sub_agent, trajectory_system, memory_system]
     plans: []
     tasks: []
 
   sub_agent:
-    description: "Independent Subgraph nodes via create_react_agent. Isolated State Schema, config-driven tools/prompts, data-only constraint in RCA mode"
+    description: "Independent Subgraph nodes via create_react_agent. Isolated State Schema, config-driven tools/prompts, pre_model_hook compression, data-only constraint in RCA mode"
     design: "designs/sub-agent.md"
     related_concepts: [system_architecture, orchestrator, configuration_system]
     plans: []
     tasks: []
 
   generic_state_wrapper:
-    description: "Generic SDK wrapper supporting multiple agent system types (hypothesis-driven, sequential, decision-tree) via configuration"
+    description: "Generic SDK wrapper supporting multiple agent system types (hypothesis-driven, sequential, memory-extraction, decision-tree) via configuration. Shared BaseOrchestrator, PhaseManager, StateSchemaFactory"
     design: "designs/generic-state-wrapper.md"
-    related_concepts: [orchestrator, configuration_system]
+    related_concepts: [orchestrator, configuration_system, memory_system]
+    plans: []
+    tasks: []
+
+  memory_system:
+    description: "Two-layer memory: intra-task (context compression + recall_history tool backed by checkpoint chain) and cross-task (Memory Extraction agent system producing KnowledgeEntry items in LangGraph Store)"
+    design: "designs/generic-state-wrapper.md"
+    related_concepts: [orchestrator, generic_state_wrapper, trajectory_system]
     plans: []
     tasks: []
 
@@ -38,9 +45,9 @@ concepts:
     tasks: []
 
   trajectory_system:
-    description: "Hierarchical trace capture via Checkpoint chain and stream(subgraphs=True). Export to RL training format (state, action, reward, next_state)"
+    description: "Hierarchical trace capture via Checkpoint chain and stream(subgraphs=True). Export to RL training format (state, action, reward, next_state). CompressionRef preserves fine-grained history"
     design: null
-    related_concepts: [system_architecture, orchestrator, recovery_system]
+    related_concepts: [system_architecture, orchestrator, recovery_system, memory_system]
     plans: []
     tasks: []
 

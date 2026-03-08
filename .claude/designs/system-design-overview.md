@@ -113,6 +113,19 @@ class ExecutorState(TypedDict):
 
 This is fully supported by LangGraph: custom dataclass fields alongside messages, partial state updates, and `RemoveMessage` API.
 
+### Context Compression
+
+Even with Mode 2, long-running RCA tasks can exhaust context windows. Two-layer compression addresses this:
+
+- **Sub-Agent layer**: When tool call count exceeds threshold, compress message history into a structured 8-section summary via `pre_model_hook`. Full history remains in checkpoints.
+- **Orchestrator layer**: On phase transition, compress completed phase's `exploration_history` into a `PhaseSummary`. Active phase retains full detail.
+
+Compression is a **prompt optimization only** — checkpoints retain full uncompressed data for trajectory export, replay, and observability. Each compression creates a `CompressionRef` in checkpoint metadata recording the compressed range (`from_id`, `to_id`), enabling O(1) drill-down.
+
+**History Recall**: After compression, Agents can call a `recall_history` tool to query their pre-compression checkpoint messages on demand — retrieving raw metric data, tool call parameters, and intermediate reasoning that the summary omitted. This shares the same conceptual interface as cross-task knowledge retrieval (natural language query → relevant data).
+
+> Detail: See [orchestrator.md](orchestrator.md) for compression data structures, checkpoint interaction, recall tool design, and configuration.
+
 ---
 
 ## Configuration System
@@ -267,7 +280,7 @@ Tech stack: Python + FastAPI + LangGraph backend, React + WebSocket + d3.js fron
 
 ## Multi-System Support (SDK Wrapper)
 
-Different diagnostic patterns share the same core framework, differentiated by configuration:
+Different agent system types share the same core framework (BaseOrchestrator, PhaseManager, StateSchemaFactory), differentiated by configuration:
 
 ```python
 # Hypothesis-driven RCA
@@ -275,9 +288,14 @@ orchestrator = AgentSystemBuilder.build(system_type="hypothesis_driven", config=
 
 # Sequential diagnosis (only config changes)
 orchestrator = AgentSystemBuilder.build(system_type="sequential", config=...)
+
+# Memory Extraction — cross-task knowledge building (same framework, different state + phases)
+memory_agent = AgentSystemBuilder.build(system_type="memory_extraction", config=...)
 ```
 
-> Detail: See [generic-state-wrapper.md](generic-state-wrapper.md) for the full SDK wrapper design.
+The **Memory Extraction** system reuses the same Supervisor + Subgraph architecture to process completed RCA trajectories and extract failure patterns, diagnostic skills, and system knowledge into a persistent Knowledge Store (LangGraph Store). The RCA Orchestrator can then query this knowledge via `search_knowledge` tool during hypothesis generation.
+
+> Detail: See [generic-state-wrapper.md](generic-state-wrapper.md) for the full SDK wrapper design and Memory Extraction system.
 
 ---
 

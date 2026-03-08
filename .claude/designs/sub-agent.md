@@ -62,8 +62,11 @@ def create_sub_agent(agent_id: str, config: AgentConfig, tool_registry: ToolRegi
         name=agent_id,
         state_schema=SubAgentState,
         interrupt_before=config.interrupt_before or [],
+        pre_model_hook=build_compression_hook(config),  # Context compression
     )
 ```
+
+> **Context compression**: The `pre_model_hook` compresses message history when tool call count exceeds the configured threshold. Full history remains in state for trajectory export. See [orchestrator.md](orchestrator.md#context-compression-intra-task-memory) for the compression data structures and configuration.
 
 ### ReAct Execution Loop
 
