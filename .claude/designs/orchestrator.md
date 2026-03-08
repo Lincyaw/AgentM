@@ -179,6 +179,8 @@ class SubAgentMessageSummary:
 
 **Implementation via `pre_model_hook`**:
 
+> **✅ LangGraph Verified**: `pre_model_hook` supports returning `llm_input_messages` which modifies only the LLM input without changing the actual `messages` state. This is the correct mechanism for compression — the full uncompressed history stays in checkpoints for trajectory export. The design below should use `llm_input_messages` instead of `messages` in the return value to preserve state integrity.
+
 ```python
 def sub_agent_compression_hook(state: SubAgentState) -> dict:
     """pre_model_hook: compress messages before LLM call when threshold exceeded."""
@@ -191,13 +193,15 @@ def sub_agent_compression_hook(state: SubAgentState) -> dict:
 
     summary = compress_messages_to_summary(messages_to_compress)  # LLM call
 
-    # Replace message history with: summary + latest message
+    # Replace LLM input with: summary + latest message (state unchanged)
     compressed_messages = [
         SystemMessage(content=format_summary(summary)),
         latest_message,
     ]
 
-    return {"messages": compressed_messages}
+    # ⚠️ Implementation note: return `llm_input_messages` instead of `messages`
+    # to preserve full history in state/checkpoints
+    return {"llm_input_messages": compressed_messages}
 
 # Attach to Sub-Agent
 agent = create_react_agent(
@@ -208,9 +212,11 @@ agent = create_react_agent(
 ```
 
 **Key design choice**: Compression happens in `pre_model_hook`, which runs before every LLM call inside the ReAct loop. This means:
-- The full uncompressed history remains in state (for trajectory export)
+- The full uncompressed history remains in state (for trajectory export) — **via `llm_input_messages` return key**
 - Only the LLM's input is compressed
 - The compression is transparent to the Orchestrator
+
+> **⚠️ Implementation Note**: The `pre_model_hook` return must use `llm_input_messages` (not `messages`) to achieve this. Returning `messages` would **overwrite** the state's message history. With `llm_input_messages`, LangGraph sends the compressed messages to the LLM but keeps the original `messages` in the checkpoint.
 
 ### Layer 2: Orchestrator Notebook Compression
 
@@ -358,6 +364,8 @@ S0 → S1 → S2 → ... → S14 → S15(compression happens here)→ S16 → ..
 
 ### Compression Reference in Metadata
 
+> **✅ LangGraph Verified**: `CheckpointMetadata` is a `TypedDict` with `total=False`, which accepts arbitrary extra keys. Custom fields like `compression_ref` will be preserved in checkpoint storage and retrievable via `get_state_history()`. The `JsonPlusSerializer` (default) handles standard Python types and dataclasses.
+
 When compression occurs, the new checkpoint's metadata records the compressed range for future analysis and drill-down:
 
 ```python
@@ -468,6 +476,13 @@ def recall_history(
 ```
 
 ### Implementation
+
+> **⚠️ LangGraph Verification — Custom Metadata Write Path**: While `CheckpointMetadata` supports arbitrary keys for reading, LangGraph does NOT provide a direct API for nodes to **write** custom metadata to their own checkpoint. Metadata is set internally by the Pregel engine (source, step, parents, etc.). To store `CompressionRef` in metadata, we need one of:
+> 1. **Store in state**: Add a `compression_refs: list[CompressionRef]` field to the state schema (simplest, fully supported)
+> 2. **Custom checkpointer wrapper**: Subclass the checkpointer to inject custom metadata on `put()`
+> 3. **Checkpoint metadata via `update_state()`**: Call `update_state()` from outside the graph to attach metadata (but this creates a new checkpoint)
+>
+> **Recommendation**: Option 1 (store in state) is the most pragmatic. The `CompressionRef` data is small and logically belongs to the agent's working context. The recall_history tool can read it directly from state.
 
 ```python
 def recall_history_impl(
@@ -753,7 +768,9 @@ def phase_exploration(state: ExecutorState) -> dict:
     return {
         "notebook": notebook,
         "current_phase": "generation",
-        "messages": [RemoveMessage(id="__all__")]  # Clean up messages
+        "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)]  # Clean up messages
+        # ✅ LangGraph Verified: REMOVE_ALL_MESSAGES is a constant in langgraph.graph.message
+        # that clears all messages at once. No need to specify individual IDs.
     }
 ```
 
@@ -1074,37 +1091,298 @@ Prompt templates are external files — switching scenarios requires **only new 
 
 ## Monitoring & Intervention
 
-### Real-Time Streaming
+The Orchestrator monitors Sub-Agents via a **`check_agents` tool** — a dashboard-style interface that returns the current status of all dispatched agents. This is a pull-based design: the Orchestrator decides when to check, rather than being interrupted.
 
-```python
-async def monitor_execution(graph, config, websocket):
-    async for namespace, mode, data in graph.astream(
-        input_data, config,
-        stream_mode=["updates", "custom"],
-        subgraphs=True,  # Capture Sub-Agent events
-    ):
-        agent_path = list(namespace) if namespace else ["orchestrator"]
-        await websocket.send_json({"agent_path": agent_path, "data": data})
+### Design Rationale
+
+The Orchestrator dispatches multiple Sub-Agents in parallel (via `Send`). While waiting for results, it needs situational awareness:
+- Which agents are still running?
+- What are they doing right now?
+- Which agents have finished, and what did they return?
+
+Rather than interrupting Sub-Agents periodically (which adds latency and wastes cycles when agents are progressing normally), the Orchestrator has a tool it can call at any time during its own reasoning loop.
+
+### Architecture
+
+```
+External Runner (async)
+  │
+  ├─ graph.astream(input, config, subgraphs=True)
+  │       │
+  │       ├─ Sub-Agent events ──→ AgentDashboard (in-memory)
+  │       │                       ├─ running agents: latest events buffer
+  │       │                       └─ completed agents: result queue (consume-once)
+  │       │
+  │       └─ Sub-Agents execute uninterrupted
+  │
+  └─ Orchestrator node:
+       ├─ Calls check_agents() tool → reads AgentDashboard
+       ├─ Sees: running agents' progress + completed agents' results
+       └─ Decides: wait / inject instruction / abort
 ```
 
-### Intervention Mechanisms
+### AgentDashboard
 
 ```python
-# Interrupt Sub-Agent
-state = graph.get_state(config)
+@dataclass
+class AgentStatus:
+    agent_id: str
+    status: Literal["running", "completed", "failed"]
 
-# Inject new instruction
-graph.update_state(config, {
-    "messages": state.values["messages"] + [
-        HumanMessage(content="[Orchestrator] New instruction: focus on Section 3")
-    ],
-})
+    # For running agents: progress summary (generated on-demand by lightweight model)
+    current_summary: Optional[str] = None         # "Checking connection pool, 3 tools called so far"
+    latest_events: Optional[list[dict]] = None    # Raw recent events buffer (for summary generation)
 
-# Resume execution
-result = graph.invoke(None, config)
+    # For completed agents: final result (consumed once)
+    result: Optional[dict] = None
+    completed_at: Optional[str] = None
 
-# Redirect to different Sub-Agent
-result = graph.invoke(Command(goto="database_agent"), config)
+class AgentDashboard:
+    """In-memory dashboard tracking all dispatched Sub-Agents.
+
+    Updated by the external runner via stream events.
+    Read by the Orchestrator via check_agents tool.
+    """
+
+    def __init__(self, summary_model: str = "gpt-4o-mini"):
+        self._agents: dict[str, AgentStatus] = {}
+        self._consumed_results: set[str] = set()  # Track consumed completed results
+        self._summary_model = load_model(summary_model)  # Lightweight model for summaries
+
+    def update_from_event(self, namespace: tuple, event_data: dict):
+        """Called by external runner for each stream event."""
+        agent_id = namespace[-1] if namespace else None
+        if not agent_id or agent_id == "orchestrator":
+            return
+
+        if agent_id not in self._agents:
+            self._agents[agent_id] = AgentStatus(agent_id=agent_id, status="running")
+
+        agent = self._agents[agent_id]
+
+        # Buffer latest events for summary generation
+        if agent.latest_events is None:
+            agent.latest_events = []
+        agent.latest_events.append(event_data)
+
+        # Detect completion
+        if is_terminal_event(event_data):
+            agent.status = "completed"
+            agent.result = extract_result(event_data)
+            agent.completed_at = datetime.now().isoformat()
+
+    def get_status(self) -> dict:
+        """Called by check_agents tool. Returns status snapshot.
+
+        Completed results are returned ONCE — subsequent calls won't include them.
+        Running agents get an on-demand summary via lightweight model.
+        """
+        result = {"running": [], "completed": [], "failed": []}
+
+        for agent_id, agent in self._agents.items():
+            if agent.status == "running":
+                # Generate summary on-demand (only when Orchestrator asks)
+                if agent.latest_events:
+                    agent.current_summary = self._summarize(agent)
+                result["running"].append({
+                    "agent_id": agent_id,
+                    "summary": agent.current_summary,
+                })
+
+            elif agent.status == "completed" and agent_id not in self._consumed_results:
+                # Return result once, then mark as consumed
+                result["completed"].append({
+                    "agent_id": agent_id,
+                    "result": agent.result,
+                    "completed_at": agent.completed_at,
+                })
+                self._consumed_results.add(agent_id)
+
+            elif agent.status == "failed" and agent_id not in self._consumed_results:
+                result["failed"].append({
+                    "agent_id": agent_id,
+                    "error": agent.result,
+                })
+                self._consumed_results.add(agent_id)
+
+        return result
+
+    def _summarize(self, agent: AgentStatus) -> str:
+        """Use lightweight model to summarize agent's recent activity."""
+        events_text = format_events_for_summary(agent.latest_events[-10:])  # Last 10 events
+        summary = self._summary_model.invoke(
+            f"Summarize this agent's current activity in 1-2 sentences:\n{events_text}"
+        )
+        return summary.content
+```
+
+### check_agents Tool
+
+```python
+@tool
+def check_agents() -> dict:
+    """Check the current status of all dispatched Sub-Agents.
+
+    Returns a dashboard with three sections:
+    - running: Agents still executing, with a brief summary of their current activity
+    - completed: Agents that have finished since the last check (results shown ONCE)
+    - failed: Agents that encountered errors since the last check (shown ONCE)
+
+    Use this to:
+    - Monitor progress of long-running agents
+    - Collect results from completed agents
+    - Detect agents that are stuck or blocked
+    - Decide whether to wait, inject new instructions, or abort an agent
+    """
+    return dashboard.get_status()
+```
+
+### Intervention: inject_instruction and abort_agent
+
+When the Orchestrator determines (from `check_agents` results) that a Sub-Agent needs intervention:
+
+```python
+@tool
+def inject_instruction(agent_id: str, instruction: str) -> str:
+    """Inject a new instruction into a running Sub-Agent.
+
+    The instruction will be added to the agent's message history as a HumanMessage.
+    The agent will see it on its next reasoning step.
+
+    Use when:
+    - Agent seems stuck on a wrong path
+    - New information from another agent should redirect this agent's focus
+    - You want to narrow or expand the agent's investigation scope
+
+    Args:
+        agent_id: The Sub-Agent to instruct
+        instruction: The instruction text
+    """
+    # Implemented via external runner's update_state()
+    runner.inject_instruction(agent_id, instruction)
+    return f"Instruction injected into {agent_id}"
+
+
+@tool
+def abort_agent(agent_id: str, reason: str) -> str:
+    """Abort a running Sub-Agent's execution.
+
+    Use when:
+    - Agent is clearly stuck or in a loop
+    - Another agent's results have made this agent's task unnecessary
+    - Timeout exceeded
+
+    Args:
+        agent_id: The Sub-Agent to abort
+        reason: Why the agent is being aborted (recorded in trajectory)
+    """
+    runner.abort_agent(agent_id, reason)
+    return f"Aborted {agent_id}: {reason}"
+```
+
+### External Runner
+
+The Runner is the bridge between the Orchestrator's tools and LangGraph's external APIs:
+
+```python
+class ExecutionRunner:
+    """Drives graph execution and maintains the AgentDashboard.
+
+    Runs outside the graph — uses stream() and update_state() APIs.
+    Provides the backing implementation for check_agents, inject_instruction, abort_agent tools.
+    """
+
+    def __init__(self, graph: CompiledGraph, dashboard: AgentDashboard):
+        self.graph = graph
+        self.dashboard = dashboard
+
+    async def execute(self, input_data: dict, config: dict):
+        """Run the graph, feeding stream events into the dashboard."""
+        async for namespace, mode, data in self.graph.astream(
+            input_data, config,
+            stream_mode=["updates", "custom"],
+            subgraphs=True,
+        ):
+            # Feed events to dashboard
+            self.dashboard.update_from_event(namespace, data)
+
+            # Also forward to WebSocket for frontend (if connected)
+            if self.websocket:
+                await self.websocket.send_json({
+                    "agent_path": list(namespace),
+                    "mode": mode,
+                    "data": data,
+                })
+
+    def inject_instruction(self, agent_id: str, instruction: str):
+        """Inject instruction into a running sub-agent via update_state."""
+        subgraph_config = self._get_subgraph_config(agent_id)
+        self.graph.update_state(subgraph_config, {
+            "messages": [HumanMessage(content=f"[Orchestrator] {instruction}")],
+        })
+
+    def abort_agent(self, agent_id: str, reason: str):
+        """Abort a sub-agent by injecting a termination instruction."""
+        subgraph_config = self._get_subgraph_config(agent_id)
+        self.graph.update_state(subgraph_config, {
+            "messages": [HumanMessage(
+                content=f"[Orchestrator] ABORT: {reason}. Return your current findings immediately."
+            )],
+        })
+```
+
+### Configuration
+
+```yaml
+# orchestrator.yaml
+orchestrator:
+  monitoring:
+    summary_model: "gpt-4o-mini"          # Lightweight model for progress summaries
+    max_events_for_summary: 10            # Number of recent events to summarize
+    stream_mode: ["updates", "custom"]    # What to capture from sub-agents
+    stream_to_frontend: true              # Forward events to WebSocket
+
+  tools:
+    - check_agents          # Monitor sub-agent status
+    - inject_instruction    # Inject new instructions into running agent
+    - abort_agent           # Abort a running agent
+    - dispatch_task         # Submit new task (existing)
+```
+
+### Example Flow
+
+```
+Orchestrator (Phase 3: Verification)
+  │
+  ├─ dispatch_task("database", "Verify H1: connection pool exhaustion")
+  ├─ dispatch_task("infrastructure", "Verify H1: check resource limits")
+  │
+  ├─ ... Orchestrator continues reasoning ...
+  │
+  ├─ check_agents()
+  │   → running: [
+  │       {agent: "database", summary: "Querying slow query log, 3 queries analyzed so far"},
+  │       {agent: "infrastructure", summary: "Checking memory usage, disk I/O collected"},
+  │     ]
+  │   → completed: []
+  │   Decision: Both progressing normally, continue waiting.
+  │
+  ├─ check_agents()
+  │   → running: [
+  │       {agent: "database", summary: "Retrying connection to replica, 3 failed attempts"},
+  │     ]
+  │   → completed: [
+  │       {agent: "infrastructure", result: {cpu: 0.45, memory: 0.6, ...}},
+  │     ]
+  │   Decision: Infrastructure done (consume result). Database struggling with replica.
+  │
+  ├─ inject_instruction("database", "Skip replica, focus on primary connection pool metrics")
+  │
+  ├─ check_agents()
+  │   → completed: [
+  │       {agent: "database", result: {pool_size: 100, active: 100, waiting: 45}},
+  │     ]
+  │   Decision: All agents done. Proceed to verdict.
 ```
 
 ---

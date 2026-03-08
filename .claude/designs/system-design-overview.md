@@ -190,14 +190,17 @@ Switching scenarios requires **only config + prompt files**, zero code changes.
 
 ## Monitoring & Intervention
 
-Orchestrator acts as Team Leader with full visibility:
+Orchestrator monitors Sub-Agents via a **pull-based dashboard tool** (`check_agents`), backed by an external `ExecutionRunner` that streams subgraph events into an in-memory `AgentDashboard`.
 
-- **Stream monitoring**: `stream(subgraphs=True)` captures all Sub-Agent events in real-time
-- **Interrupt**: Pause Sub-Agent execution at checkpoints
-- **Instruction injection**: `update_state()` to inject new instructions into running Sub-Agent
-- **Redirect**: Reroute task to a different Sub-Agent
+- **`check_agents` tool**: Returns running agents' progress summaries (via lightweight model) and completed agents' results (consume-once)
+- **`inject_instruction` tool**: Inject new instructions into a running Sub-Agent (via Runner's `update_state()`)
+- **`abort_agent` tool**: Terminate a stuck or unnecessary Sub-Agent
+- **External Runner**: Drives `graph.astream(subgraphs=True)`, feeds events to Dashboard, provides backing for intervention tools
+- **Frontend streaming**: Runner forwards events to WebSocket for real-time frontend display
 
-> Detail: See [orchestrator.md](orchestrator.md) for intervention implementation.
+Key design choice: Sub-Agents run **uninterrupted**. The Orchestrator pulls status on-demand during its own reasoning loop, and only intervenes when necessary. Summaries are generated lazily (only when `check_agents` is called).
+
+> Detail: See [orchestrator.md](orchestrator.md#monitoring--intervention) for full `AgentDashboard`, tool definitions, and `ExecutionRunner` implementation.
 
 ---
 
@@ -314,13 +317,16 @@ The **Memory Extraction** system reuses the same Supervisor + Subgraph architect
 | Decision | Rationale | Trade-off |
 |----------|-----------|-----------|
 | Hypothetico-Deductive state machine | Formal scientific method foundation | Must handle cycle-back on refutation |
-| Supervisor + Subgraph | Leverages LangGraph's native multi-agent capabilities | Graph must be compiled at startup |
+| Supervisor + Subgraph | Leverages LangGraph's native multi-agent capabilities ✅ | Graph must be compiled at startup |
 | Minimal messages + Notebook | Avoids context window explosion; structured working memory | Frontend must reconstruct conversation |
 | No confidence scores | LLM-generated confidence is unreliable; three-value verdict | Less granular ranking |
 | No prediction anchoring | Avoids confirmation bias in LLM | Verdict relies on post-hoc analysis |
 | Adversarial review (feature-gated) | Devil's Advocate counters LLM confirmation bias | Extra LLM call per verification |
-| Async task dispatch | Orchestrator submits concurrent tasks; time-multiplexing | Results aggregation complexity |
+| Async task dispatch | Orchestrator submits concurrent tasks via `Send` API ✅ | Results aggregation needs reducer |
 | Feature gates | All behaviors config-toggleable | Config surface area grows |
 | Config-driven everything | Zero code changes for new scenarios | Config validation needed |
-| Checkpoint-based trajectory | Automatic capture, no extra overhead | Must reconstruct tree from linear chain |
-| PostgreSQL persistence | Production-grade reliability | External service dependency |
+| Checkpoint-based trajectory | Automatic capture, no extra overhead ✅ | Must reconstruct tree from linear chain |
+| PostgreSQL persistence | Production-grade reliability ✅ | External service dependency |
+| pre_model_hook compression | LLM input compressed, full history in checkpoints ✅ | Uses `llm_input_messages`, not `messages` |
+| Static agent pool | Compiled once at startup from YAML config | Restart required to add/remove agents |
+| Pull-based monitoring | `check_agents` tool, sub-agents run uninterrupted | Requires external `ExecutionRunner` |

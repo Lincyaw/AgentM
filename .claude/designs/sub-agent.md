@@ -40,6 +40,8 @@ Rules:
 
 ## Implementation via create_react_agent
 
+> **⚠️ API Migration Note**: `create_react_agent` has been deprecated in recent LangGraph versions and moved to `langchain.agents` as `create_agent`. The import path should be updated to `from langchain.agents import create_agent`. Core functionality (state_schema, pre_model_hook, interrupt_before) remains the same. Verify the exact API at implementation time.
+
 ```python
 from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
@@ -82,8 +84,10 @@ Input (messages)
 
 Each iteration continues until:
 - Agent returns final answer
-- `max_steps` limit reached
+- `recursion_limit` reached (see note below)
 - Interrupt point triggered
+
+> **⚠️ LangGraph Verification**: `create_react_agent` does NOT have a native `max_steps` parameter. Step limiting is done via `recursion_limit` in the invocation config (e.g., `graph.invoke(input, {"recursion_limit": 40})`). The default is 10000. The YAML config's `execution.max_steps` must be translated to `recursion_limit` by our framework at invocation time. Note: `remaining_steps` is tracked in the agent state and when < 2, the agent returns a final message instead of raising `GraphRecursionError`.
 
 ---
 
@@ -275,43 +279,75 @@ AIMessage(content=json.dumps({
 
 ---
 
-## Interrupt Points
+## Orchestrator Intervention
 
-Sub-Agents can be paused at configured points for Orchestrator review:
+> **Design Decision**: Sub-Agents run **uninterrupted** by default. The Orchestrator monitors them via a pull-based `check_agents` tool and intervenes only when necessary — see [orchestrator.md](orchestrator.md#monitoring--intervention).
+>
+> The `interrupt_before` mechanism is reserved for **safety-critical agents** (e.g., database agents executing destructive queries) where external review is mandatory before tool execution.
+
+### Safety Interrupts (Optional, Per-Agent)
+
+For agents that execute potentially dangerous operations, `interrupt_before: ["tools"]` can be configured to require external approval:
 
 ```python
 # In config: interrupt_before: ["tools"]
 # → Agent pauses before executing any tool call
+# → External runner (not Orchestrator node) reviews and resumes
 
-# Orchestrator reviews pending tool calls
-state = graph.get_state(config)
-pending_tools = state.values.get("pending_tool_calls")
-
-# Approve, modify, or reject
-graph.update_state(config, {"pending_tool_calls": filtered_calls})
+# External runner reviews pending tool calls
+state = graph.get_state(config, subgraphs=True)
+# ... inspect sub-agent's pending tool calls ...
 graph.invoke(Command(resume=True), config)
 ```
 
----
+### Orchestrator-Driven Intervention
 
-## Dynamic Agent Pool
-
-Support runtime addition/removal of Sub-Agents via config hot-reload:
+For non-safety scenarios, the Orchestrator uses tools to intervene:
 
 ```python
-class DynamicSubAgentPool:
-    def add_agent(self, agent_id: str, agent_config: dict):
-        agent = create_sub_agent(agent_id, AgentConfig(**agent_config), self.tool_registry)
-        self.builder.add_node(agent_id, agent)
-        self.builder.add_edge(agent_id, "orchestrator")
-        self._rebuild_graph()
+# Orchestrator detects agent is stuck (via check_agents tool)
+# → Injects new instruction
+inject_instruction("database", "Skip replica, focus on primary pool metrics")
 
-    def remove_agent(self, agent_id: str):
-        del self.agents[agent_id]
-        self._rebuild_graph()
+# Orchestrator determines agent's task is no longer needed
+# → Aborts agent
+abort_agent("infrastructure", "H1 already confirmed by database agent")
 ```
 
-Triggered by file watcher (watchdog) on config directory changes.
+These tools are backed by the `ExecutionRunner` which calls `graph.update_state()` on the sub-agent's namespace externally.
+
+---
+
+## Agent Pool
+
+> **Design Decision**: All Sub-Agents are `create_react_agent` instances differing only in config (tools, prompts, model, temperature). The graph topology is static — compiled once at startup from YAML config. Adding/removing agents requires restarting the service and recompiling the graph.
+>
+> Dynamic runtime addition/removal was considered but deemed unnecessary: the agent pool is determined by the diagnostic scenario's config, not runtime conditions.
+
+Agent pool is built at startup from config:
+
+```python
+class AgentPool:
+    def __init__(self, config_dir: str, tool_registry: ToolRegistry):
+        self.agents = {}
+        for config_file in Path(config_dir).glob("*.yaml"):
+            agent_config = load_agent_config(config_file)
+            self.agents[agent_config.name] = create_sub_agent(
+                agent_config.name, agent_config, tool_registry
+            )
+
+    def build_graph(self, orchestrator_node) -> CompiledGraph:
+        """Build and compile the complete graph with all agents."""
+        builder = StateGraph(ExecutorState)
+        builder.add_node("orchestrator", orchestrator_node)
+
+        for agent_id, agent in self.agents.items():
+            builder.add_node(agent_id, agent)
+            builder.add_edge(agent_id, "orchestrator")
+
+        builder.add_edge(START, "orchestrator")
+        return builder.compile(checkpointer=checkpointer)
+```
 
 ---
 
@@ -348,9 +384,13 @@ Error types:
 
 | Decision | Rationale |
 |----------|-----------|
-| create_react_agent | Pre-built ReAct loop, works out of the box |
-| Independent State Schema | Full isolation; avoids state pollution |
-| Same-name field mapping | Automatic, no explicit mapping code needed |
+| create_react_agent | Pre-built ReAct loop, works out of the box. **⚠️ Deprecated — use `create_agent` from `langchain.agents`** |
+| Independent State Schema | Full isolation; avoids state pollution. **✅ Verified: `state_schema` param supported, same-name field auto-mapping works** |
+| Same-name field mapping | Automatic, no explicit mapping code needed. **✅ Verified** |
 | No Sub-Agent checkpointer | Root manages all checkpoints; simpler architecture |
 | Config-driven tools/prompts | New agents via YAML only, no code changes |
 | Data-only constraint (RCA) | All reasoning centralized in Orchestrator for traceability |
+| pre_model_hook compression | **✅ Verified: `llm_input_messages` return key preserves full state in checkpoints** |
+| Static agent pool | Graph compiled once at startup. No runtime hot-reload — simplicity over dynamism |
+| Pull-based monitoring | Orchestrator uses `check_agents` tool, sub-agents run uninterrupted |
+| recursion_limit for step control | **⚠️ No native `max_steps` param — must translate to `recursion_limit` in config** |
