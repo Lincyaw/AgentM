@@ -1360,6 +1360,10 @@ class TaskManager:
             "configurable": {"thread_id": f"{task_id}-{agent_id}"},
             "recursion_limit": agent_config.execution.max_steps * 2,  # ReAct loop ≈ 2x steps
         }
+        # Checkpointer: Sub-Agents share the same checkpointer backend (from system.yaml)
+        # but each task gets a unique thread_id, ensuring isolated checkpoint chains.
+        # The checkpointer instance is passed when compiling each Sub-Agent subgraph:
+        #   subgraph = builder.compile(checkpointer=shared_checkpointer)
 
         managed = ManagedTask(
             task_id=task_id,
@@ -1832,7 +1836,7 @@ orchestrator:
 | Feature gates for behaviors | All diagnostic strategies are config-toggleable; no code changes |
 | Notebook as working memory | Structured, serializable, supports RL export and failure recovery |
 | Minimal messages (Mode 2) | Avoids context window explosion; Notebook is the real memory |
-| Three-block verification result | Cleanly separates raw data / reasoning / verdict |
+| VerificationResult (verdict + report) | Cleanly separates structured verdict from natural language report; two-field structure replaces former three-block design |
 | Two-layer context compression | Sub-Agent (pre_model_hook) + Orchestrator (phase summaries); prompt optimization only, checkpoints retain full data |
 | Compression ref in state | `compression_refs` field in state; `from_id` / `to_id` enables O(1) drill-down to fine-grained history |
 | recall_history tool | Post-compression Agents can query their own pre-compression messages; retrieves raw data, tool params, and reasoning from checkpoint chain |

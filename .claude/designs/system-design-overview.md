@@ -81,6 +81,8 @@ OBSERVE → HYPOTHESIZE → EXPERIMENT → ANALYZE → CONCLUDE
 | **3. Verification** | Experiment + Analyze | Sub-Agents → Orchestrator | Investigate data, then interpret results |
 | **4. Confirmation** | Conclude | Orchestrator | Confirm root cause or refute and loop back |
 
+> **Note**: These phases describe a conceptual diagnostic methodology, not a rigid state machine enforced by the graph. The Orchestrator (a `create_react_agent` in RCA mode) naturally interleaves these phases in its ReAct loop — forming hypotheses while still exploring, or looping back when evidence contradicts. Phases are recorded as markers in DiagnosticNotebook for trajectory analysis and frontend display. See [orchestrator.md](orchestrator.md#phase-as-notebook-marker-not-graph-control) for details.
+
 Key design choices:
 - **No confidence scores** — LLM-generated confidence is unreliable; use three-value verdict (`confirmed / rejected / partial`)
 - **No prediction anchoring** — Orchestrator does NOT set expected outcomes before experiments, avoiding confirmation bias
