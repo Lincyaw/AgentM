@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
+import functools
 import importlib
 from pathlib import Path
 from typing import Any, Callable
 
 import yaml
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import Tool
 
 
 class ToolDefinition:
@@ -20,21 +20,11 @@ class ToolDefinition:
         self.config_schema = config_schema
         self.parameters: dict[str, Any] = config_schema
 
-    def create_with_config(self, **config: Any) -> StructuredTool:
-        """Create a LangChain StructuredTool instance with bound config parameters."""
-        description = config.pop("description", self.func.__doc__ or self.name)
-
-        if asyncio.iscoroutinefunction(self.func):
-            return StructuredTool.from_function(
-                coroutine=self.func,
-                name=self.name,
-                description=description,
-            )
-        return StructuredTool.from_function(
-            func=self.func,
-            name=self.name,
-            description=description,
-        )
+    def create_with_config(self, **config: Any) -> Tool:
+        """Create a LangChain Tool instance with bound config parameters."""
+        description = config.pop("description", self.name)
+        bound_func = functools.partial(self.func, **config) if config else self.func
+        return Tool(name=self.name, func=bound_func, description=description)
 
 
 class ToolRegistry:
@@ -61,4 +51,4 @@ class ToolRegistry:
         for tool in data.get("tools", []):
             module = importlib.import_module(tool["module"])
             func = getattr(module, tool["function"])
-            self.register(tool["name"], func, tool.get("params", {}))
+            self.register(tool["name"], func, tool.get("parameters", {}))

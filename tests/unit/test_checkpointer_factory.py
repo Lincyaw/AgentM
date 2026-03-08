@@ -62,18 +62,31 @@ def test_memory_backend_returns_memory_saver() -> None:
     assert isinstance(saver, MemorySaver)
 
 
-def test_sqlite_backend_returns_sqlite_saver(tmp_path) -> None:
-    """SQLite backend must create a SqliteSaver instance."""
+def test_sqlite_backend_deferred_to_async() -> None:
+    """SQLite backend returns None from sync factory — created later in async context."""
     from agentm.builder import _create_checkpointer
-    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    storage = StorageConfig(
+        checkpointer=StorageBackendConfig(backend="sqlite", url="./test.db"),
+        store=StorageBackendConfig(backend="memory", url=""),
+    )
+    saver = _create_checkpointer(storage)
+    assert saver is None  # deferred to _create_async_checkpointer
+
+
+@pytest.mark.asyncio
+async def test_async_sqlite_checkpointer(tmp_path) -> None:
+    """_create_async_checkpointer must return an AsyncSqliteSaver for sqlite backend."""
+    from agentm.builder import _create_async_checkpointer
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
     db_path = str(tmp_path / "test.db")
     storage = StorageConfig(
         checkpointer=StorageBackendConfig(backend="sqlite", url=db_path),
         store=StorageBackendConfig(backend="memory", url=""),
     )
-    saver = _create_checkpointer(storage)
-    assert isinstance(saver, SqliteSaver)
+    saver = await _create_async_checkpointer(storage)
+    assert isinstance(saver, AsyncSqliteSaver)
 
 
 def test_unknown_backend_returns_none() -> None:

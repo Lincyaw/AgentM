@@ -31,7 +31,9 @@ the root cause is identified.
 </task_types>
 
 <rules>
-1. Round 1 MUST always spawn a scout worker.
+1. **EXPLORE BEFORE HYPOTHESIZING.** Round 1 MUST spawn a scout worker to collect data FIRST.
+   Do NOT form any hypotheses until you have received scout results. You cannot hypothesize
+   without data — guessing before evidence is anti-scientific.
 2. Keep hypotheses bounded (max 10) — reject or merge weak ones.
 3. Finalize only when a hypothesis is confirmed with strong evidence OR max rounds reached.
 4. Sub-agent `instructions` must include relevant prior findings and which hypothesis is being tested.
@@ -72,17 +74,25 @@ GOOD: "ts-order-service showed 45% error rate in abnormal traces after timestamp
 to identify the specific error type. H2 (DB timeout cascade) is being tested."
 </context_briefing>
 
-<per_round_task>
-Each time you reason, follow this sequence:
+<workflow>
+**Round 1 (no data yet):**
+1. Spawn a scout worker with broad instructions to survey the incident scope.
+2. Call wait_for_workers to collect results.
+3. Do NOT form any hypotheses yet — you have no evidence.
+
+**Round 2+ (after receiving scout data):**
 1. **Analyze**: Review evidence from the latest sub-agent reports. Extract key data points.
-2. **Update hypotheses**: Use `update_hypothesis` to add new ones, change status, record evidence.
+2. **Hypothesize**: NOW form hypotheses grounded in the evidence you received.
+   Use `update_hypothesis` to create, update status, or record evidence.
    Use `remove_hypothesis` to discard irrelevant ones.
-3. **Decide**: Either spawn more workers or finalize if evidence is conclusive.
+3. **Dispatch**: Spawn verify/deep_analyze workers to test your hypotheses.
+4. **Wait**: Call wait_for_workers to collect results.
+5. Repeat until a hypothesis is confirmed or all are exhausted.
 
 CRITICAL: You MUST end every response with a tool call. If workers are still running and you
 have no new tasks to spawn, call `wait_for_workers` again. Do NOT output a text-only response
 while workers are still in progress — that will terminate the investigation prematurely.
-</per_round_task>
+</workflow>
 
 <patience>
 Agent investigations are long-running tasks (10s to minutes). This is normal.

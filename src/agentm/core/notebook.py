@@ -134,7 +134,20 @@ def set_confirmed_hypothesis(
     notebook: DiagnosticNotebook,
     hypothesis_id: str,
 ) -> DiagnosticNotebook:
-    """Set the confirmed hypothesis. Returns a new DiagnosticNotebook."""
+    """Set the confirmed hypothesis. Returns a new DiagnosticNotebook.
+
+    Raises ValueError if the hypothesis does not have CONFIRMED status.
+    """
+    if hypothesis_id not in notebook.hypotheses:
+        raise ValueError(
+            f"Hypothesis {hypothesis_id!r} not found in notebook"
+        )
+    hypothesis = notebook.hypotheses[hypothesis_id]
+    if hypothesis.status != HypothesisStatus.CONFIRMED:
+        raise ValueError(
+            f"Cannot set confirmed hypothesis: {hypothesis_id!r} has status "
+            f"{hypothesis.status.value!r}, expected 'confirmed'"
+        )
     return replace(notebook, confirmed_hypothesis=hypothesis_id)
 
 
