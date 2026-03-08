@@ -36,39 +36,26 @@ def _extract_task_type_values(func) -> set[str]:
 
 
 class TestTaskTypeLiteralConsistency:
-    """Ref: designs/sub-agent.md § Task Types, designs/orchestrator.md § dispatch_agent
+    """Ref: designs/sub-agent.md § Task Types, designs/orchestrator.md § spawn_worker
 
-    task_type Literal values must be identical across all modules that use them:
-    - tools/orchestrator.py dispatch_agent
+    task_type Literal values must be identical across modules that use them:
     - agents/sub_agent.py create_sub_agent
     - core/task_manager.py TaskManager.submit
 
     Bug: one module has {"scout", "verify", "deep_analyze"} but another uses
-    {"scout", "verify", "analyze"} → dispatch_agent passes "deep_analyze"
+    {"scout", "verify", "analyze"} → spawn_worker passes "deep_analyze"
     to create_sub_agent which doesn't recognize it.
     """
 
-    def test_dispatch_agent_and_create_sub_agent_agree(self):
+    def test_create_sub_agent_and_task_manager_submit_agree(self):
         from agentm.agents.sub_agent import create_sub_agent
-        from agentm.tools.orchestrator import dispatch_agent
-
-        dispatch_values = _extract_task_type_values(dispatch_agent)
-        sub_agent_values = _extract_task_type_values(create_sub_agent)
-        assert dispatch_values == sub_agent_values, (
-            f"task_type Literal mismatch:\n"
-            f"  dispatch_agent: {dispatch_values}\n"
-            f"  create_sub_agent: {sub_agent_values}"
-        )
-
-    def test_dispatch_agent_and_task_manager_submit_agree(self):
         from agentm.core.task_manager import TaskManager
-        from agentm.tools.orchestrator import dispatch_agent
 
-        dispatch_values = _extract_task_type_values(dispatch_agent)
+        sub_agent_values = _extract_task_type_values(create_sub_agent)
         submit_values = _extract_task_type_values(TaskManager.submit)
-        assert dispatch_values == submit_values, (
+        assert sub_agent_values == submit_values, (
             f"task_type Literal mismatch:\n"
-            f"  dispatch_agent: {dispatch_values}\n"
+            f"  create_sub_agent: {sub_agent_values}\n"
             f"  TaskManager.submit: {submit_values}"
         )
 

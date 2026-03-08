@@ -1,0 +1,20 @@
+tools:
+  - name: spawn_worker
+    module: agentm.tools.orchestrator
+    function: spawn_worker
+    params: {}
+
+  - name: wait_for_workers
+    module: agentm.tools.orchestrator
+    function: wait_for_workers
+    params: {}
+
+  - name: update_hypothesis
+    module: agentm.tools.orchestrator
+    function: update_hypothesis
+    params: {}
+
+  - name: remove_hypothesis
+    module: agentm.tools.orchestrator
+    function: remove_hypothesis
+    params: {}

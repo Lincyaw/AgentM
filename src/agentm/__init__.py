@@ -1,2 +1,4 @@
 def main() -> None:
-    print("Hello from agentm!")
+    from agentm.cli.main import main as cli_main
+
+    cli_main()

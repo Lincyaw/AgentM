@@ -1,0 +1,84 @@
+system:
+  type: "hypothesis_driven"
+
+phases:
+  exploration:
+    description: "Initial data collection via scout tasks"
+    next_phases: [generation]
+  generation:
+    description: "Form hypotheses from collected data"
+    next_phases: [verification]
+  verification:
+    description: "Test hypotheses with targeted evidence gathering"
+    next_phases: [verification, confirmation, generation]
+  confirmation:
+    description: "Confirm root cause and produce final report"
+    next_phases: []
+
+orchestrator:
+  model: "gpt-4"
+  temperature: 0.3
+  orchestrator_mode: "react"
+
+  prompts:
+    system: "prompts/orchestrator_system.j2"
+
+  tools:
+    - spawn_worker
+    - wait_for_workers
+    - update_hypothesis
+    - remove_hypothesis
+
+  feature_gates:
+    adversarial_review: false
+    parallel_verification: false
+    auto_refine_partial: true
+    min_verifications_before_confirm: 2
+    deep_exploration: false
+
+  compression:
+    enabled: true
+    compression_threshold: 0.8
+    compression_model: "gpt-4o-mini"
+    notebook:
+      compression_model: "gpt-4o-mini"
+    recall:
+      enabled: true
+      model: "gpt-4o-mini"
+      max_messages_per_query: 200
+
+  monitoring:
+    summary_model: "gpt-4o-mini"
+    stream_mode: ["updates", "custom"]
+
+# Worker agent — one definition, task_type selects the prompt
+agents:
+  worker:
+    model: "gpt-4o-mini"
+    temperature: 0.2
+    task_type_prompts:
+      scout: "prompts/task_types/scout.j2"
+      verify: "prompts/task_types/verify.j2"
+      deep_analyze: "prompts/task_types/deep_analyze.j2"
+    tools:
+      - query_metrics_ohlc_abnormal
+      - query_metrics_ohlc_normal
+      - query_trace_stats_abnormal
+      - query_trace_stats_normal
+      - get_service_call_graph_abnormal
+      - get_service_call_graph_normal
+      - get_span_call_graph_abnormal
+      - get_span_call_graph_normal
+      - get_deployment_graph
+      - search_logs_abnormal
+      - search_logs_normal
+    execution:
+      max_steps: 25
+      timeout: 180
+      tool_call_budget: 25
+      retry:
+        max_attempts: 3
+        initial_interval: 1.0
+    compression:
+      compression_model: "gpt-4o-mini"
+      prompt: "prompts/compression/sub_agent_compress.j2"

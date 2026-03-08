@@ -37,9 +37,9 @@ class TestMandatoryFieldRejection:
         with pytest.raises(ValidationError):
             SystemConfig(storage=StorageConfig(checkpointer=backend, store=backend), recovery=RecoveryConfig())  # type: ignore[call-arg]
 
-    def test_agent_config_rejects_missing_prompt(self):
-        with pytest.raises(ValidationError):
-            AgentConfig(model="gpt-4o", temperature=0.0, tools=[])  # type: ignore[call-arg]
+    def test_agent_config_accepts_missing_prompt(self):
+        cfg = AgentConfig(model="gpt-4o", temperature=0.0, tools=[])
+        assert cfg.prompt is None
 
     def test_agent_config_rejects_missing_tools(self):
         with pytest.raises(ValidationError):
