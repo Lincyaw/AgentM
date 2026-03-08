@@ -276,18 +276,18 @@ When using API endpoints with limited TPS, rate limiting prevents 429 errors bef
 from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_openai import ChatOpenAI
 
-# Shared rate limiter — all model instances using the same API share one limiter
+# Shared rate limiter — ALL agents (Orchestrator + Sub-Agents) using the same API share one limiter
 rate_limiter = InMemoryRateLimiter(
     requests_per_second=5,        # Steady-state rate
     check_every_n_seconds=0.1,    # Check interval
     max_bucket_size=10,           # Max burst (handles parallel Send fan-out)
 )
 
-# All agents using gpt-4 share this rate limiter
+# All agents (Orchestrator + Sub-Agents) using gpt-4 share this rate limiter
 gpt4_model = ChatOpenAI(model="gpt-4", rate_limiter=rate_limiter)
 ```
 
-**Key design point**: When multiple Sub-Agents are dispatched in parallel via `Send`, they all call the LLM concurrently. A **shared** `InMemoryRateLimiter` instance across all model instances using the same API key ensures global throttling. The framework creates one rate limiter per model config entry and injects it into all agents using that model.
+**Key design point**: The rate limiter is scoped to the **API key / model config**, not to individual agents. The Orchestrator and all Sub-Agents using the same model config share one `InMemoryRateLimiter` instance. This ensures global throttling regardless of which agent (Orchestrator or Sub-Agent) is making the call — parallel `Send` fan-out, Orchestrator reasoning, compression LLM calls, and progress summary calls all go through the same limiter.
 
 Configuration in `system.yaml`:
 
