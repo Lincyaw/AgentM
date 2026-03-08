@@ -111,22 +111,17 @@ class TestUpdateHypothesisRejectsIllegalTransitions:
 class TestSetConfirmedHypothesisConsistency:
     """P8: set_confirmed_hypothesis should only confirm CONFIRMED hypotheses."""
 
-    def test_confirm_investigating_hypothesis_is_inconsistent(
+    def test_confirm_investigating_hypothesis_raises(
         self, notebook_with_hypothesis: DiagnosticNotebook
     ) -> None:
-        """Setting confirmed_hypothesis for an INVESTIGATING hypothesis creates inconsistency.
+        """Setting confirmed_hypothesis for an INVESTIGATING hypothesis raises ValueError.
 
-        This test documents the inconsistency — the function currently allows it
-        but the business rule says it shouldn't. The Orchestrator's update_hypothesis
-        tool is responsible for enforcing this at the tool layer.
+        The function validates that the hypothesis must have CONFIRMED status
+        before it can be set as the confirmed root cause.
         """
         # notebook_with_hypothesis has H1 in INVESTIGATING state
-        nb = set_confirmed_hypothesis(notebook_with_hypothesis, "H1")
-        # The function sets it (it's a low-level operation)
-        assert nb.confirmed_hypothesis == "H1"
-        # But the hypothesis is NOT in CONFIRMED status — this is the inconsistency
-        # that the Orchestrator tool layer must prevent
-        assert nb.hypotheses["H1"].status != HypothesisStatus.CONFIRMED
+        with pytest.raises(ValueError, match="expected 'confirmed'"):
+            set_confirmed_hypothesis(notebook_with_hypothesis, "H1")
 
     def test_confirm_after_proper_lifecycle(
         self, notebook: DiagnosticNotebook
@@ -145,10 +140,17 @@ class TestSetConfirmedHypothesisConsistency:
         assert nb.hypotheses["H1"].status == HypothesisStatus.CONFIRMED
 
     def test_set_confirmed_is_immutable(
-        self, notebook_with_hypothesis: DiagnosticNotebook
+        self, notebook: DiagnosticNotebook
     ) -> None:
         """set_confirmed_hypothesis should not modify the original notebook."""
-        original = notebook_with_hypothesis
+        nb = add_hypothesis(notebook, "H1", "Pool exhaustion", "2026-03-08T10:00:00")
+        nb = update_hypothesis_status(
+            nb, "H1", HypothesisStatus.INVESTIGATING, "2026-03-08T10:01:00"
+        )
+        nb = update_hypothesis_status(
+            nb, "H1", HypothesisStatus.CONFIRMED, "2026-03-08T10:02:00"
+        )
+        original = nb
         result = set_confirmed_hypothesis(original, "H1")
 
         assert result is not original

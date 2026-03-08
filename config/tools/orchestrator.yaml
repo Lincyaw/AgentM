@@ -1,20 +1,35 @@
 tools:
-  - name: spawn_worker
+  - name: dispatch_agent
     module: agentm.tools.orchestrator
-    function: spawn_worker
-    params: {}
+    function: dispatch_agent
+    parameters: {}
 
-  - name: wait_for_workers
+  - name: check_tasks
     module: agentm.tools.orchestrator
-    function: wait_for_workers
-    params: {}
+    function: check_tasks
+    parameters: {}
 
   - name: update_hypothesis
     module: agentm.tools.orchestrator
     function: update_hypothesis
-    params: {}
+    parameters: {}
 
   - name: remove_hypothesis
     module: agentm.tools.orchestrator
     function: remove_hypothesis
-    params: {}
+    parameters: {}
+
+  - name: inject_instruction
+    module: agentm.tools.orchestrator
+    function: inject_instruction
+    parameters: {}
+
+  - name: abort_task
+    module: agentm.tools.orchestrator
+    function: abort_task
+    parameters: {}
+
+  - name: recall_history
+    module: agentm.tools.orchestrator
+    function: recall_history
+    parameters: {}

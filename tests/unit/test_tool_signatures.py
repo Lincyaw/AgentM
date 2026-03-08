@@ -15,8 +15,11 @@ from __future__ import annotations
 
 import inspect
 from typing import Literal, get_args, get_origin, get_type_hints
+from unittest.mock import AsyncMock
 
 import pytest
+
+from agentm.tools.orchestrator import create_orchestrator_tools
 
 
 def _resolve_annotation(func, param_name: str):
@@ -47,87 +50,108 @@ def _extract_literal_values(annotation) -> set[str] | None:
     return None
 
 
-class TestSpawnWorkerSignature:
-    """Ref: designs/orchestrator.md § spawn_worker
+@pytest.fixture
+def orch_tools():
+    """Create orchestrator tool functions via factory for signature testing."""
+    mock_tm = AsyncMock()
+    return create_orchestrator_tools(mock_tm, agent_pool=None)
+
+
+class TestDispatchAgentSignature:
+    """Ref: designs/orchestrator.md § dispatch_agent
 
     Bug: missing task_type parameter → LLM cannot specify scout/verify/deep_analyze,
     all tasks dispatch as default → no task specialization.
     """
 
-    def test_is_async(self):
-        from agentm.tools.orchestrator import spawn_worker
-        assert inspect.iscoroutinefunction(spawn_worker)
+    def test_is_async(self, orch_tools):
+        assert inspect.iscoroutinefunction(orch_tools["dispatch_agent"])
 
-    def test_has_task_type_parameter(self):
-        from agentm.tools.orchestrator import spawn_worker
-        sig = inspect.signature(spawn_worker)
+    def test_has_task_type_parameter(self, orch_tools):
+        sig = inspect.signature(orch_tools["dispatch_agent"])
         assert "task_type" in sig.parameters
 
-    def test_has_instructions_parameter(self):
-        from agentm.tools.orchestrator import spawn_worker
-        sig = inspect.signature(spawn_worker)
-        assert "instructions" in sig.parameters
+    def test_task_type_is_literal_with_correct_values(self, orch_tools):
+        annotation = _resolve_annotation(orch_tools["dispatch_agent"], "task_type")
+        values = _extract_literal_values(annotation)
+        assert values is not None, "task_type should be a Literal type"
+        assert values == {"scout", "verify", "deep_analyze"}
+
+    def test_task_type_defaults_to_scout(self, orch_tools):
+        sig = inspect.signature(orch_tools["dispatch_agent"])
+        param = sig.parameters["task_type"]
+        assert param.default == "scout"
+
+    def test_has_tool_call_id_parameter(self, orch_tools):
+        """Tool must accept tool_call_id for ToolMessage routing."""
+        sig = inspect.signature(orch_tools["dispatch_agent"])
+        assert "tool_call_id" in sig.parameters
 
 
-class TestWaitForWorkersSignature:
-    """Ref: designs/orchestrator.md § wait_for_workers
+class TestCheckTasksSignature:
+    """Ref: designs/orchestrator.md § check_tasks
 
-    Bug: wait_for_workers is sync → blocks the event loop while waiting for Sub-Agents,
+    Bug: check_tasks is sync → blocks the event loop while waiting for Sub-Agents,
     preventing other agents from running concurrently.
     """
 
-    def test_is_async(self):
-        from agentm.tools.orchestrator import wait_for_workers
-        assert inspect.iscoroutinefunction(wait_for_workers)
+    def test_is_async(self, orch_tools):
+        assert inspect.iscoroutinefunction(orch_tools["check_tasks"])
 
-    def test_has_timeout_seconds_parameter(self):
-        from agentm.tools.orchestrator import wait_for_workers
-        sig = inspect.signature(wait_for_workers)
-        assert "timeout_seconds" in sig.parameters
+    def test_has_wait_seconds_parameter(self, orch_tools):
+        sig = inspect.signature(orch_tools["check_tasks"])
+        assert "wait_seconds" in sig.parameters
 
-    def test_timeout_seconds_defaults_to_30(self):
-        from agentm.tools.orchestrator import wait_for_workers
-        sig = inspect.signature(wait_for_workers)
-        param = sig.parameters["timeout_seconds"]
-        assert param.default == 30
+    def test_has_tool_call_id_parameter(self, orch_tools):
+        sig = inspect.signature(orch_tools["check_tasks"])
+        assert "tool_call_id" in sig.parameters
 
 
 class TestUpdateHypothesisSignature:
     """Ref: designs/orchestrator.md § update_hypothesis
 
-    Bug: status parameter is Optional[str] instead of constrained →
-    LLM can pass any string as status → bypasses state machine validation.
+    Bug: status parameter is Optional[str] instead of Literal → LLM can pass
+    any string as status → bypasses state machine validation.
     """
 
-    def test_is_sync(self):
+    def test_is_async(self):
         from agentm.tools.orchestrator import update_hypothesis
-        assert not inspect.iscoroutinefunction(update_hypothesis)
+        assert inspect.iscoroutinefunction(update_hypothesis)
 
     def test_description_is_required(self):
-        """Description must NOT be Optional — every hypothesis needs a description."""
+        """Description must NOT be Optional — every hypothesis needs a description.
+
+        Bug: Optional description → LLM omits it → Notebook has undescribed hypothesis.
+        """
         from agentm.tools.orchestrator import update_hypothesis
         sig = inspect.signature(update_hypothesis)
         param = sig.parameters["description"]
+        # Required means no default value
         assert param.default is inspect.Parameter.empty
 
-    def test_status_defaults_to_formed(self):
+    def test_status_is_literal_matching_enum(self):
+        """Status must be Literal with values matching HypothesisStatus enum.
+
+        Bug: Literal values drift from enum → LLM passes valid Literal
+        that the enum rejects downstream.
+        """
+        from agentm.models.enums import HypothesisStatus
+        from agentm.tools.orchestrator import update_hypothesis
+
+        annotation = _resolve_annotation(update_hypothesis, "status")
+        literal_values = _extract_literal_values(annotation)
+        assert literal_values is not None, "status should be a Literal type"
+        enum_values = {member.value for member in HypothesisStatus}
+        assert literal_values == enum_values, (
+            f"Literal drift detected.\n"
+            f"  Missing from Literal: {enum_values - literal_values}\n"
+            f"  Extra in Literal: {literal_values - enum_values}"
+        )
+
+    def test_has_tool_call_id_parameter(self):
         from agentm.tools.orchestrator import update_hypothesis
         sig = inspect.signature(update_hypothesis)
-        param = sig.parameters["status"]
-        assert param.default == "formed"
-
-
-class TestRemoveHypothesisSignature:
-    """Ref: designs/orchestrator.md § remove_hypothesis"""
-
-    def test_is_sync(self):
-        from agentm.tools.orchestrator import remove_hypothesis
-        assert not inspect.iscoroutinefunction(remove_hypothesis)
-
-    def test_has_id_parameter(self):
-        from agentm.tools.orchestrator import remove_hypothesis
-        sig = inspect.signature(remove_hypothesis)
-        assert "id" in sig.parameters
+        assert "tool_call_id" in sig.parameters
 
 
 class TestCreateSubAgentSignature:

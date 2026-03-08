@@ -11,6 +11,11 @@ from __future__ import annotations
 
 import inspect
 from typing import Literal, get_args, get_origin, get_type_hints
+from unittest.mock import AsyncMock
+
+import pytest
+
+from agentm.tools.orchestrator import create_orchestrator_tools
 
 
 def _extract_task_type_values(func) -> set[str]:
@@ -35,27 +40,46 @@ def _extract_task_type_values(func) -> set[str]:
     raise AssertionError(f"{func.__qualname__} task_type is not Literal: {annotation}")
 
 
-class TestTaskTypeLiteralConsistency:
-    """Ref: designs/sub-agent.md § Task Types, designs/orchestrator.md § spawn_worker
+@pytest.fixture
+def dispatch_agent_func():
+    """Get dispatch_agent function from factory for testing."""
+    mock_tm = AsyncMock()
+    tools = create_orchestrator_tools(mock_tm, agent_pool=None)
+    return tools["dispatch_agent"]
 
-    task_type Literal values must be identical across modules that use them:
+
+class TestTaskTypeLiteralConsistency:
+    """Ref: designs/sub-agent.md § Task Types, designs/orchestrator.md § dispatch_agent
+
+    task_type Literal values must be identical across all modules that use them:
+    - tools/orchestrator.py dispatch_agent
     - agents/sub_agent.py create_sub_agent
     - core/task_manager.py TaskManager.submit
 
     Bug: one module has {"scout", "verify", "deep_analyze"} but another uses
-    {"scout", "verify", "analyze"} → spawn_worker passes "deep_analyze"
+    {"scout", "verify", "analyze"} → dispatch_agent passes "deep_analyze"
     to create_sub_agent which doesn't recognize it.
     """
 
-    def test_create_sub_agent_and_task_manager_submit_agree(self):
+    def test_dispatch_agent_and_create_sub_agent_agree(self, dispatch_agent_func):
         from agentm.agents.sub_agent import create_sub_agent
+
+        dispatch_values = _extract_task_type_values(dispatch_agent_func)
+        sub_agent_values = _extract_task_type_values(create_sub_agent)
+        assert dispatch_values == sub_agent_values, (
+            f"task_type Literal mismatch:\n"
+            f"  dispatch_agent: {dispatch_values}\n"
+            f"  create_sub_agent: {sub_agent_values}"
+        )
+
+    def test_dispatch_agent_and_task_manager_submit_agree(self, dispatch_agent_func):
         from agentm.core.task_manager import TaskManager
 
-        sub_agent_values = _extract_task_type_values(create_sub_agent)
+        dispatch_values = _extract_task_type_values(dispatch_agent_func)
         submit_values = _extract_task_type_values(TaskManager.submit)
-        assert sub_agent_values == submit_values, (
+        assert dispatch_values == submit_values, (
             f"task_type Literal mismatch:\n"
-            f"  create_sub_agent: {sub_agent_values}\n"
+            f"  dispatch_agent: {dispatch_values}\n"
             f"  TaskManager.submit: {submit_values}"
         )
 

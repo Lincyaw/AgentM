@@ -76,6 +76,7 @@ class RetryConfig(BaseModel):
 
     max_attempts: int = 3
     initial_interval: float = 1.0
+    backoff_factor: float = 2.0
 
 
 class ExecutionConfig(BaseModel):

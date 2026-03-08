@@ -7,9 +7,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
-from agentm.config.schema import ScenarioConfig, StorageConfig, SystemConfig
-from agentm.core.state_registry import get_state_schema
+from agentm.config.schema import ScenarioConfig, StorageConfig
 from agentm.core.trajectory import TrajectoryCollector
+from agentm.core.state_registry import get_state_schema
 
 
 class AgentSystem:
@@ -23,6 +23,7 @@ class AgentSystem:
         task_manager: Any | None = None,
         trajectory: TrajectoryCollector | None = None,
         thread_id: str = "",
+        _pending_storage: StorageConfig | None = None,
     ) -> None:
         self.graph = graph
         self.langgraph_config = config or {}
@@ -30,9 +31,24 @@ class AgentSystem:
         self.task_manager = task_manager
         self.trajectory = trajectory
         self.thread_id = thread_id
+        self._pending_storage = _pending_storage
+        self._initialized = _pending_storage is None
+
+    async def _ensure_checkpointer(self) -> None:
+        """Lazily create the async checkpointer on first use."""
+        if self._initialized:
+            return
+        self._initialized = True
+        if self._pending_storage is not None:
+            checkpointer = await _create_async_checkpointer(self._pending_storage)
+            if checkpointer is not None:
+                # Patch the compiled graph's checkpointer
+                self.graph.checkpointer = checkpointer
+            self._pending_storage = None
 
     async def execute(self, input_data: dict[str, Any]) -> dict[str, Any]:
         """Execute the agent system with the given input. Returns final state."""
+        await self._ensure_checkpointer()
         return await self.graph.ainvoke(input_data, config=self.langgraph_config)
 
     async def stream(
@@ -46,6 +62,7 @@ class AgentSystem:
             input_data: Initial state for the agent system.
             on_event: Optional async callback invoked with each event dict.
         """
+        await self._ensure_checkpointer()
         step = 0
         async for event in self.graph.astream(input_data, config=self.langgraph_config):
             step += 1
@@ -59,12 +76,13 @@ class AgentSystem:
                     envelope = {
                         "agent_path": ["orchestrator"],
                         "node_name": node_name,
-                        "mode": "updates",
-                        "data": event,
-                        "timestamp": datetime.now().isoformat(),
+                        "data": node_data,
                         "step": step,
                     }
-                    await on_event(envelope)
+                    if asyncio.iscoroutinefunction(on_event):
+                        await on_event(envelope)
+                    else:
+                        on_event(envelope)
 
             yield event
 
@@ -122,12 +140,25 @@ class AgentSystem:
 
 
 def _create_checkpointer(storage_config: StorageConfig) -> Any:
-    """Create a LangGraph checkpointer from storage config."""
+    """Create a LangGraph checkpointer from storage config.
+
+    For 'memory' backend, returns a MemorySaver directly.
+    For 'sqlite' backend, returns None here — the AsyncSqliteSaver must be
+    created inside an async context. Use _create_async_checkpointer() instead.
+    """
     backend = storage_config.checkpointer.backend
 
     if backend == "memory":
         from langgraph.checkpoint.memory import MemorySaver
         return MemorySaver()
+
+    # sqlite and others handled by _create_async_checkpointer
+    return None
+
+
+async def _create_async_checkpointer(storage_config: StorageConfig) -> Any:
+    """Create an async checkpointer. Must be called from within an event loop."""
+    backend = storage_config.checkpointer.backend
 
     if backend == "sqlite":
         import aiosqlite
@@ -135,12 +166,17 @@ def _create_checkpointer(storage_config: StorageConfig) -> Any:
 
         url = storage_config.checkpointer.url or "./checkpoints.db"
         conn = aiosqlite.connect(url)
-        return AsyncSqliteSaver(conn=conn)
+        saver = AsyncSqliteSaver(conn=conn)
+        await saver.setup()
+        return saver
 
     return None
 
 
 TOOLS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "tools"
+
+
+import asyncio
 
 
 class AgentSystemBuilder:
@@ -155,47 +191,15 @@ class AgentSystemBuilder:
     def build(
         system_type: str,
         scenario_config: ScenarioConfig,
-        system_config: SystemConfig | None = None,
-        scenario_dir: Path | str | None = None,
+        system_config: Any | None = None,
     ) -> AgentSystem:
-        """Build an AgentSystem from a system type, scenario config, and system config.
-
-        Args:
-            system_type: The agent system type (e.g. "hypothesis_driven").
-            scenario_config: Parsed scenario configuration.
-            system_config: Parsed system configuration (optional, for model API keys/base_url).
-            scenario_dir: Directory containing the scenario files. Used to resolve
-                relative prompt paths in scenario config. If None, prompt paths are
-                used as-is.
-        """
+        """Build an AgentSystem from a system type and scenario config."""
         from agentm.agents.orchestrator import create_orchestrator
         from agentm.agents.sub_agent import AgentPool
         from agentm.core.task_manager import TaskManager
         from agentm.core.tool_registry import ToolRegistry
 
         get_state_schema(system_type)  # validate system_type exists
-
-        # Resolve relative prompt paths against scenario_dir
-        if scenario_dir is not None:
-            scenario_dir = Path(scenario_dir)
-            resolved_prompts = {
-                k: str(scenario_dir / v)
-                for k, v in scenario_config.orchestrator.prompts.items()
-            }
-            scenario_config.orchestrator.prompts = resolved_prompts
-
-            for agent_config in scenario_config.agents.values():
-                if agent_config.prompt is not None:
-                    agent_config.prompt = str(scenario_dir / agent_config.prompt)
-                if agent_config.task_type_prompts:
-                    agent_config.task_type_prompts = {
-                        k: str(scenario_dir / v)
-                        for k, v in agent_config.task_type_prompts.items()
-                    }
-                if agent_config.compression and agent_config.compression.prompt:
-                    agent_config.compression.prompt = str(
-                        scenario_dir / agent_config.compression.prompt
-                    )
 
         if scenario_config.orchestrator.orchestrator_mode == "react":
             tool_registry = ToolRegistry()
@@ -213,18 +217,21 @@ class AgentSystemBuilder:
             )
 
             # Resolve model config for workers
-            worker_config = scenario_config.agents.get("worker")
-            worker_model_config = None
-            if worker_config is not None and system_config is not None:
-                worker_model_config = system_config.models.get(worker_config.model)
+            worker_model_configs: dict[str, Any] = {}
+            for agent_id, agent_cfg in scenario_config.agents.items():
+                if system_config is not None:
+                    worker_model_configs[agent_id] = system_config.models.get(agent_cfg.model)
 
-            agent_pool = AgentPool(scenario_config, tool_registry, worker_model_config)
+            agent_pool = AgentPool(scenario_config, tool_registry, worker_model_configs)
             task_manager = TaskManager()
 
             # --- Checkpointer ---
             checkpointer = None
+            pending_storage: StorageConfig | None = None
             if system_config is not None:
                 checkpointer = _create_checkpointer(system_config.storage)
+                if checkpointer is None and system_config.storage.checkpointer.backend != "memory":
+                    pending_storage = system_config.storage
 
             thread_id = str(uuid.uuid4())
             langgraph_config: dict[str, Any] = {
@@ -240,11 +247,9 @@ class AgentSystemBuilder:
                     output_dir=system_config.debug.trajectory.output_dir,
                 )
 
-            # Wire module-level references for orchestrator tools
-            import agentm.tools.orchestrator as orch_tools
-            orch_tools._task_manager = task_manager
-            orch_tools._agent_pool = agent_pool
-            orch_tools._trajectory = trajectory
+            # --- Dependency injection via closure factory ---
+            from agentm.tools.orchestrator import create_orchestrator_tools
+            create_orchestrator_tools(task_manager, agent_pool)
 
             # Wire trajectory into task_manager
             task_manager._trajectory = trajectory
@@ -269,6 +274,7 @@ class AgentSystemBuilder:
                 task_manager=task_manager,
                 trajectory=trajectory,
                 thread_id=thread_id,
+                _pending_storage=pending_storage,
             )
 
         raise NotImplementedError(

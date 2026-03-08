@@ -25,17 +25,7 @@ class BaseExecutorState(TypedDict):
     messages: Annotated[list, add_messages]
     task_id: str
     task_description: str
-    current_phase: str
-
-
-class ExecutorState(TypedDict):
-    """State for the hypothesis-driven RCA Orchestrator (Mode 2: Minimal Messages + Notebook)."""
-
-    messages: Annotated[list, add_messages]
-    notebook: DiagnosticNotebook
-    task_id: str
     current_phase: Phase
-    compression_refs: list[CompressionRef]
 
 
 class SubAgentState(TypedDict):
@@ -49,10 +39,15 @@ class SubAgentState(TypedDict):
 
 
 class HypothesisDrivenState(BaseExecutorState):
-    """Hypothesis-driven RCA state."""
+    """Hypothesis-driven RCA state.
+
+    Primary state schema for the hypothesis-driven RCA Orchestrator.
+    Inherits messages, task_id, task_description, current_phase from BaseExecutorState.
+    """
 
     notebook: DiagnosticNotebook
     current_hypothesis: Optional[str]
+    compression_refs: list[CompressionRef]
 
 
 class SequentialDiagnosisState(BaseExecutorState):
