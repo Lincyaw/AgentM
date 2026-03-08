@@ -1446,15 +1446,16 @@ orchestrator:
   temperature: 0.3
 
   prompts:
-    system: "templates/orchestrator_system.txt"
-    hypothesis_generation: "templates/generate_hypotheses.txt"
-    verification_task: "templates/verify_hypothesis.txt"
-    adversarial_review: "templates/adversarial_review.txt"
+    system: "prompts/orchestrator_system.j2"
+    hypothesis_generation: "prompts/hypothesis_generation.j2"
+    verification_task: "prompts/verify_hypothesis.j2"
+    adversarial_review: "prompts/adversarial_review.j2"
 
   tools:
-    - dispatch_task
-    - interrupt_agent
+    - check_agents
     - inject_instruction
+    - abort_agent
+    - dispatch_task
 
   monitoring:
     enabled: true

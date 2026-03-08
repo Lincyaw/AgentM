@@ -38,8 +38,8 @@ concepts:
     tasks: []
 
   configuration_system:
-    description: "Three-layer YAML config: system-level, orchestrator-level, agent-level. Jinja2 prompt templates, runtime context_schema. Static agent pool — restart to apply config changes"
-    design: null
+    description: "Config system: system.yaml (global), tools/*.yaml (reusable tool defs), scenarios/<name>/ (scenario.yaml + prompts/*.j2). Pydantic schema validation + cross-reference validation at startup. Environment variable substitution"
+    design: "designs/system-design-overview.md"
     related_concepts: [system_architecture, sub_agent, orchestrator]
     plans: []
     tasks: []

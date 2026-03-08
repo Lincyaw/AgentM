@@ -130,58 +130,197 @@ Compression is a **prompt optimization only** — checkpoints retain full uncomp
 
 ## Configuration System
 
-Three-layer configuration, all YAML-based:
+### Directory Structure
+
+```
+config/
+├── system.yaml                        # Global: models, storage, recovery, rate limits
+├── tools/                             # Tool definitions (reusable across scenarios)
+│   ├── infrastructure.yaml            # check_cpu, check_memory, check_disk, ...
+│   ├── database.yaml                  # get_db_metrics, analyze_slow_queries, ...
+│   ├── knowledge.yaml                 # knowledge_search, knowledge_list, ...
+│   └── orchestrator.yaml              # check_agents, inject_instruction, abort_agent
+└── scenarios/                         # Self-contained scenario definitions
+    ├── rca_hypothesis/
+    │   ├── scenario.yaml              # Orchestrator + agents + feature gates
+    │   └── prompts/
+    │       ├── orchestrator_system.j2
+    │       ├── hypothesis_generation.j2
+    │       └── agents/
+    │           ├── infrastructure.j2
+    │           └── database.j2
+    └── memory_extraction/
+        ├── scenario.yaml
+        └── prompts/
+            ├── orchestrator_system.j2
+            └── agents/
+                ├── trajectory_analyst.j2
+                └── knowledge_writer.j2
+```
+
+**Design principles**:
+- A **scenario directory** is self-contained: switching scenarios = pointing to a different directory
+- **Tools** are independent of scenarios — pure capability definitions, reusable across scenarios
+- **Prompts** are per-scenario — same agent role may have different prompts in different scenarios
+- **system.yaml** is global — shared across all scenarios (models, storage, credentials)
 
 ### Layer 1: System Config (`system.yaml`)
 
+Global infrastructure configuration. Shared by all scenarios.
+
 ```yaml
 system:
-  type: "hypothesis_driven"  # or "sequential", "decision_tree"
   models:
     gpt-4:
       api_key: "${OPENAI_API_KEY}"
-      rate_limit:                      # Per-model rate limiting
+      rate_limit:
         requests_per_second: 5
-        max_bucket_size: 10            # Max burst size
+        max_bucket_size: 10
     gpt-4o-mini:
       api_key: "${OPENAI_API_KEY}"
       rate_limit:
-        requests_per_second: 20        # Lighter model, higher TPS
+        requests_per_second: 20
         max_bucket_size: 30
+
   storage:
-    checkpointer: { backend: "postgresql", url: "${DB_URL}" }
+    checkpointer:
+      backend: "postgresql"
+      url: "${DB_URL}"
+    store:
+      backend: "postgresql"
+      url: "${DB_URL}"
+      index:
+        dims: 1536
+        embed: "openai:text-embedding-3-small"
+
+  recovery:
+    mode: "manual"
+    expose_api: true
 ```
 
-### Layer 2: Orchestrator Config (`orchestrator.yaml`)
+Environment variables (`${VAR}`) are resolved at config load time.
+
+### Layer 2: Tool Definitions (`tools/*.yaml`)
+
+Tool definitions are pure capability descriptions — what the tool does, where its code lives, and what parameters it accepts.
 
 ```yaml
+# tools/database.yaml
+tools:
+  get_db_metrics:
+    description: "Get database performance metrics (CPU, connections, cache hit rate)"
+    module: "agentm.tools.database"
+    function: "get_db_metrics"
+    parameters:
+      time_window:
+        type: string
+        default: "5m"
+        description: "Time window for metrics"
+
+  analyze_slow_queries:
+    description: "Find and analyze slow queries above threshold"
+    module: "agentm.tools.database"
+    function: "analyze_slow_queries"
+    parameters:
+      threshold_ms:
+        type: integer
+        default: 1000
+      top_n:
+        type: integer
+        default: 5
+```
+
+At startup, all tool YAMLs are loaded into a `ToolRegistry`. Agents reference tools by name and can override default parameters via `tool_settings`.
+
+### Layer 3: Scenario Config (`scenarios/<name>/scenario.yaml`)
+
+A scenario is a complete, runnable configuration — Orchestrator settings, agent definitions, feature gates. Everything needed to build and compile the graph.
+
+```yaml
+# scenarios/rca_hypothesis/scenario.yaml
+system:
+  type: "hypothesis_driven"
+
 orchestrator:
   model: "gpt-4"
   temperature: 0.3
+
   prompts:
-    system: "templates/orchestrator_system.txt"
-    hypothesis_generation: "templates/generate_hypotheses.txt"
-  tools: [dispatch_task, interrupt_agent, inject_instruction]
+    system: "prompts/orchestrator_system.j2"
+    hypothesis_generation: "prompts/hypothesis_generation.j2"
+
+  tools:
+    - check_agents
+    - inject_instruction
+    - abort_agent
+    - dispatch_task
+    - knowledge_search
+    - knowledge_list
+    - knowledge_read
+    - recall_history
+
+  feature_gates:
+    adversarial_review: true
+    parallel_verification: false
+    auto_refine_partial: true
+    min_verifications_before_confirm: 2
+    deep_exploration: false
+
+  compression:
+    enabled: true
+    notebook:
+      compress_on_phase_transition: true
+      max_history_entries: 20
+      compression_model: "gpt-4o-mini"
+    recall:
+      enabled: true
+      model: "gpt-4o-mini"
+
   monitoring:
+    summary_model: "gpt-4o-mini"
     stream_mode: ["updates", "custom"]
-    max_execution_time: 3600
+
+agents:
+  infrastructure:
+    model: "gpt-4o-mini"
+    temperature: 0.2
+    prompt: "prompts/agents/infrastructure.j2"
+    tools: [check_cpu, check_memory, check_disk, check_network]
+    execution:
+      max_steps: 20
+      timeout: 120
+      retry:
+        max_attempts: 3
+        initial_interval: 1.0
+    compression:
+      max_uncompressed_steps: 10
+      compression_model: "gpt-4o-mini"
+
+  database:
+    model: "gpt-4"
+    temperature: 0.1
+    prompt: "prompts/agents/database.j2"
+    tools: [get_db_metrics, analyze_slow_queries, check_connections, check_locks]
+    tool_settings:
+      analyze_slow_queries:
+        threshold_ms: 500               # Override default for this scenario
+    execution:
+      max_steps: 30
+      timeout: 300
+      interrupt_before: ["tools"]       # Safety: review DB queries
+      retry:
+        max_attempts: 3
+        initial_interval: 1.0
+    compression:
+      max_uncompressed_steps: 15
+      compression_model: "gpt-4o-mini"
 ```
 
-### Layer 3: Agent Configs (`agents/*.yaml`)
-
-```yaml
-agent:
-  name: "infrastructure"
-  model: "gpt-4o-mini"
-  temperature: 0
-  prompt:
-    template: "templates/agents/infrastructure_system.txt"
-  tools: [check_cpu, check_memory, check_disk]
-  state_schema: "infrastructure_private_state"
-  shared_fields: ["messages"]
-```
+Prompt paths are **relative to the scenario directory**.
 
 ### Layer 4: Runtime Config (context_schema)
+
+Per-invocation context passed at runtime — not in YAML files.
 
 ```python
 @dataclass
@@ -193,7 +332,103 @@ class ExecutorContext:
 result = graph.invoke(input, config, context=ExecutorContext(...))
 ```
 
-Switching scenarios requires **only config + prompt files**, zero code changes.
+### Configuration Validation
+
+Config is validated at startup in two phases. Any failure prevents the system from starting.
+
+**Phase 1: Schema validation** — Each YAML file is parsed into a Pydantic model. Missing required fields, wrong types, and invalid values are caught.
+
+```python
+from pydantic import BaseModel, validator
+
+class ModelConfig(BaseModel):
+    api_key: str
+    rate_limit: Optional[RateLimitConfig] = None
+
+class SystemConfig(BaseModel):
+    models: dict[str, ModelConfig]
+    storage: StorageConfig
+    recovery: RecoveryConfig
+
+class AgentConfig(BaseModel):
+    model: str
+    temperature: float
+    prompt: str                  # Relative path to .j2 file
+    tools: list[str]
+    tool_settings: dict[str, dict] = {}
+    execution: ExecutionConfig
+    compression: Optional[CompressionConfig] = None
+
+class ScenarioConfig(BaseModel):
+    system: SystemTypeConfig
+    orchestrator: OrchestratorConfig
+    agents: dict[str, AgentConfig]
+```
+
+**Phase 2: Reference validation** — Cross-file references are checked for existence.
+
+```python
+def validate_references(system: SystemConfig, scenario: ScenarioConfig, tool_registry: ToolRegistry):
+    errors = []
+
+    # 1. Agent model references → must exist in system.models
+    for agent_name, agent in scenario.agents.items():
+        if agent.model not in system.models:
+            errors.append(f"Agent '{agent_name}' references model '{agent.model}' "
+                         f"not defined in system.yaml")
+
+    # Orchestrator model too
+    if scenario.orchestrator.model not in system.models:
+        errors.append(f"Orchestrator references model '{scenario.orchestrator.model}' "
+                     f"not defined in system.yaml")
+
+    # 2. Agent tool references → must exist in tool registry
+    for agent_name, agent in scenario.agents.items():
+        for tool_name in agent.tools:
+            if not tool_registry.has(tool_name):
+                errors.append(f"Agent '{agent_name}' references tool '{tool_name}' "
+                             f"not found in tools/*.yaml")
+
+    # 3. Prompt file references → must exist on disk
+    scenario_dir = Path(scenario._source_dir)
+    for agent_name, agent in scenario.agents.items():
+        prompt_path = scenario_dir / agent.prompt
+        if not prompt_path.exists():
+            errors.append(f"Agent '{agent_name}' prompt file not found: {prompt_path}")
+
+    # 4. Tool settings keys → must match tool's declared parameters
+    for agent_name, agent in scenario.agents.items():
+        for tool_name, settings in agent.tool_settings.items():
+            if tool_name not in agent.tools:
+                errors.append(f"Agent '{agent_name}' has tool_settings for '{tool_name}' "
+                             f"but doesn't list it in tools")
+            tool_def = tool_registry.get(tool_name)
+            for param_name in settings:
+                if param_name not in tool_def.parameters:
+                    errors.append(f"Agent '{agent_name}' tool_settings for '{tool_name}' "
+                                 f"references unknown parameter '{param_name}'")
+
+    if errors:
+        raise ConfigValidationError(errors)
+```
+
+### Config Loading Flow
+
+```
+Startup
+  │
+  ├─ 1. Load system.yaml → SystemConfig (Pydantic schema validation)
+  ├─ 2. Resolve environment variables (${VAR} → os.environ[VAR])
+  ├─ 3. Load tools/*.yaml → ToolRegistry (schema validation per tool)
+  ├─ 4. Load scenario.yaml → ScenarioConfig (schema validation)
+  ├─ 5. Cross-reference validation (models, tools, prompts, tool_settings)
+  ├─ 6. Build rate limiters (one per model config)
+  ├─ 7. Build agents (create_react_agent for each agent in scenario)
+  ├─ 8. Compile graph (Orchestrator + all agents)
+  └─ 9. Ready to serve
+```
+
+Switching scenarios requires **only pointing to a different scenario directory** — zero code changes.
 
 ---
 
