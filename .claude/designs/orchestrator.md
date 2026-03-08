@@ -1,7 +1,7 @@
 # Design: Orchestrator
 
 **Status**: DRAFT
-**Last Updated**: 2026-03-07
+**Last Updated**: 2026-03-08
 
 ---
 
@@ -12,10 +12,54 @@ The Orchestrator is the **Supervisor node** in the Root StateGraph, acting as a 
 ### Core Responsibilities
 
 1. **Hypothesis reasoning** — Generate and verify hypotheses using LLM
-2. **Sub-Agent dispatch** — Route tasks via `Command(goto="agent_name")`
+2. **Async task dispatch** — Submit multiple concurrent tasks to Sub-Agents (time-multiplexing)
 3. **Notebook management** — Track hypotheses, evidence, and exploration history
 4. **Monitoring & intervention** — Stream Sub-Agent execution, interrupt, inject instructions
-5. **Phase orchestration** — Drive the four-phase diagnostic flow
+5. **Phase orchestration** — Drive the Hypothetico-Deductive state machine
+
+---
+
+## Theoretical Foundation: Hypothetico-Deductive Method
+
+The Orchestrator is modeled as a **state machine** following the **Hypothetico-Deductive Method** from experimental science:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                                                               │
+│    OBSERVE ───→ HYPOTHESIZE ───→ EXPERIMENT ───→ ANALYZE     │
+│       ↑                                            │         │
+│       │                                            ↓         │
+│       │                                        CONCLUDE      │
+│       │                                       ╱        ╲     │
+│       │                               REFUTED           CONFIRMED
+│       │                                 │                  │  │
+│       └──── (new cycle) ←──────────────┘                  │  │
+│                                                    [terminal] │
+│                                                               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Mapping to our four phases:
+
+| Scientific Method | AgentM Phase | Actor | Description |
+|-------------------|-------------|-------|-------------|
+| **Observe** | Phase 1: Exploration | Sub-Agents | Collect raw data from multiple sources |
+| **Hypothesize** | Phase 2: Generation | Orchestrator (LLM) | Generate candidate hypotheses from observations |
+| **Experiment** | Phase 3: Verification | Sub-Agents | Investigate specific data to test each hypothesis |
+| **Analyze** | Phase 3: Verification | Orchestrator (LLM) | Interpret results against hypothesis |
+| **Conclude** | Phase 4: Confirmation | Orchestrator | Confirm root cause or refute and loop back |
+
+### Confirmation Bias Mitigation
+
+LLMs are prone to **confirmation bias** — they tend to find evidence supporting their own hypotheses. We address this structurally:
+
+1. **No prediction anchoring** — Orchestrator does NOT set expected outcomes before experiments. This avoids the LLM anchoring on a predicted result and interpreting ambiguous data in its favor.
+
+2. **Adversarial review** (feature-gated) — After verification, a separate Sub-Agent with a "Devil's Advocate" role attempts to refute the conclusion. This uses LLM's divergent capability against its own confirmation bias. See [Feature Gates](#feature-gates).
+
+3. **Mandatory counter-evidence** — The three-block VerificationResult requires `rejecting_reasons` as a non-optional field. Sub-Agents must actively look for evidence AGAINST the hypothesis.
+
+4. **Role separation** — The entity that generates hypotheses (Orchestrator) is different from the entity that collects evidence (Sub-Agent), reducing self-reinforcing loops.
 
 ---
 
@@ -346,6 +390,175 @@ def phase_confirmation(state: ExecutorState) -> dict:
 
 ---
 
+## Async Task Dispatch
+
+The Orchestrator operates like a real team leader — it can **submit multiple concurrent tasks** and collect results asynchronously, rather than waiting for each task to complete sequentially.
+
+### Dispatch Model
+
+```python
+# Orchestrator submits multiple tasks concurrently via LangGraph Send API
+def orchestrator_dispatch(state: ExecutorState):
+    notebook = state.notebook
+    pending_tasks = plan_next_tasks(notebook)
+
+    # Fan-out: dispatch all tasks in parallel
+    return [
+        Send(task.agent, {
+            "task_id": task.id,
+            "hypothesis_id": task.hypothesis_id,
+            "instruction": task.instruction,
+        })
+        for task in pending_tasks
+    ]
+```
+
+### Concurrency Patterns
+
+| Pattern | When | LangGraph Mechanism |
+|---------|------|-------------------|
+| **Parallel fan-out** | Phase 1 (explore all agents at once) | `Send()` from conditional edge |
+| **Parallel verification** | Multiple independent hypotheses | `Send()` to different agents |
+| **Sequential with review** | Verification + adversarial review | Agent → Orchestrator → Review Agent |
+| **Fire and forget** | Low-priority background checks | `Send()` with results aggregated later |
+
+### Task Queue in Notebook
+
+```python
+@dataclass
+class PendingTask:
+    id: str
+    agent: str
+    hypothesis_id: Optional[str]
+    instruction: str
+    status: Literal["pending", "dispatched", "completed", "failed"]
+    dispatched_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    result: Optional[dict] = None
+
+# DiagnosticNotebook gains a task queue
+@dataclass
+class DiagnosticNotebook:
+    # ... existing fields ...
+    pending_tasks: list[PendingTask] = field(default_factory=list)
+```
+
+The Orchestrator checks pending_tasks at each decision point, dispatches ready tasks, and processes completed results — **time-multiplexing** like a human manager.
+
+### Results Aggregation
+
+```python
+class ExecutorState(TypedDict):
+    # ... existing fields ...
+    # Reducer accumulates results from parallel Sub-Agents
+    agent_results: Annotated[list[dict], operator.add]
+```
+
+When multiple Sub-Agents complete, their results are accumulated via the reducer. The Orchestrator processes them in the next decision cycle.
+
+---
+
+## Feature Gates
+
+Diagnostic behaviors are configurable via **feature gates** — boolean flags in config that enable/disable specific capabilities without code changes.
+
+### Configuration
+
+```yaml
+# orchestrator.yaml
+orchestrator:
+  feature_gates:
+    # Adversarial review: after verification, a Devil's Advocate
+    # Sub-Agent attempts to refute the conclusion
+    adversarial_review: true
+
+    # Parallel hypothesis verification: test multiple hypotheses
+    # concurrently instead of sequentially
+    parallel_verification: false
+
+    # Auto-refine: when verdict is "partial", automatically
+    # generate a refined hypothesis and re-verify
+    auto_refine_partial: true
+
+    # Minimum verifications: require at least N hypotheses
+    # to be tested before accepting a "confirmed" result
+    min_verifications_before_confirm: 2
+
+    # Exploration depth: run a second exploration round
+    # if initial data is insufficient for hypothesis generation
+    deep_exploration: false
+```
+
+### Adversarial Review (Devil's Advocate)
+
+When `adversarial_review: true`, after the Orchestrator reaches a verdict, it dispatches a **separate Sub-Agent** with a Devil's Advocate role to challenge the conclusion:
+
+```
+Normal flow:
+  Sub-Agent → VerificationResult → Orchestrator verdict
+
+With adversarial review:
+  Sub-Agent → VerificationResult → Orchestrator preliminary verdict
+      → Devil's Advocate Agent → ChallengeResult
+      → Orchestrator final verdict
+```
+
+The adversarial agent:
+- Receives the raw investigation data and the preliminary verdict
+- Does NOT see the original hypothesis description (prevents anchoring)
+- Is prompted to find inconsistencies, alternative explanations, and overlooked evidence
+- Returns a `ChallengeResult` with counter-arguments
+
+```python
+@dataclass
+class ChallengeResult:
+    counter_arguments: list[str]     # Arguments against the verdict
+    alternative_explanations: list[str]  # Other possible causes
+    overlooked_evidence: list[str]   # Data points that were ignored
+    challenge_strength: Literal["weak", "moderate", "strong"]
+    # "strong" challenge forces verdict downgrade (confirmed → partial)
+```
+
+This is **also a Sub-Agent task** — dispatched asynchronously like any other. The Orchestrator waits for both the verification result and the adversarial review before making the final verdict.
+
+### Feature Gate Access in Code
+
+```python
+def phase_hypothesis_verification(state: ExecutorState, config: dict) -> dict:
+    features = config["orchestrator"]["feature_gates"]
+
+    # Choose dispatch strategy based on feature gates
+    if features.get("parallel_verification"):
+        # Fan-out: verify all active hypotheses in parallel
+        return dispatch_parallel_verification(state)
+    else:
+        # Sequential: verify one by one
+        return dispatch_sequential_verification(state)
+
+def process_verification_result(state, result, config):
+    features = config["orchestrator"]["feature_gates"]
+
+    # Preliminary verdict
+    verdict = result.verdict
+
+    # Adversarial review if enabled
+    if features.get("adversarial_review") and verdict == "confirmed":
+        challenge = await dispatch_adversarial_review(result)
+        if challenge.challenge_strength == "strong":
+            verdict = "partial"  # Downgrade
+
+    # Minimum verification check
+    min_checks = features.get("min_verifications_before_confirm", 1)
+    verified_count = count_verified_hypotheses(state.notebook)
+    if verdict == "confirmed" and verified_count < min_checks:
+        # Don't confirm yet, continue verifying others
+        verdict = "partial"
+
+    return verdict
+```
+
+---
+
 ## LLM Decision-Making
 
 The Orchestrator uses LLM to make routing decisions. Prompts are loaded from config files (Jinja2 templates):
@@ -465,6 +678,7 @@ orchestrator:
     system: "templates/orchestrator_system.txt"
     hypothesis_generation: "templates/generate_hypotheses.txt"
     verification_task: "templates/verify_hypothesis.txt"
+    adversarial_review: "templates/adversarial_review.txt"
 
   tools:
     - dispatch_task
@@ -479,6 +693,13 @@ orchestrator:
   intervention:
     allow_interruption: true
     allow_instruction_injection: true
+
+  feature_gates:
+    adversarial_review: true
+    parallel_verification: false
+    auto_refine_partial: true
+    min_verifications_before_confirm: 2
+    deep_exploration: false
 ```
 
 ---
@@ -495,8 +716,13 @@ orchestrator:
 
 | Decision | Rationale |
 |----------|-----------|
+| Hypothetico-Deductive state machine | Formal scientific method foundation; clear phase transitions |
 | Orchestrator = reasoner, Sub-Agent = data collector | Clear separation; all reasoning traceable in one place |
 | No confidence scores | LLM-generated confidence is unreliable; three-value verdict instead |
+| No prediction anchoring | Avoids confirmation bias; Orchestrator does not set expected outcomes |
+| Adversarial review via Sub-Agent | Devil's Advocate challenges conclusions; uses LLM divergence against its own bias |
+| Async task dispatch (Send API) | Orchestrator submits concurrent tasks like a real team leader; time-multiplexing |
+| Feature gates for behaviors | All diagnostic strategies are config-toggleable; no code changes |
 | Notebook as working memory | Structured, serializable, supports RL export and failure recovery |
 | Minimal messages (Mode 2) | Avoids context window explosion; Notebook is the real memory |
 | Three-block verification result | Cleanly separates raw data / reasoning / verdict |

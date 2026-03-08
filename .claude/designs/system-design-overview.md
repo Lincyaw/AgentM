@@ -1,7 +1,7 @@
 # Design: AgentM System Architecture
 
 **Status**: DRAFT
-**Last Updated**: 2026-03-07
+**Last Updated**: 2026-03-08
 
 ---
 
@@ -57,28 +57,32 @@ AgentM is a **hypothesis-driven multi-agent orchestration framework** built on L
 
 ---
 
-## Four-Phase Diagnostic Flow
+## Theoretical Foundation: Hypothetico-Deductive Method
 
-The core diagnostic pattern is hypothesis-driven RCA with four phases:
+The Orchestrator is modeled as a **state machine** following the **Hypothetico-Deductive Method** from experimental science:
 
 ```
-Phase 1: Exploration     → Parallel data collection from Sub-Agents
-Phase 2: Generation      → Orchestrator generates candidate hypotheses
-Phase 3: Verification    → Verify hypotheses one-by-one via Sub-Agents
-Phase 4: Confirmation    → Output root cause and recommendations
+OBSERVE → HYPOTHESIZE → EXPERIMENT → ANALYZE → CONCLUDE
+   ↑                                              │
+   └──── REFUTED (new cycle) ←────────────────────┘
 ```
 
-### Phase 1: Exploration
+### Four-Phase Diagnostic Flow
 
-Orchestrator dispatches parallel data collection tasks. Sub-Agents return **raw data only**, no reasoning.
+| Phase | Scientific Step | Actor | Description |
+|-------|----------------|-------|-------------|
+| **1. Exploration** | Observe | Sub-Agents (parallel) | Collect raw data from multiple sources |
+| **2. Generation** | Hypothesize | Orchestrator (LLM) | Generate candidate hypotheses from observations |
+| **3. Verification** | Experiment + Analyze | Sub-Agents → Orchestrator | Investigate data, then interpret results |
+| **4. Confirmation** | Conclude | Orchestrator | Confirm root cause or refute and loop back |
 
-### Phase 2: Hypothesis Generation
+Key design choices:
+- **No confidence scores** — LLM-generated confidence is unreliable; use three-value verdict (`confirmed / rejected / partial`)
+- **No prediction anchoring** — Orchestrator does NOT set expected outcomes before experiments, avoiding confirmation bias
+- **Adversarial review** (feature-gated) — A Devil's Advocate Sub-Agent challenges conclusions to counter LLM confirmation bias
+- **Async task dispatch** — Orchestrator submits multiple concurrent tasks via LangGraph `Send` API, like a real team leader
 
-Orchestrator analyzes collected data via LLM and generates 3-5 candidate hypotheses. No confidence scores — hypotheses have status: `active | confirmed | rejected | partial`.
-
-### Phase 3: Hypothesis Verification
-
-For each active hypothesis, Orchestrator assigns verification tasks. Sub-Agent returns a **three-block result**:
+Sub-Agent returns a **three-block result** per verification:
 
 | Block | Content |
 |-------|---------|
@@ -86,11 +90,7 @@ For each active hypothesis, Orchestrator assigns verification tasks. Sub-Agent r
 | **Reasoning** | Supporting reasons, rejecting reasons, neutral observations |
 | **Verdict** | `confirmed` / `rejected` / `partial` |
 
-### Phase 4: Confirmation
-
-Output the confirmed root cause with evidence chain and recommendations.
-
-> Detail: See [orchestrator.md](orchestrator.md) for complete Notebook structure, data models, and phase implementation.
+> Detail: See [orchestrator.md](orchestrator.md) for Notebook structure, state machine formalization, feature gates, and phase implementation.
 
 ---
 
@@ -295,10 +295,14 @@ orchestrator = AgentSystemBuilder.build(system_type="sequential", config=...)
 
 | Decision | Rationale | Trade-off |
 |----------|-----------|-----------|
+| Hypothetico-Deductive state machine | Formal scientific method foundation | Must handle cycle-back on refutation |
 | Supervisor + Subgraph | Leverages LangGraph's native multi-agent capabilities | Graph must be compiled at startup |
 | Minimal messages + Notebook | Avoids context window explosion; structured working memory | Frontend must reconstruct conversation |
-| No confidence scores | LLM-generated confidence is unreliable; use three-value verdict instead | Less granular ranking |
-| Three-block verification result | Separates raw data / reasoning / verdict cleanly | Sub-Agent return structure is more complex |
+| No confidence scores | LLM-generated confidence is unreliable; three-value verdict | Less granular ranking |
+| No prediction anchoring | Avoids confirmation bias in LLM | Verdict relies on post-hoc analysis |
+| Adversarial review (feature-gated) | Devil's Advocate counters LLM confirmation bias | Extra LLM call per verification |
+| Async task dispatch | Orchestrator submits concurrent tasks; time-multiplexing | Results aggregation complexity |
+| Feature gates | All behaviors config-toggleable | Config surface area grows |
 | Config-driven everything | Zero code changes for new scenarios | Config validation needed |
 | Checkpoint-based trajectory | Automatic capture, no extra overhead | Must reconstruct tree from linear chain |
 | PostgreSQL persistence | Production-grade reliability | External service dependency |
