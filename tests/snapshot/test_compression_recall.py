@@ -17,24 +17,6 @@ from agentm.core.compression import (
 from agentm.config.schema import CompressionConfig
 from agentm.models.data import DiagnosticNotebook, ExplorationStep, PhaseSummary
 from agentm.models.enums import Phase
-from agentm.tools.orchestrator import recall_history
-
-
-class TestCompressionPreservesRecall:
-    """P6: After compression, recall_history should still return data."""
-
-    def test_recall_history_returns_placeholder(self) -> None:
-        """recall_history returns a non-empty placeholder in Phase 1."""
-        result = recall_history("CPU metrics from agent-infra")
-        assert isinstance(result, str)
-        assert len(result) > 0
-
-    def test_recall_with_different_scopes(self) -> None:
-        """recall_history works with both scope values."""
-        r1 = recall_history("query", scope="current_compression")
-        r2 = recall_history("query", scope="all_compressions")
-        assert isinstance(r1, str)
-        assert isinstance(r2, str)
 
 
 class TestPhaseCompressionIntegrity:

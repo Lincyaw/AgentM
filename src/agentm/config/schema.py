@@ -21,6 +21,7 @@ class ModelConfig(BaseModel):
     """Configuration for a single LLM model."""
 
     api_key: str
+    base_url: Optional[str] = None
     rate_limit: Optional[RateLimitConfig] = None
 
 
@@ -46,12 +47,28 @@ class RecoveryConfig(BaseModel):
     expose_api: bool = True
 
 
+class TrajectoryConfig(BaseModel):
+    """Trajectory export configuration."""
+
+    enabled: bool = True
+    output_dir: str = "./trajectories"
+
+
+class DebugConfig(BaseModel):
+    """Debug infrastructure configuration."""
+
+    trajectory: TrajectoryConfig = TrajectoryConfig()
+    console_live: bool = False
+    verbose: bool = False
+
+
 class SystemConfig(BaseModel):
     """Global system configuration (system.yaml)."""
 
     models: dict[str, ModelConfig]
     storage: StorageConfig
     recovery: RecoveryConfig
+    debug: DebugConfig = DebugConfig()
 
 
 class RetryConfig(BaseModel):
@@ -88,7 +105,7 @@ class AgentConfig(BaseModel):
 
     model: str
     temperature: float
-    prompt: str
+    prompt: Optional[str] = None
     tools: list[str]
     tool_settings: dict[str, dict[str, Any]] = {}
     task_type_prompts: Optional[dict[str, str]] = None

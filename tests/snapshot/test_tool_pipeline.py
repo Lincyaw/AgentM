@@ -1,8 +1,8 @@
-"""P1, P2: Tool pipeline tests — dispatch_agent and check_tasks data flow.
+"""P1, P2: Tool pipeline tests — spawn_worker and wait_for_workers data flow.
 
 Bug prevented:
-- P1: dispatch_agent fires but TaskManager not updated → Orchestrator loses track
-- P2: check_tasks returns data but doesn't persist in Notebook → data lost on compression
+- P1: spawn_worker fires but TaskManager not updated → Orchestrator loses track
+- P2: wait_for_workers returns data but doesn't persist in Notebook → data lost on compression
 """
 
 from __future__ import annotations
@@ -16,68 +16,61 @@ from agentm.core.task_manager import TaskManager
 from agentm.models.enums import AgentRunStatus
 
 
-class TestDispatchAgentPipeline:
-    """P1: dispatch_agent creates a managed task and returns task_id."""
+class TestSpawnWorkerPipeline:
+    """P1: spawn_worker creates a managed task and returns task status JSON."""
 
     @pytest.fixture(autouse=True)
-    def _bind_task_manager(self, task_manager: TaskManager) -> None:
-        self._orig = orch_tools._task_manager
+    def _bind_refs(self, task_manager: TaskManager) -> None:
+        self._orig_tm = orch_tools._task_manager
+        self._orig_pool = orch_tools._agent_pool
         orch_tools._task_manager = task_manager
+        # Provide a minimal mock agent_pool
+        orch_tools._agent_pool = _MockAgentPool()
         self.task_manager = task_manager
         yield
-        orch_tools._task_manager = self._orig
+        orch_tools._task_manager = self._orig_tm
+        orch_tools._agent_pool = self._orig_pool
 
     @pytest.mark.asyncio
-    async def test_dispatch_creates_managed_task(self) -> None:
-        """dispatch_agent should create a RUNNING task in TaskManager."""
-        cmd = await orch_tools.dispatch_agent(
-            agent_id="db",
-            task="check connections",
+    async def test_spawn_creates_managed_task(self) -> None:
+        """spawn_worker should create a task in TaskManager."""
+        result = await orch_tools.spawn_worker(
             task_type="scout",
-            tool_call_id="call-001",
+            instructions="check connections",
         )
 
         # TaskManager should have exactly one task
         status = await self.task_manager.get_all_status()
         all_tasks = status["running"] + status["completed"] + status["failed"]
         assert len(all_tasks) == 1
-        assert all_tasks[0]["agent_id"] == "db"
+        assert all_tasks[0]["agent_id"] == "worker-scout"
 
     @pytest.mark.asyncio
-    async def test_dispatch_returns_command_with_task_id(self) -> None:
-        """Returned Command should contain ToolMessage with task_id."""
-        cmd = await orch_tools.dispatch_agent(
-            agent_id="db",
-            task="check connections",
-            tool_call_id="call-002",
+    async def test_spawn_returns_json_with_task_id(self) -> None:
+        """Returned JSON should contain task_id, task_type, status."""
+        result = await orch_tools.spawn_worker(
+            task_type="scout",
+            instructions="check connections",
         )
 
-        messages = cmd.update["messages"]
-        assert len(messages) == 1
-        content = json.loads(messages[0].content)
+        content = json.loads(result)
         assert "task_id" in content
-        assert content["agent_id"] == "db"
+        assert content["task_type"] == "scout"
         assert content["status"] == "running"
 
     @pytest.mark.asyncio
-    async def test_dispatch_with_hypothesis_id(self) -> None:
-        """dispatch_agent should pass hypothesis_id to TaskManager."""
-        await orch_tools.dispatch_agent(
-            agent_id="db",
-            task="verify H1",
-            task_type="verify",
-            hypothesis_id="H1",
-            tool_call_id="call-003",
+    async def test_spawn_rejects_invalid_task_type(self) -> None:
+        """spawn_worker should return error JSON for invalid task_type."""
+        result = await orch_tools.spawn_worker(
+            task_type="invalid",
+            instructions="do something",
         )
-
-        status = await self.task_manager.get_all_status()
-        running = status["running"]
-        assert len(running) == 1
-        assert running[0]["hypothesis_id"] == "H1"
+        content = json.loads(result)
+        assert "error" in content
 
 
-class TestCheckTasksPipeline:
-    """P2: check_tasks returns status and results via Command."""
+class TestWaitForWorkersPipeline:
+    """P2: wait_for_workers returns status and results."""
 
     @pytest.fixture(autouse=True)
     def _bind_task_manager(self, task_manager_with_completed_task: TaskManager) -> None:
@@ -88,16 +81,11 @@ class TestCheckTasksPipeline:
         orch_tools._task_manager = self._orig
 
     @pytest.mark.asyncio
-    async def test_check_tasks_returns_completed_results(self) -> None:
-        """check_tasks should include completed task results in ToolMessage."""
-        cmd = await orch_tools.check_tasks(
-            wait_seconds=0,
-            tool_call_id="call-010",
-        )
+    async def test_wait_returns_completed_results(self) -> None:
+        """wait_for_workers should include completed task results."""
+        result = await orch_tools.wait_for_workers(timeout_seconds=0)
 
-        messages = cmd.update["messages"]
-        assert len(messages) == 1
-        content = json.loads(messages[0].content)
+        content = json.loads(result)
         assert len(content["completed"]) == 1
         assert content["completed"][0]["agent_id"] == "db"
         assert content["completed"][0]["result"] == {
@@ -106,17 +94,21 @@ class TestCheckTasksPipeline:
         }
 
     @pytest.mark.asyncio
-    async def test_check_tasks_returns_failed_results(
+    async def test_wait_returns_failed_results(
         self, task_manager_with_failed_task: TaskManager
     ) -> None:
-        """check_tasks should include failed task error summary."""
+        """wait_for_workers should include failed task error summary."""
         orch_tools._task_manager = task_manager_with_failed_task
 
-        cmd = await orch_tools.check_tasks(
-            wait_seconds=0,
-            tool_call_id="call-011",
-        )
+        result = await orch_tools.wait_for_workers(timeout_seconds=0)
 
-        content = json.loads(cmd.update["messages"][0].content)
+        content = json.loads(result)
         assert len(content["failed"]) == 1
         assert "timeout" in content["failed"][0]["error_summary"].lower()
+
+
+class _MockAgentPool:
+    """Minimal mock that returns None as the subgraph (TaskManager won't run it)."""
+
+    def get_worker(self, task_type: str):
+        return None

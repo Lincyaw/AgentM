@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 from agentm.models.data import ManagedTask
 from agentm.models.enums import AgentRunStatus
@@ -23,6 +23,8 @@ class TaskManager:
 
     def __init__(self) -> None:
         self._tasks: dict[str, ManagedTask] = {}
+        self._broadcast_callback: Callable[..., Any] | None = None
+        self._trajectory: Any | None = None  # Set by builder
 
     async def submit(
         self,
@@ -53,6 +55,22 @@ class TaskManager:
             )
 
         self._tasks[task_id] = managed
+
+        # Record task dispatch to trajectory
+        if self._trajectory is not None:
+            await self._trajectory.record(
+                event_type="task_dispatch",
+                agent_path=[agent_id],
+                data={
+                    "task_id": task_id,
+                    "agent_id": agent_id,
+                    "task_type": task_type,
+                    "instruction_preview": instruction[:200],
+                    "hypothesis_id": hypothesis_id,
+                },
+                task_id=task_id,
+            )
+
         return task_id
 
     async def get_all_status(self, wait_seconds: float = 0) -> dict[str, Any]:
@@ -152,9 +170,34 @@ class TaskManager:
                 if len(managed.events_buffer) > 20:
                     managed.events_buffer = managed.events_buffer[-20:]
 
+                if self._broadcast_callback is not None:
+                    await self._broadcast_callback({
+                        "agent_path": [managed.agent_id],
+                        "mode": mode if isinstance(mode, str) else "updates",
+                        "data": data,
+                        "timestamp": datetime.now().isoformat(),
+                    })
+
             managed.status = AgentRunStatus.COMPLETED
             managed.result = {"events": managed.events_buffer}
             managed.completed_at = datetime.now().isoformat()
+            if managed.started_at:
+                started = datetime.fromisoformat(managed.started_at)
+                managed.duration_seconds = (
+                    datetime.now() - started
+                ).total_seconds()
+
+            if self._trajectory is not None:
+                await self._trajectory.record(
+                    event_type="task_complete",
+                    agent_path=[managed.agent_id],
+                    data={
+                        "task_id": managed.task_id,
+                        "agent_id": managed.agent_id,
+                        "duration_seconds": managed.duration_seconds,
+                    },
+                    task_id=managed.task_id,
+                )
 
         except asyncio.CancelledError:
             managed.completed_at = datetime.now().isoformat()
@@ -165,3 +208,15 @@ class TaskManager:
             managed.error_summary = str(e)
             managed.last_steps = managed.events_buffer[-5:]
             managed.completed_at = datetime.now().isoformat()
+
+            if self._trajectory is not None:
+                await self._trajectory.record(
+                    event_type="task_fail",
+                    agent_path=[managed.agent_id],
+                    data={
+                        "task_id": managed.task_id,
+                        "agent_id": managed.agent_id,
+                        "error_summary": str(e),
+                    },
+                    task_id=managed.task_id,
+                )

@@ -1,0 +1,25 @@
+tools:
+  - name: knowledge_search
+    module: agentm.tools.knowledge
+    function: knowledge_search
+    params: {}
+
+  - name: knowledge_list
+    module: agentm.tools.knowledge
+    function: knowledge_list
+    params: {}
+
+  - name: knowledge_read
+    module: agentm.tools.knowledge
+    function: knowledge_read
+    params: {}
+
+  - name: knowledge_write
+    module: agentm.tools.knowledge
+    function: knowledge_write
+    params: {}
+
+  - name: knowledge_delete
+    module: agentm.tools.knowledge
+    function: knowledge_delete
+    params: {}

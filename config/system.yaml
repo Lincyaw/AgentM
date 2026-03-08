@@ -1,0 +1,32 @@
+models:
+  gpt-4:
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "${OPENAI_BASE_URL:}"
+    rate_limit:
+      requests_per_second: 5
+      max_bucket_size: 10
+  gpt-4o-mini:
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "${OPENAI_BASE_URL:}"
+    rate_limit:
+      requests_per_second: 20
+      max_bucket_size: 30
+
+storage:
+  checkpointer:
+    backend: "sqlite"
+    url: "./checkpoints.db"
+  store:
+    backend: "memory"
+    url: ""
+
+recovery:
+  mode: "manual"
+  expose_api: true
+
+debug:
+  trajectory:
+    enabled: true
+    output_dir: "./trajectories"
+  console_live: false
+  verbose: false
