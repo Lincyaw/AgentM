@@ -15,23 +15,17 @@ The SDK Wrapper is the **implementation framework** underlying all AgentM agent 
 
 ```
 Generic SDK Wrapper (shared code)
-├─ State Schema Registry  — Concrete state classes per system type
-├─ PhaseManager           — Phase lifecycle and transitions
-├─ BaseOrchestrator       — Supervisor routing, Sub-Agent dispatch
-├─ Trajectory Recording   — Checkpoint, streaming, export
-└─ Configuration System   — YAML loading, validation, hot-reload
-         ↓
-┌────────────────────────────────────────────────────────┐
-│  Concrete Agent Systems (config-driven)                 │
-├────────────────────────────────────────────────────────┤
-│                                                         │
-│  hypothesis_driven     — RCA with hypothesis reasoning  │
-│  sequential            — Step-by-step diagnosis         │
-│  memory_extraction     — Cross-task knowledge building  │
-│  decision_tree         — Classification-based diagnosis │
-│  custom                — User-defined system            │
-│                                                         │
-└────────────────────────────────────────────────────────┘
+├─ AgentSystemBuilder      — Unified build() interface
+├─ State Schema Registry   — Concrete state classes per system type
+├─ TaskManager             — Async Sub-Agent lifecycle (shared by all)
+├─ Configuration System    — YAML loading, validation
+└─ Two architecture modes:
+   ├─ ReAct mode (create_react_agent)
+   │   └─ For: hypothesis_driven (RCA)
+   │   └─ Phases: Notebook state markers, LLM-driven
+   └─ StateGraph mode (custom graph with phase nodes)
+       └─ For: memory_extraction, sequential, decision_tree
+       └─ Phases: Explicit nodes, PhaseManager-driven
 ```
 
 ---
@@ -46,7 +40,7 @@ import operator
 
 class BaseExecutorState(TypedDict):
     """Fields shared by all agent systems."""
-    messages: Annotated[list, operator.add]
+    messages: Annotated[list[BaseMessage], add_messages]
     task_id: str
     task_description: str
     current_phase: str
@@ -143,6 +137,8 @@ class PhaseManager:
 
 ## Base Orchestrator
 
+> **Note**: BaseOrchestrator and PhaseManager are used by **StateGraph-based systems** (linear scenarios like memory_extraction, sequential, decision_tree). **ReAct-based systems** (like hypothesis_driven RCA) use `create_react_agent` directly — they don't use BaseOrchestrator or PhaseManager. Phase management in ReAct systems happens through the LLM's own reasoning, with phases recorded as Notebook state markers.
+
 ```python
 class BaseOrchestrator(ABC):
     """Shared Orchestrator logic for all systems."""
@@ -213,6 +209,7 @@ Memory Extraction System (system_type: "memory_extraction")
 
 | Aspect | hypothesis_driven (RCA) | memory_extraction (Memory) |
 |--------|------------------------|---------------------------|
+| **Architecture** | ReAct (create_react_agent) | StateGraph (PhaseManager) |
 | **Input** | Incident report / alert | Completed RCA trajectory (thread_id) |
 | **Output** | Root cause + recommendations | Knowledge entries (patterns, skills) |
 | **State** | DiagnosticNotebook + Hypotheses | Extracted patterns + Knowledge entries |
@@ -601,11 +598,11 @@ RCA Orchestrator (Phase 2: Hypothesis Generation)
   │
   ├─ 1. Semantic search with confidence filter:
   │     knowledge_search("API timeout under high load",
-  │                      filter={"confidence": {"$in": ["fact", "pattern"]}})
+  │                      filter={"confidence": {"$eq": "fact"}})
   │     → returns: [{path: "/failure_pattern/database/connection_pool_exhaustion",
-  │                  confidence: "fact", score: 0.92, ...},
-  │                 {path: "/failure_pattern/network/dns_resolution_timeout",
-  │                  confidence: "pattern", score: 0.71, ...}]
+  │                  confidence: "fact", score: 0.92, ...}]
+  │     # Note: repeat with {"confidence": {"$eq": "pattern"}} if needed.
+  │     # LangGraph Store supports $eq, $ne, $gt, $gte, $lt, $lte — but NOT $in.
   │
   ├─ 2. Browse neighborhood: knowledge_list("/failure_pattern/database/")
   │     → returns: {sub_paths: [], entries: [
@@ -644,6 +641,7 @@ system:
 orchestrator:
   model: "gpt-4o"
   temperature: 0.3
+  orchestrator_mode: "graph"
 
   prompts:
     system: "prompts/orchestrator_system.j2"
@@ -732,16 +730,48 @@ result = await memory_system.execute({
 
 ---
 
+## AgentSystemBuilder
+
+```python
+class AgentSystemBuilder:
+    """Unified entry point for building any agent system.
+
+    Internally selects the appropriate architecture based on system_type:
+    - ReAct-based (create_react_agent): For exploratory, non-linear scenarios like RCA
+    - StateGraph-based (custom graph with phase nodes): For linear, deterministic scenarios like Memory Extraction
+
+    External callers use the same interface regardless of internal architecture.
+    """
+
+    @staticmethod
+    def build(system_type: str, config: ScenarioConfig) -> AgentSystem:
+        state_schema = get_state_schema(system_type)
+
+        # Select architecture based on system type characteristics
+        if config.orchestrator_mode == "react":
+            # RCA, exploratory scenarios: LLM freely interleaves phases
+            return build_react_system(state_schema, config)
+        else:
+            # Memory extraction, sequential: explicit phase nodes
+            return build_graph_system(state_schema, config)
+
+class AgentSystem:
+    """Unified interface for all agent systems."""
+    async def execute(self, input_data: dict) -> dict: ...
+    async def stream(self, input_data: dict): ...
+```
+
+---
+
 ## Building a New System
 
 Adding a new agent system type requires:
 
 1. **State class** — Define a new `TypedDict` inheriting from `BaseExecutorState`, register in `STATE_SCHEMAS`
-2. **YAML config** — Define phases, agents, feature gates
-3. **Phase handlers** — Implement the phase functions
-4. **Orchestrator subclass** — Implement `_decide_next_phase`
-
-No changes to the core framework (PhaseManager, BaseOrchestrator, registry).
+2. **Architecture mode** — Choose `react` (exploratory) or `graph` (linear) in scenario.yaml `orchestrator_mode`
+3. **YAML config** — Define agents, tools, prompts, feature gates
+4. **If StateGraph mode**: Define phase handlers and register with PhaseManager
+5. **If ReAct mode**: Design the system prompt with diagnostic methodology guidelines
 
 ---
 

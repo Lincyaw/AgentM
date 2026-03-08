@@ -801,6 +801,69 @@ The Orchestrator is a single `create_react_agent` running a continuous ReAct loo
 
 The LLM is free to interleave phases naturally — e.g., it might start forming hypotheses while exploration agents are still running, or loop back to exploration after a verification fails.
 
+### Notebook I/O: How the Orchestrator Reads and Writes Notebook
+
+The Orchestrator LLM needs to see Notebook content (read) and tools need to update it (write). Two mechanisms handle this:
+
+**Read**: `prompt` callable injects Notebook content before every LLM call.
+
+```python
+def build_orchestrator_prompt(system_prompt_template: str):
+    """Build a prompt callable that injects Notebook into LLM context."""
+
+    def prompt(state: ExecutorState):
+        notebook_text = format_notebook(state["notebook"])
+        system_prompt = render_template(system_prompt_template, notebook=notebook_text)
+        return [
+            SystemMessage(content=system_prompt),
+            *state["messages"],
+        ]
+
+    return prompt
+
+orchestrator = create_react_agent(
+    model=model,
+    tools=tools,
+    prompt=build_orchestrator_prompt("prompts/orchestrator_system.j2"),
+    state_schema=ExecutorState,
+)
+```
+
+**Write**: Tools return `Command(update={"notebook": ...})` to transparently update Notebook.
+
+```python
+@tool
+def check_tasks(tool_call_id: Annotated[str, InjectedToolCallId],
+                wait_seconds: int = 10) -> Command:
+    results = task_manager.get_all_status(wait_seconds=wait_seconds)
+
+    # Transparently update Notebook with completed results
+    notebook = current_notebook()  # Read from state via closure or InjectedState
+    for completed in results["completed"]:
+        notebook.collected_data[completed["agent_id"]] = completed["result"]
+        notebook.exploration_history.append(ExplorationStep(
+            step_number=notebook.current_step,
+            phase=notebook.current_phase,
+            action=f"Collected results from {completed['agent_id']}",
+            timestamp=datetime.now().isoformat(),
+            content=str(completed["result"]),
+            agent_outcomes={completed["agent_id"]: AgentOutcome(
+                agent_id=completed["agent_id"],
+                task_id=completed["task_id"],
+                status=AgentRunStatus.COMPLETED,
+                duration_seconds=completed.get("duration_seconds"),
+            )},
+        ))
+        notebook.current_step += 1
+
+    return Command(update={
+        "notebook": notebook,
+        "messages": [ToolMessage(content=json.dumps(results), tool_call_id=tool_call_id)],
+    })
+```
+
+**LLM perspective**: The LLM calls `check_tasks()`, sees results in the ToolMessage, and continues reasoning. The Notebook is updated transparently — the LLM sees the updated Notebook in the next prompt injection. It never needs to explicitly manage Notebook state.
+
 ### System Prompt Guidelines (Not Enforced by Graph)
 
 The Orchestrator's system prompt provides diagnostic discipline without rigid enforcement:
@@ -831,16 +894,25 @@ Your working memory is the DiagnosticNotebook. Record all findings there.
 
 ## Tools Available
 - dispatch_agent(agent_id, task): Send a task to a Sub-Agent (async, returns immediately)
-- check_tasks(): See status of all dispatched tasks + results of completed ones
+- check_tasks(wait_seconds=10): See status of all dispatched tasks + results of completed ones.
+  If all tasks are still running, waits internally up to wait_seconds before returning.
 - inject_instruction(task_id, msg): Redirect a running agent
 - abort_task(task_id, reason): Stop a running agent
 - knowledge_search/list/read: Query historical knowledge base
 - recall_history: Retrieve compressed history details
 
+## Patience & Thoroughness
+- Agent investigations are long-running tasks (10s to minutes). This is normal.
+- When check_tasks shows all agents still running, review your existing data and refine
+  your thinking. Do NOT repeatedly check without doing analysis in between.
+- Do NOT abort a task unless you see clear failure signals (errors, stuck at same step).
+  Agents progressing through steps are working normally.
+- Do NOT rush to conclusions. Thorough investigation beats fast guessing.
+
 ## Notebook Management
+- The Notebook is updated automatically when you use tools (you don't need to manage it).
 - Update current_phase to reflect your focus: exploration / generation / verification / confirmation
-- Record each significant action as an ExplorationStep in exploration_history
-- Maintain hypotheses with evidence and counter_evidence
+- The Notebook content is shown to you at the beginning of each reasoning step.
 ```
 
 ### Example: Realistic RCA Flow
@@ -1348,12 +1420,18 @@ class TaskManager:
             managed.completed_at = datetime.now().isoformat()
             managed.duration_seconds = self._calc_duration(managed)
 
-    def get_all_status(self) -> dict:
+    async def get_all_status(self, wait_seconds: int = 10) -> dict:
         """Return status snapshot of all tasks, including full results for completed tasks.
 
-        Called by check_tasks tool. Completed task results are included inline
-        so the Orchestrator gets everything in one call.
+        If all tasks are still running, waits up to wait_seconds for any to complete
+        before returning. This prevents LLM from polling in a tight loop.
         """
+        # Wait for at least one task to complete (if all are running)
+        if wait_seconds > 0 and all(
+            t.status == AgentRunStatus.RUNNING for t in self._tasks.values()
+        ):
+            await self._wait_for_any_completion(timeout=wait_seconds)
+
         result = {"running": [], "completed": [], "failed": []}
         for task_id, task in self._tasks.items():
             entry = {
@@ -1463,7 +1541,12 @@ The Orchestrator has four task management tools, all backed by the TaskManager:
 
 ```python
 @tool
-def dispatch_agent(agent_id: str, task: str, hypothesis_id: Optional[str] = None) -> dict:
+async def dispatch_agent(
+    agent_id: str,
+    task: str,
+    hypothesis_id: Optional[str] = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = None,
+) -> Command:
     """Dispatch a task to a Sub-Agent. The agent starts executing immediately
     in the background and this tool returns right away with a task_id.
 
@@ -1471,49 +1554,103 @@ def dispatch_agent(agent_id: str, task: str, hypothesis_id: Optional[str] = None
 
     Multiple agents can be dispatched concurrently — call this tool multiple times.
 
-    > **Implementation note**: This is an async tool (`async def`). LangChain's
-    > `@tool` decorator supports async functions natively. All TaskManager tools
-    > must be defined as `async def` since they call `await task_manager.submit()`.
-
     Args:
         agent_id: Which Sub-Agent to dispatch (e.g., "infrastructure", "database", "logs")
         task: Natural language instruction for the agent.
-            Phase 1 example: "Scan infrastructure metrics: CPU, memory, disk, network"
-            Phase 3 example: "Verify H1: Check connection pool size, active connections, wait queue"
         hypothesis_id: Optional hypothesis being investigated (for tracing)
     """
     managed = await task_manager.submit(agent_id, task, hypothesis_id)
-    return {
-        "task_id": managed.task_id,
-        "agent_id": agent_id,
-        "status": "running",
-    }
+
+    # Transparently update Notebook: record the dispatch
+    notebook = get_current_notebook()
+    notebook.exploration_history.append(ExplorationStep(
+        step_number=notebook.current_step,
+        phase=notebook.current_phase,
+        action=f"Dispatched {agent_id}: {task[:80]}",
+        timestamp=datetime.now().isoformat(),
+        content=f"Dispatched {agent_id} agent. Task: {task}",
+        target_agents=[agent_id],
+        agent_outcomes={agent_id: AgentOutcome(
+            agent_id=agent_id, task_id=managed.task_id,
+            status=AgentRunStatus.RUNNING,
+        )},
+    ))
+    notebook.current_step += 1
+
+    return Command(update={
+        "notebook": notebook,
+        "messages": [ToolMessage(
+            content=json.dumps({"task_id": managed.task_id, "agent_id": agent_id, "status": "running"}),
+            tool_call_id=tool_call_id,
+        )],
+    })
 
 
 @tool
-def check_tasks() -> dict:
+async def check_tasks(
+    wait_seconds: int = 10,
+    tool_call_id: Annotated[str, InjectedToolCallId] = None,
+) -> Command:
     """Check the current status of all dispatched tasks.
+
+    If all tasks are still running, waits internally up to wait_seconds
+    before returning — so each call returns meaningful new information.
 
     Returns a dashboard with three sections:
     - running: Tasks still executing, with step progress and activity summary
     - completed: Tasks that have finished, with full results inline
     - failed: Tasks that encountered errors
 
-    Use this to:
-    - Monitor progress of long-running agents
-    - Decide whether to wait, inject new instructions, or abort
-    - Collect completed task results (included inline, no separate call needed)
+    Args:
+        wait_seconds: Max seconds to wait if all tasks are still running (default 10).
+            Increase for long investigations, decrease for quick checks.
     """
-    return task_manager.get_all_status()
+    results = await task_manager.get_all_status(wait_seconds=wait_seconds)
+
+    # Transparently update Notebook with completed/failed results
+    notebook = get_current_notebook()
+    for completed in results["completed"]:
+        notebook.collected_data[completed["agent_id"]] = completed.get("result")
+        notebook.exploration_history.append(ExplorationStep(
+            step_number=notebook.current_step,
+            phase=notebook.current_phase,
+            action=f"Result from {completed['agent_id']}",
+            timestamp=datetime.now().isoformat(),
+            content=str(completed.get("result", "")),
+            agent_outcomes={completed["agent_id"]: AgentOutcome(
+                agent_id=completed["agent_id"],
+                task_id=completed["task_id"],
+                status=AgentRunStatus.COMPLETED,
+                duration_seconds=completed.get("duration_seconds"),
+            )},
+        ))
+        notebook.current_step += 1
+
+    for failed in results["failed"]:
+        notebook.exploration_history.append(ExplorationStep(
+            step_number=notebook.current_step,
+            phase=notebook.current_phase,
+            action=f"Failed: {failed['agent_id']}",
+            timestamp=datetime.now().isoformat(),
+            content=f"Agent {failed['agent_id']} failed: {failed.get('error_summary', 'unknown')}",
+            agent_outcomes={failed["agent_id"]: AgentOutcome(
+                agent_id=failed["agent_id"],
+                task_id=failed["task_id"],
+                status=AgentRunStatus.FAILED,
+                error=failed.get("error_summary"),
+            )},
+        ))
+        notebook.current_step += 1
+
+    return Command(update={
+        "notebook": notebook,
+        "messages": [ToolMessage(content=json.dumps(results), tool_call_id=tool_call_id)],
+    })
 
 
 @tool
 def inject_instruction(task_id: str, instruction: str) -> str:
     """Inject a new instruction into a running Sub-Agent.
-
-    The instruction is queued and injected at the Sub-Agent's next interrupt point
-    via Command(resume=..., update={...}). The agent will see it as a HumanMessage
-    when it resumes execution.
 
     The instruction is queued and will be injected into the agent's LLM input
     on its next reasoning step (via pre_model_hook). The agent sees it as a

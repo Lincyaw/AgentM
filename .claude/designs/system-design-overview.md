@@ -448,7 +448,7 @@ Switching scenarios requires **only pointing to a different scenario directory**
 The Orchestrator dispatches Sub-Agents asynchronously via a **TaskManager** and monitors them through tools in its ReAct loop. Sub-Agents execute as independent `asyncio.Task`s, each running a compiled subgraph.
 
 - **`dispatch_agent` tool**: Launch a Sub-Agent asynchronously (returns immediately with `task_id`)
-- **`check_tasks` tool**: Query status of all dispatched tasks (running/completed/failed, step progress, summaries, results)
+- **`check_tasks` tool**: Query status of all dispatched tasks (running/completed/failed, step progress, summaries, results). Waits internally if all tasks are still running to avoid LLM polling.
 - **`inject_instruction` tool**: Inject new instructions into a running Sub-Agent (via `pre_model_hook` instruction queue)
 - **`abort_task` tool**: Cancel a running Sub-Agent's `asyncio.Task`
 - **TaskManager**: Manages async task lifecycle, streams events to WebSocket for frontend display
