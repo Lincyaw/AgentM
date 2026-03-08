@@ -5,6 +5,8 @@
 
 ---
 
+> **Code conventions**: Same as [orchestrator.md](orchestrator.md#code-conventions-in-this-document). Data structures (`dataclass`, `Enum`, `TypedDict`) are **normative**; function logic is **illustrative**.
+
 ## Overview
 
 The SDK Wrapper is the **implementation framework** underlying all AgentM agent systems. The core insight:
@@ -13,7 +15,7 @@ The SDK Wrapper is the **implementation framework** underlying all AgentM agent 
 
 ```
 Generic SDK Wrapper (shared code)
-├─ StateSchemaFactory     — Dynamic state schema generation
+├─ State Schema Registry  — Concrete state classes per system type
 ├─ PhaseManager           — Phase lifecycle and transitions
 ├─ BaseOrchestrator       — Supervisor routing, Sub-Agent dispatch
 ├─ Trajectory Recording   — Checkpoint, streaming, export
@@ -77,46 +79,26 @@ class DecisionTreeState(BaseExecutorState):
     feature_values: dict[str, Any]
 ```
 
-### StateSchemaFactory
+### State Schema Registry
 
-> **⚠️ LangGraph Verification — Dynamic TypedDict Creation**: Python's `TypedDict` function-call syntax (`TypedDict("Name", fields)`) works for creating dynamic schemas, but **`Annotated` types with reducers** may not propagate correctly when using this approach. The `create_react_agent` and `StateGraph` expect proper type annotations.
->
-> **Recommendation**: Test that `Annotated[list, operator.add]` reducers work when passed through `TypedDict()` dynamic creation. If not, use a class-based approach with `type()` metaclass or pre-define the concrete state classes and select via config mapping (simpler, more explicit).
+Each system type maps to its concrete State class. The registry is a simple lookup — no dynamic TypedDict creation needed.
 
 ```python
-class StateSchemaFactory:
-    """Generate state schemas from config."""
+STATE_SCHEMAS: dict[str, type] = {
+    "hypothesis_driven": HypothesisDrivenState,
+    "sequential": SequentialDiagnosisState,
+    "memory_extraction": MemoryExtractionState,
+    "decision_tree": DecisionTreeState,
+}
 
-    SYSTEM_FIELDS = {
-        "hypothesis_driven": {
-            "notebook": DiagnosticNotebook,
-            "current_hypothesis": Optional[str],
-        },
-        "sequential": {
-            "steps": Annotated[list[dict], operator.add],
-            "current_step_index": int,
-        },
-        "memory_extraction": {
-            "source_trajectories": list[str],
-            "extracted_patterns": Annotated[list[dict], operator.add],
-            "knowledge_entries": list[KnowledgeEntry],
-            "existing_knowledge": list[KnowledgeEntry],
-        },
-        "decision_tree": {
-            "decision_path": list[str],
-            "current_node_id": str,
-            "feature_values": dict,
-        },
-    }
-
-    @staticmethod
-    def create(system_type: str, custom_fields: dict = None) -> type:
-        base = {"messages": Annotated[list, operator.add],
-                "task_id": str, "task_description": str, "current_phase": str}
-        system = StateSchemaFactory.SYSTEM_FIELDS.get(system_type, {})
-        all_fields = {**base, **system, **(custom_fields or {})}
-        return TypedDict("ExecutorState", all_fields)
+def get_state_schema(system_type: str) -> type:
+    """Look up the state schema for a system type."""
+    if system_type not in STATE_SCHEMAS:
+        raise ValueError(f"Unknown system type: {system_type}. Available: {list(STATE_SCHEMAS.keys())}")
+    return STATE_SCHEMAS[system_type]
 ```
+
+To add a new system type: define a new State class inheriting from `BaseExecutorState`, then register it in `STATE_SCHEMAS`.
 
 ---
 
@@ -270,11 +252,36 @@ Phase 4: REFINE
 ### Knowledge Data Structures
 
 ```python
+from enum import Enum
+
+
+class KnowledgeCategory(str, Enum):
+    """Top-level classification of knowledge entries."""
+    FAILURE_PATTERN = "failure_pattern"
+    DIAGNOSTIC_SKILL = "diagnostic_skill"
+    SYSTEM_KNOWLEDGE = "system_knowledge"
+
+
+class KnowledgeConfidence(str, Enum):
+    """Confidence level of a knowledge entry, determined by evidence strength.
+
+    Memory Agent assigns this during extraction based on how the knowledge
+    was established:
+    - FACT: Verified causal relationship (hypothesis confirmed through RCA)
+    - PATTERN: Observed correlation across multiple trajectories (statistical, not causal)
+    - HEURISTIC: Inferred strategy or rule of thumb from diagnostic experience
+    """
+    FACT = "fact"            # Confirmed causal relationship, e.g., "pool full → API timeout"
+    PATTERN = "pattern"      # Observed correlation, e.g., "CPU >80% often accompanies slow queries"
+    HEURISTIC = "heuristic"  # Empirical strategy, e.g., "check connection pool before disk I/O"
+
+
 @dataclass
 class KnowledgeEntry:
     id: str
     path: str                         # Full namespace path, e.g., "failure_pattern/database/connection_pool_exhaustion"
-    category: Literal["failure_pattern", "diagnostic_skill", "system_knowledge"]
+    category: KnowledgeCategory
+    confidence: KnowledgeConfidence   # How reliable this knowledge is
     domain: str                       # Second-level grouping, e.g., "database", "network", "memory"
     title: str                        # "Database connection pool exhaustion"
     description: str                  # Detailed description
@@ -292,6 +299,26 @@ class KnowledgeEvidence:
     relevant_data: dict               # Key data points from that trajectory
     summary: str                      # Brief description of how this evidence supports the entry
 ```
+
+### Knowledge Confidence Model
+
+Memory Agent assigns a confidence level to each extracted knowledge entry based on how it was established during RCA:
+
+| Confidence | Meaning | Source in Trajectory | Example |
+|-----------|---------|---------------------|---------|
+| **FACT** | Verified causal relationship | Hypothesis confirmed (Phase 4) with supporting evidence | "When connection pool is 100% full, API response > 5s" |
+| **PATTERN** | Observed correlation, not proven causal | Recurring co-occurrence across multiple trajectories | "CPU > 80% is often accompanied by slow query increase" |
+| **HEURISTIC** | Effective strategy from experience | Diagnostic path that led to faster resolution | "Check connection pool before disk I/O — faster to confirm/eliminate" |
+
+**How RCA Orchestrator uses confidence**:
+
+| RCA Phase | Preferred Confidence | Rationale |
+|-----------|---------------------|-----------|
+| Phase 1 (Exploration) | HEURISTIC, PATTERN | Guide which agents to dispatch first; broad relevance |
+| Phase 2 (Hypothesis Generation) | FACT, PATTERN | Generate hypotheses from known causes and correlations |
+| Phase 3 (Verification) | FACT only | Only trust confirmed causal knowledge when evaluating evidence |
+
+**Confidence promotion**: A PATTERN entry can be promoted to FACT when a new RCA trajectory confirms the causal relationship. The Memory Agent handles this during the REFINE phase by comparing new verification results against existing pattern entries.
 
 ### Knowledge Store: Filesystem-Like Namespace
 
@@ -373,11 +400,11 @@ await store.setup()
 
 ### Knowledge Categories
 
-| Category | What It Contains | How RCA Uses It |
-|----------|-----------------|----------------|
-| **failure_pattern** | Recurring failure modes with symptoms, root causes, and resolution | Orchestrator searches during Phase 2 (hypothesis generation) to propose hypotheses based on historical precedent |
-| **diagnostic_skill** | Effective investigation strategies (which tools to use, in what order, for what symptoms) | Orchestrator references during Phase 1 (exploration) and Phase 3 (verification) to optimize investigation |
-| **system_knowledge** | Domain facts about the target system (architecture, dependencies, known limits) | Injected into Orchestrator's system prompt for context |
+| Category | What It Contains | Typical Confidence | How RCA Uses It |
+|----------|-----------------|-------------------|----------------|
+| **failure_pattern** | Recurring failure modes with symptoms, root causes, and resolution | FACT or PATTERN | Orchestrator searches during Phase 2 (hypothesis generation) to propose hypotheses based on historical precedent |
+| **diagnostic_skill** | Effective investigation strategies (which tools to use, in what order, for what symptoms) | HEURISTIC | Orchestrator references during Phase 1 (exploration) and Phase 3 (verification) to optimize investigation |
+| **system_knowledge** | Domain facts about the target system (architecture, dependencies, known limits) | FACT | Injected into Orchestrator's system prompt for context |
 
 ### Integration with RCA System: Knowledge Tools
 
@@ -459,7 +486,12 @@ def knowledge_list(path: str = "/") -> dict:
     return {
         "path": path,
         "sub_paths": [namespace_to_path(ns) for ns in children],
-        "entries": [{"key": e.key, "title": e.value.get("title", ""), "frequency": e.value.get("frequency", 0)} for e in entries],
+        "entries": [{
+            "key": e.key,
+            "title": e.value.get("title", ""),
+            "confidence": e.value.get("confidence", ""),
+            "frequency": e.value.get("frequency", 0),
+        } for e in entries],
     }
 
 
@@ -567,27 +599,31 @@ def knowledge_delete(path: str) -> str:
 ```
 RCA Orchestrator (Phase 2: Hypothesis Generation)
   │
-  ├─ 1. Semantic search: knowledge_search("API timeout under high load")
-  │     → returns: [{path: "/failure_pattern/database/connection_pool_exhaustion", score: 0.92, ...},
-  │                 {path: "/failure_pattern/network/dns_resolution_timeout", score: 0.71, ...}]
+  ├─ 1. Semantic search with confidence filter:
+  │     knowledge_search("API timeout under high load",
+  │                      filter={"confidence": {"$in": ["fact", "pattern"]}})
+  │     → returns: [{path: "/failure_pattern/database/connection_pool_exhaustion",
+  │                  confidence: "fact", score: 0.92, ...},
+  │                 {path: "/failure_pattern/network/dns_resolution_timeout",
+  │                  confidence: "pattern", score: 0.71, ...}]
   │
   ├─ 2. Browse neighborhood: knowledge_list("/failure_pattern/database/")
   │     → returns: {sub_paths: [], entries: [
-  │         {key: "connection_pool_exhaustion", title: "...", frequency: 5},
-  │         {key: "slow_query_lock_contention", title: "...", frequency: 3},
-  │         {key: "replication_lag", title: "...", frequency: 1},
+  │         {key: "connection_pool_exhaustion", title: "...", frequency: 5, confidence: "fact"},
+  │         {key: "slow_query_lock_contention", title: "...", frequency: 3, confidence: "pattern"},
+  │         {key: "replication_lag", title: "...", frequency: 1, confidence: "pattern"},
   │     ]}
-  │     → Agent sees: "connection_pool_exhaustion" is the most frequent database pattern,
-  │       and there are other database patterns to consider
+  │     → Agent sees: "connection_pool_exhaustion" is a confirmed FACT (highest confidence),
+  │       other patterns are correlations worth considering
   │
   ├─ 3. Read full detail: knowledge_read("/failure_pattern/database/connection_pool_exhaustion")
-  │     → returns full KnowledgeEntry with evidence, related_entries, etc.
+  │     → returns full KnowledgeEntry with evidence, confidence, related_entries, etc.
   │
   ├─ 4. Follow related: knowledge_read("/diagnostic_skill/database/connection_pool_analysis")
-  │     → returns the recommended diagnostic approach for this pattern
+  │     → returns the recommended diagnostic approach (HEURISTIC confidence)
   │
-  └─ 5. Generate hypothesis with historical context:
-        "H1: Connection pool exhaustion (5 historical precedents, recommended skill available)"
+  └─ 5. Generate hypothesis with historical context and confidence:
+        "H1: Connection pool exhaustion (FACT, 5 precedents, diagnostic skill available)"
 ```
 
 ### Trigger Modes
@@ -700,12 +736,12 @@ result = await memory_system.execute({
 
 Adding a new agent system type requires:
 
-1. **YAML config** — Define phases, agents, feature gates
-2. **State fields** — Add system-specific fields to `StateSchemaFactory.SYSTEM_FIELDS`
+1. **State class** — Define a new `TypedDict` inheriting from `BaseExecutorState`, register in `STATE_SCHEMAS`
+2. **YAML config** — Define phases, agents, feature gates
 3. **Phase handlers** — Implement the phase functions
 4. **Orchestrator subclass** — Implement `_decide_next_phase`
 
-No changes to the core framework (StateSchemaFactory, PhaseManager, BaseOrchestrator).
+No changes to the core framework (PhaseManager, BaseOrchestrator, registry).
 
 ---
 

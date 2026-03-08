@@ -16,7 +16,7 @@ AgentM is a **hypothesis-driven multi-agent orchestration framework** built on L
 | Hypothesis-driven reasoning | All reasoning happens in the Orchestrator; Sub-Agents only collect data |
 | Config-driven system | Prompts, tools, models configured via YAML files |
 | Agent isolation | Sub-Agents have private state; communicate via shared `messages` field |
-| Orchestrator supervision | Monitor Sub-Agent execution, interrupt, redirect, inject instructions |
+| Orchestrator supervision | Monitor Sub-Agent execution via TaskManager tools, inject instructions, abort |
 | Trajectory recording | Hierarchical execution traces with hypothesis evolution, RL export |
 | Failure recovery | Resume from checkpoint, debug replay from any point |
 | Multi-system support | Generic SDK wrapper supports different diagnostic patterns |
@@ -31,7 +31,7 @@ AgentM is a **hypothesis-driven multi-agent orchestration framework** built on L
 │            Root StateGraph (ExecutorState)             │
 │                                                        │
 │  ┌──────────────────────────────────────────────────┐ │
-│  │ Orchestrator (Supervisor Node)                    │ │
+│  │ Orchestrator (create_react_agent, ReAct loop)     │ │
 │  │                                                    │ │
 │  │  DiagnosticNotebook (Working Memory)              │ │
 │  │  ├─ collected_data: {}   (from Sub-Agents)        │ │
@@ -40,13 +40,18 @@ AgentM is a **hypothesis-driven multi-agent orchestration framework** built on L
 │  │  └─ current_phase: exploration|generation|...     │ │
 │  │                                                    │ │
 │  │  Role: Hypothesis reasoner (Team Leader)          │ │
-│  │  Tools: dispatch_task, interrupt_agent, ...        │ │
+│  │  Tools: dispatch_agent, check_tasks, get_result,  │ │
+│  │         inject_instruction, abort_task, ...        │ │
 │  └──────────────────────────────────────────────────┘ │
-│                        ↕                               │
+│           ↕ (tool calls)                               │
+│  ┌──────────────────────────────────────────────────┐ │
+│  │ TaskManager (async task lifecycle management)     │ │
+│  └──────────────────────────────────────────────────┘ │
+│           ↕ (asyncio.Tasks)                            │
 │  ┌────────────┬────────────┬────────────┐             │
 │  │ SubAgent 1 │ SubAgent 2 │ SubAgent N │             │
-│  │ (Subgraph) │ (Subgraph) │ (Subgraph) │             │
-│  │ Tools/State│ Tools/State│ Tools/State│             │
+│  │ (compiled  │ (compiled  │ (compiled  │             │
+│  │  subgraph) │  subgraph) │  subgraph) │             │
 │  └────────────┴────────────┴────────────┘             │
 └──────────────────────────────────────────────────────┘
          ↓                    ↓
@@ -80,15 +85,14 @@ Key design choices:
 - **No confidence scores** — LLM-generated confidence is unreliable; use three-value verdict (`confirmed / rejected / partial`)
 - **No prediction anchoring** — Orchestrator does NOT set expected outcomes before experiments, avoiding confirmation bias
 - **Adversarial review** (feature-gated) — A Devil's Advocate Sub-Agent challenges conclusions to counter LLM confirmation bias
-- **Async task dispatch** — Orchestrator submits multiple concurrent tasks via LangGraph `Send` API, like a real team leader
+- **Async task dispatch** — Orchestrator dispatches concurrent tasks via TaskManager, monitors and intervenes through tools
 
-Sub-Agent returns a **three-block result** per verification:
+Sub-Agent returns a **VerificationResult** per verification:
 
-| Block | Content |
-|-------|---------|
-| **Investigation Data** | Raw investigation results (metrics, logs, states) |
-| **Reasoning** | Supporting reasons, rejecting reasons, neutral observations |
-| **Verdict** | `confirmed` / `rejected` / `partial` |
+| Field | Type | Content |
+|-------|------|---------|
+| **verdict** | `Verdict` (Enum) | `confirmed` / `rejected` / `partial` — structured, for system routing |
+| **report** | `str` (natural language) | Full diagnostic narrative: data collected, supporting/contradicting observations, key findings |
 
 > Detail: See [orchestrator.md](orchestrator.md) for Notebook structure, state machine formalization, feature gates, and phase implementation.
 
@@ -139,7 +143,7 @@ config/
 │   ├── infrastructure.yaml            # check_cpu, check_memory, check_disk, ...
 │   ├── database.yaml                  # get_db_metrics, analyze_slow_queries, ...
 │   ├── knowledge.yaml                 # knowledge_search, knowledge_list, ...
-│   └── orchestrator.yaml              # check_agents, inject_instruction, abort_agent
+│   └── orchestrator.yaml              # dispatch_agent, check_tasks, inject_instruction, abort_task
 └── scenarios/                         # Self-contained scenario definitions
     ├── rca_hypothesis/
     │   ├── scenario.yaml              # Orchestrator + agents + feature gates
@@ -250,10 +254,11 @@ orchestrator:
     hypothesis_generation: "prompts/hypothesis_generation.j2"
 
   tools:
-    - check_agents
+    - dispatch_agent
+    - check_tasks
+    - get_result
     - inject_instruction
-    - abort_agent
-    - dispatch_task
+    - abort_task
     - knowledge_search
     - knowledge_list
     - knowledge_read
@@ -268,9 +273,8 @@ orchestrator:
 
   compression:
     enabled: true
+    compression_threshold: 0.8        # Compress when token usage ≥ 80% of context limit
     notebook:
-      compress_on_phase_transition: true
-      max_history_entries: 20
       compression_model: "gpt-4o-mini"
     recall:
       enabled: true
@@ -293,7 +297,6 @@ agents:
         max_attempts: 3
         initial_interval: 1.0
     compression:
-      max_uncompressed_steps: 10
       compression_model: "gpt-4o-mini"
 
   database:
@@ -312,7 +315,6 @@ agents:
         max_attempts: 3
         initial_interval: 1.0
     compression:
-      max_uncompressed_steps: 15
       compression_model: "gpt-4o-mini"
 ```
 
@@ -434,17 +436,18 @@ Switching scenarios requires **only pointing to a different scenario directory**
 
 ## Monitoring & Intervention
 
-Orchestrator monitors Sub-Agents via a **pull-based dashboard tool** (`check_agents`), backed by an external `ExecutionRunner` that streams subgraph events into an in-memory `AgentDashboard`.
+The Orchestrator dispatches Sub-Agents asynchronously via a **TaskManager** and monitors them through tools in its ReAct loop. Sub-Agents execute as independent `asyncio.Task`s, each running a compiled subgraph.
 
-- **`check_agents` tool**: Returns running agents' progress summaries (via lightweight model) and completed agents' results (consume-once)
-- **`inject_instruction` tool**: Inject new instructions into a running Sub-Agent (via Runner's `update_state()`)
-- **`abort_agent` tool**: Terminate a stuck or unnecessary Sub-Agent
-- **External Runner**: Drives `graph.astream(subgraphs=True)`, feeds events to Dashboard, provides backing for intervention tools
-- **Frontend streaming**: Runner forwards events to WebSocket for real-time frontend display
+- **`dispatch_agent` tool**: Launch a Sub-Agent asynchronously (returns immediately with `task_id`)
+- **`check_tasks` tool**: Query status of all dispatched tasks (running/completed/failed, step progress, summaries)
+- **`get_result` tool**: Fetch the full result of a completed task
+- **`inject_instruction` tool**: Inject new instructions into a running Sub-Agent (via `update_state()`)
+- **`abort_task` tool**: Cancel a running Sub-Agent's `asyncio.Task`
+- **TaskManager**: Manages async task lifecycle, streams events to WebSocket for frontend display
 
-Key design choice: Sub-Agents run **uninterrupted**. The Orchestrator pulls status on-demand during its own reasoning loop, and only intervenes when necessary. Summaries are generated lazily (only when `check_agents` is called).
+Key design choice: The Orchestrator remains active in its ReAct loop while Sub-Agents execute concurrently. It decides when to check, intervene, or wait — acting as a true team leader with real-time situational awareness.
 
-> Detail: See [orchestrator.md](orchestrator.md#monitoring--intervention) for full `AgentDashboard`, tool definitions, and `ExecutionRunner` implementation.
+> Detail: See [orchestrator.md](orchestrator.md#taskmanager--orchestrator-tools) for full `TaskManager` implementation and tool definitions.
 
 ---
 
@@ -496,7 +499,7 @@ Errors are handled at four layers, each with a different actor and strategy:
 |-------|-------|---------|----------|---------|
 | **1. Sub-Agent self-heal** | Sub-Agent LLM | Tool returns error as `ToolMessage` | LLM reasons about the error and tries an alternative approach | API returns 404 → agent tries a different endpoint |
 | **2. RetryPolicy** | LangGraph engine | Node execution raises exception | Automatic retry with exponential backoff | Rate limit 429 → retry after 1s, 2s, 4s |
-| **3. Orchestrator decision** | Orchestrator LLM | Sub-Agent reports failure via `check_agents` | Re-dispatch, switch agent, adjust task, or skip | Database agent fails → try infrastructure agent |
+| **3. Orchestrator decision** | Orchestrator LLM | Sub-Agent reports failure via `check_tasks` | Re-dispatch, switch agent, adjust task, or skip | Database agent fails → try infrastructure agent |
 | **4. System recovery** | Human operator | Process crash, OOM, infrastructure failure | Manual resume from checkpoint | Service restarts → operator resumes thread |
 
 Layer 1-2 are automatic. Layer 3 is LLM-driven. Layer 4 is manual.
@@ -588,10 +591,10 @@ agent:
 
 ### Layer 3: Orchestrator Decision on Sub-Agent Failure
 
-When a Sub-Agent fails (exhausts retries or hits a fatal error), its status appears as `failed` in the `check_agents` result. The failure report includes both an error summary and the last few execution steps, giving the Orchestrator enough context to decide next steps.
+When a Sub-Agent fails (exhausts retries or hits a fatal error), its status appears as `failed` in the `check_tasks` result. The failure report includes both an error summary and the last few execution steps, giving the Orchestrator enough context to decide next steps.
 
 ```python
-# check_agents() returns:
+# check_tasks() returns:
 {
     "failed": [{
         "agent_id": "database",
@@ -647,11 +650,13 @@ system:
   recovery:
     mode: "manual"                    # "manual" — operator decides
     expose_api: true                  # Expose recovery endpoints in REST API
-    # Recovery API endpoints:
-    #   GET  /api/tasks/{thread_id}/state       — inspect state at crash point
-    #   GET  /api/tasks/{thread_id}/history     — browse checkpoint history
-    #   POST /api/tasks/{thread_id}/resume      — resume from last checkpoint
-    #   POST /api/tasks/{thread_id}/rollback    — rollback to specific checkpoint
+    # Recovery API endpoints (consistent with frontend dashboard API):
+    #   GET  /api/tasks/{thread_id}/state        — inspect state at crash point
+    #   GET  /api/tasks/{thread_id}/history       — browse checkpoint history
+    #   GET  /api/tasks/{thread_id}/history/{id}  — single checkpoint full state
+    #   GET  /api/tasks/{thread_id}/trajectory    — export full trajectory as JSONL
+    #   POST /api/tasks/{thread_id}/resume        — resume from last or specific checkpoint
+    #   POST /api/tasks/{thread_id}/fork          — fork from checkpoint with state modifications
 ```
 
 ### Debug Replay
@@ -686,15 +691,18 @@ debug_result = graph.invoke(None, fork_config)
 ## Frontend Architecture
 
 ```
-AgentM Dashboard
-├── Agent Topology     — Orchestrator + Sub-Agents connection graph
-├── Execution Monitor  — Real-time progress, phase indicator, timeline
-├── Conversation View  — Rebuilt from Notebook (Mode 2)
-├── Hypothesis Tracker — Hypothesis list, status changes, evidence
-└── Debug Panel        — State inspector, checkpoint navigator, replay
+AgentM Dashboard (single HTML file, React + WebSocket + d3.js)
+├── Agent Topology     — d3.js force-directed graph, real-time agent status
+├── Execution Monitor  — Timeline + agent detail split pane, searchable
+├── Conversation View  — Scenario plugin (RCA: phase-based flow from Notebook)
+└── Debug Panel        — Checkpoint browser, state inspector, replay/fork/export
 ```
 
 Tech stack: Python + FastAPI + LangGraph backend, React + WebSocket + d3.js frontend.
+
+Scenario-specific views (Conversation View) are loaded via a plugin interface. Each scenario provides its own component. Currently only the RCA hypothesis-driven scenario is implemented.
+
+> Detail: See [frontend-architecture.md](frontend-architecture.md) for full page layouts, WebSocket protocol, component tree, and scenario plugin API.
 
 ---
 
@@ -726,6 +734,7 @@ The **Memory Extraction** system reuses the same Supervisor + Subgraph architect
 | [orchestrator.md](orchestrator.md) | Orchestrator + DiagnosticNotebook + Four-phase flow + Verification model |
 | [sub-agent.md](sub-agent.md) | Sub-Agent architecture + Config + State isolation + Tool management |
 | [generic-state-wrapper.md](generic-state-wrapper.md) | Generic SDK wrapper for multiple diagnostic patterns |
+| [frontend-architecture.md](frontend-architecture.md) | Dashboard UI, WebSocket protocol, scenario plugin system |
 
 ---
 
@@ -735,15 +744,16 @@ The **Memory Extraction** system reuses the same Supervisor + Subgraph architect
 |----------|-----------|-----------|
 | Hypothetico-Deductive state machine | Formal scientific method foundation | Must handle cycle-back on refutation |
 | Supervisor + Subgraph | Leverages LangGraph's native multi-agent capabilities ✅ | Graph must be compiled at startup |
-| Minimal messages + Notebook | Avoids context window explosion; structured working memory | Frontend must reconstruct conversation |
+| Async TaskManager | Sub-Agents run as asyncio.Tasks, Orchestrator monitors via tools ✅ | Concurrent state management complexity |
+| Minimal messages + Notebook | Avoids context window explosion; structured working memory | Frontend reconstructs conversation via scenario plugin |
 | No confidence scores | LLM-generated confidence is unreliable; three-value verdict | Less granular ranking |
 | No prediction anchoring | Avoids confirmation bias in LLM | Verdict relies on post-hoc analysis |
 | Adversarial review (feature-gated) | Devil's Advocate counters LLM confirmation bias | Extra LLM call per verification |
-| Async task dispatch | Orchestrator submits concurrent tasks via `Send` API ✅ | Results aggregation needs reducer |
+| Async task dispatch | Orchestrator dispatches concurrent tasks via TaskManager (asyncio.Tasks) ✅ | Results collected via check_tasks/get_result tools |
 | Feature gates | All behaviors config-toggleable | Config surface area grows |
 | Config-driven everything | Zero code changes for new scenarios | Config validation needed |
 | Checkpoint-based trajectory | Automatic capture, no extra overhead ✅ | Must reconstruct tree from linear chain |
 | PostgreSQL persistence | Production-grade reliability ✅ | External service dependency |
-| pre_model_hook compression | LLM input compressed, full history in checkpoints ✅ | Uses `llm_input_messages`, not `messages` |
+| pre_model_hook compression | LLM input compressed, full history in checkpoints ✅ | Token-based trigger (80% context limit), uses `llm_input_messages` |
 | Static agent pool | Compiled once at startup from YAML config | Restart required to add/remove agents |
-| Pull-based monitoring | `check_agents` tool, sub-agents run uninterrupted | Requires external `ExecutionRunner` |
+| Pull-based monitoring | `check_tasks` tool in ReAct loop, sub-agents run asynchronously | Requires TaskManager managing asyncio.Tasks |

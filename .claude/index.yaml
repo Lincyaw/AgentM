@@ -10,14 +10,14 @@ concepts:
     tasks: []
 
   orchestrator:
-    description: "Supervisor node acting as hypothesis reasoner. Maintains DiagnosticNotebook, drives four-phase RCA flow, context compression with checkpoint-backed recall, monitors Sub-Agents via pull-based check_agents tool backed by ExecutionRunner"
+    description: "create_react_agent acting as hypothesis reasoner. Maintains DiagnosticNotebook, drives four-phase RCA flow, context compression with checkpoint-backed recall. Dispatches Sub-Agents asynchronously via TaskManager, monitors/injects/aborts via tools in ReAct loop"
     design: "designs/orchestrator.md"
     related_concepts: [system_architecture, sub_agent, trajectory_system, memory_system, execution_runner]
     plans: []
     tasks: []
 
   sub_agent:
-    description: "Independent Subgraph nodes via create_react_agent. Isolated State Schema, config-driven tools/prompts, pre_model_hook compression (llm_input_messages), data-only constraint in RCA mode, static agent pool compiled at startup"
+    description: "Independently compiled subgraphs via create_react_agent. Isolated State Schema, config-driven tools/prompts, pre_model_hook compression (llm_input_messages), data-only constraint in RCA mode, static agent pool compiled at startup. Launched as asyncio.Tasks by TaskManager"
     design: "designs/sub-agent.md"
     related_concepts: [system_architecture, orchestrator, configuration_system, execution_runner]
     plans: []
@@ -31,7 +31,7 @@ concepts:
     tasks: []
 
   memory_system:
-    description: "Two-layer memory: intra-task (context compression + recall_history tool backed by checkpoint chain) and cross-task (Memory Extraction agent system producing KnowledgeEntry items in LangGraph Store)"
+    description: "Two-layer memory: intra-task (context compression + recall_history tool backed by checkpoint chain) and cross-task (Memory Extraction agent system producing KnowledgeEntry items with three confidence levels — FACT/PATTERN/HEURISTIC — in LangGraph Store)"
     design: "designs/generic-state-wrapper.md"
     related_concepts: [orchestrator, generic_state_wrapper, trajectory_system]
     plans: []
@@ -59,15 +59,15 @@ concepts:
     tasks: []
 
   execution_runner:
-    description: "External async process driving graph execution. Streams subgraph events into AgentDashboard, provides backing for check_agents/inject_instruction/abort_agent tools, forwards events to frontend WebSocket"
+    description: "TaskManager: manages async Sub-Agent execution as asyncio.Tasks. Provides backing for dispatch_agent/check_tasks/get_result/inject_instruction/abort_task tools. Streams events to frontend WebSocket"
     design: "designs/orchestrator.md"
     related_concepts: [orchestrator, sub_agent, frontend_architecture, trajectory_system]
     plans: []
     tasks: []
 
   frontend_architecture:
-    description: "Web dashboard: agent topology, execution monitor, conversation view (rebuilt from Notebook), hypothesis tracker, debug panel. React + WebSocket. Events fed by ExecutionRunner"
-    design: null
-    related_concepts: [system_architecture, trajectory_system, orchestrator, execution_runner]
+    description: "Read-only observation dashboard: Agent Topology (d3.js), Execution Monitor (timeline+detail), Conversation View (scenario plugin), Debug Panel (checkpoint browser). Single HTML file, React + WebSocket + d3.js. Scenario plugin architecture for extensibility"
+    design: "designs/frontend-architecture.md"
+    related_concepts: [system_architecture, trajectory_system, orchestrator, execution_runner, configuration_system]
     plans: []
     tasks: []
