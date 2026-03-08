@@ -1,710 +1,702 @@
-# Design: 通用的 State 管理 SDK Wrapper
+# Design: Generic SDK Wrapper
 
 **Status**: DRAFT
-**Last Updated**: 2026-03-07
+**Last Updated**: 2026-03-08
 
-## 核心思想
+---
 
-你提出的关键洞察：
+## Overview
 
-> 在工程实现上，不同的 Agent 系统（假设驱动、顺序诊断、决策树等）的区别，其实就是**中间记录的状态的区别**。所以应该设计一个通用的 SDK Wrapper，只改变少部分代码就可以支持不同用途的 Agent System。
+The SDK Wrapper is the **implementation framework** underlying all AgentM agent systems. The core insight:
 
-这个设计思想解决了什么问题？
+> Different agent systems (hypothesis-driven RCA, sequential diagnosis, memory extraction, etc.) share the same Supervisor + Subgraph architecture. The differences are only in **state schema**, **phase definitions**, and **configuration**. A generic framework supports all of them with zero code changes — only config + prompt files.
 
 ```
-❌ 问题：为每个不同的 Agent 系统写不同的代码
-RCA (假设驱动)  → 一套代码
-性能优化 (顺序) → 另一套代码
-决策树        → 再一套代码
-
-✅ 解决方案：写一个通用的框架，通过改变配置支持多种系统
-核心框架：一套代码
-├─ 假设驱动 RCA    → 配置 + 少量代码
-├─ 顺序诊断        → 配置 + 少量代码
-└─ 决策树分类      → 配置 + 少量代码
+Generic SDK Wrapper (shared code)
+├─ StateSchemaFactory     — Dynamic state schema generation
+├─ PhaseManager           — Phase lifecycle and transitions
+├─ BaseOrchestrator       — Supervisor routing, Sub-Agent dispatch
+├─ Trajectory Recording   — Checkpoint, streaming, export
+└─ Configuration System   — YAML loading, validation, hot-reload
+         ↓
+┌────────────────────────────────────────────────────────┐
+│  Concrete Agent Systems (config-driven)                 │
+├────────────────────────────────────────────────────────┤
+│                                                         │
+│  hypothesis_driven     — RCA with hypothesis reasoning  │
+│  sequential            — Step-by-step diagnosis         │
+│  memory_extraction     — Cross-task knowledge building  │
+│  decision_tree         — Classification-based diagnosis │
+│  custom                — User-defined system            │
+│                                                         │
+└────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## SDK Wrapper 的结构
+## State Schema
 
-### 概览
+### Base State (shared by all systems)
 
-```
-┌─────────────────────────────────────────────┐
-│     Generic SDK Wrapper (通用框架)           │
-├─────────────────────────────────────────────┤
-│                                             │
-│  1. State Management (通用状态管理)         │
-│     - StateSchema 定义                     │
-│     - StateReducer 定义                    │
-│     - StateValidator                       │
-│                                             │
-│  2. Phase Management (通用阶段管理)         │
-│     - Phase 定义（exploration, etc）      │
-│     - 阶段转换逻辑                         │
-│     - 阶段检查点                           │
-│                                             │
-│  3. Orchestrator Core (通用 Orchestrator)  │
-│     - 基础路由逻辑                         │
-│     - Sub-Agent 调度                      │
-│     - 状态更新                             │
-│                                             │
-│  4. Trajectory Recording (通用轨迹记录)    │
-│     - Checkpoint 管理                      │
-│     - Event 流捕获                         │
-│     - 导出机制                             │
-│                                             │
-│  5. Configuration System (通用配置系统)    │
-│     - 配置加载和验证                       │
-│     - 动态能力注入                         │
-│                                             │
-└─────────────────────────────────────────────┘
-           ↓
-┌─────────────────────────────────────────────┐
-│  具体 Agent System（通过配置区分）          │
-├─────────────────────────────────────────────┤
-│                                             │
-│  Hypothesis-Driven RCA                     │
-│  ├─ StateSchema: notebook + hypotheses     │
-│  ├─ Phases: exploration, generation, ...  │
-│  └─ Orchestrator Logic: 假设验证          │
-│                                             │
-│  Sequential Diagnosis                      │
-│  ├─ StateSchema: steps + results           │
-│  ├─ Phases: step-by-step                  │
-│  └─ Orchestrator Logic: 顺序执行          │
-│                                             │
-│  Decision Tree Classification               │
-│  ├─ StateSchema: decision_path + features │
-│  ├─ Phases: node-by-node                  │
-│  └─ Orchestrator Logic: 递归分类          │
-│                                             │
-└─────────────────────────────────────────────┘
-```
-
----
-
-## 通用的状态管理框架
-
-### 1. StateSchema 的参数化
-
-**基础 StateSchema 接口**:
 ```python
-from typing import TypedDict, Annotated, Any
+from typing import TypedDict, Annotated
 import operator
 
 class BaseExecutorState(TypedDict):
-    """所有 Agent System 共有的基础状态"""
-    messages: Annotated[list, operator.add]  # 通用消息
+    """Fields shared by all agent systems."""
+    messages: Annotated[list, operator.add]
     task_id: str
     task_description: str
-    current_phase: str  # 当前所在的阶段
+    current_phase: str
+```
 
-    # ⭐ 动态字段：由具体系统定义
-    # custom_state: dict  # 由配置注入
+### System-Specific States
 
-
+```python
 class HypothesisDrivenState(BaseExecutorState):
-    """假设驱动 RCA 的状态"""
-    notebook: DiagnosticNotebook  # 假设驱动特有
+    """Hypothesis-driven RCA state."""
+    notebook: DiagnosticNotebook
     current_hypothesis: Optional[str]
 
-
 class SequentialDiagnosisState(BaseExecutorState):
-    """顺序诊断的状态"""
-    steps: Annotated[list[dict], operator.add]  # 顺序特有
+    """Sequential step-by-step diagnosis state."""
+    steps: Annotated[list[dict], operator.add]
     current_step_index: int
 
+class MemoryExtractionState(BaseExecutorState):
+    """Cross-task knowledge extraction state."""
+    source_trajectories: list[str]          # Thread IDs of completed RCA tasks
+    extracted_patterns: Annotated[list[dict], operator.add]  # Patterns found by Sub-Agents
+    knowledge_entries: list[KnowledgeEntry]  # Final refined knowledge
+    existing_knowledge: list[KnowledgeEntry] # Current knowledge base (for dedup/refine)
 
 class DecisionTreeState(BaseExecutorState):
-    """决策树分类的状态"""
-    decision_path: list[str]  # 决策树特有
+    """Decision tree classification state."""
+    decision_path: list[str]
     current_node_id: str
     feature_values: dict[str, Any]
 ```
 
-### 2. StateSchema 工厂
+### StateSchemaFactory
 
 ```python
 class StateSchemaFactory:
-    """根据配置动态生成 StateSchema"""
+    """Generate state schemas from config."""
+
+    SYSTEM_FIELDS = {
+        "hypothesis_driven": {
+            "notebook": DiagnosticNotebook,
+            "current_hypothesis": Optional[str],
+        },
+        "sequential": {
+            "steps": Annotated[list[dict], operator.add],
+            "current_step_index": int,
+        },
+        "memory_extraction": {
+            "source_trajectories": list[str],
+            "extracted_patterns": Annotated[list[dict], operator.add],
+            "knowledge_entries": list[KnowledgeEntry],
+            "existing_knowledge": list[KnowledgeEntry],
+        },
+        "decision_tree": {
+            "decision_path": list[str],
+            "current_node_id": str,
+            "feature_values": dict,
+        },
+    }
 
     @staticmethod
-    def create_state_schema(system_type: str, custom_fields: dict = None) -> type:
-        """
-        动态创建 StateSchema
-
-        Args:
-            system_type: "hypothesis_driven", "sequential", "decision_tree"
-            custom_fields: 额外的自定义字段
-
-        Returns:
-            动态生成的 TypedDict 类
-        """
-
-        # 基础字段
-        base_fields = {
-            "messages": Annotated[list, operator.add],
-            "task_id": str,
-            "task_description": str,
-            "current_phase": str
-        }
-
-        # 系统特定字段
-        system_fields = {
-            "hypothesis_driven": {
-                "notebook": DiagnosticNotebook,
-                "hypothesis_order": list[str]
-            },
-            "sequential": {
-                "steps": Annotated[list[dict], operator.add],
-                "current_step_index": int,
-                "completed_steps": list[str]
-            },
-            "decision_tree": {
-                "decision_path": list[str],
-                "current_node_id": str,
-                "feature_values": dict
-            }
-        }.get(system_type, {})
-
-        # 合并
-        all_fields = {**base_fields, **system_fields}
-
-        # 添加自定义字段
-        if custom_fields:
-            all_fields.update(custom_fields)
-
-        # 动态创建 TypedDict
+    def create(system_type: str, custom_fields: dict = None) -> type:
+        base = {"messages": Annotated[list, operator.add],
+                "task_id": str, "task_description": str, "current_phase": str}
+        system = StateSchemaFactory.SYSTEM_FIELDS.get(system_type, {})
+        all_fields = {**base, **system, **(custom_fields or {})}
         return TypedDict("ExecutorState", all_fields)
 ```
 
 ---
 
-## 通用的阶段管理框架
-
-### Phase 的定义和管理
+## Phase Management
 
 ```python
-from enum import Enum
-from dataclasses import dataclass
-from typing import Callable, Optional
-
 @dataclass
 class Phase:
-    """阶段定义"""
     name: str
     description: str
-    handler: Callable  # 该阶段的处理函数
-    next_phases: list[str]  # 可能的下一个阶段
-    on_enter: Optional[Callable] = None  # 进入该阶段时的回调
-    on_exit: Optional[Callable] = None   # 退出该阶段时的回调
-
+    handler: Callable
+    next_phases: list[str]
+    on_enter: Optional[Callable] = None   # e.g., compress previous phase
+    on_exit: Optional[Callable] = None
 
 class PhaseManager:
-    """通用的阶段管理器"""
-
     def __init__(self, phases: dict[str, Phase], initial_phase: str):
-        """
-        Args:
-            phases: {phase_name: Phase 对象}
-            initial_phase: 初始阶段
-        """
         self.phases = phases
         self.current_phase = initial_phase
-        self.phase_history = [initial_phase]
-
-    def get_current_phase(self) -> Phase:
-        return self.phases[self.current_phase]
-
-    async def execute_current_phase(self, state: dict) -> dict:
-        """执行当前阶段"""
-        phase = self.get_current_phase()
-
-        # 执行 on_enter 回调
-        if phase.on_enter:
-            state = await phase.on_enter(state)
-
-        # 执行阶段主逻辑
-        state = await phase.handler(state)
-
-        # 执行 on_exit 回调
-        if phase.on_exit:
-            state = await phase.on_exit(state)
-
-        return state
 
     def transition_to(self, next_phase: str):
-        """转移到下一个阶段"""
-        current = self.get_current_phase()
-
-        if next_phase not in current.next_phases:
-            raise ValueError(f"Cannot transition from {self.current_phase} to {next_phase}")
-
+        if next_phase not in self.phases[self.current_phase].next_phases:
+            raise ValueError(f"Invalid transition: {self.current_phase} → {next_phase}")
         self.current_phase = next_phase
-        self.phase_history.append(next_phase)
 
-    def can_transition_to(self, next_phase: str) -> bool:
-        current = self.get_current_phase()
-        return next_phase in current.next_phases
+    @classmethod
+    def from_config(cls, config: dict) -> "PhaseManager":
+        """Build PhaseManager from YAML config."""
+        ...
 ```
 
-### 具体系统的 Phase 定义
+### Phase Definitions by System Type
 
-#### 假设驱动 RCA
-
-```python
-# 定义假设驱动 RCA 的 Phase
-
-async def phase_exploration(state: dict) -> dict:
-    """Phase 1: 初步全面调查"""
-    notebook = state["notebook"]
-    # ... 收集数据的逻辑
-    return state
-
-
-async def phase_hypothesis_generation(state: dict) -> dict:
-    """Phase 2: 生成假设"""
-    notebook = state["notebook"]
-    # ... 生成假设的逻辑
-    return state
-
-
-async def phase_hypothesis_verification(state: dict) -> dict:
-    """Phase 3: 验证假设"""
-    notebook = state["notebook"]
-    # ... 验证假设的逻辑
-    return state
-
-
-async def phase_confirmation(state: dict) -> dict:
-    """Phase 4: 确认根因"""
-    notebook = state["notebook"]
-    # ... 输出根因的逻辑
-    return state
-
-
-# 使用 PhaseManager 注册这些 Phase
-hypothesis_driven_phases = {
-    "exploration": Phase(
-        name="exploration",
-        description="Initial data collection",
-        handler=phase_exploration,
-        next_phases=["hypothesis_generation"]
-    ),
-    "hypothesis_generation": Phase(
-        name="hypothesis_generation",
-        description="Generate candidate hypotheses",
-        handler=phase_hypothesis_generation,
-        next_phases=["hypothesis_verification"]
-    ),
-    "hypothesis_verification": Phase(
-        name="hypothesis_verification",
-        description="Verify hypotheses one by one",
-        handler=phase_hypothesis_verification,
-        next_phases=["hypothesis_verification", "confirmation"],
-        # 可以循环验证或进入确认
-    ),
-    "confirmation": Phase(
-        name="confirmation",
-        description="Confirm root cause",
-        handler=phase_confirmation,
-        next_phases=[]  # 终止
-    )
-}
-
-phase_manager = PhaseManager(
-    phases=hypothesis_driven_phases,
-    initial_phase="exploration"
-)
-```
-
-#### 顺序诊断
-
-```python
-async def phase_step_1(state: dict) -> dict:
-    """Step 1: 检查基础设施"""
-    # ...
-    state["steps"].append({"name": "infrastructure", "result": ...})
-    state["current_step_index"] = 1
-    return state
-
-
-async def phase_step_2(state: dict) -> dict:
-    """Step 2: 检查日志"""
-    # ...
-    state["steps"].append({"name": "logs", "result": ...})
-    state["current_step_index"] = 2
-    return state
-
-
-# 更简单，是线性的
-sequential_phases = {
-    "step_1": Phase("step_1", "Check infrastructure", phase_step_1, ["step_2"]),
-    "step_2": Phase("step_2", "Check logs", phase_step_2, ["step_3"]),
-    "step_3": Phase("step_3", "Final analysis", phase_step_3, [])
-}
-
-phase_manager = PhaseManager(sequential_phases, "step_1")
-```
+| System | Phases | Flow |
+|--------|--------|------|
+| **hypothesis_driven** | exploration → generation → verification → confirmation | Loops on verification; may cycle back |
+| **sequential** | step_1 → step_2 → ... → step_N | Linear, no branching |
+| **memory_extraction** | collect → analyze → extract → refine | See [Memory Extraction System](#memory-extraction-system) |
+| **decision_tree** | node evaluation → branch → node evaluation → ... → leaf | Tree traversal |
 
 ---
 
-## 通用的 Orchestrator 核心
-
-### 基础 Orchestrator 类
+## Base Orchestrator
 
 ```python
-from abc import ABC, abstractmethod
-
-
 class BaseOrchestrator(ABC):
-    """通用 Orchestrator 基类"""
+    """Shared Orchestrator logic for all systems."""
 
-    def __init__(
-        self,
-        state_schema: type,
-        phase_manager: PhaseManager,
-        sub_agents: dict[str, CompiledGraph],
-        config: dict
-    ):
+    def __init__(self, state_schema, phase_manager, sub_agents, config):
         self.state_schema = state_schema
         self.phase_manager = phase_manager
         self.sub_agents = sub_agents
         self.config = config
 
-    async def execute(self, initial_input: dict) -> dict:
-        """执行诊断流程"""
-
-        # 初始化状态
-        state = self._initialize_state(initial_input)
-
-        # 执行各个 Phase
-        while self.phase_manager.current_phase != "completed":
-            state = await self.phase_manager.execute_current_phase(state)
-
-            # 由具体系统决定下一个 Phase
-            next_phase = await self._decide_next_phase(state)
-
-            if self.phase_manager.can_transition_to(next_phase):
-                self.phase_manager.transition_to(next_phase)
-            else:
-                break
-
-        return state
-
-    def _initialize_state(self, initial_input: dict) -> dict:
-        """初始化状态"""
-        return {
-            "messages": [HumanMessage(content=initial_input["task"])],
-            "task_id": initial_input.get("task_id", str(uuid.uuid4())),
-            "task_description": initial_input["task"],
-            "current_phase": self.phase_manager.current_phase
-        }
-
     @abstractmethod
     async def _decide_next_phase(self, state: dict) -> str:
-        """
-        决定下一个 Phase
-        由具体系统（假设驱动、顺序等）实现
-        """
+        """System-specific phase transition logic."""
         pass
 
     async def dispatch_to_agent(self, agent_id: str, task: dict) -> dict:
-        """分配任务给 Sub-Agent"""
-        agent = self.sub_agents[agent_id]
-        return await agent.ainvoke(task)
+        """Dispatch task to Sub-Agent (shared)."""
+        return await self.sub_agents[agent_id].ainvoke(task)
+```
 
+### System-Specific Orchestrators
 
+```python
 class HypothesisDrivenOrchestrator(BaseOrchestrator):
-    """假设驱动 RCA 的 Orchestrator"""
-
-    async def _decide_next_phase(self, state: dict) -> str:
+    async def _decide_next_phase(self, state):
         notebook = state["notebook"]
-
         if notebook.confirmed_hypothesis:
             return "confirmation"
-        elif all(h.status in ["confirmed", "rejected"] for h in notebook.hypotheses.values()):
-            return "confirmation"
-        else:
-            return "hypothesis_verification"  # 继续验证
+        return "hypothesis_verification"
 
-
-class SequentialOrchestrator(BaseOrchestrator):
-    """顺序诊断的 Orchestrator"""
-
-    async def _decide_next_phase(self, state: dict) -> str:
-        current_step = state["current_step_index"]
-        total_steps = len(self.phase_manager.phases)
-
-        if current_step >= total_steps - 1:
-            return "completed"
-        else:
-            next_step_id = f"step_{current_step + 2}"
-            return next_step_id
+class MemoryExtractionOrchestrator(BaseOrchestrator):
+    async def _decide_next_phase(self, state):
+        if not state["extracted_patterns"]:
+            return "analyze"  # Still analyzing trajectories
+        if not state["knowledge_entries"]:
+            return "extract"  # Patterns found, need to synthesize
+        return "refine"       # Refine against existing knowledge
 ```
 
 ---
 
-## SDK Wrapper 的使用方式
+## Memory Extraction System
 
-### 方式 1: 假设驱动 RCA
+The Memory Extraction system is a concrete agent system built on the same SDK Wrapper. It processes completed RCA trajectories to build a cross-task knowledge base.
 
-```python
-from agentm.sdk import AgentSystemBuilder, StateSchemaFactory, PhaseManager
+### Architecture
 
-# 1. 创建 StateSchema
-state_schema = StateSchemaFactory.create_state_schema("hypothesis_driven")
-
-# 2. 创建 Phase Manager（从配置文件加载）
-config = load_yaml("config/scenarios/rca.yaml")
-phase_manager = PhaseManager.from_config(config)
-
-# 3. 构建 Orchestrator
-orchestrator = AgentSystemBuilder.build(
-    system_type="hypothesis_driven",
-    config=config,
-    state_schema=state_schema,
-    phase_manager=phase_manager
-)
-
-# 4. 执行
-result = await orchestrator.execute({
-    "task": "API 响应时间从 200ms → 5s，找根本原因"
-})
+```
+Memory Extraction System (system_type: "memory_extraction")
+│
+├─ Orchestrator (MemoryExtractionOrchestrator)
+│   ├─ Drives 4 phases: collect → analyze → extract → refine
+│   ├─ Feature gates: most RCA-specific gates OFF
+│   └─ Tools: search_knowledge_store, update_knowledge_store
+│
+├─ Sub-Agents
+│   ├─ trajectory_analyst    — Read and analyze historical trajectories
+│   ├─ pattern_extractor     — Identify failure patterns across trajectories
+│   └─ knowledge_writer      — Write/update knowledge entries
+│
+└─ Knowledge Store (LangGraph Store)
+    ├─ failure_patterns      — Common failure modes
+    ├─ diagnostic_skills     — Effective diagnostic strategies
+    └─ system_knowledge      — Domain-specific facts
 ```
 
-### 方式 2: 顺序诊断（只需改配置和很少代码）
+### Comparison with RCA System
 
-```python
-# 1. 改配置（新建 config/scenarios/sequential.yaml）
-config = load_yaml("config/scenarios/sequential.yaml")
+| Aspect | hypothesis_driven (RCA) | memory_extraction (Memory) |
+|--------|------------------------|---------------------------|
+| **Input** | Incident report / alert | Completed RCA trajectory (thread_id) |
+| **Output** | Root cause + recommendations | Knowledge entries (patterns, skills) |
+| **State** | DiagnosticNotebook + Hypotheses | Extracted patterns + Knowledge entries |
+| **Phases** | explore → hypothesize → verify → confirm | collect → analyze → extract → refine |
+| **Sub-Agent role** | Collect live system data | Analyze historical trajectory data |
+| **Feature gates** | adversarial_review, parallel_verification, etc. | All RCA-specific gates OFF |
+| **Compression** | Active (long tool call sequences) | Typically not needed (reading, not executing) |
+| **Shared framework** | BaseOrchestrator, PhaseManager, Send API, Checkpoint, Stream | Same |
 
-# 2. 创建 StateSchema（自动）
-state_schema = StateSchemaFactory.create_state_schema("sequential")
+### Four-Phase Flow
 
-# 3. 创建 Phase Manager（从配置自动生成）
-phase_manager = PhaseManager.from_config(config)
-
-# 4. 构建 Orchestrator（同样的 API）
-orchestrator = AgentSystemBuilder.build(
-    system_type="sequential",
-    config=config,
-    state_schema=state_schema,
-    phase_manager=phase_manager
-)
-
-# 5. 执行（完全相同）
-result = await orchestrator.execute({
-    "task": "检查系统性能"
-})
-
-# ✅ 看，代码几乎没变！只改了配置和 system_type
+```
+Phase 1: COLLECT
+  │  Load target trajectories from checkpoint store
+  │  Orchestrator selects which completed RCA threads to analyze
+  │  Sub-Agents read trajectory data via get_state_history()
+  ↓
+Phase 2: ANALYZE
+  │  Sub-Agents examine trajectories for patterns
+  │  Each Sub-Agent focuses on different aspects:
+  │    - trajectory_analyst: execution flow, phase durations, decision points
+  │    - pattern_extractor: recurring failures, common root causes
+  │  Results aggregated via Annotated[list, operator.add]
+  ↓
+Phase 3: EXTRACT
+  │  Orchestrator synthesizes Sub-Agent findings into KnowledgeEntry objects
+  │  Deduplication against existing_knowledge
+  │  Categorization: failure_pattern | diagnostic_skill | system_knowledge
+  ↓
+Phase 4: REFINE
+  │  Compare with existing knowledge base
+  │  Update existing entries (add evidence, refine descriptions)
+  │  or create new entries
+  │  Write to Knowledge Store
 ```
 
-### 方式 3: 自定义系统
+### Knowledge Data Structures
 
 ```python
-# 完全自定义一个新的 Agent System
+@dataclass
+class KnowledgeEntry:
+    id: str
+    path: str                         # Full namespace path, e.g., "failure_pattern/database/connection_pool_exhaustion"
+    category: Literal["failure_pattern", "diagnostic_skill", "system_knowledge"]
+    domain: str                       # Second-level grouping, e.g., "database", "network", "memory"
+    title: str                        # "Database connection pool exhaustion"
+    description: str                  # Detailed description
+    evidence: list[KnowledgeEvidence] # Source trajectories and supporting data
+    tags: list[str]                   # ["database", "connection_pool", "timeout"]
+    related_entries: list[str]        # Paths of related entries (e.g., a pattern → its effective skill)
+    created_at: str
+    updated_at: str
+    frequency: int                    # How many times this pattern has been observed
 
-# Step 1: 定义自定义 State 字段
-custom_fields = {
-    "decision_tree": str,
-    "current_node": str,
-    "branch_history": list[str]
-}
+@dataclass
+class KnowledgeEvidence:
+    source_thread_id: str             # Which RCA task this came from
+    source_checkpoint_range: Optional[tuple[str, str]]  # (from_id, to_id)
+    relevant_data: dict               # Key data points from that trajectory
+    summary: str                      # Brief description of how this evidence supports the entry
+```
 
-# Step 2: 创建 StateSchema
-state_schema = StateSchemaFactory.create_state_schema(
-    "custom",  # 自定义类型
-    custom_fields=custom_fields
+### Knowledge Store: Filesystem-Like Namespace
+
+The Knowledge Store uses LangGraph Store as backend, with a **hierarchical namespace** design that mirrors a filesystem. This gives Agents two complementary retrieval modes:
+
+1. **Semantic search** — Fuzzy, similarity-based ("find database-related failures")
+2. **Path browsing** — Precise, structure-based ("list what's under `/failure_pattern/database/`")
+
+This is analogous to how humans use a filesystem: search to find approximate location, then `ls` to confirm context, then open the specific file. Agents can cross-validate search results by browsing the structural neighborhood.
+
+#### Namespace Hierarchy
+
+```
+knowledge/                              ← root namespace
+├── failure_pattern/                    ← category
+│   ├── database/                       ← domain
+│   │   ├── connection_pool_exhaustion  ← entry (KnowledgeEntry)
+│   │   ├── slow_query_lock_contention
+│   │   └── replication_lag
+│   ├── network/
+│   │   ├── dns_resolution_timeout
+│   │   └── tcp_connection_reset
+│   └── memory/
+│       └── gc_pressure_oom
+├── diagnostic_skill/
+│   ├── database/
+│   │   └── connection_pool_analysis
+│   └── general/
+│       └── timeline_correlation
+└── system_knowledge/
+    ├── architecture/
+    │   └── service_dependency_map
+    └── limits/
+        └── connection_pool_defaults
+```
+
+#### Mapping to LangGraph Store
+
+LangGraph Store uses namespace tuples. The path maps directly:
+
+```python
+# Path: "failure_pattern/database/connection_pool_exhaustion"
+# → namespace: ("knowledge", "failure_pattern", "database")
+# → key: "connection_pool_exhaustion"
+# → value: KnowledgeEntry as dict
+
+store.put(
+    namespace=("knowledge", "failure_pattern", "database"),
+    key="connection_pool_exhaustion",
+    value=asdict(entry),
+    index=["title", "description", "tags"],  # Fields to embed for semantic search
 )
+```
 
-# Step 3: 定义 Phase 处理函数
-async def phase_decision_tree(state: dict) -> dict:
-    """自定义的决策树阶段"""
-    # ... 自定义逻辑
-    return state
+#### Store Configuration
 
-# Step 4: 创建 Phase Manager
-custom_phases = {
-    "decision_tree": Phase(
-        "decision_tree",
-        "Navigate decision tree",
-        phase_decision_tree,
-        ["decision_tree", "completed"]
-    ),
-    "completed": Phase(
-        "completed",
-        "Done",
-        lambda s: s,
-        []
+```python
+from langgraph.store.postgres import AsyncPostgresStore
+
+store = AsyncPostgresStore(
+    conn_string="postgresql://...",
+    index={
+        "dims": 1536,
+        "embed": "openai:text-embedding-3-small",
+        "fields": ["title", "description"],  # Default fields to embed
+    },
+)
+await store.setup()
+```
+
+### Knowledge Categories
+
+| Category | What It Contains | How RCA Uses It |
+|----------|-----------------|----------------|
+| **failure_pattern** | Recurring failure modes with symptoms, root causes, and resolution | Orchestrator searches during Phase 2 (hypothesis generation) to propose hypotheses based on historical precedent |
+| **diagnostic_skill** | Effective investigation strategies (which tools to use, in what order, for what symptoms) | Orchestrator references during Phase 1 (exploration) and Phase 3 (verification) to optimize investigation |
+| **system_knowledge** | Domain facts about the target system (architecture, dependencies, known limits) | Injected into Orchestrator's system prompt for context |
+
+### Integration with RCA System: Knowledge Tools
+
+The RCA Orchestrator gets three tools for interacting with the Knowledge Store, mirroring filesystem operations:
+
+```python
+@tool
+def knowledge_search(
+    query: str,
+    path: str = "/",
+    filter: Optional[dict] = None,
+    limit: int = 5,
+) -> list[dict]:
+    """Semantic search over the knowledge base.
+
+    Use this to find relevant historical patterns, skills, or facts
+    based on natural language description. Results are ranked by relevance.
+
+    To narrow the search scope, specify a path prefix.
+
+    Args:
+        query: Natural language description of what you're looking for.
+            Examples:
+            - "database connection timeout under high load"
+            - "how to diagnose memory leaks in Java services"
+        path: Path prefix to search within. Defaults to "/" (all knowledge).
+            Examples:
+            - "/failure_pattern/database/" — only database failure patterns
+            - "/diagnostic_skill/" — only diagnostic skills
+        filter: Optional structured filter.
+            Examples:
+            - {"frequency": {"$gte": 3}} — patterns observed 3+ times
+            - {"tags": {"$eq": "timeout"}}
+        limit: Maximum number of results to return.
+    """
+    namespace_prefix = path_to_namespace(path)
+    results = store.search(
+        namespace_prefix=namespace_prefix,
+        query=query,
+        filter=filter,
+        limit=limit,
     )
-}
+    return [format_search_result(r) for r in results]
 
-phase_manager = PhaseManager(custom_phases, "decision_tree")
 
-# Step 5: 创建 Orchestrator
-class CustomOrchestrator(BaseOrchestrator):
-    async def _decide_next_phase(self, state: dict) -> str:
-        # 自定义决策逻辑
-        return "completed"
+@tool
+def knowledge_list(path: str = "/") -> dict:
+    """List the structure of the knowledge base at a given path.
 
-orchestrator = CustomOrchestrator(
-    state_schema=state_schema,
-    phase_manager=phase_manager,
-    sub_agents={...},
-    config={...}
-)
+    Use this to understand what knowledge exists and how it's organized.
+    Returns both sub-directories (sub-namespaces) and entries at the path.
 
-# ✅ 用同样的 execute() 接口
-result = await orchestrator.execute(input_data)
+    This is useful for:
+    - Understanding the overall knowledge structure
+    - Browsing a specific domain to see available patterns
+    - Cross-validating search results by checking neighboring entries
+
+    Args:
+        path: Path to list. Defaults to "/" (root).
+            Examples:
+            - "/" — show top-level categories
+            - "/failure_pattern/" — show all domains under failure patterns
+            - "/failure_pattern/database/" — show all database failure patterns
+    """
+    namespace = path_to_namespace(path)
+
+    # List sub-namespaces (like sub-directories)
+    children = store.list_namespaces(
+        prefix=namespace,
+        max_depth=len(namespace) + 1,  # Only immediate children
+    )
+
+    # List entries at this path (like files in the directory)
+    entries = store.search(
+        namespace_prefix=namespace,
+        limit=100,
+    )
+
+    return {
+        "path": path,
+        "sub_paths": [namespace_to_path(ns) for ns in children],
+        "entries": [{"key": e.key, "title": e.value.get("title", ""), "frequency": e.value.get("frequency", 0)} for e in entries],
+    }
+
+
+@tool
+def knowledge_read(path: str) -> dict:
+    """Read a specific knowledge entry by its full path.
+
+    Use this to get the complete details of a knowledge entry,
+    including full description, all evidence, and related entries.
+
+    Args:
+        path: Full path to the entry.
+            Example: "/failure_pattern/database/connection_pool_exhaustion"
+    """
+    namespace, key = path_to_namespace_and_key(path)
+    item = store.get(namespace=namespace, key=key)
+    if item is None:
+        raise ToolException(f"Knowledge entry not found: {path}")
+    return item.value
 ```
 
----
+#### Path Utility Functions
 
-## 配置系统的参数化
+```python
+STORE_ROOT = ("knowledge",)
 
-### 通用配置结构
+def path_to_namespace(path: str) -> tuple[str, ...]:
+    """Convert filesystem-like path to LangGraph Store namespace tuple.
+    "/" → ("knowledge",)
+    "/failure_pattern/database/" → ("knowledge", "failure_pattern", "database")
+    """
+    parts = [p for p in path.strip("/").split("/") if p]
+    return STORE_ROOT + tuple(parts)
+
+def path_to_namespace_and_key(path: str) -> tuple[tuple[str, ...], str]:
+    """Split path into namespace + key.
+    "/failure_pattern/database/connection_pool_exhaustion"
+    → (("knowledge", "failure_pattern", "database"), "connection_pool_exhaustion")
+    """
+    parts = [p for p in path.strip("/").split("/") if p]
+    return STORE_ROOT + tuple(parts[:-1]), parts[-1]
+
+def namespace_to_path(namespace: tuple[str, ...]) -> str:
+    """Convert namespace tuple back to path string.
+    ("knowledge", "failure_pattern", "database") → "/failure_pattern/database/"
+    """
+    parts = namespace[len(STORE_ROOT):]  # Strip root prefix
+    return "/" + "/".join(parts) + "/" if parts else "/"
+```
+
+#### Write Tools (Memory Agent Only)
+
+The RCA Orchestrator has **read-only** access (search, list, read). The Memory Extraction system's Sub-Agents additionally have **write** access:
+
+```python
+@tool
+def knowledge_write(
+    path: str,
+    entry: dict,
+    merge: bool = False,
+) -> str:
+    """Create or update a knowledge entry.
+
+    Args:
+        path: Full path for the entry.
+            Example: "/failure_pattern/database/connection_pool_exhaustion"
+        entry: KnowledgeEntry fields as dict.
+        merge: If True and entry exists, merge evidence and increment frequency.
+               If False and entry exists, overwrite.
+    """
+    namespace, key = path_to_namespace_and_key(path)
+    if merge:
+        existing = store.get(namespace=namespace, key=key)
+        if existing:
+            entry = merge_entries(existing.value, entry)
+    store.put(namespace=namespace, key=key, value=entry,
+              index=["title", "description"])
+    return f"Written: {path}"
+
+
+@tool
+def knowledge_delete(path: str) -> str:
+    """Delete a knowledge entry. Use when an entry is outdated or incorrect.
+
+    Args:
+        path: Full path of the entry to delete.
+    """
+    namespace, key = path_to_namespace_and_key(path)
+    store.delete(namespace=namespace, key=key)
+    return f"Deleted: {path}"
+```
+
+#### Tool Access by System Type
+
+| Tool | RCA Orchestrator | Memory Extraction Sub-Agents |
+|------|:---:|:---:|
+| `knowledge_search` | read | read |
+| `knowledge_list` | read | read |
+| `knowledge_read` | read | read |
+| `knowledge_write` | — | write |
+| `knowledge_delete` | — | write |
+
+#### Agent Workflow Example
+
+```
+RCA Orchestrator (Phase 2: Hypothesis Generation)
+  │
+  ├─ 1. Semantic search: knowledge_search("API timeout under high load")
+  │     → returns: [{path: "/failure_pattern/database/connection_pool_exhaustion", score: 0.92, ...},
+  │                 {path: "/failure_pattern/network/dns_resolution_timeout", score: 0.71, ...}]
+  │
+  ├─ 2. Browse neighborhood: knowledge_list("/failure_pattern/database/")
+  │     → returns: {sub_paths: [], entries: [
+  │         {key: "connection_pool_exhaustion", title: "...", frequency: 5},
+  │         {key: "slow_query_lock_contention", title: "...", frequency: 3},
+  │         {key: "replication_lag", title: "...", frequency: 1},
+  │     ]}
+  │     → Agent sees: "connection_pool_exhaustion" is the most frequent database pattern,
+  │       and there are other database patterns to consider
+  │
+  ├─ 3. Read full detail: knowledge_read("/failure_pattern/database/connection_pool_exhaustion")
+  │     → returns full KnowledgeEntry with evidence, related_entries, etc.
+  │
+  ├─ 4. Follow related: knowledge_read("/diagnostic_skill/database/connection_pool_analysis")
+  │     → returns the recommended diagnostic approach for this pattern
+  │
+  └─ 5. Generate hypothesis with historical context:
+        "H1: Connection pool exhaustion (5 historical precedents, recommended skill available)"
+```
+
+### Trigger Modes
+
+| Mode | When | Description |
+|------|------|-------------|
+| **Post-task** | After each RCA task completes | Automatically process the latest trajectory |
+| **Batch** | Scheduled (e.g., daily) | Process multiple recent trajectories at once |
+| **Manual** | On-demand | User triggers analysis of specific trajectories |
+
+### Configuration
 
 ```yaml
-# config/scenarios/<system_type>.yaml
-
+# config/scenarios/memory_extraction.yaml
 system:
-  type: "hypothesis_driven"  # or "sequential", "decision_tree", "custom"
-  description: "RCA with hypothesis-driven reasoning"
-
-state_schema:
-  base_fields:
-    - messages
-    - task_id
-    - task_description
-    - current_phase
-  system_fields:
-    notebook: "DiagnosticNotebook"  # 自动注入
-    hypothesis_order: "list[str]"
-
-phases:
-  exploration:
-    handler: "phase_exploration"
-    next_phases:
-      - hypothesis_generation
-    on_enter: "init_notebook"
-    on_exit: "log_exploration_complete"
-
-  hypothesis_generation:
-    handler: "phase_hypothesis_generation"
-    next_phases:
-      - hypothesis_verification
-
-  hypothesis_verification:
-    handler: "phase_hypothesis_verification"
-    next_phases:
-      - hypothesis_verification  # 可循环
-      - confirmation
-
-  confirmation:
-    handler: "phase_confirmation"
-    next_phases: []
+  type: "memory_extraction"
 
 orchestrator:
-  decision_logic:
-    class: "HypothesisDrivenOrchestrator"  # 自动加载
-    methods:
-      _decide_next_phase: "decide_by_notebook"
+  model: "gpt-4o"
+  temperature: 0.3
+
+  feature_gates:
+    # RCA-specific gates — all OFF
+    adversarial_review: false
+    parallel_verification: false
+    auto_refine_partial: false
+    # Memory-specific gates
+    dedup_against_existing: true
+    auto_merge_similar: true
+    min_evidence_for_pattern: 2   # Require N occurrences before creating a pattern
+
+  tools:
+    - search_knowledge_store
+    - update_knowledge_store
+
+  compression:
+    enabled: false    # Memory extraction tasks are typically short
+
+phases:
+  collect:
+    handler: "phase_collect_trajectories"
+    next_phases: [analyze]
+  analyze:
+    handler: "phase_analyze_trajectories"
+    next_phases: [analyze, extract]   # May loop for more analysis
+  extract:
+    handler: "phase_extract_knowledge"
+    next_phases: [refine]
+  refine:
+    handler: "phase_refine_knowledge"
+    next_phases: []
 
 sub_agents:
-  infrastructure_agent: {...}
-  log_agent: {...}
-  db_agent: {...}
+  trajectory_analyst:
+    model: "gpt-4o-mini"
+    tools:
+      - read_trajectory          # Read checkpoint history from completed RCA threads
+      - get_checkpoint_history
+      - knowledge_search          # Search existing knowledge (read-only)
+      - knowledge_list
+  pattern_extractor:
+    model: "gpt-4o"
+    tools:
+      - knowledge_search          # Search for dedup / cross-reference
+      - knowledge_list            # Browse structure
+      - knowledge_read            # Read full entries
+      - compare_trajectories
+  knowledge_writer:
+    model: "gpt-4o"
+    tools:
+      - knowledge_search          # Check before writing
+      - knowledge_list
+      - knowledge_read
+      - knowledge_write           # Create / update entries
+      - knowledge_delete          # Remove obsolete entries
+
+knowledge_store:
+  backend: "langgraph_store"
+  namespace_root: "knowledge"
+  persistence: "postgres"           # "memory" | "sqlite" | "postgres"
+  index:
+    dims: 1536
+    embed: "openai:text-embedding-3-small"
+    fields: ["title", "description"]  # Fields to embed for semantic search
+```
+
+### Usage
+
+```python
+# Build Memory Extraction system — same API as RCA
+memory_system = AgentSystemBuilder.build(
+    system_type="memory_extraction",
+    config=load_yaml("config/scenarios/memory_extraction.yaml"),
+)
+
+# Post-task: process a completed RCA trajectory
+result = await memory_system.execute({
+    "task": "Extract knowledge from completed RCA",
+    "source_trajectories": ["thread-rca-001", "thread-rca-002"],
+})
+
+# The knowledge store is now updated and available to future RCA tasks
+# via the search_knowledge tool
 ```
 
 ---
 
-## 好处总结
+## Building a New System
 
-### 1️⃣ 代码复用最大化
+Adding a new agent system type requires:
 
-```
-假设驱动 RCA: 600 行代码（Orchestrator + Phase 处理）
-顺序诊断:    200 行代码（配置 + Phase 处理）
-决策树:      200 行代码（配置 + Phase 处理）
-总计:        只有 1000 行，而不是 3×600 = 1800 行
-```
+1. **YAML config** — Define phases, agents, feature gates
+2. **State fields** — Add system-specific fields to `StateSchemaFactory.SYSTEM_FIELDS`
+3. **Phase handlers** — Implement the phase functions
+4. **Orchestrator subclass** — Implement `_decide_next_phase`
 
-### 2️⃣ 新系统添加变得非常简单
-
-```
-添加新的 Agent System:
-1. 写配置文件（config/scenarios/new_system.yaml）
-2. 实现 Phase 处理函数（可以复用很多）
-3. 实现 Orchestrator 的 _decide_next_phase 方法
-4. 完成！
-
-总工作量: 50-100 行代码
-```
-
-### 3️⃣ 核心框架非常稳定
-
-```
-一旦 SDK Wrapper 完成，后续开发都是：
-- 配置系统的改变
-- Phase 处理函数的改变
-- Orchestrator 决策逻辑的改变
-
-核心框架（StateSchemaFactory, PhaseManager, BaseOrchestrator）不需改动
-```
-
-### 4️⃣ 易于学习和维护
-
-```
-新开发者只需理解：
-1. StateSchema 如何定义（很简单）
-2. Phase 如何实现（就是一个异步函数）
-3. Orchestrator 如何决策（就是选择下一个 Phase）
-
-不需要理解 3 个不同的代码库
-```
+No changes to the core framework (StateSchemaFactory, PhaseManager, BaseOrchestrator).
 
 ---
 
-## 实现路线图
+## Related Documents
 
-### Phase 1: 通用框架
-- [ ] StateSchemaFactory
-- [ ] PhaseManager
-- [ ] BaseOrchestrator
-- [ ] 配置加载系统
-
-### Phase 2: 假设驱动 RCA
-- [ ] HypothesisDrivenOrchestrator
-- [ ] Phase 处理函数
-- [ ] 假设驱动特定的配置
-
-### Phase 3: 顺序诊断
-- [ ] SequentialOrchestrator
-- [ ] Phase 处理函数
-- [ ] 配置示例
-
-### Phase 4: 决策树
-- [ ] DecisionTreeOrchestrator
-- [ ] Phase 处理函数
-- [ ] 配置示例
-
-### Phase 5: 轨迹和 RL
-- [ ] 通用的轨迹导出系统
-- [ ] 与不同系统的适配
-
----
-
-## 和之前设计的关系
-
-这个 SDK Wrapper 设计**不改变之前的架构**，只是提供一个**实现框架**，使得：
-
-1. **假设驱动 RCA** 的设计完整支持
-2. **其他系统**（顺序、决策树等）也可以轻松支持
-3. **代码最大化复用**
-4. **配置最大化灵活性**
-
-核心思想是：**在配置层面区分不同系统，在代码层面复用通用框架**。
+- [System Architecture](system-design-overview.md) — Overall system design
+- [Orchestrator](orchestrator.md) — Orchestrator design, hypothesis flow, compression, recall
+- [Sub-Agent](sub-agent.md) — Sub-Agent architecture and configuration
