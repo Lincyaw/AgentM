@@ -9,7 +9,7 @@
 
 ## Overview
 
-Sub-Agents are **independently compiled subgraphs**, created via `create_react_agent`. They are launched asynchronously by the **TaskManager** as `asyncio.Task`s — they are NOT nodes in the Root StateGraph. Sub-Agents receive tasks from the Orchestrator (via `dispatch_agent` tool), execute tool calls, and return results (via `get_result` tool).
+Sub-Agents are **independently compiled subgraphs**, created via `create_react_agent`. They are launched asynchronously by the **TaskManager** as `asyncio.Task`s — they are NOT nodes in the Root StateGraph. Sub-Agents receive tasks from the Orchestrator (via `dispatch_agent` tool), execute tool calls, and return results (via `check_tasks` tool, which includes results inline for completed tasks).
 
 **Key constraint**: In hypothesis-driven RCA, Sub-Agents act as **data collectors** — they return raw data and structured verification results, not independent reasoning.
 
@@ -17,18 +17,21 @@ Sub-Agents are **independently compiled subgraphs**, created via `create_react_a
 
 ## State Schema
 
-Each Sub-Agent has its own State Schema. Since Sub-Agents are independently compiled subgraphs (not nodes in the Root graph), there is **no automatic state mapping** between parent and child. Communication happens exclusively through the Orchestrator's tools (`dispatch_agent` sends instructions, `get_result` retrieves results).
+Each Sub-Agent has its own State Schema. Since Sub-Agents are independently compiled subgraphs (not nodes in the Root graph), there is **no automatic state mapping** between parent and child. Communication happens exclusively through the Orchestrator's tools (`dispatch_agent` sends instructions, `check_tasks` retrieves results inline for completed tasks).
 
 ```python
 # Sub-Agent state (fully independent, not mapped to Root graph)
 class SubAgentState(TypedDict):
-    messages: Annotated[list, operator.add]   # Agent's own message history
+    messages: Annotated[list[BaseMessage], add_messages]  # Agent's own message history (dedup by ID, supports RemoveMessage)
     scratchpad: list[str]                     # Private working notes
     observations: list[str]                   # Private observations
     tool_call_count: int = 0                  # Tracked for progress reporting
+    compression_refs: list[CompressionRef] = []  # Compression tracking (see orchestrator.md)
 ```
 
-Since Sub-Agents are invoked by TaskManager (not as graph nodes), their state is fully private. The Orchestrator receives results through `get_result` tool — it never sees the Sub-Agent's internal state directly.
+> **⚠️ LangGraph Verified**: `add_messages` (from `langgraph.graph.message`) is the standard reducer for message lists. It handles deduplication by message ID, supports `RemoveMessage` for deletion, and is consistent with `create_react_agent`'s internal state. Do NOT use `operator.add` — it would cause duplicate messages.
+
+Since Sub-Agents are invoked by TaskManager (not as graph nodes), their state is fully private. The Orchestrator receives results through `check_tasks` tool (completed results inline) — it never sees the Sub-Agent's internal state directly.
 
 ---
 
@@ -286,7 +289,7 @@ inject_instruction("task-001", "Skip replica, focus on primary pool metrics")
 abort_task("task-002", "H1 already confirmed by database agent")
 ```
 
-These tools are backed by the `TaskManager` which calls `subgraph.aupdate_state()` for injection and `asyncio.Task.cancel()` for abort.
+These tools are backed by the `TaskManager` which queues instructions via a per-task instruction queue (consumed by Sub-Agent's `pre_model_hook`), and uses `asyncio.Task.cancel()` for abort.
 
 ---
 
@@ -332,13 +335,16 @@ Sub-Agent level (Layer 1 + 2):
 # Layer 1: LLM self-correction via handle_tool_errors=True (default in create_react_agent)
 # Tool errors are returned as ToolMessage, LLM reasons about them and tries alternatives
 
-# Layer 2: Transient errors handled via RetryPolicy
-workflow.add_node(
-    "sub_agent",
-    sub_agent,
-    retry_policy=RetryPolicy(max_attempts=3, initial_interval=1.0),
-)
+# Layer 2: API-level retry via LangChain's built-in model retry
+# ChatOpenAI(max_retries=3) handles transient API errors (429, 5xx, timeouts)
+# For task-level retry, the TaskManager wraps subgraph execution:
+#   try: await subgraph.ainvoke(...)
+#   except: retry with exponential backoff (configured per agent)
 ```
+
+> **⚠️ Note**: LangGraph's `RetryPolicy` only applies to nodes within a `StateGraph` (via `add_node(retry_policy=...)`). Since Sub-Agents are independently compiled subgraphs launched as `asyncio.Task`s (not nodes in the Root graph), `RetryPolicy` cannot be applied to them directly. Retry logic is implemented at two levels:
+> 1. **API layer**: `ChatOpenAI(max_retries=...)` handles transient HTTP errors
+> 2. **Task layer**: TaskManager's `_execute_agent` wraps execution with retry + exponential backoff
 
 Error types and handling:
 - Tool error → Layer 1: returned as ToolMessage for LLM self-correction
@@ -361,7 +367,7 @@ Error types and handling:
 |----------|-----------|
 | create_react_agent | Pre-built ReAct loop, verify import path at implementation time |
 | Independent State Schema | Full isolation; Sub-Agents are compiled independently, not graph nodes. No state mapping — communication via tools only |
-| Independent Sub-Agent checkpointer | Each Sub-Agent has its own thread_id via TaskManager; enables `update_state()` for injection |
+| Independent Sub-Agent checkpointer | Each Sub-Agent has its own thread_id via TaskManager; enables trajectory export and replay per agent |
 | Config-driven tools/prompts | New agents via YAML only, no code changes |
 | Data-only constraint (RCA) | All reasoning centralized in Orchestrator for traceability |
 | pre_model_hook compression | **✅ Verified: `llm_input_messages` return key preserves full state in checkpoints. Triggered at 80% context limit** |

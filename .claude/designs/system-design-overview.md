@@ -40,8 +40,8 @@ AgentM is a **hypothesis-driven multi-agent orchestration framework** built on L
 │  │  └─ current_phase: exploration|generation|...     │ │
 │  │                                                    │ │
 │  │  Role: Hypothesis reasoner (Team Leader)          │ │
-│  │  Tools: dispatch_agent, check_tasks, get_result,  │ │
-│  │         inject_instruction, abort_task, ...        │ │
+│  │  Tools: dispatch_agent, check_tasks,                │ │
+│  │         inject_instruction, abort_task, ...          │ │
 │  └──────────────────────────────────────────────────┘ │
 │           ↕ (tool calls)                               │
 │  ┌──────────────────────────────────────────────────┐ │
@@ -266,7 +266,6 @@ orchestrator:
   tools:
     - dispatch_agent
     - check_tasks
-    - get_result
     - inject_instruction
     - abort_task
     - knowledge_search
@@ -435,8 +434,8 @@ Startup
   ├─ 4. Load scenario.yaml → ScenarioConfig (schema validation)
   ├─ 5. Cross-reference validation (models, tools, prompts, tool_settings)
   ├─ 6. Build rate limiters (one per model config)
-  ├─ 7. Build agents (create_react_agent for each agent in scenario)
-  ├─ 8. Compile graph (Orchestrator + all agents)
+  ├─ 7. Build Sub-Agents (create_react_agent) + Orchestrator (create_react_agent)
+  ├─ 8. Compile graph
   └─ 9. Ready to serve
 ```
 
@@ -449,9 +448,8 @@ Switching scenarios requires **only pointing to a different scenario directory**
 The Orchestrator dispatches Sub-Agents asynchronously via a **TaskManager** and monitors them through tools in its ReAct loop. Sub-Agents execute as independent `asyncio.Task`s, each running a compiled subgraph.
 
 - **`dispatch_agent` tool**: Launch a Sub-Agent asynchronously (returns immediately with `task_id`)
-- **`check_tasks` tool**: Query status of all dispatched tasks (running/completed/failed, step progress, summaries)
-- **`get_result` tool**: Fetch the full result of a completed task
-- **`inject_instruction` tool**: Inject new instructions into a running Sub-Agent (via `update_state()`)
+- **`check_tasks` tool**: Query status of all dispatched tasks (running/completed/failed, step progress, summaries, results)
+- **`inject_instruction` tool**: Inject new instructions into a running Sub-Agent (via `pre_model_hook` instruction queue)
 - **`abort_task` tool**: Cancel a running Sub-Agent's `asyncio.Task`
 - **TaskManager**: Manages async task lifecycle, streams events to WebSocket for frontend display
 
@@ -566,21 +564,23 @@ Handled natively by `create_react_agent` with `handle_tool_errors=True`. Tool er
 # LLM decides: "I'll try the primary database instead"
 ```
 
-### Layer 2: RetryPolicy
+### Layer 2: Retry (API + Task Level)
 
-Configured per agent node for transient errors:
+Retry is handled at two levels:
 
 ```python
-workflow.add_node(
-    "database_agent",
-    database_agent,
-    retry_policy=RetryPolicy(
-        max_attempts=3,
-        initial_interval=1.0,      # 1s, 2s, 4s backoff
-        backoff_factor=2.0,
-        retry_on=is_transient_error,  # Custom predicate
-    ),
-)
+# API-level: LangChain's built-in model retry for transient HTTP errors (429, 5xx)
+model = ChatOpenAI(model="gpt-4", max_retries=3)
+
+# Task-level: TaskManager wraps subgraph execution with retry + exponential backoff
+# Configured per agent in scenario.yaml (execution.retry.*)
+```
+
+> **⚠️ Note**: LangGraph's `RetryPolicy` only applies to nodes within a `StateGraph`.
+> Since Sub-Agents are independently compiled subgraphs launched as `asyncio.Task`s
+> (not graph nodes), `RetryPolicy` cannot be used. Instead:
+> 1. **API layer**: `ChatOpenAI(max_retries=...)` handles transient HTTP errors
+> 2. **Task layer**: TaskManager implements retry with exponential backoff
 ```
 
 Configuration in YAML:
@@ -759,7 +759,7 @@ The **Memory Extraction** system reuses the same Supervisor + Subgraph architect
 | No confidence scores | LLM-generated confidence is unreliable; three-value verdict | Less granular ranking |
 | No prediction anchoring | Avoids confirmation bias in LLM | Verdict relies on post-hoc analysis |
 | Adversarial review (feature-gated) | Devil's Advocate counters LLM confirmation bias | Extra LLM call per verification |
-| Async task dispatch | Orchestrator dispatches concurrent tasks via TaskManager (asyncio.Tasks) ✅ | Results collected via check_tasks/get_result tools |
+| Async task dispatch | Orchestrator dispatches concurrent tasks via TaskManager (asyncio.Tasks) ✅ | Results collected via check_tasks tool (inline) |
 | Feature gates | All behaviors config-toggleable | Config surface area grows |
 | Config-driven everything | Zero code changes for new scenarios | Config validation needed |
 | Checkpoint-based trajectory | Automatic capture, no extra overhead ✅ | Must reconstruct tree from linear chain |

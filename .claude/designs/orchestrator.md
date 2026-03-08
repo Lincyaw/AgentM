@@ -18,9 +18,11 @@ This document contains two kinds of code:
 
 ## Overview
 
-The Orchestrator is a **`create_react_agent`** instance acting as the **Team Leader / Hypothesis Reasoner**. It operates in a ReAct loop (LLM → tool call → observe → repeat), using tools to dispatch Sub-Agents asynchronously, monitor their progress, and intervene when needed.
+The Orchestrator is a **`create_react_agent`** instance acting as the **Team Leader / Hypothesis Reasoner**. It operates in a continuous ReAct loop (LLM → tool call → observe → repeat), using tools to dispatch Sub-Agents asynchronously, monitor their progress, and intervene when needed.
 
 Sub-Agents are **independently compiled subgraphs**, launched as background `asyncio.Task`s by a **TaskManager**. The Orchestrator interacts with Sub-Agents exclusively through tools — never directly as graph nodes.
+
+Phases (exploration, generation, verification, confirmation) are **not graph nodes** — they are markers in DiagnosticNotebook that the LLM updates to reflect its current focus. The LLM naturally interleaves phases like a human SRE: forming hypotheses while still exploring, looping back when evidence contradicts.
 
 ### Core Responsibilities
 
@@ -28,7 +30,7 @@ Sub-Agents are **independently compiled subgraphs**, launched as background `asy
 2. **Async task dispatch** — Submit concurrent tasks to Sub-Agents via `dispatch_agent` tool (non-blocking)
 3. **Monitoring & intervention** — Check task progress, inject instructions, abort stuck agents via tools
 4. **Notebook management** — Track hypotheses, evidence, and exploration history
-5. **Phase orchestration** — Drive the Hypothetico-Deductive state machine
+5. **Diagnostic discipline** — Prompt-guided (not graph-enforced) diagnostic methodology
 
 ---
 
@@ -253,7 +255,7 @@ def sub_agent_compression_hook(state: SubAgentState) -> dict:
     # to preserve full history in state/checkpoints
     return {"llm_input_messages": compressed_messages}
 
-# Attach to Sub-Agent
+# Attach to Sub-Agent (create_react_agent)
 agent = create_react_agent(
     model=model,
     tools=tools,
@@ -786,159 +788,124 @@ time: 4.2s}, {sql: "...", time: 2.8s}, {sql: "...", time: 2.1s}], primary_cpu=42
 
 ---
 
-## Four-Phase Implementation
+## Orchestrator Behavior: ReAct Loop with Notebook
 
-### Phase 1: Exploration
+The Orchestrator is a single `create_react_agent` running a continuous ReAct loop. There are no separate phase nodes or explicit phase transitions — the LLM freely interweaves exploration, hypothesis generation, verification, and confirmation as it sees fit, guided by its system prompt.
 
-Parallel data collection from multiple Sub-Agents.
+### Phase as Notebook Marker, Not Graph Control
 
-```python
-def phase_exploration(state: ExecutorState) -> dict:
-    notebook = state.notebook
+`current_phase` in DiagnosticNotebook is a **descriptive label**, not a routing signal. The Orchestrator LLM updates it to reflect what it's currently focused on. This serves:
+- **Trajectory recording** — which phase an action belongs to
+- **Frontend display** — phase indicator in topology/conversation view
+- **Compression** — can compress older phase data when approaching token limits
 
-    tasks = [
-        Task(agent="infrastructure", task="Scan infrastructure", depth="overview"),
-        Task(agent="logs", task="Collect error logs", time_window="last_1h"),
-        Task(agent="database", task="Check connection pool", depth="overview"),
-    ]
+The LLM is free to interleave phases naturally — e.g., it might start forming hypotheses while exploration agents are still running, or loop back to exploration after a verification fails.
 
-    for task in tasks:
-        result = await dispatch_to_agent(task.agent, task)
-        notebook.collected_data[task.agent] = result.data  # Raw data only
+### System Prompt Guidelines (Not Enforced by Graph)
 
-    notebook.current_phase = Phase.GENERATION
-    notebook.current_step += 1
+The Orchestrator's system prompt provides diagnostic discipline without rigid enforcement:
 
-    return {
-        "notebook": notebook,
-        "current_phase": Phase.GENERATION,
-        "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)]  # Clean up messages
-        # ✅ LangGraph Verified: REMOVE_ALL_MESSAGES is a constant in langgraph.graph.message
-        # that clears all messages at once. No need to specify individual IDs.
-    }
+```jinja2
+{# prompts/orchestrator_system.j2 #}
+
+You are an RCA specialist investigating a production incident.
+
+Your working memory is the DiagnosticNotebook. Record all findings there.
+
+## Diagnostic Approach
+
+1. **Start broad**: Dispatch multiple agents to collect initial data across infrastructure,
+   database, logs, and network. Don't deep-dive before you've scanned the landscape.
+
+2. **Form hypotheses early**: As data comes in, start forming hypotheses. Don't wait
+   for all agents to finish before thinking.
+
+3. **Verify with evidence**: For each hypothesis, dispatch targeted investigations.
+   Actively look for BOTH supporting AND contradicting evidence.
+
+4. **Consider alternatives**: Before confirming a root cause, ensure you've considered
+   at least 2 alternative explanations and found evidence to rule them out.
+
+5. **Conclude decisively**: When evidence strongly supports one hypothesis and alternatives
+   are eliminated, confirm the root cause and provide actionable recommendations.
+
+## Tools Available
+- dispatch_agent(agent_id, task): Send a task to a Sub-Agent (async, returns immediately)
+- check_tasks(): See status of all dispatched tasks + results of completed ones
+- inject_instruction(task_id, msg): Redirect a running agent
+- abort_task(task_id, reason): Stop a running agent
+- knowledge_search/list/read: Query historical knowledge base
+- recall_history: Retrieve compressed history details
+
+## Notebook Management
+- Update current_phase to reflect your focus: exploration / generation / verification / confirmation
+- Record each significant action as an ExplorationStep in exploration_history
+- Maintain hypotheses with evidence and counter_evidence
 ```
 
-**Sub-Agent constraint**: Return raw data only. No reasoning.
-- OK: `{"cpu": 0.85, "memory": 0.4}`
-- NOT OK: `"I think CPU is high because..."`
+### Example: Realistic RCA Flow
 
-### Phase 2: Hypothesis Generation
+This shows how the Orchestrator naturally interleaves phases in a ReAct loop:
 
-Orchestrator uses LLM to generate candidate hypotheses from collected data.
-
-```python
-def phase_hypothesis_generation(state: ExecutorState) -> dict:
-    notebook = state.notebook
-
-    prompt = f"""
-    You are an RCA expert. Based on the following data, generate 3-5 root cause hypotheses.
-    For each hypothesis, provide: description, supporting evidence, counter evidence.
-
-    Collected data:
-    {json.dumps(notebook.collected_data, indent=2)}
-    """
-
-    hypotheses_raw = await llm.invoke(prompt)
-
-    for i, h in enumerate(hypotheses_raw):
-        hypothesis = Hypothesis(
-            id=f"H{i+1}",
-            description=h["description"],
-            evidence=h.get("evidence", []),
-            counter_evidence=h.get("counter_evidence", []),
-            status=HypothesisStatus.FORMED,
-            created_at=datetime.now().isoformat(),
-            last_updated=datetime.now().isoformat(),
-        )
-        notebook.hypotheses[hypothesis.id] = hypothesis
-
-    notebook.hypothesis_verification_order = list(notebook.hypotheses.keys())
-    notebook.current_phase = Phase.VERIFICATION
-    notebook.current_step += 1
-
-    return {"notebook": notebook, "current_phase": Phase.VERIFICATION}
+```
+Orchestrator LLM (ReAct loop)
+  │
+  │ # Broad scan first
+  ├─ "Let me scan the landscape"
+  │  dispatch_agent("infrastructure", "Scan CPU, memory, disk, network")
+  │  dispatch_agent("database", "Check connection pool, slow queries")
+  │  dispatch_agent("logs", "Collect error logs from last hour")
+  │  → Notebook: current_phase = exploration
+  │
+  │ # Check progress — infra is done, others still running
+  ├─ check_tasks()
+  │  → infra completed: "CPU 85%, memory 40%, disk ok"
+  │  → db: running (step 3/30)
+  │  → logs: running (step 2/20)
+  │
+  │ # Already forming a hypothesis from partial data
+  ├─ "CPU is high. Might be related. Let me wait for DB results."
+  │  → Notebook: hypotheses["H1"] = {description: "High CPU causing slow responses", status: FORMED}
+  │  → Notebook: current_phase = generation (already thinking while exploring)
+  │
+  │ # More results in
+  ├─ check_tasks()
+  │  → db completed: "Connection pool 100/100, 45 waiting, 3 slow queries > 2s"
+  │  → logs completed: "12 connection timeout errors in last 15 min"
+  │
+  │ # Revise hypothesis based on new data
+  ├─ "Connection pool exhaustion looks more likely than CPU."
+  │  → Notebook: hypotheses["H1"].status = REJECTED (CPU is symptom, not cause)
+  │  → Notebook: hypotheses["H2"] = {description: "DB connection pool exhaustion", status: FORMED}
+  │  → Notebook: current_phase = verification
+  │
+  │ # Deep investigation
+  ├─ dispatch_agent("database", "Deep dive: connection sources, lock wait times,
+  │    which queries hold connections longest")
+  │
+  │ # Meanwhile, check alternative
+  ├─ dispatch_agent("infrastructure", "Check if CPU spike is from postgres processes
+  │    or application. Check recent deployments.")
+  │
+  ├─ check_tasks()
+  │  → db completed: "Top connection holder: JOIN on orders table (4.2s avg).
+  │    Lock wait 320ms. All 100 connections from app-server-01 pool."
+  │  → infra completed: "CPU: postgres 45%, java 28%. No recent deployments."
+  │
+  │ # Confirm with counter-evidence check
+  ├─ "Strong evidence for H2. But let me check: could it be the app server, not the DB?"
+  │  → Notebook: hypotheses["H2"].evidence += ["pool full", "slow queries holding connections"]
+  │  → Notebook: hypotheses["H2"].counter_evidence += ["CPU is effect not cause"]
+  │
+  │ # Final confirmation
+  ├─ "Root cause: Connection pool exhaustion caused by slow queries.
+  │    Recommendations: increase pool_size, add query timeout, optimize orders JOIN."
+  │  → Notebook: confirmed_hypothesis = "H2"
+  │  → Notebook: current_phase = confirmation
+  └─ done
 ```
 
-### Phase 3: Hypothesis Verification
-
-Verify hypotheses one-by-one. Sub-Agent returns a VerificationResult (verdict + natural language report).
-
-```python
-def phase_hypothesis_verification(state: ExecutorState) -> dict:
-    notebook = state.notebook
-
-    for hypothesis_id in notebook.hypothesis_verification_order:
-        hypothesis = notebook.hypotheses[hypothesis_id]
-        if hypothesis.status != HypothesisStatus.FORMED:
-            continue
-
-        # Mark as investigating before dispatch
-        hypothesis.status = HypothesisStatus.INVESTIGATING
-        hypothesis.last_updated = datetime.now().isoformat()
-
-        agent_name = select_agent_for_verification(hypothesis)
-        result = await dispatch_to_agent(agent_name, f"Verify {hypothesis_id}")
-        # result is a VerificationResult (verdict + report)
-
-        if result.verdict == Verdict.CONFIRMED:
-            hypothesis.status = HypothesisStatus.CONFIRMED
-            notebook.confirmed_hypothesis = hypothesis_id
-            break
-
-        elif result.verdict == Verdict.REJECTED:
-            hypothesis.status = HypothesisStatus.REJECTED
-
-        elif result.verdict == Verdict.PARTIAL:
-            hypothesis.status = HypothesisStatus.PARTIAL
-            hypothesis.description = result.refined_description or hypothesis.description
-
-        # Orchestrator extracts key evidence from the report into hypothesis
-        # (This is Orchestrator's own reasoning, not automatic field mapping)
-        update_hypothesis_evidence(hypothesis, result.report)
-
-        # Record exploration step
-        notebook.exploration_history.append(ExplorationStep(
-            step_number=notebook.current_step,
-            phase=Phase.VERIFICATION,
-            action=f"Verify {hypothesis_id}",
-            timestamp=datetime.now().isoformat(),
-            content=result.report,                    # Natural language diagnostic report
-            target_hypothesis_id=hypothesis_id,
-            verdict=result.verdict,                   # Structured — for state machine
-        ))
-        notebook.current_step += 1
-
-    notebook.current_phase = Phase.CONFIRMATION
-    return {"notebook": notebook, "current_phase": Phase.CONFIRMATION}
-```
-
-### Phase 4: Confirmation
-
-Output the final diagnostic result.
-
-```python
-def phase_confirmation(state: ExecutorState) -> dict:
-    notebook = state.notebook
-
-    if notebook.confirmed_hypothesis:
-        root_cause = notebook.hypotheses[notebook.confirmed_hypothesis]
-        output = {
-            "status": "SUCCESS",
-            "root_cause": root_cause.description,
-            "evidence": root_cause.evidence,
-            "recommendations": generate_recommendations(root_cause),
-        }
-    else:
-        output = {
-            "status": "INCONCLUSIVE",
-            "hypotheses_eliminated": [
-                h.description for h in notebook.hypotheses.values()
-                if h.status == HypothesisStatus.REJECTED
-            ],
-        }
-
-    return {"notebook": notebook, "current_phase": Phase.CONFIRMATION}
-```
+**Key observation**: The LLM naturally moved from exploration → generation → verification → confirmation, but it didn't follow a rigid sequence. It formed H1 while still exploring, rejected it when new data arrived, and interleaved verification with alternative checking. This is how humans actually do RCA.
 
 ---
 
@@ -969,7 +936,7 @@ The Orchestrator operates like a real team leader — it **submits tasks asynchr
 │  │                                                       │ │
 │  │  submit() → asyncio.create_task(subgraph.ainvoke())  │ │
 │  │  get_all_status() → status + completed results        │ │
-│  │  inject() → subgraph update_state()                   │ │
+│  │  inject() → queue instruction (pre_model_hook)        │ │
 │  │  abort() → asyncio.Task.cancel()                      │ │
 │  │                                                       │ │
 │  │  Also: stream events → WebSocket for frontend         │ │
@@ -1046,11 +1013,10 @@ class TaskTraceRef:
     agent_thread_id: str           # Sub-Agent's own thread_id for get_state_history()
     parent_thread_id: str          # Orchestrator's thread_id
     parent_dispatch_step: int      # Orchestrator checkpoint step when dispatch_agent was called
-    parent_result_step: Optional[int] = None  # Orchestrator step when get_result was called
     hypothesis_id: Optional[str] = None
 ```
 
-The TaskManager populates this on `submit()` and updates `parent_result_step` when `get_result()` is called.
+The TaskManager populates this on `submit()` and updates it when the task completes.
 
 ### Trajectory Export
 
@@ -1081,7 +1047,7 @@ At export time, the hierarchical trajectory is reconstructed by combining:
 }
 ```
 
-**RL Training Export**: For (state, action, reward, next_state) transitions, the Orchestrator trace provides the high-level decision trace (dispatch → check → get_result → reason). Each Sub-Agent trace provides the low-level execution trace (tool call → observe → reason → tool call). These can be exported separately or merged by aligning on dispatch/result steps.
+**RL Training Export**: For (state, action, reward, next_state) transitions, the Orchestrator trace provides the high-level decision trace (dispatch → check → reason). Each Sub-Agent trace provides the low-level execution trace (tool call → observe → reason → tool call). These can be exported separately or merged by aligning on dispatch/result steps.
 
 **Replay**: Orchestrator and Sub-Agent traces can be replayed independently. To replay from a specific point:
 - Orchestrator: `graph.invoke(None, {thread_id: "rca-042", checkpoint_id: "..."})`
@@ -1091,7 +1057,7 @@ At export time, the hierarchical trajectory is reconstructed by combining:
 
 ## Message Passing: ToolMessage Protocol
 
-Sub-Agent results are passed back to the Orchestrator as **ToolMessage content** through the `get_result` tool. The Orchestrator never sees Sub-Agent internal state directly.
+Sub-Agent results are passed back to the Orchestrator as **ToolMessage content** through the `check_tasks` tool (results included inline for completed tasks). The Orchestrator never sees Sub-Agent internal state directly.
 
 ### Flow
 
@@ -1107,8 +1073,8 @@ Sub-Agent results are passed back to the Orchestrator as **ToolMessage content**
    final_msg = result_state["messages"][-1]  # Last AIMessage
    managed.result = parse_agent_output(final_msg.content)
 
-4. Orchestrator calls get_result("task-001")
-   → ToolMessage: {pool_size: 100, active: 100, waiting: 45}
+4. Orchestrator calls check_tasks()
+   → completed: [{task_id: "task-001", result: {pool_size: 100, active: 100, waiting: 45}}]
 
 5. Orchestrator LLM reasons about the result
 ```
@@ -1146,8 +1112,7 @@ The Orchestrator only interacts with Sub-Agent data through ToolMessages:
 | Tool | ToolMessage Content |
 |------|-------------------|
 | `dispatch_agent` | `{task_id, agent_id, status: "running"}` |
-| `check_tasks` | `{running: [...], completed: [...], failed: [...]}` |
-| `get_result` | Sub-Agent's final output (raw data or VerificationResult) |
+| `check_tasks` | `{running: [...], completed: [{..., result: ...}], failed: [...]}` |
 | `inject_instruction` | `"Instruction injected into task-001"` |
 | `abort_task` | `"Aborted task-001: reason"` |
 
@@ -1220,62 +1185,25 @@ This is **also a Sub-Agent task** — dispatched asynchronously like any other. 
 
 ### Feature Gate Access in Code
 
-```python
-def phase_hypothesis_verification(state: ExecutorState, config: dict) -> dict:
-    features = config["orchestrator"]["feature_gates"]
-
-    # Choose dispatch strategy based on feature gates
-    if features.get("parallel_verification"):
-        # Fan-out: verify all active hypotheses in parallel
-        return dispatch_parallel_verification(state)
-    else:
-        # Sequential: verify one by one
-        return dispatch_sequential_verification(state)
-
-def process_verification_result(state, result, config):
-    features = config["orchestrator"]["feature_gates"]
-
-    # Preliminary verdict
-    verdict = result.verdict
-
-    # Adversarial review if enabled
-    if features.get("adversarial_review") and verdict == Verdict.CONFIRMED:
-        challenge = await dispatch_adversarial_review(result)
-        if challenge.challenge_strength == "strong":
-            verdict = Verdict.PARTIAL  # Downgrade
-
-    # Minimum verification check
-    min_checks = features.get("min_verifications_before_confirm", 1)
-    verified_count = count_verified_hypotheses(state.notebook)
-    if verdict == Verdict.CONFIRMED and verified_count < min_checks:
-        # Don't confirm yet, continue verifying others
-        verdict = Verdict.PARTIAL
-
-    return verdict
-```
-
----
-
-## LLM Decision-Making
-
-The Orchestrator uses LLM to make routing decisions. Prompts are loaded from config files (Jinja2 templates):
+Feature gates are accessed from the Orchestrator's runtime config. Since the Orchestrator is a `create_react_agent`, feature gates influence the **system prompt** and **tool behavior**, not graph routing:
 
 ```python
-def orchestrator_node(state: ExecutorState) -> Command[...]:
-    system_prompt = load_prompt_template(
-        config["prompts"]["system"],
-        notebook=state.notebook,
-        phase=state.current_phase,
-    )
+# Feature gates are injected into the system prompt template
+# prompts/orchestrator_system.j2
+{% if feature_gates.adversarial_review %}
+After reaching a verdict, always request a counter-argument before confirming.
+{% endif %}
 
-    response = model.invoke([
-        SystemMessage(content=system_prompt),
-        *state.messages,
-    ])
+{% if feature_gates.min_verifications_before_confirm > 1 %}
+Before confirming a root cause, ensure you have verified at least
+{{ feature_gates.min_verifications_before_confirm }} alternative hypotheses.
+{% endif %}
 
-    decision = parse_decision(response.content)
-    return Command(goto=decision["next_agent"])
+# Feature gates can also influence tool behavior at runtime
+# (e.g., dispatch_agent could auto-dispatch an adversarial agent after verification)
 ```
+
+Since the Orchestrator is a `create_react_agent`, all decision-making happens within its ReAct loop — there is no explicit routing logic or `Command(goto=...)`. The system prompt (Jinja2 template) configures the LLM's diagnostic approach, and feature gates are injected as prompt conditions. Switching scenarios requires **only new config + prompt files**, zero code changes.
 
 Prompt templates are external files — switching scenarios requires **only new config + prompt files**, zero code changes.
 
@@ -1314,11 +1242,11 @@ class ManagedTask:
     asyncio_task: Optional[asyncio.Task] = field(default=None, repr=False)
     events_buffer: list[dict] = field(default_factory=list)  # Recent events for summary
     subgraph_config: Optional[dict] = field(default=None, repr=False)  # For update_state
+    pending_instructions: list[str] = field(default_factory=list)  # Queued by inject()
 
     # Trajectory registry (for hierarchical trace reconstruction)
     parent_thread_id: Optional[str] = None    # Orchestrator's thread_id
     parent_dispatch_step: Optional[int] = None  # Orchestrator step at dispatch time
-    parent_result_step: Optional[int] = None    # Orchestrator step at get_result time
 ```
 
 ### TaskManager
@@ -1329,8 +1257,7 @@ class TaskManager:
 
     Provides the backing implementation for Orchestrator tools:
     - dispatch_agent → submit()
-    - check_tasks   → get_all_status()
-    - get_result    → get_result()
+    - check_tasks   → get_all_status() (includes results for completed tasks)
     - inject_instruction → inject()
     - abort_task    → abort()
 
@@ -1425,7 +1352,7 @@ class TaskManager:
         """Return status snapshot of all tasks, including full results for completed tasks.
 
         Called by check_tasks tool. Completed task results are included inline
-        so the Orchestrator gets everything in one call — no need for a separate get_result.
+        so the Orchestrator gets everything in one call.
         """
         result = {"running": [], "completed": [], "failed": []}
         for task_id, task in self._tasks.items():
@@ -1449,15 +1376,22 @@ class TaskManager:
                 result["failed"].append(entry)
         return result
 
-    async def inject(self, task_id: str, instruction: str):
-        """Inject instruction into a running Sub-Agent via update_state()."""
+    def inject(self, task_id: str, instruction: str):
+        """Queue an instruction for a running Sub-Agent.
+
+        The instruction is stored in a per-task queue. The Sub-Agent's
+        pre_model_hook checks this queue before every LLM call and injects
+        pending instructions into the LLM input as HumanMessages.
+
+        This is safe because pre_model_hook runs synchronously within the
+        ReAct loop — no race conditions with the streaming subgraph.
+        """
         task = self._tasks.get(task_id)
         if not task or task.status != AgentRunStatus.RUNNING:
             raise ToolException(f"Task {task_id} is not running")
-        subgraph = self._agents[task.agent_id]
-        await subgraph.aupdate_state(task.subgraph_config, {
-            "messages": [HumanMessage(content=f"[Orchestrator] {instruction}")],
-        })
+        if not hasattr(task, 'pending_instructions'):
+            task.pending_instructions = []
+        task.pending_instructions.append(instruction)
 
     async def abort(self, task_id: str, reason: str):
         """Abort a running Sub-Agent by cancelling its asyncio.Task."""
@@ -1495,9 +1429,37 @@ class TaskManager:
         return summary.content
 ```
 
+### Instruction Injection: pre_model_hook
+
+Sub-Agents consume Orchestrator instructions via a `pre_model_hook` that checks the TaskManager's per-task instruction queue before every LLM call. This is safe because the hook runs synchronously within the Sub-Agent's ReAct loop.
+
+```python
+def build_instruction_hook(task_manager: TaskManager, task_id: str):
+    """Build a pre_model_hook that checks for pending Orchestrator instructions."""
+
+    def hook(state):
+        instructions = task_manager.consume_instructions(task_id)
+        if instructions:
+            injected = [
+                HumanMessage(content=f"[Orchestrator] {msg}")
+                for msg in instructions
+            ]
+            return {"llm_input_messages": state["messages"] + injected}
+        return {"llm_input_messages": state["messages"]}
+
+    return hook
+
+# Attach when creating the Sub-Agent for a task
+agent = create_react_agent(
+    model=model,
+    tools=tools,
+    pre_model_hook=build_instruction_hook(task_manager, task_id),
+)
+```
+
 ### Orchestrator Tools
 
-The Orchestrator has five task management tools, all backed by the TaskManager:
+The Orchestrator has four task management tools, all backed by the TaskManager:
 
 ```python
 @tool
@@ -1505,9 +1467,13 @@ def dispatch_agent(agent_id: str, task: str, hypothesis_id: Optional[str] = None
     """Dispatch a task to a Sub-Agent. The agent starts executing immediately
     in the background and this tool returns right away with a task_id.
 
-    Use check_tasks() to monitor progress and get_result() to collect results.
+    Use check_tasks() to monitor progress and collect results when completed.
 
     Multiple agents can be dispatched concurrently — call this tool multiple times.
+
+    > **Implementation note**: This is an async tool (`async def`). LangChain's
+    > `@tool` decorator supports async functions natively. All TaskManager tools
+    > must be defined as `async def` since they call `await task_manager.submit()`.
 
     Args:
         agent_id: Which Sub-Agent to dispatch (e.g., "infrastructure", "database", "logs")
@@ -1530,36 +1496,28 @@ def check_tasks() -> dict:
 
     Returns a dashboard with three sections:
     - running: Tasks still executing, with step progress and activity summary
-    - completed: Tasks that have finished (use get_result to fetch full results)
+    - completed: Tasks that have finished, with full results inline
     - failed: Tasks that encountered errors
 
     Use this to:
     - Monitor progress of long-running agents
     - Decide whether to wait, inject new instructions, or abort
-    - Know when to call get_result() for completed tasks
+    - Collect completed task results (included inline, no separate call needed)
     """
     return task_manager.get_all_status()
-
-
-@tool
-def get_result(task_id: str) -> dict:
-    """Get the full result of a completed task.
-
-    Call this after check_tasks() shows a task as completed.
-    Returns the Sub-Agent's final output data.
-
-    Args:
-        task_id: The task_id returned by dispatch_agent
-    """
-    return task_manager.get_result(task_id)
 
 
 @tool
 def inject_instruction(task_id: str, instruction: str) -> str:
     """Inject a new instruction into a running Sub-Agent.
 
-    The instruction is added to the agent's message history as a HumanMessage.
-    The agent will see it on its next reasoning step.
+    The instruction is queued and injected at the Sub-Agent's next interrupt point
+    via Command(resume=..., update={...}). The agent will see it as a HumanMessage
+    when it resumes execution.
+
+    The instruction is queued and will be injected into the agent's LLM input
+    on its next reasoning step (via pre_model_hook). The agent sees it as a
+    HumanMessage from [Orchestrator].
 
     Use when:
     - Agent seems stuck on a wrong path (from check_tasks summary)
@@ -1570,8 +1528,8 @@ def inject_instruction(task_id: str, instruction: str) -> str:
         task_id: The task to instruct
         instruction: The instruction text
     """
-    await task_manager.inject(task_id, instruction)
-    return f"Instruction injected into {task_id}"
+    task_manager.inject(task_id, instruction)
+    return f"Instruction queued for {task_id}. Agent will see it on next reasoning step."
 
 
 @tool
@@ -1619,23 +1577,19 @@ Orchestrator (Phase 3: Verification)
   │        step: 8, max_steps: 30, summary: "Retrying connection to replica, 3 failed attempts"},
   │     ]
   │   → completed: [
-  │       {task_id: "task-002", agent: "infrastructure", duration: 12.3},
+  │       {task_id: "task-002", agent: "infrastructure", duration: 12.3,
+  │        result: {cpu: 0.45, memory: 0.6, disk_io: {...}, network: {...}}},
   │     ]
   │   Decision: Infrastructure done. Database struggling with replica.
-  │
-  ├─ get_result("task-002")
-  │   → {cpu: 0.45, memory: 0.6, disk_io: {...}, network: {...}}
   │
   ├─ inject_instruction("task-001", "Skip replica, focus on primary pool metrics")
   │   → "Instruction injected into task-001"
   │
   ├─ check_tasks()
   │   → completed: [
-  │       {task_id: "task-001", agent: "database", duration: 18.0},
+  │       {task_id: "task-001", agent: "database", duration: 18.0,
+  │        result: {pool_size: 100, active: 100, waiting: 45}},
   │     ]
-  │
-  ├─ get_result("task-001")
-  │   → {pool_size: 100, active: 100, waiting: 45}
   │
   └─ All results collected. Orchestrator reasons about verdict...
 ```
@@ -1701,8 +1655,7 @@ orchestrator:
 
   tools:
     - dispatch_agent          # Async dispatch to Sub-Agent (non-blocking)
-    - check_tasks             # Monitor all task status
-    - get_result              # Fetch completed task result
+    - check_tasks             # Monitor all task status + collect results
     - inject_instruction      # Inject instruction into running task
     - abort_task              # Abort running task
 
