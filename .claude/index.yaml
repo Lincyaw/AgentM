@@ -10,7 +10,7 @@ concepts:
     tasks: []
 
   orchestrator:
-    description: "create_react_agent acting as hypothesis reasoner. Maintains DiagnosticNotebook, drives four-phase RCA flow, context compression with checkpoint-backed recall. Dispatches Sub-Agents asynchronously via TaskManager, monitors/injects/aborts via tools in ReAct loop"
+    description: "create_react_agent acting as hypothesis reasoner. Maintains DiagnosticNotebook, drives RCA flow in ReAct loop (phases are Notebook state markers, not graph nodes), context compression with checkpoint-backed recall. Dispatches Sub-Agents asynchronously via TaskManager, monitors/injects/aborts via tools"
     design: "designs/orchestrator.md"
     related_concepts: [system_architecture, sub_agent, trajectory_system, memory_system, execution_runner]
     plans: []
@@ -31,9 +31,10 @@ concepts:
     tasks: []
 
   memory_system:
-    description: "Two-layer memory: intra-task (context compression + recall_history tool backed by checkpoint chain) and cross-task (Memory Extraction agent system producing KnowledgeEntry items with three confidence levels — FACT/PATTERN/HEURISTIC — in LangGraph Store)"
-    design: "designs/generic-state-wrapper.md"
+    description: "Two-layer memory: intra-task (context compression + recall_history tool backed by checkpoint chain, see orchestrator.md) and cross-task (Memory Extraction agent system producing KnowledgeEntry items with three confidence levels — FACT/PATTERN/HEURISTIC — in LangGraph Store, see generic-state-wrapper.md)"
+    design: "designs/orchestrator.md"
     related_concepts: [orchestrator, generic_state_wrapper, trajectory_system]
+    related_designs: ["designs/generic-state-wrapper.md"]
     plans: []
     tasks: []
 
@@ -52,14 +53,14 @@ concepts:
     tasks: []
 
   recovery_system:
-    description: "Four-layer error handling: Sub-Agent self-heal, RetryPolicy, Orchestrator decision (with error summary + last steps), manual system recovery via checkpoint resume. Debug replay via checkpoint fork"
+    description: "Four-layer error handling: Sub-Agent self-heal, API+Task retry (ChatOpenAI max_retries + TaskManager exponential backoff), Orchestrator decision (with error summary + last steps), manual system recovery via checkpoint resume. Debug replay via checkpoint fork"
     design: "designs/system-design-overview.md"
     related_concepts: [system_architecture, trajectory_system, orchestrator, sub_agent, execution_runner]
     plans: []
     tasks: []
 
   execution_runner:
-    description: "TaskManager: manages async Sub-Agent execution as asyncio.Tasks. Provides backing for dispatch_agent/check_tasks/get_result/inject_instruction/abort_task tools. Streams events to frontend WebSocket"
+    description: "TaskManager: manages async Sub-Agent execution as asyncio.Tasks. Provides backing for dispatch_agent/check_tasks/inject_instruction/abort_task tools. Injects instructions via interrupt+Command(resume). Streams events to frontend WebSocket"
     design: "designs/orchestrator.md"
     related_concepts: [orchestrator, sub_agent, frontend_architecture, trajectory_system]
     plans: []
