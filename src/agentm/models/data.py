@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import Literal, Optional
 
 from agentm.models.enums import (
     AgentRunStatus,
@@ -17,9 +17,6 @@ from agentm.models.enums import (
     Phase,
     Verdict,
 )
-
-if TYPE_CHECKING:
-    pass
 
 
 # --- Hypothesis & Verification ---
