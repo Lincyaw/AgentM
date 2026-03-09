@@ -70,7 +70,7 @@ def knowledge_search(
     if store is None:
         raise RuntimeError("Knowledge store not initialized — call set_store() first")
     namespace_prefix = path_to_namespace(path)
-    results = store.search(namespace_prefix=namespace_prefix, query=query, filter=filter, limit=limit)
+    results = store.search(namespace_prefix, query=query, filter=filter, limit=limit)
     return [
         {
             "key": r.key,
@@ -89,7 +89,7 @@ def knowledge_list(path: str = "/") -> dict[str, Any]:
         raise RuntimeError("Knowledge store not initialized — call set_store() first")
     namespace = path_to_namespace(path)
     children = store.list_namespaces(prefix=namespace, max_depth=len(namespace) + 1)
-    entries = store.search(namespace_prefix=namespace, limit=100)
+    entries = store.search(namespace, limit=100)
     return {
         "path": path,
         "sub_paths": [namespace_to_path(ns) for ns in children],
