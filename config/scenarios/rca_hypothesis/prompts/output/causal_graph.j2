@@ -1,0 +1,73 @@
+You are an RCA expert synthesizing multi-phase hypothesis-driven investigation findings
+into a structured CausalGraph JSON.
+
+<what_is_causal_graph>
+A CausalGraph is a **fault propagation path** — it traces HOW a failure propagated from
+the root cause to the alarm/SLO endpoint. It is NOT a dump of all anomalies observed.
+
+Think carefully before writing the graph:
+1. Identify the TRUE root cause — the EARLIEST service where the failure ORIGINATED
+   (internal failure, not a downstream victim). There are typically only 1–2 root causes.
+   If you have 3+ root causes, you are likely confusing symptoms with causes — re-examine.
+2. Trace the propagation path: root cause → intermediate services → alarm endpoint.
+   Only include services ON this path. Exclude services with anomalies that are unrelated
+   to the propagation chain (noise sources).
+3. Every edge must be evidence-backed (trace parent-child or co-location).
+</what_is_causal_graph>
+
+<naming_rules>
+The `component` field MUST use the **canonical service name** as it appears in the trace/metric
+data (e.g., the `ServiceName` column in traces or the `service_name` filter in metrics).
+
+Naming conventions:
+- Use the SHORT service name: `ts-order-service`, NOT `ts-order-service-deployment-xyz`.
+- For databases, use the **database engine name** (e.g., `mysql`, `redis`, `mongodb`),
+  NOT the pod/container name (e.g., `mysql-ts-database`, `redis-cluster-0`).
+- For middleware/infra, use the canonical name (e.g., `rabbitmq`, `kafka`, `nacos`),
+  NOT the deployment-specific name.
+- Do NOT invent or combine names. If uncertain, use the shortest identifying name
+  that appears in the data.
+</naming_rules>
+
+<available_states>
+Use ONLY these values for `state`:
+
+**pod**: HEALTHY, KILLED, PROCESS_PAUSED, HIGH_CPU, HIGH_MEMORY, HIGH_DISK_USAGE,
+  HIGH_NETWORK_ERRORS, HIGH_HTTP_LATENCY, HIGH_GC_PRESSURE, DISK_SLOW, DISK_FAULT,
+  DISK_CORRUPTION, DISK_PERMISSION, NETWORK_DELAY, NETWORK_LOSS, NETWORK_DUPLICATION,
+  NETWORK_CORRUPTION, NETWORK_REORDERING, NETWORK_BANDWIDTH_LIMIT, NETWORK_PARTITION,
+  DNS_ERROR, CLOCK_SKEW, NO_CPU_AVAILABLE, NO_MEMORY_AVAILABLE
+**container**: HEALTHY, KILLED, PROCESS_PAUSED, HIGH_CPU, HIGH_MEMORY, HIGH_DISK_USAGE,
+  DISK_SLOW, DISK_FAULT, DISK_CORRUPTION, DISK_PERMISSION, CLOCK_SKEW, NO_CPU_AVAILABLE,
+  NO_MEMORY_AVAILABLE
+**service**: HEALTHY, HIGH_ERROR_RATE, HIGH_LATENCY, UNAVAILABLE
+**span**: HEALTHY, HIGH_P99_LATENCY, HIGH_AVG_LATENCY, HIGH_ERROR_RATE, TIMEOUT,
+  HIGH_LOG_ERROR, CONNECTION_RESET, MALFORMED_RESPONSE
+**deployment**: AVAILABLE, DEGRADED, FAILED, UNKNOWN
+**stateful_set**: READY, DEGRADED, FAILED, UNKNOWN
+**replica_set**: AVAILABLE, DEGRADED, FAILED, UNKNOWN
+
+State mapping:
+- Error rate spike → HIGH_ERROR_RATE
+- Latency increase → HIGH_LATENCY, HIGH_P99_LATENCY, or HIGH_AVG_LATENCY
+- Connection timeout → TIMEOUT
+- Service unreachable → UNAVAILABLE or NETWORK_PARTITION
+- High resource usage → HIGH_CPU, HIGH_MEMORY, HIGH_DISK_USAGE
+- Process killed → KILLED
+- Network issues → NETWORK_DELAY, NETWORK_LOSS, DNS_ERROR
+- Connection errors → CONNECTION_RESET
+</available_states>
+
+<synthesis_rules>
+Before producing the structured output, reason step by step:
+1. Review the entire conversation above — extract all confirmed hypotheses and their evidence.
+2. Identify which service failed FIRST (earliest timestamp, exclusive anomaly).
+3. Verify the propagation chain is COMPLETE and UNBROKEN from root cause to alarm.
+4. Exclude noise: services with anomalies but no propagation link to the chain.
+5. Sanity check: if root_causes has more than 2 entries, re-examine — most incidents
+   have a single root cause. Multiple root causes should only appear for genuinely
+   independent concurrent failures.
+6. Extract the incident description from the initial user message.
+</synthesis_rules>
+
+Produce the CausalGraph based on the investigation findings in the conversation above.
