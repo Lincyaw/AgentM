@@ -59,7 +59,10 @@ class TestRetrySuccessAfterFailure:
 
     @pytest.mark.asyncio
     async def test_succeeds_on_second_attempt(self):
-        events = [("ns", "updates", {"step": 1})]
+        events = [
+            ("ns", "updates", {"step": 1}),
+            ("ns", "updates", {"structured_response": {"findings": "ok"}}),
+        ]
         subgraph = _make_subgraph([
             RuntimeError("transient"),
             events,
