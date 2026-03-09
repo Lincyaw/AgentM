@@ -60,11 +60,18 @@ def count_tokens(messages: list[Any], model: str = "gpt-4") -> int:
     return total
 
 
-def _summarize_messages(messages: list[Any], model: str = "gpt-4o-mini") -> str:
-    """Summarize a list of messages into a structured text summary using an LLM."""
-    from langchain_openai import ChatOpenAI
-    from langchain_core.messages import HumanMessage as LCHumanMessage
+_SUMMARIZE_PROMPT = (
+    "Summarize the following agent execution history into a structured summary. "
+    "Preserve: key findings, tool call results, data values, and decisions made. "
+    "Be concise but retain specific data points (numbers, names, timestamps)."
+)
 
+# Max tokens to send to the compression model per chunk (leave headroom for prompt + response)
+_MAX_CHUNK_TOKENS = 100_000
+
+
+def _format_messages_for_summary(messages: list[Any]) -> list[str]:
+    """Format messages into text lines for the summarization prompt."""
     formatted = []
     for msg in messages:
         role = getattr(msg, "type", "unknown")
@@ -75,18 +82,79 @@ def _summarize_messages(messages: list[Any], model: str = "gpt-4o-mini") -> str:
         elif content:
             preview = content[:500] + "..." if len(content) > 500 else content
             formatted.append(f"[{role}] {preview}")
+    return formatted
 
-    messages_text = "\n".join(formatted)
 
-    prompt = (
-        "Summarize the following agent execution history into a structured summary. "
-        "Preserve: key findings, tool call results, data values, and decisions made. "
-        "Be concise but retain specific data points (numbers, names, timestamps).\n\n"
-        f"Messages:\n{messages_text}"
-    )
+def _summarize_messages(messages: list[Any], model: str = "gpt-4o-mini") -> str:
+    """Summarize a list of messages using an LLM, chunking if needed.
+
+    When the formatted messages exceed the compression model's context window,
+    they are split into chunks. Each chunk is summarized independently, then
+    the chunk summaries are combined into a final summary.
+    """
+    from langchain_openai import ChatOpenAI
+    from langchain_core.messages import HumanMessage as LCHumanMessage
+
+    formatted_lines = _format_messages_for_summary(messages)
+
+    # Split into chunks that fit the compression model's context window
+    chunks: list[str] = []
+    current_chunk: list[str] = []
+    current_tokens = 0
+
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except KeyError:
+        encoding = tiktoken.get_encoding("cl100k_base")
+
+    for line in formatted_lines:
+        line_tokens = len(encoding.encode(line))
+        if current_tokens + line_tokens > _MAX_CHUNK_TOKENS and current_chunk:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = []
+            current_tokens = 0
+        current_chunk.append(line)
+        current_tokens += line_tokens
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
 
     llm = ChatOpenAI(model=model, temperature=0)
-    result = llm.invoke([LCHumanMessage(content=prompt)])
+
+    if len(chunks) == 1:
+        # Single chunk — summarize directly
+        prompt = f"{_SUMMARIZE_PROMPT}\n\nMessages:\n{chunks[0]}"
+        result = llm.invoke([LCHumanMessage(content=prompt)])
+        content = result.content
+        if isinstance(content, list):
+            return " ".join(str(part) for part in content)
+        return str(content)
+
+    # Multi-chunk — summarize each chunk, then combine
+    chunk_summaries: list[str] = []
+    for i, chunk in enumerate(chunks):
+        prompt = (
+            f"{_SUMMARIZE_PROMPT}\n\n"
+            f"This is part {i + 1} of {len(chunks)} of the execution history.\n\n"
+            f"Messages:\n{chunk}"
+        )
+        result = llm.invoke([LCHumanMessage(content=prompt)])
+        content = result.content
+        if isinstance(content, list):
+            chunk_summaries.append(" ".join(str(part) for part in content))
+        else:
+            chunk_summaries.append(str(content))
+
+    # Combine chunk summaries into a final summary
+    combined = "\n\n---\n\n".join(
+        f"[Part {i + 1}]\n{s}" for i, s in enumerate(chunk_summaries)
+    )
+    final_prompt = (
+        "Combine the following partial summaries into one coherent, structured summary. "
+        "Remove redundancy but preserve all key data points.\n\n"
+        f"{combined}"
+    )
+    result = llm.invoke([LCHumanMessage(content=final_prompt)])
     content = result.content
     if isinstance(content, list):
         return " ".join(str(part) for part in content)
