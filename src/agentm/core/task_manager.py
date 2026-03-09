@@ -268,7 +268,7 @@ class TaskManager:
                         })
 
                 managed.status = AgentRunStatus.COMPLETED
-                managed.result = {"events": managed.events_buffer}
+                managed.result = _extract_final_answer(managed.events_buffer)
                 managed.completed_at = datetime.now().isoformat()
                 if managed.started_at:
                     started = datetime.fromisoformat(managed.started_at)
@@ -321,3 +321,27 @@ class TaskManager:
                 },
                 task_id=managed.task_id,
             )
+
+
+def _extract_final_answer(events_buffer: list[Any]) -> str:
+    """Extract the Sub-Agent's final answer from its event stream.
+
+    The Orchestrator only needs the Sub-Agent's conclusion, not the full
+    internal tool call history. This walks the events buffer backwards to
+    find the last AIMessage content (the agent's final report/summary).
+    """
+    # Walk backwards through events to find the last AI message with content
+    for event in reversed(events_buffer):
+        if not isinstance(event, dict):
+            continue
+        messages = event.get("messages", [])
+        for msg in reversed(messages):
+            role = getattr(msg, "type", "unknown")
+            content = getattr(msg, "content", "")
+            tool_calls = getattr(msg, "tool_calls", None)
+            # The final answer is an AI message with content but no tool calls
+            if role == "ai" and content and not tool_calls:
+                return content
+
+    # Fallback: if no clean final answer, return a brief summary
+    return "(Sub-Agent completed but produced no final summary)"
