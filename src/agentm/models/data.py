@@ -182,6 +182,7 @@ class ManagedTask:
     asyncio_task: Optional[asyncio.Task] = field(default=None, repr=False)  # type: ignore[type-arg]
     events_buffer: list[dict] = field(default_factory=list)
     subgraph_config: Optional[dict] = field(default=None, repr=False)
+    reported: bool = False
     pending_instructions: list[str] = field(default_factory=list)
     parent_thread_id: Optional[str] = None
     parent_dispatch_step: Optional[int] = None

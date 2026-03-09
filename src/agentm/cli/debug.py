@@ -174,7 +174,7 @@ def _event_detail(event: dict) -> str:
     if et == "tool_call":
         return f"{data.get('tool_name', '')}({str(data.get('args', ''))[:40]})"
     if et == "tool_result":
-        return f"{data.get('tool_name', '')}: {data.get('result_preview', '')[:40]}"
+        return f"{data.get('tool_name', '')}: {(data.get('result') or data.get('result_preview', ''))[:40]}"
     if et == "hypothesis_update":
         return f"{data.get('hypothesis_id', '')} -> {data.get('status', '')}"
     if et in ("task_dispatch", "task_complete", "task_fail"):
@@ -185,7 +185,7 @@ def _event_detail(event: dict) -> str:
             parts.append(data.get("error_summary", "")[:30])
         return " | ".join(parts)
     if et == "llm_end":
-        return data.get("content_preview", "")[:60]
+        return (data.get("content") or data.get("content_preview", ""))[:60]
     if et == "error":
         return data.get("message", "")[:60]
     return str(data)[:60]

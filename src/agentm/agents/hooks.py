@@ -7,6 +7,7 @@ from typing import Any, Callable
 from langchain_core.messages import HumanMessage
 
 from agentm.core.task_manager import TaskManager
+from agentm.core.trajectory import TrajectoryCollector
 
 
 def build_instruction_hook(task_manager: TaskManager, task_id: str) -> Callable:
@@ -18,6 +19,7 @@ def build_instruction_hook(task_manager: TaskManager, task_id: str) -> Callable:
 
     Ref: designs/sub-agent.md § Instruction Queue
     """
+
     def hook(state: dict[str, Any]) -> dict[str, Any]:
         instructions = task_manager.consume_instructions(task_id)
         original_messages = state.get("messages", [])
@@ -29,7 +31,62 @@ def build_instruction_hook(task_manager: TaskManager, task_id: str) -> Callable:
     return hook
 
 
-def build_combined_hook(instruction_hook: Callable, compression_hook: Callable) -> Callable:
+def build_llm_input_hook(
+    trajectory: TrajectoryCollector,
+    agent_path: list[str],
+) -> Callable:
+    """Build a pre_model_hook that records the messages sent to the LLM.
+
+    Emits an ``llm_start`` trajectory event containing a summary of the
+    messages about to be fed to the model.  Uses ``record_sync`` because
+    pre_model_hook is synchronous.
+    """
+
+    def hook(state: dict[str, Any]) -> dict[str, Any]:
+        messages = state.get("llm_input_messages") or state.get("messages", [])
+        summary: list[dict[str, Any]] = []
+        for msg in messages:
+            role = getattr(msg, "type", "unknown")
+            content = getattr(msg, "content", "")
+            entry: dict[str, Any] = {"role": role}
+            if role == "system":
+                entry["content"] = content[:500] + ("..." if len(content) > 500 else "")
+            elif role == "ai":
+                tc = getattr(msg, "tool_calls", None)
+                if tc:
+                    entry["tool_calls"] = [{"name": c.get("name", "")} for c in tc]
+                if content:
+                    entry["content"] = content[:300] + (
+                        "..." if len(content) > 300 else ""
+                    )
+            elif role == "tool":
+                entry["name"] = getattr(msg, "name", "")
+                entry["content"] = content[:200] + ("..." if len(content) > 200 else "")
+            elif role == "human":
+                entry["content"] = content[:300] + ("..." if len(content) > 300 else "")
+            else:
+                entry["content"] = content[:200] + ("..." if len(content) > 200 else "")
+            summary.append(entry)
+
+        trajectory.record_sync(
+            event_type="llm_start",
+            agent_path=agent_path,
+            data={
+                "message_count": len(messages),
+                "messages": summary,
+            },
+        )
+        # Pass through unchanged
+        if "llm_input_messages" in state:
+            return {"llm_input_messages": state["llm_input_messages"]}
+        return {"messages": messages}
+
+    return hook
+
+
+def build_combined_hook(
+    instruction_hook: Callable, compression_hook: Callable
+) -> Callable:
     """Chain instruction + compression hooks into a single pre_model_hook.
 
     Applies instruction_hook first (to inject messages), then compression_hook
@@ -38,6 +95,7 @@ def build_combined_hook(instruction_hook: Callable, compression_hook: Callable) 
 
     Ref: designs/orchestrator.md § Instruction Injection
     """
+
     def hook(state: dict[str, Any]) -> dict[str, Any]:
         intermediate = instruction_hook(state)
         result = compression_hook(intermediate)
