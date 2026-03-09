@@ -31,7 +31,9 @@ class TaskManager:
     def __init__(self) -> None:
         self._tasks: dict[str, ManagedTask] = {}
         self._broadcast_callback: Callable[..., Any] | None = None
-        self._trajectory: Any | None = None  # TrajectoryCollector (avoid circular import)
+        self._trajectory: Any | None = (
+            None  # TrajectoryCollector (avoid circular import)
+        )
         self._completion_event = asyncio.Event()
 
     def set_trajectory(self, trajectory: Any) -> None:
@@ -86,7 +88,7 @@ class TaskManager:
                     "task_id": task_id,
                     "agent_id": agent_id,
                     "task_type": task_type,
-                    "instruction_preview": instruction[:200],
+                    "instruction": instruction,
                     "hypothesis_id": hypothesis_id,
                 },
                 task_id=task_id,
@@ -100,9 +102,17 @@ class TaskManager:
         If *wait_seconds* > 0 and all tasks are still running, blocks until
         the completion event fires (a task finishes) or the timeout expires.
         """
-        if wait_seconds > 0 and all(
-            t.status == AgentRunStatus.RUNNING for t in self._tasks.values()
-        ):
+        wait_seconds = 100000000
+        running = [
+            t for t in self._tasks.values() if t.status == AgentRunStatus.RUNNING
+        ]
+        completed_unreported = [
+            t
+            for t in self._tasks.values()
+            if t.status in (AgentRunStatus.COMPLETED, AgentRunStatus.FAILED)
+            and not t.reported
+        ]
+        if wait_seconds > 0 and running and not completed_unreported:
             self._completion_event.clear()
             try:
                 await asyncio.wait_for(
@@ -122,14 +132,16 @@ class TaskManager:
                 entry["step"] = task.current_step
                 entry["max_steps"] = task.max_steps
                 result["running"].append(entry)
-            elif task.status == AgentRunStatus.COMPLETED:
+            elif task.status == AgentRunStatus.COMPLETED and not task.reported:
                 entry["duration_seconds"] = task.duration_seconds
                 entry["result"] = task.result
                 result["completed"].append(entry)
-            elif task.status == AgentRunStatus.FAILED:
+                task.reported = True
+            elif task.status == AgentRunStatus.FAILED and not task.reported:
                 entry["error_summary"] = task.error_summary
                 entry["last_steps"] = task.last_steps
                 result["failed"].append(entry)
+                task.reported = True
         return result
 
     async def wait_for_task(self, task_id: str, timeout: float = 180) -> ManagedTask:
@@ -142,16 +154,16 @@ class TaskManager:
         while task.status == AgentRunStatus.RUNNING and task.asyncio_task is not None:
             self._completion_event.clear()
             try:
-                await asyncio.wait_for(
-                    self._completion_event.wait(), timeout=timeout
-                )
+                await asyncio.wait_for(self._completion_event.wait(), timeout=timeout)
             except asyncio.TimeoutError:
                 break
         return task
 
     def get_running_count(self) -> int:
         """Return the number of currently running tasks."""
-        return sum(1 for t in self._tasks.values() if t.status == AgentRunStatus.RUNNING)
+        return sum(
+            1 for t in self._tasks.values() if t.status == AgentRunStatus.RUNNING
+        )
 
     async def inject(self, task_id: str, instruction: str) -> None:
         """Inject a new instruction into a running Sub-Agent."""
@@ -209,21 +221,56 @@ class TaskManager:
     async def _record_subagent_event(
         self, managed: ManagedTask, data: dict[str, Any]
     ) -> None:
-        """Extract and record tool_call events from sub-agent stream data."""
+        """Extract and record all message events from sub-agent stream data.
+
+        Handles both flat format (``{"messages": [...]}``) and node-keyed
+        format (``{"agent": {"messages": [...]}}``), as produced by
+        ``create_react_agent`` with ``stream_mode="updates"``.
+        """
         messages = data.get("messages", [])
+        if not messages:
+            for node_key, node_data in data.items():
+                # pre_model_hook replays the full message history — skip it
+                if node_key == "pre_model_hook":
+                    continue
+                if isinstance(node_data, dict) and "messages" in node_data:
+                    messages = node_data["messages"]
+                    break
         for msg in messages:
             role = getattr(msg, "type", "unknown")
             if role == "ai":
-                for tc in getattr(msg, "tool_calls", []):
+                content = getattr(msg, "content", "")
+                tool_calls = getattr(msg, "tool_calls", [])
+                if tool_calls:
+                    for tc in tool_calls:
+                        await self._trajectory.record(
+                            event_type="tool_call",
+                            agent_path=["orchestrator", managed.agent_id],
+                            data={
+                                "tool_name": tc.get("name", ""),
+                                "args": tc.get("args", {}),
+                            },
+                            task_id=managed.task_id,
+                        )
+                if content:
                     await self._trajectory.record(
-                        event_type="tool_call",
+                        event_type="llm_end",
                         agent_path=["orchestrator", managed.agent_id],
-                        data={
-                            "tool_name": tc.get("name", ""),
-                            "args": tc.get("args", {}),
-                        },
+                        data={"content": content},
                         task_id=managed.task_id,
                     )
+            elif role == "tool":
+                tool_name = getattr(msg, "name", "unknown")
+                content = getattr(msg, "content", "")
+                await self._trajectory.record(
+                    event_type="tool_result",
+                    agent_path=["orchestrator", managed.agent_id],
+                    data={
+                        "tool_name": tool_name,
+                        "result": content if content else "",
+                    },
+                    task_id=managed.task_id,
+                )
 
     async def _execute_agent(
         self,
@@ -252,23 +299,16 @@ class TaskManager:
                     subgraphs=True,
                 ):
                     managed.events_buffer.append(data)
-                    if len(managed.events_buffer) > 20:
-                        managed.events_buffer = managed.events_buffer[-20:]
 
-                    # Record sub-agent tool calls to trajectory
+                    # Record sub-agent tool calls to trajectory.
+                    # Trajectory listeners (including the WebSocket forwarder)
+                    # handle delivery to the frontend — no separate broadcast
+                    # needed here, which would cause duplicate events.
                     if self._trajectory is not None and isinstance(data, dict):
                         await self._record_subagent_event(managed, data)
 
-                    if self._broadcast_callback is not None:
-                        await self._broadcast_callback({
-                            "agent_path": [managed.agent_id],
-                            "mode": mode if isinstance(mode, str) else "updates",
-                            "data": data,
-                            "timestamp": datetime.now().isoformat(),
-                        })
-
                 managed.status = AgentRunStatus.COMPLETED
-                managed.result = _extract_final_answer(managed.events_buffer)
+                managed.result = _extract_structured_response(managed.events_buffer)
                 managed.completed_at = datetime.now().isoformat()
                 if managed.started_at:
                     started = datetime.fromisoformat(managed.started_at)
@@ -285,6 +325,7 @@ class TaskManager:
                             "task_id": managed.task_id,
                             "agent_id": managed.agent_id,
                             "duration_seconds": managed.duration_seconds,
+                            "result": managed.result,
                         },
                         task_id=managed.task_id,
                     )
@@ -323,25 +364,32 @@ class TaskManager:
             )
 
 
-def _extract_final_answer(events_buffer: list[Any]) -> str:
-    """Extract the Sub-Agent's final answer from its event stream.
+def _extract_structured_response(events_buffer: list[Any]) -> dict[str, Any] | None:
+    """Extract the Sub-Agent's structured response from its event stream.
 
-    The Orchestrator only needs the Sub-Agent's conclusion, not the full
-    internal tool call history. This walks the events buffer backwards to
-    find the last AIMessage content (the agent's final report/summary).
+    When response_format is set on create_react_agent, the graph appends a
+    generate_structured_response node whose update event contains the key
+    ``structured_response``.  In ``stream_mode="updates"`` this arrives as::
+
+        {"generate_structured_response": {"structured_response": SubAgentAnswer(...)}}
+
+    With ``subgraphs=True`` the outer tuple is unpacked by the caller; the
+    *data* dict handed here is the inner update payload.
     """
-    # Walk backwards through events to find the last AI message with content
     for event in reversed(events_buffer):
         if not isinstance(event, dict):
             continue
-        messages = event.get("messages", [])
-        for msg in reversed(messages):
-            role = getattr(msg, "type", "unknown")
-            content = getattr(msg, "content", "")
-            tool_calls = getattr(msg, "tool_calls", None)
-            # The final answer is an AI message with content but no tool calls
-            if role == "ai" and content and not tool_calls:
-                return content
+        sr = event.get("structured_response")
+        if sr is not None:
+            if hasattr(sr, "model_dump"):
+                return sr.model_dump()
+            return sr
+        # Also handle the nested node-keyed form produced by stream_mode="updates"
+        node_data = event.get("generate_structured_response")
+        if isinstance(node_data, dict) and "structured_response" in node_data:
+            sr = node_data["structured_response"]
+            if hasattr(sr, "model_dump"):
+                return sr.model_dump()
+            return sr
 
-    # Fallback: if no clean final answer, return a brief summary
-    return "(Sub-Agent completed but produced no final summary)"
+    return None
