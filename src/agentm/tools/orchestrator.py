@@ -30,7 +30,12 @@ def create_orchestrator_tools(
         hypothesis_id: Optional[str] = None,
         tool_call_id: Annotated[str, InjectedToolCallId] = "",
     ) -> Command:
-        """Launch a background Sub-Agent. Returns Command to update graph state."""
+        """Launch a Sub-Agent. Auto-blocks when this is the only running task.
+
+        Single-worker: waits for completion and returns result directly,
+        saving an LLM roundtrip through check_tasks.
+        Multi-worker: returns immediately with status "running".
+        """
         subgraph = agent_pool.get_worker(task_type)
         task_id = await task_manager.submit(
             agent_id,
@@ -40,11 +45,27 @@ def create_orchestrator_tools(
             subgraph=subgraph,
             config={"recursion_limit": 50},
         )
-        content = json.dumps({
-            "task_id": task_id,
-            "agent_id": agent_id,
-            "status": "running",
-        })
+
+        # Auto-block: if this is the only running task and it has a real
+        # asyncio task, wait for completion via the completion event.
+        managed = task_manager.get_task(task_id)
+        if task_manager.get_running_count() == 1 and managed.asyncio_task is not None:
+            await task_manager.wait_for_task(task_id)
+            content = json.dumps({
+                "task_id": task_id,
+                "agent_id": agent_id,
+                "status": managed.status.value,
+                "result": managed.result,
+                "error_summary": managed.error_summary,
+                "duration_seconds": managed.duration_seconds,
+            }, default=str)
+        else:
+            content = json.dumps({
+                "task_id": task_id,
+                "agent_id": agent_id,
+                "status": "running",
+            })
+
         return Command(
             update={"messages": [ToolMessage(content=content, tool_call_id=tool_call_id)]}
         )
@@ -58,7 +79,7 @@ def create_orchestrator_tools(
         return Command(
             update={
                 "messages": [
-                    ToolMessage(content=json.dumps(results), tool_call_id=tool_call_id)
+                    ToolMessage(content=json.dumps(results, default=str), tool_call_id=tool_call_id)
                 ]
             }
         )
