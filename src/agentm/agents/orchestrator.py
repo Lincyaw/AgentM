@@ -13,7 +13,11 @@ from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
 from agentm.config.schema import OrchestratorConfig
-from agentm.core.compression import compress_completed_phase
+from agentm.core.compression import (
+    build_compression_hook,
+    compress_completed_phase,
+    count_tokens,
+)
 from agentm.core.notebook import format_notebook_for_llm, should_compress_phase
 from agentm.core.prompt import load_prompt_template
 
@@ -79,5 +83,9 @@ def create_orchestrator(
         agent_kwargs["checkpointer"] = checkpointer
     if store is not None:
         agent_kwargs["store"] = store
+
+    # Orchestrator message compression via pre_model_hook
+    if config.compression is not None and config.compression.enabled:
+        agent_kwargs["pre_model_hook"] = build_compression_hook(config.compression)
 
     return create_react_agent(**agent_kwargs)
