@@ -15,6 +15,7 @@ from agentm.models.enums import HypothesisStatus
 def create_orchestrator_tools(
     task_manager: Any,
     agent_pool: Any,
+    trajectory: Any | None = None,
 ) -> dict[str, Callable[..., Any]]:
     """Factory that creates orchestrator tool functions with injected dependencies.
 
@@ -30,12 +31,14 @@ def create_orchestrator_tools(
         tool_call_id: Annotated[str, InjectedToolCallId] = "",
     ) -> Command:
         """Launch a background Sub-Agent. Returns Command to update graph state."""
+        subgraph = agent_pool.get_worker(task_type)
         task_id = await task_manager.submit(
             agent_id,
             task,
             task_type,
             hypothesis_id,
-            subgraph=None,
+            subgraph=subgraph,
+            config={"recursion_limit": 50},
         )
         content = json.dumps({
             "task_id": task_id,
@@ -60,76 +63,96 @@ def create_orchestrator_tools(
             }
         )
 
-    def inject_instruction(task_id: str, instruction: str) -> str:
+    async def inject_instruction(task_id: str, instruction: str) -> str:
         """Inject a new instruction into a running Sub-Agent."""
-        managed = task_manager.get_task(task_id)
-        managed.pending_instructions.append(instruction)
+        await task_manager.inject(task_id, instruction)
         return f"Instruction injected into task {task_id}"
 
-    def abort_task(task_id: str, reason: str) -> str:
+    async def abort_task(task_id: str, reason: str) -> str:
         """Abort a running Sub-Agent task."""
-        from agentm.models.enums import AgentRunStatus
-
-        managed = task_manager.get_task(task_id)
-        if managed.asyncio_task is not None:
-            managed.asyncio_task.cancel()
-        managed.status = AgentRunStatus.FAILED
-        managed.error_summary = f"Aborted: {reason}"
+        await task_manager.abort(task_id, reason)
         return f"Task {task_id} aborted: {reason}"
+
+    async def update_hypothesis(
+        id: str,
+        description: str,
+        status: Literal[
+            "formed",
+            "investigating",
+            "confirmed",
+            "rejected",
+            "refined",
+            "inconclusive",
+        ] = "formed",
+        evidence_summary: Optional[str] = None,
+        parent_id: Optional[str] = None,
+        tool_call_id: Annotated[str, InjectedToolCallId] = "",
+    ) -> Command:
+        """Create or update a hypothesis in the DiagnosticNotebook."""
+        HypothesisStatus(status)  # validate the value matches enum
+        content = f"Hypothesis {id} updated: {status} — {description}"
+
+        if trajectory is not None:
+            await trajectory.record(
+                event_type="hypothesis_update",
+                agent_path=["orchestrator"],
+                data={
+                    "hypothesis_id": id,
+                    "status": status,
+                    "description": description,
+                    "evidence_summary": evidence_summary,
+                    "parent_id": parent_id,
+                },
+                hypothesis_id=id,
+            )
+
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(content=content, tool_call_id=tool_call_id)
+                ]
+            }
+        )
+
+    async def remove_hypothesis(
+        id: str,
+        tool_call_id: Annotated[str, InjectedToolCallId] = "",
+    ) -> Command:
+        """Remove a hypothesis from the DiagnosticNotebook."""
+        if trajectory is not None:
+            await trajectory.record(
+                event_type="hypothesis_update",
+                agent_path=["orchestrator"],
+                data={
+                    "hypothesis_id": id,
+                    "status": "removed",
+                    "description": "",
+                },
+                hypothesis_id=id,
+            )
+
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=f"Hypothesis {id} removed",
+                        tool_call_id=tool_call_id,
+                    )
+                ]
+            }
+        )
 
     return {
         "dispatch_agent": dispatch_agent,
         "check_tasks": check_tasks,
         "inject_instruction": inject_instruction,
         "abort_task": abort_task,
+        "update_hypothesis": update_hypothesis,
+        "remove_hypothesis": remove_hypothesis,
     }
 
 
 # --- Tools that do NOT require injected dependencies ---
-
-
-async def update_hypothesis(
-    id: str,
-    description: str,
-    status: Literal[
-        "formed",
-        "investigating",
-        "confirmed",
-        "rejected",
-        "refined",
-        "inconclusive",
-    ] = "formed",
-    evidence_summary: Optional[str] = None,
-    parent_id: Optional[str] = None,
-    tool_call_id: Annotated[str, InjectedToolCallId] = "",
-) -> Command:
-    """Create or update a hypothesis in the DiagnosticNotebook."""
-    HypothesisStatus(status)  # validate the value matches enum
-    content = f"Hypothesis {id} updated: {status} — {description}"
-    return Command(
-        update={
-            "messages": [
-                ToolMessage(content=content, tool_call_id=tool_call_id)
-            ]
-        }
-    )
-
-
-async def remove_hypothesis(
-    id: str,
-    tool_call_id: Annotated[str, InjectedToolCallId] = "",
-) -> Command:
-    """Remove a hypothesis from the DiagnosticNotebook."""
-    return Command(
-        update={
-            "messages": [
-                ToolMessage(
-                    content=f"Hypothesis {id} removed",
-                    tool_call_id=tool_call_id,
-                )
-            ]
-        }
-    )
 
 
 def recall_history(

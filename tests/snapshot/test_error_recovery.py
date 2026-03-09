@@ -56,16 +56,18 @@ class TestAbortTask:
         tools = create_orchestrator_tools(task_manager_with_running_task, agent_pool=None)
         self.abort_task = tools["abort_task"]
 
-    def test_abort_sets_failed_status(self) -> None:
+    @pytest.mark.asyncio
+    async def test_abort_sets_failed_status(self) -> None:
         """abort_task should set task status to FAILED."""
-        self.abort_task("task-running-001", "timeout")
+        await self.abort_task("task-running-001", "timeout")
 
         task = self.task_manager.get_task("task-running-001")
         assert task.status == AgentRunStatus.FAILED
 
-    def test_abort_records_reason(self) -> None:
+    @pytest.mark.asyncio
+    async def test_abort_records_reason(self) -> None:
         """abort_task should record the reason in error_summary."""
-        self.abort_task("task-running-001", "timeout")
+        await self.abort_task("task-running-001", "timeout")
 
         task = self.task_manager.get_task("task-running-001")
         assert "timeout" in task.error_summary
@@ -79,7 +81,7 @@ class TestAbortTask:
         asyncio_task = asyncio.ensure_future(_long_running())
         self.task_manager.get_task("task-running-001").asyncio_task = asyncio_task
 
-        self.abort_task("task-running-001", "timeout")
+        await self.abort_task("task-running-001", "timeout")
 
         assert asyncio_task.cancelling() > 0
 

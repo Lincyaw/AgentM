@@ -8,6 +8,7 @@ Serves the single-file HTML dashboard and provides:
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -44,13 +45,25 @@ _websocket_clients: set[WebSocket] = set()
 
 
 async def broadcast_event(event: dict[str, Any]) -> None:
-    """Broadcast a WebSocket event envelope to all connected clients."""
+    """Broadcast a WebSocket event envelope to all connected clients.
+
+    Normalizes envelopes from different sources (trajectory listeners
+    and TaskManager._broadcast_callback) into a consistent format for the
+    frontend.
+    """
+    # Ensure timestamp exists
+    if "timestamp" not in event:
+        event["timestamp"] = datetime.now().isoformat()
+    # Ensure mode exists (builder uses node_name instead)
+    if "mode" not in event:
+        event["mode"] = "updates"
+
     payload = json.dumps(event, default=str)
     dead: list[WebSocket] = []
     for ws in _websocket_clients:
         try:
             await ws.send_text(payload)
-        except Exception:
+        except (WebSocketDisconnect, ConnectionError, RuntimeError):
             dead.append(ws)
     for ws in dead:
         _websocket_clients.discard(ws)
@@ -109,7 +122,6 @@ def _serialize_value(val: Any) -> Any:
     if isinstance(val, (list, tuple)):
         return [_serialize_value(v) for v in val]
     if hasattr(val, "__dataclass_fields__"):
-        from dataclasses import asdict
         return asdict(val)
     if isinstance(val, BaseModel):
         return val.model_dump()

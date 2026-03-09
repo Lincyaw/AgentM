@@ -8,9 +8,19 @@ from __future__ import annotations
 
 import pytest
 
+from agentm.agents.sub_agent import AgentPool
+from agentm.config.schema import AgentConfig, ExecutionConfig, ScenarioConfig, OrchestratorConfig, SystemTypeConfig
 from agentm.core.task_manager import TaskManager
-from agentm.models.data import DiagnosticNotebook, Hypothesis, ManagedTask
+from agentm.core.tool_registry import ToolRegistry
+from agentm.core.notebook import add_hypothesis, update_hypothesis_status
+from agentm.models.data import DiagnosticNotebook, ManagedTask
 from agentm.models.enums import AgentRunStatus, HypothesisStatus, Phase
+
+
+# A sentinel object that stands in for a compiled subgraph in tests.
+# TaskManager will create_task with it, but _execute_agent will fail on
+# astream() — which is fine because tests don't run the agent loop.
+_STUB_SUBGRAPH = object()
 
 
 @pytest.fixture
@@ -31,14 +41,42 @@ def notebook_with_hypothesis() -> DiagnosticNotebook:
         task_description="DB connection pool investigation",
         start_time="2026-03-08T10:00:00",
     )
-    nb.hypotheses["H1"] = Hypothesis(
-        id="H1",
+    nb = add_hypothesis(
+        nb,
+        hypothesis_id="H1",
         description="Connection pool exhaustion",
-        status=HypothesisStatus.INVESTIGATING,
-        evidence=["Active connections 200/200"],
         created_at="2026-03-08T10:05:00",
     )
+    nb = update_hypothesis_status(
+        nb,
+        hypothesis_id="H1",
+        status=HypothesisStatus.INVESTIGATING,
+        last_updated="2026-03-08T10:05:00",
+        evidence=["Active connections 200/200"],
+    )
     return nb
+
+
+@pytest.fixture
+def agent_pool() -> AgentPool:
+    """A real AgentPool with stub subgraphs pre-cached (no LLM needed)."""
+    scenario_config = ScenarioConfig(
+        system=SystemTypeConfig(type="hypothesis_driven"),
+        orchestrator=OrchestratorConfig(model="gpt-4"),
+        agents={
+            "worker": AgentConfig(
+                model="gpt-4",
+                temperature=0.2,
+                tools=[],
+                execution=ExecutionConfig(max_steps=25),
+            ),
+        },
+    )
+    pool = AgentPool(scenario_config, ToolRegistry())
+    # Pre-fill cache so get_worker() returns the stub without creating a real agent
+    for task_type in ("scout", "verify", "deep_analyze"):
+        pool._workers[task_type] = _STUB_SUBGRAPH
+    return pool
 
 
 @pytest.fixture

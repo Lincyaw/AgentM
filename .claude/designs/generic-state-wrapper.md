@@ -407,6 +407,8 @@ await store.setup()
 
 The RCA Orchestrator gets three tools for interacting with the Knowledge Store, mirroring filesystem operations:
 
+> **Implementation Note**: Knowledge tools (`knowledge_search`, `knowledge_list`, `knowledge_read`, `knowledge_write`) are implemented but **disabled** in the RCA scenario config. The LangGraph Store backend needs to be wired by the builder before they can be activated. The tool implementations exist in `src/agentm/tools/knowledge.py` but the Store instance is not yet injected at runtime.
+
 ```python
 @tool
 def knowledge_search(
@@ -731,6 +733,8 @@ result = await memory_system.execute({
 ---
 
 ## AgentSystemBuilder
+
+> **Implementation Note**: Only `react` mode (via `create_react_agent`) is currently implemented. Other modes (`graph` for StateGraph-based systems like memory_extraction, sequential, decision_tree) raise `NotImplementedError`. The `AgentSystemBuilder.build()` method validates `orchestrator_mode` and delegates to `build_react_system()` for `react` mode.
 
 ```python
 class AgentSystemBuilder:

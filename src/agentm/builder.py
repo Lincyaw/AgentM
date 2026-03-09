@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator
 
+from langchain_core.tools import StructuredTool
+from langgraph.checkpoint.memory import MemorySaver
+
+from agentm.agents.orchestrator import create_orchestrator
+from agentm.agents.sub_agent import AgentPool
 from agentm.config.schema import ScenarioConfig, StorageConfig
-from agentm.core.trajectory import TrajectoryCollector
 from agentm.core.state_registry import get_state_schema
+from agentm.core.task_manager import TaskManager
+from agentm.core.tool_registry import ToolRegistry
+from agentm.core.trajectory import TrajectoryCollector
+from agentm.tools.orchestrator import create_orchestrator_tools
 
 
 class AgentSystem:
@@ -19,8 +28,8 @@ class AgentSystem:
         self,
         graph: Any,
         config: dict[str, Any] | None = None,
-        scenario_config: Any | None = None,
-        task_manager: Any | None = None,
+        scenario_config: ScenarioConfig | None = None,
+        task_manager: TaskManager | None = None,
         trajectory: TrajectoryCollector | None = None,
         thread_id: str = "",
         _pending_storage: StorageConfig | None = None,
@@ -33,6 +42,13 @@ class AgentSystem:
         self.thread_id = thread_id
         self._pending_storage = _pending_storage
         self._initialized = _pending_storage is None
+
+    async def __aenter__(self) -> AgentSystem:
+        return self
+
+    async def __aexit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: Any) -> None:
+        if self.trajectory is not None:
+            await self.trajectory.close()
 
     async def _ensure_checkpointer(self) -> None:
         """Lazily create the async checkpointer on first use."""
@@ -54,35 +70,24 @@ class AgentSystem:
     async def stream(
         self,
         input_data: dict[str, Any],
-        on_event: Callable[..., Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream events from the agent system execution.
 
-        Args:
-            input_data: Initial state for the agent system.
-            on_event: Optional async callback invoked with each event dict.
+        Events are recorded to the TrajectoryCollector, which notifies all
+        registered listeners (DebugConsole, WebSocket broadcast, etc.).
         """
         await self._ensure_checkpointer()
         step = 0
         async for event in self.graph.astream(input_data, config=self.langgraph_config):
             step += 1
 
-            # Record to trajectory and notify callback
+            # Record to trajectory — listeners are notified automatically
             for node_name, node_data in event.items():
                 if node_name == "__interrupt__":
                     continue
+                if not isinstance(node_data, dict):
+                    continue
                 await self._record_node_event(node_name, node_data, step)
-                if on_event is not None:
-                    envelope = {
-                        "agent_path": ["orchestrator"],
-                        "node_name": node_name,
-                        "data": node_data,
-                        "step": step,
-                    }
-                    if asyncio.iscoroutinefunction(on_event):
-                        await on_event(envelope)
-                    else:
-                        on_event(envelope)
 
             yield event
 
@@ -149,7 +154,6 @@ def _create_checkpointer(storage_config: StorageConfig) -> Any:
     backend = storage_config.checkpointer.backend
 
     if backend == "memory":
-        from langgraph.checkpoint.memory import MemorySaver
         return MemorySaver()
 
     # sqlite and others handled by _create_async_checkpointer
@@ -162,7 +166,7 @@ async def _create_async_checkpointer(storage_config: StorageConfig) -> Any:
 
     if backend == "sqlite":
         import aiosqlite
-        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver  # noqa: I001
 
         url = storage_config.checkpointer.url or "./checkpoints.db"
         conn = aiosqlite.connect(url)
@@ -174,9 +178,6 @@ async def _create_async_checkpointer(storage_config: StorageConfig) -> Any:
 
 
 TOOLS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "tools"
-
-
-import asyncio
 
 
 class AgentSystemBuilder:
@@ -194,11 +195,6 @@ class AgentSystemBuilder:
         system_config: Any | None = None,
     ) -> AgentSystem:
         """Build an AgentSystem from a system type and scenario config."""
-        from agentm.agents.orchestrator import create_orchestrator
-        from agentm.agents.sub_agent import AgentPool
-        from agentm.core.task_manager import TaskManager
-        from agentm.core.tool_registry import ToolRegistry
-
         get_state_schema(system_type)  # validate system_type exists
 
         if scenario_config.orchestrator.orchestrator_mode == "react":
@@ -217,12 +213,12 @@ class AgentSystemBuilder:
             )
 
             # Resolve model config for workers
-            worker_model_configs: dict[str, Any] = {}
-            for agent_id, agent_cfg in scenario_config.agents.items():
-                if system_config is not None:
-                    worker_model_configs[agent_id] = system_config.models.get(agent_cfg.model)
+            worker_config = scenario_config.agents.get("worker")
+            worker_model_config = None
+            if worker_config is not None and system_config is not None:
+                worker_model_config = system_config.models.get(worker_config.model)
 
-            agent_pool = AgentPool(scenario_config, tool_registry, worker_model_configs)
+            agent_pool = AgentPool(scenario_config, tool_registry, worker_model_config)
             task_manager = TaskManager()
 
             # --- Checkpointer ---
@@ -248,17 +244,32 @@ class AgentSystemBuilder:
                 )
 
             # --- Dependency injection via closure factory ---
-            from agentm.tools.orchestrator import create_orchestrator_tools
-            create_orchestrator_tools(task_manager, agent_pool)
+            injected_tools = create_orchestrator_tools(task_manager, agent_pool, trajectory=trajectory)
 
             # Wire trajectory into task_manager
-            task_manager._trajectory = trajectory
+            task_manager.set_trajectory(trajectory)
 
-            # Build orchestrator tools from scenario config
-            tools: list[Any] = [
-                tool_registry.get(name).create_with_config()
-                for name in scenario_config.orchestrator.tools
-            ]
+            # Build orchestrator tools: YAML-registered + factory-injected
+            tools: list[Any] = []
+
+            for name in scenario_config.orchestrator.tools:
+                if name in injected_tools:
+                    # Factory-created tool (has closure over task_manager/agent_pool)
+                    func = injected_tools[name]
+                    if asyncio.iscoroutinefunction(func):
+                        tool = StructuredTool.from_function(
+                            coroutine=func, name=name, description=func.__doc__ or name,
+                        )
+                    else:
+                        tool = StructuredTool.from_function(
+                            func=func, name=name, description=func.__doc__ or name,
+                        )
+                    tools.append(tool)
+                elif tool_registry.has(name):
+                    # YAML-registered tool (module-level function)
+                    tools.append(tool_registry.get(name).create_with_config())
+                else:
+                    raise ValueError(f"Tool {name!r} not found in registry or factory")
 
             graph = create_orchestrator(
                 config=scenario_config.orchestrator,

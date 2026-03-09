@@ -39,6 +39,8 @@ Since Sub-Agents are invoked by TaskManager (not as graph nodes), their state is
 
 > **⚠️ API Note**: At design time, `create_react_agent` is in `langgraph.prebuilt`. Verify the current import path at implementation time, as the API may have been reorganized.
 
+> **Implementation Note — state_schema**: `state_schema` is intentionally **NOT** passed to `create_react_agent`. Same reason as the Orchestrator: the framework's default `AgentState` includes `remaining_steps` which is required by `create_react_agent`. See [orchestrator.md](orchestrator.md#message-management-mode-2-minimal-messages--notebook) for the full rationale.
+
 ```python
 from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
@@ -85,6 +87,8 @@ Each iteration continues until:
 - Interrupt point triggered
 
 > **⚠️ LangGraph Verification**: `create_react_agent` does NOT have a native `max_steps` parameter. Step limiting is done via `recursion_limit` in the invocation config (e.g., `graph.invoke(input, {"recursion_limit": 40})`). The default is 10000. The YAML config's `execution.max_steps` must be translated to `recursion_limit` by our framework at invocation time. Note: `remaining_steps` is tracked in the agent state and when < 2, the agent returns a final message instead of raising `GraphRecursionError`.
+
+> **Implementation Note — Step Limiting**: `_build_budget_hook(max_steps)` injects urgency messages into the conversation when the step budget is running low. This is the current step-limiting mechanism — it nudges the agent to wrap up rather than hard-terminating via `recursion_limit`. The budget hook runs as a `pre_model_hook` and prepends a system message when remaining steps fall below a threshold.
 
 ---
 
@@ -465,6 +469,8 @@ These tools are backed by the `TaskManager` which queues instructions via a per-
 > **Design Decision**: All Sub-Agents are `create_react_agent` instances differing only in config (tools, prompts, model, temperature). The graph topology is static — compiled once at startup from YAML config. Adding/removing agents requires restarting the service and recompiling the graph.
 >
 > Dynamic runtime addition/removal was considered but deemed unnecessary: the agent pool is determined by the diagnostic scenario's config, not runtime conditions.
+
+> **Implementation Note**: The current implementation uses a single "worker" agent configuration with `task_type_prompts` for scout/verify/deep_analyze, NOT a per-agent-id pool. `AgentPool.get_worker(task_type)` lazily creates one compiled subgraph per `task_type`. The `agent_id` passed to `dispatch_agent` is used for naming and logging but all agents share the same worker config. Per-agent-id configuration (different models, tools, prompts per agent_id) is a future enhancement.
 
 Agent pool is built at startup from config:
 

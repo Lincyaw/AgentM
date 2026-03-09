@@ -114,31 +114,28 @@ class TestUpdateHypothesisSignature:
     any string as status → bypasses state machine validation.
     """
 
-    def test_is_async(self):
-        from agentm.tools.orchestrator import update_hypothesis
-        assert inspect.iscoroutinefunction(update_hypothesis)
+    def test_is_async(self, orch_tools):
+        assert inspect.iscoroutinefunction(orch_tools["update_hypothesis"])
 
-    def test_description_is_required(self):
+    def test_description_is_required(self, orch_tools):
         """Description must NOT be Optional — every hypothesis needs a description.
 
         Bug: Optional description → LLM omits it → Notebook has undescribed hypothesis.
         """
-        from agentm.tools.orchestrator import update_hypothesis
-        sig = inspect.signature(update_hypothesis)
+        sig = inspect.signature(orch_tools["update_hypothesis"])
         param = sig.parameters["description"]
         # Required means no default value
         assert param.default is inspect.Parameter.empty
 
-    def test_status_is_literal_matching_enum(self):
+    def test_status_is_literal_matching_enum(self, orch_tools):
         """Status must be Literal with values matching HypothesisStatus enum.
 
         Bug: Literal values drift from enum → LLM passes valid Literal
         that the enum rejects downstream.
         """
         from agentm.models.enums import HypothesisStatus
-        from agentm.tools.orchestrator import update_hypothesis
 
-        annotation = _resolve_annotation(update_hypothesis, "status")
+        annotation = _resolve_annotation(orch_tools["update_hypothesis"], "status")
         literal_values = _extract_literal_values(annotation)
         assert literal_values is not None, "status should be a Literal type"
         enum_values = {member.value for member in HypothesisStatus}
@@ -148,9 +145,8 @@ class TestUpdateHypothesisSignature:
             f"  Extra in Literal: {literal_values - enum_values}"
         )
 
-    def test_has_tool_call_id_parameter(self):
-        from agentm.tools.orchestrator import update_hypothesis
-        sig = inspect.signature(update_hypothesis)
+    def test_has_tool_call_id_parameter(self, orch_tools):
+        sig = inspect.signature(orch_tools["update_hypothesis"])
         assert "tool_call_id" in sig.parameters
 
 
@@ -248,3 +244,41 @@ class TestCompressionHookSignature:
         from agentm.core.compression import build_compression_hook
         sig = inspect.signature(build_compression_hook)
         assert sig.return_annotation is not inspect.Parameter.empty
+
+
+class TestInjectInstructionSignature:
+    """inject_instruction should be async to properly delegate to TaskManager.inject().
+
+    Bug: sync inject_instruction bypasses TaskManager.inject() status validation,
+    allowing injection into completed/failed tasks.
+    """
+
+    def test_is_async(self, orch_tools):
+        assert inspect.iscoroutinefunction(orch_tools["inject_instruction"])
+
+    def test_has_task_id_parameter(self, orch_tools):
+        sig = inspect.signature(orch_tools["inject_instruction"])
+        assert "task_id" in sig.parameters
+
+    def test_has_instruction_parameter(self, orch_tools):
+        sig = inspect.signature(orch_tools["inject_instruction"])
+        assert "instruction" in sig.parameters
+
+
+class TestAbortTaskSignature:
+    """abort_task should be async to properly delegate to TaskManager.abort().
+
+    Bug: sync abort_task bypasses TaskManager.abort() status validation and
+    trajectory recording, silently corrupting task state.
+    """
+
+    def test_is_async(self, orch_tools):
+        assert inspect.iscoroutinefunction(orch_tools["abort_task"])
+
+    def test_has_task_id_parameter(self, orch_tools):
+        sig = inspect.signature(orch_tools["abort_task"])
+        assert "task_id" in sig.parameters
+
+    def test_has_reason_parameter(self, orch_tools):
+        sig = inspect.signature(orch_tools["abort_task"])
+        assert "reason" in sig.parameters

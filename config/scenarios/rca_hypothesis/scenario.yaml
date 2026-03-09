@@ -30,10 +30,8 @@ orchestrator:
     - remove_hypothesis
     - inject_instruction
     - abort_task
-    - knowledge_search
-    - knowledge_list
-    - knowledge_read
     - recall_history
+    # knowledge_search, knowledge_list, knowledge_read — disabled until LangGraph Store is wired
 
   feature_gates:
     adversarial_review: false
@@ -79,9 +77,9 @@ agents:
       - search_logs_abnormal
       - search_logs_normal
     execution:
-      max_steps: 25
+      max_steps: 40
       timeout: 180
-      tool_call_budget: 25
+      tool_call_budget: 40
       retry:
         max_attempts: 3
         initial_interval: 1.0

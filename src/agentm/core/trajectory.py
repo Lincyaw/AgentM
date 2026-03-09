@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import threading
 from datetime import datetime
 from pathlib import Path
-from typing import IO, Any, Optional
+from typing import IO, Any, Callable
 
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 
 class TrajectoryEvent(BaseModel):
@@ -20,9 +24,9 @@ class TrajectoryEvent(BaseModel):
     node_name: str
     event_type: str
     data: dict[str, Any]
-    task_id: Optional[str] = None
-    hypothesis_id: Optional[str] = None
-    parent_seq: Optional[int] = None
+    task_id: str | None = None
+    hypothesis_id: str | None = None
+    parent_seq: int | None = None
 
 
 class TrajectoryCollector:
@@ -37,8 +41,48 @@ class TrajectoryCollector:
         self._output_dir = Path(output_dir)
         self._seq = 0
         self._lock = asyncio.Lock()
+        self._sync_lock = threading.Lock()
         self._file: IO[str] | None = None
         self._events: list[dict[str, Any]] = []
+        self._listeners: list[Callable[[dict[str, Any]], Any]] = []
+
+    def __del__(self) -> None:
+        if self._file is not None:
+            try:
+                self._file.close()
+            except Exception:
+                pass
+
+    def add_listener(self, listener: Callable[[dict[str, Any]], Any]) -> None:
+        """Register a callback invoked on every recorded event.
+
+        Listeners receive the TrajectoryEvent dict after it has been written
+        to JSONL and buffered in memory. Async and sync callables are both
+        supported.
+        """
+        self._listeners.append(listener)
+
+    async def _notify_listeners(self, event_dict: dict[str, Any]) -> None:
+        """Fan out event to all registered listeners (async context)."""
+        for listener in self._listeners:
+            if asyncio.iscoroutinefunction(listener):
+                await listener(event_dict)
+            else:
+                listener(event_dict)
+
+    def _notify_listeners_sync(self, event_dict: dict[str, Any]) -> None:
+        """Fan out event from sync context. Schedules async listeners as tasks."""
+        for listener in self._listeners:
+            if asyncio.iscoroutinefunction(listener):
+                try:
+                    asyncio.get_running_loop().create_task(listener(event_dict))
+                except RuntimeError:
+                    logger.warning(
+                        "Dropping async listener %r: no running event loop",
+                        getattr(listener, '__name__', listener),
+                    )
+            else:
+                listener(event_dict)
 
     @property
     def run_id(self) -> str:
@@ -81,10 +125,12 @@ class TrajectoryCollector:
             dumped = event.model_dump()
             line = event.model_dump_json() + "\n"
             self._ensure_file()
-            assert self._file is not None
+            if self._file is None:
+                raise RuntimeError("Trajectory file not initialized after _ensure_file()")
             self._file.write(line)
             self._file.flush()
             self._events.append(dumped)
+            await self._notify_listeners(dumped)
             return self._seq
 
     def record_sync(
@@ -102,27 +148,30 @@ class TrajectoryCollector:
         Writes directly without the async lock — only safe when called from
         within the event loop thread (which sync tool functions are).
         """
-        self._seq += 1
-        event = TrajectoryEvent(
-            run_id=self._run_id,
-            seq=self._seq,
-            timestamp=datetime.now().isoformat(),
-            agent_path=agent_path,
-            node_name=node_name,
-            event_type=event_type,
-            data=data,
-            task_id=task_id,
-            hypothesis_id=hypothesis_id,
-            parent_seq=parent_seq,
-        )
-        dumped = event.model_dump()
-        line = event.model_dump_json() + "\n"
-        self._ensure_file()
-        assert self._file is not None
-        self._file.write(line)
-        self._file.flush()
-        self._events.append(dumped)
-        return self._seq
+        with self._sync_lock:
+            self._seq += 1
+            event = TrajectoryEvent(
+                run_id=self._run_id,
+                seq=self._seq,
+                timestamp=datetime.now().isoformat(),
+                agent_path=agent_path,
+                node_name=node_name,
+                event_type=event_type,
+                data=data,
+                task_id=task_id,
+                hypothesis_id=hypothesis_id,
+                parent_seq=parent_seq,
+            )
+            dumped = event.model_dump()
+            line = event.model_dump_json() + "\n"
+            self._ensure_file()
+            if self._file is None:
+                raise RuntimeError("Trajectory file not initialized after _ensure_file()")
+            self._file.write(line)
+            self._file.flush()
+            self._events.append(dumped)
+            self._notify_listeners_sync(dumped)
+            return self._seq
 
     def _ensure_file(self) -> None:
         if self._file is None:

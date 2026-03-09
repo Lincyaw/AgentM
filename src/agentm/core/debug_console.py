@@ -65,27 +65,13 @@ class DebugConsole:
             self._live.stop()
             self._live = None
 
-    async def on_event(self, event: dict[str, Any]) -> None:
-        """Process an event envelope and update the display.
-
-        Called as the on_event callback from AgentSystem.stream().
-        """
-        self._step = event.get("step", self._step)
-        data = event.get("data", {})
-
-        # Parse the LangGraph event dict (keys = node names)
-        for node_name, node_data in data.items():
-            if node_name == "__interrupt__":
-                continue
-            self._parse_node_data(node_name, node_data)
-
-        if self._live is not None:
-            self._live.update(self._build_layout())
-
     def on_trajectory_event(self, event: dict[str, Any]) -> None:
         """Process a trajectory event dict for display updates.
 
-        Called from CLI when trajectory events are available.
+        This is the sole event consumer. All events flow through
+        TrajectoryCollector which emits TrajectoryEvent dicts to listeners.
+        Handles: task_dispatch, task_complete, task_fail, tool_call,
+        hypothesis_update.
         """
         event_type = event.get("event_type", "")
         evt_data = event.get("data", {})
@@ -124,80 +110,6 @@ class DebugConsole:
 
         if self._live is not None:
             self._live.update(self._build_layout())
-
-    def _parse_node_data(
-        self, node_name: str, node_data: dict[str, Any]
-    ) -> None:
-        """Extract tool calls and LLM content from a node update."""
-        messages = node_data.get("messages", [])
-        for msg in messages:
-            role = getattr(msg, "type", "unknown")
-            content = getattr(msg, "content", "")
-
-            if role == "ai":
-                tool_calls = getattr(msg, "tool_calls", [])
-                for tc in tool_calls:
-                    self._tool_calls.append({
-                        "tool": tc.get("name", ""),
-                        "args": str(tc.get("args", ""))[:60],
-                        "time": f"step {self._step}",
-                        "agent": "orchestrator",
-                    })
-                    self._tool_calls = self._tool_calls[-20:]
-            elif role == "tool":
-                tool_name = getattr(msg, "name", "")
-                if tool_name in (
-                    "spawn_worker", "wait_for_workers",
-                    "update_hypothesis", "remove_hypothesis",
-                ):
-                    self._parse_tool_result(tool_name, content)
-
-    def _parse_tool_result(self, tool_name: str, content: str) -> None:
-        """Update agent/hypothesis state from tool results."""
-        import json
-
-        if tool_name == "spawn_worker":
-            try:
-                result = json.loads(content)
-                tid = result.get("task_id", "")
-                if tid:
-                    self._agents[tid] = {
-                        "agent_id": f"worker-{result.get('task_type', '?')}",
-                        "status": "running",
-                        "step": 0,
-                        "duration": None,
-                    }
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        elif tool_name == "wait_for_workers":
-            try:
-                result = json.loads(content)
-                for completed in result.get("completed", []):
-                    tid = completed.get("task_id", "")
-                    if tid in self._agents:
-                        self._agents[tid]["status"] = "completed"
-                        self._agents[tid]["duration"] = completed.get("duration_seconds")
-                for failed in result.get("failed", []):
-                    tid = failed.get("task_id", "")
-                    if tid in self._agents:
-                        self._agents[tid]["status"] = "failed"
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        elif tool_name == "update_hypothesis":
-            # Parse from the string format "Hypothesis H1 updated: status — description"
-            if "updated:" in content:
-                parts = content.split("updated:", 1)
-                hid = parts[0].replace("Hypothesis ", "").strip()
-                rest = parts[1].strip()
-                status_desc = rest.split(" — ", 1)
-                status = status_desc[0].strip() if status_desc else ""
-                desc = status_desc[1].strip() if len(status_desc) > 1 else ""
-                self._hypotheses[hid] = {
-                    "status": status,
-                    "description": desc[:60],
-                }
 
     def _build_layout(self) -> Layout:
         """Build the three-panel layout."""
