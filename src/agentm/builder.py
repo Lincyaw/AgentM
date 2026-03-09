@@ -12,6 +12,8 @@ from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 
+from dataclasses import asdict
+
 from agentm.agents.orchestrator import create_orchestrator
 from agentm.agents.sub_agent import AgentPool
 from agentm.config.schema import ScenarioConfig, StorageConfig
@@ -21,6 +23,19 @@ from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
 from agentm.tools import knowledge as knowledge_module
 from agentm.tools.orchestrator import create_orchestrator_tools
+from agentm.tools.think import think
+
+
+def _serialize_notebook(notebook: Any) -> dict[str, Any]:
+    """Serialize a DiagnosticNotebook dataclass to a JSON-safe dict."""
+    if hasattr(notebook, "__dataclass_fields__"):
+        raw = asdict(notebook)
+    elif isinstance(notebook, dict):
+        raw = notebook
+    else:
+        return {}
+    # asdict converts enums to their value automatically
+    return raw
 
 
 class AgentSystem:
@@ -48,9 +63,24 @@ class AgentSystem:
     async def __aenter__(self) -> AgentSystem:
         return self
 
-    async def __aexit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: Any) -> None:
+    async def __aexit__(
+        self, exc_type: type | None, exc_val: BaseException | None, exc_tb: Any
+    ) -> None:
         if self.trajectory is not None:
             await self.trajectory.close()
+        await self._close_checkpointer()
+
+    async def _close_checkpointer(self) -> None:
+        """Close the checkpointer's underlying connection if applicable."""
+        checkpointer = getattr(self.graph, "checkpointer", None)
+        if checkpointer is None:
+            return
+        conn = getattr(checkpointer, "conn", None)
+        if conn is not None and hasattr(conn, "close"):
+            try:
+                await conn.close()
+            except Exception:
+                pass
 
     async def _ensure_checkpointer(self) -> None:
         """Lazily create the async checkpointer on first use."""
@@ -100,6 +130,36 @@ class AgentSystem:
         if self.trajectory is None:
             return
 
+        # pre_model_hook emits the full (possibly rewritten) message list, not
+        # new messages.  Recording it would duplicate every prior message.
+        if node_name == "pre_model_hook":
+            return
+
+        # Broadcast notebook state updates for the Conversation View
+        notebook = node_data.get("notebook")
+        if notebook is not None:
+            notebook_data = _serialize_notebook(notebook)
+            task_id = (
+                notebook_data.get("task_id", "")
+                if isinstance(notebook_data, dict)
+                else ""
+            )
+            raw_phase = node_data.get("current_phase", "")
+            current_phase = (
+                raw_phase.value if hasattr(raw_phase, "value") else str(raw_phase)
+            )
+            await self.trajectory.record(
+                event_type="state_update",
+                agent_path=["orchestrator"],
+                node_name=node_name,
+                data={
+                    "notebook": notebook_data,
+                    "task_id": task_id,
+                    "current_phase": current_phase,
+                    "step": step,
+                },
+            )
+
         messages = node_data.get("messages", [])
         for msg in messages:
             role = getattr(msg, "type", "unknown")
@@ -125,8 +185,7 @@ class AgentSystem:
                         agent_path=["orchestrator"],
                         node_name=node_name,
                         data={
-                            "content_preview": content[:500],
-                            "content_length": len(content),
+                            "content": content,
                             "step": step,
                         },
                     )
@@ -139,8 +198,7 @@ class AgentSystem:
                     node_name=node_name,
                     data={
                         "tool_name": tool_name,
-                        "result_preview": content[:500] if content else "",
-                        "result_length": len(content) if content else 0,
+                        "result": content if content else "",
                         "step": step,
                     },
                 )
@@ -228,7 +286,10 @@ class AgentSystemBuilder:
             pending_storage: StorageConfig | None = None
             if system_config is not None:
                 checkpointer = _create_checkpointer(system_config.storage)
-                if checkpointer is None and system_config.storage.checkpointer.backend != "memory":
+                if (
+                    checkpointer is None
+                    and system_config.storage.checkpointer.backend != "memory"
+                ):
                     pending_storage = system_config.storage
 
             thread_id = str(uuid.uuid4())
@@ -246,10 +307,15 @@ class AgentSystemBuilder:
                 )
 
             # --- Dependency injection via closure factory ---
-            injected_tools = create_orchestrator_tools(task_manager, agent_pool, trajectory=trajectory)
+            injected_tools = create_orchestrator_tools(
+                task_manager, agent_pool, trajectory=trajectory
+            )
 
             # Wire trajectory into task_manager
             task_manager.set_trajectory(trajectory)
+
+            # Wire trajectory into agent_pool for llm_start events
+            agent_pool._trajectory = trajectory
 
             # Extract graph reference setter before tool registration (not a real tool)
             set_graph_ref = injected_tools.pop("_set_graph_ref", None)
@@ -274,18 +340,24 @@ class AgentSystemBuilder:
                     func = injected_tools[name]
                     if asyncio.iscoroutinefunction(func):
                         tool = StructuredTool.from_function(
-                            coroutine=func, name=name, description=func.__doc__ or name,
+                            coroutine=func,
+                            name=name,
+                            description=func.__doc__ or name,
                         )
                     else:
                         tool = StructuredTool.from_function(
-                            func=func, name=name, description=func.__doc__ or name,
+                            func=func,
+                            name=name,
+                            description=func.__doc__ or name,
                         )
                     tools.append(tool)
                 elif name in KNOWLEDGE_TOOLS:
                     # Knowledge tools (standalone functions with store injected via set_store)
                     func = KNOWLEDGE_TOOLS[name]
                     tool = StructuredTool.from_function(
-                        func=func, name=name, description=func.__doc__ or name,
+                        func=func,
+                        name=name,
+                        description=func.__doc__ or name,
                     )
                     tools.append(tool)
                 elif tool_registry.has(name):
@@ -294,12 +366,16 @@ class AgentSystemBuilder:
                 else:
                     raise ValueError(f"Tool {name!r} not found in registry or factory")
 
+            # Think tool is always available for structured reasoning
+            tools.append(think)
+
             graph = create_orchestrator(
                 config=scenario_config.orchestrator,
                 tools=tools,
                 checkpointer=checkpointer,
                 store=store,
                 model_config=orch_model_config,
+                trajectory=trajectory,
             )
 
             # Wire graph reference for recall_history (must happen after graph compilation)

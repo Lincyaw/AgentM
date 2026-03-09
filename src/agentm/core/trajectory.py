@@ -45,6 +45,7 @@ class TrajectoryCollector:
         self._file: IO[str] | None = None
         self._events: list[dict[str, Any]] = []
         self._listeners: list[Callable[[dict[str, Any]], Any]] = []
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def __del__(self) -> None:
         if self._file is not None:
@@ -61,6 +62,13 @@ class TrajectoryCollector:
         supported.
         """
         self._listeners.append(listener)
+        # Capture event loop on first async listener registration so
+        # _notify_listeners_sync can schedule coroutines from other threads.
+        if self._loop is None and asyncio.iscoroutinefunction(listener):
+            try:
+                self._loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
 
     async def _notify_listeners(self, event_dict: dict[str, Any]) -> None:
         """Fan out event to all registered listeners (async context)."""
@@ -74,13 +82,19 @@ class TrajectoryCollector:
         """Fan out event from sync context. Schedules async listeners as tasks."""
         for listener in self._listeners:
             if asyncio.iscoroutinefunction(listener):
+                # Try current thread's loop first, fall back to saved loop.
                 try:
                     asyncio.get_running_loop().create_task(listener(event_dict))
                 except RuntimeError:
-                    logger.warning(
-                        "Dropping async listener %r: no running event loop",
-                        getattr(listener, '__name__', listener),
-                    )
+                    if self._loop is not None and self._loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            listener(event_dict), self._loop
+                        )
+                    else:
+                        logger.warning(
+                            "Dropping async listener %r: no running event loop",
+                            getattr(listener, "__name__", listener),
+                        )
             else:
                 listener(event_dict)
 
@@ -126,7 +140,9 @@ class TrajectoryCollector:
             line = event.model_dump_json() + "\n"
             self._ensure_file()
             if self._file is None:
-                raise RuntimeError("Trajectory file not initialized after _ensure_file()")
+                raise RuntimeError(
+                    "Trajectory file not initialized after _ensure_file()"
+                )
             self._file.write(line)
             self._file.flush()
             self._events.append(dumped)
@@ -166,7 +182,9 @@ class TrajectoryCollector:
             line = event.model_dump_json() + "\n"
             self._ensure_file()
             if self._file is None:
-                raise RuntimeError("Trajectory file not initialized after _ensure_file()")
+                raise RuntimeError(
+                    "Trajectory file not initialized after _ensure_file()"
+                )
             self._file.write(line)
             self._file.flush()
             self._events.append(dumped)
