@@ -34,6 +34,7 @@ async def _query_trace_stats(
     start_time: str | None = None,
     end_time: str | None = None,
     filters: str | None = None,
+    limit: int = 200,
 ) -> str:
     file = _resolve_file("traces", period)
     db_interval = _INTERVAL_MAP.get(interval, "5 minutes")
@@ -56,8 +57,9 @@ async def _query_trace_stats(
         WHERE 1=1{fc}{tc}
         GROUP BY time_bucket, "{group_by}"
         ORDER BY time_bucket, "{group_by}"
+        LIMIT ?
     """
-    params = fc_params + tc_params
+    params = fc_params + tc_params + [int(limit)]
     rows = _query(sql, params)
     if not rows:
         return _empty_hint(
@@ -140,11 +142,13 @@ async def _get_service_call_graph(
         WHERE parent.service_name != child.service_name{fc}{tc}
         GROUP BY parent.service_name, child.service_name
         ORDER BY call_count DESC
+        LIMIT 100
     """
     sql_nodes = f"""
         SELECT service_name AS service, count(*) AS span_count
         FROM read_parquet('{file}')
         GROUP BY service_name ORDER BY span_count DESC
+        LIMIT 100
     """
     edge_params = fc_params + tc_params
     nodes = _query(sql_nodes)

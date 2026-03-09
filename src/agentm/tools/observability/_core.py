@@ -60,32 +60,54 @@ def _estimate_token_count(text: str) -> int:
 
 
 def _enforce_token_limit(payload: str, context: str) -> str:
+    """Enforce token budget on tool results.
+
+    When the payload fits within TOKEN_LIMIT, returns it as-is.
+    When it exceeds the limit, truncates the data to fit and appends
+    a warning with the original row count so the agent can refine.
+    """
     if _estimate_token_count(payload) <= TOKEN_LIMIT:
         return payload
     estimated_tokens = _estimate_token_count(payload)
     ratio = TOKEN_LIMIT / estimated_tokens
     parsed = json.loads(payload)
+
     if isinstance(parsed, list):
-        current_size = len(parsed)
-        suggested_limit = max(1, int(current_size * ratio * 0.8))
-        rows_returned = current_size
-    elif isinstance(parsed, dict):
-        rows_returned = {k: len(v) for k, v in parsed.items() if isinstance(v, list)}
-        suggested_limit = (
-            {k: max(1, int(n * ratio * 0.8)) for k, n in rows_returned.items()}
-            if rows_returned
-            else None
-        )
-    else:
-        rows_returned = None
-        suggested_limit = None
+        original_count = len(parsed)
+        keep = max(1, int(original_count * ratio * 0.8))
+        truncated = parsed[:keep]
+        result = {
+            "_truncated": True,
+            "_total_rows": original_count,
+            "_rows_returned": keep,
+            "_context": context,
+            "_suggestion": "Add more filters, a narrower time range, or specify a LIMIT to get complete data.",
+            "data": truncated,
+        }
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    if isinstance(parsed, dict):
+        # For dict payloads (e.g. call graphs with {nodes, edges}), truncate each list
+        truncated_dict: dict[str, Any] = {}
+        meta: dict[str, Any] = {"_truncated": True, "_context": context}
+        for k, v in parsed.items():
+            if isinstance(v, list):
+                keep = max(1, int(len(v) * ratio * 0.8))
+                truncated_dict[k] = v[:keep]
+                meta[f"_{k}_total"] = len(v)
+                meta[f"_{k}_returned"] = keep
+            else:
+                truncated_dict[k] = v
+        meta["_suggestion"] = "Add more filters or a narrower time range."
+        truncated_dict.update(meta)
+        return json.dumps(truncated_dict, ensure_ascii=False, indent=2)
+
+    # Scalar or unknown — return warning only
     warning = {
         "error": "Result exceeds token budget",
         "context": context,
         "estimated_tokens": estimated_tokens,
         "token_limit": TOKEN_LIMIT,
-        "rows_returned": rows_returned,
-        "suggested_limit": suggested_limit,
         "suggestion": "Add more filters or reduce the LIMIT.",
     }
     return json.dumps(warning, ensure_ascii=False, indent=2)
