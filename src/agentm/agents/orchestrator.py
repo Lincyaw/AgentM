@@ -13,7 +13,8 @@ from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
 from agentm.config.schema import OrchestratorConfig
-from agentm.core.notebook import format_notebook_for_llm
+from agentm.core.compression import compress_completed_phase
+from agentm.core.notebook import format_notebook_for_llm, should_compress_phase
 from agentm.core.prompt import load_prompt_template
 
 
@@ -27,7 +28,12 @@ def build_orchestrator_prompt(system_prompt_template: str) -> Callable:
     def prompt(state: dict) -> list:
         notebook_data = state.get("notebook")
         if notebook_data is not None:
-            notebook_text = format_notebook_for_llm(notebook_data)
+            # Compress completed phases for LLM input only (state is not mutated)
+            notebook_for_llm = notebook_data
+            for phase in ("exploration", "generation", "verification"):
+                if should_compress_phase(notebook_for_llm, phase):
+                    notebook_for_llm = compress_completed_phase(notebook_for_llm, phase)
+            notebook_text = format_notebook_for_llm(notebook_for_llm)
         else:
             notebook_text = "(Investigation starting — no data collected yet)"
         system_prompt = load_prompt_template(system_prompt_template, notebook=notebook_text)

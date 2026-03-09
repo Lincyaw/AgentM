@@ -142,22 +142,119 @@ def create_orchestrator_tools(
             }
         )
 
-    return {
+    # --- Mutable references for recall_history ---
+    # Set by builder after graph compilation (chicken-and-egg: graph is created with tools).
+    _graph_ref: list[Any] = [None]
+    _config_ref: list[dict[str, Any]] = [{}]
+
+    def recall_history(
+        query: str,
+        scope: Literal["current_compression", "all_compressions"] = "current_compression",
+    ) -> str:
+        """Search pre-compression history for detailed information.
+
+        Use this when you need details that were lost during context compression,
+        such as: raw metric breakdowns, tool call parameters, time-series data,
+        or observations not included in the summary.
+
+        Args:
+            query: Natural language description of what you're looking for.
+                Examples:
+                - "What were the top 5 slow queries and their execution times?"
+                - "What parameters were used when checking the connection pool?"
+                - "Was there any disk inode data collected during infrastructure scan?"
+            scope: Search range.
+                - "current_compression": Only the most recent compressed range
+                - "all_compressions": All compressed ranges in this task
+        """
+        graph = _graph_ref[0]
+        config = _config_ref[0]
+
+        if graph is None or not config:
+            return "recall_history is not available — graph reference not set."
+
+        # Read compression_refs from current state
+        try:
+            state = graph.get_state(config)
+            compression_refs = state.values.get("compression_refs", [])
+        except Exception:
+            compression_refs = []
+
+        if not compression_refs:
+            return (
+                "No compression has occurred yet. Full history is already in your context. "
+                "This tool is only useful after context compression."
+            )
+
+        # NOTE: scope selects which compression_refs to search.
+        # Currently traverses all checkpoints; will be filtered by ref ranges
+        # when drill_down_compressed_range is implemented.
+
+        # Extract messages from checkpoint history
+        all_messages: list[dict[str, Any]] = []
+        try:
+            for state_snapshot in graph.get_state_history(config):
+                messages = state_snapshot.values.get("messages", [])
+                for msg in messages:
+                    all_messages.append({
+                        "type": getattr(msg, "type", "unknown"),
+                        "content": getattr(msg, "content", ""),
+                        "tool_calls": getattr(msg, "tool_calls", None),
+                    })
+                # Cap messages to avoid loading too many checkpoints
+                if len(all_messages) > 200:
+                    break
+        except Exception as e:
+            return f"Error accessing checkpoint history: {e}"
+
+        if not all_messages:
+            return "No messages found in checkpoint history."
+
+        # Format messages for retrieval prompt
+        formatted_msgs: list[str] = []
+        for m in all_messages[:200]:
+            if m["tool_calls"]:
+                tool_info = ", ".join(tc.get("name", "?") for tc in m["tool_calls"])
+                formatted_msgs.append(f"[{m['type']}] Tools: {tool_info}")
+            elif m["content"]:
+                preview = m["content"][:300]
+                formatted_msgs.append(f"[{m['type']}] {preview}")
+
+        retrieval_prompt = (
+            f"You are searching through an agent's historical execution records.\n\n"
+            f"Query: {query}\n\n"
+            f"Records:\n" + "\n".join(formatted_msgs) + "\n\n"
+            "Find and return information relevant to the query. "
+            "Include specific data values, not just summaries."
+        )
+
+        # Use LLM to find relevant information
+        try:
+            from langchain_openai import ChatOpenAI
+            from langchain_core.messages import HumanMessage as LCHumanMessage
+
+            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+            result = llm.invoke([LCHumanMessage(content=retrieval_prompt)])
+            content = result.content
+            if isinstance(content, list):
+                return " ".join(str(part) for part in content)
+            return str(content)
+        except Exception as e:
+            return f"Error during recall: {e}"
+
+    def _set_graph_ref(graph: Any, config: dict[str, Any]) -> None:
+        """Set the compiled graph and config references for recall_history."""
+        _graph_ref[0] = graph
+        _config_ref[0] = config
+
+    tools: dict[str, Callable[..., Any]] = {
         "dispatch_agent": dispatch_agent,
         "check_tasks": check_tasks,
         "inject_instruction": inject_instruction,
         "abort_task": abort_task,
         "update_hypothesis": update_hypothesis,
         "remove_hypothesis": remove_hypothesis,
+        "recall_history": recall_history,
+        "_set_graph_ref": _set_graph_ref,
     }
-
-
-# --- Tools that do NOT require injected dependencies ---
-
-
-def recall_history(
-    query: str,
-    scope: Literal["current_compression", "all_compressions"] = "current_compression",
-) -> str:
-    """Search pre-compression history for detailed information."""
-    return "No compression history available yet."
+    return tools
