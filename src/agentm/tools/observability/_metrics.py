@@ -26,6 +26,7 @@ async def _query_metrics_ohlc(
     start_time: str | None = None,
     end_time: str | None = None,
     filters: str | None = None,
+    limit: int = 200,
 ) -> str:
     file = _resolve_file("metrics", period)
     db_interval = _INTERVAL_MAP.get(interval, "5 minutes")
@@ -41,8 +42,9 @@ async def _query_metrics_ohlc(
         FROM read_parquet('{file}')
         WHERE metric = ?{fc}{tc}
         GROUP BY time_bucket ORDER BY time_bucket
+        LIMIT ?
     """
-    params = [metric_name] + fc_params + tc_params
+    params = [metric_name] + fc_params + tc_params + [int(limit)]
     rows = _query(sql, params)
     if not rows:
         return _empty_hint(
