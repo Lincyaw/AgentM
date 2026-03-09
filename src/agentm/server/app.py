@@ -15,6 +15,7 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -57,6 +58,20 @@ async def broadcast_event(event: dict[str, Any]) -> None:
     # Ensure mode exists (builder uses node_name instead)
     if "mode" not in event:
         event["mode"] = "updates"
+
+    # Serialize LangChain Message objects inside data.messages so the
+    # frontend receives plain dicts with type/content/tool_calls fields.
+    data = event.get("data")
+    if isinstance(data, dict):
+        raw_messages = data.get("messages")
+        if isinstance(raw_messages, list):
+            event = {
+                **event,
+                "data": {
+                    **data,
+                    "messages": [_serialize_message(m) for m in raw_messages],
+                },
+            }
 
     payload = json.dumps(event, default=str)
     dead: list[WebSocket] = []
@@ -147,6 +162,8 @@ def create_dashboard_app(
     graph: Any | None = None,
     scenario_config: Any | None = None,
     task_manager: Any | None = None,
+    trajectory: Any | None = None,
+    thread_id: str | None = None,
 ) -> FastAPI:
     """Create the FastAPI dashboard application.
 
@@ -154,6 +171,8 @@ def create_dashboard_app(
         graph: The compiled LangGraph graph (for checkpoint APIs).
         scenario_config: Parsed ScenarioConfig (for topology API).
         task_manager: TaskManager instance (for wiring WebSocket forwarding).
+        trajectory: TrajectoryCollector instance (for replaying history on connect).
+        thread_id: LangGraph thread_id for checkpoint APIs.
     """
     app = FastAPI(title="AgentM Dashboard")
 
@@ -161,6 +180,8 @@ def create_dashboard_app(
     app.state.graph = graph
     app.state.scenario_config = scenario_config
     app.state.task_manager = task_manager
+    app.state.trajectory = trajectory
+    app.state.thread_id = thread_id
 
     # ── HTML dashboard ─────────────────────────────────────────────────
 
@@ -169,12 +190,30 @@ def create_dashboard_app(
         html_path = STATIC_DIR / "index.html"
         return HTMLResponse(html_path.read_text(encoding="utf-8"))
 
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
     # ── WebSocket ──────────────────────────────────────────────────────
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
         await websocket.accept()
         _websocket_clients.add(websocket)
+        # Replay trajectory history so refreshed clients get full state
+        traj = app.state.trajectory
+        if traj is not None:
+            for evt in traj.events:
+                try:
+                    payload = json.dumps({
+                        "event_type": evt.get("event_type", ""),
+                        "agent_path": evt.get("agent_path", []),
+                        "data": evt.get("data", {}),
+                        "timestamp": evt.get("timestamp", ""),
+                        "mode": "replay",
+                    }, default=str)
+                    await websocket.send_text(payload)
+                except (WebSocketDisconnect, ConnectionError, RuntimeError):
+                    _websocket_clients.discard(websocket)
+                    return
         try:
             while True:
                 await websocket.receive_text()
@@ -196,7 +235,11 @@ def create_dashboard_app(
                 "tools": agent.tools,
                 "max_steps": agent.execution.max_steps,
             })
-        return {"scenario_id": sc.system.type, "agents": agents}
+        return {
+            "scenario_id": sc.system.type,
+            "agents": agents,
+            "thread_id": app.state.thread_id,
+        }
 
     # ── Task state API ─────────────────────────────────────────────────
 
