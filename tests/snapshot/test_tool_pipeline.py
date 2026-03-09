@@ -28,7 +28,10 @@ class TestDispatchAgentPipeline:
 
     @pytest.mark.asyncio
     async def test_dispatch_creates_managed_task(self) -> None:
-        """dispatch_agent should create a RUNNING task in TaskManager."""
+        """dispatch_agent should create a task in TaskManager.
+
+        With auto-block (single worker), the task completes before returning.
+        """
         cmd = await self.dispatch_agent(
             agent_id="db",
             task="check connections",
@@ -36,15 +39,18 @@ class TestDispatchAgentPipeline:
             tool_call_id="call-001",
         )
 
-        # TaskManager should have exactly one task
         status = await self.task_manager.get_all_status()
         all_tasks = status["running"] + status["completed"] + status["failed"]
         assert len(all_tasks) == 1
         assert all_tasks[0]["agent_id"] == "db"
 
     @pytest.mark.asyncio
-    async def test_dispatch_returns_command_with_task_id(self) -> None:
-        """Returned Command should contain ToolMessage with task_id."""
+    async def test_dispatch_single_worker_auto_blocks(self) -> None:
+        """Single-worker dispatch should auto-block and return completed result.
+
+        Bug prevented: Orchestrator wastes an LLM roundtrip calling check_tasks
+        when there's only one worker and nothing else to do.
+        """
         cmd = await self.dispatch_agent(
             agent_id="db",
             task="check connections",
@@ -56,7 +62,8 @@ class TestDispatchAgentPipeline:
         content = json.loads(messages[0].content)
         assert "task_id" in content
         assert content["agent_id"] == "db"
-        assert content["status"] == "running"
+        assert content["status"] == "completed"
+        assert content["result"] is not None
 
     @pytest.mark.asyncio
     async def test_dispatch_with_hypothesis_id(self) -> None:
@@ -70,9 +77,10 @@ class TestDispatchAgentPipeline:
         )
 
         status = await self.task_manager.get_all_status()
-        running = status["running"]
-        assert len(running) == 1
-        assert running[0]["hypothesis_id"] == "H1"
+        # Auto-block completes the single task
+        completed = status["completed"]
+        assert len(completed) == 1
+        assert completed[0]["hypothesis_id"] == "H1"
 
 
 class TestCheckTasksPipeline:

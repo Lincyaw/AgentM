@@ -22,12 +22,17 @@ class TaskManager:
     - check_tasks   -> get_all_status()
     - inject_instruction -> inject()
     - abort_task    -> abort()
+
+    A shared ``_completion_event`` (asyncio.Event) is fired whenever any task
+    finishes, fails, or is aborted.  ``get_all_status`` and ``wait_for_task``
+    await this event instead of polling, giving precise wake-up on completion.
     """
 
     def __init__(self) -> None:
         self._tasks: dict[str, ManagedTask] = {}
         self._broadcast_callback: Callable[..., Any] | None = None
         self._trajectory: Any | None = None  # TrajectoryCollector (avoid circular import)
+        self._completion_event = asyncio.Event()
 
     def set_trajectory(self, trajectory: Any) -> None:
         """Set the TrajectoryCollector for event recording."""
@@ -90,15 +95,21 @@ class TaskManager:
         return task_id
 
     async def get_all_status(self, wait_seconds: float = 0) -> dict[str, Any]:
-        """Get status of all managed tasks. Optionally wait if all are still running."""
+        """Get status of all managed tasks.
+
+        If *wait_seconds* > 0 and all tasks are still running, blocks until
+        the completion event fires (a task finishes) or the timeout expires.
+        """
         if wait_seconds > 0 and all(
             t.status == AgentRunStatus.RUNNING for t in self._tasks.values()
         ):
-            done, _ = await asyncio.wait(
-                [t.asyncio_task for t in self._tasks.values() if t.asyncio_task],
-                timeout=wait_seconds,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            self._completion_event.clear()
+            try:
+                await asyncio.wait_for(
+                    self._completion_event.wait(), timeout=wait_seconds
+                )
+            except asyncio.TimeoutError:
+                pass
 
         result: dict[str, Any] = {"running": [], "completed": [], "failed": []}
         for task_id, task in self._tasks.items():
@@ -121,6 +132,27 @@ class TaskManager:
                 result["failed"].append(entry)
         return result
 
+    async def wait_for_task(self, task_id: str, timeout: float = 180) -> ManagedTask:
+        """Wait for a specific task to leave RUNNING state.
+
+        Uses the shared completion event so it wakes instantly when any task
+        finishes, then checks whether the target task is done.
+        """
+        task = self.get_task(task_id)
+        while task.status == AgentRunStatus.RUNNING and task.asyncio_task is not None:
+            self._completion_event.clear()
+            try:
+                await asyncio.wait_for(
+                    self._completion_event.wait(), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                break
+        return task
+
+    def get_running_count(self) -> int:
+        """Return the number of currently running tasks."""
+        return sum(1 for t in self._tasks.values() if t.status == AgentRunStatus.RUNNING)
+
     async def inject(self, task_id: str, instruction: str) -> None:
         """Inject a new instruction into a running Sub-Agent."""
         task = self.get_task(task_id)
@@ -141,6 +173,7 @@ class TaskManager:
             task.asyncio_task.cancel()
         task.status = AgentRunStatus.FAILED
         task.error_summary = f"Aborted: {reason}"
+        self._completion_event.set()
         if self._trajectory is not None:
             await self._trajectory.record(
                 event_type="task_abort",
@@ -242,6 +275,7 @@ class TaskManager:
                     managed.duration_seconds = (
                         datetime.now() - started
                     ).total_seconds()
+                self._completion_event.set()
 
                 if self._trajectory is not None:
                     await self._trajectory.record(
@@ -258,6 +292,7 @@ class TaskManager:
 
             except asyncio.CancelledError:
                 managed.completed_at = datetime.now().isoformat()
+                self._completion_event.set()
                 raise
 
             except Exception as e:
@@ -273,6 +308,7 @@ class TaskManager:
         managed.error_summary = str(last_error)
         managed.last_steps = managed.events_buffer[-5:]
         managed.completed_at = datetime.now().isoformat()
+        self._completion_event.set()
 
         if self._trajectory is not None:
             await self._trajectory.record(
