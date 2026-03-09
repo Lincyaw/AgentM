@@ -1,34 +1,4 @@
 tools:
-  - name: dispatch_agent
-    module: agentm.tools.orchestrator
-    function: dispatch_agent
-    parameters: {}
-
-  - name: check_tasks
-    module: agentm.tools.orchestrator
-    function: check_tasks
-    parameters: {}
-
-  - name: update_hypothesis
-    module: agentm.tools.orchestrator
-    function: update_hypothesis
-    parameters: {}
-
-  - name: remove_hypothesis
-    module: agentm.tools.orchestrator
-    function: remove_hypothesis
-    parameters: {}
-
-  - name: inject_instruction
-    module: agentm.tools.orchestrator
-    function: inject_instruction
-    parameters: {}
-
-  - name: abort_task
-    module: agentm.tools.orchestrator
-    function: abort_task
-    parameters: {}
-
   - name: recall_history
     module: agentm.tools.orchestrator
     function: recall_history

@@ -20,9 +20,9 @@ class TestDispatchAgentPipeline:
     """P1: dispatch_agent creates a managed task and returns task_id."""
 
     @pytest.fixture(autouse=True)
-    def _bind_tools(self, task_manager: TaskManager) -> None:
+    def _bind_tools(self, task_manager: TaskManager, agent_pool) -> None:
         self.task_manager = task_manager
-        tools = create_orchestrator_tools(task_manager, agent_pool=None)
+        tools = create_orchestrator_tools(task_manager, agent_pool=agent_pool)
         self.dispatch_agent = tools["dispatch_agent"]
         self.check_tasks = tools["check_tasks"]
 
@@ -79,9 +79,9 @@ class TestCheckTasksPipeline:
     """P2: check_tasks returns status and results via Command."""
 
     @pytest.fixture(autouse=True)
-    def _bind_tools(self, task_manager_with_completed_task: TaskManager) -> None:
+    def _bind_tools(self, task_manager_with_completed_task: TaskManager, agent_pool) -> None:
         self.task_manager = task_manager_with_completed_task
-        tools = create_orchestrator_tools(task_manager_with_completed_task, agent_pool=None)
+        tools = create_orchestrator_tools(task_manager_with_completed_task, agent_pool=agent_pool)
         self.check_tasks = tools["check_tasks"]
 
     @pytest.mark.asyncio
@@ -104,10 +104,10 @@ class TestCheckTasksPipeline:
 
     @pytest.mark.asyncio
     async def test_check_tasks_returns_failed_results(
-        self, task_manager_with_failed_task: TaskManager
+        self, task_manager_with_failed_task: TaskManager, agent_pool
     ) -> None:
         """check_tasks should include failed task error summary."""
-        tools = create_orchestrator_tools(task_manager_with_failed_task, agent_pool=None)
+        tools = create_orchestrator_tools(task_manager_with_failed_task, agent_pool=agent_pool)
         check_tasks = tools["check_tasks"]
 
         cmd = await check_tasks(

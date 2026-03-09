@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from langchain_core.messages import SystemMessage
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+
 from agentm.config.schema import AgentConfig, ModelConfig, ScenarioConfig
+from agentm.core.compression import build_compression_hook
+from agentm.core.prompt import load_prompt_template
 from agentm.core.tool_registry import ToolRegistry
 
 
@@ -21,11 +27,6 @@ def create_sub_agent(
     full system prompt (not an overlay). When config.prompt is set, the task_type
     prompt is appended as an overlay.
     """
-    from langchain_openai import ChatOpenAI
-    from langgraph.prebuilt import create_react_agent
-
-    from agentm.core.prompt import load_prompt_template
-
     llm_kwargs: dict[str, Any] = {"model": config.model, "temperature": config.temperature}
     if model_config is not None:
         llm_kwargs["api_key"] = model_config.api_key
@@ -49,11 +50,14 @@ def create_sub_agent(
             overlay = load_prompt_template(config.task_type_prompts[task_type], agent_id=agent_id)
             prompt = prompt + "\n\n" + overlay
 
+    max_steps = config.execution.max_steps
+    budget_hook = _build_budget_hook(max_steps)
+
     if config.compression is not None:
-        from agentm.core.compression import build_compression_hook
-        pre_model_hook = build_compression_hook(config.compression)
+        compression_hook = build_compression_hook(config.compression)
+        pre_model_hook = _chain_hooks(budget_hook, compression_hook)
     else:
-        pre_model_hook = None
+        pre_model_hook = budget_hook
 
     return create_react_agent(
         model=model,
@@ -62,6 +66,47 @@ def create_sub_agent(
         name=agent_id,
         pre_model_hook=pre_model_hook,
     )
+
+
+def _build_budget_hook(max_steps: int) -> Any:
+    """Build a pre_model_hook that injects remaining-step awareness."""
+
+    def hook(state: dict[str, Any]) -> dict[str, Any]:
+        messages = state.get("messages", [])
+        # Each LLM call + tool call = ~2 messages; estimate current step
+        step = len([m for m in messages if getattr(m, "type", "") == "ai"])
+        remaining = max(0, max_steps - step)
+
+        if remaining <= 3:
+            urgency = (
+                f"\n\nWARNING: You have {remaining} steps remaining out of {max_steps}. "
+                f"You MUST summarize your findings NOW and produce your final report. "
+                f"Do NOT call any more tools — write your conclusion immediately."
+            )
+        elif remaining <= max_steps // 3:
+            urgency = (
+                f"\n\nBUDGET: {remaining}/{max_steps} steps remaining. "
+                f"Start wrapping up — prioritize the most important remaining queries, "
+                f"then produce your summary."
+            )
+        else:
+            urgency = f"\n\n[Steps remaining: {remaining}/{max_steps}]"
+
+        # Inject as the last system message so LLM sees it
+        budget_msg = SystemMessage(content=urgency)
+        return {"messages": [*messages, budget_msg]}
+
+    return hook
+
+
+def _chain_hooks(*hooks: Any) -> Any:
+    """Chain multiple pre_model_hooks — each receives the output of the previous."""
+    def chained(state: dict[str, Any]) -> dict[str, Any]:
+        result = state
+        for hook in hooks:
+            result = hook(result)
+        return result
+    return chained
 
 
 class AgentPool:
@@ -94,6 +139,3 @@ class AgentPool:
             )
         return self._workers[task_type]
 
-    def get_agent(self, agent_id: str) -> Any:
-        """Get a compiled sub-agent subgraph by ID (legacy compat)."""
-        return self._workers.get(agent_id)
