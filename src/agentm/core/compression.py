@@ -2,17 +2,44 @@
 
 from __future__ import annotations
 
+import contextvars
 from dataclasses import replace
 from typing import Any, Callable
 
 import tiktoken
+from langchain_core.messages import SystemMessage
 
 from agentm.config.schema import CompressionConfig
 from agentm.models.data import DiagnosticNotebook, PhaseSummary
 
+# Thread-safe tracking of compression events within a single agent invocation.
+# Callers (e.g. orchestrator/builder) read events via get_compression_events()
+# and clear them after persisting to state.
+_compression_events: contextvars.ContextVar[list[dict[str, Any]]] = contextvars.ContextVar(
+    "compression_events", default=[]
+)
+
+
+def record_compression_event(event: dict[str, Any]) -> None:
+    """Record that a compression occurred. Called by compression hooks."""
+    events = list(_compression_events.get([]))
+    events.append(event)
+    _compression_events.set(events)
+
+
+def get_compression_events() -> list[dict[str, Any]]:
+    """Get all recorded compression events since last clear."""
+    return list(_compression_events.get([]))
+
+
+def clear_compression_events() -> None:
+    """Clear recorded compression events."""
+    _compression_events.set([])
+
 _DEFAULT_CONTEXT_WINDOW = 128_000
 _DEFAULT_THRESHOLD_RATIO = 0.8
 _DEFAULT_THRESHOLD_TOKENS = int(_DEFAULT_CONTEXT_WINDOW * _DEFAULT_THRESHOLD_RATIO)
+_DEFAULT_PRESERVE_N = 2
 
 
 def count_tokens(messages: list[Any], model: str = "gpt-4") -> int:
@@ -33,6 +60,39 @@ def count_tokens(messages: list[Any], model: str = "gpt-4") -> int:
     return total
 
 
+def _summarize_messages(messages: list[Any], model: str = "gpt-4o-mini") -> str:
+    """Summarize a list of messages into a structured text summary using an LLM."""
+    from langchain_openai import ChatOpenAI
+    from langchain_core.messages import HumanMessage as LCHumanMessage
+
+    formatted = []
+    for msg in messages:
+        role = getattr(msg, "type", "unknown")
+        content = getattr(msg, "content", "")
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            tool_info = ", ".join(tc.get("name", "?") for tc in msg.tool_calls)
+            formatted.append(f"[{role}] Called tools: {tool_info}")
+        elif content:
+            preview = content[:500] + "..." if len(content) > 500 else content
+            formatted.append(f"[{role}] {preview}")
+
+    messages_text = "\n".join(formatted)
+
+    prompt = (
+        "Summarize the following agent execution history into a structured summary. "
+        "Preserve: key findings, tool call results, data values, and decisions made. "
+        "Be concise but retain specific data points (numbers, names, timestamps).\n\n"
+        f"Messages:\n{messages_text}"
+    )
+
+    llm = ChatOpenAI(model=model, temperature=0)
+    result = llm.invoke([LCHumanMessage(content=prompt)])
+    content = result.content
+    if isinstance(content, list):
+        return " ".join(str(part) for part in content)
+    return str(content)
+
+
 def sub_agent_compression_hook(state: dict[str, Any]) -> dict[str, Any]:
     """pre_model_hook: compress messages before LLM call when token limit approached.
 
@@ -50,8 +110,22 @@ def sub_agent_compression_hook(state: dict[str, Any]) -> dict[str, Any]:
     if token_count < _DEFAULT_THRESHOLD_TOKENS:
         return {"messages": messages}
 
-    # Phase 1: pass-through — LLM summarization deferred to later phase
-    return {"llm_input_messages": messages}
+    if len(messages) <= _DEFAULT_PRESERVE_N:
+        return {"messages": messages}
+
+    older_messages = messages[:-_DEFAULT_PRESERVE_N]
+    recent_messages = messages[-_DEFAULT_PRESERVE_N:]
+
+    summary_text = _summarize_messages(older_messages)
+    summary_msg = SystemMessage(content=f"[Compressed History Summary]\n{summary_text}")
+
+    record_compression_event({
+        "layer": "sub_agent",
+        "step_count": len(older_messages),
+        "reason": f"token_count={token_count} exceeded threshold={_DEFAULT_THRESHOLD_TOKENS}",
+    })
+
+    return {"llm_input_messages": [summary_msg] + recent_messages}
 
 
 def build_compression_hook(config: CompressionConfig) -> Callable:
@@ -61,6 +135,7 @@ def build_compression_hook(config: CompressionConfig) -> Callable:
     but with threshold and model settings bound from the CompressionConfig.
     """
     threshold_tokens = int(_DEFAULT_CONTEXT_WINDOW * config.compression_threshold)
+    preserve_n = config.preserve_latest_n
 
     def hook(state: dict[str, Any]) -> dict[str, Any]:
         messages = state.get("messages", [])
@@ -69,8 +144,22 @@ def build_compression_hook(config: CompressionConfig) -> Callable:
         if token_count < threshold_tokens:
             return {"messages": messages}
 
-        # Phase 1: pass-through — LLM summarization deferred to later phase
-        return {"llm_input_messages": messages}
+        if len(messages) <= preserve_n:
+            return {"messages": messages}
+
+        older = messages[:-preserve_n]
+        recent = messages[-preserve_n:]
+
+        summary_text = _summarize_messages(older, model=config.compression_model)
+        summary_msg = SystemMessage(content=f"[Compressed History Summary]\n{summary_text}")
+
+        record_compression_event({
+            "layer": "sub_agent",
+            "step_count": len(older),
+            "reason": f"token_count={token_count} exceeded threshold={threshold_tokens}",
+        })
+
+        return {"llm_input_messages": [summary_msg] + recent}
 
     return hook
 

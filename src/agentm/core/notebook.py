@@ -151,6 +151,24 @@ def set_confirmed_hypothesis(
     return replace(notebook, confirmed_hypothesis=hypothesis_id)
 
 
+def should_compress_phase(notebook: DiagnosticNotebook, phase: str) -> bool:
+    """Check if a completed phase should be compressed.
+
+    A phase is compressible when:
+    1. It has exploration_history entries for that phase
+    2. It is not the current phase
+    3. It has not already been compressed (no matching PhaseSummary)
+    """
+    already_compressed = {s.phase for s in notebook.phase_summaries}
+    if phase in already_compressed:
+        return False
+
+    if phase == notebook.current_phase.value:
+        return False
+
+    return any(step.phase.value == phase for step in notebook.exploration_history)
+
+
 def format_notebook_for_llm(notebook: DiagnosticNotebook) -> str:
     """Format the notebook into an LLM prompt string, using summaries for compressed phases."""
     lines: list[str] = []

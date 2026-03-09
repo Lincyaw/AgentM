@@ -249,6 +249,9 @@ class AgentSystemBuilder:
             # Wire trajectory into task_manager
             task_manager.set_trajectory(trajectory)
 
+            # Extract graph reference setter before tool registration (not a real tool)
+            set_graph_ref = injected_tools.pop("_set_graph_ref", None)
+
             # Build orchestrator tools: YAML-registered + factory-injected
             tools: list[Any] = []
 
@@ -278,6 +281,11 @@ class AgentSystemBuilder:
                 store=None,
                 model_config=orch_model_config,
             )
+
+            # Wire graph reference for recall_history (must happen after graph compilation)
+            if set_graph_ref is not None:
+                set_graph_ref(graph, langgraph_config)
+
             return AgentSystem(
                 graph,
                 config=langgraph_config,
