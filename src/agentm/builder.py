@@ -10,6 +10,7 @@ from typing import Any, AsyncIterator
 
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.store.memory import InMemoryStore
 
 from agentm.agents.orchestrator import create_orchestrator
 from agentm.agents.sub_agent import AgentPool
@@ -18,6 +19,7 @@ from agentm.core.state_registry import get_state_schema
 from agentm.core.task_manager import TaskManager
 from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
+from agentm.tools import knowledge as knowledge_module
 from agentm.tools.orchestrator import create_orchestrator_tools
 
 
@@ -252,7 +254,18 @@ class AgentSystemBuilder:
             # Extract graph reference setter before tool registration (not a real tool)
             set_graph_ref = injected_tools.pop("_set_graph_ref", None)
 
-            # Build orchestrator tools: YAML-registered + factory-injected
+            # --- Knowledge Store ---
+            store = InMemoryStore()
+            knowledge_module.set_store(store)
+
+            # Knowledge tools are standalone functions (not factory-created)
+            KNOWLEDGE_TOOLS: dict[str, Any] = {
+                "knowledge_search": knowledge_module.knowledge_search,
+                "knowledge_list": knowledge_module.knowledge_list,
+                "knowledge_read": knowledge_module.knowledge_read,
+            }
+
+            # Build orchestrator tools: YAML-registered + factory-injected + knowledge
             tools: list[Any] = []
 
             for name in scenario_config.orchestrator.tools:
@@ -268,6 +281,13 @@ class AgentSystemBuilder:
                             func=func, name=name, description=func.__doc__ or name,
                         )
                     tools.append(tool)
+                elif name in KNOWLEDGE_TOOLS:
+                    # Knowledge tools (standalone functions with store injected via set_store)
+                    func = KNOWLEDGE_TOOLS[name]
+                    tool = StructuredTool.from_function(
+                        func=func, name=name, description=func.__doc__ or name,
+                    )
+                    tools.append(tool)
                 elif tool_registry.has(name):
                     # YAML-registered tool (module-level function)
                     tools.append(tool_registry.get(name).create_with_config())
@@ -278,7 +298,7 @@ class AgentSystemBuilder:
                 config=scenario_config.orchestrator,
                 tools=tools,
                 checkpointer=checkpointer,
-                store=None,
+                store=store,
                 model_config=orch_model_config,
             )
 
