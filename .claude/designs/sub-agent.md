@@ -279,31 +279,16 @@ time range, or component you've been assigned.
 
 ### Compression Prompt Template
 
-When Sub-Agent message history is compressed (via `pre_model_hook`), this prompt guides the compression:
+When Sub-Agent message history is compressed (via `pre_model_hook`), this prompt guides the compression into a structured 8-section summary (see `prompts/compression/sub_agent_compress.j2`):
 
-```jinja2
-{# prompts/compression/sub_agent_compress.j2 #}
-
-Compress this agent's execution history into a concise findings summary.
-
-<instructions>
-- Preserve exact identifiers (service names, hosts, metric names) verbatim
-- Quantify anomalies with specific values and baseline comparisons
-- Keep the summary under 500 words — every sentence must carry data
-- Omit reasoning process, caveats, and verbose explanations
-- Do NOT echo raw tool outputs — extract only key data points
-</instructions>
-
-<filtering_rules>
-ONLY include information relevant to the investigation:
-- **Include**: confirmed anomalies, error patterns, key metrics, causal chains
-- **Exclude**: normal/healthy observations, empty query results, failed tool calls
-- **Exclude**: speculative observations with no supporting data
-
-If a query found nothing unusual, do NOT report it. The Orchestrator only needs
-to see what is WRONG, not what is RIGHT.
-</filtering_rules>
-```
+1. **Task Assignment** — original instruction, target hypothesis ID
+2. **Key Findings** — confirmed anomalies with exact values, timestamps, service names
+3. **Affected Services** — per-service anomaly (abnormal vs normal values)
+4. **Service Call Chains** — trace-backed propagation paths
+5. **Errors and Anomaly Patterns** — error types, log signatures, temporal correlations
+6. **Hypothesis Assessment** — per-hypothesis verdict
+7. **Open Questions** — unresolved items, suggested follow-ups
+8. **Investigation Progress** — tools called, data sources covered vs unchecked
 
 ### Context Briefing Rule
 

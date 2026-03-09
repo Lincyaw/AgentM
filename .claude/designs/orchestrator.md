@@ -219,17 +219,16 @@ class SubAgentMessageSummary:
     latest_raw_data: dict            # Most recent tool output (uncompressed, for continuity)
 ```
 
-Compression prompt guideline (not a rigid schema):
-```
-Summarize this agent's execution history. Include:
-- What task was assigned and any instructions from the Orchestrator
-- What tools were called and what key data was collected
-- Any errors encountered and how they were handled
-- Current progress: what's done and what remains
-- Notable observations or anomalies
-- Key decisions and reasoning
-Keep it concise but preserve critical data points.
-```
+Compression prompt guideline — structured 8-section format (see `prompts/compression/sub_agent_compress.j2`):
+
+1. **Task Assignment** — original instruction from Orchestrator, target hypothesis ID
+2. **Key Findings** — confirmed anomalies with exact values, timestamps, service names
+3. **Affected Services** — per-service anomaly summary (abnormal vs normal values)
+4. **Service Call Chains** — trace-backed propagation paths involving anomalous services
+5. **Errors and Anomaly Patterns** — error types, log signatures, temporal correlations
+6. **Hypothesis Assessment** — per-hypothesis verdict (SUPPORTED/CONTRADICTED/INCONCLUSIVE)
+7. **Open Questions** — unresolved items and suggested follow-up queries
+8. **Investigation Progress** — tools called, data sources covered vs unchecked
 
 **Implementation via `pre_model_hook`**:
 

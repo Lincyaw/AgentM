@@ -17,7 +17,7 @@ phases:
 
 orchestrator:
   model: "gpt-4"
-  temperature: 0.3
+  temperature: 0.7
   orchestrator_mode: "react"
 
   prompts:
@@ -53,6 +53,10 @@ orchestrator:
       model: "gpt-4o-mini"
       max_messages_per_query: 200
 
+  output:
+    prompt: "prompts/output/causal_graph.j2"
+    schema_name: "CausalGraph"
+
   monitoring:
     summary_model: "gpt-4o-mini"
     stream_mode: ["updates", "custom"]
@@ -61,7 +65,7 @@ orchestrator:
 agents:
   worker:
     model: "gpt-4o-mini"
-    temperature: 0.2
+    temperature: 0.7
     task_type_prompts:
       scout: "prompts/task_types/scout.j2"
       verify: "prompts/task_types/verify.j2"

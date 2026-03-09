@@ -14,7 +14,7 @@ from agentm.cli.debug import _load_events, _print_summary, _print_timeline, _eve
 def sample_trajectory(tmp_path: Path) -> Path:
     """Create a sample trajectory JSONL file."""
     events = [
-        {"run_id": "r1", "seq": 1, "timestamp": "2026-03-08T10:00:01", "agent_path": ["orchestrator"], "node_name": "agent", "event_type": "llm_end", "data": {"content_preview": "Let me investigate"}, "task_id": None, "hypothesis_id": None, "parent_seq": None},
+        {"run_id": "r1", "seq": 1, "timestamp": "2026-03-08T10:00:01", "agent_path": ["orchestrator"], "node_name": "agent", "event_type": "llm_end", "data": {"content": "Let me investigate"}, "task_id": None, "hypothesis_id": None, "parent_seq": None},
         {"run_id": "r1", "seq": 2, "timestamp": "2026-03-08T10:00:02", "agent_path": ["orchestrator"], "node_name": "agent", "event_type": "tool_call", "data": {"tool_name": "spawn_worker", "args": {"task_type": "scout"}}, "task_id": None, "hypothesis_id": None, "parent_seq": None},
         {"run_id": "r1", "seq": 3, "timestamp": "2026-03-08T10:00:03", "agent_path": ["worker-scout"], "node_name": "", "event_type": "task_dispatch", "data": {"task_id": "t-1", "agent_id": "worker-scout", "task_type": "scout"}, "task_id": "t-1", "hypothesis_id": None, "parent_seq": None},
         {"run_id": "r1", "seq": 4, "timestamp": "2026-03-08T10:00:15", "agent_path": ["worker-scout"], "node_name": "", "event_type": "task_complete", "data": {"task_id": "t-1", "agent_id": "worker-scout", "duration_seconds": 12.3}, "task_id": "t-1", "hypothesis_id": None, "parent_seq": None},
