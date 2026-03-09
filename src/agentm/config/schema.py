@@ -127,17 +127,30 @@ class FeatureGatesConfig(BaseModel):
     min_evidence_for_pattern: int = 2
 
 
+class OutputConfig(BaseModel):
+    """Structured output configuration for the Orchestrator.
+
+    When set, create_react_agent receives response_format=(prompt, schema)
+    so the framework appends a generate_structured_response node after the
+    ReAct loop finishes.
+    """
+
+    prompt: str
+    schema_name: str = "CausalGraph"
+
+
 class OrchestratorConfig(BaseModel):
     """Orchestrator configuration within a scenario."""
 
     model: str
-    temperature: float = 0.3
+    temperature: float = 0.7
     orchestrator_mode: str = "react"
     prompts: dict[str, str] = {}
     tools: list[str] = []
     feature_gates: FeatureGatesConfig = FeatureGatesConfig()
     compression: Optional[CompressionConfig] = None
     monitoring: Optional[dict[str, Any]] = None
+    output: Optional[OutputConfig] = None
 
 
 class SystemTypeConfig(BaseModel):
