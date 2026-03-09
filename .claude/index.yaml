@@ -49,7 +49,7 @@ concepts:
     description: "create_react_agent acting as hypothesis reasoner. Maintains DiagnosticNotebook, drives RCA flow in ReAct loop (phases are Notebook state markers, not graph nodes), context compression with checkpoint-backed recall. Dispatches Sub-Agents asynchronously via TaskManager, monitors/injects/aborts via tools"
     design: "designs/orchestrator.md"
     related_concepts: [system_architecture, sub_agent, trajectory_system, memory_system, execution_runner]
-    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
+    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
     tests:
       - file: "tests/unit/test_design_contracts.py"
@@ -88,7 +88,7 @@ concepts:
     description: "Generic SDK wrapper supporting multiple agent system types (hypothesis-driven, sequential, memory-extraction, decision-tree) via configuration. Shared BaseOrchestrator, PhaseManager, State Schema Registry"
     design: "designs/generic-state-wrapper.md"
     related_concepts: [orchestrator, configuration_system, memory_system]
-    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
+    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
     tests:
       - file: "tests/unit/test_state_registry.py"
@@ -101,7 +101,7 @@ concepts:
     design: "designs/orchestrator.md"
     related_concepts: [orchestrator, generic_state_wrapper, trajectory_system]
     related_designs: ["designs/generic-state-wrapper.md"]
-    plans: []
+    plans: ["plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
     tests:
       - file: "tests/unit/test_knowledge_path_utils.py"
@@ -195,5 +195,5 @@ concepts:
     description: "AgentSystemBuilder: unified entry point for constructing agent systems. Factory closure DI, lazy async checkpointer, trajectory wiring"
     design: "designs/builder.md"
     related_concepts: [system_architecture, orchestrator, sub_agent, trajectory, configuration_system]
-    plans: []
+    plans: ["plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
