@@ -8,7 +8,13 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from langchain_core.messages import SystemMessage
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+
 from agentm.config.schema import OrchestratorConfig
+from agentm.core.notebook import format_notebook_for_llm
+from agentm.core.prompt import load_prompt_template
 
 
 def build_orchestrator_prompt(system_prompt_template: str) -> Callable:
@@ -17,13 +23,13 @@ def build_orchestrator_prompt(system_prompt_template: str) -> Callable:
     The returned callable receives the current HypothesisDrivenState and returns a list of
     messages with the system prompt populated from the DiagnosticNotebook.
     """
-    from langchain_core.messages import SystemMessage
-
-    from agentm.core.notebook import format_notebook_for_llm
-    from agentm.core.prompt import load_prompt_template
 
     def prompt(state: dict) -> list:
-        notebook_text = format_notebook_for_llm(state["notebook"])
+        notebook_data = state.get("notebook")
+        if notebook_data is not None:
+            notebook_text = format_notebook_for_llm(notebook_data)
+        else:
+            notebook_text = "(Investigation starting — no data collected yet)"
         system_prompt = load_prompt_template(system_prompt_template, notebook=notebook_text)
         return [
             SystemMessage(content=system_prompt),
@@ -38,27 +44,34 @@ def create_orchestrator(
     tools: list,
     checkpointer: Any,
     store: Any,
+    model_config: Any | None = None,
 ) -> Any:
     """Create the Orchestrator via create_react_agent.
 
-    Uses build_orchestrator_prompt to create the prompt callable,
-    passes tools, and sets state_schema=HypothesisDrivenState.
+    Uses build_orchestrator_prompt to create the prompt callable.
+    Does NOT pass state_schema — create_react_agent's default AgentState
+    includes 'remaining_steps' which is required by the framework.
 
     Returns a CompiledGraph (langgraph).
     """
-    from langchain_openai import ChatOpenAI
-    from langgraph.prebuilt import create_react_agent
+    llm_kwargs: dict[str, Any] = {"model": config.model, "temperature": config.temperature}
+    if model_config is not None:
+        if hasattr(model_config, "api_key") and model_config.api_key:
+            llm_kwargs["api_key"] = model_config.api_key
+        if hasattr(model_config, "base_url") and model_config.base_url:
+            llm_kwargs["base_url"] = model_config.base_url
+    model = ChatOpenAI(**llm_kwargs)
 
-    from agentm.models.state import HypothesisDrivenState
-
-    model = ChatOpenAI(model=config.model, temperature=config.temperature)
     prompt_callable = build_orchestrator_prompt(config.prompts.get("system", ""))
 
-    return create_react_agent(
-        model=model,
-        tools=tools,
-        prompt=prompt_callable,
-        state_schema=HypothesisDrivenState,
-        checkpointer=checkpointer,
-        store=store,
-    )
+    agent_kwargs: dict[str, Any] = {
+        "model": model,
+        "tools": tools,
+        "prompt": prompt_callable,
+    }
+    if checkpointer is not None:
+        agent_kwargs["checkpointer"] = checkpointer
+    if store is not None:
+        agent_kwargs["store"] = store
+
+    return create_react_agent(**agent_kwargs)

@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal
+
+from langchain_core.messages import HumanMessage
 
 from agentm.config.schema import RetryConfig
 from agentm.models.data import ManagedTask
@@ -24,13 +26,28 @@ class TaskManager:
 
     def __init__(self) -> None:
         self._tasks: dict[str, ManagedTask] = {}
+        self._broadcast_callback: Callable[..., Any] | None = None
+        self._trajectory: Any | None = None  # TrajectoryCollector (avoid circular import)
+
+    def set_trajectory(self, trajectory: Any) -> None:
+        """Set the TrajectoryCollector for event recording."""
+        self._trajectory = trajectory
+
+    def set_broadcast_callback(self, callback: Callable[..., Any]) -> None:
+        """Set the WebSocket broadcast callback."""
+        self._broadcast_callback = callback
+
+    @property
+    def trajectory(self) -> Any | None:
+        """Access the TrajectoryCollector (read-only)."""
+        return self._trajectory
 
     async def submit(
         self,
         agent_id: str,
         instruction: str,
         task_type: Literal["scout", "verify", "deep_analyze"] = "scout",
-        hypothesis_id: Optional[str] = None,
+        hypothesis_id: str | None = None,
         **kwargs: Any,
     ) -> str:
         """Submit a new task for a Sub-Agent. Returns task_id."""
@@ -55,6 +72,21 @@ class TaskManager:
             )
 
         self._tasks[task_id] = managed
+
+        if self._trajectory is not None:
+            await self._trajectory.record(
+                event_type="task_dispatch",
+                agent_path=[agent_id],
+                data={
+                    "task_id": task_id,
+                    "agent_id": agent_id,
+                    "task_type": task_type,
+                    "instruction_preview": instruction[:200],
+                    "hypothesis_id": hypothesis_id,
+                },
+                task_id=task_id,
+            )
+
         return task_id
 
     async def get_all_status(self, wait_seconds: float = 0) -> dict[str, Any]:
@@ -91,7 +123,7 @@ class TaskManager:
 
     async def inject(self, task_id: str, instruction: str) -> None:
         """Inject a new instruction into a running Sub-Agent."""
-        task = self._tasks[task_id]
+        task = self.get_task(task_id)
         if task.status != AgentRunStatus.RUNNING:
             raise ValueError(
                 f"Task {task_id!r} is not running (status={task.status!r})"
@@ -100,7 +132,7 @@ class TaskManager:
 
     async def abort(self, task_id: str, reason: str) -> None:
         """Abort a running Sub-Agent task."""
-        task = self._tasks[task_id]
+        task = self.get_task(task_id)
         if task.status != AgentRunStatus.RUNNING:
             raise ValueError(
                 f"Task {task_id!r} is not running (status={task.status!r})"
@@ -109,6 +141,13 @@ class TaskManager:
             task.asyncio_task.cancel()
         task.status = AgentRunStatus.FAILED
         task.error_summary = f"Aborted: {reason}"
+        if self._trajectory is not None:
+            await self._trajectory.record(
+                event_type="task_abort",
+                agent_path=[task.agent_id],
+                data={"task_id": task_id, "agent_id": task.agent_id, "reason": reason},
+                task_id=task_id,
+            )
 
     def consume_instructions(self, task_id: str) -> list[str]:
         """Dequeue and return all pending instructions for a task.
@@ -124,16 +163,41 @@ class TaskManager:
     def get_task(self, task_id: str) -> ManagedTask:
         """Look up a single managed task by ID.
 
-        Raises KeyError if task_id is not found.
+        Raises ValueError if task_id is not found.
         """
-        return self._tasks[task_id]
+        try:
+            return self._tasks[task_id]
+        except KeyError:
+            raise ValueError(
+                f"Task {task_id!r} not found. "
+                f"Known task IDs: {list(self._tasks.keys())}"
+            ) from None
+
+    async def _record_subagent_event(
+        self, managed: ManagedTask, data: dict[str, Any]
+    ) -> None:
+        """Extract and record tool_call events from sub-agent stream data."""
+        messages = data.get("messages", [])
+        for msg in messages:
+            role = getattr(msg, "type", "unknown")
+            if role == "ai":
+                for tc in getattr(msg, "tool_calls", []):
+                    await self._trajectory.record(
+                        event_type="tool_call",
+                        agent_path=["orchestrator", managed.agent_id],
+                        data={
+                            "tool_name": tc.get("name", ""),
+                            "args": tc.get("args", {}),
+                        },
+                        task_id=managed.task_id,
+                    )
 
     async def _execute_agent(
         self,
         managed: ManagedTask,
         subgraph: Any,
         config: dict[str, Any],
-        retry_config: RetryConfig = RetryConfig(),
+        retry_config: RetryConfig | None = None,
     ) -> None:
         """Core async execution loop for a Sub-Agent subgraph.
 
@@ -141,8 +205,7 @@ class TaskManager:
         and stores results upon completion.  Retries on failure with
         exponential backoff as specified by *retry_config*.
         """
-        from langchain_core.messages import HumanMessage
-
+        retry_config = retry_config or RetryConfig()
         input_data = {"messages": [HumanMessage(content=managed.instruction)]}
         last_error: Exception | None = None
 
@@ -159,9 +222,38 @@ class TaskManager:
                     if len(managed.events_buffer) > 20:
                         managed.events_buffer = managed.events_buffer[-20:]
 
+                    # Record sub-agent tool calls to trajectory
+                    if self._trajectory is not None and isinstance(data, dict):
+                        await self._record_subagent_event(managed, data)
+
+                    if self._broadcast_callback is not None:
+                        await self._broadcast_callback({
+                            "agent_path": [managed.agent_id],
+                            "mode": mode if isinstance(mode, str) else "updates",
+                            "data": data,
+                            "timestamp": datetime.now().isoformat(),
+                        })
+
                 managed.status = AgentRunStatus.COMPLETED
                 managed.result = {"events": managed.events_buffer}
                 managed.completed_at = datetime.now().isoformat()
+                if managed.started_at:
+                    started = datetime.fromisoformat(managed.started_at)
+                    managed.duration_seconds = (
+                        datetime.now() - started
+                    ).total_seconds()
+
+                if self._trajectory is not None:
+                    await self._trajectory.record(
+                        event_type="task_complete",
+                        agent_path=[managed.agent_id],
+                        data={
+                            "task_id": managed.task_id,
+                            "agent_id": managed.agent_id,
+                            "duration_seconds": managed.duration_seconds,
+                        },
+                        task_id=managed.task_id,
+                    )
                 return
 
             except asyncio.CancelledError:
@@ -181,3 +273,15 @@ class TaskManager:
         managed.error_summary = str(last_error)
         managed.last_steps = managed.events_buffer[-5:]
         managed.completed_at = datetime.now().isoformat()
+
+        if self._trajectory is not None:
+            await self._trajectory.record(
+                event_type="task_fail",
+                agent_path=[managed.agent_id],
+                data={
+                    "task_id": managed.task_id,
+                    "agent_id": managed.agent_id,
+                    "error_summary": str(last_error),
+                },
+                task_id=managed.task_id,
+            )

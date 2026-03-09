@@ -144,6 +144,8 @@ class ExecutorState(TypedDict):
     compression_refs: list[CompressionRef]
 ```
 
+> **Implementation Note — state_schema**: `ExecutorState` (and `HypothesisDrivenState`) is intentionally **NOT** passed to `create_react_agent`. The framework's default `AgentState` includes `remaining_steps` which is required by `create_react_agent` for step budget tracking. Passing a custom `state_schema` without `remaining_steps` causes runtime errors. The custom state types are validated at startup for type documentation and config validation purposes, but the actual graph uses the default state. The DiagnosticNotebook is managed entirely through tool calls (via `Command(update=...)`) rather than through graph state fields.
+
 Key properties:
 - `messages` uses `add_messages` reducer, supports `RemoveMessage` for cleanup
 - `notebook` is the structured working memory, not stored in messages
@@ -165,6 +167,8 @@ Even with Mode 2's minimal messages, the context window can still be exhausted d
 | **Orchestrator Prompt** | The formatted Notebook injected into the LLM prompt grows as data and hypotheses accumulate | Token count reaches 80% of model context limit |
 
 ### Compression Architecture
+
+> **Implementation Note**: Orchestrator-level Notebook compression (Layer 2) is deferred. Sub-Agent level compression is implemented via `build_compression_hook` which uses `pre_model_hook` with `llm_input_messages` return key. The Orchestrator compression hook will be added when the full Notebook formatting pipeline is in place.
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -499,6 +503,8 @@ The retrieval target is the **complete messages sequence** within the compressed
 ### recall_history Tool
 
 A tool available to both Orchestrator and Sub-Agents after compression has occurred.
+
+> **Implementation Note**: `recall_history` is currently stubbed. It returns `"No compression history available yet."` unconditionally. The full implementation (checkpoint traversal and LLM-based retrieval) will be wired when checkpoint-backed compression is integrated.
 
 ```python
 @tool
