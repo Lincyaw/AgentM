@@ -44,6 +44,13 @@ class _MockSubgraph:
             "updates",
             {"messages": [AIMessage(content=f"Completed: {instruction}")]},
         )
+        # Simulate the generate_structured_response node that
+        # create_react_agent appends when response_format is set.
+        yield (
+            (),
+            "updates",
+            {"structured_response": {"findings": f"Completed: {instruction}"}},
+        )
 
 
 _MOCK_SUBGRAPH = _MockSubgraph()
@@ -120,7 +127,7 @@ def task_manager_with_completed_task() -> TaskManager:
         agent_id="db",
         instruction="check connections",
         status=AgentRunStatus.COMPLETED,
-        result={"connections": "200/200", "wait_queue": 47},
+        result={"findings": "connections: 200/200, wait_queue: 47"},
         completed_at="2026-03-08T10:10:00",
         duration_seconds=15.0,
     )

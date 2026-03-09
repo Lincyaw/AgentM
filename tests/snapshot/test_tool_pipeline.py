@@ -106,8 +106,7 @@ class TestCheckTasksPipeline:
         assert len(content["completed"]) == 1
         assert content["completed"][0]["agent_id"] == "db"
         assert content["completed"][0]["result"] == {
-            "connections": "200/200",
-            "wait_queue": 47,
+            "findings": "connections: 200/200, wait_queue: 47",
         }
 
     @pytest.mark.asyncio
@@ -126,3 +125,75 @@ class TestCheckTasksPipeline:
         content = json.loads(cmd.update["messages"][0].content)
         assert len(content["failed"]) == 1
         assert "timeout" in content["failed"][0]["error_summary"].lower()
+
+
+class TestCheckTasksIncrementalReporting:
+    """P2b: check_tasks uses incremental reporting to save context window.
+
+    Bug prevented: completed/failed results returned on every check_tasks call
+    → same data repeated in every ToolMessage → context window wasted.
+
+    Design intent: completed/failed tasks are reported ONCE with full result,
+    then marked as reported. Subsequent check_tasks calls omit already-reported
+    terminal tasks. Running tasks always return a progress summary.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, task_manager_with_completed_task: TaskManager, agent_pool) -> None:
+        self.task_manager = task_manager_with_completed_task
+        tools = create_orchestrator_tools(task_manager_with_completed_task, agent_pool=agent_pool)
+        self.check_tasks = tools["check_tasks"]
+
+    @pytest.mark.asyncio
+    async def test_completed_task_reported_once(self) -> None:
+        """First check_tasks returns completed result; second call omits it.
+
+        Bug: without incremental reporting, a completed task's full result
+        (potentially large JSON) appears in every check_tasks response,
+        consuming context tokens repeatedly for zero new information.
+        """
+        # First call — result should be present
+        cmd1 = await self.check_tasks(wait_seconds=0, tool_call_id="call-020")
+        content1 = json.loads(cmd1.update["messages"][0].content)
+        assert len(content1["completed"]) == 1
+        assert content1["completed"][0]["result"] is not None
+
+        # Second call — already-reported task should NOT reappear
+        cmd2 = await self.check_tasks(wait_seconds=0, tool_call_id="call-021")
+        content2 = json.loads(cmd2.update["messages"][0].content)
+        assert len(content2["completed"]) == 0
+
+    @pytest.mark.asyncio
+    async def test_failed_task_reported_once(
+        self, task_manager_with_failed_task: TaskManager, agent_pool
+    ) -> None:
+        """Failed tasks follow the same incremental rule as completed tasks."""
+        tools = create_orchestrator_tools(task_manager_with_failed_task, agent_pool=agent_pool)
+        check_tasks = tools["check_tasks"]
+
+        # First call — failure details present
+        cmd1 = await check_tasks(wait_seconds=0, tool_call_id="call-022")
+        content1 = json.loads(cmd1.update["messages"][0].content)
+        assert len(content1["failed"]) == 1
+
+        # Second call — already-reported failure omitted
+        cmd2 = await check_tasks(wait_seconds=0, tool_call_id="call-023")
+        content2 = json.loads(cmd2.update["messages"][0].content)
+        assert len(content2["failed"]) == 0
+
+    @pytest.mark.asyncio
+    async def test_running_task_always_returns_summary(
+        self, task_manager_with_running_task: TaskManager, agent_pool
+    ) -> None:
+        """Running tasks always appear with progress summary, never suppressed."""
+        tools = create_orchestrator_tools(task_manager_with_running_task, agent_pool=agent_pool)
+        check_tasks = tools["check_tasks"]
+
+        # Call twice — running task should appear both times
+        cmd1 = await check_tasks(wait_seconds=0, tool_call_id="call-024")
+        content1 = json.loads(cmd1.update["messages"][0].content)
+        assert len(content1["running"]) == 1
+
+        cmd2 = await check_tasks(wait_seconds=0, tool_call_id="call-025")
+        content2 = json.loads(cmd2.update["messages"][0].content)
+        assert len(content2["running"]) == 1
