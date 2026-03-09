@@ -6,6 +6,8 @@ for constructing test state without a running graph.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from agentm.agents.sub_agent import AgentPool
@@ -17,10 +19,34 @@ from agentm.models.data import DiagnosticNotebook, ManagedTask
 from agentm.models.enums import AgentRunStatus, HypothesisStatus, Phase
 
 
-# A sentinel object that stands in for a compiled subgraph in tests.
-# TaskManager will create_task with it, but _execute_agent will fail on
-# astream() — which is fine because tests don't run the agent loop.
-_STUB_SUBGRAPH = object()
+class _MockSubgraph:
+    """A lightweight mock subgraph that completes immediately.
+
+    Implements the astream interface expected by TaskManager._execute_agent.
+    """
+
+    async def astream(
+        self,
+        input_data: dict[str, Any],
+        config: dict[str, Any],
+        stream_mode: list[str] | None = None,
+        subgraphs: bool = False,
+    ):
+        from langchain_core.messages import AIMessage
+
+        instruction = ""
+        for msg in input_data.get("messages", []):
+            if hasattr(msg, "content"):
+                instruction = msg.content
+                break
+        yield (
+            (),
+            "updates",
+            {"messages": [AIMessage(content=f"Completed: {instruction}")]},
+        )
+
+
+_MOCK_SUBGRAPH = _MockSubgraph()
 
 
 @pytest.fixture
@@ -73,9 +99,9 @@ def agent_pool() -> AgentPool:
         },
     )
     pool = AgentPool(scenario_config, ToolRegistry())
-    # Pre-fill cache so get_worker() returns the stub without creating a real agent
+    # Pre-fill cache so get_worker() returns the mock without creating a real agent
     for task_type in ("scout", "verify", "deep_analyze"):
-        pool._workers[task_type] = _STUB_SUBGRAPH
+        pool._workers[task_type] = _MOCK_SUBGRAPH
     return pool
 
 
