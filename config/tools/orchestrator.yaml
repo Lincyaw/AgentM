@@ -1,5 +1,1 @@
-tools:
-  - name: recall_history
-    module: agentm.tools.orchestrator
-    function: recall_history
-    parameters: {}
+tools: []
