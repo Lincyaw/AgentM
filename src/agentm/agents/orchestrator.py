@@ -20,6 +20,8 @@ from agentm.core.compression import (
 )
 from agentm.core.notebook import format_notebook_for_llm, should_compress_phase
 from agentm.core.prompt import load_prompt_template
+from agentm.core.trajectory import TrajectoryCollector
+from agentm.models.output import get_output_schema
 
 
 def build_orchestrator_prompt(system_prompt_template: str) -> Callable:
@@ -40,7 +42,9 @@ def build_orchestrator_prompt(system_prompt_template: str) -> Callable:
             notebook_text = format_notebook_for_llm(notebook_for_llm)
         else:
             notebook_text = "(Investigation starting — no data collected yet)"
-        system_prompt = load_prompt_template(system_prompt_template, notebook=notebook_text)
+        system_prompt = load_prompt_template(
+            system_prompt_template, notebook=notebook_text
+        )
         return [
             SystemMessage(content=system_prompt),
             *state["messages"],
@@ -55,6 +59,7 @@ def create_orchestrator(
     checkpointer: Any,
     store: Any,
     model_config: Any | None = None,
+    trajectory: TrajectoryCollector | None = None,
 ) -> Any:
     """Create the Orchestrator via create_react_agent.
 
@@ -64,7 +69,10 @@ def create_orchestrator(
 
     Returns a CompiledGraph (langgraph).
     """
-    llm_kwargs: dict[str, Any] = {"model": config.model, "temperature": config.temperature}
+    llm_kwargs: dict[str, Any] = {
+        "model": config.model,
+        "temperature": config.temperature,
+    }
     if model_config is not None:
         if hasattr(model_config, "api_key") and model_config.api_key:
             llm_kwargs["api_key"] = model_config.api_key
@@ -85,7 +93,33 @@ def create_orchestrator(
         agent_kwargs["store"] = store
 
     # Orchestrator message compression via pre_model_hook
+    hooks: list[Any] = []
     if config.compression is not None and config.compression.enabled:
-        agent_kwargs["pre_model_hook"] = build_compression_hook(config.compression)
+        hooks.append(build_compression_hook(config.compression))
+    if trajectory is not None:
+        from agentm.agents.hooks import build_llm_input_hook
+
+        hooks.append(build_llm_input_hook(trajectory, ["orchestrator"]))
+    if hooks:
+        if len(hooks) == 1:
+            agent_kwargs["pre_model_hook"] = hooks[0]
+        else:
+
+            def _chain(*fns: Any) -> Any:
+                def chained(state: dict) -> dict:
+                    result = state
+                    for fn in fns:
+                        result = fn(result)
+                    return result
+
+                return chained
+
+            agent_kwargs["pre_model_hook"] = _chain(*hooks)
+
+    # Structured output via response_format=(extraction_prompt, schema)
+    if config.output is not None:
+        output_prompt = load_prompt_template(config.output.prompt)
+        output_schema = get_output_schema(config.output.schema_name)
+        agent_kwargs["response_format"] = (output_prompt, output_schema)
 
     return create_react_agent(**agent_kwargs)

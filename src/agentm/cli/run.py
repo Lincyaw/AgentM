@@ -100,6 +100,8 @@ async def run_investigation(
             graph=system.graph,
             scenario_config=system.scenario_config,
             task_manager=system.task_manager,
+            trajectory=system.trajectory,
+            thread_id=system.thread_id,
         )
         if system.task_manager is not None:
             system.task_manager.set_broadcast_callback(broadcast_event)
@@ -153,6 +155,7 @@ async def run_investigation(
     finally:
         if debug_console is not None:
             debug_console.stop()
+        await system._close_checkpointer()
         if system.trajectory is not None:
             path = await system.trajectory.close()
             console.print()
@@ -179,6 +182,19 @@ def _print_event(event: dict, step: int, verbose: bool) -> None:
     for node_name, node_data in event.items():
         if node_name == "__interrupt__":
             continue
+
+        # Structured output from generate_structured_response node
+        if node_name == "generate_structured_response":
+            sr = node_data.get("structured_response")
+            if sr is not None:
+                console.print("\n[bold green][Structured Output][/]")
+                if hasattr(sr, "model_dump"):
+                    output_str = json.dumps(sr.model_dump(), indent=2, ensure_ascii=False)
+                else:
+                    output_str = json.dumps(sr, indent=2, ensure_ascii=False)
+                console.print(output_str)
+            continue
+
         messages = node_data.get("messages", [])
         for msg in messages:
             role = getattr(msg, "type", "unknown")
@@ -213,6 +229,11 @@ def _resolve_prompt_paths(scenario_config: Any, scenario_dir: Path) -> None:
             k: str(scenario_dir / v)
             for k, v in scenario_config.orchestrator.prompts.items()
         }
+
+    if scenario_config.orchestrator.output is not None:
+        scenario_config.orchestrator.output.prompt = str(
+            scenario_dir / scenario_config.orchestrator.output.prompt
+        )
 
     for agent_config in scenario_config.agents.values():
         if agent_config.prompt is not None:
