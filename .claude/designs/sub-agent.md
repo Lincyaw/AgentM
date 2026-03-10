@@ -317,6 +317,9 @@ agents:
     compression:
       prompt: "prompts/compression/sub_agent_compress.j2"
       compression_model: "gpt-4o-mini"
+    dedup:                                          # Tool call deduplication (see tool-dedup.md)
+      enabled: true
+      max_cache_size: 50
 ```
 
 Loading:
@@ -534,3 +537,4 @@ Error types and handling:
 | Static agent pool | Graph compiled once at startup. No runtime hot-reload — simplicity over dynamism |
 | Pull-based monitoring | Orchestrator uses `check_tasks` tool in ReAct loop; sub-agents run as asyncio.Tasks via TaskManager |
 | recursion_limit for step control | **⚠️ No native `max_steps` param — must translate to `recursion_limit` in config** |
+| Tool call dedup (hook + wrapper) | **Two-layer dedup: pre-model hook reminds LLM of cached results; tool wrapper hard-blocks repeat calls. See [tool-dedup.md](tool-dedup.md)** |

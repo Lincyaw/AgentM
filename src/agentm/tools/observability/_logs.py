@@ -19,7 +19,7 @@ async def _search_logs(
     period: str,
     match_mode: str = "contains",
     level: str | None = None,
-    service_name: str | None = None,
+    service_name: str | list[str] | None = None,
     start_time: str | None = None,
     end_time: str | None = None,
     limit: int = 50,
@@ -42,8 +42,10 @@ async def _search_logs(
         extra += " AND level = ?"
         params.append(level)
     if service_name:
-        extra += " AND service_name = ?"
-        params.append(service_name)
+        names = [service_name] if isinstance(service_name, str) else service_name
+        placeholders = ", ".join("?" * len(names))
+        extra += f" AND service_name IN ({placeholders})"
+        params.extend(names)
 
     tc, tc_params = _build_time_clause(start_time, end_time)
     params.extend(tc_params)
@@ -71,7 +73,7 @@ async def search_logs_abnormal(
     keyword: str,
     match_mode: str = "contains",
     level: str | None = None,
-    service_name: str | None = None,
+    service_name: str | list[str] | None = None,
     start_time: str | None = None,
     end_time: str | None = None,
     limit: int = 50,
@@ -82,7 +84,7 @@ async def search_logs_abnormal(
         keyword: Search term for log messages.
         match_mode: "exact", "contains", or "regex" (default "contains").
         level: Optional log level filter, e.g. "ERROR", "WARN".
-        service_name: Optional service name filter.
+        service_name: Optional service name filter; accepts a single name or a list of names.
         start_time: Optional start time (ISO format).
         end_time: Optional end time (ISO format).
         limit: Max results (default 50).
@@ -97,7 +99,7 @@ async def search_logs_normal(
     keyword: str,
     match_mode: str = "contains",
     level: str | None = None,
-    service_name: str | None = None,
+    service_name: str | list[str] | None = None,
     start_time: str | None = None,
     end_time: str | None = None,
     limit: int = 50,
@@ -110,7 +112,7 @@ async def search_logs_normal(
         keyword: Search term for log messages.
         match_mode: "exact", "contains", or "regex" (default "contains").
         level: Optional log level filter, e.g. "ERROR", "WARN".
-        service_name: Optional service name filter.
+        service_name: Optional service name filter; accepts a single name or a list of names.
         start_time: Optional start time (ISO format).
         end_time: Optional end time (ISO format).
         limit: Max results (default 50).

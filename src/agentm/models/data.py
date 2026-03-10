@@ -178,7 +178,6 @@ class ManagedTask:
     duration_seconds: Optional[float] = None
     result: Optional[dict] = None
     error_summary: Optional[str] = None
-    last_steps: Optional[list[dict]] = None
     asyncio_task: Optional[asyncio.Task] = field(default=None, repr=False)  # type: ignore[type-arg]
     events_buffer: list[dict] = field(default_factory=list)
     subgraph_config: Optional[dict] = field(default=None, repr=False)

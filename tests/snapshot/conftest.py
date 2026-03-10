@@ -92,7 +92,7 @@ def notebook_with_hypothesis() -> DiagnosticNotebook:
 
 @pytest.fixture
 def agent_pool() -> AgentPool:
-    """A real AgentPool with stub subgraphs pre-cached (no LLM needed)."""
+    """A real AgentPool with create_worker monkeypatched to return a mock subgraph."""
     scenario_config = ScenarioConfig(
         system=SystemTypeConfig(type="hypothesis_driven"),
         orchestrator=OrchestratorConfig(model="gpt-4"),
@@ -106,9 +106,8 @@ def agent_pool() -> AgentPool:
         },
     )
     pool = AgentPool(scenario_config, ToolRegistry())
-    # Pre-fill cache so get_worker() returns the mock without creating a real agent
-    for task_type in ("scout", "verify", "deep_analyze"):
-        pool._workers[task_type] = _MOCK_SUBGRAPH
+    # Patch create_worker to return the mock without compiling a real agent
+    pool.create_worker = lambda agent_id, task_type, task_id=None: _MOCK_SUBGRAPH  # type: ignore[assignment]
     return pool
 
 
@@ -159,7 +158,6 @@ def task_manager_with_failed_task() -> TaskManager:
         instruction="search error logs",
         status=AgentRunStatus.FAILED,
         error_summary="API timeout after 3 retries",
-        last_steps=[{"step": "query_logs", "error": "timeout"}],
     )
     tm._tasks["task-failed-001"] = managed
     return tm

@@ -9,7 +9,6 @@ from typing import Any, Callable, Literal
 
 from langchain_core.messages import HumanMessage
 
-from agentm.config.schema import RetryConfig
 from agentm.models.data import ManagedTask
 from agentm.models.enums import AgentRunStatus
 
@@ -57,12 +56,17 @@ class TaskManager:
         hypothesis_id: str | None = None,
         **kwargs: Any,
     ) -> str:
-        """Submit a new task for a Sub-Agent. Returns task_id."""
-        task_id = str(uuid.uuid4())
+        """Submit a new task for a Sub-Agent. Returns task_id.
+
+        If ``task_id`` is provided in *kwargs* it is used as-is; otherwise
+        a new UUID is generated.  This allows the caller to pre-generate the
+        ID so that the same value can be baked into the compiled subgraph
+        hooks before the task is submitted.
+        """
+        task_id = kwargs.pop("task_id", None) or str(uuid.uuid4())
 
         subgraph = kwargs.get("subgraph")
         config: dict[str, Any] = kwargs.get("config", {})
-        retry_config: RetryConfig = kwargs.get("retry_config", RetryConfig())
 
         managed = ManagedTask(
             task_id=task_id,
@@ -75,7 +79,7 @@ class TaskManager:
 
         if subgraph is not None:
             managed.asyncio_task = asyncio.create_task(
-                self._execute_agent(managed, subgraph, config, retry_config)
+                self._execute_agent(managed, subgraph, config)
             )
 
         self._tasks[task_id] = managed
@@ -139,7 +143,6 @@ class TaskManager:
                 task.reported = True
             elif task.status == AgentRunStatus.FAILED and not task.reported:
                 entry["error_summary"] = task.error_summary
-                entry["last_steps"] = task.last_steps
                 result["failed"].append(entry)
                 task.reported = True
         return result
@@ -277,91 +280,74 @@ class TaskManager:
         managed: ManagedTask,
         subgraph: Any,
         config: dict[str, Any],
-        retry_config: RetryConfig | None = None,
     ) -> None:
         """Core async execution loop for a Sub-Agent subgraph.
 
         Streams events from the subgraph, updates managed task status,
-        and stores results upon completion.  Retries on failure with
-        exponential backoff as specified by *retry_config*.
+        and stores results upon completion.  No task-level retry —
+        transient failures (network, rate-limit) are retried at the
+        LLM request level by ChatOpenAI's built-in retry.
         """
-        retry_config = retry_config or RetryConfig()
         input_data = {"messages": [HumanMessage(content=managed.instruction)]}
-        last_error: Exception | None = None
 
-        for attempt in range(1, retry_config.max_attempts + 1):
-            try:
-                managed.events_buffer = []
-                async for namespace, mode, data in subgraph.astream(
-                    input_data,
-                    config,
-                    stream_mode=["updates", "custom"],
-                    subgraphs=True,
-                ):
-                    managed.events_buffer.append(data)
+        try:
+            managed.events_buffer = []
+            async for namespace, mode, data in subgraph.astream(
+                input_data,
+                config,
+                stream_mode=["updates", "custom"],
+                subgraphs=True,
+            ):
+                managed.events_buffer.append(data)
 
-                    # Record sub-agent tool calls to trajectory.
-                    # Trajectory listeners (including the WebSocket forwarder)
-                    # handle delivery to the frontend — no separate broadcast
-                    # needed here, which would cause duplicate events.
-                    if self._trajectory is not None and isinstance(data, dict):
-                        await self._record_subagent_event(managed, data)
+                if self._trajectory is not None and isinstance(data, dict):
+                    await self._record_subagent_event(managed, data)
 
-                managed.status = AgentRunStatus.COMPLETED
-                managed.result = _extract_structured_response(managed.events_buffer)
-                managed.completed_at = datetime.now().isoformat()
-                if managed.started_at:
-                    started = datetime.fromisoformat(managed.started_at)
-                    managed.duration_seconds = (
-                        datetime.now() - started
-                    ).total_seconds()
-                self._completion_event.set()
+            managed.status = AgentRunStatus.COMPLETED
+            managed.result = _extract_structured_response(managed.events_buffer)
+            managed.completed_at = datetime.now().isoformat()
+            if managed.started_at:
+                started = datetime.fromisoformat(managed.started_at)
+                managed.duration_seconds = (
+                    datetime.now() - started
+                ).total_seconds()
+            self._completion_event.set()
 
-                if self._trajectory is not None:
-                    await self._trajectory.record(
-                        event_type="task_complete",
-                        agent_path=[managed.agent_id],
-                        data={
-                            "task_id": managed.task_id,
-                            "agent_id": managed.agent_id,
-                            "duration_seconds": managed.duration_seconds,
-                            "result": managed.result,
-                        },
-                        task_id=managed.task_id,
-                    )
-                return
+            if self._trajectory is not None:
+                await self._trajectory.record(
+                    event_type="task_complete",
+                    agent_path=[managed.agent_id],
+                    data={
+                        "task_id": managed.task_id,
+                        "agent_id": managed.agent_id,
+                        "duration_seconds": managed.duration_seconds,
+                        "result": managed.result,
+                    },
+                    task_id=managed.task_id,
+                )
 
-            except asyncio.CancelledError:
-                managed.completed_at = datetime.now().isoformat()
-                self._completion_event.set()
-                raise
+        except asyncio.CancelledError:
+            managed.completed_at = datetime.now().isoformat()
+            self._completion_event.set()
+            raise
 
-            except Exception as e:
-                last_error = e
-                if attempt < retry_config.max_attempts:
-                    delay = retry_config.initial_interval * (
-                        retry_config.backoff_factor ** (attempt - 1)
-                    )
-                    await asyncio.sleep(delay)
+        except Exception as e:
+            managed.status = AgentRunStatus.FAILED
+            managed.error_summary = str(e)
+            managed.completed_at = datetime.now().isoformat()
+            self._completion_event.set()
 
-        # All retries exhausted
-        managed.status = AgentRunStatus.FAILED
-        managed.error_summary = str(last_error)
-        managed.last_steps = managed.events_buffer[-5:]
-        managed.completed_at = datetime.now().isoformat()
-        self._completion_event.set()
-
-        if self._trajectory is not None:
-            await self._trajectory.record(
-                event_type="task_fail",
-                agent_path=[managed.agent_id],
-                data={
-                    "task_id": managed.task_id,
-                    "agent_id": managed.agent_id,
-                    "error_summary": str(last_error),
-                },
-                task_id=managed.task_id,
-            )
+            if self._trajectory is not None:
+                await self._trajectory.record(
+                    event_type="task_fail",
+                    agent_path=[managed.agent_id],
+                    data={
+                        "task_id": managed.task_id,
+                        "agent_id": managed.agent_id,
+                        "error_summary": str(e),
+                    },
+                    task_id=managed.task_id,
+                )
 
 
 def _extract_structured_response(events_buffer: list[Any]) -> dict[str, Any] | None:

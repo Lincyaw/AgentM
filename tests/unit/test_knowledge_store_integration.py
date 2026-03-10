@@ -6,6 +6,8 @@ correctness against a real InMemoryStore instance.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 from langgraph.store.memory import InMemoryStore
 
@@ -51,13 +53,13 @@ class TestWriteAndRead:
         result = knowledge_write("/failure_pattern/database/pool_exhaustion", entry)
         assert "Written" in result
 
-        read_result = knowledge_read("/failure_pattern/database/pool_exhaustion")
+        read_result = json.loads(knowledge_read("/failure_pattern/database/pool_exhaustion"))
         assert read_result["title"] == "Connection pool exhaustion"
         assert read_result["confidence"] == "fact"
 
     def test_read_nonexistent_returns_error(self) -> None:
         """Reading a non-existent path returns error dict."""
-        result = knowledge_read("/failure_pattern/nonexistent/entry")
+        result = json.loads(knowledge_read("/failure_pattern/nonexistent/entry"))
         assert "error" in result
         assert "Not found" in result["error"]
 
@@ -66,7 +68,7 @@ class TestWriteAndRead:
         knowledge_write("/failure_pattern/db/test", _sample_entry(title="v1"))
         knowledge_write("/failure_pattern/db/test", _sample_entry(title="v2"))
 
-        result = knowledge_read("/failure_pattern/db/test")
+        result = json.loads(knowledge_read("/failure_pattern/db/test"))
         assert result["title"] == "v2"
 
     def test_write_with_merge(self) -> None:
@@ -78,7 +80,7 @@ class TestWriteAndRead:
             merge=True,
         )
 
-        result = knowledge_read("/failure_pattern/db/merge_test")
+        result = json.loads(knowledge_read("/failure_pattern/db/merge_test"))
         assert result["frequency"] == 5
         assert result["new_field"] == "added"
         # Original fields preserved after merge
@@ -92,7 +94,7 @@ class TestWriteAndRead:
             merge=True,
         )
 
-        result = knowledge_read("/failure_pattern/db/new_merge")
+        result = json.loads(knowledge_read("/failure_pattern/db/new_merge"))
         assert result["title"] == "Brand new"
 
 
@@ -106,7 +108,7 @@ class TestDelete:
         delete_result = knowledge_delete("/failure_pattern/db/to_delete")
         assert "Deleted" in delete_result
 
-        read_result = knowledge_read("/failure_pattern/db/to_delete")
+        read_result = json.loads(knowledge_read("/failure_pattern/db/to_delete"))
         assert "error" in read_result
         assert "Not found" in read_result["error"]
 
@@ -125,7 +127,7 @@ class TestListNamespace:
         knowledge_write("/failure_pattern/database/pool", _sample_entry(title="Pool"))
         knowledge_write("/failure_pattern/database/locks", _sample_entry(title="Locks"))
 
-        result = knowledge_list("/failure_pattern/database/")
+        result = json.loads(knowledge_list("/failure_pattern/database/"))
         assert result["path"] == "/failure_pattern/database/"
 
         entry_keys = [e["key"] for e in result["entries"]]
@@ -137,14 +139,14 @@ class TestListNamespace:
         knowledge_write("/failure_pattern/db/test", _sample_entry())
         knowledge_write("/diagnostic_skill/general/test", _sample_entry(title="Skill"))
 
-        result = knowledge_list("/")
+        result = json.loads(knowledge_list("/"))
         sub_paths = result["sub_paths"]
         assert any("failure_pattern" in p for p in sub_paths)
         assert any("diagnostic_skill" in p for p in sub_paths)
 
     def test_list_empty_path(self) -> None:
         """Listing a path with no entries returns empty."""
-        result = knowledge_list("/nonexistent/")
+        result = json.loads(knowledge_list("/nonexistent/"))
         assert result["entries"] == []
 
 
@@ -161,7 +163,7 @@ class TestSearchNamespace:
         knowledge_write("/failure_pattern/database/pool", _sample_entry(title="Pool"))
         knowledge_write("/failure_pattern/database/locks", _sample_entry(title="Locks"))
 
-        results = knowledge_search("pool", path="/failure_pattern/database/")
+        results = json.loads(knowledge_search("pool", path="/failure_pattern/database/"))
         keys = [r["key"] for r in results]
         assert "pool" in keys
 
@@ -169,7 +171,7 @@ class TestSearchNamespace:
         """Each search result has key, namespace, value, and score fields."""
         knowledge_write("/failure_pattern/db/item", _sample_entry())
 
-        results = knowledge_search("connection", path="/failure_pattern/db/")
+        results = json.loads(knowledge_search("connection", path="/failure_pattern/db/"))
         assert len(results) == 1
         result = results[0]
         assert "key" in result
@@ -184,7 +186,7 @@ class TestSearchNamespace:
         knowledge_write("/failure_pattern/db/pool", _sample_entry(title="DB Pool"))
         knowledge_write("/failure_pattern/network/timeout", _sample_entry(title="Network Timeout"))
 
-        results = knowledge_search("", path="/failure_pattern/db/")
+        results = json.loads(knowledge_search("", path="/failure_pattern/db/"))
         keys = [r["key"] for r in results]
         assert "pool" in keys
         assert "timeout" not in keys
