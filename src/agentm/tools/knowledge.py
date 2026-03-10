@@ -6,6 +6,7 @@ Path utility functions are fully implemented (pure functions).
 from __future__ import annotations
 
 import contextvars
+import json
 from typing import Any
 
 STORE_ROOT: tuple[str, ...] = ("knowledge",)
@@ -64,14 +65,14 @@ def knowledge_search(
     path: str = "/",
     filter: dict[str, Any] | None = None,
     limit: int = 5,
-) -> list[dict[str, Any]]:
+) -> str:
     """Semantic search over the knowledge base."""
     store = _store_var.get()
     if store is None:
         raise RuntimeError("Knowledge store not initialized — call set_store() first")
     namespace_prefix = path_to_namespace(path)
     results = store.search(namespace_prefix, query=query, filter=filter, limit=limit)
-    return [
+    entries = [
         {
             "key": r.key,
             "namespace": namespace_to_path(r.namespace),
@@ -80,9 +81,12 @@ def knowledge_search(
         }
         for r in results
     ]
+    if not entries:
+        return "No results found."
+    return json.dumps(entries, default=str)
 
 
-def knowledge_list(path: str = "/") -> dict[str, Any]:
+def knowledge_list(path: str = "/") -> str:
     """List the structure of the knowledge base at a given path."""
     store = _store_var.get()
     if store is None:
@@ -90,14 +94,15 @@ def knowledge_list(path: str = "/") -> dict[str, Any]:
     namespace = path_to_namespace(path)
     children = store.list_namespaces(prefix=namespace, max_depth=len(namespace) + 1)
     entries = store.search(namespace, limit=100)
-    return {
+    result = {
         "path": path,
         "sub_paths": [namespace_to_path(ns) for ns in children],
         "entries": [{"key": e.key, "value": e.value} for e in entries],
     }
+    return json.dumps(result, default=str)
 
 
-def knowledge_read(path: str) -> dict[str, Any]:
+def knowledge_read(path: str) -> str:
     """Read a specific knowledge entry by its full path."""
     store = _store_var.get()
     if store is None:
@@ -105,8 +110,8 @@ def knowledge_read(path: str) -> dict[str, Any]:
     namespace, key = path_to_namespace_and_key(path)
     item = store.get(namespace=namespace, key=key)
     if item is None:
-        return {"error": f"Not found: {path}"}
-    return item.value
+        return json.dumps({"error": f"Not found: {path}"})
+    return json.dumps(item.value, default=str)
 
 
 def knowledge_write(

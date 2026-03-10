@@ -197,3 +197,13 @@ concepts:
     related_concepts: [system_architecture, orchestrator, sub_agent, trajectory, configuration_system]
     plans: ["plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
+
+  tool_dedup:
+    description: "Two-layer tool call deduplication: pre-model hook (soft limit, SystemMessage reminder) + tool wrapper (hard limit, cached result). DedupTracker with OrderedDict FIFO eviction. Excludes think tool. Per-agent-invocation cache."
+    design: "designs/tool-dedup.md"
+    related_concepts: [sub_agent, configuration_system]
+    plans: []
+    tasks: []
+    tests:
+      - file: "tests/unit/test_dedup.py"
+        layer: "L1 — Deterministic Invariants"

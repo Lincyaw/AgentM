@@ -21,3 +21,4 @@ env/
 .coverage
 *.db*
 trajectories
+*.log

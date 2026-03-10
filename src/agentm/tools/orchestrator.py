@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Annotated, Any, Callable, Literal, Optional
 
 from langchain_core.messages import ToolMessage
@@ -36,14 +37,19 @@ def create_orchestrator_tools(
         saving an LLM roundtrip through check_tasks.
         Multi-worker: returns immediately with status "running".
         """
-        subgraph = agent_pool.get_worker(task_type)
+        task_id = str(uuid.uuid4())
+        subgraph = agent_pool.create_worker(agent_id, task_type, task_id=task_id)
+        # Each tool-call step uses ~3 graph nodes (pre_model_hook + call_model
+        # + tools), plus a final generate_structured_response node.
+        recursion_limit = agent_pool.worker_max_steps * 3 + 20
         task_id = await task_manager.submit(
             agent_id,
             task,
             task_type,
             hypothesis_id,
             subgraph=subgraph,
-            config={"recursion_limit": 50},
+            config={"recursion_limit": recursion_limit},
+            task_id=task_id,
         )
 
         # Auto-block: if this is the only running task and it has a real
@@ -51,23 +57,30 @@ def create_orchestrator_tools(
         managed = task_manager.get_task(task_id)
         if task_manager.get_running_count() == 1 and managed.asyncio_task is not None:
             await task_manager.wait_for_task(task_id)
-            content = json.dumps({
-                "task_id": task_id,
-                "agent_id": agent_id,
-                "status": managed.status.value,
-                "result": managed.result,
-                "error_summary": managed.error_summary,
-                "duration_seconds": managed.duration_seconds,
-            }, default=str)
+            content = json.dumps(
+                {
+                    "task_id": task_id,
+                    "agent_id": agent_id,
+                    "status": managed.status.value,
+                    "result": managed.result,
+                    "error_summary": managed.error_summary,
+                    "duration_seconds": managed.duration_seconds,
+                },
+                default=str,
+            )
         else:
-            content = json.dumps({
-                "task_id": task_id,
-                "agent_id": agent_id,
-                "status": "running",
-            })
+            content = json.dumps(
+                {
+                    "task_id": task_id,
+                    "agent_id": agent_id,
+                    "status": "running",
+                }
+            )
 
         return Command(
-            update={"messages": [ToolMessage(content=content, tool_call_id=tool_call_id)]}
+            update={
+                "messages": [ToolMessage(content=content, tool_call_id=tool_call_id)]
+            }
         )
 
     async def check_tasks(
@@ -79,7 +92,10 @@ def create_orchestrator_tools(
         return Command(
             update={
                 "messages": [
-                    ToolMessage(content=json.dumps(results, default=str), tool_call_id=tool_call_id)
+                    ToolMessage(
+                        content=json.dumps(results, default=str),
+                        tool_call_id=tool_call_id,
+                    )
                 ]
             }
         )
@@ -129,9 +145,7 @@ def create_orchestrator_tools(
 
         return Command(
             update={
-                "messages": [
-                    ToolMessage(content=content, tool_call_id=tool_call_id)
-                ]
+                "messages": [ToolMessage(content=content, tool_call_id=tool_call_id)]
             }
         )
 
@@ -170,7 +184,9 @@ def create_orchestrator_tools(
 
     def recall_history(
         query: str,
-        scope: Literal["current_compression", "all_compressions"] = "current_compression",
+        scope: Literal[
+            "current_compression", "all_compressions"
+        ] = "current_compression",
     ) -> str:
         """Search pre-compression history for detailed information.
 
@@ -217,11 +233,13 @@ def create_orchestrator_tools(
             for state_snapshot in graph.get_state_history(config):
                 messages = state_snapshot.values.get("messages", [])
                 for msg in messages:
-                    all_messages.append({
-                        "type": getattr(msg, "type", "unknown"),
-                        "content": getattr(msg, "content", ""),
-                        "tool_calls": getattr(msg, "tool_calls", None),
-                    })
+                    all_messages.append(
+                        {
+                            "type": getattr(msg, "type", "unknown"),
+                            "content": getattr(msg, "content", ""),
+                            "tool_calls": getattr(msg, "tool_calls", None),
+                        }
+                    )
                 # Cap messages to avoid loading too many checkpoints
                 if len(all_messages) > 200:
                     break
@@ -254,7 +272,7 @@ def create_orchestrator_tools(
             from langchain_openai import ChatOpenAI
             from langchain_core.messages import HumanMessage as LCHumanMessage
 
-            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+            llm = ChatOpenAI(model="gpt-5.1-mini", temperature=0)
             result = llm.invoke([LCHumanMessage(content=retrieval_prompt)])
             content = result.content
             if isinstance(content, list):

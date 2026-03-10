@@ -1,45 +1,35 @@
-"""Tests for TaskManager exponential backoff retry.
+"""Tests for TaskManager single-execution semantics.
 
-Ref: designs/system-design-overview.md -- Layer 2: Retry (API + Task Level)
-Ref: designs/orchestrator.md -- TaskManager
+Task-level retry was removed — transient failures (network, rate-limit) are
+handled at the LLM request level by ChatOpenAI's built-in retry.  TaskManager
+now runs the subgraph exactly once and marks the task COMPLETED or FAILED.
 
-TaskManager wraps subgraph execution with retry + exponential backoff.
 These tests verify:
-- Success after transient failure triggers retry and ultimately COMPLETED status
-- Exhausted retries mark the task as FAILED with the last error
-- Backoff delays follow the exponential schedule from RetryConfig
-- CancelledError is not retried (propagated immediately)
-
-Bug prevented: subgraph fails once with a transient error -> task marked FAILED
-immediately instead of retrying -> Orchestrator sees permanent failure for a
-recoverable issue.
+- Successful execution marks the task COMPLETED
+- Any exception marks the task FAILED with the error summary
+- CancelledError is propagated (not swallowed)
 """
 
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
-from agentm.config.schema import RetryConfig
 from agentm.core.task_manager import TaskManager
 from agentm.models.enums import AgentRunStatus
 
 
-def _make_subgraph(side_effects: list) -> MagicMock:
-    """Build a mock subgraph whose astream yields from *side_effects*.
+def _make_subgraph(effect) -> MagicMock:
+    """Build a mock subgraph whose astream yields *effect*.
 
-    Each entry can be:
+    *effect* is either:
     - A list of tuples — yielded as events
     - An Exception — raised during iteration
     """
-    call_count = 0
 
     async def _astream(*_args, **_kwargs):
-        nonlocal call_count
-        effect = side_effects[call_count]
-        call_count += 1
         if isinstance(effect, Exception):
             raise effect
         for item in effect:
@@ -50,31 +40,19 @@ def _make_subgraph(side_effects: list) -> MagicMock:
     return mock
 
 
-class TestRetrySuccessAfterFailure:
-    """Task succeeds on second attempt after a transient error.
-
-    Bug: single failure -> task FAILED -> Orchestrator gives up.
-    Expected: retry -> task COMPLETED.
-    """
+class TestExecuteSuccess:
+    """Subgraph completes normally -> task COMPLETED with structured result."""
 
     @pytest.mark.asyncio
-    async def test_succeeds_on_second_attempt(self):
+    async def test_success(self):
         events = [
             ("ns", "updates", {"step": 1}),
             ("ns", "updates", {"structured_response": {"findings": "ok"}}),
         ]
-        subgraph = _make_subgraph([
-            RuntimeError("transient"),
-            events,
-        ])
-        retry_cfg = RetryConfig(max_attempts=3, initial_interval=0.01, backoff_factor=2.0)
+        subgraph = _make_subgraph(events)
 
         tm = TaskManager()
-        task_id = await tm.submit(
-            "db", "check connections",
-            subgraph=subgraph, retry_config=retry_cfg,
-        )
-        # Wait for the async task to complete
+        task_id = await tm.submit("db", "check connections", subgraph=subgraph)
         managed = tm.get_task(task_id)
         assert managed.asyncio_task is not None
         await managed.asyncio_task
@@ -83,63 +61,28 @@ class TestRetrySuccessAfterFailure:
         assert managed.result is not None
 
 
-class TestRetryExhausted:
-    """All retry attempts fail -> task is FAILED with last error.
-
-    Bug: retry exhausted but status stays RUNNING forever.
-    """
+class TestExecuteFailure:
+    """Subgraph raises an exception -> task FAILED immediately (no retry)."""
 
     @pytest.mark.asyncio
-    async def test_all_attempts_fail(self):
-        subgraph = _make_subgraph([
-            RuntimeError("fail-1"),
-            RuntimeError("fail-2"),
-            RuntimeError("fail-3"),
-        ])
-        retry_cfg = RetryConfig(max_attempts=3, initial_interval=0.01, backoff_factor=2.0)
+    async def test_exception_marks_failed(self):
+        subgraph = _make_subgraph(RuntimeError("recursion limit reached"))
 
         tm = TaskManager()
-        task_id = await tm.submit(
-            "db", "check connections",
-            subgraph=subgraph, retry_config=retry_cfg,
-        )
+        task_id = await tm.submit("db", "check connections", subgraph=subgraph)
         managed = tm.get_task(task_id)
         assert managed.asyncio_task is not None
         await managed.asyncio_task
 
         assert managed.status == AgentRunStatus.FAILED
-        assert managed.error_summary == "fail-3"
+        assert "recursion limit reached" in managed.error_summary
+
+
+class TestCancelledNotSwallowed:
+    """CancelledError propagates immediately."""
 
     @pytest.mark.asyncio
-    async def test_single_attempt_no_retry(self):
-        """With max_attempts=1, failure is immediate."""
-        subgraph = _make_subgraph([RuntimeError("only-try")])
-        retry_cfg = RetryConfig(max_attempts=1, initial_interval=0.01)
-
-        tm = TaskManager()
-        task_id = await tm.submit(
-            "db", "check connections",
-            subgraph=subgraph, retry_config=retry_cfg,
-        )
-        managed = tm.get_task(task_id)
-        assert managed.asyncio_task is not None
-        await managed.asyncio_task
-
-        assert managed.status == AgentRunStatus.FAILED
-        assert managed.error_summary == "only-try"
-
-
-class TestRetryCancelledNotRetried:
-    """CancelledError propagates immediately, never retried.
-
-    Bug: CancelledError caught by retry loop -> agent keeps running
-    even after abort_task cancels it.
-    """
-
-    @pytest.mark.asyncio
-    async def test_cancelled_error_not_retried(self):
-        """Verify that abort (task.cancel()) is not retried."""
-        # Subgraph that blocks until cancelled
+    async def test_cancelled_error_propagates(self):
         async def _blocking_astream(*_args, **_kwargs):
             await asyncio.sleep(100)
             yield ("ns", "updates", {"step": 1})  # pragma: no cover
@@ -147,17 +90,11 @@ class TestRetryCancelledNotRetried:
         mock = MagicMock()
         mock.astream = _blocking_astream
 
-        retry_cfg = RetryConfig(max_attempts=3, initial_interval=0.01)
-
         tm = TaskManager()
-        task_id = await tm.submit(
-            "db", "check connections",
-            subgraph=mock, retry_config=retry_cfg,
-        )
+        task_id = await tm.submit("db", "check connections", subgraph=mock)
         managed = tm.get_task(task_id)
         assert managed.asyncio_task is not None
 
-        # Give the task a moment to start, then cancel
         await asyncio.sleep(0.01)
         managed.asyncio_task.cancel()
 
@@ -166,47 +103,4 @@ class TestRetryCancelledNotRetried:
         except asyncio.CancelledError:
             pass
 
-        # The task was cancelled, not retried to FAILED
         assert managed.asyncio_task.cancelled()
-        assert managed.status != AgentRunStatus.FAILED
-
-
-class TestRetryBackoffSchedule:
-    """Verify that delays follow exponential backoff.
-
-    With initial_interval=1.0 and backoff_factor=2.0:
-    - After attempt 1 failure: sleep 1.0s
-    - After attempt 2 failure: sleep 2.0s
-    """
-
-    @pytest.mark.asyncio
-    async def test_backoff_delays(self, monkeypatch):
-        recorded_delays: list[float] = []
-        original_sleep = asyncio.sleep
-
-        async def mock_sleep(delay: float) -> None:
-            recorded_delays.append(delay)
-            # Don't actually sleep in tests
-
-        monkeypatch.setattr(asyncio, "sleep", mock_sleep)
-
-        subgraph = _make_subgraph([
-            RuntimeError("fail-1"),
-            RuntimeError("fail-2"),
-            RuntimeError("fail-3"),
-        ])
-        retry_cfg = RetryConfig(
-            max_attempts=3, initial_interval=1.0, backoff_factor=2.0
-        )
-
-        tm = TaskManager()
-        task_id = await tm.submit(
-            "db", "check connections",
-            subgraph=subgraph, retry_config=retry_cfg,
-        )
-        managed = tm.get_task(task_id)
-        assert managed.asyncio_task is not None
-        await managed.asyncio_task
-
-        # 3 attempts, 2 sleeps (after attempt 1 and 2)
-        assert recorded_delays == [1.0, 2.0]

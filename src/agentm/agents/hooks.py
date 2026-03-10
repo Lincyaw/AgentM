@@ -34,47 +34,77 @@ def build_instruction_hook(task_manager: TaskManager, task_id: str) -> Callable:
 def build_llm_input_hook(
     trajectory: TrajectoryCollector,
     agent_path: list[str],
+    task_id: str | None = None,
 ) -> Callable:
     """Build a pre_model_hook that records the messages sent to the LLM.
 
     Emits an ``llm_start`` trajectory event containing a summary of the
     messages about to be fed to the model.  Uses ``record_sync`` because
     pre_model_hook is synchronous.
+
+    Each compiled subgraph is now created per-dispatch with the correct
+    *agent_path* baked in, so no mutable override is needed.  The optional
+    *task_id* is forwarded to ``trajectory.record_sync`` for correlation.
     """
+
+    def _truncate(text: str, limit: int) -> str:
+        return text[:limit] + ("..." if len(text) > limit else "")
+
+    def _summarize(msg: Any) -> dict[str, Any]:
+        role = getattr(msg, "type", "unknown")
+        content = getattr(msg, "content", "")
+        entry: dict[str, Any] = {"role": role}
+        if role == "system":
+            entry["content"] = _truncate(content, 500)
+        elif role == "ai":
+            tc = getattr(msg, "tool_calls", None)
+            if tc:
+                entry["tool_calls"] = [{"name": c.get("name", "")} for c in tc]
+            if content:
+                entry["content"] = _truncate(content, 300)
+        elif role == "tool":
+            entry["name"] = getattr(msg, "name", "")
+            entry["content"] = _truncate(content, 200)
+        elif role == "human":
+            entry["content"] = _truncate(content, 300)
+        else:
+            entry["content"] = _truncate(content, 200)
+        return entry
+
+    def _full_message(msg: Any) -> dict[str, Any]:
+        role = getattr(msg, "type", "unknown")
+        content = getattr(msg, "content", "")
+        entry: dict[str, Any] = {"role": role, "content": content}
+        if role == "ai":
+            tc = getattr(msg, "tool_calls", None)
+            if tc:
+                entry["tool_calls"] = [
+                    {
+                        "id": c.get("id", ""),
+                        "name": c.get("name", ""),
+                        "args": c.get("args", {}),
+                    }
+                    for c in tc
+                ]
+        elif role == "tool":
+            entry["name"] = getattr(msg, "name", "")
+            tool_call_id = getattr(msg, "tool_call_id", None)
+            if tool_call_id:
+                entry["tool_call_id"] = tool_call_id
+        return entry
 
     def hook(state: dict[str, Any]) -> dict[str, Any]:
         messages = state.get("llm_input_messages") or state.get("messages", [])
-        summary: list[dict[str, Any]] = []
-        for msg in messages:
-            role = getattr(msg, "type", "unknown")
-            content = getattr(msg, "content", "")
-            entry: dict[str, Any] = {"role": role}
-            if role == "system":
-                entry["content"] = content[:500] + ("..." if len(content) > 500 else "")
-            elif role == "ai":
-                tc = getattr(msg, "tool_calls", None)
-                if tc:
-                    entry["tool_calls"] = [{"name": c.get("name", "")} for c in tc]
-                if content:
-                    entry["content"] = content[:300] + (
-                        "..." if len(content) > 300 else ""
-                    )
-            elif role == "tool":
-                entry["name"] = getattr(msg, "name", "")
-                entry["content"] = content[:200] + ("..." if len(content) > 200 else "")
-            elif role == "human":
-                entry["content"] = content[:300] + ("..." if len(content) > 300 else "")
-            else:
-                entry["content"] = content[:200] + ("..." if len(content) > 200 else "")
-            summary.append(entry)
 
         trajectory.record_sync(
             event_type="llm_start",
             agent_path=agent_path,
             data={
                 "message_count": len(messages),
-                "messages": summary,
+                "messages": [_summarize(msg) for msg in messages],
+                "full_messages": [_full_message(msg) for msg in messages],
             },
+            task_id=task_id,
         )
         # Pass through unchanged
         if "llm_input_messages" in state:

@@ -15,8 +15,8 @@ from agentm.models.data import DiagnosticNotebook, PhaseSummary
 # Thread-safe tracking of compression events within a single agent invocation.
 # Callers (e.g. orchestrator/builder) read events via get_compression_events()
 # and clear them after persisting to state.
-_compression_events: contextvars.ContextVar[list[dict[str, Any]]] = contextvars.ContextVar(
-    "compression_events", default=[]
+_compression_events: contextvars.ContextVar[list[dict[str, Any]]] = (
+    contextvars.ContextVar("compression_events", default=[])
 )
 
 
@@ -36,13 +36,14 @@ def clear_compression_events() -> None:
     """Clear recorded compression events."""
     _compression_events.set([])
 
+
 _DEFAULT_CONTEXT_WINDOW = 128_000
 _DEFAULT_THRESHOLD_RATIO = 0.8
 _DEFAULT_THRESHOLD_TOKENS = int(_DEFAULT_CONTEXT_WINDOW * _DEFAULT_THRESHOLD_RATIO)
 _DEFAULT_PRESERVE_N = 2
 
 
-def count_tokens(messages: list[Any], model: str = "gpt-4") -> int:
+def count_tokens(messages: list[Any], model: str = "gpt-5.1") -> int:
     """Count the number of tokens in a list of messages for a given model."""
     try:
         encoding = tiktoken.encoding_for_model(model)
@@ -85,7 +86,7 @@ def _format_messages_for_summary(messages: list[Any]) -> list[str]:
     return formatted
 
 
-def _summarize_messages(messages: list[Any], model: str = "gpt-4o-mini") -> str:
+def _summarize_messages(messages: list[Any], model: str = "gpt-5.1-mini") -> str:
     """Summarize a list of messages using an LLM, chunking if needed.
 
     When the formatted messages exceed the compression model's context window,
@@ -187,11 +188,13 @@ def sub_agent_compression_hook(state: dict[str, Any]) -> dict[str, Any]:
     summary_text = _summarize_messages(older_messages)
     summary_msg = SystemMessage(content=f"[Compressed History Summary]\n{summary_text}")
 
-    record_compression_event({
-        "layer": "sub_agent",
-        "step_count": len(older_messages),
-        "reason": f"token_count={token_count} exceeded threshold={_DEFAULT_THRESHOLD_TOKENS}",
-    })
+    record_compression_event(
+        {
+            "layer": "sub_agent",
+            "step_count": len(older_messages),
+            "reason": f"token_count={token_count} exceeded threshold={_DEFAULT_THRESHOLD_TOKENS}",
+        }
+    )
 
     return {"llm_input_messages": [summary_msg] + recent_messages}
 
@@ -219,13 +222,17 @@ def build_compression_hook(config: CompressionConfig) -> Callable:
         recent = messages[-preserve_n:]
 
         summary_text = _summarize_messages(older, model=config.compression_model)
-        summary_msg = SystemMessage(content=f"[Compressed History Summary]\n{summary_text}")
+        summary_msg = SystemMessage(
+            content=f"[Compressed History Summary]\n{summary_text}"
+        )
 
-        record_compression_event({
-            "layer": "sub_agent",
-            "step_count": len(older),
-            "reason": f"token_count={token_count} exceeded threshold={threshold_tokens}",
-        })
+        record_compression_event(
+            {
+                "layer": "sub_agent",
+                "step_count": len(older),
+                "reason": f"token_count={token_count} exceeded threshold={threshold_tokens}",
+            }
+        )
 
         return {"llm_input_messages": [summary_msg] + recent}
 
@@ -242,11 +249,13 @@ def compress_completed_phase(
     exploration_history pruned for the completed phase.
     """
     phase_steps = [
-        step for step in notebook.exploration_history
+        step
+        for step in notebook.exploration_history
         if step.phase.value == completed_phase
     ]
     remaining_steps = [
-        step for step in notebook.exploration_history
+        step
+        for step in notebook.exploration_history
         if step.phase.value != completed_phase
     ]
 
@@ -256,7 +265,10 @@ def compress_completed_phase(
 
     hypothesis_ids: list[str] = []
     for step in phase_steps:
-        if step.target_hypothesis_id and step.target_hypothesis_id not in hypothesis_ids:
+        if (
+            step.target_hypothesis_id
+            and step.target_hypothesis_id not in hypothesis_ids
+        ):
             hypothesis_ids.append(step.target_hypothesis_id)
 
     summary = PhaseSummary(
