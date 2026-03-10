@@ -16,7 +16,7 @@ phases:
     next_phases: []
 
 orchestrator:
-  model: "gpt-4"
+  model: "gpt-5.1"
   temperature: 0.7
   orchestrator_mode: "react"
 
@@ -45,12 +45,12 @@ orchestrator:
   compression:
     enabled: true
     compression_threshold: 0.8
-    compression_model: "gpt-4o-mini"
+    compression_model: "gpt-5.1-mini"
     notebook:
-      compression_model: "gpt-4o-mini"
+      compression_model: "gpt-5.1-mini"
     recall:
       enabled: true
-      model: "gpt-4o-mini"
+      model: "gpt-5.1-mini"
       max_messages_per_query: 200
 
   output:
@@ -58,13 +58,13 @@ orchestrator:
     schema_name: "CausalGraph"
 
   monitoring:
-    summary_model: "gpt-4o-mini"
+    summary_model: "gpt-5.1-mini"
     stream_mode: ["updates", "custom"]
 
 # Worker agent — one definition, task_type selects the prompt
 agents:
   worker:
-    model: "gpt-4o-mini"
+    model: "gpt-5.1"
     temperature: 0.7
     task_type_prompts:
       scout: "prompts/task_types/scout.j2"
@@ -86,9 +86,9 @@ agents:
       max_steps: 40
       timeout: 180
       tool_call_budget: 40
-      retry:
-        max_attempts: 3
-        initial_interval: 1.0
-    compression:
-      compression_model: "gpt-4o-mini"
-      prompt: "prompts/compression/sub_agent_compress.j2"
+      dedup:
+        enabled: true
+        max_cache_size: 50
+    # compression:
+    #   compression_model: "gpt-5.1-mini"
+    #   prompt: "prompts/compression/sub_agent_compress.j2"

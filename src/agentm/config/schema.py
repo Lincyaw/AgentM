@@ -79,14 +79,24 @@ class RetryConfig(BaseModel):
     backoff_factor: float = 2.0
 
 
+class DedupConfig(BaseModel):
+    """Tool call deduplication configuration.
+
+    Ref: designs/tool-dedup.md
+    """
+
+    enabled: bool = True
+    max_cache_size: int = 50
+
+
 class ExecutionConfig(BaseModel):
     """Execution configuration for an agent."""
 
     max_steps: int = 20
     timeout: int = 120
     interrupt_before: Optional[list[str]] = None
-    retry: RetryConfig = RetryConfig()
     tool_call_budget: Optional[int] = None
+    dedup: Optional[DedupConfig] = None
 
 
 class CompressionConfig(BaseModel):
@@ -94,7 +104,7 @@ class CompressionConfig(BaseModel):
 
     enabled: bool = True
     compression_threshold: float = 0.8
-    compression_model: str = "gpt-4o-mini"
+    compression_model: str = "gpt-5.1-mini"
     preserve_latest_n: int = 2
     prompt: Optional[str] = None
     notebook: Optional[dict[str, Any]] = None

@@ -144,6 +144,106 @@ function ExecutionPage({ agents, events }) {
   );
 }
 
+// Role colors and labels for message viewer
+const ROLE_STYLE = {
+  system:  { label: 'SYSTEM', color: C.purple, bg: C.purple + '12', border: C.purple + '30' },
+  human:   { label: 'USER',   color: C.teal,   bg: C.teal + '12',   border: C.teal + '30' },
+  ai:      { label: 'AI',     color: C.orange,  bg: C.orange + '12', border: C.orange + '30' },
+  tool:    { label: 'TOOL',   color: C.yellow,  bg: C.yellow + '12', border: C.yellow + '30' },
+  unknown: { label: '?',      color: C.muted,   bg: C.muted + '12',  border: C.muted + '30' },
+};
+
+function MessageBubble({ msg, index }) {
+  const [expanded, setExpanded] = useState(false);
+  const style = ROLE_STYLE[msg.role] || ROLE_STYLE.unknown;
+  const content = msg.content || '';
+  const isLong = content.length > 600;
+  const displayContent = (!expanded && isLong) ? content.slice(0, 600) + '...' : content;
+
+  return (
+    <div style={{ padding: '8px 12px', borderBottom: `1px solid ${C.line}`, background: style.bg }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        <span style={{ fontSize: 10, fontWeight: 700, color: style.color, padding: '1px 6px', border: `1px solid ${style.border}`, borderRadius: 3 }}>{style.label}</span>
+        {msg.role === 'tool' && msg.name && (
+          <span style={{ fontSize: 11, color: C.yellow }}>{msg.name}</span>
+        )}
+        {msg.role === 'tool' && msg.tool_call_id && (
+          <span style={{ fontSize: 10, color: C.muted }}>id: {msg.tool_call_id}</span>
+        )}
+        <span style={{ fontSize: 10, color: C.muted }}>#{index + 1}</span>
+        <div style={{ flex: 1 }} />
+        <CopyButton text={content} />
+      </div>
+      <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12, color: C.text, lineHeight: 1.6, margin: 0 }}>{displayContent}</pre>
+      {isLong && (
+        <button onClick={() => setExpanded(!expanded)} style={{ background: 'none', border: 'none', color: C.teal, cursor: 'pointer', fontSize: 11, fontFamily: 'inherit', padding: '4px 0 0 0' }}>
+          {expanded ? 'Show less' : `Show all (${content.length} chars)`}
+        </button>
+      )}
+      {msg.tool_calls && msg.tool_calls.length > 0 && (
+        <div style={{ marginTop: 6 }}>
+          <div style={{ color: C.muted, fontSize: 10, marginBottom: 2 }}>Tool calls:</div>
+          {msg.tool_calls.map((tc, i) => (
+            <div key={i} style={{ padding: '4px 8px', marginBottom: 2, border: `1px solid ${C.line}`, borderRadius: 4, fontSize: 11 }}>
+              <span style={{ color: C.yellow, fontWeight: 600 }}>{tc.name}</span>
+              {tc.args && Object.keys(tc.args).length > 0 && (
+                <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 11, color: C.text, margin: '4px 0 0 0' }}>
+                  {JSON.stringify(tc.args, null, 2)}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MessageListView({ llmStartEvents }) {
+  const [selectedTurn, setSelectedTurn] = useState(llmStartEvents.length - 1);
+  const turn = llmStartEvents[selectedTurn];
+  const fullMessages = turn?.data?.full_messages || turn?.data?.messages || [];
+
+  useEffect(() => {
+    setSelectedTurn(llmStartEvents.length - 1);
+  }, [llmStartEvents.length]);
+
+  if (llmStartEvents.length === 0) {
+    return (
+      <div style={{ padding: 40, textAlign: 'center', color: C.muted }}>No LLM calls yet</div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* Turn selector */}
+      <div style={{ padding: '6px 12px', borderBottom: `1px solid ${C.line}`, display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        <span style={{ fontSize: 11, color: C.muted }}>LLM Turn:</span>
+        <select
+          value={selectedTurn}
+          onChange={e => setSelectedTurn(Number(e.target.value))}
+          style={{ background: C.bg, color: C.text, border: `1px solid ${C.line}`, borderRadius: 3, padding: '2px 6px', fontSize: 11, fontFamily: 'inherit' }}
+        >
+          {llmStartEvents.map((ev, i) => (
+            <option key={i} value={i}>
+              Turn {i + 1} — {ev.data?.message_count || 0} messages
+            </option>
+          ))}
+        </select>
+        <span style={{ fontSize: 10, color: C.muted }}>
+          {fullMessages.length} messages{turn?.data?.full_messages ? '' : ' (truncated)'}
+        </span>
+      </div>
+      {/* Messages */}
+      <div style={{ flex: 1, overflowY: 'auto' }}>
+        {fullMessages.map((msg, i) => (
+          <MessageBubble key={i} msg={msg} index={i} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function AgentDetailPanel({ agent, agentId, events, onClose }) {
   const [tab, setTab] = useState('events');
   const [filterText, setFilterText] = useState('');
@@ -153,6 +253,10 @@ function AgentDetailPanel({ agent, agentId, events, onClose }) {
   const agentEvents = useMemo(() => {
     return events.filter(ev => ev.event_type && (ev.agent_path || []).slice(-1)[0] === agentId);
   }, [events, agentId]);
+
+  const llmStartEvents = useMemo(() => {
+    return agentEvents.filter(ev => ev.event_type === 'llm_start');
+  }, [agentEvents]);
 
   // Auto-scroll on new events
   useEffect(() => {
@@ -222,6 +326,7 @@ function AgentDetailPanel({ agent, agentId, events, onClose }) {
 
   const tabs = [
     { id: 'events', label: `Events (${agentEvents.length})` },
+    { id: 'messages', label: `Messages (${llmStartEvents.length})` },
     { id: 'tools', label: `Tools (${agent?.toolCalls?.length || 0})` },
   ];
 
@@ -342,6 +447,10 @@ function AgentDetailPanel({ agent, agentId, events, onClose }) {
               <div style={{ padding: 40, textAlign: 'center', color: C.muted }}>{filterText ? 'No matching events' : 'No events yet'}</div>
             )}
           </div>
+        )}
+
+        {tab === 'messages' && (
+          <MessageListView llmStartEvents={llmStartEvents} />
         )}
 
         {tab === 'tools' && (
