@@ -38,11 +38,6 @@ async def run_investigation(
     max_steps: int = 100,
 ) -> None:
     """Run the full RCA investigation."""
-    # Apply env-var overrides
-    if api_key := os.environ.get("AGENTM_API_KEY"):
-        os.environ.setdefault("OPENAI_API_KEY", api_key)
-    if base_url := os.environ.get("AGENTM_API_BASE_URL"):
-        os.environ.setdefault("OPENAI_BASE_URL", base_url)
 
     project_root = Path(config_path).resolve().parent.parent
     scenario_path = Path(scenario_dir)
@@ -253,10 +248,6 @@ async def run_memory_extraction(
     max_steps: int = 60,
 ) -> None:
     """Run a memory extraction pass over one or more completed RCA trajectories."""
-    if api_key := os.environ.get("AGENTM_API_KEY"):
-        os.environ.setdefault("OPENAI_API_KEY", api_key)
-    if base_url := os.environ.get("AGENTM_API_BASE_URL"):
-        os.environ.setdefault("OPENAI_BASE_URL", base_url)
 
     project_root = Path(config_path).resolve().parent.parent
     scenario_path = Path(scenario_dir)
@@ -489,11 +480,6 @@ async def resume_investigation(
     verbose: bool = False,
 ) -> None:
     """Resume an interrupted investigation from a trajectory file."""
-    # Apply env-var overrides
-    if api_key := os.environ.get("AGENTM_API_KEY"):
-        os.environ.setdefault("OPENAI_API_KEY", api_key)
-    if base_url := os.environ.get("AGENTM_API_BASE_URL"):
-        os.environ.setdefault("OPENAI_BASE_URL", base_url)
 
     # 1. Read metadata from trajectory file
     traj_path = Path(trajectory_file)
