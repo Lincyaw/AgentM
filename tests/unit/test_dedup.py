@@ -8,7 +8,6 @@ hook injection/passthrough, wrapper interception, and backward compat.
 
 from __future__ import annotations
 
-import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel
@@ -105,7 +104,9 @@ class TestDedupHookInjection:
         tracker = DedupTracker()
         hook = build_dedup_hook(tracker)
 
-        ai1, tool1 = _make_tool_call_pair("query_metrics", {"svc": "A"}, "cpu=85%", "tc-1")
+        ai1, tool1 = _make_tool_call_pair(
+            "query_metrics", {"svc": "A"}, "cpu=85%", "tc-1"
+        )
         # Second identical call in a new AI message
         ai2 = AIMessage(
             content="",
@@ -116,7 +117,11 @@ class TestDedupHookInjection:
         result = hook(state)
 
         messages = result["messages"]
-        injected_msgs = [m for m in messages if isinstance(m, HumanMessage) and "DEDUP" in getattr(m, "content", "")]
+        injected_msgs = [
+            m
+            for m in messages
+            if isinstance(m, HumanMessage) and "DEDUP" in getattr(m, "content", "")
+        ]
         assert len(injected_msgs) >= 1
         assert "DEDUP WARNING" in injected_msgs[-1].content
         assert "query_metrics" in injected_msgs[-1].content
@@ -135,7 +140,11 @@ class TestDedupHookInjection:
         result = hook(state)
 
         messages = result["messages"]
-        injected_msgs = [m for m in messages if isinstance(m, HumanMessage) and "DEDUP" in getattr(m, "content", "")]
+        injected_msgs = [
+            m
+            for m in messages
+            if isinstance(m, HumanMessage) and "DEDUP" in getattr(m, "content", "")
+        ]
         assert len(injected_msgs) == 0
 
 
@@ -146,7 +155,9 @@ class TestDedupHookHistoryScanning:
         tracker = DedupTracker()
         hook = build_dedup_hook(tracker)
 
-        ai1, tool1 = _make_tool_call_pair("get_graph", {"svc": "B"}, "graph-data", "tc-1")
+        ai1, tool1 = _make_tool_call_pair(
+            "get_graph", {"svc": "B"}, "graph-data", "tc-1"
+        )
         state = {"messages": [ai1, tool1]}
         hook(state)
 

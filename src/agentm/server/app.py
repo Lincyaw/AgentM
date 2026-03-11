@@ -203,13 +203,16 @@ def create_dashboard_app(
         if traj is not None:
             for evt in traj.events:
                 try:
-                    payload = json.dumps({
-                        "event_type": evt.get("event_type", ""),
-                        "agent_path": evt.get("agent_path", []),
-                        "data": evt.get("data", {}),
-                        "timestamp": evt.get("timestamp", ""),
-                        "mode": "replay",
-                    }, default=str)
+                    payload = json.dumps(
+                        {
+                            "event_type": evt.get("event_type", ""),
+                            "agent_path": evt.get("agent_path", []),
+                            "data": evt.get("data", {}),
+                            "timestamp": evt.get("timestamp", ""),
+                            "mode": "replay",
+                        },
+                        default=str,
+                    )
                     await websocket.send_text(payload)
                 except (WebSocketDisconnect, ConnectionError, RuntimeError):
                     _websocket_clients.discard(websocket)
@@ -229,12 +232,14 @@ def create_dashboard_app(
             return {"scenario_id": "unknown", "agents": []}
         agents = []
         for name, agent in sc.agents.items():
-            agents.append({
-                "agent_id": name,
-                "model": agent.model,
-                "tools": agent.tools,
-                "max_steps": agent.execution.max_steps,
-            })
+            agents.append(
+                {
+                    "agent_id": name,
+                    "model": agent.model,
+                    "tools": agent.tools,
+                    "max_steps": agent.execution.max_steps,
+                }
+            )
         return {
             "scenario_id": sc.system.type,
             "agents": agents,
@@ -349,13 +354,13 @@ def create_dashboard_app(
         result = await g.ainvoke(None, config)
         return {
             "status": "resumed",
-            "result": _serialize_state_values(result) if isinstance(result, dict) else str(result),
+            "result": _serialize_state_values(result)
+            if isinstance(result, dict)
+            else str(result),
         }
 
     @app.post("/api/tasks/{thread_id}/fork")
-    async def fork_from_checkpoint(
-        thread_id: str, body: ForkRequest
-    ) -> dict[str, Any]:
+    async def fork_from_checkpoint(thread_id: str, body: ForkRequest) -> dict[str, Any]:
         g = app.state.graph
         if g is None:
             return {"error": "No graph available"}
@@ -369,7 +374,9 @@ def create_dashboard_app(
         result = await g.ainvoke(None, fork_config)
         return {
             "status": "forked",
-            "result": _serialize_state_values(result) if isinstance(result, dict) else str(result),
+            "result": _serialize_state_values(result)
+            if isinstance(result, dict)
+            else str(result),
         }
 
     return app

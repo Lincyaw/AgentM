@@ -163,7 +163,9 @@ class OrchestratorConfig(BaseModel):
     monitoring: Optional[dict[str, Any]] = None
     output: Optional[OutputConfig] = None
     max_rounds: int = 20  # node mode only: max LLM rounds before forced synthesize
-    disable_tool_binding: bool = False  # set True for models that don't support bind_tools (e.g. MiniMax)
+    disable_tool_binding: bool = (
+        False  # set True for models that don't support bind_tools (e.g. MiniMax)
+    )
 
 
 class SystemTypeConfig(BaseModel):

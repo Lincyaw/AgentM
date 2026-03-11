@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool, StructuredTool
+from pydantic import BaseModel
 
 
 class DedupTracker:
@@ -59,7 +60,9 @@ class DedupTracker:
 _EXCLUDED_TOOLS = frozenset({"think"})
 
 
-def build_dedup_hook(tracker: DedupTracker) -> Callable[[dict[str, Any]], dict[str, Any]]:
+def build_dedup_hook(
+    tracker: DedupTracker,
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
     """Build a pre_model_hook that scans history and injects dedup reminders.
 
     1. Scans message history for (AIMessage tool_call → ToolMessage result) pairs,
@@ -200,10 +203,14 @@ def wrap_tool_with_dedup(tool: BaseTool, tracker: DedupTracker) -> BaseTool:
         tracker.store(key, result_str)
         return result_str
 
-    return StructuredTool(
-        name=tool.name,
-        description=tool.description or "",
-        func=dedup_func,
-        coroutine=dedup_coroutine if original_coroutine else None,
-        args_schema=getattr(tool, "args_schema", None),
-    )
+    schema = getattr(tool, "args_schema", None)
+    tool_kwargs: dict[str, Any] = {
+        "name": tool.name,
+        "description": tool.description or "",
+        "func": dedup_func,
+        "coroutine": dedup_coroutine if original_coroutine else None,
+    }
+    if isinstance(schema, type) and issubclass(schema, BaseModel):
+        tool_kwargs["args_schema"] = schema
+
+    return StructuredTool(**tool_kwargs)

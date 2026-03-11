@@ -90,7 +90,14 @@ async def search_logs_abnormal(
         limit: Max results (default 50).
     """
     return await _search_logs(
-        keyword, "abnormal", match_mode, level, service_name, start_time, end_time, limit
+        keyword,
+        "abnormal",
+        match_mode,
+        level,
+        service_name,
+        start_time,
+        end_time,
+        limit,
     )
 
 
@@ -117,4 +124,6 @@ async def search_logs_normal(
         end_time: Optional end time (ISO format).
         limit: Max results (default 50).
     """
-    return await _search_logs(keyword, "normal", match_mode, level, service_name, start_time, end_time, limit)
+    return await _search_logs(
+        keyword, "normal", match_mode, level, service_name, start_time, end_time, limit
+    )

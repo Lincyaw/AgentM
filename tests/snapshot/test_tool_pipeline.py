@@ -12,7 +12,6 @@ import json
 import pytest
 
 from agentm.core.task_manager import TaskManager
-from agentm.models.enums import AgentRunStatus
 from agentm.tools.orchestrator import create_orchestrator_tools
 
 
@@ -32,7 +31,7 @@ class TestDispatchAgentPipeline:
 
         With auto-block (single worker), the task completes before returning.
         """
-        cmd = await self.dispatch_agent(
+        await self.dispatch_agent(
             agent_id="db",
             task="check connections",
             task_type="scout",
@@ -87,9 +86,13 @@ class TestCheckTasksPipeline:
     """P2: check_tasks returns status and results via Command."""
 
     @pytest.fixture(autouse=True)
-    def _bind_tools(self, task_manager_with_completed_task: TaskManager, agent_pool) -> None:
+    def _bind_tools(
+        self, task_manager_with_completed_task: TaskManager, agent_pool
+    ) -> None:
         self.task_manager = task_manager_with_completed_task
-        tools = create_orchestrator_tools(task_manager_with_completed_task, agent_pool=agent_pool)
+        tools = create_orchestrator_tools(
+            task_manager_with_completed_task, agent_pool=agent_pool
+        )
         self.check_tasks = tools["check_tasks"]
 
     @pytest.mark.asyncio
@@ -114,7 +117,9 @@ class TestCheckTasksPipeline:
         self, task_manager_with_failed_task: TaskManager, agent_pool
     ) -> None:
         """check_tasks should include failed task error summary."""
-        tools = create_orchestrator_tools(task_manager_with_failed_task, agent_pool=agent_pool)
+        tools = create_orchestrator_tools(
+            task_manager_with_failed_task, agent_pool=agent_pool
+        )
         check_tasks = tools["check_tasks"]
 
         cmd = await check_tasks(
@@ -141,7 +146,9 @@ class TestCheckTasksIncrementalReporting:
     @pytest.fixture(autouse=True)
     def _setup(self, task_manager_with_completed_task: TaskManager, agent_pool) -> None:
         self.task_manager = task_manager_with_completed_task
-        tools = create_orchestrator_tools(task_manager_with_completed_task, agent_pool=agent_pool)
+        tools = create_orchestrator_tools(
+            task_manager_with_completed_task, agent_pool=agent_pool
+        )
         self.check_tasks = tools["check_tasks"]
 
     @pytest.mark.asyncio
@@ -168,7 +175,9 @@ class TestCheckTasksIncrementalReporting:
         self, task_manager_with_failed_task: TaskManager, agent_pool
     ) -> None:
         """Failed tasks follow the same incremental rule as completed tasks."""
-        tools = create_orchestrator_tools(task_manager_with_failed_task, agent_pool=agent_pool)
+        tools = create_orchestrator_tools(
+            task_manager_with_failed_task, agent_pool=agent_pool
+        )
         check_tasks = tools["check_tasks"]
 
         # First call — failure details present
@@ -186,7 +195,9 @@ class TestCheckTasksIncrementalReporting:
         self, task_manager_with_running_task: TaskManager, agent_pool
     ) -> None:
         """Running tasks always appear with progress summary, never suppressed."""
-        tools = create_orchestrator_tools(task_manager_with_running_task, agent_pool=agent_pool)
+        tools = create_orchestrator_tools(
+            task_manager_with_running_task, agent_pool=agent_pool
+        )
         check_tasks = tools["check_tasks"]
 
         # Call twice — running task should appear both times

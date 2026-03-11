@@ -16,7 +16,6 @@ from agentm.config.schema import OrchestratorConfig
 from agentm.core.compression import (
     build_compression_hook,
     compress_completed_phase,
-    count_tokens,
 )
 from agentm.core.notebook import format_notebook_for_llm, should_compress_phase
 from agentm.core.prompt import load_prompt_template

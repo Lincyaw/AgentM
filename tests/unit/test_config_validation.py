@@ -20,7 +20,6 @@ from agentm.config.schema import (
     StorageConfig,
     SystemConfig,
     SystemTypeConfig,
-    ModelConfig,
     RecoveryConfig,
 )
 
@@ -33,9 +32,14 @@ class TestMandatoryFieldRejection:
     """
 
     def test_system_config_rejects_missing_models(self):
-        backend = StorageBackendConfig(backend="postgres", url="postgresql://localhost/db")
+        backend = StorageBackendConfig(
+            backend="postgres", url="postgresql://localhost/db"
+        )
         with pytest.raises(ValidationError):
-            SystemConfig(storage=StorageConfig(checkpointer=backend, store=backend), recovery=RecoveryConfig())  # type: ignore[call-arg]
+            SystemConfig(
+                storage=StorageConfig(checkpointer=backend, store=backend),
+                recovery=RecoveryConfig(),
+            )  # type: ignore[call-arg]
 
     def test_agent_config_accepts_missing_prompt(self):
         cfg = AgentConfig(model="gpt-4o", temperature=0.0, tools=[])
@@ -67,8 +71,10 @@ class TestScenarioConfigComposition:
             orchestrator=OrchestratorConfig(model="gpt-4o"),
             agents={
                 "db-agent": AgentConfig(
-                    model="gpt-4o-mini", temperature=0.0,
-                    prompt="prompts/db.j2", tools=["knowledge_search"],
+                    model="gpt-4o-mini",
+                    temperature=0.0,
+                    prompt="prompts/db.j2",
+                    tools=["knowledge_search"],
                 )
             },
         )

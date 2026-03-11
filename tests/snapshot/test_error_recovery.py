@@ -13,7 +13,6 @@ import asyncio
 import pytest
 
 from agentm.core.task_manager import TaskManager
-from agentm.models.data import ManagedTask
 from agentm.models.enums import AgentRunStatus
 from agentm.tools.orchestrator import create_orchestrator_tools
 
@@ -53,7 +52,9 @@ class TestAbortTask:
     @pytest.fixture(autouse=True)
     def _bind_tools(self, task_manager_with_running_task: TaskManager) -> None:
         self.task_manager = task_manager_with_running_task
-        tools = create_orchestrator_tools(task_manager_with_running_task, agent_pool=None)
+        tools = create_orchestrator_tools(
+            task_manager_with_running_task, agent_pool=None
+        )
         self.abort_task = tools["abort_task"]
 
     @pytest.mark.asyncio
@@ -75,6 +76,7 @@ class TestAbortTask:
     @pytest.mark.asyncio
     async def test_abort_cancels_asyncio_task(self) -> None:
         """abort_task should cancel the asyncio.Task if present."""
+
         async def _long_running():
             await asyncio.sleep(3600)
 

@@ -12,7 +12,9 @@ from typing import Any
 STORE_ROOT: tuple[str, ...] = ("knowledge",)
 
 # Module-level store reference, set by builder at startup
-_store_var: contextvars.ContextVar[Any | None] = contextvars.ContextVar("knowledge_store", default=None)
+_store_var: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
+    "knowledge_store", default=None
+)
 
 
 # --- Path utility functions (fully implemented) ---

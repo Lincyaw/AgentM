@@ -17,9 +17,7 @@ from agentm.tools.observability._core import (
 def _resolve_file(category: str, period: str = "abnormal") -> str:
     data_dir = _data_dir_var.get()
     if not data_dir:
-        raise RuntimeError(
-            "Data directory not set. Call set_data_directory first."
-        )
+        raise RuntimeError("Data directory not set. Call set_data_directory first.")
     key = (category, period)
     if key not in _FILE_MAP:
         raise ValueError(f"Unknown file mapping: category={category}, period={period}")
@@ -90,9 +88,7 @@ def _get_time_range(file: str) -> dict[str, str | None]:
 
 
 def _get_available_metrics(file: str) -> list[str]:
-    rows = _query(
-        f"SELECT DISTINCT metric FROM read_parquet('{file}') ORDER BY metric"
-    )
+    rows = _query(f"SELECT DISTINCT metric FROM read_parquet('{file}') ORDER BY metric")
     return [r["metric"] for r in rows]
 
 

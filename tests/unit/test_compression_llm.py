@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from agentm.config.schema import CompressionConfig
 from agentm.core.compression import (
@@ -38,7 +37,9 @@ class TestSubAgentCompressionHook:
         assert "llm_input_messages" not in result
 
     @patch("agentm.core.compression._summarize_messages")
-    def test_above_threshold_triggers_compression(self, mock_summarize: MagicMock) -> None:
+    def test_above_threshold_triggers_compression(
+        self, mock_summarize: MagicMock
+    ) -> None:
         """Messages above threshold trigger LLM compression."""
         mock_summarize.return_value = "Summary of conversation"
         messages = _make_messages(400, content_size=2000)
@@ -57,7 +58,10 @@ class TestSubAgentCompressionHook:
         result = sub_agent_compression_hook({"messages": []})
         assert result["messages"] == []
 
-    @patch("agentm.core.compression.count_tokens", return_value=_DEFAULT_THRESHOLD_TOKENS + 1)
+    @patch(
+        "agentm.core.compression.count_tokens",
+        return_value=_DEFAULT_THRESHOLD_TOKENS + 1,
+    )
     @patch("agentm.core.compression._summarize_messages")
     def test_few_messages_above_threshold_not_compressed(
         self, mock_summarize: MagicMock, mock_count: MagicMock

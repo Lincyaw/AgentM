@@ -88,7 +88,10 @@ class TestSubAgentHookRecordsEvent:
         sub_agent_compression_hook({"messages": messages})
         assert get_compression_events() == []
 
-    @patch("agentm.core.compression.count_tokens", return_value=_DEFAULT_THRESHOLD_TOKENS + 1)
+    @patch(
+        "agentm.core.compression.count_tokens",
+        return_value=_DEFAULT_THRESHOLD_TOKENS + 1,
+    )
     def test_no_event_when_few_messages(self, _mock_count: MagicMock) -> None:
         """When message count <= preserve_n, no compression and no event."""
         messages = [HumanMessage(content="a"), AIMessage(content="b")]

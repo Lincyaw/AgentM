@@ -310,7 +310,9 @@ class AgentSystemBuilder:
                 # Compute checkpoint db path for metadata
                 checkpoint_db_path = ""
                 if system_config.storage.checkpointer.backend == "sqlite":
-                    db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
+                    db_url = (
+                        system_config.storage.checkpointer.url or "./checkpoints.db"
+                    )
                     checkpoint_db_path = str(Path(db_url).resolve())
                 trajectory = TrajectoryCollector(
                     run_id=run_id,
@@ -325,10 +327,11 @@ class AgentSystemBuilder:
             )
 
             # Wire trajectory into task_manager
-            task_manager.set_trajectory(trajectory)
+            if trajectory is not None:
+                task_manager.set_trajectory(trajectory)
 
-            # Wire trajectory into agent_pool for llm_start events
-            agent_pool._trajectory = trajectory
+                # Wire trajectory into agent_pool for llm_start events
+                agent_pool._trajectory = trajectory
 
             # Extract graph reference setter before tool registration (not a real tool)
             set_graph_ref = injected_tools.pop("_set_graph_ref", None)

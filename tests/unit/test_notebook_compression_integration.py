@@ -97,12 +97,10 @@ class TestCompressThenFormat:
         compressed = compress_completed_phase(notebook, "exploration")
 
         assert all(
-            step.phase != Phase.EXPLORATION
-            for step in compressed.exploration_history
+            step.phase != Phase.EXPLORATION for step in compressed.exploration_history
         )
         assert any(
-            step.phase == Phase.GENERATION
-            for step in compressed.exploration_history
+            step.phase == Phase.GENERATION for step in compressed.exploration_history
         )
 
     def test_formatted_output_contains_active_phase_steps(self):

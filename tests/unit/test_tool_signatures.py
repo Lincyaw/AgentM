@@ -42,6 +42,7 @@ def _extract_literal_values(annotation) -> set[str] | None:
 
     # Annotated[Literal[...], ...] — unwrap
     from typing import Annotated
+
     if origin is Annotated:
         inner = get_args(annotation)[0]
         if get_origin(inner) is Literal:
@@ -159,11 +160,13 @@ class TestCreateSubAgentSignature:
 
     def test_has_task_type_parameter(self):
         from agentm.agents.react.sub_agent import create_sub_agent
+
         sig = inspect.signature(create_sub_agent)
         assert "task_type" in sig.parameters
 
     def test_task_type_is_literal_with_correct_values(self):
         from agentm.agents.react.sub_agent import create_sub_agent
+
         annotation = _resolve_annotation(create_sub_agent, "task_type")
         values = _extract_literal_values(annotation)
         assert values is not None, "task_type should be a Literal type"
@@ -171,6 +174,7 @@ class TestCreateSubAgentSignature:
 
     def test_task_type_defaults_to_scout(self):
         from agentm.agents.react.sub_agent import create_sub_agent
+
         sig = inspect.signature(create_sub_agent)
         param = sig.parameters["task_type"]
         assert param.default == "scout"
@@ -185,15 +189,18 @@ class TestTaskManagerSubmitSignature:
 
     def test_is_async(self):
         from agentm.core.task_manager import TaskManager
+
         assert inspect.iscoroutinefunction(TaskManager.submit)
 
     def test_has_task_type_parameter(self):
         from agentm.core.task_manager import TaskManager
+
         sig = inspect.signature(TaskManager.submit)
         assert "task_type" in sig.parameters
 
     def test_task_type_is_literal_with_correct_values(self):
         from agentm.core.task_manager import TaskManager
+
         annotation = _resolve_annotation(TaskManager.submit, "task_type")
         values = _extract_literal_values(annotation)
         assert values is not None, "task_type should be a Literal type"
@@ -209,16 +216,19 @@ class TestTaskManagerMethodContracts:
 
     def test_has_consume_instructions_method(self):
         from agentm.core.task_manager import TaskManager
+
         assert hasattr(TaskManager, "consume_instructions")
         assert callable(TaskManager.consume_instructions)
 
     def test_has_get_task_method(self):
         from agentm.core.task_manager import TaskManager
+
         assert hasattr(TaskManager, "get_task")
         assert callable(TaskManager.get_task)
 
     def test_has_execute_agent_method(self):
         from agentm.core.task_manager import TaskManager
+
         assert hasattr(TaskManager, "_execute_agent")
         assert inspect.iscoroutinefunction(TaskManager._execute_agent)
 
@@ -232,6 +242,7 @@ class TestCompressionHookSignature:
 
     def test_build_compression_hook_accepts_compression_config(self):
         from agentm.core.compression import build_compression_hook
+
         sig = inspect.signature(build_compression_hook)
         param = sig.parameters["config"]
         # Should accept CompressionConfig, not Any
@@ -242,6 +253,7 @@ class TestCompressionHookSignature:
 
     def test_build_compression_hook_returns_callable(self):
         from agentm.core.compression import build_compression_hook
+
         sig = inspect.signature(build_compression_hook)
         assert sig.return_annotation is not inspect.Parameter.empty
 

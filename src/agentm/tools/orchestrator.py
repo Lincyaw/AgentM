@@ -11,6 +11,7 @@ from langchain_core.tools import InjectedToolCallId
 from langgraph.types import Command
 
 from agentm.models.enums import HypothesisStatus
+from agentm.models.types import TaskType
 
 
 def create_orchestrator_tools(
@@ -27,7 +28,7 @@ def create_orchestrator_tools(
     async def dispatch_agent(
         agent_id: str,
         task: str,
-        task_type: Literal["scout", "verify", "deep_analyze"] = "scout",
+        task_type: TaskType = "scout",
         hypothesis_id: Optional[str] = None,
         tool_call_id: Annotated[str, InjectedToolCallId] = "",
     ) -> Command:
