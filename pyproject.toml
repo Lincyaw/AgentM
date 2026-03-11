@@ -22,6 +22,7 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=2.0",
     "aiosqlite>=0.22.1",
     "langchain>=1.2.10",
+    "python-dotenv>=1.2.2",
 ]
 
 [dependency-groups]

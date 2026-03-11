@@ -22,3 +22,7 @@ env/
 *.db*
 trajectories
 *.log
+
+# Environment variables (contains secrets)
+.env
+.env.local
