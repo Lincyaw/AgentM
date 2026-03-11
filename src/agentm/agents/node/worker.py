@@ -33,12 +33,10 @@ from agentm.tools.think import think
 
 
 # ---------------------------------------------------------------------------
-# Answer schemas (reused from react layer for API compatibility)
+# Answer schemas (imported from consolidated registry)
 # ---------------------------------------------------------------------------
 
-from agentm.agents.react.sub_agent import (  # noqa: E402
-    ANSWER_SCHEMA,
-)
+from agentm.models.answer_schemas import ANSWER_SCHEMA  # noqa: E402
 
 _TASK_TYPE_LABEL: dict[str, str] = {
     "scout": "Scout",
