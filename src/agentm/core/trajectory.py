@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 from datetime import datetime
@@ -36,13 +37,22 @@ class TrajectoryCollector:
     Thread-safe via ``asyncio.Lock``.
     """
 
-    def __init__(self, run_id: str, output_dir: str = "./trajectories") -> None:
+    def __init__(
+        self,
+        run_id: str,
+        output_dir: str = "./trajectories",
+        thread_id: str = "",
+        checkpoint_db: str = "",
+    ) -> None:
         self._run_id = run_id
         self._output_dir = Path(output_dir)
+        self._thread_id = thread_id
+        self._checkpoint_db = checkpoint_db
         self._seq = 0
         self._lock = asyncio.Lock()
         self._sync_lock = threading.Lock()
         self._file: IO[str] | None = None
+        self._meta_written = False
         self._events: list[dict[str, Any]] = []
         self._listeners: list[Callable[[dict[str, Any]], Any]] = []
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -195,6 +205,28 @@ class TrajectoryCollector:
         if self._file is None:
             self._output_dir.mkdir(parents=True, exist_ok=True)
             self._file = open(self.file_path, "a", encoding="utf-8")
+        if not self._meta_written:
+            self._meta_written = True
+            meta = {
+                "_meta": {
+                    "run_id": self._run_id,
+                    "thread_id": self._thread_id,
+                    "checkpoint_db": self._checkpoint_db,
+                }
+            }
+            self._file.write(json.dumps(meta) + "\n")
+            self._file.flush()
+
+    @staticmethod
+    def read_metadata(path: str | Path) -> dict[str, Any]:
+        """Read the _meta header from a trajectory file. Returns {} if absent."""
+        with open(path, encoding="utf-8") as f:
+            first_line = f.readline()
+        try:
+            data = json.loads(first_line)
+            return data.get("_meta", {})
+        except (json.JSONDecodeError, KeyError):
+            return {}
 
     async def close(self) -> str | None:
         """Flush and close. Returns the file path if a file was opened."""

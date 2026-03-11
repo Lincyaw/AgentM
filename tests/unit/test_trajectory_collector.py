@@ -32,16 +32,18 @@ async def test_record_assigns_monotonic_sequence(tmp_output: str) -> None:
 
 @pytest.mark.asyncio
 async def test_record_writes_valid_jsonl(tmp_output: str) -> None:
-    """Every line in the JSONL file must be valid JSON — broken lines crash analysis."""
+    """Every event line in the JSONL file must be valid JSON — broken lines crash analysis."""
     collector = TrajectoryCollector(run_id="test-jsonl", output_dir=tmp_output)
     await collector.record("tool_call", ["orchestrator"], {"name": "spawn_worker"})
     await collector.record("task_dispatch", ["worker-scout"], {"task_id": "t1"}, task_id="t1")
     path = await collector.close()
 
     assert path is not None
-    lines = Path(path).read_text().strip().split("\n")
-    assert len(lines) == 2
-    for line in lines:
+    all_lines = [l for l in Path(path).read_text().strip().split("\n") if l]
+    # First line is metadata (_meta), subsequent lines are events
+    event_lines = [l for l in all_lines if "_meta" not in l]
+    assert len(event_lines) == 2
+    for line in event_lines:
         parsed = json.loads(line)
         assert "run_id" in parsed
         assert "seq" in parsed
@@ -69,14 +71,16 @@ async def test_close_without_records_returns_none(tmp_output: str) -> None:
 
 @pytest.mark.asyncio
 async def test_events_buffer_matches_file(tmp_output: str) -> None:
-    """In-memory events and file contents must match — divergence causes debug confusion."""
+    """In-memory events and file event lines must match — divergence causes debug confusion."""
     collector = TrajectoryCollector(run_id="test-buffer", output_dir=tmp_output)
     await collector.record("tool_call", ["orchestrator"], {"tool": "a"})
     await collector.record("error", ["worker-scout"], {"message": "timeout"})
     path = await collector.close()
 
     assert path is not None
-    file_events = [json.loads(line) for line in Path(path).read_text().strip().split("\n")]
+    all_lines = [l for l in Path(path).read_text().strip().split("\n") if l]
+    # Skip metadata line (first line, contains _meta key)
+    file_events = [json.loads(l) for l in all_lines if "_meta" not in l]
     memory_events = collector.events
 
     assert len(file_events) == len(memory_events) == 2
@@ -93,7 +97,8 @@ async def test_record_without_optional_fields(tmp_output: str) -> None:
     path = await collector.close()
 
     assert path is not None
-    event = json.loads(Path(path).read_text().strip())
+    all_lines = [l for l in Path(path).read_text().strip().split("\n") if l and "_meta" not in l]
+    event = json.loads(all_lines[0])
     assert event["task_id"] is None
     assert event["hypothesis_id"] is None
     assert event["parent_seq"] is None
@@ -113,8 +118,8 @@ async def test_record_with_linkage_fields(tmp_output: str) -> None:
     path = await collector.close()
 
     assert path is not None
-    lines = Path(path).read_text().strip().split("\n")
-    e2 = json.loads(lines[1])
+    all_lines = [l for l in Path(path).read_text().strip().split("\n") if l and "_meta" not in l]
+    e2 = json.loads(all_lines[1])
     assert e2["task_id"] == "t-1"
     assert e2["hypothesis_id"] == "H1"
     assert e2["parent_seq"] == 1

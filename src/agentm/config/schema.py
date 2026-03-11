@@ -97,6 +97,7 @@ class ExecutionConfig(BaseModel):
     interrupt_before: Optional[list[str]] = None
     tool_call_budget: Optional[int] = None
     dedup: Optional[DedupConfig] = None
+    subgraph_mode: str = "node"  # "react" | "node"
 
 
 class CompressionConfig(BaseModel):
@@ -154,13 +155,14 @@ class OrchestratorConfig(BaseModel):
 
     model: str
     temperature: float = 0.7
-    orchestrator_mode: str = "react"
+    orchestrator_mode: str = "node"  # "react" | "node"
     prompts: dict[str, str] = {}
     tools: list[str] = []
     feature_gates: FeatureGatesConfig = FeatureGatesConfig()
     compression: Optional[CompressionConfig] = None
     monitoring: Optional[dict[str, Any]] = None
     output: Optional[OutputConfig] = None
+    max_rounds: int = 20  # node mode only: max LLM rounds before forced synthesize
 
 
 class SystemTypeConfig(BaseModel):
