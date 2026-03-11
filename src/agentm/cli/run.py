@@ -276,6 +276,29 @@ async def run_memory_extraction(
 
     _resolve_prompt_paths(scenario_config, scenario_path)
 
+    # Resolve thread_ids BEFORE build so checkpointer points at the right DB
+    thread_ids: list[str] = []
+    for entry in trajectories:
+        p = Path(entry)
+        if p.exists() and p.suffix == ".jsonl":
+            meta = TrajectoryCollector.read_metadata(p)
+            tid = meta.get("thread_id", "")
+            checkpoint_db = meta.get("checkpoint_db", "")
+            if not tid:
+                console.print(f"[red]ERROR: {entry} has no thread_id metadata.[/]")
+                sys.exit(1)
+            # Point checkpointer at the recorded DB before build so
+            # set_checkpointer() gets the right instance
+            if checkpoint_db:
+                system_config.storage.checkpointer.backend = "sqlite"
+                system_config.storage.checkpointer.url = checkpoint_db
+            thread_ids.append(tid)
+            console.print(
+                f"  Resolved [dim]{p.name}[/] → thread_id [cyan]{tid[:16]}…[/]"
+            )
+        else:
+            thread_ids.append(entry)  # assume it's already a thread_id UUID
+
     system = AgentSystemBuilder.build(
         system_type="memory_extraction",
         scenario_config=scenario_config,
@@ -331,30 +354,6 @@ async def run_memory_extraction(
                 )
 
             system.trajectory.add_listener(_traj_to_ws)
-
-    # Resolve thread_ids: accept either a raw UUID or a trajectory .jsonl path
-    thread_ids: list[str] = []
-    for entry in trajectories:
-        p = Path(entry)
-        if p.exists() and p.suffix == ".jsonl":
-            meta = TrajectoryCollector.read_metadata(p)
-            tid = meta.get("thread_id", "")
-            checkpoint_db = meta.get("checkpoint_db", "")
-            if not tid:
-                console.print(
-                    f"[red]ERROR: {entry} has no thread_id metadata.[/]"
-                )
-                sys.exit(1)
-            # Point checkpointer at the recorded db so workers can read it
-            if checkpoint_db:
-                system_config.storage.checkpointer.backend = "sqlite"
-                system_config.storage.checkpointer.url = checkpoint_db
-            thread_ids.append(tid)
-            console.print(
-                f"  Resolved [dim]{p.name}[/] → thread_id [cyan]{tid[:16]}…[/]"
-            )
-        else:
-            thread_ids.append(entry)  # assume it's already a thread_id UUID
 
     # Build instruction for the orchestrator
     if not task:

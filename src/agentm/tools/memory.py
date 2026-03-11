@@ -1,50 +1,72 @@
 """Memory tools for reading trajectory checkpoints.
 
-Uses the ContextVar pattern (same as knowledge.py) for checkpointer injection.
-Builder calls memory_module.set_checkpointer(checkpointer) at startup.
+Reads directly from the SQLite checkpoints.db using langgraph's serde,
+so workers can call these sync tools without needing the async checkpointer.
+Builder calls memory_module.set_db_path(path) at startup.
 """
 
 from __future__ import annotations
 
-import contextvars
 import json
+import sqlite3
 from typing import Any
 
-# Module-level checkpointer reference, set by builder at startup
-_checkpointer_var: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
-    "memory_checkpointer", default=None
-)
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+_serde = JsonPlusSerializer()
+
+# Path to the SQLite checkpoints DB — set by builder at startup
+_db_path: str | None = None
 
 
+def set_db_path(path: str) -> None:
+    """Set the SQLite DB path. Called by builder at startup."""
+    global _db_path
+    _db_path = path
+
+
+# Keep backward-compatible alias used in builder
 def set_checkpointer(checkpointer: Any) -> None:
-    """Set the LangGraph checkpointer. Called by builder at startup."""
-    _checkpointer_var.set(checkpointer)
+    """No-op shim kept for call-site compatibility. Use set_db_path() instead."""
+    pass
+
+
+def _get_conn() -> sqlite3.Connection | None:
+    if not _db_path:
+        return None
+    return sqlite3.connect(_db_path)
 
 
 def read_trajectory(thread_id: str) -> str:
-    """Read all messages from a completed trajectory checkpoint.
-
-    Loads the most recent checkpoint for the given thread_id and returns
-    the full message history formatted as readable text.
+    """Read all messages from the most recent checkpoint of a trajectory.
 
     Args:
         thread_id: The thread ID of the trajectory to read.
     """
-    checkpointer = _checkpointer_var.get()
-    if checkpointer is None:
-        return "Memory checkpointer not initialized — call set_checkpointer() first."
+    if not _db_path:
+        return "Memory DB path not set — call set_db_path() first."
 
-    config = {"configurable": {"thread_id": thread_id}}
     try:
-        # get() returns a CheckpointTuple or None
-        checkpoint_tuple = checkpointer.get(config)
+        conn = sqlite3.connect(_db_path)
+        row = conn.execute(
+            "SELECT type, checkpoint FROM checkpoints "
+            "WHERE thread_id=? AND checkpoint_ns='' "
+            "ORDER BY checkpoint_id DESC LIMIT 1",
+            (thread_id,),
+        ).fetchone()
+        conn.close()
     except Exception as exc:
         return f"Error reading trajectory {thread_id!r}: {exc}"
 
-    if checkpoint_tuple is None:
+    if row is None:
         return f"No checkpoint found for thread_id={thread_id!r}."
 
-    messages = checkpoint_tuple.checkpoint.get("channel_values", {}).get("messages", [])
+    try:
+        obj = _serde.loads_typed((row[0], row[1]))
+    except Exception as exc:
+        return f"Error deserializing checkpoint for {thread_id!r}: {exc}"
+
+    messages = obj.get("channel_values", {}).get("messages", [])
     if not messages:
         return f"Checkpoint found for {thread_id!r} but contains no messages."
 
@@ -72,37 +94,49 @@ def read_trajectory(thread_id: str) -> str:
 def get_checkpoint_history(thread_id: str, limit: int = 50) -> str:
     """List checkpoint history steps for a trajectory thread.
 
-    Returns metadata about each checkpoint (step number, timestamp, channels
-    updated) without loading full message content.
+    Returns metadata (step index, checkpoint_id, channels updated) without
+    loading full message content.
 
     Args:
         thread_id: The thread ID to inspect.
         limit: Maximum number of checkpoints to return (default 50).
     """
-    checkpointer = _checkpointer_var.get()
-    if checkpointer is None:
-        return "Memory checkpointer not initialized — call set_checkpointer() first."
+    if not _db_path:
+        return "Memory DB path not set — call set_db_path() first."
 
-    config = {"configurable": {"thread_id": thread_id}}
     try:
-        history = list(checkpointer.list(config, limit=limit))
+        conn = sqlite3.connect(_db_path)
+        rows = conn.execute(
+            "SELECT checkpoint_id, type, checkpoint FROM checkpoints "
+            "WHERE thread_id=? AND checkpoint_ns='' "
+            "ORDER BY checkpoint_id DESC LIMIT ?",
+            (thread_id, limit),
+        ).fetchall()
+        conn.close()
     except Exception as exc:
         return f"Error listing checkpoint history for {thread_id!r}: {exc}"
 
-    if not history:
+    if not rows:
         return f"No checkpoint history found for thread_id={thread_id!r}."
 
     entries: list[dict[str, Any]] = []
-    for i, ct in enumerate(history):
-        ts = getattr(ct.checkpoint, "ts", None) or getattr(ct, "created_at", "")
-        channel_versions = ct.checkpoint.get("channel_versions", {})
+    for i, (checkpoint_id, type_, data) in enumerate(rows):
+        try:
+            obj = _serde.loads_typed((type_, data))
+            ts = obj.get("ts", "")
+            channels = list(obj.get("channel_versions", {}).keys())
+        except Exception:
+            ts = ""
+            channels = []
         entries.append(
             {
                 "step": i,
-                "ts": str(ts),
-                "channels_updated": list(channel_versions.keys()),
-                "metadata": ct.metadata or {},
+                "checkpoint_id": checkpoint_id,
+                "ts": ts,
+                "channels_updated": channels,
             }
         )
 
     return json.dumps(entries, default=str, indent=2)
+
+
