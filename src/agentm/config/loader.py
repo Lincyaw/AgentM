@@ -54,6 +54,17 @@ def load_system_config(path: Path | str) -> SystemConfig:
     return SystemConfig(**resolved)
 
 
+def load_config(
+    system_path: Path | str,
+    scenario_path: Path | str,
+) -> tuple[SystemConfig, ScenarioConfig]:
+    """Convenience wrapper — load both system and scenario configs.
+
+    Returns (system_config, scenario_config).
+    """
+    return load_system_config(system_path), load_scenario_config(scenario_path)
+
+
 def load_scenario_config(path: Path | str) -> ScenarioConfig:
     """Load and validate scenario.yaml into a ScenarioConfig."""
     raw = yaml.safe_load(Path(path).read_text())
