@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import typer
+from dotenv import load_dotenv
 
 from agentm.cli.debug import analyze_trajectory
 from agentm.cli.run import resume_investigation, run_investigation, run_memory_extraction
@@ -90,6 +91,7 @@ def debug(
 
 
 def main() -> None:
+    load_dotenv()
     app()
 
 
