@@ -11,6 +11,12 @@ models:
     rate_limit:
       requests_per_second: 20
       max_bucket_size: 30
+  MiniMax-M2.5:
+    api_key: "${AGENTM_API_KEY}"
+    base_url: "${AGENTM_API_BASE_URL:}"
+    rate_limit:
+      requests_per_second: 10
+      max_bucket_size: 20
 
 storage:
   checkpointer:
