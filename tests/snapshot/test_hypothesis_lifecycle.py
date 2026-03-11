@@ -13,18 +13,15 @@ from agentm.core.notebook import (
     add_hypothesis,
     set_confirmed_hypothesis,
     update_hypothesis_status,
-    validate_hypothesis_transition,
 )
-from agentm.models.data import DiagnosticNotebook, Hypothesis
+from agentm.models.data import DiagnosticNotebook
 from agentm.models.enums import HypothesisStatus
 
 
 class TestUpdateHypothesisRejectsIllegalTransitions:
     """P7: update_hypothesis rejects illegal state transitions."""
 
-    def test_rejected_to_confirmed_raises(
-        self, notebook: DiagnosticNotebook
-    ) -> None:
+    def test_rejected_to_confirmed_raises(self, notebook: DiagnosticNotebook) -> None:
         """REJECTED → CONFIRMED is illegal — must go through REFINED first."""
         nb = add_hypothesis(notebook, "H1", "Pool exhaustion", "2026-03-08T10:00:00")
         nb = update_hypothesis_status(
@@ -39,9 +36,7 @@ class TestUpdateHypothesisRejectsIllegalTransitions:
                 nb, "H1", HypothesisStatus.CONFIRMED, "2026-03-08T10:03:00"
             )
 
-    def test_formed_to_confirmed_raises(
-        self, notebook: DiagnosticNotebook
-    ) -> None:
+    def test_formed_to_confirmed_raises(self, notebook: DiagnosticNotebook) -> None:
         """FORMED → CONFIRMED is illegal — must go through INVESTIGATING."""
         nb = add_hypothesis(notebook, "H1", "Pool exhaustion", "2026-03-08T10:00:00")
 
@@ -50,9 +45,7 @@ class TestUpdateHypothesisRejectsIllegalTransitions:
                 nb, "H1", HypothesisStatus.CONFIRMED, "2026-03-08T10:01:00"
             )
 
-    def test_confirmed_to_anything_raises(
-        self, notebook: DiagnosticNotebook
-    ) -> None:
+    def test_confirmed_to_anything_raises(self, notebook: DiagnosticNotebook) -> None:
         """CONFIRMED is terminal — no outgoing transitions."""
         nb = add_hypothesis(notebook, "H1", "Pool exhaustion", "2026-03-08T10:00:00")
         nb = update_hypothesis_status(
@@ -123,9 +116,7 @@ class TestSetConfirmedHypothesisConsistency:
         with pytest.raises(ValueError, match="expected 'confirmed'"):
             set_confirmed_hypothesis(notebook_with_hypothesis, "H1")
 
-    def test_confirm_after_proper_lifecycle(
-        self, notebook: DiagnosticNotebook
-    ) -> None:
+    def test_confirm_after_proper_lifecycle(self, notebook: DiagnosticNotebook) -> None:
         """Proper lifecycle: FORMED → INVESTIGATING → CONFIRMED → set_confirmed."""
         nb = add_hypothesis(notebook, "H1", "Pool exhaustion", "2026-03-08T10:00:00")
         nb = update_hypothesis_status(
@@ -139,9 +130,7 @@ class TestSetConfirmedHypothesisConsistency:
         assert nb.confirmed_hypothesis == "H1"
         assert nb.hypotheses["H1"].status == HypothesisStatus.CONFIRMED
 
-    def test_set_confirmed_is_immutable(
-        self, notebook: DiagnosticNotebook
-    ) -> None:
+    def test_set_confirmed_is_immutable(self, notebook: DiagnosticNotebook) -> None:
         """set_confirmed_hypothesis should not modify the original notebook."""
         nb = add_hypothesis(notebook, "H1", "Pool exhaustion", "2026-03-08T10:00:00")
         nb = update_hypothesis_status(

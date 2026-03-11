@@ -135,16 +135,24 @@ def _safe_tool(func):  # noqa: ANN001, ANN201
         try:
             return await func(*args, **kwargs)
         except QueryError as e:
-            return json.dumps({
-                "error": "Query failed",
-                "detail": str(e),
-                "suggestion": "Check your filter column names and parameter values. "
-                "Only use column/metric/service names that appeared in previous tool results.",
-            }, ensure_ascii=False, indent=2)
+            return json.dumps(
+                {
+                    "error": "Query failed",
+                    "detail": str(e),
+                    "suggestion": "Check your filter column names and parameter values. "
+                    "Only use column/metric/service names that appeared in previous tool results.",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
         except (RuntimeError, FileNotFoundError, ValueError) as e:
-            return json.dumps({
-                "error": str(e),
-            }, ensure_ascii=False, indent=2)
+            return json.dumps(
+                {
+                    "error": str(e),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
 
     return wrapper
 
@@ -170,4 +178,6 @@ def set_data_directory(directory: str) -> str:
         return json.dumps({"error": f"No parquet files found in {directory}"})
     data_dir = str(p)
     _data_dir_var.set(data_dir)
-    return json.dumps({"status": "ok", "data_dir": data_dir, "files": parquet_files}, indent=2)
+    return json.dumps(
+        {"status": "ok", "data_dir": data_dir, "files": parquet_files}, indent=2
+    )

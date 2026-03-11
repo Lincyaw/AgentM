@@ -40,11 +40,14 @@ def run(
         8765, "--port", help="Dashboard server port (requires --dashboard)"
     ),
     dashboard_host: str = typer.Option(
-        "127.0.0.1", "--dashboard-host",
+        "127.0.0.1",
+        "--dashboard-host",
         help="Dashboard server bind address (default: 127.0.0.1)",
     ),
     max_steps: int = typer.Option(
-        100, "--max-steps", help="Maximum orchestrator steps (default: 100)",
+        100,
+        "--max-steps",
+        help="Maximum orchestrator steps (default: 100)",
     ),
 ) -> None:
     """Run an RCA investigation."""
@@ -103,7 +106,9 @@ def resume(
         "config/system.yaml", "--config", help="System config YAML"
     ),
     checkpoint: str | None = typer.Option(
-        None, "--checkpoint", help="Checkpoint ID to restore (skips interactive selection)"
+        None,
+        "--checkpoint",
+        help="Checkpoint ID to restore (skips interactive selection)",
     ),
     list_checkpoints: bool = typer.Option(
         False, "--list", help="List available checkpoints without executing"

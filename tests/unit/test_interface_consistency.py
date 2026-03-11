@@ -9,7 +9,6 @@ signature says type Y → runtime TypeError when the modules interact.
 
 from __future__ import annotations
 
-import inspect
 from typing import Literal, get_args, get_origin, get_type_hints
 from unittest.mock import AsyncMock
 
@@ -32,6 +31,7 @@ def _extract_task_type_values(func) -> set[str]:
         return set(get_args(annotation))
 
     from typing import Annotated
+
     if origin is Annotated:
         inner = get_args(annotation)[0]
         if get_origin(inner) is Literal:
@@ -95,10 +95,12 @@ class TestOrchestratorCreationImports:
 
     def test_build_orchestrator_prompt_exists(self):
         from agentm.agents.react.orchestrator import build_orchestrator_prompt
+
         assert callable(build_orchestrator_prompt)
 
     def test_create_orchestrator_exists(self):
         from agentm.agents.react.orchestrator import create_orchestrator
+
         assert callable(create_orchestrator)
 
 
@@ -113,10 +115,12 @@ class TestHooksModuleExports:
 
     def test_build_instruction_hook_exists(self):
         from agentm.agents.hooks import build_instruction_hook
+
         assert callable(build_instruction_hook)
 
     def test_build_combined_hook_exists(self):
         from agentm.agents.hooks import build_combined_hook
+
         assert callable(build_combined_hook)
 
 
@@ -132,6 +136,7 @@ class TestCompressionRefLayerValues:
 
     def test_layer_annotation_is_literal(self):
         from agentm.models.data import CompressionRef
+
         annotation = CompressionRef.__dataclass_fields__["layer"].type
         # The annotation should be Literal["sub_agent", "orchestrator"]
         # With from __future__ import annotations, it's stored as a string

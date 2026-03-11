@@ -110,26 +110,35 @@ async def run_investigation(
         dashboard_broadcast = broadcast_event
 
         uvi_config = uvicorn.Config(
-            app, host=dashboard_host, port=dashboard_port, log_level="warning",
+            app,
+            host=dashboard_host,
+            port=dashboard_port,
+            log_level="warning",
         )
         server = uvicorn.Server(uvi_config)
         dashboard_server_task = asyncio.create_task(server.serve())
         await asyncio.sleep(0.3)
-        console.print(f"Dashboard: [link=http://localhost:{dashboard_port}]http://localhost:{dashboard_port}[/link]")
+        console.print(
+            f"Dashboard: [link=http://localhost:{dashboard_port}]http://localhost:{dashboard_port}[/link]"
+        )
 
     # Register trajectory listeners — all events flow through TrajectoryCollector
     if system.trajectory is not None:
         if debug_console is not None:
             system.trajectory.add_listener(debug_console.on_trajectory_event)
         if dashboard_broadcast is not None:
+
             async def _traj_to_ws(event: dict) -> None:
-                await dashboard_broadcast({
-                    "event_type": event.get("event_type", ""),
-                    "agent_path": event.get("agent_path", []),
-                    "data": event.get("data", {}),
-                    "timestamp": event.get("timestamp", ""),
-                    "mode": "trajectory",
-                })
+                await dashboard_broadcast(
+                    {
+                        "event_type": event.get("event_type", ""),
+                        "agent_path": event.get("agent_path", []),
+                        "data": event.get("data", {}),
+                        "timestamp": event.get("timestamp", ""),
+                        "mode": "trajectory",
+                    }
+                )
+
             system.trajectory.add_listener(_traj_to_ws)
 
     # Stream execution
@@ -145,7 +154,9 @@ async def run_investigation(
             if not system_config.debug.console_live:
                 _print_event(event, step, verbose)
             if step > max_steps:
-                console.print(f"\n[yellow][!] Reached step limit ({max_steps}), stopping.[/]")
+                console.print(
+                    f"\n[yellow][!] Reached step limit ({max_steps}), stopping.[/]"
+                )
                 break
 
     except KeyboardInterrupt:
@@ -194,7 +205,9 @@ def _print_event(event: dict, step: int, verbose: bool) -> None:
             if sr is not None:
                 console.print("\n[bold green][Structured Output][/]")
                 if hasattr(sr, "model_dump"):
-                    output_str = json.dumps(sr.model_dump(), indent=2, ensure_ascii=False)
+                    output_str = json.dumps(
+                        sr.model_dump(), indent=2, ensure_ascii=False
+                    )
                 else:
                     output_str = json.dumps(sr, indent=2, ensure_ascii=False)
                 console.print(output_str)
@@ -257,7 +270,9 @@ def _resolve_prompt_paths(scenario_config: Any, scenario_dir: Path) -> None:
 def _print_checkpoints(snapshots: list) -> None:
     """Print checkpoint list in a readable table."""
     console.print("\n[bold]Available checkpoints:[/]")
-    console.print(f"{'#':>3}  {'checkpoint_id':<40}  {'step':>5}  {'time':<19}  next_node")
+    console.print(
+        f"{'#':>3}  {'checkpoint_id':<40}  {'step':>5}  {'time':<19}  next_node"
+    )
     console.print("-" * 90)
     for i, snap in enumerate(snapshots):
         cid = snap.config["configurable"].get("checkpoint_id", "")
@@ -299,7 +314,9 @@ async def resume_investigation(
 
     if not thread_id:
         console.print("[red]ERROR: Trajectory file has no thread_id metadata.[/]")
-        console.print("[dim]This trajectory was created before resume support was added.[/]")
+        console.print(
+            "[dim]This trajectory was created before resume support was added.[/]"
+        )
         sys.exit(1)
 
     console.rule("AgentM — Resume Investigation")
@@ -360,7 +377,9 @@ async def resume_investigation(
 
     if not snapshots:
         console.print("[yellow]No checkpoints found for this thread.[/]")
-        console.print("[dim]The checkpoint DB may have been moved or the thread_id is incorrect.[/]")
+        console.print(
+            "[dim]The checkpoint DB may have been moved or the thread_id is incorrect.[/]"
+        )
         sys.exit(1)
 
     if list_only:
@@ -372,10 +391,14 @@ async def resume_investigation(
     if checkpoint_id is None:
         _print_checkpoints(snapshots)
         console.print()
-        raw = console.input("[bold]Enter checkpoint number (0 = latest, Enter = latest): [/]").strip()
+        raw = console.input(
+            "[bold]Enter checkpoint number (0 = latest, Enter = latest): [/]"
+        ).strip()
         idx = int(raw) if raw else 0
         if idx < 0 or idx >= len(snapshots):
-            console.print(f"[red]Invalid index {idx}. Valid range: 0–{len(snapshots) - 1}[/]")
+            console.print(
+                f"[red]Invalid index {idx}. Valid range: 0–{len(snapshots) - 1}[/]"
+            )
             await system._close_checkpointer()
             sys.exit(1)
         checkpoint_id = snapshots[idx].config["configurable"].get("checkpoint_id", "")
@@ -403,18 +426,25 @@ async def resume_investigation(
 
         # Wire trajectory → WebSocket (same as run_investigation)
         if system.trajectory is not None:
+
             async def _traj_to_ws(event: dict) -> None:
-                await broadcast_event({
-                    "event_type": event.get("event_type", ""),
-                    "agent_path": event.get("agent_path", []),
-                    "data": event.get("data", {}),
-                    "timestamp": event.get("timestamp", ""),
-                    "mode": "trajectory",
-                })
+                await broadcast_event(
+                    {
+                        "event_type": event.get("event_type", ""),
+                        "agent_path": event.get("agent_path", []),
+                        "data": event.get("data", {}),
+                        "timestamp": event.get("timestamp", ""),
+                        "mode": "trajectory",
+                    }
+                )
+
             system.trajectory.add_listener(_traj_to_ws)
 
         uvi_config = uvicorn.Config(
-            app, host=dashboard_host, port=dashboard_port, log_level="warning",
+            app,
+            host=dashboard_host,
+            port=dashboard_port,
+            log_level="warning",
         )
         server = uvicorn.Server(uvi_config)
         dashboard_server_task = asyncio.create_task(server.serve())

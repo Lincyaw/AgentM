@@ -9,7 +9,7 @@ from dataclasses import replace
 from typing import Optional
 
 from agentm.models.data import DiagnosticNotebook, ExplorationStep, Hypothesis
-from agentm.models.enums import HypothesisStatus, Phase
+from agentm.models.enums import HypothesisStatus
 
 _LEGAL_TRANSITIONS: dict[HypothesisStatus, set[HypothesisStatus]] = {
     HypothesisStatus.FORMED: {HypothesisStatus.INVESTIGATING},
@@ -139,9 +139,7 @@ def set_confirmed_hypothesis(
     Raises ValueError if the hypothesis does not have CONFIRMED status.
     """
     if hypothesis_id not in notebook.hypotheses:
-        raise ValueError(
-            f"Hypothesis {hypothesis_id!r} not found in notebook"
-        )
+        raise ValueError(f"Hypothesis {hypothesis_id!r} not found in notebook")
     hypothesis = notebook.hypotheses[hypothesis_id]
     if hypothesis.status != HypothesisStatus.CONFIRMED:
         raise ValueError(
@@ -183,13 +181,17 @@ def format_notebook_for_llm(notebook: DiagnosticNotebook) -> str:
     if notebook.phase_summaries:
         lines.append("## Phase Summaries")
         for summary in notebook.phase_summaries:
-            lines.append(f"### Phase: {summary.phase} ({summary.started_at} → {summary.completed_at})")
+            lines.append(
+                f"### Phase: {summary.phase} ({summary.started_at} → {summary.completed_at})"
+            )
             if summary.actions_taken:
                 lines.append("Actions: " + ", ".join(summary.actions_taken))
             if summary.decisions_made:
                 lines.append("Decisions: " + ", ".join(summary.decisions_made))
             if summary.hypotheses_affected:
-                lines.append("Hypotheses affected: " + ", ".join(summary.hypotheses_affected))
+                lines.append(
+                    "Hypotheses affected: " + ", ".join(summary.hypotheses_affected)
+                )
         lines.append("")
 
     if notebook.hypotheses:

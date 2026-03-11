@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from agentm.tools.observability._builders import (
     _build_filter_clauses,

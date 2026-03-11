@@ -11,10 +11,6 @@ AgentM is an agent framework written in Python. It is in early development (v0.1
 - All code, comments, commit messages, design documents, and file content: **English**
 - Communication with the user (conversation, explanations, questions): **Chinese**
 
-## Current Phase: Architecture Design
-
-The project is in the early design phase. All outputs are currently markdown documents, **code writing is prohibited**. All component designs must be confirmed by the user before finalization.
-
 ## Build & Development Commands
 
 This project uses **uv** as the package manager and build tool.

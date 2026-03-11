@@ -30,7 +30,10 @@ def test_debug_help() -> None:
     """`agentm debug --help` must list expected options."""
     result = runner.invoke(app, ["debug", "--help"])
     assert result.exit_code == 0
-    assert "TRAJECTORY_FILE" in result.output.upper() or "trajectory" in result.output.lower()
+    assert (
+        "TRAJECTORY_FILE" in result.output.upper()
+        or "trajectory" in result.output.lower()
+    )
     assert "--summary" in result.output
     assert "--timeline" in result.output
     assert "--filter-agent" in result.output

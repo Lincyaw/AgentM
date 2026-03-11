@@ -40,8 +40,8 @@ TOKEN_LIMIT = 5000
 # ---------------------------------------------------------------------------
 # ContextVar: maps table_name -> source (file path string or list[dict])
 # ---------------------------------------------------------------------------
-_tables_var: contextvars.ContextVar[dict[str, str | list[dict]]] = contextvars.ContextVar(
-    "duckdb_sql_tables", default={}
+_tables_var: contextvars.ContextVar[dict[str, str | list[dict]]] = (
+    contextvars.ContextVar("duckdb_sql_tables", default={})
 )
 
 
@@ -81,6 +81,7 @@ def register_tables(tables: dict[str, TableSource]) -> None:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _serialize(obj: Any) -> Any:
     """Recursively convert datetime / NaN / Inf to JSON-safe values."""
@@ -153,7 +154,9 @@ def _open_conn() -> tuple[duckdb.DuckDBPyConnection, dict[str, str | list[dict]]
         if isinstance(src, str):
             # Parquet file — create a view
             safe_path = src.replace("'", "''")
-            conn.execute(f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{safe_path}')")
+            conn.execute(
+                f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{safe_path}')"
+            )
         else:
             # In-memory list[dict] — write to a temp JSON file, import, then delete
             if src:
@@ -178,6 +181,7 @@ def _open_conn() -> tuple[duckdb.DuckDBPyConnection, dict[str, str | list[dict]]
 # ---------------------------------------------------------------------------
 # LLM-callable tools
 # ---------------------------------------------------------------------------
+
 
 async def describe_tables() -> str:
     """Return the schema (column names and types) of all registered tables.
@@ -227,7 +231,9 @@ async def describe_tables() -> str:
             schema[name] = {"row_count": row_count, "columns": columns}
         return json.dumps(schema, ensure_ascii=False, indent=2)
     except duckdb.Error as e:
-        return json.dumps({"error": f"Schema extraction failed: {e}"}, ensure_ascii=False)
+        return json.dumps(
+            {"error": f"Schema extraction failed: {e}"}, ensure_ascii=False
+        )
     finally:
         conn.close()
 
@@ -235,6 +241,7 @@ async def describe_tables() -> str:
 def _needs_quoting(col: str) -> bool:
     """Return True if a column name requires double-quoting in DuckDB SQL."""
     import re
+
     # Needs quoting if it contains non-alphanumeric/underscore chars or starts with a digit
     return bool(re.search(r"[^a-zA-Z0-9_]", col)) or (len(col) > 0 and col[0].isdigit())
 
@@ -329,7 +336,7 @@ async def query_sql(sql: str) -> str:
                         "Table names are case-sensitive. "
                         "If the error mentions a dotted name like 'attr', the column name contains dots "
                         "and must be wrapped in double-quotes: "
-                        "e.g. SELECT \"attr.k8s.pod.name\" FROM ... "
+                        'e.g. SELECT "attr.k8s.pod.name" FROM ... '
                         "Use the sql_ref field from describe_tables() for correct quoting."
                     ),
                 },

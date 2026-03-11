@@ -4,6 +4,7 @@ Bug prevented: Knowledge tools accept a Store but may fail on real Store operati
 (namespace handling, search API, key resolution). These tests verify end-to-end
 correctness against a real InMemoryStore instance.
 """
+
 from __future__ import annotations
 
 import json
@@ -53,7 +54,9 @@ class TestWriteAndRead:
         result = knowledge_write("/failure_pattern/database/pool_exhaustion", entry)
         assert "Written" in result
 
-        read_result = json.loads(knowledge_read("/failure_pattern/database/pool_exhaustion"))
+        read_result = json.loads(
+            knowledge_read("/failure_pattern/database/pool_exhaustion")
+        )
         assert read_result["title"] == "Connection pool exhaustion"
         assert read_result["confidence"] == "fact"
 
@@ -163,7 +166,9 @@ class TestSearchNamespace:
         knowledge_write("/failure_pattern/database/pool", _sample_entry(title="Pool"))
         knowledge_write("/failure_pattern/database/locks", _sample_entry(title="Locks"))
 
-        results = json.loads(knowledge_search("pool", path="/failure_pattern/database/"))
+        results = json.loads(
+            knowledge_search("pool", path="/failure_pattern/database/")
+        )
         keys = [r["key"] for r in results]
         assert "pool" in keys
 
@@ -171,7 +176,9 @@ class TestSearchNamespace:
         """Each search result has key, namespace, value, and score fields."""
         knowledge_write("/failure_pattern/db/item", _sample_entry())
 
-        results = json.loads(knowledge_search("connection", path="/failure_pattern/db/"))
+        results = json.loads(
+            knowledge_search("connection", path="/failure_pattern/db/")
+        )
         assert len(results) == 1
         result = results[0]
         assert "key" in result
@@ -184,7 +191,9 @@ class TestSearchNamespace:
     def test_search_with_path_prefix_filters(self) -> None:
         """Search scoped to a path prefix does not return entries from other namespaces."""
         knowledge_write("/failure_pattern/db/pool", _sample_entry(title="DB Pool"))
-        knowledge_write("/failure_pattern/network/timeout", _sample_entry(title="Network Timeout"))
+        knowledge_write(
+            "/failure_pattern/network/timeout", _sample_entry(title="Network Timeout")
+        )
 
         results = json.loads(knowledge_search("", path="/failure_pattern/db/"))
         keys = [r["key"] for r in results]

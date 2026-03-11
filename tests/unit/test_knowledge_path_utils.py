@@ -27,7 +27,9 @@ class TestPathToNamespace:
 
     def test_deep_path(self):
         assert path_to_namespace("/failure_pattern/database") == (
-            "knowledge", "failure_pattern", "database",
+            "knowledge",
+            "failure_pattern",
+            "database",
         )
 
     def test_trailing_slash_ignored(self):
@@ -46,7 +48,9 @@ class TestPathToNamespaceAndKey:
     """
 
     def test_splits_last_segment_as_key(self):
-        ns, key = path_to_namespace_and_key("/failure_pattern/database/connection_pool_exhaustion")
+        ns, key = path_to_namespace_and_key(
+            "/failure_pattern/database/connection_pool_exhaustion"
+        )
         assert ns == ("knowledge", "failure_pattern", "database")
         assert key == "connection_pool_exhaustion"
 

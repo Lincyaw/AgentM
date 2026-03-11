@@ -18,15 +18,17 @@ from __future__ import annotations
 from typing import Any, Literal, cast
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
 from agentm.agents.node.state import WorkerResult, WorkerState
 from agentm.config.schema import AgentConfig, ModelConfig
-from agentm.core.compression import build_compression_hook, count_tokens
+from agentm.core.compression import build_compression_hook
 from agentm.core.prompt import load_prompt_template
 from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
+from agentm.models.types import TaskType
 from agentm.tools.think import think
 
 
@@ -36,9 +38,6 @@ from agentm.tools.think import think
 
 from agentm.agents.react.sub_agent import (  # noqa: E402
     ANSWER_SCHEMA,
-    DeepAnalyzeAnswer,
-    ScoutAnswer,
-    VerifyAnswer,
 )
 
 _TASK_TYPE_LABEL: dict[str, str] = {
@@ -51,6 +50,7 @@ _TASK_TYPE_LABEL: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Tool tip formatting (mirrors graph.py in reference implementation)
 # ---------------------------------------------------------------------------
+
 
 def _format_tool_tips(tips: list[dict[str, Any]]) -> str:
     """Format cross-worker error tips as a markdown section."""
@@ -75,12 +75,13 @@ def _format_tool_tips(tips: list[dict[str, Any]]) -> str:
 # Graph builder
 # ---------------------------------------------------------------------------
 
+
 def build_worker_subgraph(
     *,
     agent_id: str,
     config: AgentConfig,
     tool_registry: ToolRegistry,
-    task_type: Literal["scout", "verify", "deep_analyze"] = "scout",
+    task_type: TaskType = "scout",
     model_config: ModelConfig | None = None,
     trajectory: TrajectoryCollector | None = None,
     task_id: str | None = None,
@@ -111,7 +112,7 @@ def build_worker_subgraph(
     # ------------------------------------------------------------------
     # Tools
     # ------------------------------------------------------------------
-    tools = [
+    tools: list[BaseTool] = [
         tool_registry.get(name).create_with_config(**config.tool_settings.get(name, {}))
         for name in config.tools
     ]
@@ -137,13 +138,17 @@ def build_worker_subgraph(
     if config.prompt is None:
         base_prompt = ""
     else:
-        base_prompt = load_prompt_template(config.prompt, **template_context)
+        base_prompt = load_prompt_template(
+            config.prompt, base_dir=None, **template_context
+        )
 
     if config.task_type_prompts and task_type in config.task_type_prompts:
         overlay = load_prompt_template(
-            config.task_type_prompts[task_type], **template_context
+            config.task_type_prompts[task_type], base_dir=None, **template_context
         )
-        system_prompt = (base_prompt + "\n\n" + overlay).strip() if base_prompt else overlay
+        system_prompt = (
+            (base_prompt + "\n\n" + overlay).strip() if base_prompt else overlay
+        )
     else:
         system_prompt = base_prompt
 
@@ -227,12 +232,15 @@ def build_worker_subgraph(
         # Context compression (returns llm_input_messages or messages)
         if compression_hook is not None:
             hook_out = compression_hook({"messages": messages})
-            llm_messages = hook_out.get("llm_input_messages") or hook_out.get("messages", messages)
+            llm_messages = hook_out.get("llm_input_messages") or hook_out.get(
+                "messages", messages
+            )
         else:
             llm_messages = messages
 
         # Trajectory: record llm_start
         if trajectory is not None:
+
             def _full_msg(msg: Any) -> dict[str, Any]:
                 role = getattr(msg, "type", "unknown")
                 content = getattr(msg, "content", "")
@@ -241,7 +249,11 @@ def build_worker_subgraph(
                     tc = getattr(msg, "tool_calls", None)
                     if tc:
                         entry["tool_calls"] = [
-                            {"id": c.get("id", ""), "name": c.get("name", ""), "args": c.get("args", {})}
+                            {
+                                "id": c.get("id", ""),
+                                "name": c.get("name", ""),
+                                "args": c.get("args", {}),
+                            }
                             for c in tc
                         ]
                 elif role == "tool":
@@ -271,7 +283,10 @@ def build_worker_subgraph(
                     trajectory.record_sync(
                         event_type="tool_call",
                         agent_path=["orchestrator", agent_id],
-                        data={"tool_name": tc.get("name", ""), "args": tc.get("args", {})},
+                        data={
+                            "tool_name": tc.get("name", ""),
+                            "args": tc.get("args", {}),
+                        },
                         task_id=task_id,
                     )
             elif ai_msg.content:
@@ -300,7 +315,9 @@ def build_worker_subgraph(
 
             if not tc_name:
                 tool_msgs.append(
-                    ToolMessage(content="(skipped: empty tool name)", tool_call_id=tc_id)
+                    ToolMessage(
+                        content="(skipped: empty tool name)", tool_call_id=tc_id
+                    )
                 )
                 continue
 
@@ -426,6 +443,7 @@ def build_worker_subgraph(
 # AgentPool equivalent for node-based workers
 # ---------------------------------------------------------------------------
 
+
 class NodeAgentPool:
     """Factory for node-based worker subgraphs.
 
@@ -459,7 +477,7 @@ class NodeAgentPool:
     def create_worker(
         self,
         agent_id: str,
-        task_type: str,
+        task_type: TaskType,
         task_id: str | None = None,
     ) -> Any:
         """Compile a fresh node-based worker subgraph per dispatch."""
@@ -467,7 +485,7 @@ class NodeAgentPool:
             agent_id=agent_id,
             config=self._worker_config,
             tool_registry=self._tool_registry,
-            task_type=task_type,  # type: ignore[arg-type]
+            task_type=task_type,
             model_config=self._model_config,
             trajectory=self._trajectory,
             task_id=task_id,

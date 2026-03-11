@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from langchain_core.messages import HumanMessage
+from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import RetryPolicy
@@ -15,6 +16,7 @@ from agentm.core.compression import build_compression_hook
 from agentm.core.prompt import load_prompt_template
 from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
+from agentm.models.types import TaskType
 from agentm.tools.think import think
 
 
@@ -84,7 +86,7 @@ def create_sub_agent(
     agent_id: str,
     config: AgentConfig,
     tool_registry: ToolRegistry,
-    task_type: Literal["scout", "verify", "deep_analyze"] = "scout",
+    task_type: TaskType = "scout",
     model_config: ModelConfig | None = None,
     trajectory: TrajectoryCollector | None = None,
     task_id: str | None = None,
@@ -106,7 +108,7 @@ def create_sub_agent(
             llm_kwargs["base_url"] = model_config.base_url
     model = ChatOpenAI(**llm_kwargs)
 
-    tools = [
+    tools: list[BaseTool] = [
         tool_registry.get(name).create_with_config(**config.tool_settings.get(name, {}))
         for name in config.tools
     ]
@@ -119,15 +121,15 @@ def create_sub_agent(
     if config.prompt is None:
         if config.task_type_prompts and task_type in config.task_type_prompts:
             prompt = load_prompt_template(
-                config.task_type_prompts[task_type], **template_context
+                config.task_type_prompts[task_type], base_dir=None, **template_context
             )
         else:
             prompt = ""
     else:
-        prompt = load_prompt_template(config.prompt, **template_context)
+        prompt = load_prompt_template(config.prompt, base_dir=None, **template_context)
         if config.task_type_prompts and task_type in config.task_type_prompts:
             overlay = load_prompt_template(
-                config.task_type_prompts[task_type], **template_context
+                config.task_type_prompts[task_type], base_dir=None, **template_context
             )
             prompt = prompt + "\n\n" + overlay
 
@@ -285,7 +287,7 @@ class AgentPool:
     def create_worker(
         self,
         agent_id: str,
-        task_type: str,
+        task_type: TaskType,
         task_id: str | None = None,
     ) -> Any:
         """Create a fresh compiled worker agent subgraph.
@@ -305,7 +307,7 @@ class AgentPool:
                 agent_id=agent_id,
                 config=self._worker_config,
                 tool_registry=self._tool_registry,
-                task_type=task_type,  # type: ignore[arg-type]
+                task_type=task_type,
                 model_config=self._model_config,
                 trajectory=self._trajectory,
                 task_id=task_id,

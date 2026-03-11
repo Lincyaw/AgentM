@@ -150,9 +150,7 @@ class TestRecallHistoryWithCompression:
         mock_graph = MagicMock()
         mock_state = MagicMock()
         mock_state.values = {
-            "compression_refs": [
-                {"from_checkpoint_id": "s0", "to_checkpoint_id": "s5"}
-            ]
+            "compression_refs": [{"from_checkpoint_id": "s0", "to_checkpoint_id": "s5"}]
         }
         mock_graph.get_state.return_value = mock_state
 
@@ -171,9 +169,7 @@ class TestRecallHistoryWithCompression:
         )
 
         # Patch the lazy import inside recall_history
-        with patch(
-            "langchain_openai.ChatOpenAI", mock_llm_class
-        ):
+        with patch("langchain_openai.ChatOpenAI", mock_llm_class):
             result = orch_tools["recall_history"]("What was the CPU breakdown?")
 
         assert "85%" in result
@@ -184,9 +180,7 @@ class TestRecallHistoryWithCompression:
         mock_graph = MagicMock()
         mock_state = MagicMock()
         mock_state.values = {
-            "compression_refs": [
-                {"from_checkpoint_id": "s0", "to_checkpoint_id": "s5"}
-            ]
+            "compression_refs": [{"from_checkpoint_id": "s0", "to_checkpoint_id": "s5"}]
         }
         mock_graph.get_state.return_value = mock_state
 
@@ -205,9 +199,7 @@ class TestRecallHistoryWithCompression:
         mock_graph = MagicMock()
         mock_state = MagicMock()
         mock_state.values = {
-            "compression_refs": [
-                {"from_checkpoint_id": "s0", "to_checkpoint_id": "s5"}
-            ]
+            "compression_refs": [{"from_checkpoint_id": "s0", "to_checkpoint_id": "s5"}]
         }
         mock_graph.get_state.return_value = mock_state
         mock_graph.get_state_history.side_effect = RuntimeError("DB connection lost")

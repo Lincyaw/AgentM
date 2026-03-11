@@ -14,6 +14,8 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
+from agentm.models.types import TaskType
+
 
 class WorkerResult(TypedDict):
     """Structured result returned by collect_and_compress.
@@ -49,7 +51,7 @@ class WorkerState(TypedDict):
 
     # Set by dispatch, read-only for llm_call / tool_node / collect_and_compress
     task_id: str
-    task_type: str          # "scout" | "verify" | "deep_analyze"
+    task_type: TaskType
     instruction: str
     hypothesis_id: str | None
 
