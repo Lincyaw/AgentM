@@ -48,6 +48,7 @@ class HypothesisDrivenState(BaseExecutorState):
     notebook: DiagnosticNotebook
     current_hypothesis: Optional[str]
     compression_refs: list[CompressionRef]
+    structured_response: Optional[Any]
 
 
 class SequentialDiagnosisState(BaseExecutorState):

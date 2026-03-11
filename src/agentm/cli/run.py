@@ -8,6 +8,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from langchain_core.messages import HumanMessage
@@ -17,6 +18,7 @@ import agentm.tools.observability as obs_tools
 from agentm.builder import AgentSystemBuilder
 from agentm.config.loader import load_scenario_config, load_system_config
 from agentm.core.debug_console import DebugConsole
+from agentm.core.trajectory import TrajectoryCollector
 from agentm.server.app import broadcast_event, create_dashboard_app
 
 
@@ -182,9 +184,12 @@ def _print_event(event: dict, step: int, verbose: bool) -> None:
     for node_name, node_data in event.items():
         if node_name == "__interrupt__":
             continue
+        if not isinstance(node_data, dict):
+            continue
 
-        # Structured output from generate_structured_response node
-        if node_name == "generate_structured_response":
+        # Structured output from generate_structured_response node (react mode)
+        # or synthesize node (node mode)
+        if node_name in ("generate_structured_response", "synthesize"):
             sr = node_data.get("structured_response")
             if sr is not None:
                 console.print("\n[bold green][Structured Output][/]")
@@ -247,3 +252,208 @@ def _resolve_prompt_paths(scenario_config: Any, scenario_dir: Path) -> None:
             agent_config.compression.prompt = str(
                 scenario_dir / agent_config.compression.prompt
             )
+
+
+def _print_checkpoints(snapshots: list) -> None:
+    """Print checkpoint list in a readable table."""
+    console.print("\n[bold]Available checkpoints:[/]")
+    console.print(f"{'#':>3}  {'checkpoint_id':<40}  {'step':>5}  {'time':<19}  next_node")
+    console.print("-" * 90)
+    for i, snap in enumerate(snapshots):
+        cid = snap.config["configurable"].get("checkpoint_id", "")
+        step = snap.metadata.get("step", "?")
+        ts = snap.created_at[:19] if getattr(snap, "created_at", None) else "?"
+        next_node = snap.next[0] if getattr(snap, "next", None) else "END"
+        marker = " ← latest" if i == 0 else ""
+        console.print(f"{i:>3}  {cid:<40}  {step:>5}  {ts}  {next_node}{marker}")
+
+
+async def resume_investigation(
+    trajectory_file: str,
+    data_dir: str,
+    scenario_dir: str,
+    config_path: str,
+    checkpoint_id: str | None = None,
+    list_only: bool = False,
+    dashboard: bool = False,
+    dashboard_port: int = 8765,
+    dashboard_host: str = "127.0.0.1",
+    verbose: bool = False,
+) -> None:
+    """Resume an interrupted investigation from a trajectory file."""
+    # Apply env-var overrides
+    if api_key := os.environ.get("AGENTM_API_KEY"):
+        os.environ.setdefault("OPENAI_API_KEY", api_key)
+    if base_url := os.environ.get("AGENTM_API_BASE_URL"):
+        os.environ.setdefault("OPENAI_BASE_URL", base_url)
+
+    # 1. Read metadata from trajectory file
+    traj_path = Path(trajectory_file)
+    if not traj_path.exists():
+        console.print(f"[red]ERROR: Trajectory file not found: {trajectory_file}[/]")
+        sys.exit(1)
+
+    meta = TrajectoryCollector.read_metadata(traj_path)
+    thread_id = meta.get("thread_id", "")
+    checkpoint_db = meta.get("checkpoint_db", "")
+
+    if not thread_id:
+        console.print("[red]ERROR: Trajectory file has no thread_id metadata.[/]")
+        console.print("[dim]This trajectory was created before resume support was added.[/]")
+        sys.exit(1)
+
+    console.rule("AgentM — Resume Investigation")
+    console.print(f"Trajectory: [cyan]{trajectory_file}[/]")
+    console.print(f"Thread ID:  [cyan]{thread_id}[/]")
+    console.print(f"Checkpoint DB: [cyan]{checkpoint_db or '(none)'}[/]")
+
+    # 2. Load configs
+    project_root = Path(config_path).resolve().parent.parent
+    scenario_path = Path(scenario_dir)
+    if not scenario_path.is_absolute():
+        scenario_path = project_root / scenario_path
+
+    system_config = load_system_config(config_path)
+    scenario_config = load_scenario_config(scenario_path / "scenario.yaml")
+
+    # Override storage to point at the saved checkpoint db
+    if checkpoint_db:
+        system_config.storage.checkpointer.backend = "sqlite"
+        system_config.storage.checkpointer.url = checkpoint_db
+
+    # Override from env
+    if model := os.environ.get("AGENTM_ORCHESTRATOR_MODEL"):
+        scenario_config.orchestrator.model = model
+    if model := os.environ.get("AGENTM_WORKER_MODEL"):
+        scenario_config.agents["worker"].model = model
+
+    # 3. Initialize data
+    if data_dir:
+        result = obs_tools.set_data_directory(data_dir)
+        init_info = json.loads(result)
+        if "error" in init_info:
+            console.print(f"[red]ERROR: {init_info['error']}[/]")
+            sys.exit(1)
+        console.print(f"Data initialized: {len(init_info['files'])} parquet files")
+
+    # Resolve prompt paths
+    _resolve_prompt_paths(scenario_config, scenario_path)
+
+    # 4. Build AgentSystem (reuse existing thread_id → picks up saved checkpoints)
+    system = AgentSystemBuilder.build(
+        system_type="hypothesis_driven",
+        scenario_config=scenario_config,
+        system_config=system_config,
+        existing_thread_id=thread_id,
+    )
+
+    # Ensure async checkpointer is initialized before listing snapshots
+    await system._ensure_checkpointer()
+
+    # 5. List checkpoints (use async API for AsyncSqliteSaver compatibility)
+    langgraph_config = {"configurable": {"thread_id": thread_id}}
+    try:
+        snapshots = [s async for s in system.graph.aget_state_history(langgraph_config)]
+    except Exception as e:
+        console.print(f"[red]ERROR reading checkpoint history: {e}[/]")
+        sys.exit(1)
+
+    if not snapshots:
+        console.print("[yellow]No checkpoints found for this thread.[/]")
+        console.print("[dim]The checkpoint DB may have been moved or the thread_id is incorrect.[/]")
+        sys.exit(1)
+
+    if list_only:
+        _print_checkpoints(snapshots)
+        await system._close_checkpointer()
+        return
+
+    # 6. Select checkpoint
+    if checkpoint_id is None:
+        _print_checkpoints(snapshots)
+        console.print()
+        raw = console.input("[bold]Enter checkpoint number (0 = latest, Enter = latest): [/]").strip()
+        idx = int(raw) if raw else 0
+        if idx < 0 or idx >= len(snapshots):
+            console.print(f"[red]Invalid index {idx}. Valid range: 0–{len(snapshots) - 1}[/]")
+            await system._close_checkpointer()
+            sys.exit(1)
+        checkpoint_id = snapshots[idx].config["configurable"].get("checkpoint_id", "")
+
+    resume_config: dict = {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_id": checkpoint_id,
+        }
+    }
+    console.print(f"\nResuming from checkpoint: [cyan]{checkpoint_id[:16]}…[/]")
+
+    # 7. Setup dashboard if requested
+    dashboard_server_task = None
+    if dashboard:
+        app = create_dashboard_app(
+            graph=system.graph,
+            scenario_config=system.scenario_config,
+            task_manager=system.task_manager,
+            trajectory=system.trajectory,
+            thread_id=thread_id,
+        )
+        if system.task_manager is not None:
+            system.task_manager.set_broadcast_callback(broadcast_event)
+
+        # Wire trajectory → WebSocket (same as run_investigation)
+        if system.trajectory is not None:
+            async def _traj_to_ws(event: dict) -> None:
+                await broadcast_event({
+                    "event_type": event.get("event_type", ""),
+                    "agent_path": event.get("agent_path", []),
+                    "data": event.get("data", {}),
+                    "timestamp": event.get("timestamp", ""),
+                    "mode": "trajectory",
+                })
+            system.trajectory.add_listener(_traj_to_ws)
+
+        uvi_config = uvicorn.Config(
+            app, host=dashboard_host, port=dashboard_port, log_level="warning",
+        )
+        server = uvicorn.Server(uvi_config)
+        dashboard_server_task = asyncio.create_task(server.serve())
+        await asyncio.sleep(0.3)
+        console.print(
+            f"Dashboard: [link=http://localhost:{dashboard_port}]"
+            f"http://localhost:{dashboard_port}[/link]"
+        )
+
+    # 8. Resume — astream with None input + resume_config
+    console.rule("Resuming")
+    step = 0
+    try:
+        async for event in system.graph.astream(None, config=resume_config):
+            step += 1
+            _print_event(event, step, verbose)
+            # Record node events to trajectory so dashboard gets live updates
+            if system.trajectory is not None:
+                for node_name, node_data in event.items():
+                    if node_name == "__interrupt__" or not isinstance(node_data, dict):
+                        continue
+                    await system._record_node_event(node_name, node_data, step)
+    except KeyboardInterrupt:
+        console.print("\n[yellow][!] Interrupted by user.[/]")
+    except Exception as e:
+        console.print(f"\n[red][ERROR] {e}[/]")
+        if verbose:
+            traceback.print_exc()
+    finally:
+        await system._close_checkpointer()
+        console.rule("Resume complete")
+        console.print(f"Steps executed: {step}")
+
+    if dashboard_server_task is not None:
+        console.print(
+            f"\nDashboard running at [link=http://localhost:{dashboard_port}]"
+            f"http://localhost:{dashboard_port}[/link] — press Ctrl+C to stop."
+        )
+        try:
+            await dashboard_server_task
+        except asyncio.CancelledError:
+            pass

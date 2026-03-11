@@ -158,19 +158,19 @@ class TestCreateSubAgentSignature:
     """
 
     def test_has_task_type_parameter(self):
-        from agentm.agents.sub_agent import create_sub_agent
+        from agentm.agents.react.sub_agent import create_sub_agent
         sig = inspect.signature(create_sub_agent)
         assert "task_type" in sig.parameters
 
     def test_task_type_is_literal_with_correct_values(self):
-        from agentm.agents.sub_agent import create_sub_agent
+        from agentm.agents.react.sub_agent import create_sub_agent
         annotation = _resolve_annotation(create_sub_agent, "task_type")
         values = _extract_literal_values(annotation)
         assert values is not None, "task_type should be a Literal type"
         assert values == {"scout", "verify", "deep_analyze"}
 
     def test_task_type_defaults_to_scout(self):
-        from agentm.agents.sub_agent import create_sub_agent
+        from agentm.agents.react.sub_agent import create_sub_agent
         sig = inspect.signature(create_sub_agent)
         param = sig.parameters["task_type"]
         assert param.default == "scout"

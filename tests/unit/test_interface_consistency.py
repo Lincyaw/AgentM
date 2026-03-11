@@ -62,7 +62,7 @@ class TestTaskTypeLiteralConsistency:
     """
 
     def test_dispatch_agent_and_create_sub_agent_agree(self, dispatch_agent_func):
-        from agentm.agents.sub_agent import create_sub_agent
+        from agentm.agents.react.sub_agent import create_sub_agent
 
         dispatch_values = _extract_task_type_values(dispatch_agent_func)
         sub_agent_values = _extract_task_type_values(create_sub_agent)
@@ -94,11 +94,11 @@ class TestOrchestratorCreationImports:
     """
 
     def test_build_orchestrator_prompt_exists(self):
-        from agentm.agents.orchestrator import build_orchestrator_prompt
+        from agentm.agents.react.orchestrator import build_orchestrator_prompt
         assert callable(build_orchestrator_prompt)
 
     def test_create_orchestrator_exists(self):
-        from agentm.agents.orchestrator import create_orchestrator
+        from agentm.agents.react.orchestrator import create_orchestrator
         assert callable(create_orchestrator)
 
 

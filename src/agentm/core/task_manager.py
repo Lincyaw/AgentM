@@ -289,12 +289,19 @@ class TaskManager:
         LLM request level by ChatOpenAI's built-in retry.
         """
         input_data = {"messages": [HumanMessage(content=managed.instruction)]}
+        worker_config = {
+            **config,
+            "configurable": {
+                **config.get("configurable", {}),
+                "thread_id": managed.task_id,
+            },
+        }
 
         try:
             managed.events_buffer = []
             async for namespace, mode, data in subgraph.astream(
                 input_data,
-                config,
+                worker_config,
                 stream_mode=["updates", "custom"],
                 subgraphs=True,
             ):
@@ -308,9 +315,7 @@ class TaskManager:
             managed.completed_at = datetime.now().isoformat()
             if managed.started_at:
                 started = datetime.fromisoformat(managed.started_at)
-                managed.duration_seconds = (
-                    datetime.now() - started
-                ).total_seconds()
+                managed.duration_seconds = (datetime.now() - started).total_seconds()
             self._completion_event.set()
 
             if self._trajectory is not None:
@@ -370,12 +375,15 @@ def _extract_structured_response(events_buffer: list[Any]) -> dict[str, Any] | N
             if hasattr(sr, "model_dump"):
                 return sr.model_dump()
             return sr
-        # Also handle the nested node-keyed form produced by stream_mode="updates"
-        node_data = event.get("generate_structured_response")
-        if isinstance(node_data, dict) and "structured_response" in node_data:
-            sr = node_data["structured_response"]
-            if hasattr(sr, "model_dump"):
-                return sr.model_dump()
-            return sr
+        # Handle the nested node-keyed form produced by stream_mode="updates".
+        # react layer: node is "generate_structured_response"
+        # node layer:  node is "collect_and_compress"
+        for node_key in ("generate_structured_response", "collect_and_compress"):
+            node_data = event.get(node_key)
+            if isinstance(node_data, dict) and "structured_response" in node_data:
+                sr = node_data["structured_response"]
+                if hasattr(sr, "model_dump"):
+                    return sr.model_dump()
+                return sr
 
     return None

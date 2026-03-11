@@ -88,6 +88,7 @@ def create_sub_agent(
     model_config: ModelConfig | None = None,
     trajectory: TrajectoryCollector | None = None,
     task_id: str | None = None,
+    checkpointer: Any = None,
 ) -> Any:
     """Create a Sub-Agent subgraph via create_react_agent. Returns a CompiledGraph.
 
@@ -164,7 +165,7 @@ def create_sub_agent(
         )
         pre_model_hook = _chain_hooks(pre_model_hook, llm_input_hook)
 
-    graph = create_react_agent(
+    agent_kwargs: dict[str, Any] = dict(
         model=model,
         tools=tools,
         prompt=prompt,
@@ -172,16 +173,21 @@ def create_sub_agent(
         pre_model_hook=pre_model_hook,
         response_format=ANSWER_SCHEMA[task_type],
     )
+    if checkpointer is not None:
+        agent_kwargs["checkpointer"] = checkpointer
+    graph = create_react_agent(**agent_kwargs)
 
     # Retry structured output parsing on validation failures.
     # Pydantic ValidationError is a ValueError subclass, which
     # default_retry_on excludes — so we use a custom retry_on.
     sr_node = graph.nodes.get("generate_structured_response")
     if sr_node is not None:
-        sr_node.retry_policy = RetryPolicy(
-            max_attempts=3,
-            retry_on=lambda exc: isinstance(exc, (ValueError, TypeError)),
-        )
+        sr_node.retry_policy = [
+            RetryPolicy(
+                max_attempts=3,
+                retry_on=lambda exc: isinstance(exc, (ValueError, TypeError)),
+            )
+        ]
 
     return graph
 
@@ -258,11 +264,13 @@ class AgentPool:
         tool_registry: ToolRegistry,
         model_config: ModelConfig | None = None,
         trajectory: TrajectoryCollector | None = None,
+        checkpointer: Any = None,
     ) -> None:
         self._worker_config = scenario_config.agents["worker"]
         self._tool_registry = tool_registry
         self._model_config = model_config
         self._trajectory = trajectory
+        self._checkpointer = checkpointer
 
     @property
     def worker_max_steps(self) -> int:
@@ -277,9 +285,27 @@ class AgentPool:
     ) -> Any:
         """Create a fresh compiled worker agent subgraph.
 
+        Selects the implementation based on ``execution.subgraph_mode``:
+        - ``"react"`` (default): create_react_agent (react/sub_agent.py)
+        - ``"node"``: manually-controlled 4-node graph (node/worker.py)
+
         Each call compiles a new subgraph so that *agent_id* and *task_id*
         are baked into the hooks — no shared state between dispatches.
         """
+        mode = self._worker_config.execution.subgraph_mode
+        if mode == "node":
+            from agentm.agents.node.worker import build_worker_subgraph
+
+            return build_worker_subgraph(
+                agent_id=agent_id,
+                config=self._worker_config,
+                tool_registry=self._tool_registry,
+                task_type=task_type,  # type: ignore[arg-type]
+                model_config=self._model_config,
+                trajectory=self._trajectory,
+                task_id=task_id,
+                checkpointer=self._checkpointer,
+            )
         return create_sub_agent(
             agent_id,
             self._worker_config,
@@ -288,4 +314,5 @@ class AgentPool:
             self._model_config,
             self._trajectory,
             task_id=task_id,
+            checkpointer=self._checkpointer,
         )

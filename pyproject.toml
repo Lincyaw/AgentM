@@ -21,6 +21,7 @@ dependencies = [
     "typer>=0.15",
     "langgraph-checkpoint-sqlite>=2.0",
     "aiosqlite>=0.22.1",
+    "langchain>=1.2.10",
 ]
 
 [dependency-groups]

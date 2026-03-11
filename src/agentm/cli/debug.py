@@ -59,7 +59,7 @@ def analyze_trajectory(
 
 
 def _load_events(path: Path) -> list[dict]:
-    """Load events from a JSONL file."""
+    """Load events from a JSONL file, skipping the metadata header line."""
     events: list[dict] = []
     with open(path, encoding="utf-8") as f:
         for line_num, line in enumerate(f, 1):
@@ -67,9 +67,14 @@ def _load_events(path: Path) -> list[dict]:
             if not line:
                 continue
             try:
-                events.append(json.loads(line))
+                data = json.loads(line)
             except json.JSONDecodeError:
                 console.print(f"[yellow]Warning: invalid JSON at line {line_num}, skipping[/]")
+                continue
+            # Skip metadata header line (identified by _meta key)
+            if "_meta" in data:
+                continue
+            events.append(data)
     return events
 
 

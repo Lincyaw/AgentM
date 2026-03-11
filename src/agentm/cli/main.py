@@ -1,4 +1,4 @@
-"""AgentM CLI — typer application with run and debug commands."""
+"""AgentM CLI — typer application with run, debug, and resume commands."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import asyncio
 import typer
 
 from agentm.cli.debug import analyze_trajectory
-from agentm.cli.run import run_investigation
+from agentm.cli.run import resume_investigation, run_investigation
 
 app = typer.Typer(
     name="agentm",
@@ -88,3 +88,54 @@ def debug(
 
 def main() -> None:
     app()
+
+
+@app.command()
+def resume(
+    trajectory_file: str = typer.Argument(help="Path to trajectory .jsonl file"),
+    data_dir: str = typer.Option("", "--data-dir", help="Observability data directory"),
+    scenario: str = typer.Option(
+        "config/scenarios/rca_hypothesis",
+        "--scenario",
+        help="Scenario directory",
+    ),
+    config: str = typer.Option(
+        "config/system.yaml", "--config", help="System config YAML"
+    ),
+    checkpoint: str | None = typer.Option(
+        None, "--checkpoint", help="Checkpoint ID to restore (skips interactive selection)"
+    ),
+    list_checkpoints: bool = typer.Option(
+        False, "--list", help="List available checkpoints without executing"
+    ),
+    dashboard: bool = typer.Option(
+        False, "--dashboard", help="Start web dashboard after resuming"
+    ),
+    port: int = typer.Option(
+        8765, "--port", help="Dashboard server port (requires --dashboard)"
+    ),
+    dashboard_host: str = typer.Option(
+        "127.0.0.1", "--dashboard-host", help="Dashboard server bind address"
+    ),
+    verbose: bool = typer.Option(False, "--verbose", help="Extra detail in output"),
+) -> None:
+    """Resume an interrupted investigation from a trajectory file.
+
+    Without --checkpoint: shows an interactive list to pick a restore point.
+    With --list: only lists available checkpoints, does not execute.
+    With --checkpoint <id>: resumes directly from the given checkpoint ID.
+    """
+    asyncio.run(
+        resume_investigation(
+            trajectory_file=trajectory_file,
+            data_dir=data_dir,
+            scenario_dir=scenario,
+            config_path=config,
+            checkpoint_id=checkpoint,
+            list_only=list_checkpoints,
+            dashboard=dashboard,
+            dashboard_port=port,
+            dashboard_host=dashboard_host,
+            verbose=verbose,
+        )
+    )

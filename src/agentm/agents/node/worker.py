@@ -1,0 +1,449 @@
+"""Node-based worker subgraph.
+
+Architecture (4 nodes, self-controlled ReAct loop):
+
+    START → dispatch → llm_call ↔ tool_node → collect_and_compress → END
+
+Differences from react/sub_agent.py (create_react_agent):
+- ``route_after_llm`` decides the next node — the framework never sees
+  a bare AIMessage with no tool_calls as a terminal condition.
+- ``collect_and_compress`` always runs at the end regardless of how the
+  LLM exited the loop, guaranteeing a non-null structured result.
+- Budget is enforced inside ``llm_call`` (counter + injected SystemMessage)
+  rather than via pre_model_hook, giving finer control over the loop.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Literal, cast
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_openai import ChatOpenAI
+from langgraph.graph import END, START, StateGraph
+
+from agentm.agents.node.state import WorkerResult, WorkerState
+from agentm.config.schema import AgentConfig, ModelConfig
+from agentm.core.compression import build_compression_hook, count_tokens
+from agentm.core.prompt import load_prompt_template
+from agentm.core.tool_registry import ToolRegistry
+from agentm.core.trajectory import TrajectoryCollector
+from agentm.tools.think import think
+
+
+# ---------------------------------------------------------------------------
+# Answer schemas (reused from react layer for API compatibility)
+# ---------------------------------------------------------------------------
+
+from agentm.agents.react.sub_agent import (  # noqa: E402
+    ANSWER_SCHEMA,
+    DeepAnalyzeAnswer,
+    ScoutAnswer,
+    VerifyAnswer,
+)
+
+_TASK_TYPE_LABEL: dict[str, str] = {
+    "scout": "Scout",
+    "verify": "Verify",
+    "deep_analyze": "DeepAnalyze",
+}
+
+
+# ---------------------------------------------------------------------------
+# Tool tip formatting (mirrors graph.py in reference implementation)
+# ---------------------------------------------------------------------------
+
+def _format_tool_tips(tips: list[dict[str, Any]]) -> str:
+    """Format cross-worker error tips as a markdown section."""
+    if not tips:
+        return ""
+    by_tool: dict[str, list[dict]] = {}
+    for tip in tips:
+        by_tool.setdefault(tip.get("tool_name", "unknown"), []).append(tip)
+
+    lines = ["## Tool Usage Tips (from prior sub-agents)", ""]
+    for tool_name, tool_tips in sorted(by_tool.items()):
+        lines.append(f"### `{tool_name}`")
+        for tip in tool_tips[-5:]:  # cap at 5 per tool
+            args = tip.get("args_summary", "")
+            error = tip.get("error", "")
+            lines.append(f"- Error with args {{{args}}}: {error}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Graph builder
+# ---------------------------------------------------------------------------
+
+def build_worker_subgraph(
+    *,
+    agent_id: str,
+    config: AgentConfig,
+    tool_registry: ToolRegistry,
+    task_type: Literal["scout", "verify", "deep_analyze"] = "scout",
+    model_config: ModelConfig | None = None,
+    trajectory: TrajectoryCollector | None = None,
+    task_id: str | None = None,
+    checkpointer: Any = None,
+) -> Any:
+    """Build and compile the node-based worker subgraph.
+
+    All dependencies are injected via parameters and captured in node
+    closures — no module-level globals, safe to compile once per dispatch.
+
+    Returns a CompiledStateGraph with the same astream interface as the
+    create_react_agent subgraph produced by react/sub_agent.py.
+    """
+    # ------------------------------------------------------------------
+    # Models
+    # ------------------------------------------------------------------
+    llm_kwargs: dict[str, Any] = {
+        "model": config.model,
+        "temperature": config.temperature,
+    }
+    if model_config is not None:
+        llm_kwargs["api_key"] = model_config.api_key
+        if model_config.base_url:
+            llm_kwargs["base_url"] = model_config.base_url
+
+    model_plain = ChatOpenAI(**llm_kwargs)
+
+    # ------------------------------------------------------------------
+    # Tools
+    # ------------------------------------------------------------------
+    tools = [
+        tool_registry.get(name).create_with_config(**config.tool_settings.get(name, {}))
+        for name in config.tools
+    ]
+    tools.append(think)
+    tools_by_name = {t.name: t for t in tools}
+
+    # Dedup wrapping (optional)
+    if config.execution.dedup is not None and config.execution.dedup.enabled:
+        from agentm.agents.dedup import DedupTracker, wrap_tool_with_dedup
+
+        tracker = DedupTracker(max_cache_size=config.execution.dedup.max_cache_size)
+        tools = [wrap_tool_with_dedup(t, tracker) for t in tools]
+        tools_by_name = {t.name: t for t in tools}
+
+    model_with_tools = model_plain.bind_tools(tools)
+
+    # ------------------------------------------------------------------
+    # System prompt
+    # ------------------------------------------------------------------
+    tools_description = "\n".join(f"- `{t.name}`: {t.description}" for t in tools)
+    template_context = {"agent_id": agent_id, "tools_description": tools_description}
+
+    if config.prompt is None:
+        base_prompt = ""
+    else:
+        base_prompt = load_prompt_template(config.prompt, **template_context)
+
+    if config.task_type_prompts and task_type in config.task_type_prompts:
+        overlay = load_prompt_template(
+            config.task_type_prompts[task_type], **template_context
+        )
+        system_prompt = (base_prompt + "\n\n" + overlay).strip() if base_prompt else overlay
+    else:
+        system_prompt = base_prompt
+
+    # ------------------------------------------------------------------
+    # Config values captured by closures
+    # ------------------------------------------------------------------
+    max_steps: int = config.execution.max_steps
+    compression_cfg = config.compression
+
+    # ------------------------------------------------------------------
+    # Node 1: dispatch
+    # Build the initial message list from task state.
+    # No LLM call — purely deterministic setup.
+    # ------------------------------------------------------------------
+
+    async def dispatch(state: WorkerState) -> dict[str, Any]:
+        msgs: list[Any] = []
+
+        # System prompt with optional tool tips
+        sp_parts = [system_prompt] if system_prompt else []
+        tips_section = _format_tool_tips(state.get("tool_tips", []))
+        if tips_section:
+            sp_parts.append(tips_section)
+        if sp_parts:
+            msgs.append(SystemMessage(content="\n\n".join(sp_parts)))
+
+        # ``instruction`` may come from two sources:
+        # 1. WorkerState.instruction (populated when caller builds full state)
+        # 2. The first HumanMessage already in messages (TaskManager always
+        #    calls _execute_agent with {"messages": [HumanMessage(instruction)]})
+        instruction = state.get("instruction", "")
+        if not instruction:
+            for m in state.get("messages", []):
+                if isinstance(m, HumanMessage):
+                    instruction = str(m.content)
+                    break
+
+        if instruction:
+            msgs.append(HumanMessage(content=instruction))
+        return {"messages": msgs}
+
+    # ------------------------------------------------------------------
+    # Node 2: llm_call
+    # Invoke model_with_tools. Injects budget reminder when running low.
+    # Applies context compression when token limit approached.
+    # Records llm_start trajectory event.
+    # ------------------------------------------------------------------
+
+    compression_hook = (
+        build_compression_hook(compression_cfg) if compression_cfg is not None else None
+    )
+
+    async def llm_call(state: WorkerState) -> dict[str, Any]:
+        messages = list(state.get("messages", []))
+
+        # Count real tool calls (think is free). Mirrors react budget_hook logic:
+        # AI messages without tool_calls also count as a step (LLM responded but
+        # chose not to call a tool — still consumed a round-trip).
+        used = 0
+        for m in messages:
+            if not isinstance(m, AIMessage):
+                continue
+            tool_calls = m.tool_calls or []
+            if not tool_calls or any(tc.get("name") != "think" for tc in tool_calls):
+                used += 1
+        remaining = max(0, max_steps - used)
+
+        if remaining <= 3:
+            budget_text = (
+                f"WARNING: {remaining}/{max_steps} steps left. "
+                "Summarize findings NOW. Do NOT call any more tools."
+            )
+            messages = [*messages, SystemMessage(content=budget_text)]
+        elif remaining <= max_steps // 3:
+            budget_text = (
+                f"BUDGET: {remaining}/{max_steps} steps remaining. "
+                "Start wrapping up — prioritize critical queries."
+            )
+            messages = [*messages, SystemMessage(content=budget_text)]
+
+        # Context compression (returns llm_input_messages or messages)
+        if compression_hook is not None:
+            hook_out = compression_hook({"messages": messages})
+            llm_messages = hook_out.get("llm_input_messages") or hook_out.get("messages", messages)
+        else:
+            llm_messages = messages
+
+        # Trajectory: record llm_start
+        if trajectory is not None:
+            trajectory.record_sync(
+                event_type="llm_start",
+                agent_path=["orchestrator", agent_id],
+                data={"message_count": len(llm_messages)},
+                task_id=task_id,
+            )
+
+        response = await model_with_tools.ainvoke(llm_messages)
+
+        # Trajectory: record tool_calls or llm_end
+        if trajectory is not None:
+            ai_msg = cast(AIMessage, response)
+            if ai_msg.tool_calls:
+                for tc in ai_msg.tool_calls:
+                    trajectory.record_sync(
+                        event_type="tool_call",
+                        agent_path=["orchestrator", agent_id],
+                        data={"tool_name": tc.get("name", ""), "args": tc.get("args", {})},
+                        task_id=task_id,
+                    )
+            elif ai_msg.content:
+                trajectory.record_sync(
+                    event_type="llm_end",
+                    agent_path=["orchestrator", agent_id],
+                    data={"content": str(ai_msg.content)},
+                    task_id=task_id,
+                )
+
+        return {"messages": [response]}
+
+    # ------------------------------------------------------------------
+    # Node 3: tool_node
+    # Execute all tool calls from the last AIMessage.
+    # Errors are caught and returned as ToolMessages (Layer 1 recovery).
+    # ------------------------------------------------------------------
+
+    async def tool_node(state: WorkerState) -> dict[str, Any]:
+        last = cast(AIMessage, state["messages"][-1])
+        tool_msgs: list[ToolMessage] = []
+
+        for tc in last.tool_calls:
+            tc_id = tc.get("id") or ""
+            tc_name = tc.get("name") or ""
+
+            if not tc_name:
+                tool_msgs.append(
+                    ToolMessage(content="(skipped: empty tool name)", tool_call_id=tc_id)
+                )
+                continue
+
+            tool = tools_by_name.get(tc_name)
+            if tool is None:
+                tool_msgs.append(
+                    ToolMessage(
+                        content=f"Tool '{tc_name}' not found. Available: {list(tools_by_name)}",
+                        tool_call_id=tc_id,
+                    )
+                )
+                continue
+
+            try:
+                obs = await tool.ainvoke(tc.get("args", {}))
+                result_text = str(obs)
+            except Exception as exc:
+                result_text = f"Tool execution failed: {exc}"
+
+            if trajectory is not None:
+                trajectory.record_sync(
+                    event_type="tool_result",
+                    agent_path=["orchestrator", agent_id],
+                    data={"tool_name": tc_name, "result": result_text[:500]},
+                    task_id=task_id,
+                )
+
+            tool_msgs.append(ToolMessage(content=result_text, tool_call_id=tc_id))
+
+        return {"messages": tool_msgs}
+
+    # ------------------------------------------------------------------
+    # Node 4: collect_and_compress
+    # Runs a separate LLM call (no tools) to produce a structured result.
+    # This node ALWAYS runs at loop exit, guaranteeing a non-null result.
+    # ------------------------------------------------------------------
+
+    answer_schema = ANSWER_SCHEMA[task_type]
+    compress_model = model_plain.with_structured_output(answer_schema)
+
+    _compress_system = (
+        "You are synthesizing a sub-agent investigation into a structured report. "
+        "Extract concrete findings from the conversation history. "
+        "Be precise — use exact service names, metric values, and timestamps. "
+        "Omit reasoning steps; report only findings and conclusions."
+    )
+
+    async def collect_and_compress(state: WorkerState) -> dict[str, Any]:
+        messages = list(state.get("messages", []))
+        non_system = [m for m in messages if not isinstance(m, SystemMessage)]
+
+        compress_input = [
+            SystemMessage(content=_compress_system),
+            *non_system,
+            HumanMessage(
+                content=(
+                    f"Task: {state.get('instruction', '')}\n"
+                    f"Task type: {state.get('task_type', task_type)}\n\n"
+                    "Produce your structured report now."
+                )
+            ),
+        ]
+
+        try:
+            result = await compress_model.ainvoke(compress_input)
+            structured: WorkerResult = result.model_dump()  # type: ignore[union-attr]
+        except Exception:
+            # Fallback: extract last non-tool AI message as plain findings
+            last_content = ""
+            for m in reversed(non_system):
+                if isinstance(m, AIMessage) and not m.tool_calls and m.content:
+                    last_content = str(m.content)
+                    break
+            structured = WorkerResult(
+                findings=last_content or "(no findings produced)",
+                leads=[],
+                verdict="",
+            )
+
+        return {"structured_response": structured}
+
+    # ------------------------------------------------------------------
+    # Routing
+    # ------------------------------------------------------------------
+
+    def route_after_llm(
+        state: WorkerState,
+    ) -> Literal["tool_node", "collect_and_compress"]:
+        last = state["messages"][-1]
+        if isinstance(last, AIMessage) and last.tool_calls:
+            return "tool_node"
+        # No tool calls — exit the ReAct loop and compress
+        return "collect_and_compress"
+
+    # ------------------------------------------------------------------
+    # Graph assembly
+    # ------------------------------------------------------------------
+
+    builder = StateGraph(WorkerState)
+
+    builder.add_node("dispatch", dispatch)
+    builder.add_node("llm_call", llm_call)
+    builder.add_node("tool_node", tool_node)
+    builder.add_node("collect_and_compress", collect_and_compress)
+
+    builder.add_edge(START, "dispatch")
+    builder.add_edge("dispatch", "llm_call")
+    builder.add_conditional_edges(
+        "llm_call",
+        route_after_llm,
+        {"tool_node": "tool_node", "collect_and_compress": "collect_and_compress"},
+    )
+    builder.add_edge("tool_node", "llm_call")
+    builder.add_edge("collect_and_compress", END)
+
+    compile_kwargs: dict[str, Any] = {"name": f"worker_{task_type}_{agent_id}"}
+    if checkpointer is not None:
+        compile_kwargs["checkpointer"] = checkpointer
+    return builder.compile(**compile_kwargs)
+
+
+# ---------------------------------------------------------------------------
+# AgentPool equivalent for node-based workers
+# ---------------------------------------------------------------------------
+
+class NodeAgentPool:
+    """Factory for node-based worker subgraphs.
+
+    Drop-in replacement for react.sub_agent.AgentPool — the TaskManager
+    calls ``create_worker`` in the same way regardless of which pool is used.
+    """
+
+    def __init__(
+        self,
+        scenario_config: Any,
+        tool_registry: ToolRegistry,
+        model_config: ModelConfig | None = None,
+        trajectory: TrajectoryCollector | None = None,
+        checkpointer: Any = None,
+    ) -> None:
+        self._worker_config = scenario_config.agents["worker"]
+        self._tool_registry = tool_registry
+        self._model_config = model_config
+        self._trajectory = trajectory
+        self._checkpointer = checkpointer
+
+    @property
+    def worker_max_steps(self) -> int:
+        return self._worker_config.execution.max_steps
+
+    def create_worker(
+        self,
+        agent_id: str,
+        task_type: str,
+        task_id: str | None = None,
+    ) -> Any:
+        """Compile a fresh node-based worker subgraph per dispatch."""
+        return build_worker_subgraph(
+            agent_id=agent_id,
+            config=self._worker_config,
+            tool_registry=self._tool_registry,
+            task_type=task_type,  # type: ignore[arg-type]
+            model_config=self._model_config,
+            trajectory=self._trajectory,
+            task_id=task_id,
+            checkpointer=self._checkpointer,
+        )

@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from agentm.agents.sub_agent import AgentPool
+from agentm.agents.react.sub_agent import AgentPool
 from agentm.config.schema import AgentConfig, ExecutionConfig, ScenarioConfig, OrchestratorConfig, SystemTypeConfig
 from agentm.core.task_manager import TaskManager
 from agentm.core.tool_registry import ToolRegistry
