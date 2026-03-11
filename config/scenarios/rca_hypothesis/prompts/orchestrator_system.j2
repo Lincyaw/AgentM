@@ -193,11 +193,14 @@ to identify the specific error type. Testing H2 (DB timeout cascade)."
 
 **Termination:**
 When a hypothesis reaches "confirmed" AND passes all <root_cause_depth> checks, STOP dispatching.
-Your investigation is complete — the framework will prompt you for your final structured output.
 Do NOT confirm prematurely — a wrong root cause is worse than a slow investigation.
 
-CRITICAL: You MUST end every response with a tool call. If workers are still running and you
-have no new tasks to dispatch, call check_tasks. A text-only response terminates the investigation.
+CRITICAL: Every response MUST end with a ``<decision>`` tag:
+- ``<decision>dispatch</decision>`` — you are dispatching workers or calling tools this round.
+- ``<decision>finalize</decision>`` — investigation is complete, ready for final output.
+
+The framework routes based on this tag. ``finalize`` triggers the synthesis step.
+``dispatch`` keeps the investigation loop running. Do not omit the tag.
 </workflow>
 
 <patience>

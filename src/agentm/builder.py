@@ -14,8 +14,9 @@ from langgraph.store.memory import InMemoryStore
 
 from dataclasses import asdict
 
-from agentm.agents.orchestrator import create_orchestrator
-from agentm.agents.sub_agent import AgentPool
+from agentm.agents.react.orchestrator import create_orchestrator
+from agentm.agents.node.orchestrator import create_node_orchestrator
+from agentm.agents.react.sub_agent import AgentPool
 from agentm.config.schema import ScenarioConfig, StorageConfig
 from agentm.core.state_registry import get_state_schema
 from agentm.core.task_manager import TaskManager
@@ -253,11 +254,12 @@ class AgentSystemBuilder:
         system_type: str,
         scenario_config: ScenarioConfig,
         system_config: Any | None = None,
+        existing_thread_id: str | None = None,
     ) -> AgentSystem:
         """Build an AgentSystem from a system type and scenario config."""
         get_state_schema(system_type)  # validate system_type exists
 
-        if scenario_config.orchestrator.orchestrator_mode == "react":
+        if scenario_config.orchestrator.orchestrator_mode in ("react", "node"):
             tool_registry = ToolRegistry()
 
             # Load all tool YAMLs
@@ -279,7 +281,6 @@ class AgentSystemBuilder:
                 worker_model_config = system_config.models.get(worker_config.model)
 
             agent_pool = AgentPool(scenario_config, tool_registry, worker_model_config)
-            task_manager = TaskManager()
 
             # --- Checkpointer ---
             checkpointer = None
@@ -292,7 +293,12 @@ class AgentSystemBuilder:
                 ):
                     pending_storage = system_config.storage
 
-            thread_id = str(uuid.uuid4())
+            # Wire checkpointer into agent_pool so workers persist per-task state
+            agent_pool._checkpointer = checkpointer
+
+            task_manager = TaskManager()
+
+            thread_id = existing_thread_id if existing_thread_id else str(uuid.uuid4())
             langgraph_config: dict[str, Any] = {
                 "configurable": {"thread_id": thread_id},
             }
@@ -301,9 +307,16 @@ class AgentSystemBuilder:
             trajectory: TrajectoryCollector | None = None
             if system_config is not None and system_config.debug.trajectory.enabled:
                 run_id = f"rca-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                # Compute checkpoint db path for metadata
+                checkpoint_db_path = ""
+                if system_config.storage.checkpointer.backend == "sqlite":
+                    db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
+                    checkpoint_db_path = str(Path(db_url).resolve())
                 trajectory = TrajectoryCollector(
                     run_id=run_id,
                     output_dir=system_config.debug.trajectory.output_dir,
+                    thread_id=thread_id,
+                    checkpoint_db=checkpoint_db_path,
                 )
 
             # --- Dependency injection via closure factory ---
@@ -369,14 +382,24 @@ class AgentSystemBuilder:
             # Think tool is always available for structured reasoning
             tools.append(think)
 
-            graph = create_orchestrator(
-                config=scenario_config.orchestrator,
-                tools=tools,
-                checkpointer=checkpointer,
-                store=store,
-                model_config=orch_model_config,
-                trajectory=trajectory,
-            )
+            if scenario_config.orchestrator.orchestrator_mode == "node":
+                graph = create_node_orchestrator(
+                    config=scenario_config.orchestrator,
+                    tools=tools,
+                    checkpointer=checkpointer,
+                    store=store,
+                    model_config=orch_model_config,
+                    trajectory=trajectory,
+                )
+            else:
+                graph = create_orchestrator(
+                    config=scenario_config.orchestrator,
+                    tools=tools,
+                    checkpointer=checkpointer,
+                    store=store,
+                    model_config=orch_model_config,
+                    trajectory=trajectory,
+                )
 
             # Wire graph reference for recall_history (must happen after graph compilation)
             if set_graph_ref is not None:

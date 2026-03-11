@@ -18,7 +18,8 @@ phases:
 orchestrator:
   model: "gpt-5.1"
   temperature: 0.7
-  orchestrator_mode: "react"
+  orchestrator_mode: "node"
+  max_rounds: 40
 
   prompts:
     system: "prompts/orchestrator_system.j2"
