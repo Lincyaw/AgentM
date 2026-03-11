@@ -30,6 +30,7 @@ orchestrator:
     - knowledge_search
     - knowledge_list
     - knowledge_read
+    - knowledge_write
     - read_trajectory
     - get_checkpoint_history
 
