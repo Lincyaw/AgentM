@@ -14,9 +14,8 @@ captures corrupted state → replay and time-travel produce wrong results.
 
 from __future__ import annotations
 
-import pytest
 
-from agentm.models.data import DiagnosticNotebook, ExplorationStep, Hypothesis
+from agentm.models.data import DiagnosticNotebook, ExplorationStep
 from agentm.models.enums import HypothesisStatus, Phase
 
 
@@ -41,7 +40,9 @@ class TestAddHypothesisImmutability:
         from agentm.core.notebook import add_hypothesis
 
         original = _make_notebook()
-        result = add_hypothesis(original, "H1", "Pool exhaustion", "2026-03-08T01:00:00Z")
+        result = add_hypothesis(
+            original, "H1", "Pool exhaustion", "2026-03-08T01:00:00Z"
+        )
 
         assert result is not original
 
@@ -59,7 +60,9 @@ class TestAddHypothesisImmutability:
         from agentm.core.notebook import add_hypothesis
 
         original = _make_notebook()
-        result = add_hypothesis(original, "H1", "Pool exhaustion", "2026-03-08T01:00:00Z")
+        result = add_hypothesis(
+            original, "H1", "Pool exhaustion", "2026-03-08T01:00:00Z"
+        )
 
         assert "H1" in result.hypotheses
         assert result.hypotheses["H1"].description == "Pool exhaustion"

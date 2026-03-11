@@ -8,7 +8,9 @@ from typing import Any
 from jinja2 import Template
 
 
-def load_prompt_template(path: Path | str, base_dir: Path | None = None, **context: Any) -> str:
+def load_prompt_template(
+    path: Path | str, *, base_dir: Path | None = None, **context: Any
+) -> str:
     """Load a Jinja2 prompt template and render it with the given context.
 
     Args:

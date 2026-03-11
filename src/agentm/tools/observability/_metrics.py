@@ -77,7 +77,9 @@ async def query_metrics_ohlc_abnormal(
         end_time: Optional end time (ISO format).
         filters: Optional JSON, e.g. '{"service_name": "ts-order-service"}'.
     """
-    return await _query_metrics_ohlc(metric_name, "abnormal", interval, start_time, end_time, filters)
+    return await _query_metrics_ohlc(
+        metric_name, "abnormal", interval, start_time, end_time, filters
+    )
 
 
 @_safe_tool
@@ -102,4 +104,6 @@ async def query_metrics_ohlc_normal(
         end_time: Optional end time (ISO format).
         filters: Optional JSON, e.g. '{"service_name": "ts-order-service"}'.
     """
-    return await _query_metrics_ohlc(metric_name, "normal", interval, start_time, end_time, filters)
+    return await _query_metrics_ohlc(
+        metric_name, "normal", interval, start_time, end_time, filters
+    )

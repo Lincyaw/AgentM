@@ -90,7 +90,9 @@ async def query_trace_stats_abnormal(
         end_time: Optional end time (ISO format).
         filters: Optional JSON filters.
     """
-    return await _query_trace_stats("abnormal", group_by, interval, start_time, end_time, filters)
+    return await _query_trace_stats(
+        "abnormal", group_by, interval, start_time, end_time, filters
+    )
 
 
 @_safe_tool
@@ -112,7 +114,9 @@ async def query_trace_stats_normal(
         end_time: Optional end time (ISO format).
         filters: Optional JSON filters.
     """
-    return await _query_trace_stats("normal", group_by, interval, start_time, end_time, filters)
+    return await _query_trace_stats(
+        "normal", group_by, interval, start_time, end_time, filters
+    )
 
 
 # -- Service Call Graph --
@@ -217,7 +221,9 @@ async def _get_span_call_graph(trace_id: str, period: str) -> str:
     """
     rows = _query(sql, [trace_id])
     if not rows:
-        sample_tids = _query(f"SELECT DISTINCT trace_id FROM read_parquet('{file}') LIMIT 5")
+        sample_tids = _query(
+            f"SELECT DISTINCT trace_id FROM read_parquet('{file}') LIMIT 5"
+        )
         return _empty_hint(
             file,
             "get_span_call_graph",

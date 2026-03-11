@@ -20,7 +20,14 @@ class TestHypothesisStatusMatchesDesign:
     Bug: enum drifts from tool signature → LLM produces a status the code rejects.
     """
 
-    DESIGN_VALUES = {"formed", "investigating", "confirmed", "rejected", "refined", "inconclusive"}
+    DESIGN_VALUES = {
+        "formed",
+        "investigating",
+        "confirmed",
+        "rejected",
+        "refined",
+        "inconclusive",
+    }
 
     def test_enum_values_match_design_document(self):
         actual = {member.value for member in HypothesisStatus}
@@ -99,16 +106,26 @@ class TestHypothesisDrivenStateContract:
 
     def test_hypothesis_driven_state_has_all_required_fields(self):
         from agentm.models.state import HypothesisDrivenState
+
         required = (
-            "messages", "notebook", "task_id", "task_description",
-            "current_phase", "current_hypothesis", "compression_refs",
+            "messages",
+            "notebook",
+            "task_id",
+            "task_description",
+            "current_phase",
+            "current_hypothesis",
+            "compression_refs",
         )
-        annotations = HypothesisDrivenState.__annotations__
         # Include inherited annotations from BaseExecutorState
         import typing
-        all_annotations = typing.get_type_hints(HypothesisDrivenState, include_extras=True)
+
+        all_annotations = typing.get_type_hints(
+            HypothesisDrivenState, include_extras=True
+        )
         for field in required:
-            assert field in all_annotations, f"HypothesisDrivenState missing required field: {field}"
+            assert field in all_annotations, (
+                f"HypothesisDrivenState missing required field: {field}"
+            )
 
 
 class TestSubAgentStateContract:
@@ -121,7 +138,16 @@ class TestSubAgentStateContract:
 
     def test_sub_agent_state_has_all_required_fields(self):
         from agentm.models.state import SubAgentState
-        required = ("messages", "scratchpad", "observations", "tool_call_count", "compression_refs")
+
+        required = (
+            "messages",
+            "scratchpad",
+            "observations",
+            "tool_call_count",
+            "compression_refs",
+        )
         annotations = SubAgentState.__annotations__
         for field in required:
-            assert field in annotations, f"SubAgentState missing required field: {field}"
+            assert field in annotations, (
+                f"SubAgentState missing required field: {field}"
+            )

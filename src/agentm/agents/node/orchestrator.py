@@ -25,11 +25,9 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
-logger = logging.getLogger(__name__)
-
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
@@ -43,10 +41,13 @@ from agentm.core.trajectory import TrajectoryCollector
 from agentm.models.output import get_output_schema
 from agentm.models.state import HypothesisDrivenState
 
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _parse_decision(text: str) -> str:
     """Extract the value of <decision>...</decision> from LLM output.
@@ -126,17 +127,12 @@ def create_node_orchestrator(
             notebook_text = "(Investigation starting — no data collected yet)"
 
         if system_prompt_template:
-            base = load_prompt_template(
-                system_prompt_template, notebook=notebook_text
-            )
+            base = load_prompt_template(system_prompt_template, notebook=notebook_text)
         else:
             base = f"You are a root cause analysis orchestrator.\n\n{notebook_text}"
 
         # Inject round context and finalize signal (mirrors HypothesisStrategy)
-        round_block = (
-            f"\n\n<round_context>\n"
-            f"Round: {round_num}/{max_rounds}\n"
-        )
+        round_block = f"\n\n<round_context>\nRound: {round_num}/{max_rounds}\n"
         if round_num >= max_rounds:
             round_block += (
                 "\n⚠️ LAST ROUND — you MUST output "
@@ -158,9 +154,7 @@ def create_node_orchestrator(
         else None
     )
 
-    def _prepare_messages(
-        state: HypothesisDrivenState, round_num: int
-    ) -> list[Any]:
+    def _prepare_messages(state: HypothesisDrivenState, round_num: int) -> list[Any]:
         """Build message list: system prompt + history, with optional compression."""
         system_msg = SystemMessage(content=_build_system_prompt(state, round_num))
         history = list(state.get("messages", []))
@@ -168,7 +162,9 @@ def create_node_orchestrator(
 
         if compression_hook is not None:
             hook_out = compression_hook({"messages": messages})
-            return hook_out.get("llm_input_messages") or hook_out.get("messages", messages)
+            return hook_out.get("llm_input_messages") or hook_out.get(
+                "messages", messages
+            )
 
         return messages
 
@@ -197,6 +193,7 @@ def create_node_orchestrator(
 
         # Record llm_start with full message context for dashboard Messages view
         if trajectory is not None:
+
             def _full_msg(msg: Any) -> dict[str, Any]:
                 role = getattr(msg, "type", "unknown")
                 content = getattr(msg, "content", "")
@@ -204,7 +201,11 @@ def create_node_orchestrator(
                 tc = getattr(msg, "tool_calls", None)
                 if tc:
                     entry["tool_calls"] = [
-                        {"id": c.get("id", ""), "name": c.get("name", ""), "args": c.get("args", {})}
+                        {
+                            "id": c.get("id", ""),
+                            "name": c.get("name", ""),
+                            "args": c.get("args", {}),
+                        }
                         for c in tc
                     ]
                 if role == "tool":
@@ -271,14 +272,21 @@ def create_node_orchestrator(
         synth_input = [
             SystemMessage(content=output_prompt_text + json_instruction),
             *non_system,
-            HumanMessage(content="Produce your final structured report now. Output raw JSON only."),
+            HumanMessage(
+                content="Produce your final structured report now. Output raw JSON only."
+            ),
         ]
 
         try:
             result = await synthesize_model.ainvoke(synth_input)
-            structured = result.model_dump() if hasattr(result, "model_dump") else result
+            structured = (
+                result.model_dump() if hasattr(result, "model_dump") else result
+            )
         except Exception as exc:
-            logger.warning("synthesize structured output failed (%s), falling back to plain LLM", exc)
+            logger.warning(
+                "synthesize structured output failed (%s), falling back to plain LLM",
+                exc,
+            )
             # Fallback: call model without structured output, store raw text
             try:
                 raw = await model_plain.ainvoke(synth_input)

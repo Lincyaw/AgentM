@@ -27,12 +27,15 @@ class TestGetStateSchema:
     or unhelpful error with no guidance on valid values.
     """
 
-    @pytest.mark.parametrize("system_type,expected", [
-        ("hypothesis_driven", HypothesisDrivenState),
-        ("sequential", SequentialDiagnosisState),
-        ("memory_extraction", MemoryExtractionState),
-        ("decision_tree", DecisionTreeState),
-    ])
+    @pytest.mark.parametrize(
+        "system_type,expected",
+        [
+            ("hypothesis_driven", HypothesisDrivenState),
+            ("sequential", SequentialDiagnosisState),
+            ("memory_extraction", MemoryExtractionState),
+            ("decision_tree", DecisionTreeState),
+        ],
+    )
     def test_resolves_all_registered_types(self, system_type, expected):
         assert get_state_schema(system_type) is expected
 

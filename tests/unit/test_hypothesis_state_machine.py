@@ -53,7 +53,9 @@ class TestHypothesisStateMachineDesign:
 
         Bug: another state accidentally has empty transitions → hypothesis stuck.
         """
-        terminal_states = [s for s, targets in LEGAL_TRANSITIONS.items() if len(targets) == 0]
+        terminal_states = [
+            s for s, targets in LEGAL_TRANSITIONS.items() if len(targets) == 0
+        ]
         assert terminal_states == [HypothesisStatus.CONFIRMED]
 
     def test_all_non_terminal_states_can_eventually_reach_confirmed(self):
@@ -62,7 +64,10 @@ class TestHypothesisStateMachineDesign:
         Bug: state machine has a dead-end cycle (e.g., REFINED ↔ INVESTIGATING
         but INVESTIGATING can't reach CONFIRMED) → diagnosis never concludes.
         """
-        def can_reach_confirmed(start: HypothesisStatus, visited: set[HypothesisStatus]) -> bool:
+
+        def can_reach_confirmed(
+            start: HypothesisStatus, visited: set[HypothesisStatus]
+        ) -> bool:
             if start == HypothesisStatus.CONFIRMED:
                 return True
             if start in visited:
@@ -86,14 +91,19 @@ class TestHypothesisStateMachineDesign:
         This is the P7 test case from testing-strategy.md: prevents the LLM
         from hallucinating a direct REJECTED→CONFIRMED transition.
         """
-        assert HypothesisStatus.CONFIRMED not in LEGAL_TRANSITIONS[HypothesisStatus.REJECTED]
+        assert (
+            HypothesisStatus.CONFIRMED
+            not in LEGAL_TRANSITIONS[HypothesisStatus.REJECTED]
+        )
 
     def test_formed_cannot_skip_to_confirmed(self):
         """FORMED → CONFIRMED is illegal — must go through INVESTIGATING first.
 
         Bug: LLM skips investigation and confirms immediately → no evidence gathered.
         """
-        assert HypothesisStatus.CONFIRMED not in LEGAL_TRANSITIONS[HypothesisStatus.FORMED]
+        assert (
+            HypothesisStatus.CONFIRMED not in LEGAL_TRANSITIONS[HypothesisStatus.FORMED]
+        )
 
     def test_confirmed_has_no_outgoing_transitions(self):
         """Once confirmed, a hypothesis cannot change status.
@@ -111,33 +121,41 @@ class TestValidateHypothesisTransition:
     These tests will pass once the function is implemented.
     """
 
-    @pytest.mark.parametrize("current,target", [
-        (HypothesisStatus.FORMED, HypothesisStatus.INVESTIGATING),
-        (HypothesisStatus.INVESTIGATING, HypothesisStatus.CONFIRMED),
-        (HypothesisStatus.INVESTIGATING, HypothesisStatus.REJECTED),
-        (HypothesisStatus.INVESTIGATING, HypothesisStatus.REFINED),
-        (HypothesisStatus.INVESTIGATING, HypothesisStatus.INCONCLUSIVE),
-        (HypothesisStatus.REFINED, HypothesisStatus.INVESTIGATING),
-        (HypothesisStatus.INCONCLUSIVE, HypothesisStatus.INVESTIGATING),
-        (HypothesisStatus.REJECTED, HypothesisStatus.REFINED),
-    ])
+    @pytest.mark.parametrize(
+        "current,target",
+        [
+            (HypothesisStatus.FORMED, HypothesisStatus.INVESTIGATING),
+            (HypothesisStatus.INVESTIGATING, HypothesisStatus.CONFIRMED),
+            (HypothesisStatus.INVESTIGATING, HypothesisStatus.REJECTED),
+            (HypothesisStatus.INVESTIGATING, HypothesisStatus.REFINED),
+            (HypothesisStatus.INVESTIGATING, HypothesisStatus.INCONCLUSIVE),
+            (HypothesisStatus.REFINED, HypothesisStatus.INVESTIGATING),
+            (HypothesisStatus.INCONCLUSIVE, HypothesisStatus.INVESTIGATING),
+            (HypothesisStatus.REJECTED, HypothesisStatus.REFINED),
+        ],
+    )
     def test_legal_transitions_accepted(self, current, target):
         from agentm.core.notebook import validate_hypothesis_transition
+
         assert validate_hypothesis_transition(current, target) is True
 
-    @pytest.mark.parametrize("current,target", [
-        # REJECTED → CONFIRMED is the critical illegal path
-        (HypothesisStatus.REJECTED, HypothesisStatus.CONFIRMED),
-        # FORMED cannot skip investigation
-        (HypothesisStatus.FORMED, HypothesisStatus.CONFIRMED),
-        (HypothesisStatus.FORMED, HypothesisStatus.REJECTED),
-        # CONFIRMED is terminal
-        (HypothesisStatus.CONFIRMED, HypothesisStatus.INVESTIGATING),
-        (HypothesisStatus.CONFIRMED, HypothesisStatus.REJECTED),
-        # Self-transitions make no sense
-        (HypothesisStatus.FORMED, HypothesisStatus.FORMED),
-        (HypothesisStatus.INVESTIGATING, HypothesisStatus.INVESTIGATING),
-    ])
+    @pytest.mark.parametrize(
+        "current,target",
+        [
+            # REJECTED → CONFIRMED is the critical illegal path
+            (HypothesisStatus.REJECTED, HypothesisStatus.CONFIRMED),
+            # FORMED cannot skip investigation
+            (HypothesisStatus.FORMED, HypothesisStatus.CONFIRMED),
+            (HypothesisStatus.FORMED, HypothesisStatus.REJECTED),
+            # CONFIRMED is terminal
+            (HypothesisStatus.CONFIRMED, HypothesisStatus.INVESTIGATING),
+            (HypothesisStatus.CONFIRMED, HypothesisStatus.REJECTED),
+            # Self-transitions make no sense
+            (HypothesisStatus.FORMED, HypothesisStatus.FORMED),
+            (HypothesisStatus.INVESTIGATING, HypothesisStatus.INVESTIGATING),
+        ],
+    )
     def test_illegal_transitions_rejected(self, current, target):
         from agentm.core.notebook import validate_hypothesis_transition
+
         assert validate_hypothesis_transition(current, target) is False

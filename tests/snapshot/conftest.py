@@ -11,12 +11,18 @@ from typing import Any
 import pytest
 
 from agentm.agents.react.sub_agent import AgentPool
-from agentm.config.schema import AgentConfig, ExecutionConfig, ScenarioConfig, OrchestratorConfig, SystemTypeConfig
+from agentm.config.schema import (
+    AgentConfig,
+    ExecutionConfig,
+    ScenarioConfig,
+    OrchestratorConfig,
+    SystemTypeConfig,
+)
 from agentm.core.task_manager import TaskManager
 from agentm.core.tool_registry import ToolRegistry
 from agentm.core.notebook import add_hypothesis, update_hypothesis_status
 from agentm.models.data import DiagnosticNotebook, ManagedTask
-from agentm.models.enums import AgentRunStatus, HypothesisStatus, Phase
+from agentm.models.enums import AgentRunStatus, HypothesisStatus
 
 
 class _MockSubgraph:

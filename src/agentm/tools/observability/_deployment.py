@@ -46,7 +46,9 @@ async def get_deployment_graph(
     rows = _query(sql, params)
 
     services_with_pods = {r["service"] for r in rows}
-    deploy_where = ' WHERE "attr.k8s.deployment.name" IS NOT NULL AND "attr.k8s.pod.name" IS NULL'
+    deploy_where = (
+        ' WHERE "attr.k8s.deployment.name" IS NOT NULL AND "attr.k8s.pod.name" IS NULL'
+    )
     deploy_params: list[object] = []
     if service_name:
         deploy_where += " AND service_name = ?"
@@ -66,7 +68,9 @@ async def get_deployment_graph(
             rows.append(r)
 
     if not rows:
-        return json.dumps({"warning": "No Kubernetes deployment info found in metrics data."})
+        return json.dumps(
+            {"warning": "No Kubernetes deployment info found in metrics data."}
+        )
     rows = [{k: v for k, v in r.items() if v is not None and v != ""} for r in rows]
     payload = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
     return _enforce_token_limit(payload, "get_deployment_graph")

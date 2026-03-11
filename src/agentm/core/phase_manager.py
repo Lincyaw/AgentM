@@ -13,7 +13,9 @@ class PhaseManager:
 
     def __init__(self, phases: dict[str, PhaseDefinition], initial_phase: str) -> None:
         if initial_phase not in phases:
-            raise ValueError(f"Initial phase '{initial_phase}' not in phases: {list(phases.keys())}")
+            raise ValueError(
+                f"Initial phase '{initial_phase}' not in phases: {list(phases.keys())}"
+            )
         self.phases = phases
         self.current_phase = initial_phase
 
@@ -21,7 +23,9 @@ class PhaseManager:
         """Transition to the next phase. Validates the transition is allowed."""
         current_def = self.phases.get(self.current_phase)
         if current_def is None:
-            raise ValueError(f"Current phase '{self.current_phase}' not found in phases")
+            raise ValueError(
+                f"Current phase '{self.current_phase}' not found in phases"
+            )
         if next_phase not in current_def.next_phases:
             raise ValueError(
                 f"Invalid transition: {self.current_phase} -> {next_phase}. "

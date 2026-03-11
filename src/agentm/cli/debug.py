@@ -32,14 +32,17 @@ def analyze_trajectory(
 
     if filter_agent:
         events = [
-            e for e in events
-            if filter_agent in "/".join(e.get("agent_path", []))
+            e for e in events if filter_agent in "/".join(e.get("agent_path", []))
         ]
-        console.print(f"  Filtered by agent [cyan]{filter_agent}[/]: {len(events)} events")
+        console.print(
+            f"  Filtered by agent [cyan]{filter_agent}[/]: {len(events)} events"
+        )
 
     if filter_type:
         events = [e for e in events if e.get("event_type") == filter_type]
-        console.print(f"  Filtered by type [cyan]{filter_type}[/]: {len(events)} events")
+        console.print(
+            f"  Filtered by type [cyan]{filter_type}[/]: {len(events)} events"
+        )
 
     if not events:
         console.print("[yellow]No events match the filters.[/]")
@@ -69,7 +72,9 @@ def _load_events(path: Path) -> list[dict]:
             try:
                 data = json.loads(line)
             except json.JSONDecodeError:
-                console.print(f"[yellow]Warning: invalid JSON at line {line_num}, skipping[/]")
+                console.print(
+                    f"[yellow]Warning: invalid JSON at line {line_num}, skipping[/]"
+                )
                 continue
             # Skip metadata header line (identified by _meta key)
             if "_meta" in data:
@@ -119,8 +124,10 @@ def _print_summary(events: list[dict]) -> None:
         h_table.add_column("Final Status")
         for hid, status in sorted(hypotheses.items()):
             style = {
-                "confirmed": "green", "rejected": "red",
-                "investigating": "yellow", "formed": "dim",
+                "confirmed": "green",
+                "rejected": "red",
+                "investigating": "yellow",
+                "formed": "dim",
             }.get(status, "")
             h_table.add_row(hid, Text(status, style=style))
         console.print(h_table)
@@ -131,7 +138,9 @@ def _print_summary(events: list[dict]) -> None:
         d_table = Table(title="Task Durations", expand=True)
         d_table.add_column("Task ID", style="dim", max_width=16)
         d_table.add_column("Duration", justify="right")
-        for tid, dur in sorted(task_durations.items(), key=lambda x: x[1], reverse=True):
+        for tid, dur in sorted(
+            task_durations.items(), key=lambda x: x[1], reverse=True
+        ):
             d_table.add_row(tid[:16], f"{dur:.1f}s")
         console.print(d_table)
         console.print()

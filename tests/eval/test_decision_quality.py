@@ -20,11 +20,15 @@ class TestHypothesisGenerationQuality:
     """Evaluate whether the Orchestrator generates reasonable hypotheses
     from collected data."""
 
-    def test_generates_relevant_hypotheses(self, rca_scenario_context: dict[str, str]) -> None:
+    def test_generates_relevant_hypotheses(
+        self, rca_scenario_context: dict[str, str]
+    ) -> None:
         """Given exploration data, hypotheses should be relevant to the symptoms."""
         raise NotImplementedError("Layer 3 eval not yet implemented")
 
-    def test_avoids_duplicate_hypotheses(self, rca_scenario_context: dict[str, str]) -> None:
+    def test_avoids_duplicate_hypotheses(
+        self, rca_scenario_context: dict[str, str]
+    ) -> None:
         """Generated hypotheses should not be redundant."""
         raise NotImplementedError("Layer 3 eval not yet implemented")
 
@@ -32,10 +36,14 @@ class TestHypothesisGenerationQuality:
 class TestVerificationDecisionQuality:
     """Evaluate whether the Orchestrator makes correct confirm/reject decisions."""
 
-    def test_confirms_with_sufficient_evidence(self, rca_scenario_context: dict[str, str]) -> None:
+    def test_confirms_with_sufficient_evidence(
+        self, rca_scenario_context: dict[str, str]
+    ) -> None:
         """Orchestrator should confirm when evidence is strong."""
         raise NotImplementedError("Layer 3 eval not yet implemented")
 
-    def test_rejects_with_contradicting_evidence(self, rca_scenario_context: dict[str, str]) -> None:
+    def test_rejects_with_contradicting_evidence(
+        self, rca_scenario_context: dict[str, str]
+    ) -> None:
         """Orchestrator should reject when evidence contradicts."""
         raise NotImplementedError("Layer 3 eval not yet implemented")

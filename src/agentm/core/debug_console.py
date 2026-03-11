@@ -94,12 +94,14 @@ class DebugConsole:
             if tid in self._agents:
                 self._agents[tid]["status"] = "failed"
         elif event_type == "tool_call":
-            self._tool_calls.append({
-                "tool": evt_data.get("tool_name", ""),
-                "args": str(evt_data.get("args", ""))[:60],
-                "time": event.get("timestamp", "")[-12:],
-                "agent": "/".join(event.get("agent_path", [])),
-            })
+            self._tool_calls.append(
+                {
+                    "tool": evt_data.get("tool_name", ""),
+                    "args": str(evt_data.get("args", ""))[:60],
+                    "time": event.get("timestamp", "")[-12:],
+                    "agent": "/".join(event.get("agent_path", [])),
+                }
+            )
             self._tool_calls = self._tool_calls[-20:]
         elif event_type == "hypothesis_update":
             hid = evt_data.get("hypothesis_id", "")

@@ -11,18 +11,19 @@ from dataclasses import replace
 from agentm.core.compression import (
     build_compression_hook,
     compress_completed_phase,
-    count_tokens,
     sub_agent_compression_hook,
 )
 from agentm.config.schema import CompressionConfig
-from agentm.models.data import DiagnosticNotebook, ExplorationStep, PhaseSummary
+from agentm.models.data import DiagnosticNotebook, ExplorationStep
 from agentm.models.enums import Phase
 
 
 class TestPhaseCompressionIntegrity:
     """P6: compress_completed_phase preserves data for future recall."""
 
-    def test_compression_creates_phase_summary(self, notebook: DiagnosticNotebook) -> None:
+    def test_compression_creates_phase_summary(
+        self, notebook: DiagnosticNotebook
+    ) -> None:
         """Compressing a phase should create a PhaseSummary."""
         step = ExplorationStep(
             step_number=0,
@@ -39,7 +40,9 @@ class TestPhaseCompressionIntegrity:
         assert compressed.phase_summaries[0].phase == "exploration"
         assert "dispatched infra agent" in compressed.phase_summaries[0].actions_taken
 
-    def test_compression_removes_phase_steps(self, notebook: DiagnosticNotebook) -> None:
+    def test_compression_removes_phase_steps(
+        self, notebook: DiagnosticNotebook
+    ) -> None:
         """Compressed phase steps should be removed from exploration_history."""
         steps = [
             ExplorationStep(

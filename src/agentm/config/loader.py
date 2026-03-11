@@ -36,8 +36,10 @@ def _substitute(value: Any) -> Any:
         return [_substitute(item) for item in value]
     if isinstance(value, str):
         has_env_ref = _ENV_VAR_PATTERN.search(value) is not None
+
         def _replace(match: re.Match[str]) -> str:
             return _resolve_env_ref(match.group(1))
+
         result = _ENV_VAR_PATTERN.sub(_replace, value)
         if has_env_ref and not result:
             return None

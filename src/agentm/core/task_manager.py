@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime
-from typing import Any, Callable, Literal
+from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage
 
+from agentm.core.trajectory import TrajectoryCollector
 from agentm.models.data import ManagedTask
 from agentm.models.enums import AgentRunStatus
+from agentm.models.types import TaskType
 
 
 class TaskManager:
@@ -30,12 +32,10 @@ class TaskManager:
     def __init__(self) -> None:
         self._tasks: dict[str, ManagedTask] = {}
         self._broadcast_callback: Callable[..., Any] | None = None
-        self._trajectory: Any | None = (
-            None  # TrajectoryCollector (avoid circular import)
-        )
+        self._trajectory: TrajectoryCollector | None = None
         self._completion_event = asyncio.Event()
 
-    def set_trajectory(self, trajectory: Any) -> None:
+    def set_trajectory(self, trajectory: TrajectoryCollector) -> None:
         """Set the TrajectoryCollector for event recording."""
         self._trajectory = trajectory
 
@@ -44,7 +44,7 @@ class TaskManager:
         self._broadcast_callback = callback
 
     @property
-    def trajectory(self) -> Any | None:
+    def trajectory(self) -> TrajectoryCollector | None:
         """Access the TrajectoryCollector (read-only)."""
         return self._trajectory
 
@@ -52,7 +52,7 @@ class TaskManager:
         self,
         agent_id: str,
         instruction: str,
-        task_type: Literal["scout", "verify", "deep_analyze"] = "scout",
+        task_type: TaskType = "scout",
         hypothesis_id: str | None = None,
         **kwargs: Any,
     ) -> str:
@@ -232,6 +232,10 @@ class TaskManager:
         format (``{"agent": {"messages": [...]}}``), as produced by
         ``create_react_agent`` with ``stream_mode="updates"``.
         """
+        trajectory = self._trajectory
+        if trajectory is None:
+            return
+
         messages = data.get("messages", [])
         if not messages:
             for node_key, node_data in data.items():
@@ -248,7 +252,7 @@ class TaskManager:
                 tool_calls = getattr(msg, "tool_calls", [])
                 if tool_calls:
                     for tc in tool_calls:
-                        await self._trajectory.record(
+                        await trajectory.record(
                             event_type="tool_call",
                             agent_path=["orchestrator", managed.agent_id],
                             data={
@@ -258,7 +262,7 @@ class TaskManager:
                             task_id=managed.task_id,
                         )
                 if content:
-                    await self._trajectory.record(
+                    await trajectory.record(
                         event_type="llm_end",
                         agent_path=["orchestrator", managed.agent_id],
                         data={"content": content},
@@ -267,7 +271,7 @@ class TaskManager:
             elif role == "tool":
                 tool_name = getattr(msg, "name", "unknown")
                 content = getattr(msg, "content", "")
-                await self._trajectory.record(
+                await trajectory.record(
                     event_type="tool_result",
                     agent_path=["orchestrator", managed.agent_id],
                     data={

@@ -15,7 +15,9 @@ from langchain_core.tools import StructuredTool
 class ToolDefinition:
     """A registered tool definition with config-based instantiation."""
 
-    def __init__(self, name: str, func: Callable[..., Any], config_schema: dict[str, Any]) -> None:
+    def __init__(
+        self, name: str, func: Callable[..., Any], config_schema: dict[str, Any]
+    ) -> None:
         self.name = name
         self.func = func
         self.config_schema = config_schema
@@ -46,7 +48,9 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, ToolDefinition] = {}
 
-    def register(self, name: str, func: Callable[..., Any], config_schema: dict[str, Any]) -> None:
+    def register(
+        self, name: str, func: Callable[..., Any], config_schema: dict[str, Any]
+    ) -> None:
         """Register a tool definition."""
         self._tools[name] = ToolDefinition(name, func, config_schema)
 
