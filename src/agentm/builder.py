@@ -343,9 +343,10 @@ class AgentSystemBuilder:
             store = InMemoryStore()
             knowledge_module.set_store(store)
 
-            # Wire checkpointer into memory module for memory-extraction system
-            if checkpointer is not None:
-                memory_module.set_checkpointer(checkpointer)
+            # Wire checkpointer DB path into memory module for memory-extraction system
+            if system_config is not None:
+                db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
+                memory_module.set_db_path(str(Path(db_url).resolve()))
 
             # Knowledge tools are standalone functions (not factory-created)
             KNOWLEDGE_TOOLS: dict[str, Any] = {
