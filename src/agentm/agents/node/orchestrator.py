@@ -277,11 +277,34 @@ def create_node_orchestrator(
         messages = list(state.get("messages", []))
         non_system = [m for m in messages if not isinstance(m, SystemMessage)]
 
-        # Append JSON schema instruction to ensure the model outputs valid JSON
-        schema_json = output_schema.model_json_schema() if output_schema else {}
+        # Build a field-level example from the schema so the model sees
+        # field names + types, NOT the raw JSON Schema meta-object.
+        import json as _json
+
+        def _schema_to_example(schema_cls: type[BaseModel]) -> dict:
+            """Create a placeholder dict from Pydantic schema fields."""
+            example: dict = {}
+            for name, field_info in schema_cls.model_fields.items():
+                ann = field_info.annotation
+                if ann is int:
+                    example[name] = 0
+                elif ann is float:
+                    example[name] = 0.0
+                elif ann is str:
+                    example[name] = f"<{field_info.description or name}>"
+                elif ann is bool:
+                    example[name] = False
+                elif hasattr(ann, "__origin__") and ann.__origin__ is list:
+                    example[name] = []
+                else:
+                    example[name] = f"<{field_info.description or name}>"
+            return example
+
+        example_obj = _schema_to_example(output_schema) if output_schema else {}
         json_instruction = (
-            f"\n\nYou MUST respond with a single valid JSON object matching this schema:\n"
-            f"{schema_json}\n"
+            "\n\nYou MUST respond with a single valid JSON object with these fields "
+            "(fill in actual values, not placeholders):\n"
+            f"{_json.dumps(example_obj, indent=2)}\n"
             "Do NOT include any explanation or markdown — output raw JSON only."
         )
 

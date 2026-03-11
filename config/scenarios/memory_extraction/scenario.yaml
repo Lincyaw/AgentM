@@ -2,17 +2,11 @@ system:
   type: "memory_extraction"
 
 phases:
-  collect:
-    description: "Load and summarise completed RCA trajectories"
-    next_phases: [analyze]
-  analyze:
-    description: "Identify cross-trajectory patterns"
-    next_phases: [extract]
   extract:
-    description: "Distil patterns into structured knowledge entries"
-    next_phases: [refine]
-  refine:
-    description: "Deduplicate and write entries to the knowledge store"
+    description: "Read trajectories and extract candidate knowledge entries"
+    next_phases: [consolidate]
+  consolidate:
+    description: "Deduplicate, merge, and write entries to the knowledge store"
     next_phases: []
 
 orchestrator:
@@ -38,23 +32,19 @@ orchestrator:
     prompt: "prompts/output/knowledge_summary.j2"
     schema_name: "KnowledgeSummary"
 
-# Worker agent — task_type selects the prompt
 agents:
   worker:
     model: "gpt-5.1-mini"
     temperature: 0.2
     task_type_prompts:
-      collect: "prompts/task_types/collect.j2"
-      analyze: "prompts/task_types/analyze.j2"
       extract: "prompts/task_types/extract.j2"
-      refine: "prompts/task_types/refine.j2"
     tools:
       - read_trajectory
       - get_checkpoint_history
       - knowledge_search
       - knowledge_list
       - knowledge_read
-      - knowledge_write
+      # No knowledge_write — workers are read-only
     execution:
       max_steps: 20
       timeout: 120
