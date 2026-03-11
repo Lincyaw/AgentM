@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
@@ -34,8 +34,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from agentm.config.schema import OrchestratorConfig
-from agentm.core.compression import build_compression_hook, compress_completed_phase
-from agentm.core.notebook import format_notebook_for_llm, should_compress_phase
+from agentm.core.compression import build_compression_hook
+from agentm.core.context_formatters import format_rca_context
 from agentm.core.prompt import load_prompt_template
 from agentm.core.trajectory import TrajectoryCollector
 from agentm.models.output import get_output_schema
@@ -71,6 +71,8 @@ def create_node_orchestrator(
     tools: list[Any],
     checkpointer: Any,
     store: Any,
+    state_schema: type = HypothesisDrivenState,
+    format_context: Callable[[dict], str] | None = None,
     model_config: Any | None = None,
     trajectory: TrajectoryCollector | None = None,
 ) -> Any:
@@ -79,7 +81,23 @@ def create_node_orchestrator(
     Drop-in replacement for react/orchestrator.py::create_orchestrator —
     same signature, same return type, works with the existing builder.py
     wiring unchanged.
+
+    Args:
+        config: OrchestratorConfig from the scenario YAML.
+        tools: List of tools available to the orchestrator.
+        checkpointer: LangGraph checkpointer (or None).
+        store: LangGraph store backend (or None).
+        state_schema: TypedDict class for the StateGraph. Defaults to
+            HypothesisDrivenState (backward-compatible).
+        format_context: Callable ``(state: dict) -> str`` that produces the
+            working-memory section of the system prompt. Defaults to
+            ``format_rca_context`` (notebook-based, backward-compatible).
+        model_config: Optional model configuration (API key, base_url).
+        trajectory: Optional TrajectoryCollector for event recording.
     """
+    # Default formatter: RCA notebook (preserves backward compatibility)
+    _format_context: Callable[[dict], str] = format_context or format_rca_context
+
     # ------------------------------------------------------------------
     # Model setup
     # ------------------------------------------------------------------
@@ -114,24 +132,22 @@ def create_node_orchestrator(
     # Message preparation helpers
     # ------------------------------------------------------------------
 
-    def _build_system_prompt(state: HypothesisDrivenState, round_num: int) -> str:
-        """Rebuild system prompt with current notebook and round context."""
-        notebook = state.get("notebook")
-        if notebook is not None:
-            notebook_for_llm = notebook
-            for phase in ("exploration", "generation", "verification"):
-                if should_compress_phase(notebook_for_llm, phase):
-                    notebook_for_llm = compress_completed_phase(notebook_for_llm, phase)
-            notebook_text = format_notebook_for_llm(notebook_for_llm)
-        else:
-            notebook_text = "(Investigation starting — no data collected yet)"
+    def _build_system_prompt(state: dict, round_num: int) -> str:
+        """Rebuild system prompt with current working memory and round context."""
+        context_text = _format_context(state)
 
         if system_prompt_template:
-            base = load_prompt_template(system_prompt_template, notebook=notebook_text)
+            # Pass notebook= for backward compat with RCA prompt templates that
+            # use {{ notebook }}, and context= for new templates.
+            base = load_prompt_template(
+                system_prompt_template,
+                notebook=context_text,
+                context=context_text,
+            )
         else:
-            base = f"You are a root cause analysis orchestrator.\n\n{notebook_text}"
+            base = f"You are an agent orchestrator.\n\n{context_text}"
 
-        # Inject round context and finalize signal (mirrors HypothesisStrategy)
+        # Inject round context and finalize signal
         round_block = f"\n\n<round_context>\nRound: {round_num}/{max_rounds}\n"
         if round_num >= max_rounds:
             round_block += (
@@ -154,7 +170,7 @@ def create_node_orchestrator(
         else None
     )
 
-    def _prepare_messages(state: HypothesisDrivenState, round_num: int) -> list[Any]:
+    def _prepare_messages(state: dict, round_num: int) -> list[Any]:
         """Build message list: system prompt + history, with optional compression."""
         system_msg = SystemMessage(content=_build_system_prompt(state, round_num))
         history = list(state.get("messages", []))
@@ -172,7 +188,7 @@ def create_node_orchestrator(
     # Node 1: llm_call
     # ------------------------------------------------------------------
 
-    async def llm_call(state: HypothesisDrivenState) -> dict[str, Any]:
+    async def llm_call(state: dict) -> dict[str, Any]:
         messages = list(state.get("messages", []))
         round_num = sum(1 for m in messages if isinstance(m, AIMessage)) + 1
 
@@ -233,7 +249,7 @@ def create_node_orchestrator(
 
     _inner_tool_node = ToolNode(tools)
 
-    async def tool_node(state: HypothesisDrivenState, config: RunnableConfig) -> Any:
+    async def tool_node(state: dict, config: RunnableConfig) -> Any:
         result = await _inner_tool_node.ainvoke(state, config)
         # ToolNode returns dict {"messages": [...]} for regular tools but
         # list [Command(...)] when tools return Command objects (e.g. dispatch_agent).
@@ -254,7 +270,7 @@ def create_node_orchestrator(
         else None
     )
 
-    async def synthesize(state: HypothesisDrivenState) -> dict[str, Any]:
+    async def synthesize(state: dict) -> dict[str, Any]:
         if synthesize_model is None:
             return {}
 
@@ -303,7 +319,7 @@ def create_node_orchestrator(
     # ------------------------------------------------------------------
 
     def route_after_llm(
-        state: HypothesisDrivenState,
+        state: dict,
     ) -> Literal["tool_node", "llm_call", "synthesize"]:
         last = state["messages"][-1]
         if not isinstance(last, AIMessage):
@@ -328,7 +344,7 @@ def create_node_orchestrator(
     # Graph assembly
     # ------------------------------------------------------------------
 
-    builder = StateGraph(HypothesisDrivenState)
+    builder = StateGraph(state_schema)
 
     builder.add_node("llm_call", llm_call)
     builder.add_node("tool_node", tool_node)
@@ -350,3 +366,4 @@ def create_node_orchestrator(
         compile_kwargs["store"] = store
 
     return builder.compile(name="node_orchestrator", **compile_kwargs)
+

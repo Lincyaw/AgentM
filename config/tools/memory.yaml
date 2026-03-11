@@ -1,0 +1,10 @@
+tools:
+  - name: read_trajectory
+    module: agentm.tools.memory
+    function: read_trajectory
+    parameters: {}
+
+  - name: get_checkpoint_history
+    module: agentm.tools.memory
+    function: get_checkpoint_history
+    parameters: {}

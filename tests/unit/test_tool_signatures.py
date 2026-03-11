@@ -72,11 +72,10 @@ class TestDispatchAgentSignature:
         sig = inspect.signature(orch_tools["dispatch_agent"])
         assert "task_type" in sig.parameters
 
-    def test_task_type_is_literal_with_correct_values(self, orch_tools):
+    def test_task_type_is_str(self, orch_tools):
+        """task_type is str so memory-extraction types (collect, analyze, etc.) flow through."""
         annotation = _resolve_annotation(orch_tools["dispatch_agent"], "task_type")
-        values = _extract_literal_values(annotation)
-        assert values is not None, "task_type should be a Literal type"
-        assert values == {"scout", "verify", "deep_analyze"}
+        assert annotation is str, f"task_type should be str, got: {annotation}"
 
     def test_task_type_defaults_to_scout(self, orch_tools):
         sig = inspect.signature(orch_tools["dispatch_agent"])
@@ -164,13 +163,12 @@ class TestCreateSubAgentSignature:
         sig = inspect.signature(create_sub_agent)
         assert "task_type" in sig.parameters
 
-    def test_task_type_is_literal_with_correct_values(self):
+    def test_task_type_is_str(self):
+        """task_type is str so memory-extraction types flow through alongside RCA types."""
         from agentm.agents.react.sub_agent import create_sub_agent
 
         annotation = _resolve_annotation(create_sub_agent, "task_type")
-        values = _extract_literal_values(annotation)
-        assert values is not None, "task_type should be a Literal type"
-        assert values == {"scout", "verify", "deep_analyze"}
+        assert annotation is str, f"task_type should be str, got: {annotation}"
 
     def test_task_type_defaults_to_scout(self):
         from agentm.agents.react.sub_agent import create_sub_agent
@@ -198,13 +196,12 @@ class TestTaskManagerSubmitSignature:
         sig = inspect.signature(TaskManager.submit)
         assert "task_type" in sig.parameters
 
-    def test_task_type_is_literal_with_correct_values(self):
+    def test_task_type_is_str(self):
+        """task_type is str (widened from Literal) to support multiple scenario types."""
         from agentm.core.task_manager import TaskManager
 
         annotation = _resolve_annotation(TaskManager.submit, "task_type")
-        values = _extract_literal_values(annotation)
-        assert values is not None, "task_type should be a Literal type"
-        assert values == {"scout", "verify", "deep_analyze"}
+        assert annotation is str, f"task_type should be str, got: {annotation}"
 
 
 class TestTaskManagerMethodContracts:

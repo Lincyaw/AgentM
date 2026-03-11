@@ -77,8 +77,30 @@ class CausalGraph(BaseModel):
 # Schema registry
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# KnowledgeSummary — Memory Extraction investigation output
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeSummary(BaseModel):
+    """Final output of a memory_extraction run."""
+
+    entries_created: int = Field(description="Number of new knowledge entries written.")
+    entries_updated: int = Field(description="Number of existing entries updated.")
+    entries_skipped: int = Field(
+        description="Number of entries skipped (duplicate or low confidence)."
+    )
+    categories: list[str] = Field(
+        description="Distinct knowledge categories populated during this run."
+    )
+    summary: str = Field(
+        description="One-paragraph prose summary of what was learned and stored."
+    )
+
+
 OUTPUT_SCHEMAS: dict[str, type[BaseModel]] = {
     "CausalGraph": CausalGraph,
+    "KnowledgeSummary": KnowledgeSummary,
 }
 
 

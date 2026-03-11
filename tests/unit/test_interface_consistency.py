@@ -17,29 +17,6 @@ import pytest
 from agentm.tools.orchestrator import create_orchestrator_tools
 
 
-def _extract_task_type_values(func) -> set[str]:
-    """Extract the Literal values of the task_type parameter from a function.
-
-    Handles `from __future__ import annotations` by using get_type_hints().
-    """
-    hints = get_type_hints(func, include_extras=True)
-    annotation = hints.get("task_type")
-    assert annotation is not None, f"{func.__qualname__} missing task_type annotation"
-
-    origin = get_origin(annotation)
-    if origin is Literal:
-        return set(get_args(annotation))
-
-    from typing import Annotated
-
-    if origin is Annotated:
-        inner = get_args(annotation)[0]
-        if get_origin(inner) is Literal:
-            return set(get_args(inner))
-
-    raise AssertionError(f"{func.__qualname__} task_type is not Literal: {annotation}")
-
-
 @pytest.fixture
 def dispatch_agent_func():
     """Get dispatch_agent function from factory for testing."""
@@ -51,36 +28,55 @@ def dispatch_agent_func():
 class TestTaskTypeLiteralConsistency:
     """Ref: designs/sub-agent.md § Task Types, designs/orchestrator.md § dispatch_agent
 
-    task_type Literal values must be identical across all modules that use them:
-    - tools/orchestrator.py dispatch_agent
-    - agents/sub_agent.py create_sub_agent
-    - core/task_manager.py TaskManager.submit
+    task_type is str (widened from Literal) so that memory-extraction task types
+    (collect, analyze, extract, refine) flow through alongside RCA types.
+    The ANSWER_SCHEMA registry is the single source of truth for valid values.
 
-    Bug: one module has {"scout", "verify", "deep_analyze"} but another uses
-    {"scout", "verify", "analyze"} → dispatch_agent passes "deep_analyze"
-    to create_sub_agent which doesn't recognize it.
+    Bug prevented: ANSWER_SCHEMA missing a task_type that workers use →
+    KeyError at runtime when creating the structured output model.
     """
 
-    def test_dispatch_agent_and_create_sub_agent_agree(self, dispatch_agent_func):
-        from agentm.agents.react.sub_agent import create_sub_agent
+    def test_answer_schema_covers_rca_task_types(self):
+        """ANSWER_SCHEMA must include the three RCA worker task types."""
+        from agentm.models.answer_schemas import ANSWER_SCHEMA
 
-        dispatch_values = _extract_task_type_values(dispatch_agent_func)
-        sub_agent_values = _extract_task_type_values(create_sub_agent)
-        assert dispatch_values == sub_agent_values, (
-            f"task_type Literal mismatch:\n"
-            f"  dispatch_agent: {dispatch_values}\n"
-            f"  create_sub_agent: {sub_agent_values}"
+        for task_type in ("scout", "verify", "deep_analyze"):
+            assert task_type in ANSWER_SCHEMA, (
+                f"ANSWER_SCHEMA missing RCA task type: {task_type!r}"
+            )
+
+    def test_answer_schema_covers_memory_extraction_task_types(self):
+        """ANSWER_SCHEMA must include the four memory-extraction worker task types."""
+        from agentm.models.answer_schemas import ANSWER_SCHEMA
+
+        for task_type in ("collect", "analyze", "extract", "refine"):
+            assert task_type in ANSWER_SCHEMA, (
+                f"ANSWER_SCHEMA missing memory-extraction task type: {task_type!r}"
+            )
+
+    def test_task_type_is_str_annotation(self, dispatch_agent_func):
+        """dispatch_agent task_type must be annotated as str (not Literal)."""
+        hints = get_type_hints(dispatch_agent_func, include_extras=True)
+        annotation = hints.get("task_type")
+        assert annotation is str, (
+            f"dispatch_agent task_type should be str, got: {annotation}"
         )
 
     def test_dispatch_agent_and_task_manager_submit_agree(self, dispatch_agent_func):
+        """Both dispatch_agent and TaskManager.submit must use str task_type."""
         from agentm.core.task_manager import TaskManager
 
-        dispatch_values = _extract_task_type_values(dispatch_agent_func)
-        submit_values = _extract_task_type_values(TaskManager.submit)
-        assert dispatch_values == submit_values, (
-            f"task_type Literal mismatch:\n"
-            f"  dispatch_agent: {dispatch_values}\n"
-            f"  TaskManager.submit: {submit_values}"
+        dispatch_hints = get_type_hints(dispatch_agent_func, include_extras=True)
+        submit_hints = get_type_hints(TaskManager.submit, include_extras=True)
+
+        dispatch_annotation = dispatch_hints.get("task_type")
+        submit_annotation = submit_hints.get("task_type")
+
+        assert dispatch_annotation is str, (
+            f"dispatch_agent task_type should be str, got: {dispatch_annotation}"
+        )
+        assert submit_annotation is str, (
+            f"TaskManager.submit task_type should be str, got: {submit_annotation}"
         )
 
 

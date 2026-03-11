@@ -18,11 +18,13 @@ from agentm.agents.react.orchestrator import create_orchestrator
 from agentm.agents.node.orchestrator import create_node_orchestrator
 from agentm.agents.react.sub_agent import AgentPool
 from agentm.config.schema import ScenarioConfig, StorageConfig
+from agentm.core.context_formatters import FORMAT_CONTEXT_REGISTRY
 from agentm.core.state_registry import get_state_schema
 from agentm.core.task_manager import TaskManager
 from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
 from agentm.tools import knowledge as knowledge_module
+from agentm.tools import memory as memory_module
 from agentm.tools.orchestrator import create_orchestrator_tools
 from agentm.tools.think import think
 
@@ -306,7 +308,7 @@ class AgentSystemBuilder:
             # --- Trajectory ---
             trajectory: TrajectoryCollector | None = None
             if system_config is not None and system_config.debug.trajectory.enabled:
-                run_id = f"rca-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                run_id = f"{system_type}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
                 # Compute checkpoint db path for metadata
                 checkpoint_db_path = ""
                 if system_config.storage.checkpointer.backend == "sqlite":
@@ -323,7 +325,8 @@ class AgentSystemBuilder:
 
             # --- Dependency injection via closure factory ---
             injected_tools = create_orchestrator_tools(
-                task_manager, agent_pool, trajectory=trajectory
+                task_manager, agent_pool, trajectory=trajectory,
+                config=scenario_config.orchestrator,
             )
 
             # Wire trajectory into task_manager
@@ -340,6 +343,10 @@ class AgentSystemBuilder:
             store = InMemoryStore()
             knowledge_module.set_store(store)
 
+            # Wire checkpointer into memory module for memory-extraction system
+            if checkpointer is not None:
+                memory_module.set_checkpointer(checkpointer)
+
             # Knowledge tools are standalone functions (not factory-created)
             KNOWLEDGE_TOOLS: dict[str, Any] = {
                 "knowledge_search": knowledge_module.knowledge_search,
@@ -347,7 +354,13 @@ class AgentSystemBuilder:
                 "knowledge_read": knowledge_module.knowledge_read,
             }
 
-            # Build orchestrator tools: YAML-registered + factory-injected + knowledge
+            # Memory tools are standalone functions (checkpointer injected above)
+            MEMORY_TOOLS: dict[str, Any] = {
+                "read_trajectory": memory_module.read_trajectory,
+                "get_checkpoint_history": memory_module.get_checkpoint_history,
+            }
+
+            # Build orchestrator tools: YAML-registered + factory-injected + knowledge + memory
             tools: list[Any] = []
 
             for name in scenario_config.orchestrator.tools:
@@ -376,6 +389,15 @@ class AgentSystemBuilder:
                         description=func.__doc__ or name,
                     )
                     tools.append(tool)
+                elif name in MEMORY_TOOLS:
+                    # Memory tools (standalone functions with checkpointer injected)
+                    func = MEMORY_TOOLS[name]
+                    tool = StructuredTool.from_function(
+                        func=func,
+                        name=name,
+                        description=func.__doc__ or name,
+                    )
+                    tools.append(tool)
                 elif tool_registry.has(name):
                     # YAML-registered tool (module-level function)
                     tools.append(tool_registry.get(name).create_with_config())
@@ -385,12 +407,18 @@ class AgentSystemBuilder:
             # Think tool is always available for structured reasoning
             tools.append(think)
 
+            # Resolve state schema and context formatter for this system type
+            state_schema = get_state_schema(system_type)
+            format_context = FORMAT_CONTEXT_REGISTRY.get(system_type)
+
             if scenario_config.orchestrator.orchestrator_mode == "node":
                 graph = create_node_orchestrator(
                     config=scenario_config.orchestrator,
                     tools=tools,
                     checkpointer=checkpointer,
                     store=store,
+                    state_schema=state_schema,
+                    format_context=format_context,
                     model_config=orch_model_config,
                     trajectory=trajectory,
                 )
