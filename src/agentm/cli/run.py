@@ -360,8 +360,7 @@ async def run_memory_extraction(
         traj_list = "\n".join(f"- {tid}" for tid in thread_ids)
         task = (
             f"Extract reusable knowledge from the following completed RCA "
-            f"trajectories:\n\n{traj_list}\n\n"
-            "Follow the four-phase workflow: collect → analyze → extract → refine."
+            f"trajectories:\n\n{traj_list}"
         )
 
     from agentm.models.enums import Phase
@@ -404,9 +403,6 @@ async def run_memory_extraction(
             debug_console.stop()
         await system._close_checkpointer()
 
-        # Dump knowledge store to JSON so it survives process exit
-        _dump_knowledge_store(system)
-
         if system.trajectory is not None:
             path = await system.trajectory.close()
             console.print()
@@ -425,54 +421,6 @@ async def run_memory_extraction(
             await dashboard_server_task
         except asyncio.CancelledError:
             pass
-
-
-def _dump_knowledge_store(system: Any) -> None:
-    """Dump all knowledge store entries to knowledge/knowledge.json.
-
-    Merges with any existing entries from previous runs so knowledge
-    accumulates across multiple extract invocations.
-    """
-    try:
-        from agentm.tools import knowledge as km
-
-        store = km._store_var.get()
-        if store is None:
-            return
-
-        items = store.search(("knowledge",), query=None, limit=500)
-        if not items:
-            return
-
-        new_entries: dict[str, Any] = {}
-        for item in items:
-            path = "/" + "/".join(item.namespace[1:]) + "/" + item.key
-            new_entries[path] = {"path": path, **item.value}
-
-        out_path = Path("./knowledge/knowledge.json")
-        out_path.parent.mkdir(exist_ok=True)
-
-        # Merge with existing entries
-        existing: dict[str, Any] = {}
-        if out_path.exists():
-            try:
-                for entry in json.loads(out_path.read_text(encoding="utf-8")):
-                    existing[entry["path"]] = entry
-            except Exception:
-                pass
-
-        merged = {**existing, **new_entries}
-        out_path.write_text(
-            json.dumps(list(merged.values()), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        console.print(
-            f"Knowledge saved: [green]{out_path}[/] "
-            f"({len(new_entries)} new, {len(merged)} total)"
-        )
-
-    except Exception as e:
-        console.print(f"[yellow]Could not dump knowledge store: {e}[/]")
 
 
 def _resolve_prompt_paths(scenario_config: Any, scenario_dir: Path) -> None:
