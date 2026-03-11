@@ -233,10 +233,31 @@ def build_worker_subgraph(
 
         # Trajectory: record llm_start
         if trajectory is not None:
+            def _full_msg(msg: Any) -> dict[str, Any]:
+                role = getattr(msg, "type", "unknown")
+                content = getattr(msg, "content", "")
+                entry: dict[str, Any] = {"role": role, "content": content}
+                if role == "ai":
+                    tc = getattr(msg, "tool_calls", None)
+                    if tc:
+                        entry["tool_calls"] = [
+                            {"id": c.get("id", ""), "name": c.get("name", ""), "args": c.get("args", {})}
+                            for c in tc
+                        ]
+                elif role == "tool":
+                    entry["name"] = getattr(msg, "name", "")
+                    tcid = getattr(msg, "tool_call_id", None)
+                    if tcid:
+                        entry["tool_call_id"] = tcid
+                return entry
+
             trajectory.record_sync(
                 event_type="llm_start",
                 agent_path=["orchestrator", agent_id],
-                data={"message_count": len(llm_messages)},
+                data={
+                    "message_count": len(llm_messages),
+                    "full_messages": [_full_msg(m) for m in llm_messages],
+                },
                 task_id=task_id,
             )
 
@@ -429,6 +450,11 @@ class NodeAgentPool:
     @property
     def worker_max_steps(self) -> int:
         return self._worker_config.execution.max_steps
+
+    @property
+    def worker_self_reports_trajectory(self) -> bool:
+        """Node workers record trajectory events themselves — always True."""
+        return True
 
     def create_worker(
         self,
