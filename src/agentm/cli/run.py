@@ -428,7 +428,11 @@ async def run_memory_extraction(
 
 
 def _dump_knowledge_store(system: Any) -> None:
-    """Dump all knowledge store entries to a JSON file next to the trajectory."""
+    """Dump all knowledge store entries to knowledge/knowledge.json.
+
+    Merges with any existing entries from previous runs so knowledge
+    accumulates across multiple extract invocations.
+    """
     try:
         from agentm.tools import knowledge as km
 
@@ -436,27 +440,36 @@ def _dump_knowledge_store(system: Any) -> None:
         if store is None:
             return
 
-        # Collect all entries under the root namespace
         items = store.search(("knowledge",), query=None, limit=500)
         if not items:
             return
 
-        entries = []
+        new_entries: dict[str, Any] = {}
         for item in items:
-            entries.append(
-                {
-                    "path": "/" + "/".join(item.namespace[1:]) + "/" + item.key,
-                    **item.value,
-                }
-            )
+            path = "/" + "/".join(item.namespace[1:]) + "/" + item.key
+            new_entries[path] = {"path": path, **item.value}
 
-        out_dir = Path("./trajectories")
-        out_dir.mkdir(exist_ok=True)
-        out_path = out_dir / f"knowledge-{system.thread_id[:8]}.json"
+        out_path = Path("./knowledge/knowledge.json")
+        out_path.parent.mkdir(exist_ok=True)
+
+        # Merge with existing entries
+        existing: dict[str, Any] = {}
+        if out_path.exists():
+            try:
+                for entry in json.loads(out_path.read_text(encoding="utf-8")):
+                    existing[entry["path"]] = entry
+            except Exception:
+                pass
+
+        merged = {**existing, **new_entries}
         out_path.write_text(
-            json.dumps(entries, indent=2, ensure_ascii=False), encoding="utf-8"
+            json.dumps(list(merged.values()), indent=2, ensure_ascii=False),
+            encoding="utf-8",
         )
-        console.print(f"Knowledge saved: [green]{out_path}[/] ({len(entries)} entries)")
+        console.print(
+            f"Knowledge saved: [green]{out_path}[/] "
+            f"({len(new_entries)} new, {len(merged)} total)"
+        )
 
     except Exception as e:
         console.print(f"[yellow]Could not dump knowledge store: {e}[/]")
