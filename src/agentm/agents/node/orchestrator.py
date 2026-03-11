@@ -194,6 +194,35 @@ def create_node_orchestrator(
             }
 
         llm_messages = _prepare_messages(state, round_num)
+
+        # Record llm_start with full message context for dashboard Messages view
+        if trajectory is not None:
+            def _full_msg(msg: Any) -> dict[str, Any]:
+                role = getattr(msg, "type", "unknown")
+                content = getattr(msg, "content", "")
+                entry: dict[str, Any] = {"role": role, "content": content}
+                tc = getattr(msg, "tool_calls", None)
+                if tc:
+                    entry["tool_calls"] = [
+                        {"id": c.get("id", ""), "name": c.get("name", ""), "args": c.get("args", {})}
+                        for c in tc
+                    ]
+                if role == "tool":
+                    entry["name"] = getattr(msg, "name", "")
+                    tcid = getattr(msg, "tool_call_id", None)
+                    if tcid:
+                        entry["tool_call_id"] = tcid
+                return entry
+
+            trajectory.record_sync(
+                event_type="llm_start",
+                agent_path=["orchestrator"],
+                data={
+                    "message_count": len(llm_messages),
+                    "full_messages": [_full_msg(m) for m in llm_messages],
+                },
+            )
+
         response = await model_with_tools.ainvoke(llm_messages)
         return {"messages": [response]}
 

@@ -277,6 +277,11 @@ class AgentPool:
         """Max tool-call steps configured for the worker agent."""
         return self._worker_config.execution.max_steps
 
+    @property
+    def worker_self_reports_trajectory(self) -> bool:
+        """True when worker subgraphs record trajectory events themselves (node mode)."""
+        return self._worker_config.execution.subgraph_mode == "node"
+
     def create_worker(
         self,
         agent_id: str,

@@ -64,6 +64,7 @@ class TaskManager:
         hooks before the task is submitted.
         """
         task_id = kwargs.pop("task_id", None) or str(uuid.uuid4())
+        trajectory_self_reported: bool = kwargs.pop("trajectory_self_reported", False)
 
         subgraph = kwargs.get("subgraph")
         config: dict[str, Any] = kwargs.get("config", {})
@@ -75,6 +76,7 @@ class TaskManager:
             hypothesis_id=hypothesis_id,
             started_at=datetime.now().isoformat(),
             subgraph_config=config,
+            trajectory_self_reported=trajectory_self_reported,
         )
 
         if subgraph is not None:
@@ -308,7 +310,8 @@ class TaskManager:
                 managed.events_buffer.append(data)
 
                 if self._trajectory is not None and isinstance(data, dict):
-                    await self._record_subagent_event(managed, data)
+                    if not managed.trajectory_self_reported:
+                        await self._record_subagent_event(managed, data)
 
             managed.status = AgentRunStatus.COMPLETED
             managed.result = _extract_structured_response(managed.events_buffer)

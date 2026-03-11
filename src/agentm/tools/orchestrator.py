@@ -50,6 +50,7 @@ def create_orchestrator_tools(
             subgraph=subgraph,
             config={"recursion_limit": recursion_limit},
             task_id=task_id,
+            trajectory_self_reported=agent_pool.worker_self_reports_trajectory,
         )
 
         # Auto-block: if this is the only running task and it has a real
