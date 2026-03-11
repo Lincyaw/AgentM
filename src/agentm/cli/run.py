@@ -240,6 +240,199 @@ def _print_event(event: dict, step: int, verbose: bool) -> None:
                         console.print(f"     [dim]... ({len(content)} chars total)[/]")
 
 
+async def run_memory_extraction(
+    trajectories: list[str],
+    task: str,
+    scenario_dir: str,
+    config_path: str,
+    debug_mode: bool = False,
+    verbose: bool = False,
+    dashboard: bool = False,
+    dashboard_port: int = 8765,
+    dashboard_host: str = "127.0.0.1",
+    max_steps: int = 60,
+) -> None:
+    """Run a memory extraction pass over one or more completed RCA trajectories."""
+    if api_key := os.environ.get("AGENTM_API_KEY"):
+        os.environ.setdefault("OPENAI_API_KEY", api_key)
+    if base_url := os.environ.get("AGENTM_API_BASE_URL"):
+        os.environ.setdefault("OPENAI_BASE_URL", base_url)
+
+    project_root = Path(config_path).resolve().parent.parent
+    scenario_path = Path(scenario_dir)
+    if not scenario_path.is_absolute():
+        scenario_path = project_root / scenario_path
+
+    system_config = load_system_config(config_path)
+    scenario_config = load_scenario_config(scenario_path / "scenario.yaml")
+
+    if model := os.environ.get("AGENTM_ORCHESTRATOR_MODEL"):
+        scenario_config.orchestrator.model = model
+    if model := os.environ.get("AGENTM_WORKER_MODEL"):
+        scenario_config.agents["worker"].model = model
+
+    if debug_mode:
+        system_config.debug.console_live = True
+    if verbose:
+        system_config.debug.verbose = True
+
+    console.rule("AgentM — Memory Extraction")
+    console.print(f"Source trajectories: [cyan]{len(trajectories)}[/]")
+    for t in trajectories:
+        console.print(f"  • [dim]{t}[/]")
+    console.print(f"Orchestrator: [cyan]{scenario_config.orchestrator.model}[/]")
+    console.print(f"Worker: [cyan]{scenario_config.agents['worker'].model}[/]")
+
+    _resolve_prompt_paths(scenario_config, scenario_path)
+
+    system = AgentSystemBuilder.build(
+        system_type="memory_extraction",
+        scenario_config=scenario_config,
+        system_config=system_config,
+    )
+
+    # Debug console
+    debug_console = None
+    if system_config.debug.console_live:
+        debug_console = DebugConsole(verbose=verbose)
+        debug_console.start()
+
+    # Dashboard
+    dashboard_server_task = None
+    dashboard_broadcast = None
+    if dashboard:
+        app = create_dashboard_app(
+            graph=system.graph,
+            scenario_config=system.scenario_config,
+            task_manager=system.task_manager,
+            trajectory=system.trajectory,
+            thread_id=system.thread_id,
+        )
+        if system.task_manager is not None:
+            system.task_manager.set_broadcast_callback(broadcast_event)
+        dashboard_broadcast = broadcast_event
+
+        uvi_config = uvicorn.Config(
+            app, host=dashboard_host, port=dashboard_port, log_level="warning"
+        )
+        server = uvicorn.Server(uvi_config)
+        dashboard_server_task = asyncio.create_task(server.serve())
+        await asyncio.sleep(0.3)
+        console.print(
+            f"Dashboard: [link=http://localhost:{dashboard_port}]"
+            f"http://localhost:{dashboard_port}[/link]"
+        )
+
+    if system.trajectory is not None:
+        if debug_console is not None:
+            system.trajectory.add_listener(debug_console.on_trajectory_event)
+        if dashboard_broadcast is not None:
+
+            async def _traj_to_ws(event: dict) -> None:
+                await dashboard_broadcast(
+                    {
+                        "event_type": event.get("event_type", ""),
+                        "agent_path": event.get("agent_path", []),
+                        "data": event.get("data", {}),
+                        "timestamp": event.get("timestamp", ""),
+                        "mode": "trajectory",
+                    }
+                )
+
+            system.trajectory.add_listener(_traj_to_ws)
+
+    # Resolve thread_ids: accept either a raw UUID or a trajectory .jsonl path
+    thread_ids: list[str] = []
+    for entry in trajectories:
+        p = Path(entry)
+        if p.exists() and p.suffix == ".jsonl":
+            meta = TrajectoryCollector.read_metadata(p)
+            tid = meta.get("thread_id", "")
+            checkpoint_db = meta.get("checkpoint_db", "")
+            if not tid:
+                console.print(
+                    f"[red]ERROR: {entry} has no thread_id metadata.[/]"
+                )
+                sys.exit(1)
+            # Point checkpointer at the recorded db so workers can read it
+            if checkpoint_db:
+                system_config.storage.checkpointer.backend = "sqlite"
+                system_config.storage.checkpointer.url = checkpoint_db
+            thread_ids.append(tid)
+            console.print(
+                f"  Resolved [dim]{p.name}[/] → thread_id [cyan]{tid[:16]}…[/]"
+            )
+        else:
+            thread_ids.append(entry)  # assume it's already a thread_id UUID
+
+    # Build instruction for the orchestrator
+    if not task:
+        traj_list = "\n".join(f"- {tid}" for tid in thread_ids)
+        task = (
+            f"Extract reusable knowledge from the following completed RCA "
+            f"trajectories:\n\n{traj_list}\n\n"
+            "Follow the four-phase workflow: collect → analyze → extract → refine."
+        )
+
+    from agentm.models.enums import Phase
+
+    initial_state = {
+        "messages": [HumanMessage(content=task)],
+        "task_id": system.thread_id,
+        "task_description": task,
+        "current_phase": Phase.EXPLORATION,
+        "source_trajectories": thread_ids,
+        "extracted_patterns": [],
+        "knowledge_entries": [],
+        "existing_knowledge": [],
+    }
+
+    console.rule("Starting extraction")
+    console.print(f"Task: {task[:200]}{'...' if len(task) > 200 else ''}")
+    console.print()
+
+    step = 0
+    try:
+        async for event in system.stream(initial_state):
+            step += 1
+            if not system_config.debug.console_live:
+                _print_event(event, step, verbose)
+            if step > max_steps:
+                console.print(
+                    f"\n[yellow][!] Reached step limit ({max_steps}), stopping.[/]"
+                )
+                break
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow][!] Extraction interrupted by user.[/]")
+    except Exception as e:
+        console.print(f"\n[red][ERROR] {e}[/]")
+        if verbose:
+            traceback.print_exc()
+    finally:
+        if debug_console is not None:
+            debug_console.stop()
+        await system._close_checkpointer()
+        if system.trajectory is not None:
+            path = await system.trajectory.close()
+            console.print()
+            console.rule("Extraction complete")
+            console.print(f"Steps: {step}")
+            if path:
+                console.print(f"Trajectory saved: [green]{path}[/]")
+            console.print(f"Thread ID: [dim]{system.thread_id}[/]")
+
+    if dashboard_server_task is not None:
+        console.print(
+            f"\nDashboard running at [link=http://localhost:{dashboard_port}]"
+            f"http://localhost:{dashboard_port}[/link] — press Ctrl+C to stop."
+        )
+        try:
+            await dashboard_server_task
+        except asyncio.CancelledError:
+            pass
+
+
 def _resolve_prompt_paths(scenario_config: Any, scenario_dir: Path) -> None:
     """Resolve relative prompt paths in scenario config against scenario_dir."""
     if scenario_config.orchestrator.prompts:
