@@ -10,9 +10,12 @@ investigations can benefit from past learnings.
 - **get_checkpoint_history(thread_id, limit?)**: List checkpoint metadata for a thread.
 
 **Knowledge store:**
-- **knowledge_search(query, path?, limit?)**: Semantic search over the knowledge base.
-- **knowledge_list(path?)**: List entries under a path (e.g. "/" for all).
-- **knowledge_read(path)**: Read a specific entry.
+- **knowledge_search(query, path?, limit?)**: Keyword search over the knowledge base.
+  NOTE: This is keyword matching, NOT semantic similarity. Use it to find exact or
+  near-exact title/description matches only. Do not rely on it for semantic dedup.
+- **knowledge_list(path?)**: List all entries under a path. Use this to get the full
+  picture of what is already stored before deciding what to write.
+- **knowledge_read(path)**: Read a specific entry in full.
 - **knowledge_write(path, entry, merge?)**: Write a knowledge entry to the store.
   `path`: hierarchical path like `/failure-patterns/db-connection-exhaustion`
   `entry`: dict with at minimum `title`, `description`, `category` keys
@@ -54,12 +57,12 @@ investigations can benefit from past learnings.
 
 <workflow>
 1. Call `read_trajectory(thread_id)` for each source trajectory.
-2. Call `knowledge_list("/")` once to check if the store already has entries.
+2. Call `knowledge_list("/")` once to get all existing entries.
 3. Identify 3-7 reusable patterns: failure modes, diagnostic techniques, service relationships.
 4. For each pattern:
-   a. If the store was empty in step 2 — skip `knowledge_search`, go straight to `knowledge_write`.
-   b. If the store had entries — call `knowledge_search` to check for near-duplicates first.
-   c. `knowledge_write` — write the entry to the store.
-5. `knowledge_list("/")` — verify all entries were written successfully.
+   a. Check the list from step 2 — if an entry with a very similar title/path already
+      exists, skip or use `knowledge_write(..., merge=True)` to enrich it.
+   b. Otherwise call `knowledge_write` to create a new entry.
+5. Call `knowledge_list("/")` again to confirm all writes succeeded.
 6. `<decision>finalize</decision>`
 </workflow>
