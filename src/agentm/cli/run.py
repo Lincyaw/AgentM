@@ -403,6 +403,10 @@ async def run_memory_extraction(
         if debug_console is not None:
             debug_console.stop()
         await system._close_checkpointer()
+
+        # Dump knowledge store to JSON so it survives process exit
+        _dump_knowledge_store(system)
+
         if system.trajectory is not None:
             path = await system.trajectory.close()
             console.print()
@@ -421,6 +425,41 @@ async def run_memory_extraction(
             await dashboard_server_task
         except asyncio.CancelledError:
             pass
+
+
+def _dump_knowledge_store(system: Any) -> None:
+    """Dump all knowledge store entries to a JSON file next to the trajectory."""
+    try:
+        from agentm.tools import knowledge as km
+
+        store = km._store_var.get()
+        if store is None:
+            return
+
+        # Collect all entries under the root namespace
+        items = store.search(("knowledge",), query=None, limit=500)
+        if not items:
+            return
+
+        entries = []
+        for item in items:
+            entries.append(
+                {
+                    "path": "/" + "/".join(item.namespace[1:]) + "/" + item.key,
+                    **item.value,
+                }
+            )
+
+        out_dir = Path("./trajectories")
+        out_dir.mkdir(exist_ok=True)
+        out_path = out_dir / f"knowledge-{system.thread_id[:8]}.json"
+        out_path.write_text(
+            json.dumps(entries, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        console.print(f"Knowledge saved: [green]{out_path}[/] ({len(entries)} entries)")
+
+    except Exception as e:
+        console.print(f"[yellow]Could not dump knowledge store: {e}[/]")
 
 
 def _resolve_prompt_paths(scenario_config: Any, scenario_dir: Path) -> None:
