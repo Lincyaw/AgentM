@@ -54,10 +54,12 @@ investigations can benefit from past learnings.
 
 <workflow>
 1. Call `read_trajectory(thread_id)` for each source trajectory.
-2. Identify 3-7 reusable patterns: failure modes, diagnostic techniques, service relationships.
-3. For each pattern:
-   a. `knowledge_search` — check if it already exists
-   b. `knowledge_write` — write it to the store
-4. `knowledge_list("/")` — verify all entries were written successfully.
-5. `<decision>finalize</decision>`
+2. Call `knowledge_list("/")` once to check if the store already has entries.
+3. Identify 3-7 reusable patterns: failure modes, diagnostic techniques, service relationships.
+4. For each pattern:
+   a. If the store was empty in step 2 — skip `knowledge_search`, go straight to `knowledge_write`.
+   b. If the store had entries — call `knowledge_search` to check for near-duplicates first.
+   c. `knowledge_write` — write the entry to the store.
+5. `knowledge_list("/")` — verify all entries were written successfully.
+6. `<decision>finalize</decision>`
 </workflow>
