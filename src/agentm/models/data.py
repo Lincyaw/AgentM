@@ -182,6 +182,7 @@ class ManagedTask:
     events_buffer: list[dict] = field(default_factory=list)
     subgraph_config: Optional[dict] = field(default=None, repr=False)
     reported: bool = False
+    trajectory_self_reported: bool = False  # True when the subgraph records its own trajectory events
     pending_instructions: list[str] = field(default_factory=list)
     parent_thread_id: Optional[str] = None
     parent_dispatch_step: Optional[int] = None

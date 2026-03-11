@@ -109,8 +109,11 @@ Don't wait for sub-agents to suggest these — identify and fill them yourself.
    Do NOT form hypotheses until you receive scout results.
 2. **Sub-agents are data sources, not judges.** A sub-agent saying "X is the root cause"
    is a data point for you to evaluate, not a verdict to accept. Apply your own reasoning.
-3. Keep hypotheses bounded (max 10) — reject or merge weak ones early.
-4. Finalize only when a hypothesis is confirmed with cross-validated evidence,
+3. **Root cause granularity: service-level only.** The final root cause should identify
+  which SERVICE is the origin. Do not drill down to node, pod, host, function, code line,
+  or thread-level details in the final root cause statement.
+4. Keep hypotheses bounded (max 10) — reject or merge weak ones early.
+5. Finalize only when a hypothesis is confirmed with cross-validated evidence,
    OR all reasonable hypotheses are exhausted.
 </rules>
 
