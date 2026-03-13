@@ -1,12 +1,24 @@
-"""AgentSystem and AgentSystemBuilder — unified entry point for all agent systems."""
+"""AgentSystem and builder entry points for all agent systems.
+
+Two builder paths:
+
+1. **``AgentSystemBuilder.build()``** (legacy) — Config-driven factory that
+   resolves system_type from scenario config.  Backward-compatible with all
+   existing callers.
+
+2. **``GenericAgentSystemBuilder[S]``** — New fluent builder parameterized
+   over a user-defined state type ``S``.  Accepts a ``ReasoningStrategy[S]``
+   and composes middleware, backend, and tools explicitly.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Generic
 
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
@@ -17,15 +29,37 @@ from agentm.agents.react.orchestrator import create_orchestrator
 from agentm.agents.node.orchestrator import create_node_orchestrator
 from agentm.agents.react.sub_agent import AgentPool
 from agentm.config.schema import ScenarioConfig, StorageConfig
-from agentm.core.context_formatters import FORMAT_CONTEXT_REGISTRY
+from agentm.core.backend import StorageBackend
 from agentm.core.state_registry import get_state_schema
+from agentm.core.strategy import ReasoningStrategy
 from agentm.core.task_manager import TaskManager
 from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
+from agentm.middleware import AgentMMiddleware
+from agentm.models.state import S
 from agentm.tools import knowledge as knowledge_module
 from agentm.tools import memory as memory_module
 from agentm.tools.orchestrator import create_orchestrator_tools
 from agentm.tools.think import think
+
+
+def _resolve_format_context(system_type: str) -> Any:
+    """Lazily resolve the context formatter for a system type.
+
+    Imports scenario formatters on demand to avoid SDK → scenarios
+    dependency at module level.
+    """
+    if system_type == "hypothesis_driven":
+        from agentm.scenarios.rca.formatters import format_rca_context
+
+        return format_rca_context
+    if system_type == "memory_extraction":
+        from agentm.scenarios.memory_extraction.formatters import (
+            format_memory_extraction_context,
+        )
+
+        return format_memory_extraction_context
+    return None
 
 
 def _serialize_notebook(notebook: Any) -> dict[str, Any]:
@@ -40,8 +74,12 @@ def _serialize_notebook(notebook: Any) -> dict[str, Any]:
     return raw
 
 
-class AgentSystem:
-    """Unified interface for all agent systems."""
+class AgentSystem(Generic[S]):
+    """Unified interface for all agent systems.
+
+    Parameterized over ``S`` so that callers using the generic builder
+    get typed ``execute`` / ``stream`` signatures.
+    """
 
     def __init__(
         self,
@@ -62,7 +100,7 @@ class AgentSystem:
         self._pending_storage = _pending_storage
         self._initialized = _pending_storage is None
 
-    async def __aenter__(self) -> AgentSystem:
+    async def __aenter__(self) -> AgentSystem[S]:
         return self
 
     async def __aexit__(
@@ -242,12 +280,219 @@ async def _create_async_checkpointer(storage_config: StorageConfig) -> Any:
 TOOLS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "tools"
 
 
+# ---------------------------------------------------------------------------
+# New generic fluent builder
+# ---------------------------------------------------------------------------
+
+
+class GenericAgentSystemBuilder(Generic[S]):
+    """Fluent builder for constructing ``AgentSystem[S]`` instances.
+
+    Uses explicit ``ReasoningStrategy[S]``, middleware, and backend
+    rather than inferring everything from a config file.
+
+    Example::
+
+        system = (
+            GenericAgentSystemBuilder(SupportTicketState)
+            .with_strategy(SupportTicketStrategy())
+            .with_scenario(scenario_config)
+            .with_middleware([CompressionMiddleware(cfg), BudgetMiddleware(20)])
+            .build()
+        )
+    """
+
+    def __init__(self, state_schema: type[S]) -> None:
+        self._state_schema = state_schema
+        self._strategy: ReasoningStrategy[S] | None = None
+        self._scenario: ScenarioConfig | None = None
+        self._backend: StorageBackend | None = None
+        self._middleware: list[AgentMMiddleware] = []
+        self._tools: list[Any] = []
+        self._system_config: Any | None = None
+        self._thread_id: str | None = None
+
+    def with_strategy(
+        self, strategy: ReasoningStrategy[S]
+    ) -> GenericAgentSystemBuilder[S]:
+        """Set the reasoning strategy."""
+        self._strategy = strategy
+        return self
+
+    def with_scenario(
+        self, config: ScenarioConfig
+    ) -> GenericAgentSystemBuilder[S]:
+        """Set the scenario configuration."""
+        self._scenario = config
+        return self
+
+    def with_backend(
+        self, backend: StorageBackend
+    ) -> GenericAgentSystemBuilder[S]:
+        """Set the storage backend."""
+        self._backend = backend
+        return self
+
+    def with_middleware(
+        self, middleware: Sequence[AgentMMiddleware]
+    ) -> GenericAgentSystemBuilder[S]:
+        """Set the middleware pipeline (replaces any previous list)."""
+        self._middleware = list(middleware)
+        return self
+
+    def with_tools(self, tools: list[Any]) -> GenericAgentSystemBuilder[S]:
+        """Set additional tools for the orchestrator."""
+        self._tools = list(tools)
+        return self
+
+    def with_system_config(
+        self, system_config: Any
+    ) -> GenericAgentSystemBuilder[S]:
+        """Set the system-level config (models, storage, debug)."""
+        self._system_config = system_config
+        return self
+
+    def with_thread_id(
+        self, thread_id: str
+    ) -> GenericAgentSystemBuilder[S]:
+        """Set an explicit thread ID for checkpoint continuity."""
+        self._thread_id = thread_id
+        return self
+
+    def build(self) -> AgentSystem[S]:
+        """Build the ``AgentSystem[S]``.
+
+        Requires at least a strategy and scenario config.
+        """
+        if self._strategy is None:
+            raise ValueError("Strategy is required — call with_strategy()")
+        if self._scenario is None:
+            raise ValueError(
+                "Scenario config is required — call with_scenario()"
+            )
+
+        strategy = self._strategy
+        scenario = self._scenario
+        system_config = self._system_config
+
+        # --- Checkpointer ---
+        checkpointer = None
+        pending_storage: StorageConfig | None = None
+        if system_config is not None:
+            checkpointer = _create_checkpointer(system_config.storage)
+            if (
+                checkpointer is None
+                and system_config.storage.checkpointer.backend != "memory"
+            ):
+                pending_storage = system_config.storage
+
+        thread_id = self._thread_id or str(uuid.uuid4())
+        langgraph_config: dict[str, Any] = {
+            "configurable": {"thread_id": thread_id},
+        }
+
+        # --- Trajectory ---
+        trajectory: TrajectoryCollector | None = None
+        if system_config is not None and system_config.debug.trajectory.enabled:
+            run_id = f"{strategy.name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            checkpoint_db_path = ""
+            if system_config.storage.checkpointer.backend == "sqlite":
+                db_url = (
+                    system_config.storage.checkpointer.url or "./checkpoints.db"
+                )
+                checkpoint_db_path = str(Path(db_url).resolve())
+            trajectory = TrajectoryCollector(
+                run_id=run_id,
+                output_dir=system_config.debug.trajectory.output_dir,
+                thread_id=thread_id,
+                checkpoint_db=checkpoint_db_path,
+            )
+
+        # --- Tools ---
+        tools = list(self._tools)
+        tools.append(think)
+
+        # --- Format context via strategy ---
+        format_context = strategy.format_context
+
+        # --- State schema ---
+        state_schema = strategy.state_schema()
+
+        # --- Build graph ---
+        orch_model_config = None
+        if system_config is not None:
+            orch_model_name = scenario.orchestrator.model
+            orch_model_config = system_config.models.get(orch_model_name)
+
+        if scenario.orchestrator.orchestrator_mode == "node":
+            graph = create_node_orchestrator(
+                config=scenario.orchestrator,
+                tools=tools,
+                checkpointer=checkpointer,
+                store=None,
+                state_schema=state_schema,
+                format_context=format_context,
+                model_config=orch_model_config,
+                trajectory=trajectory,
+            )
+        else:
+            graph = create_orchestrator(
+                config=scenario.orchestrator,
+                tools=tools,
+                checkpointer=checkpointer,
+                store=None,
+                format_context=format_context,
+                model_config=orch_model_config,
+                trajectory=trajectory,
+            )
+
+        return AgentSystem(
+            graph,
+            config=langgraph_config,
+            scenario_config=scenario,
+            trajectory=trajectory,
+            thread_id=thread_id,
+            _pending_storage=pending_storage,
+        )
+
+    @staticmethod
+    def create(
+        strategy: ReasoningStrategy[S],
+        scenario_config: ScenarioConfig,
+        system_config: Any | None = None,
+        middleware: Sequence[AgentMMiddleware] | None = None,
+        tools: list[Any] | None = None,
+        thread_id: str | None = None,
+    ) -> AgentSystem[S]:
+        """Convenience factory — builds an AgentSystem in one call."""
+        builder: GenericAgentSystemBuilder[S] = GenericAgentSystemBuilder(
+            strategy.state_schema()
+        )
+        builder.with_strategy(strategy).with_scenario(scenario_config)
+        if system_config is not None:
+            builder.with_system_config(system_config)
+        if middleware is not None:
+            builder.with_middleware(middleware)
+        if tools is not None:
+            builder.with_tools(tools)
+        if thread_id is not None:
+            builder.with_thread_id(thread_id)
+        return builder.build()
+
+
+# ---------------------------------------------------------------------------
+# Legacy builder — preserved for backward compatibility
+# ---------------------------------------------------------------------------
+
+
 class AgentSystemBuilder:
-    """Unified entry point for building any agent system.
+    """Unified entry point for building any agent system (legacy API).
 
     Internally selects the appropriate architecture based on system_type:
     - ReAct-based (create_react_agent): For exploratory, non-linear scenarios like RCA
     - StateGraph-based (custom graph with phase nodes): For linear, deterministic scenarios
+
+    For new code, prefer ``GenericAgentSystemBuilder[S]``.
     """
 
     @staticmethod
@@ -256,7 +501,7 @@ class AgentSystemBuilder:
         scenario_config: ScenarioConfig,
         system_config: Any | None = None,
         existing_thread_id: str | None = None,
-    ) -> AgentSystem:
+    ) -> AgentSystem[Any]:
         """Build an AgentSystem from a system type and scenario config."""
         get_state_schema(system_type)  # validate system_type exists
 
@@ -327,6 +572,13 @@ class AgentSystemBuilder:
                 task_manager, agent_pool, trajectory=trajectory,
                 config=scenario_config.orchestrator,
             )
+
+            # Load scenario-specific tools based on system_type
+            if system_type == "hypothesis_driven":
+                from agentm.scenarios.rca.tools import create_rca_tools
+
+                rca_tools = create_rca_tools(trajectory=trajectory)
+                injected_tools.update(rca_tools)
 
             # Wire trajectory into task_manager
             if trajectory is not None:
@@ -410,7 +662,7 @@ class AgentSystemBuilder:
 
             # Resolve state schema and context formatter for this system type
             state_schema = get_state_schema(system_type)
-            format_context = FORMAT_CONTEXT_REGISTRY.get(system_type)
+            format_context = _resolve_format_context(system_type)
 
             if scenario_config.orchestrator.orchestrator_mode == "node":
                 graph = create_node_orchestrator(
@@ -429,6 +681,7 @@ class AgentSystemBuilder:
                     tools=tools,
                     checkpointer=checkpointer,
                     store=None,
+                    format_context=format_context,
                     model_config=orch_model_config,
                     trajectory=trajectory,
                 )
@@ -450,3 +703,18 @@ class AgentSystemBuilder:
         raise NotImplementedError(
             f"Orchestrator mode {scenario_config.orchestrator.orchestrator_mode!r} not yet implemented"
         )
+
+
+def build_from_type(
+    system_type: str,
+    scenario_config: ScenarioConfig,
+    system_config: Any | None = None,
+    existing_thread_id: str | None = None,
+) -> AgentSystem[Any]:
+    """Bridge function — delegates to ``AgentSystemBuilder.build()``.
+
+    Provided for callers that prefer a plain function over a static method.
+    """
+    return AgentSystemBuilder.build(
+        system_type, scenario_config, system_config, existing_thread_id
+    )

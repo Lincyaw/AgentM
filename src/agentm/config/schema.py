@@ -126,7 +126,14 @@ class AgentConfig(BaseModel):
 
 
 class FeatureGatesConfig(BaseModel):
-    """Feature gates for the Orchestrator."""
+    """Feature gates for the Orchestrator.
+
+    Domain-specific feature gates can be added via ``model_config = ConfigDict(extra="allow")``.
+    Subclasses (e.g. ``RCAFeatureGates``, ``MemoryFeatureGates``) define
+    domain-specific fields while this base accepts any extra keys.
+    """
+
+    model_config = {"extra": "allow"}
 
     adversarial_review: bool = False
     parallel_verification: bool = False

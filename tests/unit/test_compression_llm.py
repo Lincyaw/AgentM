@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agentm.config.schema import CompressionConfig
-from agentm.core.compression import (
+from agentm.middleware.compression import (
     _DEFAULT_THRESHOLD_TOKENS,
     _summarize_messages,
     build_compression_hook,
@@ -36,7 +36,7 @@ class TestSubAgentCompressionHook:
         assert result["messages"] == messages
         assert "llm_input_messages" not in result
 
-    @patch("agentm.core.compression._summarize_messages")
+    @patch("agentm.middleware.compression._summarize_messages")
     def test_above_threshold_triggers_compression(
         self, mock_summarize: MagicMock
     ) -> None:
@@ -59,10 +59,10 @@ class TestSubAgentCompressionHook:
         assert result["messages"] == []
 
     @patch(
-        "agentm.core.compression.count_tokens",
+        "agentm.middleware.compression.count_tokens",
         return_value=_DEFAULT_THRESHOLD_TOKENS + 1,
     )
-    @patch("agentm.core.compression._summarize_messages")
+    @patch("agentm.middleware.compression._summarize_messages")
     def test_few_messages_above_threshold_not_compressed(
         self, mock_summarize: MagicMock, mock_count: MagicMock
     ) -> None:
@@ -77,7 +77,7 @@ class TestSubAgentCompressionHook:
 
 
 class TestBuildCompressionHook:
-    @patch("agentm.core.compression._summarize_messages")
+    @patch("agentm.middleware.compression._summarize_messages")
     def test_respects_preserve_latest_n(self, mock_summarize: MagicMock) -> None:
         """Configurable preserve_latest_n is respected."""
         mock_summarize.return_value = "Summary"
@@ -105,7 +105,7 @@ class TestBuildCompressionHook:
         result = hook({"messages": messages})
         assert "messages" in result
 
-    @patch("agentm.core.compression._summarize_messages")
+    @patch("agentm.middleware.compression._summarize_messages")
     def test_few_messages_not_compressed(self, mock_summarize: MagicMock) -> None:
         """When message count <= preserve_n, hook passes through."""
         config = CompressionConfig(

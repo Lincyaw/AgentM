@@ -1,46 +1,6 @@
-"""Context formatters for the Node Orchestrator's system prompt working-memory section.
-
-Each formatter receives the current graph state dict and returns a string that
-is injected into the orchestrator's system prompt as the "working memory" block.
-
-The FORMAT_CONTEXT_REGISTRY maps system_type -> callable (or None for types that
-do not need a custom formatter).
-"""
+"""Memory-extraction-specific context formatters."""
 
 from __future__ import annotations
-
-from typing import Callable
-
-from agentm.core.compression import compress_completed_phase
-from agentm.core.notebook import format_notebook_for_llm, should_compress_phase
-
-
-# ---------------------------------------------------------------------------
-# RCA / hypothesis-driven formatter
-# ---------------------------------------------------------------------------
-
-
-def format_rca_context(state: dict) -> str:
-    """Format HypothesisDrivenState notebook for LLM system prompt.
-
-    Applies phase compression to completed phases before formatting.
-    Returns a human-readable notebook text block.
-    """
-    notebook = state.get("notebook")
-    if notebook is None:
-        return "(Investigation starting — no data collected yet)"
-
-    notebook_for_llm = notebook
-    for phase in ("exploration", "generation", "verification"):
-        if should_compress_phase(notebook_for_llm, phase):
-            notebook_for_llm = compress_completed_phase(notebook_for_llm, phase)
-
-    return format_notebook_for_llm(notebook_for_llm)
-
-
-# ---------------------------------------------------------------------------
-# Memory-extraction formatter
-# ---------------------------------------------------------------------------
 
 
 def format_memory_extraction_context(state: dict) -> str:
@@ -103,15 +63,3 @@ def format_memory_extraction_context(state: dict) -> str:
         return "(Memory extraction starting — no data yet)"
 
     return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
-
-FORMAT_CONTEXT_REGISTRY: dict[str, Callable[[dict], str] | None] = {
-    "hypothesis_driven": format_rca_context,
-    "memory_extraction": format_memory_extraction_context,
-    "sequential": None,
-    "decision_tree": None,
-}

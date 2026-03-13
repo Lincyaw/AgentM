@@ -9,10 +9,9 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import RetryPolicy
-from pydantic import BaseModel
 
 from agentm.config.schema import AgentConfig, ModelConfig, ScenarioConfig
-from agentm.core.compression import build_compression_hook
+from agentm.middleware.compression import build_compression_hook
 from agentm.core.prompt import load_prompt_template
 from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
@@ -20,23 +19,16 @@ from agentm.models.types import TaskType
 from agentm.tools.think import think
 
 # ---------------------------------------------------------------------------
-# Answer schemas — imported from consolidated registry
+# Answer schemas — lazy-loaded from consolidated registry
 # ---------------------------------------------------------------------------
 
 from agentm.models.answer_schemas import (  # noqa: E402
     ANSWER_SCHEMA,
-    DeepAnalyzeAnswer,
-    ScoutAnswer,
-    SubAgentAnswer,
-    VerifyAnswer,
+    _ensure_defaults as _ensure_answer_defaults,
 )
 
 __all__ = [
     "ANSWER_SCHEMA",
-    "ScoutAnswer",
-    "DeepAnalyzeAnswer",
-    "VerifyAnswer",
-    "SubAgentAnswer",
     "AgentPool",
     "create_sub_agent",
 ]
@@ -58,6 +50,7 @@ def create_sub_agent(
     and *task_id* are baked into the hooks at compile time — no mutable
     overrides needed.
     """
+    _ensure_answer_defaults()
     llm_kwargs: dict[str, Any] = {
         "model": config.model,
         "temperature": config.temperature,
@@ -104,7 +97,7 @@ def create_sub_agent(
 
     # Dedup layer: wrap tools + hook (between compression and llm_input)
     if config.execution.dedup is not None and config.execution.dedup.enabled:
-        from agentm.agents.dedup import (
+        from agentm.middleware.dedup import (
             DedupTracker,
             build_dedup_hook,
             wrap_tool_with_dedup,
@@ -118,7 +111,7 @@ def create_sub_agent(
         pre_model_hook = _chain_hooks(pre_model_hook, dedup_hook)
 
     if trajectory is not None:
-        from agentm.agents.hooks import build_llm_input_hook
+        from agentm.middleware.trajectory import build_llm_input_hook
 
         llm_input_hook = build_llm_input_hook(
             trajectory,

@@ -8,14 +8,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from agentm.core.compression import (
+from agentm.middleware.compression import (
     build_compression_hook,
-    compress_completed_phase,
     sub_agent_compression_hook,
 )
+from agentm.scenarios.rca.compression import compress_completed_phase
 from agentm.config.schema import CompressionConfig
-from agentm.models.data import DiagnosticNotebook, ExplorationStep
-from agentm.models.enums import Phase
+from agentm.scenarios.rca.data import DiagnosticNotebook, ExplorationStep
+from agentm.scenarios.rca.enums import Phase
 
 
 class TestPhaseCompressionIntegrity:

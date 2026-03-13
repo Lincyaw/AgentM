@@ -37,11 +37,13 @@ concepts:
         layer: "L2 — Snapshot Pipeline"
       - file: "tests/snapshot/test_compression_recall.py"
         layer: "L2 — Snapshot Pipeline"
+      - file: "tests/unit/test_generic_sdk.py"
+        layer: "L1 — Deterministic Invariants"
 
   system_architecture:
-    description: "LangGraph Supervisor+Subgraph multi-agent orchestration system with config-driven design, trajectory recording, monitoring, and failure recovery"
+    description: "LangGraph Supervisor+Subgraph multi-agent orchestration system with config-driven design, trajectory recording, monitoring, and failure recovery. Generic SDK layer: TypeVar S, ReasoningStrategy Protocol, AgentMMiddleware (self-contained modules in middleware/), StorageBackend, GenericAgentSystemBuilder. Hook factories colocated with middleware classes — no separate agents/hooks or core/compression"
     design: "designs/system-design-overview.md"
-    related_concepts: [orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner, builder]
+    related_concepts: [orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner, builder, reasoning_strategy, middleware_system, storage_backend]
     plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
     tasks: []
 
@@ -74,7 +76,7 @@ concepts:
           - "Set confirmed hypothesis consistency (§ Orchestrator Tools)"
 
   sub_agent:
-    description: "Independently compiled subgraphs via create_react_agent. Isolated State Schema, config-driven tools/prompts, pre_model_hook compression (llm_input_messages), data-only constraint in RCA mode, static agent pool compiled at startup. Launched as asyncio.Tasks by TaskManager"
+    description: "Independently compiled subgraphs via create_react_agent. Isolated State Schema, config-driven tools/prompts, pre_model_hook pipeline (compression, dedup, budget, trajectory, instruction — all from middleware/), data-only constraint in RCA mode, static agent pool compiled at startup. Launched as asyncio.Tasks by TaskManager"
     design: "designs/sub-agent.md"
     related_concepts: [system_architecture, orchestrator, configuration_system, execution_runner]
     plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
@@ -85,9 +87,9 @@ concepts:
           - "SubAgentState has all required fields (§ State Schema)"
 
   generic_state_wrapper:
-    description: "Generic SDK wrapper supporting multiple agent system types (hypothesis-driven, sequential, memory-extraction, decision-tree) via configuration. Shared BaseOrchestrator, PhaseManager, State Schema Registry"
+    description: "Generic SDK architecture: TypeVar S parameterizes framework over user-defined state types. ReasoningStrategy[S] Protocol, StrategyRegistry, GenericAgentSystemBuilder[S] fluent builder, AgentMMiddleware pipeline, StorageBackend protocol, TaskResult[R] typed results"
     design: "designs/generic-state-wrapper.md"
-    related_concepts: [orchestrator, configuration_system, memory_system]
+    related_concepts: [orchestrator, configuration_system, memory_system, builder, reasoning_strategy, middleware_system, storage_backend]
     plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
     tests:
@@ -95,6 +97,20 @@ concepts:
         covers:
           - "State Schema Registry resolves all 4 system types to correct TypedDict (§ State Schema Registry)"
           - "Unknown/partial system_type raises helpful error (§ State Schema Registry)"
+      - file: "tests/unit/test_generic_sdk.py"
+        layer: "L1 — Deterministic Invariants"
+        covers:
+          - "ReasoningStrategy Protocol runtime_checkable (§ Strategy)"
+          - "StrategyRegistry lookup and registration (§ Strategy Registry)"
+          - "HypothesisDrivenStrategy initial state and phase graph (§ Strategies)"
+          - "MemoryExtractionStrategy initial state and phase graph (§ Strategies)"
+          - "AgentMMiddleware compose_middleware chaining (§ Middleware)"
+          - "BudgetMiddleware, DedupMiddleware class hierarchy (§ Middleware)"
+          - "StorageBackend protocol satisfaction (§ Backend)"
+          - "FilesystemBackend read/write/glob/grep/path traversal (§ Backend)"
+          - "CompositeBackend prefix routing (§ Backend)"
+          - "TaskResult[R] frozen generic dataclass (§ Message Protocol)"
+          - "GenericAgentSystemBuilder fluent API (§ Builder)"
 
   memory_system:
     description: "Two-layer memory: intra-task (context compression + recall_history tool backed by checkpoint chain, see orchestrator.md) and cross-task (Memory Extraction agent system producing KnowledgeEntry items with three confidence levels — FACT/PATTERN/HEURISTIC — in LangGraph Store, see generic-state-wrapper.md)"
@@ -123,9 +139,9 @@ concepts:
           - "ScenarioConfig composition — accepts complete valid scenario (§ Configuration — scenario.yaml)"
 
   trajectory_system:
-    description: "Hierarchical trace capture via TaskManager registry (TaskTraceRef). Independent checkpoint chains per agent, linked by task_id. Export to RL training format. CompressionRef stored in state"
+    description: "Hierarchical trace capture via TaskManager registry (TaskTraceRef). Independent checkpoint chains per agent, linked by task_id. Export to RL training format. CompressionRef stored in state. LLM input recording via middleware/trajectory.py (build_llm_input_hook)"
     design: "designs/orchestrator.md"
-    related_concepts: [system_architecture, orchestrator, recovery_system, memory_system, execution_runner, trajectory, debug_console]
+    related_concepts: [system_architecture, orchestrator, recovery_system, memory_system, execution_runner, trajectory, debug_console, middleware_system]
     plans: []
     tasks: []
 
@@ -192,18 +208,62 @@ concepts:
     tasks: []
 
   builder:
-    description: "AgentSystemBuilder: unified entry point for constructing agent systems. Factory closure DI, lazy async checkpointer, trajectory wiring"
+    description: "AgentSystemBuilder (legacy) + GenericAgentSystemBuilder[S] (new fluent builder). Factory closure DI, lazy async checkpointer, trajectory wiring. Generic builder accepts ReasoningStrategy[S], middleware pipeline, StorageBackend"
     design: "designs/builder.md"
-    related_concepts: [system_architecture, orchestrator, sub_agent, trajectory, configuration_system]
+    related_concepts: [system_architecture, orchestrator, sub_agent, trajectory, configuration_system, reasoning_strategy, middleware_system, storage_backend]
     plans: ["plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
+    tests:
+      - file: "tests/unit/test_generic_sdk.py"
+        covers:
+          - "GenericAgentSystemBuilder requires strategy and scenario (§ Builder)"
+          - "Fluent API returns self for chaining (§ Builder)"
+
+  reasoning_strategy:
+    description: "ReasoningStrategy[S] Protocol: pluggable domain logic. Defines initial_state, format_context, phase_definitions, should_terminate, compress_state, get_answer_schemas, state_schema. StrategyRegistry maps system-type names to instances. Concrete: HypothesisDrivenStrategy, MemoryExtractionStrategy"
+    related_concepts: [generic_state_wrapper, builder, orchestrator]
+    plans: []
+    tasks: []
+    tests:
+      - file: "tests/unit/test_generic_sdk.py"
+        covers:
+          - "Protocol runtime_checkable verification"
+          - "Strategy registry lookup and custom registration"
+          - "Concrete strategy initial state and phase definitions"
+
+  middleware_system:
+    description: "AgentMMiddleware base class with before_model/abefore_model/aafter_model/awrap_tool_call hooks. compose_middleware() chains into create_react_agent pre_model_hook. Each middleware module is self-contained (hook factory + middleware class colocated): middleware/compression.py (build_compression_hook, sub_agent_compression_hook, count_tokens, compression event tracking, CompressionMiddleware), middleware/dedup.py (DedupTracker, build_dedup_hook, wrap_tool_with_dedup, DedupMiddleware), middleware/instruction.py (build_instruction_hook, build_combined_hook, InstructionInjectionMiddleware), middleware/trajectory.py (build_llm_input_hook, TrajectoryMiddleware), middleware/budget.py (BudgetMiddleware)"
+    related_concepts: [generic_state_wrapper, builder, sub_agent, tool_dedup]
+    plans: []
+    tasks: []
+    tests:
+      - file: "tests/unit/test_generic_sdk.py"
+        covers:
+          - "Base middleware passthrough"
+          - "compose_middleware chaining"
+          - "Class hierarchy verification"
+
+  storage_backend:
+    description: "StorageBackend Protocol (read/write/ls/glob/grep/exists/mkdir). FilesystemBackend for local fs with path traversal prevention. CompositeBackend for prefix-based routing to sub-backends (modeled after Deep Agents CompositeBackend)"
+    related_concepts: [generic_state_wrapper, builder, memory_system]
+    plans: []
+    tasks: []
+    tests:
+      - file: "tests/unit/test_generic_sdk.py"
+        covers:
+          - "Protocol runtime_checkable satisfaction"
+          - "FilesystemBackend CRUD operations"
+          - "CompositeBackend prefix routing"
+          - "Path traversal prevention"
 
   tool_dedup:
-    description: "Two-layer tool call deduplication: pre-model hook (soft limit, SystemMessage reminder) + tool wrapper (hard limit, cached result). DedupTracker with OrderedDict FIFO eviction. Excludes think tool. Per-agent-invocation cache."
+    description: "Two-layer tool call deduplication: pre-model hook (soft limit, HumanMessage reminder) + tool wrapper (hard limit, short rejection). DedupTracker with OrderedDict FIFO eviction. Excludes think tool. Per-agent-invocation cache. All code in middleware/dedup.py"
     design: "designs/tool-dedup.md"
-    related_concepts: [sub_agent, configuration_system]
+    related_concepts: [sub_agent, configuration_system, middleware_system]
     plans: []
     tasks: []
     tests:
       - file: "tests/unit/test_dedup.py"
+        layer: "L1 — Deterministic Invariants"
+      - file: "tests/unit/test_generic_sdk.py"
         layer: "L1 — Deterministic Invariants"

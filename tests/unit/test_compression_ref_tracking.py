@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agentm.config.schema import CompressionConfig
-from agentm.core.compression import (
+from agentm.middleware.compression import (
     _DEFAULT_THRESHOLD_TOKENS,
     build_compression_hook,
     clear_compression_events,
@@ -62,8 +62,8 @@ class TestSubAgentHookRecordsEvent:
     def setup_method(self) -> None:
         clear_compression_events()
 
-    @patch("agentm.core.compression._summarize_messages", return_value="Summary")
-    @patch("agentm.core.compression.count_tokens", return_value=200_000)
+    @patch("agentm.middleware.compression._summarize_messages", return_value="Summary")
+    @patch("agentm.middleware.compression.count_tokens", return_value=200_000)
     def test_records_event_on_compression(
         self, _mock_count: MagicMock, _mock_summarize: MagicMock
     ) -> None:
@@ -89,7 +89,7 @@ class TestSubAgentHookRecordsEvent:
         assert get_compression_events() == []
 
     @patch(
-        "agentm.core.compression.count_tokens",
+        "agentm.middleware.compression.count_tokens",
         return_value=_DEFAULT_THRESHOLD_TOKENS + 1,
     )
     def test_no_event_when_few_messages(self, _mock_count: MagicMock) -> None:
@@ -105,8 +105,8 @@ class TestBuildCompressionHookRecordsEvent:
     def setup_method(self) -> None:
         clear_compression_events()
 
-    @patch("agentm.core.compression._summarize_messages", return_value="Summary")
-    @patch("agentm.core.compression.count_tokens", return_value=200_000)
+    @patch("agentm.middleware.compression._summarize_messages", return_value="Summary")
+    @patch("agentm.middleware.compression.count_tokens", return_value=200_000)
     def test_configurable_hook_records_event(
         self, _mock_count: MagicMock, _mock_summarize: MagicMock
     ) -> None:
