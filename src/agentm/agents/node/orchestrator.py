@@ -32,14 +32,14 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
+from pydantic import BaseModel
 
 from agentm.config.schema import OrchestratorConfig
-from agentm.core.compression import build_compression_hook
-from agentm.core.context_formatters import format_rca_context
+from agentm.middleware.compression import build_compression_hook
 from agentm.core.prompt import load_prompt_template
 from agentm.core.trajectory import TrajectoryCollector
 from agentm.models.output import get_output_schema
-from agentm.models.state import HypothesisDrivenState
+from agentm.models.state import BaseExecutorState
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ def create_node_orchestrator(
     tools: list[Any],
     checkpointer: Any,
     store: Any,
-    state_schema: type = HypothesisDrivenState,
+    state_schema: type = BaseExecutorState,
     format_context: Callable[[dict], str] | None = None,
     model_config: Any | None = None,
     trajectory: TrajectoryCollector | None = None,
@@ -112,8 +112,12 @@ def create_node_orchestrator(
         model_config: Optional model configuration (API key, base_url).
         trajectory: Optional TrajectoryCollector for event recording.
     """
-    # Default formatter: RCA notebook (preserves backward compatibility)
-    _format_context: Callable[[dict], str] = format_context or format_rca_context
+    # Default formatter: plain state description (no domain coupling)
+    if format_context is not None:
+        _format_context: Callable[[dict], str] = format_context
+    else:
+        def _format_context(state: dict) -> str:
+            return f"Phase: {state.get('current_phase', 'unknown')}"
 
     # ------------------------------------------------------------------
     # Model setup

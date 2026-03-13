@@ -20,9 +20,11 @@ from agentm.config.schema import (
 )
 from agentm.core.task_manager import TaskManager
 from agentm.core.tool_registry import ToolRegistry
-from agentm.core.notebook import add_hypothesis, update_hypothesis_status
-from agentm.models.data import DiagnosticNotebook, ManagedTask
-from agentm.models.enums import AgentRunStatus, HypothesisStatus
+from agentm.scenarios.rca.notebook import add_hypothesis, update_hypothesis_status
+from agentm.scenarios.rca.data import DiagnosticNotebook
+from agentm.models.data import ManagedTask
+from agentm.models.enums import AgentRunStatus
+from agentm.scenarios.rca.enums import HypothesisStatus
 
 
 class _MockSubgraph:

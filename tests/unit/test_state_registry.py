@@ -14,10 +14,10 @@ import pytest
 from agentm.core.state_registry import get_state_schema
 from agentm.models.state import (
     DecisionTreeState,
-    HypothesisDrivenState,
-    MemoryExtractionState,
     SequentialDiagnosisState,
 )
+from agentm.scenarios.rca.state import HypothesisDrivenState
+from agentm.scenarios.memory_extraction.state import MemoryExtractionState
 
 
 class TestGetStateSchema:

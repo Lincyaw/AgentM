@@ -38,8 +38,9 @@ class TestTaskTypeLiteralConsistency:
 
     def test_answer_schema_covers_rca_task_types(self):
         """ANSWER_SCHEMA must include the three RCA worker task types."""
-        from agentm.models.answer_schemas import ANSWER_SCHEMA
+        from agentm.models.answer_schemas import ANSWER_SCHEMA, _ensure_defaults
 
+        _ensure_defaults()
         for task_type in ("scout", "verify", "deep_analyze"):
             assert task_type in ANSWER_SCHEMA, (
                 f"ANSWER_SCHEMA missing RCA task type: {task_type!r}"
@@ -47,8 +48,9 @@ class TestTaskTypeLiteralConsistency:
 
     def test_answer_schema_covers_memory_extraction_task_types(self):
         """ANSWER_SCHEMA must include the four memory-extraction worker task types."""
-        from agentm.models.answer_schemas import ANSWER_SCHEMA
+        from agentm.models.answer_schemas import ANSWER_SCHEMA, _ensure_defaults
 
+        _ensure_defaults()
         for task_type in ("collect", "analyze", "extract", "refine"):
             assert task_type in ANSWER_SCHEMA, (
                 f"ANSWER_SCHEMA missing memory-extraction task type: {task_type!r}"
@@ -110,12 +112,12 @@ class TestHooksModuleExports:
     """
 
     def test_build_instruction_hook_exists(self):
-        from agentm.agents.hooks import build_instruction_hook
+        from agentm.middleware.instruction import build_instruction_hook
 
         assert callable(build_instruction_hook)
 
     def test_build_combined_hook_exists(self):
-        from agentm.agents.hooks import build_combined_hook
+        from agentm.middleware.instruction import build_combined_hook
 
         assert callable(build_combined_hook)
 

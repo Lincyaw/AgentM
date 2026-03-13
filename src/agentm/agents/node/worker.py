@@ -24,7 +24,7 @@ from langgraph.graph import END, START, StateGraph
 
 from agentm.agents.node.state import WorkerResult, WorkerState
 from agentm.config.schema import AgentConfig, ModelConfig
-from agentm.core.compression import build_compression_hook
+from agentm.middleware.compression import build_compression_hook
 from agentm.core.prompt import load_prompt_template
 from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
@@ -33,10 +33,10 @@ from agentm.tools.think import think
 
 
 # ---------------------------------------------------------------------------
-# Answer schemas (imported from consolidated registry)
+# Answer schemas (lazy-loaded from consolidated registry)
 # ---------------------------------------------------------------------------
 
-from agentm.models.answer_schemas import ANSWER_SCHEMA  # noqa: E402
+from agentm.models.answer_schemas import ANSWER_SCHEMA, _ensure_defaults as _ensure_answer_defaults  # noqa: E402
 
 _TASK_TYPE_LABEL: dict[str, str] = {
     "scout": "Scout",
@@ -119,7 +119,7 @@ def build_worker_subgraph(
 
     # Dedup wrapping (optional)
     if config.execution.dedup is not None and config.execution.dedup.enabled:
-        from agentm.agents.dedup import DedupTracker, wrap_tool_with_dedup
+        from agentm.middleware.dedup import DedupTracker, wrap_tool_with_dedup
 
         tracker = DedupTracker(max_cache_size=config.execution.dedup.max_cache_size)
         tools = [wrap_tool_with_dedup(t, tracker) for t in tools]
@@ -353,6 +353,7 @@ def build_worker_subgraph(
     # This node ALWAYS runs at loop exit, guaranteeing a non-null result.
     # ------------------------------------------------------------------
 
+    _ensure_answer_defaults()
     answer_schema = ANSWER_SCHEMA[task_type]
     compress_model = model_plain.with_structured_output(answer_schema)
 
