@@ -183,7 +183,7 @@ def _open_conn() -> tuple[duckdb.DuckDBPyConnection, dict[str, str | list[dict]]
 # ---------------------------------------------------------------------------
 
 
-async def describe_tables() -> str:
+async def describe_tables(request: str) -> str:
     """Return the schema (column names and types) of all registered tables.
 
     Call this **before** writing a SQL query to discover table names and
@@ -199,10 +199,16 @@ async def describe_tables() -> str:
 
         SELECT service_name, "attr.k8s.pod.name" FROM abnormal_logs LIMIT 10
 
+    Args:
+        request: Any non-empty instruction string (for example, "show schema").
+            This argument exists to ensure a stable tool-call schema across
+            providers that reject zero-argument tools.
+
     Returns:
         JSON string — ``{ "<table>": { "row_count": N, "columns": [{name, type, sql_ref}, ...] }, ... }``
         or ``{ "error": "..." }`` if no tables are registered.
     """
+    _ = request
     tables = _tables_var.get()
     if not tables:
         return json.dumps(

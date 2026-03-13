@@ -23,6 +23,7 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "langchain>=1.2.10",
     "python-dotenv>=1.2.2",
+    "sentence-transformers>=3.0",
 ]
 
 [dependency-groups]
