@@ -99,6 +99,7 @@ class TestCheckTasksPipeline:
     async def test_check_tasks_returns_completed_results(self) -> None:
         """check_tasks should include completed task results in ToolMessage."""
         cmd = await self.check_tasks(
+            request="status",
             wait_seconds=0,
             tool_call_id="call-010",
         )
@@ -123,6 +124,7 @@ class TestCheckTasksPipeline:
         check_tasks = tools["check_tasks"]
 
         cmd = await check_tasks(
+            request="status",
             wait_seconds=0,
             tool_call_id="call-011",
         )
@@ -160,13 +162,21 @@ class TestCheckTasksIncrementalReporting:
         consuming context tokens repeatedly for zero new information.
         """
         # First call — result should be present
-        cmd1 = await self.check_tasks(wait_seconds=0, tool_call_id="call-020")
+        cmd1 = await self.check_tasks(
+            request="status",
+            wait_seconds=0,
+            tool_call_id="call-020",
+        )
         content1 = json.loads(cmd1.update["messages"][0].content)
         assert len(content1["completed"]) == 1
         assert content1["completed"][0]["result"] is not None
 
         # Second call — already-reported task should NOT reappear
-        cmd2 = await self.check_tasks(wait_seconds=0, tool_call_id="call-021")
+        cmd2 = await self.check_tasks(
+            request="status",
+            wait_seconds=0,
+            tool_call_id="call-021",
+        )
         content2 = json.loads(cmd2.update["messages"][0].content)
         assert len(content2["completed"]) == 0
 
@@ -181,12 +191,20 @@ class TestCheckTasksIncrementalReporting:
         check_tasks = tools["check_tasks"]
 
         # First call — failure details present
-        cmd1 = await check_tasks(wait_seconds=0, tool_call_id="call-022")
+        cmd1 = await check_tasks(
+            request="status",
+            wait_seconds=0,
+            tool_call_id="call-022",
+        )
         content1 = json.loads(cmd1.update["messages"][0].content)
         assert len(content1["failed"]) == 1
 
         # Second call — already-reported failure omitted
-        cmd2 = await check_tasks(wait_seconds=0, tool_call_id="call-023")
+        cmd2 = await check_tasks(
+            request="status",
+            wait_seconds=0,
+            tool_call_id="call-023",
+        )
         content2 = json.loads(cmd2.update["messages"][0].content)
         assert len(content2["failed"]) == 0
 
@@ -201,10 +219,18 @@ class TestCheckTasksIncrementalReporting:
         check_tasks = tools["check_tasks"]
 
         # Call twice — running task should appear both times
-        cmd1 = await check_tasks(wait_seconds=0, tool_call_id="call-024")
+        cmd1 = await check_tasks(
+            request="status",
+            wait_seconds=0,
+            tool_call_id="call-024",
+        )
         content1 = json.loads(cmd1.update["messages"][0].content)
         assert len(content1["running"]) == 1
 
-        cmd2 = await check_tasks(wait_seconds=0, tool_call_id="call-025")
+        cmd2 = await check_tasks(
+            request="status",
+            wait_seconds=0,
+            tool_call_id="call-025",
+        )
         content2 = json.loads(cmd2.update["messages"][0].content)
         assert len(content2["running"]) == 1
