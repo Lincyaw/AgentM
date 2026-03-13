@@ -43,10 +43,27 @@ from agentm.models.state import HypothesisDrivenState
 
 logger = logging.getLogger(__name__)
 
+# Maximum number of retries when synthesize structured output fails validation.
+# Total attempts = 1 (initial) + _SYNTH_MAX_RETRIES.
+_SYNTH_MAX_RETRIES = 2
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _extract_raw_from_error(exc: Exception) -> str:
+    """Extract the raw LLM JSON text from a structured-output failure.
+
+    LangChain's ``OutputParserException`` carries an ``llm_output`` attribute
+    with the text the model actually produced.  Walk the exception chain to
+    find it; fall back to ``str(exc)`` so the feedback message is still useful.
+    """
+    for e in (exc, getattr(exc, "__cause__", None), getattr(exc, "__context__", None)):
+        if e is not None and hasattr(e, "llm_output") and e.llm_output:
+            return str(e.llm_output)
+    return str(exc)
 
 
 def _parse_decision(text: str) -> str:
@@ -308,7 +325,7 @@ def create_node_orchestrator(
             "Do NOT include any explanation or markdown — output raw JSON only."
         )
 
-        synth_input = [
+        attempt_messages = [
             SystemMessage(content=output_prompt_text + json_instruction),
             *non_system,
             HumanMessage(
@@ -316,24 +333,46 @@ def create_node_orchestrator(
             ),
         ]
 
-        try:
-            result = await synthesize_model.ainvoke(synth_input)
-            structured = (
-                result.model_dump() if hasattr(result, "model_dump") else result
-            )
-        except Exception as exc:
-            logger.warning(
-                "synthesize structured output failed (%s), falling back to plain LLM",
-                exc,
-            )
-            # Fallback: call model without structured output, store raw text
+        structured: dict[str, Any] | None = None
+        for attempt in range(1 + _SYNTH_MAX_RETRIES):
             try:
-                raw = await model_plain.ainvoke(synth_input)
-                raw_text = str(getattr(raw, "content", raw))
-            except Exception as exc2:
-                logger.warning("synthesize fallback also failed: %s", exc2)
-                raw_text = ""
-            structured = {"raw_text": raw_text}
+                result = await synthesize_model.ainvoke(attempt_messages)
+                structured = (
+                    result.model_dump() if hasattr(result, "model_dump") else result
+                )
+                break  # success
+            except Exception as exc:
+                if attempt < _SYNTH_MAX_RETRIES:
+                    logger.info(
+                        "synthesize attempt %d failed, retrying with feedback: %s",
+                        attempt + 1,
+                        exc,
+                    )
+                    raw_json = _extract_raw_from_error(exc)
+                    attempt_messages.append(AIMessage(content=raw_json))
+                    attempt_messages.append(
+                        HumanMessage(
+                            content=(
+                                f"Your JSON output had validation errors:\n{exc}\n\n"
+                                f"Your previous output:\n{raw_json}\n\n"
+                                "Fix the errors and output valid JSON matching the schema exactly."
+                            )
+                        )
+                    )
+                else:
+                    logger.warning(
+                        "synthesize structured output failed after %d attempts (%s), "
+                        "falling back to plain LLM",
+                        attempt + 1,
+                        exc,
+                    )
+                    try:
+                        raw = await model_plain.ainvoke(attempt_messages)
+                        raw_text = str(getattr(raw, "content", raw))
+                    except Exception as exc2:
+                        logger.warning("synthesize fallback also failed: %s", exc2)
+                        raw_text = ""
+                    structured = {"raw_text": raw_text}
 
         return {"structured_response": structured}
 

@@ -1,14 +1,6 @@
 system:
   type: "memory_extraction"
 
-phases:
-  extract:
-    description: "Read trajectories and extract candidate knowledge entries"
-    next_phases: [consolidate]
-  consolidate:
-    description: "Deduplicate, merge, and write entries to the knowledge store"
-    next_phases: []
-
 orchestrator:
   model: "gpt-5.1"
   temperature: 0.3

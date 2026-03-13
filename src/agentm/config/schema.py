@@ -180,4 +180,3 @@ class ScenarioConfig(BaseModel):
     system: SystemTypeConfig
     orchestrator: OrchestratorConfig
     agents: dict[str, AgentConfig]
-    phases: Optional[dict[str, dict[str, Any]]] = None

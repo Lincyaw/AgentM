@@ -219,13 +219,13 @@ def build_worker_subgraph(
                 f"WARNING: {remaining}/{max_steps} steps left. "
                 "Summarize findings NOW. Do NOT call any more tools."
             )
-            messages = [*messages, SystemMessage(content=budget_text)]
+            messages = [*messages, HumanMessage(content=budget_text)]
         elif remaining <= max_steps // 3:
             budget_text = (
                 f"BUDGET: {remaining}/{max_steps} steps remaining. "
                 "Start wrapping up — prioritize critical queries."
             )
-            messages = [*messages, SystemMessage(content=budget_text)]
+            messages = [*messages, HumanMessage(content=budget_text)]
 
         # Context compression (returns llm_input_messages or messages)
         if compression_hook is not None:

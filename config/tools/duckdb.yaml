@@ -1,0 +1,10 @@
+tools:
+  - name: describe_tables
+    module: agentm.tools.duckdb_sql
+    function: describe_tables
+    parameters: {}
+
+  - name: query_sql
+    module: agentm.tools.duckdb_sql
+    function: query_sql
+    parameters: {}

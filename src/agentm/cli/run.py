@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage
 from rich.console import Console
 
 import agentm.tools.observability as obs_tools
+from agentm.tools.duckdb_sql import register_tables as duckdb_register_tables
 from agentm.builder import AgentSystemBuilder
 from agentm.config.loader import load_scenario_config, load_system_config
 from agentm.core.debug_console import DebugConsole
@@ -72,6 +73,13 @@ async def run_investigation(
         console.print(f"[red]ERROR: {init_info['error']}[/]")
         sys.exit(1)
     console.print(f"Data initialized: {len(init_info['files'])} parquet files")
+    duckdb_register_tables(
+        {
+            Path(f).stem: str(Path(data_dir) / f)
+            for f in init_info["files"]
+            if Path(f).parent == Path(".")
+        }
+    )
 
     # Resolve relative prompt paths against scenario_dir
     _resolve_prompt_paths(scenario_config, scenario_path)
@@ -530,6 +538,13 @@ async def resume_investigation(
             console.print(f"[red]ERROR: {init_info['error']}[/]")
             sys.exit(1)
         console.print(f"Data initialized: {len(init_info['files'])} parquet files")
+        duckdb_register_tables(
+            {
+                Path(f).stem: str(Path(data_dir) / f)
+                for f in init_info["files"]
+                if Path(f).parent == Path(".")
+            }
+        )
 
     # Resolve prompt paths
     _resolve_prompt_paths(scenario_config, scenario_path)

@@ -29,8 +29,10 @@ reasoning to a sub-agent's conclusions.
 **Memory:**
 - **recall_history(query, scope?)**: Search pre-compression history for details lost during
   context compression. Only useful after compression has occurred.
-- **knowledge_search(query)**: Semantic search across the knowledge store.
-- **knowledge_list(path?)**: List entries under a knowledge store path.
+- **knowledge_search(query, mode?)**: Search the knowledge store. `mode`: "keyword",
+  "semantic", or "hybrid" (default). Returns matching entries with relevance scores.
+- **knowledge_list(path?, depth?)**: List entries under a knowledge store path.
+  `depth`: 1 (default), 0 (unlimited), N (up to N levels).
 - **knowledge_read(path)**: Read a specific knowledge store entry.
 </tools>
 

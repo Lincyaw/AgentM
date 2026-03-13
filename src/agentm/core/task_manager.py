@@ -108,7 +108,6 @@ class TaskManager:
         If *wait_seconds* > 0 and all tasks are still running, blocks until
         the completion event fires (a task finishes) or the timeout expires.
         """
-        wait_seconds = 100000000
         running = [
             t for t in self._tasks.values() if t.status == AgentRunStatus.RUNNING
         ]

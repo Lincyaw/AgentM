@@ -10,7 +10,6 @@ from typing import Any, AsyncIterator
 
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.store.memory import InMemoryStore
 
 from dataclasses import asdict
 
@@ -340,19 +339,20 @@ class AgentSystemBuilder:
             set_graph_ref = injected_tools.pop("_set_graph_ref", None)
 
             # --- Knowledge Store ---
-            store = InMemoryStore()
-            knowledge_module.set_store(store)
+            knowledge_module.init(base_dir="./knowledge")
 
             # Wire checkpointer DB path into memory module for memory-extraction system
             if system_config is not None:
                 db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
                 memory_module.set_db_path(str(Path(db_url).resolve()))
 
-            # Knowledge tools are standalone functions (not factory-created)
+            # Knowledge tools are standalone functions (file-system backend)
             KNOWLEDGE_TOOLS: dict[str, Any] = {
                 "knowledge_search": knowledge_module.knowledge_search,
                 "knowledge_list": knowledge_module.knowledge_list,
                 "knowledge_read": knowledge_module.knowledge_read,
+                "knowledge_write": knowledge_module.knowledge_write,
+                "knowledge_delete": knowledge_module.knowledge_delete,
             }
 
             # Memory tools are standalone functions (checkpointer injected above)
@@ -382,7 +382,7 @@ class AgentSystemBuilder:
                         )
                     tools.append(tool)
                 elif name in KNOWLEDGE_TOOLS:
-                    # Knowledge tools (standalone functions with store injected via set_store)
+                    # Knowledge tools (file-system backend, initialized via init())
                     func = KNOWLEDGE_TOOLS[name]
                     tool = StructuredTool.from_function(
                         func=func,
@@ -417,7 +417,7 @@ class AgentSystemBuilder:
                     config=scenario_config.orchestrator,
                     tools=tools,
                     checkpointer=checkpointer,
-                    store=store,
+                    store=None,
                     state_schema=state_schema,
                     format_context=format_context,
                     model_config=orch_model_config,
@@ -428,7 +428,7 @@ class AgentSystemBuilder:
                     config=scenario_config.orchestrator,
                     tools=tools,
                     checkpointer=checkpointer,
-                    store=store,
+                    store=None,
                     model_config=orch_model_config,
                     trajectory=trajectory,
                 )

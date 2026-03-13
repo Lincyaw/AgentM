@@ -93,10 +93,12 @@ def create_orchestrator_tools(
         )
 
     async def check_tasks(
+        request: str,
         wait_seconds: float = 10,
         tool_call_id: Annotated[str, InjectedToolCallId] = "",
     ) -> Command:
         """Check status of all dispatched tasks and collect completed results."""
+        _ = request
         results = await task_manager.get_all_status(wait_seconds=wait_seconds)
         return Command(
             update={
@@ -386,10 +388,12 @@ def create_orchestrator_tools(
         )
 
     async def check_tasks(
+        request: str,
         wait_seconds: float = 10,
         tool_call_id: Annotated[str, InjectedToolCallId] = "",
     ) -> Command:
         """Check status of all dispatched tasks and collect completed results."""
+        _ = request
         results = await task_manager.get_all_status(wait_seconds=wait_seconds)
         return Command(
             update={
