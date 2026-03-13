@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentm.models.enums import HypothesisStatus
+from agentm.scenarios.rca.enums import HypothesisStatus
 
 # Legal transitions as specified in the design document and notebook.py docstring.
 # This is the SINGLE SOURCE OF TRUTH for the state machine.
@@ -135,7 +135,7 @@ class TestValidateHypothesisTransition:
         ],
     )
     def test_legal_transitions_accepted(self, current, target):
-        from agentm.core.notebook import validate_hypothesis_transition
+        from agentm.scenarios.rca.notebook import validate_hypothesis_transition
 
         assert validate_hypothesis_transition(current, target) is True
 
@@ -156,6 +156,6 @@ class TestValidateHypothesisTransition:
         ],
     )
     def test_illegal_transitions_rejected(self, current, target):
-        from agentm.core.notebook import validate_hypothesis_transition
+        from agentm.scenarios.rca.notebook import validate_hypothesis_transition
 
         assert validate_hypothesis_transition(current, target) is False

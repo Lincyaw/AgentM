@@ -1,7 +1,7 @@
 """Orchestrator graph creation.
 
 Builds the Orchestrator's CompiledGraph via create_react_agent with
-a prompt callable that injects the DiagnosticNotebook into LLM context.
+a prompt callable that injects working memory into LLM context.
 """
 
 from __future__ import annotations
@@ -13,36 +13,38 @@ from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
 from agentm.config.schema import OrchestratorConfig
-from agentm.core.compression import (
-    build_compression_hook,
-    compress_completed_phase,
-)
-from agentm.core.notebook import format_notebook_for_llm, should_compress_phase
+from agentm.middleware.compression import build_compression_hook
 from agentm.core.prompt import load_prompt_template
 from agentm.core.trajectory import TrajectoryCollector
 from agentm.models.output import get_output_schema
 
 
-def build_orchestrator_prompt(system_prompt_template: str) -> Callable:
-    """Build a prompt callable that injects Notebook into LLM context before each call.
+def build_orchestrator_prompt(
+    system_prompt_template: str,
+    format_context: Callable[[dict], str] | None = None,
+) -> Callable:
+    """Build a prompt callable that injects working memory into LLM context before each call.
 
-    The returned callable receives the current HypothesisDrivenState and returns a list of
-    messages with the system prompt populated from the DiagnosticNotebook.
+    The returned callable receives the current state and returns a list of
+    messages with the system prompt populated from the format_context callable.
+
+    Args:
+        system_prompt_template: Template string for the system prompt.
+        format_context: Optional callable ``(state: dict) -> str`` producing
+            the working-memory text. If not provided, the system prompt
+            receives empty context.
     """
 
     def prompt(state: dict) -> list:
-        notebook_data = state.get("notebook")
-        if notebook_data is not None:
-            # Compress completed phases for LLM input only (state is not mutated)
-            notebook_for_llm = notebook_data
-            for phase in ("exploration", "generation", "verification"):
-                if should_compress_phase(notebook_for_llm, phase):
-                    notebook_for_llm = compress_completed_phase(notebook_for_llm, phase)
-            notebook_text = format_notebook_for_llm(notebook_for_llm)
+        if format_context is not None:
+            context_text = format_context(state)
         else:
-            notebook_text = "(Investigation starting — no data collected yet)"
+            context_text = ""
+
         system_prompt = load_prompt_template(
-            system_prompt_template, notebook=notebook_text
+            system_prompt_template,
+            notebook=context_text,
+            context=context_text,
         )
         return [
             SystemMessage(content=system_prompt),
@@ -57,6 +59,7 @@ def create_orchestrator(
     tools: list,
     checkpointer: Any,
     store: Any,
+    format_context: Callable[[dict], str] | None = None,
     model_config: Any | None = None,
     trajectory: TrajectoryCollector | None = None,
 ) -> Any:
@@ -65,6 +68,15 @@ def create_orchestrator(
     Uses build_orchestrator_prompt to create the prompt callable.
     Does NOT pass state_schema — create_react_agent's default AgentState
     includes 'remaining_steps' which is required by the framework.
+
+    Args:
+        config: OrchestratorConfig from the scenario YAML.
+        tools: List of tools available to the orchestrator.
+        checkpointer: LangGraph checkpointer (or None).
+        store: LangGraph store backend (or None).
+        format_context: Optional callable for working-memory formatting.
+        model_config: Optional model configuration (API key, base_url).
+        trajectory: Optional TrajectoryCollector for event recording.
 
     Returns a CompiledGraph (langgraph).
     """
@@ -79,7 +91,10 @@ def create_orchestrator(
             llm_kwargs["base_url"] = model_config.base_url
     model = ChatOpenAI(**llm_kwargs)
 
-    prompt_callable = build_orchestrator_prompt(config.prompts.get("system", ""))
+    prompt_callable = build_orchestrator_prompt(
+        config.prompts.get("system", ""),
+        format_context=format_context,
+    )
 
     agent_kwargs: dict[str, Any] = {
         "model": model,
@@ -96,7 +111,7 @@ def create_orchestrator(
     if config.compression is not None and config.compression.enabled:
         hooks.append(build_compression_hook(config.compression))
     if trajectory is not None:
-        from agentm.agents.hooks import build_llm_input_hook
+        from agentm.middleware.trajectory import build_llm_input_hook
 
         hooks.append(build_llm_input_hook(trajectory, ["orchestrator"]))
     if hooks:

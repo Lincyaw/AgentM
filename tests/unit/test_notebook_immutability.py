@@ -15,8 +15,8 @@ captures corrupted state → replay and time-travel produce wrong results.
 from __future__ import annotations
 
 
-from agentm.models.data import DiagnosticNotebook, ExplorationStep
-from agentm.models.enums import HypothesisStatus, Phase
+from agentm.scenarios.rca.data import DiagnosticNotebook, ExplorationStep
+from agentm.scenarios.rca.enums import HypothesisStatus, Phase
 
 
 def _make_notebook(**overrides) -> DiagnosticNotebook:
@@ -37,7 +37,7 @@ class TestAddHypothesisImmutability:
     """
 
     def test_returns_new_instance(self):
-        from agentm.core.notebook import add_hypothesis
+        from agentm.scenarios.rca.notebook import add_hypothesis
 
         original = _make_notebook()
         result = add_hypothesis(
@@ -47,7 +47,7 @@ class TestAddHypothesisImmutability:
         assert result is not original
 
     def test_original_unchanged(self):
-        from agentm.core.notebook import add_hypothesis
+        from agentm.scenarios.rca.notebook import add_hypothesis
 
         original = _make_notebook()
         original_hyp_count = len(original.hypotheses)
@@ -57,7 +57,7 @@ class TestAddHypothesisImmutability:
         assert len(original.hypotheses) == original_hyp_count
 
     def test_new_hypothesis_present_in_result(self):
-        from agentm.core.notebook import add_hypothesis
+        from agentm.scenarios.rca.notebook import add_hypothesis
 
         original = _make_notebook()
         result = add_hypothesis(
@@ -76,7 +76,7 @@ class TestUpdateHypothesisStatusImmutability:
     """
 
     def test_returns_new_instance(self):
-        from agentm.core.notebook import add_hypothesis, update_hypothesis_status
+        from agentm.scenarios.rca.notebook import add_hypothesis, update_hypothesis_status
 
         nb = _make_notebook()
         nb = add_hypothesis(nb, "H1", "Pool exhaustion", "2026-03-08T01:00:00Z")
@@ -87,7 +87,7 @@ class TestUpdateHypothesisStatusImmutability:
         assert result is not nb
 
     def test_original_status_unchanged(self):
-        from agentm.core.notebook import add_hypothesis, update_hypothesis_status
+        from agentm.scenarios.rca.notebook import add_hypothesis, update_hypothesis_status
 
         nb = _make_notebook()
         nb = add_hypothesis(nb, "H1", "Pool exhaustion", "2026-03-08T01:00:00Z")
@@ -106,7 +106,7 @@ class TestAddExplorationStepImmutability:
     """
 
     def test_returns_new_instance(self):
-        from agentm.core.notebook import add_exploration_step
+        from agentm.scenarios.rca.notebook import add_exploration_step
 
         original = _make_notebook()
         step = ExplorationStep(
@@ -121,7 +121,7 @@ class TestAddExplorationStepImmutability:
         assert result is not original
 
     def test_original_history_unchanged(self):
-        from agentm.core.notebook import add_exploration_step
+        from agentm.scenarios.rca.notebook import add_exploration_step
 
         original = _make_notebook()
         original_count = len(original.exploration_history)
@@ -146,7 +146,7 @@ class TestAddCollectedDataImmutability:
     """
 
     def test_returns_new_instance(self):
-        from agentm.core.notebook import add_collected_data
+        from agentm.scenarios.rca.notebook import add_collected_data
 
         original = _make_notebook()
         result = add_collected_data(original, "db-agent", {"connections": "200/200"})
@@ -154,7 +154,7 @@ class TestAddCollectedDataImmutability:
         assert result is not original
 
     def test_original_collected_data_unchanged(self):
-        from agentm.core.notebook import add_collected_data
+        from agentm.scenarios.rca.notebook import add_collected_data
 
         original = _make_notebook()
 
@@ -171,7 +171,7 @@ class TestSetConfirmedHypothesisImmutability:
     """
 
     def test_returns_new_instance(self):
-        from agentm.core.notebook import (
+        from agentm.scenarios.rca.notebook import (
             add_hypothesis,
             set_confirmed_hypothesis,
             update_hypothesis_status,
@@ -190,7 +190,7 @@ class TestSetConfirmedHypothesisImmutability:
         assert result is not nb
 
     def test_original_confirmed_hypothesis_unchanged(self):
-        from agentm.core.notebook import (
+        from agentm.scenarios.rca.notebook import (
             add_hypothesis,
             set_confirmed_hypothesis,
             update_hypothesis_status,

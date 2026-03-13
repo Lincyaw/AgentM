@@ -1,16 +1,29 @@
-"""Context compression for Sub-Agent and Orchestrator layers."""
+"""Compression middleware — prevents token overflow via LLM-based summarization.
+
+Two modes:
+1. Default hook (``sub_agent_compression_hook``): uses hardcoded thresholds.
+2. Configurable hook (``build_compression_hook``): respects ``CompressionConfig``.
+
+Both follow the ``pre_model_hook`` protocol: receive state dict, return dict
+with ``messages`` (passthrough) or ``llm_input_messages`` (compressed).
+
+Ref: designs/orchestrator.md § Compression Architecture
+"""
 
 from __future__ import annotations
 
 import contextvars
-from dataclasses import replace
 from typing import Any, Callable
 
 import tiktoken
 from langchain_core.messages import SystemMessage
 
 from agentm.config.schema import CompressionConfig
-from agentm.models.data import DiagnosticNotebook, PhaseSummary
+from agentm.middleware import AgentMMiddleware
+
+# ---------------------------------------------------------------------------
+# Compression event tracking (contextvars)
+# ---------------------------------------------------------------------------
 
 # Thread-safe tracking of compression events within a single agent invocation.
 # Callers (e.g. orchestrator/builder) read events via get_compression_events()
@@ -37,6 +50,10 @@ def clear_compression_events() -> None:
     _compression_events.set([])
 
 
+# ---------------------------------------------------------------------------
+# Token counting
+# ---------------------------------------------------------------------------
+
 _DEFAULT_CONTEXT_WINDOW = 128_000
 _DEFAULT_THRESHOLD_RATIO = 0.8
 _DEFAULT_THRESHOLD_TOKENS = int(_DEFAULT_CONTEXT_WINDOW * _DEFAULT_THRESHOLD_RATIO)
@@ -60,6 +77,10 @@ def count_tokens(messages: list[Any], model: str = "gpt-5.1") -> int:
             total += len(encoding.encode(content))
     return total
 
+
+# ---------------------------------------------------------------------------
+# LLM-based summarization
+# ---------------------------------------------------------------------------
 
 _SUMMARIZE_PROMPT = (
     "Summarize the following agent execution history into a structured summary. "
@@ -162,6 +183,11 @@ def _summarize_messages(messages: list[Any], model: str = "gpt-5.1-mini") -> str
     return str(content)
 
 
+# ---------------------------------------------------------------------------
+# Pre-model hooks
+# ---------------------------------------------------------------------------
+
+
 def sub_agent_compression_hook(state: dict[str, Any]) -> dict[str, Any]:
     """pre_model_hook: compress messages before LLM call when token limit approached.
 
@@ -239,49 +265,17 @@ def build_compression_hook(config: CompressionConfig) -> Callable:
     return hook
 
 
-def compress_completed_phase(
-    notebook: DiagnosticNotebook,
-    completed_phase: str,
-) -> DiagnosticNotebook:
-    """Compress a completed phase's detailed records into a PhaseSummary.
+# ---------------------------------------------------------------------------
+# Middleware class
+# ---------------------------------------------------------------------------
 
-    Returns a new DiagnosticNotebook with phase_summaries updated and
-    exploration_history pruned for the completed phase.
-    """
-    phase_steps = [
-        step
-        for step in notebook.exploration_history
-        if step.phase.value == completed_phase
-    ]
-    remaining_steps = [
-        step
-        for step in notebook.exploration_history
-        if step.phase.value != completed_phase
-    ]
 
-    started_at = phase_steps[0].timestamp if phase_steps else ""
-    completed_at = phase_steps[-1].timestamp if phase_steps else ""
-    actions_taken = [step.action for step in phase_steps]
+class CompressionMiddleware(AgentMMiddleware):
+    """Pre-model middleware that compresses message history when threshold exceeded."""
 
-    hypothesis_ids: list[str] = []
-    for step in phase_steps:
-        if (
-            step.target_hypothesis_id
-            and step.target_hypothesis_id not in hypothesis_ids
-        ):
-            hypothesis_ids.append(step.target_hypothesis_id)
+    def __init__(self, config: CompressionConfig) -> None:
+        self._config = config
+        self._hook = build_compression_hook(config)
 
-    summary = PhaseSummary(
-        phase=completed_phase,
-        started_at=started_at,
-        completed_at=completed_at,
-        actions_taken=actions_taken,
-        hypotheses_affected=hypothesis_ids,
-    )
-
-    new_phase_summaries = list(notebook.phase_summaries) + [summary]
-    return replace(
-        notebook,
-        exploration_history=remaining_steps,
-        phase_summaries=new_phase_summaries,
-    )
+    def before_model(self, state: dict[str, Any]) -> dict[str, Any]:
+        return self._hook(state)

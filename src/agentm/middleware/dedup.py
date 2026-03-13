@@ -1,4 +1,4 @@
-"""Tool call deduplication for Sub-Agent ReAct loops.
+"""Dedup middleware — prevents repeated tool calls.
 
 Two-layer dedup:
 1. Pre-model hook (soft): reminds LLM it already called a tool with the same args.
@@ -18,6 +18,8 @@ from typing import Any, Callable
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel
+
+from agentm.middleware import AgentMMiddleware
 
 
 class DedupTracker:
@@ -214,3 +216,19 @@ def wrap_tool_with_dedup(tool: BaseTool, tracker: DedupTracker) -> BaseTool:
         tool_kwargs["args_schema"] = schema
 
     return StructuredTool(**tool_kwargs)
+
+
+class DedupMiddleware(AgentMMiddleware):
+    """Pre-model middleware that injects dedup reminders for repeated tool calls."""
+
+    def __init__(self, tracker: DedupTracker | None = None) -> None:
+        self._tracker = tracker or DedupTracker()
+        self._hook = build_dedup_hook(self._tracker)
+
+    @property
+    def tracker(self) -> DedupTracker:
+        """Access the underlying tracker (e.g. for tool wrapping)."""
+        return self._tracker
+
+    def before_model(self, state: dict[str, Any]) -> dict[str, Any]:
+        return self._hook(state)

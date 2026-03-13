@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel
 
-from agentm.agents.dedup import (
+from agentm.middleware.dedup import (
     DedupTracker,
     build_dedup_hook,
     wrap_tool_with_dedup,

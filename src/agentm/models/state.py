@@ -1,30 +1,40 @@
 """State schemas (TypedDict) for AgentM agent systems.
 
-Normative definitions from design docs. Field names and types are binding.
+SDK state types are defined here. Domain-specific states live in their
+canonical locations under ``scenarios/``.
+
+The global TypeVar ``S`` allows framework components (builder, middleware,
+task manager) to be generic over user-defined state types that extend
+``BaseExecutorState``.
 """
 
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Any, Optional, TypedDict
+from typing import Annotated, Any, TypedDict, TypeVar
 
 from langgraph.graph.message import add_messages
 
-from agentm.models.data import (
-    CompressionRef,
-    DiagnosticNotebook,
-    KnowledgeEntry,
-)
-from agentm.models.enums import Phase
+from agentm.models.data import CompressionRef
 
 
 class BaseExecutorState(TypedDict):
-    """Fields shared by all agent systems."""
+    """Fields shared by all agent systems.
+
+    ``current_phase`` is a plain ``str`` so the framework layer stays
+    domain-agnostic.  Concrete strategies use their own phase enums
+    internally (e.g. ``Phase`` for RCA) and convert to ``str`` at the
+    boundary.
+    """
 
     messages: Annotated[list, add_messages]
     task_id: str
     task_description: str
-    current_phase: Phase
+    current_phase: str
+
+
+# Global TypeVar for generic framework components.
+S = TypeVar("S", bound=BaseExecutorState)
 
 
 class SubAgentState(TypedDict):
@@ -37,33 +47,11 @@ class SubAgentState(TypedDict):
     compression_refs: list[CompressionRef]
 
 
-class HypothesisDrivenState(BaseExecutorState):
-    """Hypothesis-driven RCA state.
-
-    Primary state schema for the hypothesis-driven RCA Orchestrator.
-    Inherits messages, task_id, task_description, current_phase from BaseExecutorState.
-    """
-
-    notebook: DiagnosticNotebook
-    current_hypothesis: Optional[str]
-    compression_refs: list[CompressionRef]
-    structured_response: Optional[Any]
-
-
 class SequentialDiagnosisState(BaseExecutorState):
     """Sequential step-by-step diagnosis state."""
 
     steps: Annotated[list[dict], operator.add]
     current_step_index: int
-
-
-class MemoryExtractionState(BaseExecutorState):
-    """Cross-task knowledge extraction state."""
-
-    source_trajectories: list[str]
-    extracted_patterns: Annotated[list[dict], operator.add]
-    knowledge_entries: list[KnowledgeEntry]
-    existing_knowledge: list[KnowledgeEntry]
 
 
 class DecisionTreeState(BaseExecutorState):

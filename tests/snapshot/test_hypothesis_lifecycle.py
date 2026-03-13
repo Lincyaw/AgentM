@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import pytest
 
-from agentm.core.notebook import (
+from agentm.scenarios.rca.notebook import (
     add_hypothesis,
     set_confirmed_hypothesis,
     update_hypothesis_status,
 )
-from agentm.models.data import DiagnosticNotebook
-from agentm.models.enums import HypothesisStatus
+from agentm.scenarios.rca.data import DiagnosticNotebook
+from agentm.scenarios.rca.enums import HypothesisStatus
 
 
 class TestUpdateHypothesisRejectsIllegalTransitions:

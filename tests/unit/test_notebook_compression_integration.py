@@ -9,10 +9,10 @@ Ref: designs/generic-state-wrapper.md -- Layer 2 Orchestrator compression
 
 from __future__ import annotations
 
-from agentm.core.compression import compress_completed_phase
-from agentm.core.notebook import format_notebook_for_llm, should_compress_phase
-from agentm.models.data import DiagnosticNotebook, ExplorationStep
-from agentm.models.enums import Phase
+from agentm.scenarios.rca.compression import compress_completed_phase
+from agentm.scenarios.rca.notebook import format_notebook_for_llm, should_compress_phase
+from agentm.scenarios.rca.data import DiagnosticNotebook, ExplorationStep
+from agentm.scenarios.rca.enums import Phase
 
 
 def _make_notebook_with_history() -> DiagnosticNotebook:

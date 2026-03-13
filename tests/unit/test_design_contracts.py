@@ -6,8 +6,8 @@ normative definitions. They prevent drift between design and implementation.
 
 from __future__ import annotations
 
-from agentm.models.data import DiagnosticNotebook, Hypothesis
-from agentm.models.enums import HypothesisStatus, Phase, Verdict
+from agentm.scenarios.rca.data import DiagnosticNotebook, Hypothesis
+from agentm.scenarios.rca.enums import HypothesisStatus, Phase, Verdict
 
 
 class TestHypothesisStatusMatchesDesign:
@@ -105,7 +105,7 @@ class TestHypothesisDrivenStateContract:
     """
 
     def test_hypothesis_driven_state_has_all_required_fields(self):
-        from agentm.models.state import HypothesisDrivenState
+        from agentm.scenarios.rca.state import HypothesisDrivenState
 
         required = (
             "messages",

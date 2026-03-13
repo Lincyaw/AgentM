@@ -55,7 +55,15 @@ def _extract_literal_values(annotation) -> set[str] | None:
 def orch_tools():
     """Create orchestrator tool functions via factory for signature testing."""
     mock_tm = AsyncMock()
-    return create_orchestrator_tools(mock_tm, agent_pool=None)
+    tools = create_orchestrator_tools(mock_tm, agent_pool=None)
+
+    # Also load RCA-specific tools for testing their signatures
+    from agentm.scenarios.rca.tools import create_rca_tools
+
+    rca_tools = create_rca_tools(trajectory=None)
+    tools.update(rca_tools)
+
+    return tools
 
 
 class TestDispatchAgentSignature:
@@ -133,7 +141,7 @@ class TestUpdateHypothesisSignature:
         Bug: Literal values drift from enum → LLM passes valid Literal
         that the enum rejects downstream.
         """
-        from agentm.models.enums import HypothesisStatus
+        from agentm.scenarios.rca.enums import HypothesisStatus
 
         annotation = _resolve_annotation(orch_tools["update_hypothesis"], "status")
         literal_values = _extract_literal_values(annotation)
@@ -238,7 +246,7 @@ class TestCompressionHookSignature:
     """
 
     def test_build_compression_hook_accepts_compression_config(self):
-        from agentm.core.compression import build_compression_hook
+        from agentm.middleware.compression import build_compression_hook
 
         sig = inspect.signature(build_compression_hook)
         param = sig.parameters["config"]
@@ -249,7 +257,7 @@ class TestCompressionHookSignature:
         assert "CompressionConfig" in annotation_name
 
     def test_build_compression_hook_returns_callable(self):
-        from agentm.core.compression import build_compression_hook
+        from agentm.middleware.compression import build_compression_hook
 
         sig = inspect.signature(build_compression_hook)
         assert sig.return_annotation is not inspect.Parameter.empty

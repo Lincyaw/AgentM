@@ -371,13 +371,11 @@ async def run_memory_extraction(
             f"trajectories:\n\n{traj_list}"
         )
 
-    from agentm.models.enums import Phase
-
     initial_state = {
         "messages": [HumanMessage(content=task)],
         "task_id": system.thread_id,
         "task_description": task,
-        "current_phase": Phase.EXPLORATION,
+        "current_phase": "exploration",
         "source_trajectories": thread_ids,
         "extracted_patterns": [],
         "knowledge_entries": [],

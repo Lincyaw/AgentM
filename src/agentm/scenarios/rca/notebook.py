@@ -8,8 +8,12 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Optional
 
-from agentm.models.data import DiagnosticNotebook, ExplorationStep, Hypothesis
-from agentm.models.enums import HypothesisStatus
+from agentm.scenarios.rca.data import (
+    DiagnosticNotebook,
+    ExplorationStep,
+    Hypothesis,
+)
+from agentm.scenarios.rca.enums import HypothesisStatus
 
 _LEGAL_TRANSITIONS: dict[HypothesisStatus, set[HypothesisStatus]] = {
     HypothesisStatus.FORMED: {HypothesisStatus.INVESTIGATING},
