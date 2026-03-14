@@ -16,8 +16,12 @@ from agentm.models.state import (
     DecisionTreeState,
     SequentialDiagnosisState,
 )
+from agentm.scenarios import discover
 from agentm.scenarios.rca.state import HypothesisDrivenState
 from agentm.scenarios.memory_extraction.state import MemoryExtractionState
+
+# Ensure scenario registrations are loaded for all tests in this module.
+discover()
 
 
 class TestGetStateSchema:

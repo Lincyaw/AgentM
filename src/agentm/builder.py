@@ -46,8 +46,8 @@ from agentm.tools.think import think
 def _resolve_format_context(system_type: str) -> Any:
     """Lazily resolve the context formatter for a system type.
 
-    Imports scenario formatters on demand to avoid SDK → scenarios
-    dependency at module level.
+    Imports scenario formatters on demand.  By this point
+    ``scenarios.discover()`` has already run.
     """
     if system_type == "hypothesis_driven":
         from agentm.scenarios.rca.formatters import format_rca_context
@@ -364,6 +364,10 @@ class GenericAgentSystemBuilder(Generic[S]):
 
         Requires at least a strategy and scenario config.
         """
+        from agentm.scenarios import discover as _discover_scenarios
+
+        _discover_scenarios()
+
         if self._strategy is None:
             raise ValueError("Strategy is required — call with_strategy()")
         if self._scenario is None:
@@ -503,6 +507,9 @@ class AgentSystemBuilder:
         existing_thread_id: str | None = None,
     ) -> AgentSystem[Any]:
         """Build an AgentSystem from a system type and scenario config."""
+        from agentm.scenarios import discover as _discover_scenarios
+
+        _discover_scenarios()
         get_state_schema(system_type)  # validate system_type exists
 
         if scenario_config.orchestrator.orchestrator_mode in ("react", "node"):
