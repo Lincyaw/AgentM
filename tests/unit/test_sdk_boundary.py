@@ -24,8 +24,7 @@ _AGENTM_ROOT = Path(__file__).resolve().parent.parent.parent / "src" / "agentm"
 _LAZY_LOADERS: set[str] = {
     # Builder resolves scenario formatters and tools lazily
     "builder.py",
-    # Agent factories call scenarios.discover() inside functions
-    "agents/react/sub_agent.py",
+    # Agent factory calls scenarios.discover() inside function
     "agents/node/worker.py",
 }
 

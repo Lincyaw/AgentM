@@ -1,7 +1,8 @@
 """Consolidated answer schema registry for all Sub-Agent task types.
 
-Both react/sub_agent.py and node/worker.py import from this module.
-Adding a new scenario only requires registering schemas via scenario init.
+node/worker.py imports from this module to resolve the answer schema
+for each task type.  Adding a new scenario only requires registering
+schemas via scenario init.
 
 SDK base class ``_BaseAnswer`` is defined here. Domain-specific schemas
 live in their canonical locations under ``scenarios/``.

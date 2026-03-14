@@ -76,7 +76,7 @@ concepts:
           - "Set confirmed hypothesis consistency (§ Orchestrator Tools)"
 
   sub_agent:
-    description: "Independently compiled subgraphs via create_react_agent. Isolated State Schema, config-driven tools/prompts, pre_model_hook pipeline (compression, dedup, budget, trajectory, instruction — all from middleware/), data-only constraint in RCA mode, static agent pool compiled at startup. Launched as asyncio.Tasks by TaskManager"
+    description: "Node-based worker subgraphs (4-node StateGraph: dispatch → llm_call ↔ tool_node → collect_and_compress). Isolated State Schema, config-driven tools/prompts, NodePipeline middleware (budget, compression, trajectory), dedup tool wrapping, data-only constraint in RCA mode. AgentPool factory compiled at startup. Launched as asyncio.Tasks by TaskManager"
     design: "designs/sub-agent.md"
     related_concepts: [system_architecture, orchestrator, configuration_system, execution_runner]
     plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
