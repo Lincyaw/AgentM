@@ -12,6 +12,34 @@ from agentm.core.trajectory import TrajectoryCollector
 from agentm.middleware import AgentMMiddleware
 
 
+def _full_message(msg: Any) -> dict[str, Any]:
+    """Convert a LangChain message to a plain dict with full content.
+
+    Extracts role, content, and — for AI messages — tool_calls with id/name/args.
+    For tool messages, includes the tool name and tool_call_id.
+    """
+    role = getattr(msg, "type", "unknown")
+    content = getattr(msg, "content", "")
+    entry: dict[str, Any] = {"role": role, "content": content}
+    if role == "ai":
+        tc = getattr(msg, "tool_calls", None)
+        if tc:
+            entry["tool_calls"] = [
+                {
+                    "id": c.get("id", ""),
+                    "name": c.get("name", ""),
+                    "args": c.get("args", {}),
+                }
+                for c in tc
+            ]
+    elif role == "tool":
+        entry["name"] = getattr(msg, "name", "")
+        tool_call_id = getattr(msg, "tool_call_id", None)
+        if tool_call_id:
+            entry["tool_call_id"] = tool_call_id
+    return entry
+
+
 def build_llm_input_hook(
     trajectory: TrajectoryCollector,
     agent_path: list[str],
@@ -50,28 +78,6 @@ def build_llm_input_hook(
             entry["content"] = _truncate(content, 300)
         else:
             entry["content"] = _truncate(content, 200)
-        return entry
-
-    def _full_message(msg: Any) -> dict[str, Any]:
-        role = getattr(msg, "type", "unknown")
-        content = getattr(msg, "content", "")
-        entry: dict[str, Any] = {"role": role, "content": content}
-        if role == "ai":
-            tc = getattr(msg, "tool_calls", None)
-            if tc:
-                entry["tool_calls"] = [
-                    {
-                        "id": c.get("id", ""),
-                        "name": c.get("name", ""),
-                        "args": c.get("args", {}),
-                    }
-                    for c in tc
-                ]
-        elif role == "tool":
-            entry["name"] = getattr(msg, "name", "")
-            tool_call_id = getattr(msg, "tool_call_id", None)
-            if tool_call_id:
-                entry["tool_call_id"] = tool_call_id
         return entry
 
     def hook(state: dict[str, Any]) -> dict[str, Any]:

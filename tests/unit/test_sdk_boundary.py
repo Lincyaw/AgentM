@@ -20,16 +20,13 @@ from pathlib import Path
 _AGENTM_ROOT = Path(__file__).resolve().parent.parent.parent / "src" / "agentm"
 
 # Files that are allowed to import from agentm.scenarios (lazy-loading
-# registries or bridge modules that explicitly load scenario code on demand).
+# bridge modules that explicitly load scenario code on demand).
 _LAZY_LOADERS: set[str] = {
-    # Registries with lazy loading from scenarios
-    "core/strategy_registry.py",
-    "core/state_registry.py",
-    # Schema registries with lazy defaults
-    "models/answer_schemas.py",
-    "models/output.py",
     # Builder resolves scenario formatters and tools lazily
     "builder.py",
+    # Agent factories call scenarios.discover() inside functions
+    "agents/react/sub_agent.py",
+    "agents/node/worker.py",
 }
 
 # SDK modules to scan (everything except scenarios/ and __pycache__)
@@ -43,7 +40,6 @@ _SDK_DIRS = [
     "backends",
     "cli",
     "server",
-    "strategies",
 ]
 
 

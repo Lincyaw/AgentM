@@ -25,6 +25,7 @@ from langgraph.graph import END, START, StateGraph
 from agentm.agents.node.state import WorkerResult, WorkerState
 from agentm.config.schema import AgentConfig, ModelConfig
 from agentm.middleware.compression import build_compression_hook
+from agentm.middleware.trajectory import _full_message
 from agentm.core.prompt import load_prompt_template
 from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
@@ -36,13 +37,7 @@ from agentm.tools.think import think
 # Answer schemas (lazy-loaded from consolidated registry)
 # ---------------------------------------------------------------------------
 
-from agentm.models.answer_schemas import ANSWER_SCHEMA, _ensure_defaults as _ensure_answer_defaults  # noqa: E402
-
-_TASK_TYPE_LABEL: dict[str, str] = {
-    "scout": "Scout",
-    "verify": "Verify",
-    "deep_analyze": "DeepAnalyze",
-}
+from agentm.models.answer_schemas import ANSWER_SCHEMA  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -238,35 +233,12 @@ def build_worker_subgraph(
 
         # Trajectory: record llm_start
         if trajectory is not None:
-
-            def _full_msg(msg: Any) -> dict[str, Any]:
-                role = getattr(msg, "type", "unknown")
-                content = getattr(msg, "content", "")
-                entry: dict[str, Any] = {"role": role, "content": content}
-                if role == "ai":
-                    tc = getattr(msg, "tool_calls", None)
-                    if tc:
-                        entry["tool_calls"] = [
-                            {
-                                "id": c.get("id", ""),
-                                "name": c.get("name", ""),
-                                "args": c.get("args", {}),
-                            }
-                            for c in tc
-                        ]
-                elif role == "tool":
-                    entry["name"] = getattr(msg, "name", "")
-                    tcid = getattr(msg, "tool_call_id", None)
-                    if tcid:
-                        entry["tool_call_id"] = tcid
-                return entry
-
             trajectory.record_sync(
                 event_type="llm_start",
                 agent_path=["orchestrator", agent_id],
                 data={
                     "message_count": len(llm_messages),
-                    "full_messages": [_full_msg(m) for m in llm_messages],
+                    "full_messages": [_full_message(m) for m in llm_messages],
                 },
                 task_id=task_id,
             )
@@ -353,7 +325,9 @@ def build_worker_subgraph(
     # This node ALWAYS runs at loop exit, guaranteeing a non-null result.
     # ------------------------------------------------------------------
 
-    _ensure_answer_defaults()
+    from agentm.scenarios import discover as _discover_scenarios
+
+    _discover_scenarios()
     answer_schema = ANSWER_SCHEMA[task_type]
     compress_model = model_plain.with_structured_output(answer_schema)
 
