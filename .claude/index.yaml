@@ -232,7 +232,7 @@ concepts:
           - "Concrete strategy initial state and phase definitions"
 
   middleware_system:
-    description: "AgentMMiddleware base class with before_model/abefore_model/aafter_model/awrap_tool_call hooks. compose_middleware() chains into create_react_agent pre_model_hook. Each middleware module is self-contained (hook factory + middleware class colocated): middleware/compression.py, middleware/dedup.py, middleware/instruction.py, middleware/trajectory.py (_full_message shared helper), middleware/budget.py, middleware/loop_detection.py (LoopDetectionMiddleware — doom loop detection), middleware/pre_completion.py (PreCompletionChecklistMiddleware — exit verification), middleware/tool_output.py (ToolOutputOffloadMiddleware — large output truncation)"
+    description: "AgentMMiddleware base class with before_model/abefore_model/aafter_model/awrap_tool_call hooks. compose_middleware() for React-mode pre_model_hook chaining. NodePipeline for Node-mode graphs (before + after lifecycle). Each middleware module is self-contained (hook factory + middleware class colocated): middleware/compression.py, middleware/dedup.py, middleware/instruction.py, middleware/trajectory.py (before: llm_start, after: tool_call/llm_end), middleware/budget.py, middleware/loop_detection.py, middleware/pre_completion.py, middleware/tool_output.py"
     related_concepts: [generic_state_wrapper, builder, sub_agent, tool_dedup]
     plans: []
     tasks: []
