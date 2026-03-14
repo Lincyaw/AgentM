@@ -4,13 +4,12 @@ Architecture (4 nodes, self-controlled ReAct loop):
 
     START → dispatch → llm_call ↔ tool_node → collect_and_compress → END
 
-Differences from react/sub_agent.py (create_react_agent):
 - ``route_after_llm`` decides the next node — the framework never sees
   a bare AIMessage with no tool_calls as a terminal condition.
 - ``collect_and_compress`` always runs at the end regardless of how the
   LLM exited the loop, guaranteeing a non-null structured result.
 - Budget, compression, and trajectory are handled via ``NodePipeline``
-  (same middleware classes as React mode, but invoked explicitly).
+  (same middleware classes used by the orchestrator).
 """
 
 from __future__ import annotations
@@ -361,11 +360,12 @@ def build_worker_subgraph(
 # ---------------------------------------------------------------------------
 
 
-class NodeAgentPool:
+class AgentPool:
     """Factory for node-based worker subgraphs.
 
-    Drop-in replacement for react.sub_agent.AgentPool — the TaskManager
-    calls ``create_worker`` in the same way regardless of which pool is used.
+    Creates a fresh compiled subgraph per dispatch.  The TaskManager
+    calls ``create_worker`` to get a compiled graph with *agent_id*
+    and *task_id* baked into its middleware closures.
     """
 
     def __init__(

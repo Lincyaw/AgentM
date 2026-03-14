@@ -158,30 +158,30 @@ class TestUpdateHypothesisSignature:
         assert "tool_call_id" in sig.parameters
 
 
-class TestCreateSubAgentSignature:
+class TestBuildWorkerSubgraphSignature:
     """Ref: designs/sub-agent.md § Task Types
 
-    Bug: create_sub_agent ignores task_type → all Sub-Agents use the same
+    Bug: build_worker_subgraph ignores task_type → all workers use the same
     generic prompt regardless of whether they're scouting or verifying.
     """
 
     def test_has_task_type_parameter(self):
-        from agentm.agents.react.sub_agent import create_sub_agent
+        from agentm.agents.node.worker import build_worker_subgraph
 
-        sig = inspect.signature(create_sub_agent)
+        sig = inspect.signature(build_worker_subgraph)
         assert "task_type" in sig.parameters
 
     def test_task_type_is_str(self):
         """task_type is str so memory-extraction types flow through alongside RCA types."""
-        from agentm.agents.react.sub_agent import create_sub_agent
+        from agentm.agents.node.worker import build_worker_subgraph
 
-        annotation = _resolve_annotation(create_sub_agent, "task_type")
+        annotation = _resolve_annotation(build_worker_subgraph, "task_type")
         assert annotation is str, f"task_type should be str, got: {annotation}"
 
     def test_task_type_defaults_to_scout(self):
-        from agentm.agents.react.sub_agent import create_sub_agent
+        from agentm.agents.node.worker import build_worker_subgraph
 
-        sig = inspect.signature(create_sub_agent)
+        sig = inspect.signature(build_worker_subgraph)
         param = sig.parameters["task_type"]
         assert param.default == "scout"
 

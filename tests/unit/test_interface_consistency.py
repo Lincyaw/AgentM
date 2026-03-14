@@ -87,21 +87,16 @@ class TestTaskTypeLiteralConsistency:
 class TestOrchestratorCreationImports:
     """Ref: designs/orchestrator.md § Orchestrator Creation
 
-    The orchestrator module must export the expected factory functions.
+    The node orchestrator module must export the expected factory function.
 
-    Bug: function renamed or moved → AgentSystemBuilder can't find it →
+    Bug: function renamed or moved → builder can't find it →
     system startup fails.
     """
 
-    def test_build_orchestrator_prompt_exists(self):
-        from agentm.agents.react.orchestrator import build_orchestrator_prompt
+    def test_create_node_orchestrator_exists(self):
+        from agentm.agents.node.orchestrator import create_node_orchestrator
 
-        assert callable(build_orchestrator_prompt)
-
-    def test_create_orchestrator_exists(self):
-        from agentm.agents.react.orchestrator import create_orchestrator
-
-        assert callable(create_orchestrator)
+        assert callable(create_node_orchestrator)
 
 
 class TestHooksModuleExports:

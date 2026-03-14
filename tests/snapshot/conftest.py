@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from agentm.agents.react.sub_agent import AgentPool
+from agentm.agents.node.worker import AgentPool
 from agentm.config.schema import (
     AgentConfig,
     ExecutionConfig,

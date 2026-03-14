@@ -1,7 +1,7 @@
 """Budget middleware — injects remaining-step awareness.
 
-Wraps the existing ``_build_budget_hook`` logic from
-``agents/react/sub_agent.py`` as an ``AgentMMiddleware`` subclass.
+Counts AI messages with real tool calls (excluding ``think``) and
+injects urgency messages when the step budget is running low.
 """
 
 from __future__ import annotations
