@@ -35,8 +35,8 @@ from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel
 
 from agentm.config.schema import OrchestratorConfig
-from agentm.middleware.compression import build_compression_hook
-from agentm.middleware.trajectory import _full_message
+from agentm.middleware import NodePipeline
+from agentm.middleware.trajectory import TrajectoryMiddleware
 from agentm.core.prompt import load_prompt_template
 from agentm.core.trajectory import TrajectoryCollector
 from agentm.models.output import get_output_schema
@@ -142,6 +142,11 @@ def create_node_orchestrator(
     system_prompt_template: str = config.prompts.get("system", "")
     max_rounds: int = config.max_rounds
     compression_cfg = config.compression
+    compression_hook = None
+    if compression_cfg is not None and compression_cfg.enabled:
+        from agentm.middleware.compression import build_compression_hook
+
+        compression_hook = build_compression_hook(compression_cfg)
 
     # Structured output schema for synthesize node (optional)
     output_schema = None
@@ -149,6 +154,17 @@ def create_node_orchestrator(
     if config.output is not None:
         output_schema = get_output_schema(config.output.schema_name)
         output_prompt_text = load_prompt_template(config.output.prompt)
+
+    # ------------------------------------------------------------------
+    # Middleware pipeline (trajectory only — compression is handled
+    # inside _prepare_messages because it needs the dynamic system prompt)
+    # ------------------------------------------------------------------
+    middlewares: list = []
+    if trajectory is not None:
+        middlewares.append(
+            TrajectoryMiddleware(trajectory, ["orchestrator"])
+        )
+    pipeline = NodePipeline(middlewares) if middlewares else None
 
     # ------------------------------------------------------------------
     # Message preparation helpers
@@ -185,12 +201,6 @@ def create_node_orchestrator(
         round_block += "</round_context>"
 
         return base + round_block
-
-    compression_hook = (
-        build_compression_hook(compression_cfg)
-        if compression_cfg is not None and compression_cfg.enabled
-        else None
-    )
 
     def _prepare_messages(state: dict, round_num: int) -> list[Any]:
         """Build message list: system prompt + history, with optional compression."""
@@ -229,18 +239,16 @@ def create_node_orchestrator(
 
         llm_messages = _prepare_messages(state, round_num)
 
-        # Record llm_start with full message context for dashboard Messages view
-        if trajectory is not None:
-            trajectory.record_sync(
-                event_type="llm_start",
-                agent_path=["orchestrator"],
-                data={
-                    "message_count": len(llm_messages),
-                    "full_messages": [_full_message(m) for m in llm_messages],
-                },
-            )
+        # Pre-model pipeline: trajectory(llm_start)
+        if pipeline is not None:
+            pipeline.before({"messages": llm_messages})
 
         response = await model_with_tools.ainvoke(llm_messages)
+
+        # Post-model pipeline: trajectory(tool_call / llm_end)
+        if pipeline is not None:
+            await pipeline.after({"messages": messages}, response)
+
         return {"messages": [response]}
 
     # ------------------------------------------------------------------

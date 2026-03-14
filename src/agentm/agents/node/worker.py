@@ -9,8 +9,8 @@ Differences from react/sub_agent.py (create_react_agent):
   a bare AIMessage with no tool_calls as a terminal condition.
 - ``collect_and_compress`` always runs at the end regardless of how the
   LLM exited the loop, guaranteeing a non-null structured result.
-- Budget is enforced inside ``llm_call`` (counter + injected SystemMessage)
-  rather than via pre_model_hook, giving finer control over the loop.
+- Budget, compression, and trajectory are handled via ``NodePipeline``
+  (same middleware classes as React mode, but invoked explicitly).
 """
 
 from __future__ import annotations
@@ -24,8 +24,10 @@ from langgraph.graph import END, START, StateGraph
 
 from agentm.agents.node.state import WorkerResult, WorkerState
 from agentm.config.schema import AgentConfig, ModelConfig
-from agentm.middleware.compression import build_compression_hook
-from agentm.middleware.trajectory import _full_message
+from agentm.middleware import NodePipeline
+from agentm.middleware.budget import BudgetMiddleware
+from agentm.middleware.compression import CompressionMiddleware
+from agentm.middleware.trajectory import TrajectoryMiddleware
 from agentm.core.prompt import load_prompt_template
 from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
@@ -146,10 +148,16 @@ def build_worker_subgraph(
         system_prompt = base_prompt
 
     # ------------------------------------------------------------------
-    # Config values captured by closures
+    # Middleware pipeline (replaces inline budget/compression/trajectory)
     # ------------------------------------------------------------------
-    max_steps: int = config.execution.max_steps
-    compression_cfg = config.compression
+    middlewares: list = [BudgetMiddleware(config.execution.max_steps)]
+    if config.compression is not None:
+        middlewares.append(CompressionMiddleware(config.compression))
+    if trajectory is not None:
+        middlewares.append(
+            TrajectoryMiddleware(trajectory, ["orchestrator", agent_id], task_id=task_id)
+        )
+    pipeline = NodePipeline(middlewares)
 
     # ------------------------------------------------------------------
     # Node 1: dispatch
@@ -185,87 +193,23 @@ def build_worker_subgraph(
 
     # ------------------------------------------------------------------
     # Node 2: llm_call
-    # Invoke model_with_tools. Injects budget reminder when running low.
-    # Applies context compression when token limit approached.
-    # Records llm_start trajectory event.
+    # Runs the middleware pipeline (budget, compression, trajectory)
+    # then invokes the LLM with the prepared messages.
     # ------------------------------------------------------------------
-
-    compression_hook = (
-        build_compression_hook(compression_cfg) if compression_cfg is not None else None
-    )
 
     async def llm_call(state: WorkerState) -> dict[str, Any]:
         messages = list(state.get("messages", []))
 
-        # Count real tool calls (think is free). Mirrors react budget_hook logic:
-        # AI messages without tool_calls also count as a step (LLM responded but
-        # chose not to call a tool — still consumed a round-trip).
-        used = 0
-        for m in messages:
-            if not isinstance(m, AIMessage):
-                continue
-            tool_calls = m.tool_calls or []
-            if not tool_calls or any(tc.get("name") != "think" for tc in tool_calls):
-                used += 1
-        remaining = max(0, max_steps - used)
-
-        if remaining <= 3:
-            budget_text = (
-                f"WARNING: {remaining}/{max_steps} steps left. "
-                "Summarize findings NOW. Do NOT call any more tools."
-            )
-            messages = [*messages, HumanMessage(content=budget_text)]
-        elif remaining <= max_steps // 3:
-            budget_text = (
-                f"BUDGET: {remaining}/{max_steps} steps remaining. "
-                "Start wrapping up — prioritize critical queries."
-            )
-            messages = [*messages, HumanMessage(content=budget_text)]
-
-        # Context compression (returns llm_input_messages or messages)
-        if compression_hook is not None:
-            hook_out = compression_hook({"messages": messages})
-            llm_messages = hook_out.get("llm_input_messages") or hook_out.get(
-                "messages", messages
-            )
-        else:
-            llm_messages = messages
-
-        # Trajectory: record llm_start
-        if trajectory is not None:
-            trajectory.record_sync(
-                event_type="llm_start",
-                agent_path=["orchestrator", agent_id],
-                data={
-                    "message_count": len(llm_messages),
-                    "full_messages": [_full_message(m) for m in llm_messages],
-                },
-                task_id=task_id,
-            )
+        # Pre-model pipeline: budget → compression → trajectory(llm_start)
+        prepared = pipeline.before({"messages": messages})
+        llm_messages = prepared.get("llm_input_messages") or prepared.get(
+            "messages", messages
+        )
 
         response = await model_with_tools.ainvoke(llm_messages)
 
-        # Trajectory: record tool_calls or llm_end
-        if trajectory is not None:
-            ai_msg = cast(AIMessage, response)
-            if ai_msg.tool_calls:
-                for tc in ai_msg.tool_calls:
-                    trajectory.record_sync(
-                        event_type="tool_call",
-                        agent_path=["orchestrator", agent_id],
-                        data={
-                            "tool_name": tc.get("name", ""),
-                            "args": tc.get("args", {}),
-                        },
-                        task_id=task_id,
-                    )
-            elif ai_msg.content:
-                trajectory.record_sync(
-                    event_type="llm_end",
-                    agent_path=["orchestrator", agent_id],
-                    data={"content": str(ai_msg.content)},
-                    task_id=task_id,
-                )
+        # Post-model pipeline: trajectory(tool_call / llm_end)
+        await pipeline.after({"messages": messages}, response)
 
         return {"messages": [response]}
 
