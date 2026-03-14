@@ -24,7 +24,6 @@ from agentm.tools.think import think
 
 from agentm.models.answer_schemas import (  # noqa: E402
     ANSWER_SCHEMA,
-    _ensure_defaults as _ensure_answer_defaults,
 )
 
 __all__ = [
@@ -50,7 +49,9 @@ def create_sub_agent(
     and *task_id* are baked into the hooks at compile time — no mutable
     overrides needed.
     """
-    _ensure_answer_defaults()
+    from agentm.scenarios import discover as _discover_scenarios
+
+    _discover_scenarios()
     llm_kwargs: dict[str, Any] = {
         "model": config.model,
         "temperature": config.temperature,

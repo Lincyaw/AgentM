@@ -9,7 +9,7 @@ signature says type Y → runtime TypeError when the modules interact.
 
 from __future__ import annotations
 
-from typing import Literal, get_args, get_origin, get_type_hints
+from typing import get_type_hints
 from unittest.mock import AsyncMock
 
 import pytest
@@ -38,9 +38,10 @@ class TestTaskTypeLiteralConsistency:
 
     def test_answer_schema_covers_rca_task_types(self):
         """ANSWER_SCHEMA must include the three RCA worker task types."""
-        from agentm.models.answer_schemas import ANSWER_SCHEMA, _ensure_defaults
+        from agentm.models.answer_schemas import ANSWER_SCHEMA
+        from agentm.scenarios import discover
 
-        _ensure_defaults()
+        discover()
         for task_type in ("scout", "verify", "deep_analyze"):
             assert task_type in ANSWER_SCHEMA, (
                 f"ANSWER_SCHEMA missing RCA task type: {task_type!r}"
@@ -48,9 +49,10 @@ class TestTaskTypeLiteralConsistency:
 
     def test_answer_schema_covers_memory_extraction_task_types(self):
         """ANSWER_SCHEMA must include the four memory-extraction worker task types."""
-        from agentm.models.answer_schemas import ANSWER_SCHEMA, _ensure_defaults
+        from agentm.models.answer_schemas import ANSWER_SCHEMA
+        from agentm.scenarios import discover
 
-        _ensure_defaults()
+        discover()
         for task_type in ("collect", "analyze", "extract", "refine"):
             assert task_type in ANSWER_SCHEMA, (
                 f"ANSWER_SCHEMA missing memory-extraction task type: {task_type!r}"

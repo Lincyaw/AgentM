@@ -6,7 +6,9 @@ node that invokes the LLM with structured output after the ReAct loop.
 
 Registry lookup: OUTPUT_SCHEMAS maps schema_name -> model class.
 
-Domain-specific schemas live in their canonical locations under ``scenarios/``.
+Registries are populated by scenario ``register()`` functions called
+via ``agentm.scenarios.discover()``.  The SDK core never imports from
+``scenarios/`` directly.
 """
 
 from __future__ import annotations
@@ -14,25 +16,10 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
-# Schema registry (lazy-loaded)
+# Schema registry — populated by scenario register() functions
 # ---------------------------------------------------------------------------
 
 OUTPUT_SCHEMAS: dict[str, type[BaseModel]] = {}
-_defaults_loaded = False
-
-
-def _ensure_defaults() -> None:
-    """Lazily import and register default output schemas from scenarios."""
-    global _defaults_loaded
-    if _defaults_loaded:
-        return
-    _defaults_loaded = True
-
-    from agentm.scenarios.rca.output import CausalGraph
-    from agentm.scenarios.memory_extraction.output import KnowledgeSummary
-
-    OUTPUT_SCHEMAS.setdefault("CausalGraph", CausalGraph)
-    OUTPUT_SCHEMAS.setdefault("KnowledgeSummary", KnowledgeSummary)
 
 
 def get_output_schema(schema_name: str) -> type[BaseModel]:
@@ -40,7 +27,6 @@ def get_output_schema(schema_name: str) -> type[BaseModel]:
 
     Raises ValueError if the schema is not registered.
     """
-    _ensure_defaults()
     if schema_name not in OUTPUT_SCHEMAS:
         available = list(OUTPUT_SCHEMAS.keys())
         raise ValueError(

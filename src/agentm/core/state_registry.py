@@ -1,29 +1,30 @@
 """State schema registry for system-type-specific state classes.
 
-Default state schemas are lazily loaded from ``scenarios/`` on first access.
+Registries are populated by scenario ``register()`` functions called
+via ``agentm.scenarios.discover()``.  The SDK core never imports from
+``scenarios/`` directly.
+
+SDK-only state schemas (SequentialDiagnosisState, DecisionTreeState)
+are registered at module load time since they live in ``models/state.py``.
 """
 
 from __future__ import annotations
 
-STATE_SCHEMAS: dict[str, type] = {}
-_defaults_loaded = False
+from agentm.models.state import DecisionTreeState, SequentialDiagnosisState
+
+STATE_SCHEMAS: dict[str, type] = {
+    "sequential": SequentialDiagnosisState,
+    "decision_tree": DecisionTreeState,
+}
 
 
-def _ensure_defaults() -> None:
-    """Lazily import and register default state schemas from scenarios."""
-    global _defaults_loaded
-    if _defaults_loaded:
-        return
-    _defaults_loaded = True
+def register_state(system_type: str, state_schema: type) -> None:
+    """Register a state schema for a system type.
 
-    from agentm.scenarios.rca.state import HypothesisDrivenState
-    from agentm.scenarios.memory_extraction.state import MemoryExtractionState
-    from agentm.models.state import DecisionTreeState, SequentialDiagnosisState
-
-    STATE_SCHEMAS.setdefault("hypothesis_driven", HypothesisDrivenState)
-    STATE_SCHEMAS.setdefault("sequential", SequentialDiagnosisState)
-    STATE_SCHEMAS.setdefault("memory_extraction", MemoryExtractionState)
-    STATE_SCHEMAS.setdefault("decision_tree", DecisionTreeState)
+    Called by scenario ``register()`` functions.  Uses ``setdefault``
+    semantics — first registration wins.
+    """
+    STATE_SCHEMAS.setdefault(system_type, state_schema)
 
 
 def get_state_schema(system_type: str) -> type:
@@ -31,7 +32,6 @@ def get_state_schema(system_type: str) -> type:
 
     Raises ValueError if the system type is not registered.
     """
-    _ensure_defaults()
     if system_type not in STATE_SCHEMAS:
         available = list(STATE_SCHEMAS.keys())
         raise ValueError(f"Unknown system type: {system_type}. Available: {available}")

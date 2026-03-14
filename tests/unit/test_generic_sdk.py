@@ -22,6 +22,10 @@ from agentm.middleware.budget import BudgetMiddleware
 from agentm.middleware.dedup import DedupMiddleware
 from agentm.models.state import BaseExecutorState, S
 from agentm.models.task_result import TaskResult
+from agentm.scenarios import discover
+
+# Ensure scenario registrations are loaded for all tests in this module.
+discover()
 
 
 # ---------------------------------------------------------------------------

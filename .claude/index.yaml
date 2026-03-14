@@ -41,7 +41,7 @@ concepts:
         layer: "L1 — Deterministic Invariants"
 
   system_architecture:
-    description: "LangGraph Supervisor+Subgraph multi-agent orchestration system with config-driven design, trajectory recording, monitoring, and failure recovery. Generic SDK layer: TypeVar S, ReasoningStrategy Protocol, AgentMMiddleware (self-contained modules in middleware/), StorageBackend, GenericAgentSystemBuilder. Hook factories colocated with middleware classes — no separate agents/hooks or core/compression"
+    description: "LangGraph Supervisor+Subgraph multi-agent orchestration system with config-driven design, trajectory recording, monitoring, and failure recovery. Generic SDK layer: TypeVar S, ReasoningStrategy Protocol, AgentMMiddleware (self-contained modules in middleware/), StorageBackend, GenericAgentSystemBuilder. Plugin-based scenario registration via scenarios.discover() — SDK registries have zero hardcoded scenario imports. No separate agents/hooks, core/compression, or strategies/ directory"
     design: "designs/system-design-overview.md"
     related_concepts: [orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner, builder, reasoning_strategy, middleware_system, storage_backend]
     plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
@@ -87,7 +87,7 @@ concepts:
           - "SubAgentState has all required fields (§ State Schema)"
 
   generic_state_wrapper:
-    description: "Generic SDK architecture: TypeVar S parameterizes framework over user-defined state types. ReasoningStrategy[S] Protocol, StrategyRegistry, GenericAgentSystemBuilder[S] fluent builder, AgentMMiddleware pipeline, StorageBackend protocol, TaskResult[R] typed results"
+    description: "Generic SDK architecture: TypeVar S parameterizes framework over user-defined state types. ReasoningStrategy[S] Protocol, StrategyRegistry (plugin-based, no hardcoded defaults), GenericAgentSystemBuilder[S] fluent builder, AgentMMiddleware pipeline, StorageBackend protocol, TaskResult[R] typed results. Scenario registration via scenarios.discover() entry point"
     design: "designs/generic-state-wrapper.md"
     related_concepts: [orchestrator, configuration_system, memory_system, builder, reasoning_strategy, middleware_system, storage_backend]
     plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-09-compression-recall-memory.md"]
@@ -232,7 +232,7 @@ concepts:
           - "Concrete strategy initial state and phase definitions"
 
   middleware_system:
-    description: "AgentMMiddleware base class with before_model/abefore_model/aafter_model/awrap_tool_call hooks. compose_middleware() chains into create_react_agent pre_model_hook. Each middleware module is self-contained (hook factory + middleware class colocated): middleware/compression.py (build_compression_hook, sub_agent_compression_hook, count_tokens, compression event tracking, CompressionMiddleware), middleware/dedup.py (DedupTracker, build_dedup_hook, wrap_tool_with_dedup, DedupMiddleware), middleware/instruction.py (build_instruction_hook, build_combined_hook, InstructionInjectionMiddleware), middleware/trajectory.py (build_llm_input_hook, TrajectoryMiddleware), middleware/budget.py (BudgetMiddleware)"
+    description: "AgentMMiddleware base class with before_model/abefore_model/aafter_model/awrap_tool_call hooks. compose_middleware() chains into create_react_agent pre_model_hook. Each middleware module is self-contained (hook factory + middleware class colocated): middleware/compression.py, middleware/dedup.py, middleware/instruction.py, middleware/trajectory.py (_full_message shared helper), middleware/budget.py, middleware/loop_detection.py (LoopDetectionMiddleware — doom loop detection), middleware/pre_completion.py (PreCompletionChecklistMiddleware — exit verification), middleware/tool_output.py (ToolOutputOffloadMiddleware — large output truncation)"
     related_concepts: [generic_state_wrapper, builder, sub_agent, tool_dedup]
     plans: []
     tasks: []
@@ -242,6 +242,12 @@ concepts:
           - "Base middleware passthrough"
           - "compose_middleware chaining"
           - "Class hierarchy verification"
+      - file: "tests/unit/test_harness_middleware.py"
+        layer: "L1 — Deterministic Invariants"
+        covers:
+          - "LoopDetectionMiddleware threshold and window behavior"
+          - "PreCompletionChecklistMiddleware one-shot trigger"
+          - "ToolOutputOffloadMiddleware truncation with head+tail"
 
   storage_backend:
     description: "StorageBackend Protocol (read/write/ls/glob/grep/exists/mkdir). FilesystemBackend for local fs with path traversal prevention. CompositeBackend for prefix-based routing to sub-backends (modeled after Deep Agents CompositeBackend)"
