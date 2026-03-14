@@ -295,3 +295,124 @@ class TestToolOutputOffloadMiddleware:
         msg = _tool_msg("R" * 200)
         result = mw.before_model({"llm_input_messages": [msg]})
         assert "llm_input_messages" in result
+
+
+# ---------------------------------------------------------------------------
+# NodePipeline
+# ---------------------------------------------------------------------------
+
+
+class TestNodePipeline:
+    """NodePipeline provides before + after lifecycle for Node-mode graphs."""
+
+    def test_before_chains_middlewares(self) -> None:
+        """before() applies all middleware before_model hooks in order."""
+        from agentm.middleware import AgentMMiddleware, NodePipeline
+
+        class AddMarker(AgentMMiddleware):
+            def __init__(self, marker: str):
+                self._marker = marker
+
+            def before_model(self, state: dict) -> dict:
+                msgs = list(state.get("messages", []))
+                msgs.append(self._marker)
+                return {"messages": msgs}
+
+        pipeline = NodePipeline([AddMarker("A"), AddMarker("B")])
+        result = pipeline.before({"messages": []})
+        assert result["messages"] == ["A", "B"]
+
+    def test_after_calls_aafter_model(self) -> None:
+        """after() invokes aafter_model on all middleware with response merged."""
+        import asyncio
+        from agentm.middleware import AgentMMiddleware, NodePipeline
+
+        captured: list[dict] = []
+
+        class Recorder(AgentMMiddleware):
+            async def aafter_model(self, state: dict, runtime=None):
+                captured.append(state)
+                return None
+
+        pipeline = NodePipeline([Recorder()])
+        fake_response = AIMessage(content="hello")
+        asyncio.run(pipeline.after({"messages": []}, fake_response))
+        assert len(captured) == 1
+        assert captured[0]["response"] is fake_response
+
+    def test_empty_pipeline_passthrough(self) -> None:
+        """Empty pipeline returns state unchanged."""
+        from agentm.middleware import NodePipeline
+
+        pipeline = NodePipeline([])
+        state = {"messages": ["test"]}
+        result = pipeline.before(state)
+        assert result["messages"] == ["test"]
+
+    def test_before_preserves_llm_input_messages(self) -> None:
+        """Pipeline propagates llm_input_messages through the chain."""
+        from agentm.middleware import AgentMMiddleware, NodePipeline
+
+        pipeline = NodePipeline([AgentMMiddleware()])
+        state = {"llm_input_messages": ["rewritten"]}
+        result = pipeline.before(state)
+        assert result["llm_input_messages"] == ["rewritten"]
+
+
+# ---------------------------------------------------------------------------
+# TrajectoryMiddleware.aafter_model
+# ---------------------------------------------------------------------------
+
+
+class TestTrajectoryMiddlewareAfterModel:
+    """TrajectoryMiddleware.aafter_model records tool_call and llm_end events."""
+
+    def _make_middleware(self) -> tuple:
+        """Create a TrajectoryMiddleware with a mock collector."""
+        from unittest.mock import MagicMock
+        from agentm.middleware.trajectory import TrajectoryMiddleware
+
+        collector = MagicMock()
+        mw = TrajectoryMiddleware(collector, ["orchestrator", "w1"], task_id="t1")
+        return mw, collector
+
+    def test_records_tool_calls(self) -> None:
+        """aafter_model emits tool_call events for AI messages with tool_calls."""
+        import asyncio
+
+        mw, collector = self._make_middleware()
+        response = AIMessage(
+            content="",
+            tool_calls=[
+                {"id": "tc1", "name": "query_logs", "args": {"service": "api"}},
+            ],
+        )
+        asyncio.run(mw.aafter_model({"messages": [], "response": response}))
+        collector.record_sync.assert_called_with(
+            event_type="tool_call",
+            agent_path=["orchestrator", "w1"],
+            data={"tool_name": "query_logs", "args": {"service": "api"}},
+            task_id="t1",
+        )
+
+    def test_records_llm_end(self) -> None:
+        """aafter_model emits llm_end for AI messages with content but no tool_calls."""
+        import asyncio
+
+        mw, collector = self._make_middleware()
+        response = AIMessage(content="Final answer here")
+        asyncio.run(mw.aafter_model({"messages": [], "response": response}))
+        collector.record_sync.assert_called_with(
+            event_type="llm_end",
+            agent_path=["orchestrator", "w1"],
+            data={"content": "Final answer here"},
+            task_id="t1",
+        )
+
+    def test_no_response_is_noop(self) -> None:
+        """aafter_model does nothing when response is not in state."""
+        import asyncio
+
+        mw, collector = self._make_middleware()
+        asyncio.run(mw.aafter_model({"messages": []}))
+        collector.record_sync.assert_not_called()

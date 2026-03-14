@@ -5,9 +5,10 @@ Provides a uniform base class for pre-/post-model hooks and a
 instances into a single ``pre_model_hook`` compatible with
 ``create_react_agent``.
 
-Existing closure-based hooks (compression, budget, dedup, trajectory,
-instruction injection) are re-exported from their respective
-submodules as middleware classes.
+For Node-mode graphs that control the LLM call directly,
+``NodePipeline`` wraps the same middleware list and exposes
+``before()`` / ``after()`` for explicit invocation inside the
+``llm_call`` node.
 """
 
 from __future__ import annotations
@@ -49,8 +50,12 @@ class AgentMMiddleware:
     ) -> dict[str, Any] | None:
         """Called after each LLM invocation.
 
-        Not wired into ``create_react_agent`` by default — available
-        for custom graph implementations.
+        ``state`` contains the original messages plus a ``response`` key
+        holding the LLM's ``AIMessage``.  Implementations should treat
+        this as read-only observation (e.g. trajectory recording).
+
+        Not wired into ``create_react_agent`` by default — used by
+        ``NodePipeline`` for Node-mode graphs.
         """
         return None
 
@@ -100,3 +105,50 @@ def compose_middleware(
         return result
 
     return chained
+
+
+class NodePipeline:
+    """Complete before + after middleware pipeline for Node-mode graphs.
+
+    React-mode graphs use ``compose_middleware`` which returns a plain
+    callable for the ``pre_model_hook`` parameter.  Node-mode graphs
+    control the LLM call directly, so they need explicit ``before()``
+    and ``after()`` entry points.
+
+    Usage inside a Node ``llm_call`` node::
+
+        pipeline = NodePipeline(middlewares)
+
+        async def llm_call(state):
+            prepared = pipeline.before(state)
+            llm_msgs = prepared.get("llm_input_messages") or prepared["messages"]
+            response = await model.ainvoke(llm_msgs)
+            await pipeline.after(state, response)
+            return {"messages": [response]}
+    """
+
+    def __init__(self, middlewares: list[AgentMMiddleware]) -> None:
+        self._middlewares = middlewares
+        self._pre_hook = compose_middleware(middlewares)
+
+    def before(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Run all ``before_model`` hooks in order.
+
+        Returns the prepared state dict (may contain ``messages`` or
+        ``llm_input_messages``).
+        """
+        return self._pre_hook(state)
+
+    async def after(self, state: dict[str, Any], response: Any = None) -> None:
+        """Run all ``aafter_model`` hooks in order.
+
+        The ``response`` (typically an ``AIMessage``) is merged into
+        the state dict under the ``response`` key so that middleware
+        can inspect the LLM output.
+        """
+        merged = {**state}
+        if response is not None:
+            merged["response"] = response
+        for mw in self._middlewares:
+            await mw.aafter_model(merged)
+

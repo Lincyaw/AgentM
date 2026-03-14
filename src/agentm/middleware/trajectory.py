@@ -102,7 +102,11 @@ def build_llm_input_hook(
 
 
 class TrajectoryMiddleware(AgentMMiddleware):
-    """Pre-model middleware that records ``llm_start`` events to the trajectory."""
+    """Pre- and post-model middleware that records trajectory events.
+
+    ``before_model``: emits ``llm_start`` with message summaries.
+    ``aafter_model``: emits ``tool_call`` / ``llm_end`` from the LLM response.
+    """
 
     def __init__(
         self,
@@ -110,9 +114,44 @@ class TrajectoryMiddleware(AgentMMiddleware):
         agent_path: list[str],
         task_id: str | None = None,
     ) -> None:
+        self._trajectory = trajectory
+        self._agent_path = agent_path
+        self._task_id = task_id
         self._hook = build_llm_input_hook(
             trajectory, agent_path, task_id=task_id
         )
 
     def before_model(self, state: dict[str, Any]) -> dict[str, Any]:
         return self._hook(state)
+
+    async def aafter_model(
+        self, state: dict[str, Any], runtime: Any = None
+    ) -> dict[str, Any] | None:
+        """Record ``tool_call`` or ``llm_end`` events from the LLM response."""
+        response = state.get("response")
+        if response is None:
+            return None
+
+        ai_msg = response
+        tool_calls = getattr(ai_msg, "tool_calls", None) or []
+        content = getattr(ai_msg, "content", "")
+
+        if tool_calls:
+            for tc in tool_calls:
+                self._trajectory.record_sync(
+                    event_type="tool_call",
+                    agent_path=self._agent_path,
+                    data={
+                        "tool_name": tc.get("name", ""),
+                        "args": tc.get("args", {}),
+                    },
+                    task_id=self._task_id,
+                )
+        elif content:
+            self._trajectory.record_sync(
+                event_type="llm_end",
+                agent_path=self._agent_path,
+                data={"content": str(content)},
+                task_id=self._task_id,
+            )
+        return None
