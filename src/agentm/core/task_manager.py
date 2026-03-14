@@ -65,6 +65,7 @@ class TaskManager:
         """
         task_id = kwargs.pop("task_id", None) or str(uuid.uuid4())
         trajectory_self_reported: bool = kwargs.pop("trajectory_self_reported", False)
+        max_steps: int | None = kwargs.pop("max_steps", None)
 
         subgraph = kwargs.get("subgraph")
         config: dict[str, Any] = kwargs.get("config", {})
@@ -74,6 +75,7 @@ class TaskManager:
             agent_id=agent_id,
             instruction=instruction,
             hypothesis_id=hypothesis_id,
+            max_steps=max_steps,
             started_at=datetime.now().isoformat(),
             subgraph_config=config,
             trajectory_self_reported=trajectory_self_reported,
@@ -311,6 +313,14 @@ class TaskManager:
                 subgraphs=True,
             ):
                 managed.events_buffer.append(data)
+
+                # Track step progress from llm_call node outputs
+                if isinstance(data, dict):
+                    llm_data = data.get("llm_call")
+                    if isinstance(llm_data, dict):
+                        for msg in llm_data.get("messages", []):
+                            if getattr(msg, "type", "") == "ai":
+                                managed.current_step += 1
 
                 if self._trajectory is not None and isinstance(data, dict):
                     if not managed.trajectory_self_reported:
