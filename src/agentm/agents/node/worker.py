@@ -254,7 +254,7 @@ def build_worker_subgraph(
                 trajectory.record_sync(
                     event_type="tool_result",
                     agent_path=["orchestrator", agent_id],
-                    data={"tool_name": tc_name, "result": result_text[:500]},
+                    data={"tool_name": tc_name, "result": result_text},
                     task_id=task_id,
                 )
 
