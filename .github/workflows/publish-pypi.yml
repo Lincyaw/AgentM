@@ -1,0 +1,71 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g., 0.1.0)"
+        required: true
+        default: "0.0.0"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Publishing version: ${VERSION}"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Update version in pyproject.toml
+        run: |
+          sed -i "s/^version = .*/version = \"${{ steps.version.outputs.version }}\"/" pyproject.toml
+          echo "Updated version to ${{ steps.version.outputs.version }}"
+          grep "^version" pyproject.toml
+
+      - name: Verify package structure
+        run: |
+          if [ ! -f "pyproject.toml" ]; then
+            echo "pyproject.toml not found"
+            exit 1
+          fi
+          if [ ! -d "src/agentm" ]; then
+            echo "src/agentm package directory not found"
+            exit 1
+          fi
+          echo "Package structure verified"
+
+      - name: Build and publish
+        run: |
+          echo "Building package..."
+          uv build --out-dir dist
+
+          echo "Publishing to PyPI..."
+          uv publish dist/* --trusted-publishing always
+
+          echo "Successfully published agentm==${{ steps.version.outputs.version }} to PyPI!"
