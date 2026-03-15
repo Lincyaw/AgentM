@@ -80,6 +80,7 @@ def build_worker_subgraph(
     trajectory: TrajectoryCollector | None = None,
     task_id: str | None = None,
     checkpointer: Any = None,
+    extra_tools: list[BaseTool] | None = None,
 ) -> Any:
     """Build and compile the node-based worker subgraph.
 
@@ -110,6 +111,8 @@ def build_worker_subgraph(
         tool_registry.get(name).create_with_config(**config.tool_settings.get(name, {}))
         for name in config.tools
     ]
+    if extra_tools:
+        tools.extend(extra_tools)
     tools.append(think)
     tools_by_name = {t.name: t for t in tools}
 
@@ -375,12 +378,14 @@ class AgentPool:
         model_config: ModelConfig | None = None,
         trajectory: TrajectoryCollector | None = None,
         checkpointer: Any = None,
+        extra_worker_tools: list[BaseTool] | None = None,
     ) -> None:
         self._worker_config = scenario_config.agents["worker"]
         self._tool_registry = tool_registry
         self._model_config = model_config
         self._trajectory = trajectory
         self._checkpointer = checkpointer
+        self._extra_worker_tools = extra_worker_tools or []
 
     @property
     def worker_max_steps(self) -> int:
@@ -407,4 +412,5 @@ class AgentPool:
             trajectory=self._trajectory,
             task_id=task_id,
             checkpointer=self._checkpointer,
+            extra_tools=self._extra_worker_tools or None,
         )

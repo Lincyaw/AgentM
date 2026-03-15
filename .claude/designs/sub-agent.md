@@ -484,6 +484,22 @@ class AgentPool:
 
 > **Integration with AgentSystemBuilder**: `AgentPool` is created during `AgentSystemBuilder.build()`. The builder loads scenario config, creates the pool of compiled Sub-Agent subgraphs, and passes them to the `TaskManager`. See [generic-state-wrapper.md](generic-state-wrapper.md#agentsystembuilder) for the full build process.
 
+### Extra Tools Injection
+
+`AgentPool` and `build_worker_subgraph()` accept an `extra_tools: list[BaseTool]` parameter for injecting tools that are not defined in the scenario YAML `tools` list. These are appended to the worker's tool list alongside the YAML-registered tools and `think`.
+
+Currently used by the **Service Profile** system: the builder creates `ServiceProfileStore` and injects `update_service_profile` / `query_service_profile` worker tools via `extra_worker_tools`. This allows workers to read/write shared service knowledge without modifying the scenario YAML tool definitions.
+
+### Cross-Agent Service Profile Sharing
+
+Workers are normally isolated — they cannot see each other's findings. The **Service Profile Store** (`scenarios/rca/service_profile.py`) bridges this gap by providing a thread-safe, run-scoped shared memory that both orchestrator and workers can read/write.
+
+- **Orchestrator** updates profiles after receiving worker results and queries them for context
+- **Workers** query profiles before investigating to avoid redundant queries, and update them during investigation to share discoveries in real-time
+- Both use the same `update_service_profile` / `query_service_profile` tool interface, but the orchestrator version returns `Command` while the worker version returns `str`
+
+The store uses merge semantics: topology fields are unioned, observations are appended, and `is_anomalous` can only upgrade (False → True, never downgrade).
+
 The Orchestrator graph is built separately — it contains only the Orchestrator `create_react_agent` as its sole node. Sub-Agents are passed to the `TaskManager` for async invocation.
 
 ---

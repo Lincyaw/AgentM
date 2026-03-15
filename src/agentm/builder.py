@@ -572,11 +572,29 @@ class AgentSystemBuilder:
         )
 
         # Load scenario-specific tools based on system_type
+        format_context = None  # may be overridden by scenario-specific block below
         if system_type == "hypothesis_driven":
+            from functools import partial
+
+            from agentm.scenarios.rca.formatters import format_rca_context
+            from agentm.scenarios.rca.service_profile import ServiceProfileStore
             from agentm.scenarios.rca.tools import create_rca_tools
 
-            rca_tools = create_rca_tools(trajectory=trajectory)
+            profile_store = ServiceProfileStore()
+            rca_tools = create_rca_tools(
+                trajectory=trajectory, profile_store=profile_store
+            )
+
+            # Extract worker tools before registering orchestrator tools
+            worker_profile_tools = rca_tools.pop("_worker_profile_tools", [])
             injected_tools.update(rca_tools)
+
+            # Wire profile store into format_context (replaces lazy-resolved one)
+            format_context = partial(format_rca_context, profile_store=profile_store)
+
+            # Inject profile tools into worker pool
+            if worker_profile_tools:
+                agent_pool._extra_worker_tools = worker_profile_tools
 
         # Wire trajectory into task_manager
         if trajectory is not None:
@@ -660,7 +678,8 @@ class AgentSystemBuilder:
 
         # Resolve state schema and context formatter for this system type
         state_schema = get_state_schema(system_type)
-        format_context = _resolve_format_context(system_type)
+        if format_context is None:
+            format_context = _resolve_format_context(system_type)
 
         graph = create_node_orchestrator(
             config=scenario_config.orchestrator,

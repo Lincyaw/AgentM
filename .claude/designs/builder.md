@@ -38,7 +38,10 @@ create TrajectoryCollector (JSONL event recorder)
 create orchestrator tools (factory closures capture dependencies)
     |
     v
-wire dependencies (trajectory -> TaskManager, broadcast callback)
+create scenario-specific tools (e.g., hypothesis + service profile for RCA)
+    |
+    v
+wire dependencies (trajectory -> TaskManager, profile store -> AgentPool, format_context)
     |
     v
 compile orchestrator graph (create_react_agent)
@@ -147,9 +150,18 @@ The async context manager ensures proper resource cleanup (trajectory file closu
 
 ## Current Limitations
 
-- **Only `react` mode** is implemented. The `graph` mode (for StateGraph-based systems like memory_extraction, sequential, decision_tree) raises `NotImplementedError`.
 - **Single worker config**: The `AgentPool` currently uses one shared worker configuration with task_type prompts, not per-agent-id pools. See [sub-agent.md](sub-agent.md#agent-pool) for details.
-- **Knowledge Store**: Not yet wired. Knowledge tools exist but the LangGraph Store backend is not injected by the Builder.
+
+---
+
+## Scenario-Specific Wiring (hypothesis_driven)
+
+For the `hypothesis_driven` system type, the builder performs additional wiring:
+
+1. **ServiceProfileStore**: Creates a run-scoped shared store instance
+2. **RCA Tools**: Calls `create_rca_tools(trajectory, profile_store)` — produces both orchestrator tools (Command-returning) and worker tools (str-returning, via `_worker_profile_tools` key)
+3. **Worker Tool Injection**: Passes worker profile tools to `AgentPool` via `extra_worker_tools`, which propagates them to `build_worker_subgraph(extra_tools=...)`
+4. **Context Formatter**: Uses `functools.partial` to bind `profile_store` into `format_rca_context`, so the orchestrator system prompt includes service profile summaries
 
 ---
 
