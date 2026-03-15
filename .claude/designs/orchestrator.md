@@ -881,6 +881,10 @@ Your working memory is the DiagnosticNotebook. It is shown to you at the beginni
 - **update_hypothesis(id, description, status, evidence_summary?, parent_id?)**: Create
   or update a hypothesis. Status: formed, investigating, confirmed, rejected, refined, inconclusive.
 - **remove_hypothesis(id)**: Remove a hypothesis from the board.
+- **update_service_profile(service_name, is_anomalous, ...)**: Update the shared Service Profile
+  for a service. Both orchestrator and workers can call this.
+- **query_service_profile(service_name, anomalous_only?, list_all?)**: Query the shared Service
+  Profile store. Available to both orchestrator and workers.
 - **inject_instruction(task_id, msg)**: Redirect a running agent.
 - **abort_task(task_id, reason)**: Stop a running agent.
 - **knowledge_search/list/read**: Query historical knowledge base.
@@ -1928,6 +1932,8 @@ orchestrator:
     - check_tasks             # Monitor all task status + collect results (with wait)
     - update_hypothesis       # LLM explicitly manages hypothesis board
     - remove_hypothesis       # LLM removes irrelevant hypotheses
+    - update_service_profile  # Update shared cross-agent service knowledge
+    - query_service_profile   # Query known service profiles
     - inject_instruction      # Inject instruction into running task
     - abort_task              # Abort running task
 
