@@ -42,46 +42,56 @@ class ForkRequest(BaseModel):
 # WebSocket client management
 # ---------------------------------------------------------------------------
 
-_websocket_clients: set[WebSocket] = set()
+
+class Broadcaster:
+    """Manages WebSocket clients and broadcasts events."""
+
+    def __init__(self) -> None:
+        self._clients: set[WebSocket] = set()
+
+    def add(self, ws: WebSocket) -> None:
+        self._clients.add(ws)
+
+    def remove(self, ws: WebSocket) -> None:
+        self._clients.discard(ws)
+
+    async def broadcast(self, event: dict[str, Any]) -> None:
+        """Broadcast a WebSocket event envelope to all connected clients."""
+        if "timestamp" not in event:
+            event["timestamp"] = datetime.now().isoformat()
+        if "mode" not in event:
+            event["mode"] = "updates"
+
+        data = event.get("data")
+        if isinstance(data, dict):
+            raw_messages = data.get("messages")
+            if isinstance(raw_messages, list):
+                event = {
+                    **event,
+                    "data": {
+                        **data,
+                        "messages": [_serialize_message(m) for m in raw_messages],
+                    },
+                }
+
+        payload = json.dumps(event, default=str)
+        dead: list[WebSocket] = []
+        for ws in list(self._clients):  # iterate a copy to avoid mutation during iteration
+            try:
+                await ws.send_text(payload)
+            except (WebSocketDisconnect, ConnectionError, RuntimeError):
+                dead.append(ws)
+        for ws in dead:
+            self._clients.discard(ws)
+
+
+# Default broadcaster instance for backward compatibility
+_default_broadcaster = Broadcaster()
 
 
 async def broadcast_event(event: dict[str, Any]) -> None:
-    """Broadcast a WebSocket event envelope to all connected clients.
-
-    Normalizes envelopes from different sources (trajectory listeners
-    and TaskManager._broadcast_callback) into a consistent format for the
-    frontend.
-    """
-    # Ensure timestamp exists
-    if "timestamp" not in event:
-        event["timestamp"] = datetime.now().isoformat()
-    # Ensure mode exists (builder uses node_name instead)
-    if "mode" not in event:
-        event["mode"] = "updates"
-
-    # Serialize LangChain Message objects inside data.messages so the
-    # frontend receives plain dicts with type/content/tool_calls fields.
-    data = event.get("data")
-    if isinstance(data, dict):
-        raw_messages = data.get("messages")
-        if isinstance(raw_messages, list):
-            event = {
-                **event,
-                "data": {
-                    **data,
-                    "messages": [_serialize_message(m) for m in raw_messages],
-                },
-            }
-
-    payload = json.dumps(event, default=str)
-    dead: list[WebSocket] = []
-    for ws in _websocket_clients:
-        try:
-            await ws.send_text(payload)
-        except (WebSocketDisconnect, ConnectionError, RuntimeError):
-            dead.append(ws)
-    for ws in dead:
-        _websocket_clients.discard(ws)
+    """Broadcast using the default broadcaster. Backward-compatible API."""
+    await _default_broadcaster.broadcast(event)
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +174,7 @@ def create_dashboard_app(
     task_manager: Any | None = None,
     trajectory: Any | None = None,
     thread_id: str | None = None,
+    broadcaster: Broadcaster | None = None,
 ) -> FastAPI:
     """Create the FastAPI dashboard application.
 
@@ -173,7 +184,12 @@ def create_dashboard_app(
         task_manager: TaskManager instance (for wiring WebSocket forwarding).
         trajectory: TrajectoryCollector instance (for replaying history on connect).
         thread_id: LangGraph thread_id for checkpoint APIs.
+        broadcaster: Broadcaster instance for WebSocket client management.
+            If ``None``, uses the module-level default broadcaster.
     """
+    if broadcaster is None:
+        broadcaster = _default_broadcaster
+
     app = FastAPI(title="AgentM Dashboard")
 
     # Store references on app state for route handlers
@@ -182,6 +198,7 @@ def create_dashboard_app(
     app.state.task_manager = task_manager
     app.state.trajectory = trajectory
     app.state.thread_id = thread_id
+    app.state.broadcaster = broadcaster
 
     # ── HTML dashboard ─────────────────────────────────────────────────
 
@@ -197,7 +214,8 @@ def create_dashboard_app(
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
         await websocket.accept()
-        _websocket_clients.add(websocket)
+        bc = app.state.broadcaster
+        bc.add(websocket)
         # Replay trajectory history so refreshed clients get full state
         traj = app.state.trajectory
         if traj is not None:
@@ -215,13 +233,13 @@ def create_dashboard_app(
                     )
                     await websocket.send_text(payload)
                 except (WebSocketDisconnect, ConnectionError, RuntimeError):
-                    _websocket_clients.discard(websocket)
+                    bc.remove(websocket)
                     return
         try:
             while True:
                 await websocket.receive_text()
         except WebSocketDisconnect:
-            _websocket_clients.discard(websocket)
+            bc.remove(websocket)
 
     # ── Topology API ───────────────────────────────────────────────────
 

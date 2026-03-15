@@ -252,5 +252,4 @@ def create_orchestrator_tools(
         "recall_history": recall_history,
         "_set_graph_ref": _set_graph_ref,
     }
-
     return tools
