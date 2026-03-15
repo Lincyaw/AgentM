@@ -9,12 +9,10 @@ Each test answers "what bug does this prevent?":
 
 from __future__ import annotations
 
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from agentm.scenarios.rca.service_profile import (
     ServiceObservation,
-    ServiceProfile,
     ServiceProfileStore,
 )
 
@@ -63,8 +61,12 @@ class TestServiceProfileStoreMergeLogic:
     def test_topology_union(self) -> None:
         """Upstream/downstream must be merged via set union, not overwritten."""
         store = ServiceProfileStore()
-        store.update("svc-a", upstream_services=["svc-x"], downstream_services=["svc-y"])
-        store.update("svc-a", upstream_services=["svc-z"], downstream_services=["svc-y", "svc-w"])
+        store.update(
+            "svc-a", upstream_services=["svc-x"], downstream_services=["svc-y"]
+        )
+        store.update(
+            "svc-a", upstream_services=["svc-z"], downstream_services=["svc-y", "svc-w"]
+        )
 
         profile = store.get("svc-a")
         assert profile is not None

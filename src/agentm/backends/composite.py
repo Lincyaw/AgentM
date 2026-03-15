@@ -52,9 +52,7 @@ class CompositeBackend:
                 return backend, relative or "."
         return self._default, file_path
 
-    def read(
-        self, file_path: str, offset: int = 0, limit: int = 2000
-    ) -> str:
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
         backend, rel_path = self._route(file_path)
         return backend.read(rel_path, offset=offset, limit=limit)
 

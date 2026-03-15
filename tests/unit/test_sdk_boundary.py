@@ -100,9 +100,7 @@ class TestSDKBoundary:
 
             scenario_imports = _get_scenario_imports(filepath)
             if scenario_imports:
-                violations.append(
-                    f"{rel}: imports {', '.join(scenario_imports)}"
-                )
+                violations.append(f"{rel}: imports {', '.join(scenario_imports)}")
 
         assert violations == [], (
             "SDK core modules must not import from agentm.scenarios.\n"

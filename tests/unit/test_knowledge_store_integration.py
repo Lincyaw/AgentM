@@ -136,9 +136,7 @@ class TestListNamespace:
         knowledge_write("/failure-patterns/pool", _sample_entry(title="Pool"))
         knowledge_write("/failure-patterns/locks", _sample_entry(title="Locks"))
 
-        result = json.loads(
-            knowledge_list("list", path="/failure-patterns", depth=1)
-        )
+        result = json.loads(knowledge_list("list", path="/failure-patterns", depth=1))
         assert result["path"] == "/failure-patterns"
         titles = [e["title"] for e in result["entries"]]
         assert "Pool" in titles
@@ -187,12 +185,14 @@ class TestKeywordSearch:
     """Verify keyword-based search."""
 
     def test_search_finds_by_title_keyword(self) -> None:
-        knowledge_write("/failure-patterns/pool", _sample_entry(title="Pool exhaustion"))
-        knowledge_write("/failure-patterns/locks", _sample_entry(title="Lock contention"))
-
-        results = json.loads(
-            knowledge_search("pool", path="/", mode="keyword")
+        knowledge_write(
+            "/failure-patterns/pool", _sample_entry(title="Pool exhaustion")
         )
+        knowledge_write(
+            "/failure-patterns/locks", _sample_entry(title="Lock contention")
+        )
+
+        results = json.loads(knowledge_search("pool", path="/", mode="keyword"))
         paths = [r["path"] for r in results]
         assert "/failure-patterns/pool" in paths
 

@@ -45,9 +45,7 @@ def build_loop_detection_hook(
 
         # Collect (tool_name, args_key) pairs from the last `window_size`
         # AI messages that carry tool_calls.
-        ai_messages = [
-            m for m in messages if getattr(m, "type", "") == "ai"
-        ]
+        ai_messages = [m for m in messages if getattr(m, "type", "") == "ai"]
         recent_ai = ai_messages[-window_size:] if window_size else ai_messages
 
         call_counter: Counter[str] = Counter()
@@ -60,9 +58,7 @@ def build_loop_detection_hook(
                 call_counter[f"{tc_name}:{args_key}"] += 1
 
         # Find calls that exceed the threshold
-        repeated = [
-            key for key, count in call_counter.items() if count >= threshold
-        ]
+        repeated = [key for key, count in call_counter.items() if count >= threshold]
 
         out_key = "llm_input_messages" if use_llm_input else "messages"
         if repeated:
@@ -74,8 +70,7 @@ def build_loop_detection_hook(
                 "LOOP DETECTION WARNING: The following tool calls have been "
                 f"repeated {threshold}+ times in the last {window_size} steps. "
                 "You appear to be stuck in a loop. Stop and reconsider your "
-                "approach -- try a different strategy or tool.\n"
-                + "\n".join(lines)
+                "approach -- try a different strategy or tool.\n" + "\n".join(lines)
             )
             warning_msg = HumanMessage(content=warning_text)
             return {out_key: [*messages, warning_msg]}

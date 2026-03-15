@@ -117,9 +117,7 @@ class TrajectoryMiddleware(AgentMMiddleware):
         self._trajectory = trajectory
         self._agent_path = agent_path
         self._task_id = task_id
-        self._hook = build_llm_input_hook(
-            trajectory, agent_path, task_id=task_id
-        )
+        self._hook = build_llm_input_hook(trajectory, agent_path, task_id=task_id)
 
     def before_model(self, state: dict[str, Any]) -> dict[str, Any]:
         return self._hook(state)

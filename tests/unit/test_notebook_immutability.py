@@ -76,7 +76,10 @@ class TestUpdateHypothesisStatusImmutability:
     """
 
     def test_returns_new_instance(self):
-        from agentm.scenarios.rca.notebook import add_hypothesis, update_hypothesis_status
+        from agentm.scenarios.rca.notebook import (
+            add_hypothesis,
+            update_hypothesis_status,
+        )
 
         nb = _make_notebook()
         nb = add_hypothesis(nb, "H1", "Pool exhaustion", "2026-03-08T01:00:00Z")
@@ -87,7 +90,10 @@ class TestUpdateHypothesisStatusImmutability:
         assert result is not nb
 
     def test_original_status_unchanged(self):
-        from agentm.scenarios.rca.notebook import add_hypothesis, update_hypothesis_status
+        from agentm.scenarios.rca.notebook import (
+            add_hypothesis,
+            update_hypothesis_status,
+        )
 
         nb = _make_notebook()
         nb = add_hypothesis(nb, "H1", "Pool exhaustion", "2026-03-08T01:00:00Z")

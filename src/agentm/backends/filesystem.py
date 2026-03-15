@@ -20,14 +20,10 @@ class FilesystemBackend:
         resolved = (self._root / file_path).resolve()
         # Prevent path traversal above root
         if not str(resolved).startswith(str(self._root)):
-            raise ValueError(
-                f"Path {file_path!r} resolves outside root {self._root}"
-            )
+            raise ValueError(f"Path {file_path!r} resolves outside root {self._root}")
         return resolved
 
-    def read(
-        self, file_path: str, offset: int = 0, limit: int = 2000
-    ) -> str:
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
         path = self._resolve(file_path)
         with open(path) as f:
             lines = f.readlines()
@@ -63,16 +59,12 @@ class FilesystemBackend:
         if glob_filter:
             files = sorted(search_root.rglob(glob_filter))
         else:
-            files = sorted(
-                f for f in search_root.rglob("*") if f.is_file()
-            )
+            files = sorted(f for f in search_root.rglob("*") if f.is_file())
 
         results: list[dict[str, Any]] = []
         for fp in files:
             try:
-                for lineno, line in enumerate(
-                    fp.read_text().splitlines(), 1
-                ):
+                for lineno, line in enumerate(fp.read_text().splitlines(), 1):
                     if compiled.search(line):
                         results.append(
                             {

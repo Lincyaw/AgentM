@@ -90,7 +90,7 @@ def create_node_orchestrator(
     checkpointer: Any,
     store: Any,
     state_schema: type = BaseExecutorState,
-    format_context: Callable[[dict], str] | None = None,
+    format_context: Callable[..., str] | None = None,
     model_config: Any | None = None,
     trajectory: TrajectoryCollector | None = None,
 ) -> Any:
@@ -117,6 +117,7 @@ def create_node_orchestrator(
     if format_context is not None:
         _format_context: Callable[[dict], str] = format_context
     else:
+
         def _format_context(state: dict) -> str:
             return f"Phase: {state.get('current_phase', 'unknown')}"
 
@@ -161,9 +162,7 @@ def create_node_orchestrator(
     # ------------------------------------------------------------------
     middlewares: list = []
     if trajectory is not None:
-        middlewares.append(
-            TrajectoryMiddleware(trajectory, ["orchestrator"])
-        )
+        middlewares.append(TrajectoryMiddleware(trajectory, ["orchestrator"]))
     pipeline = NodePipeline(middlewares) if middlewares else None
 
     # ------------------------------------------------------------------
@@ -302,7 +301,7 @@ def create_node_orchestrator(
                     example[name] = f"<{field_info.description or name}>"
                 elif ann is bool:
                     example[name] = False
-                elif hasattr(ann, "__origin__") and ann.__origin__ is list:
+                elif ann is not None and hasattr(ann, "__origin__") and ann.__origin__ is list:
                     example[name] = []
                 else:
                     example[name] = f"<{field_info.description or name}>"
@@ -397,9 +396,9 @@ def create_node_orchestrator(
     # Graph assembly
     # ------------------------------------------------------------------
 
-    builder = StateGraph(state_schema)
+    builder: StateGraph = StateGraph(state_schema)
 
-    builder.add_node("llm_call", llm_call)
+    builder.add_node("llm_call", llm_call)  # type: ignore[type-var]
     builder.add_node("tool_node", tool_node)
     builder.add_node("synthesize", synthesize)
 
@@ -419,4 +418,3 @@ def create_node_orchestrator(
         compile_kwargs["store"] = store
 
     return builder.compile(name="node_orchestrator", **compile_kwargs)
-
