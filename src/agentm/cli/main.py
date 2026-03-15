@@ -8,7 +8,11 @@ import typer
 from dotenv import load_dotenv
 
 from agentm.cli.debug import analyze_trajectory
-from agentm.cli.run import resume_investigation, run_investigation, run_memory_extraction
+from agentm.cli.run import (
+    resume_investigation,
+    run_investigation,
+    run_memory_extraction,
+)
 
 app = typer.Typer(
     name="agentm",
@@ -41,9 +45,9 @@ def run(
         8765, "--port", help="Dashboard server port (requires --dashboard)"
     ),
     dashboard_host: str = typer.Option(
-        "127.0.0.1",
+        "0.0.0.0",
         "--dashboard-host",
-        help="Dashboard server bind address (default: 127.0.0.1)",
+        help="Dashboard server bind address (default: 0.0.0.0)",
     ),
     max_steps: int = typer.Option(
         100,
