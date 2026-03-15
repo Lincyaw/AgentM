@@ -2,11 +2,11 @@
 
 Two builder paths:
 
-1. **``AgentSystemBuilder.build()``** (legacy) — Config-driven factory that
+1. **``AgentSystemBuilder.build()``** (legacy) --- Config-driven factory that
    resolves system_type from scenario config.  Backward-compatible with all
    existing callers.
 
-2. **``GenericAgentSystemBuilder[S]``** — New fluent builder parameterized
+2. **``GenericAgentSystemBuilder[S]``** --- New fluent builder parameterized
    over a user-defined state type ``S``.  Accepts a ``ReasoningStrategy[S]``
    and composes middleware, backend, and tools explicitly.
 """
@@ -153,7 +153,7 @@ class AgentSystem(Generic[S]):
         async for event in self.graph.astream(input_data, config=self.langgraph_config):
             step += 1
 
-            # Record to trajectory — listeners are notified automatically
+            # Record to trajectory --- listeners are notified automatically
             for node_name, node_data in event.items():
                 if node_name == "__interrupt__":
                     continue
@@ -169,7 +169,7 @@ class AgentSystem(Generic[S]):
         """Parse node output and record structured trajectory events.
 
         ``llm_call`` node events (tool_call, llm_end) are recorded by
-        ``NodePipeline`` inside the node itself — only state_update and
+        ``NodePipeline`` inside the node itself --- only state_update and
         tool_result events are recorded here from the stream.
         """
         if self.trajectory is None:
@@ -252,7 +252,7 @@ def _create_checkpointer(storage_config: StorageConfig) -> Any:
     """Create a LangGraph checkpointer from storage config.
 
     For 'memory' backend, returns a MemorySaver directly.
-    For 'sqlite' backend, returns None here — the AsyncSqliteSaver must be
+    For 'sqlite' backend, returns None here --- the AsyncSqliteSaver must be
     created inside an async context. Use _create_async_checkpointer() instead.
     """
     backend = storage_config.checkpointer.backend
@@ -373,10 +373,10 @@ class GenericAgentSystemBuilder(Generic[S]):
         _discover_scenarios()
 
         if self._strategy is None:
-            raise ValueError("Strategy is required — call with_strategy()")
+            raise ValueError("Strategy is required --- call with_strategy()")
         if self._scenario is None:
             raise ValueError(
-                "Scenario config is required — call with_scenario()"
+                "Scenario config is required --- call with_scenario()"
             )
 
         strategy = self._strategy
@@ -461,7 +461,7 @@ class GenericAgentSystemBuilder(Generic[S]):
         tools: list[Any] | None = None,
         thread_id: str | None = None,
     ) -> AgentSystem[S]:
-        """Convenience factory — builds an AgentSystem in one call."""
+        """Convenience factory --- builds an AgentSystem in one call."""
         builder: GenericAgentSystemBuilder[S] = GenericAgentSystemBuilder(
             strategy.state_schema()
         )
@@ -478,7 +478,7 @@ class GenericAgentSystemBuilder(Generic[S]):
 
 
 # ---------------------------------------------------------------------------
-# Legacy builder — preserved for backward compatibility
+# Legacy builder --- preserved for backward compatibility
 # ---------------------------------------------------------------------------
 
 
@@ -510,222 +510,212 @@ class AgentSystemBuilder:
         resolved_tools_dir = Path(tools_dir) if tools_dir is not None else _DEFAULT_TOOLS_DIR
         resolved_kb_dir = knowledge_base_dir if knowledge_base_dir is not None else "./knowledge"
 
-        tool_registry = ToolRegistry()
+        if scenario_config.orchestrator.orchestrator_mode in ("react", "node"):
+            tool_registry = ToolRegistry()
 
-        # Load all tool YAMLs
-        for yaml_file in sorted(resolved_tools_dir.glob("*.yaml")):
-            tool_registry.load_from_yaml(yaml_file)
+            # Load all tool YAMLs
+            for yaml_file in sorted(resolved_tools_dir.glob("*.yaml")):
+                tool_registry.load_from_yaml(yaml_file)
 
-        # Resolve model config for the orchestrator model
-        orch_model_name = scenario_config.orchestrator.model
-        orch_model_config = (
-            system_config.models.get(orch_model_name)
-            if system_config is not None
-            else None
-        )
-
-        # Resolve model config for workers
-        worker_config = scenario_config.agents.get("worker")
-        worker_model_config = None
-        if worker_config is not None and system_config is not None:
-            worker_model_config = system_config.models.get(worker_config.model)
-
-        agent_pool = AgentPool(scenario_config, tool_registry, worker_model_config)
-
-        # --- Checkpointer ---
-        checkpointer = None
-        pending_storage: StorageConfig | None = None
-        if system_config is not None:
-            checkpointer = _create_checkpointer(system_config.storage)
-            if (
-                checkpointer is None
-                and system_config.storage.checkpointer.backend != "memory"
-            ):
-                pending_storage = system_config.storage
-
-        # Wire checkpointer into agent_pool so workers persist per-task state
-        agent_pool._checkpointer = checkpointer
-
-        task_manager = TaskManager()
-
-        thread_id = existing_thread_id if existing_thread_id else str(uuid.uuid4())
-        langgraph_config: dict[str, Any] = {
-            "configurable": {"thread_id": thread_id},
-        }
-
-        # --- Trajectory ---
-        trajectory: TrajectoryCollector | None = None
-        if system_config is not None and system_config.debug.trajectory.enabled:
-            run_id = f"{system_type}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-            # Compute checkpoint db path for metadata
-            checkpoint_db_path = ""
-            if system_config.storage.checkpointer.backend == "sqlite":
-                db_url = (
-                    system_config.storage.checkpointer.url or "./checkpoints.db"
-                )
-                checkpoint_db_path = str(Path(db_url).resolve())
-            trajectory = TrajectoryCollector(
-                run_id=run_id,
-                output_dir=system_config.debug.trajectory.output_dir,
-                thread_id=thread_id,
-                checkpoint_db=checkpoint_db_path,
+            # Resolve model config for the orchestrator model
+            orch_model_name = scenario_config.orchestrator.model
+            orch_model_config = (
+                system_config.models.get(orch_model_name)
+                if system_config is not None
+                else None
             )
 
-        # --- Dependency injection via closure factory ---
-        injected_tools = create_orchestrator_tools(
-            task_manager, agent_pool, trajectory=trajectory,
-            config=scenario_config.orchestrator,
-        )
+            # Resolve model config for workers
+            worker_config = scenario_config.agents.get("worker")
+            worker_model_config = None
+            if worker_config is not None and system_config is not None:
+                worker_model_config = system_config.models.get(worker_config.model)
 
-        # Load scenario-specific tools based on system_type
-        format_context = None  # may be overridden by scenario-specific block below
-        if system_type == "hypothesis_driven":
-            from functools import partial
+            agent_pool = AgentPool(scenario_config, tool_registry, worker_model_config)
 
-            from agentm.scenarios.rca.formatters import format_rca_context
-            from agentm.scenarios.rca.service_profile import ServiceProfileStore
-            from agentm.scenarios.rca.tools import create_rca_tools
+            # --- Checkpointer ---
+            checkpointer = None
+            pending_storage: StorageConfig | None = None
+            if system_config is not None:
+                checkpointer = _create_checkpointer(system_config.storage)
+                if (
+                    checkpointer is None
+                    and system_config.storage.checkpointer.backend != "memory"
+                ):
+                    pending_storage = system_config.storage
 
-            profile_store = ServiceProfileStore()
-            rca_tools = create_rca_tools(
-                trajectory=trajectory, profile_store=profile_store
-            )
+            # Wire checkpointer into agent_pool so workers persist per-task state
+            agent_pool._checkpointer = checkpointer
 
-            # Extract worker tools before registering orchestrator tools
-            worker_profile_tools = rca_tools.pop("_worker_profile_tools", [])
-            injected_tools.update(rca_tools)
+            task_manager = TaskManager()
 
-            # Wire profile store into format_context (replaces lazy-resolved one)
-            format_context = partial(format_rca_context, profile_store=profile_store)
+            thread_id = existing_thread_id if existing_thread_id else str(uuid.uuid4())
+            langgraph_config: dict[str, Any] = {
+                "configurable": {"thread_id": thread_id},
+            }
 
-            # Inject profile tools into worker pool
-            if worker_profile_tools:
-                agent_pool._extra_worker_tools = worker_profile_tools
-
-        # Wire trajectory into task_manager
-        if trajectory is not None:
-            task_manager.set_trajectory(trajectory)
-
-            # Wire trajectory into agent_pool for llm_start events
-            agent_pool._trajectory = trajectory
-
-        # Extract graph reference setter before tool registration (not a real tool)
-        set_graph_ref = injected_tools.pop("_set_graph_ref", None)
-
-        # --- Knowledge Store ---
-        knowledge_module.init(base_dir=resolved_kb_dir)
-
-        # Wire checkpointer DB path into memory module for memory-extraction system
-        if system_config is not None:
-            db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
-            memory_module.set_db_path(str(Path(db_url).resolve()))
-
-        # Knowledge tools are standalone functions (file-system backend)
-        KNOWLEDGE_TOOLS: dict[str, Any] = {
-            "knowledge_search": knowledge_module.knowledge_search,
-            "knowledge_list": knowledge_module.knowledge_list,
-            "knowledge_read": knowledge_module.knowledge_read,
-            "knowledge_write": knowledge_module.knowledge_write,
-            "knowledge_delete": knowledge_module.knowledge_delete,
-        }
-
-        # Memory tools are standalone functions (checkpointer injected above)
-        MEMORY_TOOLS: dict[str, Any] = {
-            "read_trajectory": memory_module.read_trajectory,
-            "get_checkpoint_history": memory_module.get_checkpoint_history,
-        }
-
-        # Build orchestrator tools: YAML-registered + factory-injected + knowledge + memory
-        tools: list[Any] = []
-
-        for name in scenario_config.orchestrator.tools:
-            if name in injected_tools:
-                # Factory-created tool (has closure over task_manager/agent_pool)
-                func = injected_tools[name]
-                if asyncio.iscoroutinefunction(func):
-                    tool = StructuredTool.from_function(
-                        coroutine=func,
-                        name=name,
-                        description=func.__doc__ or name,
+            # --- Trajectory ---
+            trajectory: TrajectoryCollector | None = None
+            if system_config is not None and system_config.debug.trajectory.enabled:
+                run_id = f"{system_type}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                # Compute checkpoint db path for metadata
+                checkpoint_db_path = ""
+                if system_config.storage.checkpointer.backend == "sqlite":
+                    db_url = (
+                        system_config.storage.checkpointer.url or "./checkpoints.db"
                     )
-                else:
+                    checkpoint_db_path = str(Path(db_url).resolve())
+                trajectory = TrajectoryCollector(
+                    run_id=run_id,
+                    output_dir=system_config.debug.trajectory.output_dir,
+                    thread_id=thread_id,
+                    checkpoint_db=checkpoint_db_path,
+                )
+
+            # --- Dependency injection via closure factory ---
+            injected_tools = create_orchestrator_tools(
+                task_manager, agent_pool, trajectory=trajectory,
+                config=scenario_config.orchestrator,
+            )
+
+            # Load scenario-specific tools based on system_type
+            format_context = None  # may be overridden by scenario-specific block below
+            if system_type == "hypothesis_driven":
+                from functools import partial
+
+                from agentm.scenarios.rca.formatters import format_rca_context
+                from agentm.scenarios.rca.service_profile import ServiceProfileStore
+                from agentm.scenarios.rca.tools import create_rca_tools
+
+                profile_store = ServiceProfileStore()
+                rca_tools = create_rca_tools(
+                    trajectory=trajectory, profile_store=profile_store
+                )
+
+                # Extract worker tools before registering orchestrator tools
+                worker_profile_tools = rca_tools.pop("_worker_profile_tools", [])
+                injected_tools.update(rca_tools)
+
+                # Wire profile store into format_context (replaces lazy-resolved one)
+                format_context = partial(format_rca_context, profile_store=profile_store)
+
+                # Inject profile tools into worker pool
+                if worker_profile_tools:
+                    agent_pool._extra_worker_tools = worker_profile_tools
+
+            # Wire trajectory into task_manager
+            if trajectory is not None:
+                task_manager.set_trajectory(trajectory)
+
+                # Wire trajectory into agent_pool for llm_start events
+                agent_pool._trajectory = trajectory
+
+            # Extract graph reference setter before tool registration (not a real tool)
+            set_graph_ref = injected_tools.pop("_set_graph_ref", None)
+
+            # --- Knowledge Store ---
+            knowledge_module.init(base_dir=resolved_kb_dir)
+
+            # Wire checkpointer DB path into memory module for memory-extraction system
+            if system_config is not None:
+                db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
+                memory_module.set_db_path(str(Path(db_url).resolve()))
+
+            # Knowledge tools are standalone functions (file-system backend)
+            KNOWLEDGE_TOOLS: dict[str, Any] = {
+                "knowledge_search": knowledge_module.knowledge_search,
+                "knowledge_list": knowledge_module.knowledge_list,
+                "knowledge_read": knowledge_module.knowledge_read,
+                "knowledge_write": knowledge_module.knowledge_write,
+                "knowledge_delete": knowledge_module.knowledge_delete,
+            }
+
+            # Memory tools are standalone functions (checkpointer injected above)
+            MEMORY_TOOLS: dict[str, Any] = {
+                "read_trajectory": memory_module.read_trajectory,
+                "get_checkpoint_history": memory_module.get_checkpoint_history,
+            }
+
+            # Build orchestrator tools: YAML-registered + factory-injected + knowledge + memory
+            tools: list[Any] = []
+
+            for name in scenario_config.orchestrator.tools:
+                if name in injected_tools:
+                    # Factory-created tool (has closure over task_manager/agent_pool)
+                    func = injected_tools[name]
+                    if asyncio.iscoroutinefunction(func):
+                        tool = StructuredTool.from_function(
+                            coroutine=func,
+                            name=name,
+                            description=func.__doc__ or name,
+                        )
+                    else:
+                        tool = StructuredTool.from_function(
+                            func=func,
+                            name=name,
+                            description=func.__doc__ or name,
+                        )
+                    tools.append(tool)
+                elif name in KNOWLEDGE_TOOLS:
+                    # Knowledge tools (file-system backend, initialized via init())
+                    func = KNOWLEDGE_TOOLS[name]
                     tool = StructuredTool.from_function(
                         func=func,
                         name=name,
                         description=func.__doc__ or name,
                     )
-                tools.append(tool)
-            elif name in KNOWLEDGE_TOOLS:
-                # Knowledge tools (file-system backend, initialized via init())
-                func = KNOWLEDGE_TOOLS[name]
-                tool = StructuredTool.from_function(
-                    func=func,
-                    name=name,
-                    description=func.__doc__ or name,
-                )
-                tools.append(tool)
-            elif name in MEMORY_TOOLS:
-                # Memory tools (standalone functions with checkpointer injected)
-                func = MEMORY_TOOLS[name]
-                tool = StructuredTool.from_function(
-                    func=func,
-                    name=name,
-                    description=func.__doc__ or name,
-                )
-                tools.append(tool)
-            elif tool_registry.has(name):
-                # YAML-registered tool (module-level function)
-                tools.append(tool_registry.get(name).create_with_config())
-            else:
-                raise ConfigError(f"Tool {name!r} not found in registry or factory")
+                    tools.append(tool)
+                elif name in MEMORY_TOOLS:
+                    # Memory tools (standalone functions with checkpointer injected)
+                    func = MEMORY_TOOLS[name]
+                    tool = StructuredTool.from_function(
+                        func=func,
+                        name=name,
+                        description=func.__doc__ or name,
+                    )
+                    tools.append(tool)
+                elif tool_registry.has(name):
+                    # YAML-registered tool (module-level function)
+                    tools.append(tool_registry.get(name).create_with_config())
+                else:
+                    raise ConfigError(f"Tool {name!r} not found in registry or factory")
 
-        # Think tool is always available for structured reasoning
-        tools.append(think)
+            # Think tool is always available for structured reasoning
+            tools.append(think)
 
-        # Resolve state schema and context formatter for this system type
-        state_schema = get_state_schema(system_type)
-        if format_context is None:
-            format_context = _resolve_format_context(system_type)
+            # Resolve state schema and context formatter for this system type
+            state_schema = get_state_schema(system_type)
+            if format_context is None:
+                format_context = _resolve_format_context(system_type)
 
-        graph = create_node_orchestrator(
-            config=scenario_config.orchestrator,
-            tools=tools,
-            checkpointer=checkpointer,
-            store=None,
-            state_schema=state_schema,
-            format_context=format_context,
-            model_config=orch_model_config,
-            trajectory=trajectory,
+            graph = create_node_orchestrator(
+                config=scenario_config.orchestrator,
+                tools=tools,
+                checkpointer=checkpointer,
+                store=None,
+                state_schema=state_schema,
+                format_context=format_context,
+                model_config=orch_model_config,
+                trajectory=trajectory,
+            )
+
+            # Wire graph reference for recall_history (must happen after graph compilation)
+            if set_graph_ref is not None:
+                set_graph_ref(graph, langgraph_config)
+
+            return AgentSystem(
+                graph,
+                config=langgraph_config,
+                scenario_config=scenario_config,
+                task_manager=task_manager,
+                trajectory=trajectory,
+                thread_id=thread_id,
+                _pending_storage=pending_storage,
+            )
+
+        raise ConfigError(
+            f"Orchestrator mode {scenario_config.orchestrator.orchestrator_mode!r} not yet implemented"
         )
-
-        # Wire graph reference for recall_history (must happen after graph compilation)
-        if set_graph_ref is not None:
-            set_graph_ref(graph, langgraph_config)
-
-        return AgentSystem(
-            graph,
-            config=langgraph_config,
-            scenario_config=scenario_config,
-            task_manager=task_manager,
-            trajectory=trajectory,
-            thread_id=thread_id,
-            _pending_storage=pending_storage,
-        )
-
-
-def build_from_type(
-    system_type: str,
-    scenario_config: ScenarioConfig,
-    system_config: Any | None = None,
-    existing_thread_id: str | None = None,
-) -> AgentSystem[Any]:
-    """Bridge function — delegates to ``AgentSystemBuilder.build()``.
-
-    Provided for callers that prefer a plain function over a static method.
-    """
-    return AgentSystemBuilder.build(
-        system_type, scenario_config, system_config, existing_thread_id
-    )
 
 
 class AgentSystemBuilderFluent:
@@ -766,7 +756,7 @@ class AgentSystemBuilderFluent:
         self._knowledge_base_dir = path
         return self
 
-    def build(self) -> AgentSystem:
+    def build(self) -> AgentSystem[Any]:
         """Build with all configured options."""
         return AgentSystemBuilder.build(
             system_type=self._system_type,
@@ -776,3 +766,18 @@ class AgentSystemBuilderFluent:
             tools_dir=self._tools_dir,
             knowledge_base_dir=self._knowledge_base_dir,
         )
+
+
+def build_from_type(
+    system_type: str,
+    scenario_config: ScenarioConfig,
+    system_config: Any | None = None,
+    existing_thread_id: str | None = None,
+) -> AgentSystem[Any]:
+    """Bridge function --- delegates to ``AgentSystemBuilder.build()``.
+
+    Provided for callers that prefer a plain function over a static method.
+    """
+    return AgentSystemBuilder.build(
+        system_type, scenario_config, system_config, existing_thread_id
+    )
