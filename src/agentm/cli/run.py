@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
 import traceback
 from pathlib import Path
 from typing import Any
@@ -15,6 +14,7 @@ from langchain_core.messages import HumanMessage
 from rich.console import Console
 
 import agentm.tools.observability as obs_tools
+from agentm.exceptions import CheckpointError, DataInitError
 from agentm.tools.duckdb_sql import register_tables as duckdb_register_tables
 from agentm.builder import AgentSystemBuilder
 from agentm.config.loader import load_scenario_config, load_system_config
@@ -197,6 +197,7 @@ async def run_investigation(
     dashboard_port: int = 8765,
     dashboard_host: str = "127.0.0.1",
     max_steps: int = 100,
+    project_root: str | Path | None = None,
 ) -> None:
     """Run the full RCA investigation."""
     system_config, scenario_config, _ = _load_and_override(
@@ -211,8 +212,7 @@ async def run_investigation(
     result = obs_tools.set_data_directory(data_dir)
     init_info = json.loads(result)
     if "error" in init_info:
-        console.print(f"[red]ERROR: {init_info['error']}[/]")
-        sys.exit(1)
+        raise DataInitError(init_info["error"])
     console.print(f"Data initialized: {len(init_info['files'])} parquet files")
     duckdb_register_tables(
         {
@@ -281,8 +281,7 @@ async def run_memory_extraction(
             tid = meta.get("thread_id", "")
             checkpoint_db = meta.get("checkpoint_db", "")
             if not tid:
-                console.print(f"[red]ERROR: {entry} has no thread_id metadata.[/]")
-                sys.exit(1)
+                raise CheckpointError(f"{entry} has no thread_id metadata.")
             if checkpoint_db:
                 system_config.storage.checkpointer.backend = "sqlite"
                 system_config.storage.checkpointer.url = checkpoint_db
@@ -347,23 +346,22 @@ async def resume_investigation(
     dashboard_port: int = 8765,
     dashboard_host: str = "127.0.0.1",
     verbose: bool = False,
+    project_root: str | Path | None = None,
 ) -> None:
     """Resume an interrupted investigation from a trajectory file."""
     traj_path = Path(trajectory_file)
     if not traj_path.exists():
-        console.print(f"[red]ERROR: Trajectory file not found: {trajectory_file}[/]")
-        sys.exit(1)
+        raise CheckpointError(f"Trajectory file not found: {trajectory_file}")
 
     meta = TrajectoryCollector.read_metadata(traj_path)
     thread_id = meta.get("thread_id", "")
     checkpoint_db = meta.get("checkpoint_db", "")
 
     if not thread_id:
-        console.print("[red]ERROR: Trajectory file has no thread_id metadata.[/]")
-        console.print(
-            "[dim]This trajectory was created before resume support was added.[/]"
+        raise CheckpointError(
+            "Trajectory file has no thread_id metadata. "
+            "This trajectory was created before resume support was added."
         )
-        sys.exit(1)
 
     console.rule("AgentM — Resume Investigation")
     console.print(f"Trajectory: [cyan]{trajectory_file}[/]")
@@ -383,8 +381,7 @@ async def resume_investigation(
         result = obs_tools.set_data_directory(data_dir)
         init_info = json.loads(result)
         if "error" in init_info:
-            console.print(f"[red]ERROR: {init_info['error']}[/]")
-            sys.exit(1)
+            raise DataInitError(init_info["error"])
         console.print(f"Data initialized: {len(init_info['files'])} parquet files")
         duckdb_register_tables(
             {
@@ -407,15 +404,13 @@ async def resume_investigation(
     try:
         snapshots = [s async for s in system.graph.aget_state_history(langgraph_config)]
     except Exception as e:
-        console.print(f"[red]ERROR reading checkpoint history: {e}[/]")
-        sys.exit(1)
+        raise CheckpointError(f"Error reading checkpoint history: {e}") from e
 
     if not snapshots:
-        console.print("[yellow]No checkpoints found for this thread.[/]")
-        console.print(
-            "[dim]The checkpoint DB may have been moved or the thread_id is incorrect.[/]"
+        raise CheckpointError(
+            "No checkpoints found for this thread. "
+            "The checkpoint DB may have been moved or the thread_id is incorrect."
         )
-        sys.exit(1)
 
     if list_only:
         _print_checkpoints(snapshots)
@@ -430,11 +425,10 @@ async def resume_investigation(
         ).strip()
         idx = int(raw) if raw else 0
         if idx < 0 or idx >= len(snapshots):
-            console.print(
-                f"[red]Invalid index {idx}. Valid range: 0–{len(snapshots) - 1}[/]"
-            )
             await system._close_checkpointer()
-            sys.exit(1)
+            raise CheckpointError(
+                f"Invalid index {idx}. Valid range: 0\u2013{len(snapshots) - 1}"
+            )
         checkpoint_id = snapshots[idx].config["configurable"].get("checkpoint_id", "")
 
     resume_config: dict = {
