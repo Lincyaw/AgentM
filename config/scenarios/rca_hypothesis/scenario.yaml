@@ -15,6 +15,8 @@ orchestrator:
     - check_tasks
     - update_hypothesis
     - remove_hypothesis
+    - update_service_profile
+    - query_service_profile
     - inject_instruction
     - abort_task
     - recall_history

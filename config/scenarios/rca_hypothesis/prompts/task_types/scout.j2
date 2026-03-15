@@ -58,6 +58,23 @@ Prefer observability query tools for metrics, traces, logs, and topology.
 The `think` tool is always available for structured reasoning between queries.
 </tooling>
 
+<service_knowledge>
+You have access to a shared Service Profile store. Use it to avoid redundant work:
+
+**Before investigating**: Call `query_service_profile(service_name="X")` or
+`query_service_profile(list_all=true)` to see what's already known.
+
+**During investigation**: Call `update_service_profile(...)` to record your discoveries.
+Other agents running in parallel can immediately see your updates.
+
+**Keep it SHORT**: A profile is a quick-reference card, not a report.
+- anomaly_summary: one terse line (e.g., "p99 60s vs 4s, 45% errors")
+- key_observation: one sentence, factual, no reasoning
+- Only record what's NEW — don't repeat what's already in the profile
+
+Focus your tool budget on NEW questions — don't re-query data sources already in the profile.
+</service_knowledge>
+
 <tool_discipline>
 You have a budget of {{ tool_call_budget | default(25) }} tool calls for this task. Use them wisely.
 The `think` tool is FREE and does NOT count against your budget — use it liberally.
