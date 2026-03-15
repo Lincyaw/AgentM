@@ -333,7 +333,9 @@ class TaskManager:
             managed.status = AgentRunStatus.COMPLETED
             managed.result = _extract_structured_response(managed.events_buffer)
             managed.completed_at = datetime.now().isoformat()
-            logger.info("Task %s completed: status=%s", managed.task_id, managed.status.value)
+            logger.info(
+                "Task %s completed: status=%s", managed.task_id, managed.status.value
+            )
             if managed.started_at:
                 started = datetime.fromisoformat(managed.started_at)
                 managed.duration_seconds = (datetime.now() - started).total_seconds()

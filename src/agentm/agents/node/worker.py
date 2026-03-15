@@ -157,7 +157,9 @@ def build_worker_subgraph(
         middlewares.append(CompressionMiddleware(config.compression))
     if trajectory is not None:
         middlewares.append(
-            TrajectoryMiddleware(trajectory, ["orchestrator", agent_id], task_id=task_id)
+            TrajectoryMiddleware(
+                trajectory, ["orchestrator", agent_id], task_id=task_id
+            )
         )
     pipeline = NodePipeline(middlewares)
 

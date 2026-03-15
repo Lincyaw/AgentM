@@ -237,9 +237,15 @@ async def run_investigation(
     console.print()
 
     await _stream_and_finalize(
-        system, initial_state, system_config,
-        debug_console, dashboard_task, dashboard_port,
-        verbose, max_steps, "investigation",
+        system,
+        initial_state,
+        system_config,
+        debug_console,
+        dashboard_task,
+        dashboard_port,
+        verbose,
+        max_steps,
+        "investigation",
     )
 
 
@@ -324,9 +330,15 @@ async def run_memory_extraction(
     console.print()
 
     await _stream_and_finalize(
-        system, initial_state, system_config,
-        debug_console, dashboard_task, dashboard_port,
-        verbose, max_steps, "extraction",
+        system,
+        initial_state,
+        system_config,
+        debug_console,
+        dashboard_task,
+        dashboard_port,
+        verbose,
+        max_steps,
+        "extraction",
     )
 
 

@@ -16,7 +16,11 @@ from agentm.backends.composite import CompositeBackend
 from agentm.backends.filesystem import FilesystemBackend
 from agentm.core.backend import StorageBackend
 from agentm.core.strategy import ReasoningStrategy
-from agentm.core.strategy_registry import get_strategy, list_strategies, register_strategy
+from agentm.core.strategy_registry import (
+    get_strategy,
+    list_strategies,
+    register_strategy,
+)
 from agentm.middleware import AgentMMiddleware, compose_middleware
 from agentm.middleware.budget import BudgetMiddleware
 from agentm.middleware.dedup import DedupMiddleware
@@ -102,6 +106,7 @@ class TestStrategyRegistry:
         finally:
             # Clean up
             from agentm.core.strategy_registry import _STRATEGY_INSTANCES
+
             _STRATEGY_INSTANCES.pop("custom_test", None)
 
 
@@ -132,7 +137,10 @@ class TestHypothesisDrivenStrategy:
 
         phases = HypothesisDrivenStrategy().phase_definitions()
         assert set(phases.keys()) == {
-            "exploration", "generation", "verification", "confirmation"
+            "exploration",
+            "generation",
+            "verification",
+            "confirmation",
         }
 
     def test_format_context_empty_notebook(self):
@@ -147,7 +155,12 @@ class TestHypothesisDrivenStrategy:
         from agentm.scenarios.rca.strategy import HypothesisDrivenStrategy
 
         strategy = HypothesisDrivenStrategy()
-        state: dict[str, Any] = {"messages": [], "task_id": "t1", "task_description": "t", "current_phase": "x"}
+        state: dict[str, Any] = {
+            "messages": [],
+            "task_id": "t1",
+            "task_description": "t",
+            "current_phase": "x",
+        }
         result = strategy.format_context(state)
         assert "no data collected" in result
 

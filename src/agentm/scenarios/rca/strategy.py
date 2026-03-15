@@ -88,9 +88,7 @@ class HypothesisDrivenStrategy:
         notebook_for_llm = notebook
         for phase in ("exploration", "generation", "verification"):
             if should_compress_phase(notebook_for_llm, phase):
-                notebook_for_llm = compress_completed_phase(
-                    notebook_for_llm, phase
-                )
+                notebook_for_llm = compress_completed_phase(notebook_for_llm, phase)
 
         return format_notebook_for_llm(notebook_for_llm)
 

@@ -30,9 +30,7 @@ def get_strategy(system_type: str) -> ReasoningStrategy[Any]:
     return strategy
 
 
-def register_strategy(
-    system_type: str, strategy: ReasoningStrategy[Any]
-) -> None:
+def register_strategy(system_type: str, strategy: ReasoningStrategy[Any]) -> None:
     """Register a custom strategy for a system type.
 
     Overwrites any existing registration for the same key.

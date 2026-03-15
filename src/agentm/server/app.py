@@ -76,7 +76,9 @@ class Broadcaster:
 
         payload = json.dumps(event, default=str)
         dead: list[WebSocket] = []
-        for ws in list(self._clients):  # iterate a copy to avoid mutation during iteration
+        for ws in list(
+            self._clients
+        ):  # iterate a copy to avoid mutation during iteration
             try:
                 await ws.send_text(payload)
             except (WebSocketDisconnect, ConnectionError, RuntimeError):

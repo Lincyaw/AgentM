@@ -26,4 +26,3 @@ class TaskStatus(str, Enum):
     DISPATCHED = "dispatched"
     COMPLETED = "completed"
     FAILED = "failed"
-

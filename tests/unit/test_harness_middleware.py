@@ -108,7 +108,13 @@ class TestLoopDetectionMiddleware:
         mw = LoopDetectionMiddleware(threshold=2, window_size=20)
         msgs = [
             _ai_with_tool_calls(
-                [{"name": "read_file", "args": {"path": f"/file{i}.py"}, "id": f"tc{i}"}]
+                [
+                    {
+                        "name": "read_file",
+                        "args": {"path": f"/file{i}.py"},
+                        "id": f"tc{i}",
+                    }
+                ]
             )
             for i in range(5)
         ]
@@ -121,9 +127,7 @@ class TestLoopDetectionMiddleware:
         """When state has llm_input_messages, hook uses and returns that key."""
         mw = LoopDetectionMiddleware(threshold=2, window_size=20)
         msgs = [
-            _ai_with_tool_calls(
-                [{"name": "tool_x", "args": {}, "id": f"tc{i}"}]
-            )
+            _ai_with_tool_calls([{"name": "tool_x", "args": {}, "id": f"tc{i}"}])
             for i in range(3)
         ]
         result = mw.before_model({"llm_input_messages": msgs})
@@ -143,9 +147,7 @@ class TestPreCompletionChecklistMiddleware:
         mw = PreCompletionChecklistMiddleware()
         msgs = [
             HumanMessage(content="do stuff"),
-            _ai_with_tool_calls(
-                [{"name": "grep", "args": {"q": "x"}, "id": "tc1"}]
-            ),
+            _ai_with_tool_calls([{"name": "grep", "args": {"q": "x"}, "id": "tc1"}]),
         ]
         result = mw.before_model({"messages": msgs})
         out_msgs = result["messages"]
@@ -160,7 +162,11 @@ class TestPreCompletionChecklistMiddleware:
         ]
         result = mw.before_model({"messages": msgs})
         out_msgs = result["messages"]
-        reminders = [m for m in out_msgs if isinstance(m, HumanMessage) and "verify" in m.content.lower()]
+        reminders = [
+            m
+            for m in out_msgs
+            if isinstance(m, HumanMessage) and "verify" in m.content.lower()
+        ]
         assert len(reminders) == 1
         assert "tested your solution" in reminders[0].content
 
@@ -174,7 +180,8 @@ class TestPreCompletionChecklistMiddleware:
         # First call -- triggers
         result1 = mw.before_model({"messages": msgs})
         reminders1 = [
-            m for m in result1["messages"]
+            m
+            for m in result1["messages"]
             if isinstance(m, HumanMessage) and "verify" in m.content.lower()
         ]
         assert len(reminders1) == 1
@@ -182,7 +189,8 @@ class TestPreCompletionChecklistMiddleware:
         # Second call -- should NOT trigger again
         result2 = mw.before_model({"messages": msgs})
         reminders2 = [
-            m for m in result2["messages"]
+            m
+            for m in result2["messages"]
             if isinstance(m, HumanMessage) and "verify" in m.content.lower()
         ]
         assert len(reminders2) == 0
@@ -234,9 +242,7 @@ class TestToolOutputOffloadMiddleware:
 
     def test_long_content_truncated(self) -> None:
         """Content exceeding max_chars is replaced with head + tail."""
-        mw = ToolOutputOffloadMiddleware(
-            max_chars=100, head_chars=30, tail_chars=20
-        )
+        mw = ToolOutputOffloadMiddleware(max_chars=100, head_chars=30, tail_chars=20)
         long_content = "A" * 200
         msg = _tool_msg(long_content)
         result = mw.before_model({"messages": [msg]})
@@ -248,9 +254,7 @@ class TestToolOutputOffloadMiddleware:
 
     def test_truncated_message_includes_original_length(self) -> None:
         """The truncation notice includes the original content length."""
-        mw = ToolOutputOffloadMiddleware(
-            max_chars=100, head_chars=30, tail_chars=20
-        )
+        mw = ToolOutputOffloadMiddleware(max_chars=100, head_chars=30, tail_chars=20)
         long_content = "X" * 500
         msg = _tool_msg(long_content)
         result = mw.before_model({"messages": [msg]})

@@ -323,16 +323,12 @@ class GenericAgentSystemBuilder(Generic[S]):
         self._strategy = strategy
         return self
 
-    def with_scenario(
-        self, config: ScenarioConfig
-    ) -> GenericAgentSystemBuilder[S]:
+    def with_scenario(self, config: ScenarioConfig) -> GenericAgentSystemBuilder[S]:
         """Set the scenario configuration."""
         self._scenario = config
         return self
 
-    def with_backend(
-        self, backend: StorageBackend
-    ) -> GenericAgentSystemBuilder[S]:
+    def with_backend(self, backend: StorageBackend) -> GenericAgentSystemBuilder[S]:
         """Set the storage backend."""
         self._backend = backend
         return self
@@ -349,16 +345,12 @@ class GenericAgentSystemBuilder(Generic[S]):
         self._tools = list(tools)
         return self
 
-    def with_system_config(
-        self, system_config: Any
-    ) -> GenericAgentSystemBuilder[S]:
+    def with_system_config(self, system_config: Any) -> GenericAgentSystemBuilder[S]:
         """Set the system-level config (models, storage, debug)."""
         self._system_config = system_config
         return self
 
-    def with_thread_id(
-        self, thread_id: str
-    ) -> GenericAgentSystemBuilder[S]:
+    def with_thread_id(self, thread_id: str) -> GenericAgentSystemBuilder[S]:
         """Set an explicit thread ID for checkpoint continuity."""
         self._thread_id = thread_id
         return self
@@ -375,9 +367,7 @@ class GenericAgentSystemBuilder(Generic[S]):
         if self._strategy is None:
             raise ValueError("Strategy is required --- call with_strategy()")
         if self._scenario is None:
-            raise ValueError(
-                "Scenario config is required --- call with_scenario()"
-            )
+            raise ValueError("Scenario config is required --- call with_scenario()")
 
         strategy = self._strategy
         scenario = self._scenario
@@ -405,9 +395,7 @@ class GenericAgentSystemBuilder(Generic[S]):
             run_id = f"{strategy.name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
             checkpoint_db_path = ""
             if system_config.storage.checkpointer.backend == "sqlite":
-                db_url = (
-                    system_config.storage.checkpointer.url or "./checkpoints.db"
-                )
+                db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
                 checkpoint_db_path = str(Path(db_url).resolve())
             trajectory = TrajectoryCollector(
                 run_id=run_id,
@@ -507,8 +495,12 @@ class AgentSystemBuilder:
         _discover_scenarios()
         get_state_schema(system_type)  # validate system_type exists
 
-        resolved_tools_dir = Path(tools_dir) if tools_dir is not None else _DEFAULT_TOOLS_DIR
-        resolved_kb_dir = knowledge_base_dir if knowledge_base_dir is not None else "./knowledge"
+        resolved_tools_dir = (
+            Path(tools_dir) if tools_dir is not None else _DEFAULT_TOOLS_DIR
+        )
+        resolved_kb_dir = (
+            knowledge_base_dir if knowledge_base_dir is not None else "./knowledge"
+        )
 
         if scenario_config.orchestrator.orchestrator_mode in ("react", "node"):
             tool_registry = ToolRegistry()
@@ -574,7 +566,9 @@ class AgentSystemBuilder:
 
             # --- Dependency injection via closure factory ---
             injected_tools = create_orchestrator_tools(
-                task_manager, agent_pool, trajectory=trajectory,
+                task_manager,
+                agent_pool,
+                trajectory=trajectory,
                 config=scenario_config.orchestrator,
             )
 
@@ -597,7 +591,9 @@ class AgentSystemBuilder:
                 injected_tools.update(rca_tools)
 
                 # Wire profile store into format_context (replaces lazy-resolved one)
-                format_context = partial(format_rca_context, profile_store=profile_store)
+                format_context = partial(
+                    format_rca_context, profile_store=profile_store
+                )
 
                 # Inject profile tools into worker pool
                 if worker_profile_tools:

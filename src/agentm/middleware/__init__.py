@@ -59,9 +59,7 @@ class AgentMMiddleware:
         """
         return None
 
-    async def awrap_tool_call(
-        self, request: Any, handler: Callable[..., Any]
-    ) -> Any:
+    async def awrap_tool_call(self, request: Any, handler: Callable[..., Any]) -> Any:
         """Wrap a tool invocation.
 
         Default calls the handler unchanged.
@@ -151,4 +149,3 @@ class NodePipeline:
             merged["response"] = response
         for mw in self._middlewares:
             await mw.aafter_model(merged)
-
