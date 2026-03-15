@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Callable, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from langchain_core.messages import ToolMessage
-from langchain_core.tools import BaseTool, InjectedToolCallId, StructuredTool
+from langchain_core.tools import InjectedToolCallId, StructuredTool
 from langgraph.types import Command
 
 from agentm.scenarios.rca.enums import HypothesisStatus
@@ -140,7 +140,9 @@ def create_rca_tools(
             content = profile_store.format_profile(profile.service_name)
             return Command(
                 update={
-                    "messages": [ToolMessage(content=content, tool_call_id=tool_call_id)]
+                    "messages": [
+                        ToolMessage(content=content, tool_call_id=tool_call_id)
+                    ]
                 }
             )
 
@@ -154,7 +156,9 @@ def create_rca_tools(
             content = _do_query(profile_store, service_name, anomalous_only, list_all)
             return Command(
                 update={
-                    "messages": [ToolMessage(content=content, tool_call_id=tool_call_id)]
+                    "messages": [
+                        ToolMessage(content=content, tool_call_id=tool_call_id)
+                    ]
                 }
             )
 

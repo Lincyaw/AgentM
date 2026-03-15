@@ -83,17 +83,13 @@ class MemoryExtractionStrategy:
 
         extracted_patterns: list[dict] = state.get("extracted_patterns", [])
         if extracted_patterns:
-            lines.append(
-                f"## Extracted Patterns ({len(extracted_patterns)} total)"
-            )
+            lines.append(f"## Extracted Patterns ({len(extracted_patterns)} total)")
             for i, p in enumerate(extracted_patterns[:20], 1):
                 ptype = p.get("pattern_type", "unknown")
                 desc = p.get("description", "")
                 lines.append(f"  {i}. [{ptype}] {desc}")
             if len(extracted_patterns) > 20:
-                lines.append(
-                    f"  ... and {len(extracted_patterns) - 20} more"
-                )
+                lines.append(f"  ... and {len(extracted_patterns) - 20} more")
             lines.append("")
 
         knowledge_entries: list = state.get("knowledge_entries", [])
@@ -110,16 +106,12 @@ class MemoryExtractionStrategy:
                     title = str(entry)
                 lines.append(f"  - {title}")
             if len(knowledge_entries) > 10:
-                lines.append(
-                    f"  ... and {len(knowledge_entries) - 10} more"
-                )
+                lines.append(f"  ... and {len(knowledge_entries) - 10} more")
             lines.append("")
 
         existing_knowledge: list = state.get("existing_knowledge", [])
         if existing_knowledge:
-            lines.append(
-                f"## Existing Knowledge ({len(existing_knowledge)} entries)"
-            )
+            lines.append(f"## Existing Knowledge ({len(existing_knowledge)} entries)")
             for entry in existing_knowledge[:5]:
                 if hasattr(entry, "title"):
                     title = entry.title
@@ -129,9 +121,7 @@ class MemoryExtractionStrategy:
                     title = str(entry)
                 lines.append(f"  - {title}")
             if len(existing_knowledge) > 5:
-                lines.append(
-                    f"  ... and {len(existing_knowledge) - 5} more"
-                )
+                lines.append(f"  ... and {len(existing_knowledge) - 5} more")
             lines.append("")
 
         if not lines:

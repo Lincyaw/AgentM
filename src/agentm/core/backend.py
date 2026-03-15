@@ -18,9 +18,7 @@ class StorageBackend(Protocol):
     Implementations map these to the underlying storage medium.
     """
 
-    def read(
-        self, file_path: str, offset: int = 0, limit: int = 2000
-    ) -> str:
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
         """Read file contents as text.
 
         ``offset`` and ``limit`` refer to line numbers (0-based).

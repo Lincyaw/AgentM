@@ -133,9 +133,15 @@ class ServiceProfileStore:
                 profile = replace(
                     existing,
                     is_anomalous=existing.is_anomalous or is_anomalous,
-                    anomaly_summary=anomaly_summary if anomaly_summary else existing.anomaly_summary,
-                    upstream_services=_unique_tuple(existing.upstream_services, upstream_services),
-                    downstream_services=_unique_tuple(existing.downstream_services, downstream_services),
+                    anomaly_summary=anomaly_summary
+                    if anomaly_summary
+                    else existing.anomaly_summary,
+                    upstream_services=_unique_tuple(
+                        existing.upstream_services, upstream_services
+                    ),
+                    downstream_services=_unique_tuple(
+                        existing.downstream_services, downstream_services
+                    ),
                     observations=obs,
                     data_sources_queried=_unique_tuple(
                         existing.data_sources_queried, data_sources_queried
@@ -241,5 +247,7 @@ class ServiceProfileStore:
         if p.observations:
             parts.append("  observations:")
             for obs in p.observations:
-                parts.append(f"    - [{obs.source_agent_id}/{obs.source_task_type}] {obs.observation}")
+                parts.append(
+                    f"    - [{obs.source_agent_id}/{obs.source_task_type}] {obs.observation}"
+                )
         return "\n".join(parts)

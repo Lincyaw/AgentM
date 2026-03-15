@@ -494,9 +494,7 @@ def init(base_dir: str = "./knowledge") -> None:
 
 def _ensure_init() -> None:
     if _base_dir is None:
-        raise RuntimeError(
-            "Knowledge store not initialized \u2014 call init() first"
-        )
+        raise RuntimeError("Knowledge store not initialized \u2014 call init() first")
 
 
 def _get_default() -> KnowledgeStore:

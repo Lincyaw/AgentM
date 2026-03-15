@@ -29,9 +29,7 @@ class BudgetMiddleware(AgentMMiddleware):
             if getattr(m, "type", "") != "ai":
                 continue
             tool_calls = getattr(m, "tool_calls", None)
-            if not tool_calls or any(
-                tc.get("name") != "think" for tc in tool_calls
-            ):
+            if not tool_calls or any(tc.get("name") != "think" for tc in tool_calls):
                 step += 1
         remaining = max(0, max_steps - step)
 
