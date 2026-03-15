@@ -235,5 +235,6 @@ class TrajectoryCollector:
             self._file.close()
             path = str(self._file.name)
             self._file = None
+            logger.info("Trajectory saved: %s (%d events)", path, len(self._events))
             return path
         return None

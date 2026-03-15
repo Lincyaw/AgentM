@@ -25,6 +25,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from dataclasses import asdict
 
+from agentm.exceptions import ConfigError
 from agentm.agents.node.orchestrator import create_node_orchestrator
 from agentm.agents.node.worker import AgentPool
 from agentm.config.schema import ScenarioConfig, StorageConfig
@@ -280,7 +281,7 @@ async def _create_async_checkpointer(storage_config: StorageConfig) -> Any:
     return None
 
 
-TOOLS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "tools"
+_DEFAULT_TOOLS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "tools"
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +498,8 @@ class AgentSystemBuilder:
         scenario_config: ScenarioConfig,
         system_config: Any | None = None,
         existing_thread_id: str | None = None,
+        tools_dir: Path | str | None = None,
+        knowledge_base_dir: str | None = None,
     ) -> AgentSystem[Any]:
         """Build an AgentSystem from a system type and scenario config."""
         from agentm.scenarios import discover as _discover_scenarios
@@ -504,10 +507,13 @@ class AgentSystemBuilder:
         _discover_scenarios()
         get_state_schema(system_type)  # validate system_type exists
 
+        resolved_tools_dir = Path(tools_dir) if tools_dir is not None else _DEFAULT_TOOLS_DIR
+        resolved_kb_dir = knowledge_base_dir if knowledge_base_dir is not None else "./knowledge"
+
         tool_registry = ToolRegistry()
 
         # Load all tool YAMLs
-        for yaml_file in sorted(TOOLS_DIR.glob("*.yaml")):
+        for yaml_file in sorted(resolved_tools_dir.glob("*.yaml")):
             tool_registry.load_from_yaml(yaml_file)
 
         # Resolve model config for the orchestrator model
@@ -607,7 +613,7 @@ class AgentSystemBuilder:
         set_graph_ref = injected_tools.pop("_set_graph_ref", None)
 
         # --- Knowledge Store ---
-        knowledge_module.init(base_dir="./knowledge")
+        knowledge_module.init(base_dir=resolved_kb_dir)
 
         # Wire checkpointer DB path into memory module for memory-extraction system
         if system_config is not None:
@@ -671,7 +677,7 @@ class AgentSystemBuilder:
                 # YAML-registered tool (module-level function)
                 tools.append(tool_registry.get(name).create_with_config())
             else:
-                raise ValueError(f"Tool {name!r} not found in registry or factory")
+                raise ConfigError(f"Tool {name!r} not found in registry or factory")
 
         # Think tool is always available for structured reasoning
         tools.append(think)
@@ -720,3 +726,53 @@ def build_from_type(
     return AgentSystemBuilder.build(
         system_type, scenario_config, system_config, existing_thread_id
     )
+
+
+class AgentSystemBuilderFluent:
+    """Fluent builder for customized AgentSystem construction.
+
+    Usage::
+
+        system = (
+            AgentSystemBuilderFluent("hypothesis_driven", scenario_cfg)
+            .with_system_config(sys_cfg)
+            .with_tools_dir("/my/tools")
+            .with_knowledge_base_dir("/my/knowledge")
+            .build()
+        )
+    """
+
+    def __init__(self, system_type: str, scenario_config: ScenarioConfig) -> None:
+        self._system_type = system_type
+        self._scenario_config = scenario_config
+        self._system_config: Any | None = None
+        self._thread_id: str | None = None
+        self._tools_dir: Path | str | None = None
+        self._knowledge_base_dir: str | None = None
+
+    def with_system_config(self, config: Any) -> AgentSystemBuilderFluent:
+        self._system_config = config
+        return self
+
+    def with_thread_id(self, thread_id: str) -> AgentSystemBuilderFluent:
+        self._thread_id = thread_id
+        return self
+
+    def with_tools_dir(self, path: Path | str) -> AgentSystemBuilderFluent:
+        self._tools_dir = path
+        return self
+
+    def with_knowledge_base_dir(self, path: str) -> AgentSystemBuilderFluent:
+        self._knowledge_base_dir = path
+        return self
+
+    def build(self) -> AgentSystem:
+        """Build with all configured options."""
+        return AgentSystemBuilder.build(
+            system_type=self._system_type,
+            scenario_config=self._scenario_config,
+            system_config=self._system_config,
+            existing_thread_id=self._thread_id,
+            tools_dir=self._tools_dir,
+            knowledge_base_dir=self._knowledge_base_dir,
+        )

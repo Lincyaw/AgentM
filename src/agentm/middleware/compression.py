@@ -60,7 +60,7 @@ _DEFAULT_THRESHOLD_TOKENS = int(_DEFAULT_CONTEXT_WINDOW * _DEFAULT_THRESHOLD_RAT
 _DEFAULT_PRESERVE_N = 2
 
 
-def count_tokens(messages: list[Any], model: str = "gpt-5.1") -> int:
+def count_tokens(messages: list[Any], model: str = "gpt-4o") -> int:
     """Count the number of tokens in a list of messages for a given model."""
     try:
         encoding = tiktoken.encoding_for_model(model)
@@ -107,7 +107,7 @@ def _format_messages_for_summary(messages: list[Any]) -> list[str]:
     return formatted
 
 
-def _summarize_messages(messages: list[Any], model: str = "gpt-5.1-mini") -> str:
+def _summarize_messages(messages: list[Any], model: str = "gpt-4o-mini") -> str:
     """Summarize a list of messages using an LLM, chunking if needed.
 
     When the formatted messages exceed the compression model's context window,
@@ -190,6 +190,10 @@ def _summarize_messages(messages: list[Any], model: str = "gpt-5.1-mini") -> str
 
 def sub_agent_compression_hook(state: dict[str, Any]) -> dict[str, Any]:
     """pre_model_hook: compress messages before LLM call when token limit approached.
+
+    .. deprecated::
+        Use ``build_compression_hook(config)`` for configurable compression.
+        This function uses hardcoded defaults.
 
     When compression is NOT needed:
         Returns {'messages': state['messages']} — passes messages through unchanged.

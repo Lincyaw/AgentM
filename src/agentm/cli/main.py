@@ -7,6 +7,8 @@ import asyncio
 import typer
 from dotenv import load_dotenv
 
+from agentm.exceptions import AgentMError
+
 from agentm.cli.debug import analyze_trajectory
 from agentm.cli.run import (
     resume_investigation,
@@ -96,7 +98,15 @@ def debug(
 
 def main() -> None:
     load_dotenv()
-    app()
+    try:
+        app()
+    except AgentMError as e:
+        from rich.console import Console
+
+        Console().print(f"[red]ERROR: {e}[/]")
+        import sys
+
+        sys.exit(1)
 
 
 @app.command()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import datetime
 from typing import Any, Callable
@@ -13,6 +14,8 @@ from agentm.core.trajectory import TrajectoryCollector
 from agentm.models.data import ManagedTask
 from agentm.models.enums import AgentRunStatus
 from agentm.models.types import TaskType
+
+logger = logging.getLogger("agentm.core.task_manager")
 
 
 class TaskManager:
@@ -64,6 +67,7 @@ class TaskManager:
         hooks before the task is submitted.
         """
         task_id = kwargs.pop("task_id", None) or str(uuid.uuid4())
+        logger.info("Task %s submitted: agent=%s type=%s", task_id, agent_id, task_type)
         trajectory_self_reported: bool = kwargs.pop("trajectory_self_reported", False)
         max_steps: int | None = kwargs.pop("max_steps", None)
 
@@ -329,6 +333,7 @@ class TaskManager:
             managed.status = AgentRunStatus.COMPLETED
             managed.result = _extract_structured_response(managed.events_buffer)
             managed.completed_at = datetime.now().isoformat()
+            logger.info("Task %s completed: status=%s", managed.task_id, managed.status.value)
             if managed.started_at:
                 started = datetime.fromisoformat(managed.started_at)
                 managed.duration_seconds = (datetime.now() - started).total_seconds()
@@ -356,6 +361,7 @@ class TaskManager:
             managed.status = AgentRunStatus.FAILED
             managed.error_summary = str(e)
             managed.completed_at = datetime.now().isoformat()
+            logger.warning("Task %s failed: %s", managed.task_id, e)
             self._completion_event.set()
 
             if self._trajectory is not None:
