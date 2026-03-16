@@ -100,7 +100,6 @@ class TestCheckTasksPipeline:
         """check_tasks should include completed task results in ToolMessage."""
         cmd = await self.check_tasks(
             request="status",
-            wait_seconds=0,
             tool_call_id="call-010",
         )
 
@@ -125,7 +124,6 @@ class TestCheckTasksPipeline:
 
         cmd = await check_tasks(
             request="status",
-            wait_seconds=0,
             tool_call_id="call-011",
         )
 
@@ -164,7 +162,6 @@ class TestCheckTasksIncrementalReporting:
         # First call — result should be present
         cmd1 = await self.check_tasks(
             request="status",
-            wait_seconds=0,
             tool_call_id="call-020",
         )
         content1 = json.loads(cmd1.update["messages"][0].content)
@@ -174,7 +171,6 @@ class TestCheckTasksIncrementalReporting:
         # Second call — already-reported task should NOT reappear
         cmd2 = await self.check_tasks(
             request="status",
-            wait_seconds=0,
             tool_call_id="call-021",
         )
         content2 = json.loads(cmd2.update["messages"][0].content)
@@ -193,7 +189,6 @@ class TestCheckTasksIncrementalReporting:
         # First call — failure details present
         cmd1 = await check_tasks(
             request="status",
-            wait_seconds=0,
             tool_call_id="call-022",
         )
         content1 = json.loads(cmd1.update["messages"][0].content)
@@ -202,7 +197,6 @@ class TestCheckTasksIncrementalReporting:
         # Second call — already-reported failure omitted
         cmd2 = await check_tasks(
             request="status",
-            wait_seconds=0,
             tool_call_id="call-023",
         )
         content2 = json.loads(cmd2.update["messages"][0].content)
@@ -221,7 +215,6 @@ class TestCheckTasksIncrementalReporting:
         # Call twice — running task should appear both times
         cmd1 = await check_tasks(
             request="status",
-            wait_seconds=0,
             tool_call_id="call-024",
         )
         content1 = json.loads(cmd1.update["messages"][0].content)
@@ -229,7 +222,6 @@ class TestCheckTasksIncrementalReporting:
 
         cmd2 = await check_tasks(
             request="status",
-            wait_seconds=0,
             tool_call_id="call-025",
         )
         content2 = json.loads(cmd2.update["messages"][0].content)
