@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "vault": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "vault-mcp"
+      ],
+      "env": {
+        "VAULT_DIR": "./vault"
+      }
+    }
+  }
+}
