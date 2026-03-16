@@ -95,12 +95,45 @@ def create_orchestrator_tools(
 
     async def check_tasks(
         request: str,
-        wait_seconds: float = 10,
+        wait_seconds: float = None,
         tool_call_id: Annotated[str, InjectedToolCallId] = "",
     ) -> Command:
-        """Check status of all dispatched tasks and collect completed results."""
+        """Check status of all dispatched tasks and collect completed results.
+
+        Args:
+            request: Description of what we're waiting for
+            wait_seconds: Override wait time. If None, uses smart waiting strategy
+                         based on task progress and type
+        """
         _ = request
+
+        # Use smart waiting strategy if wait_seconds not specified
+        if wait_seconds is None:
+            running_tasks = task_manager.get_running_tasks_info()
+            if running_tasks:
+                # Use the first running task to calculate wait time
+                task_info = running_tasks[0]
+                wait_seconds = task_manager._smart_wait_strategy.calculate_wait_time(
+                    task_info["task_id"],
+                    task_info["agent_id"],
+                    task_info["task_type"],
+                    task_info["elapsed_seconds"],
+                    task_info["current_step"],
+                    task_info["max_steps"],
+                )
+            else:
+                wait_seconds = 10  # Default fallback
+
         results = await task_manager.get_all_status(wait_seconds=wait_seconds)
+
+        # Record completion times for completed tasks
+        for completed_task in results.get("completed", []):
+            if "duration_seconds" in completed_task:
+                task_manager._smart_wait_strategy.record_completion(
+                    completed_task["task_id"],
+                    completed_task["duration_seconds"]
+                )
+
         return Command(
             update={
                 "messages": [

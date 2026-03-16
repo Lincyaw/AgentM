@@ -37,6 +37,8 @@ class TaskManager:
         self._broadcast_callback: Callable[..., Any] | None = None
         self._trajectory: TrajectoryCollector | None = None
         self._completion_event = asyncio.Event()
+        # Smart waiting strategy for check_tasks
+        self._smart_wait_strategy = SmartWaitStrategy()
 
     def set_trajectory(self, trajectory: TrajectoryCollector) -> None:
         """Set the TrajectoryCollector for event recording."""
@@ -168,6 +170,26 @@ class TaskManager:
             except asyncio.TimeoutError:
                 break
         return task
+
+    def get_running_tasks_info(self) -> list[dict[str, Any]]:
+        """Get information about all running tasks for smart waiting strategy."""
+        running_info = []
+        for task_id, task in self._tasks.items():
+            if task.status == AgentRunStatus.RUNNING:
+                elapsed = 0.0
+                if task.started_at:
+                    started = datetime.fromisoformat(task.started_at)
+                    elapsed = (datetime.now() - started).total_seconds()
+
+                running_info.append({
+                    "task_id": task_id,
+                    "agent_id": task.agent_id,
+                    "task_type": getattr(task, "task_type", "scout"),
+                    "elapsed_seconds": elapsed,
+                    "current_step": task.current_step,
+                    "max_steps": task.max_steps,
+                })
+        return running_info
 
     def get_running_count(self) -> int:
         """Return the number of currently running tasks."""
@@ -377,6 +399,77 @@ class TaskManager:
                     },
                     task_id=managed.task_id,
                 )
+
+
+class SmartWaitStrategy:
+    """Intelligent waiting strategy for check_tasks to reduce polling frequency."""
+
+    def __init__(self) -> None:
+        self._wait_history: dict[str, list[float]] = {}  # task_id -> [wait_times...]
+        self._task_patterns: dict[str, float] = {}  # (agent_id, task_type) -> avg_completion_time
+
+    def calculate_wait_time(
+        self,
+        task_id: str,
+        agent_id: str,
+        task_type: str,
+        elapsed_seconds: float,
+        current_step: int,
+        max_steps: int,
+    ) -> float:
+        """Calculate optimal wait time based on task progress and history."""
+
+        # Base wait times by task type (in seconds)
+        base_waits = {
+            "scout": 15,      # scout tasks need more time for data collection
+            "verify": 10,     # verify tasks are usually faster
+            "deep_analyze": 20 # deep_analyze tasks need most time
+        }
+
+        base_wait = base_waits.get(task_type, 12)  # default to 12s if unknown type
+
+        # Get iteration count for this task
+        iterations = len(self._wait_history.get(task_id, []))
+
+        # Progress-based adjustments (take precedence over time-based)
+        if max_steps > 0 and current_step > 0:
+            progress = current_step / max_steps
+            if progress >= 0.9:  # Near completion (>=90%), reduce wait
+                return 6  # Fixed short wait when almost done
+            elif progress >= 0.7:  # Most way done (>=70%), moderate wait
+                return int(base_wait * 0.7)
+            # If progress < 0.7, continue to time-based logic
+
+        # Time-based exponential backoff
+        if elapsed_seconds > 180:  # Task running > 3 minutes
+            # Exponential backoff: 15, 22, 34, 51, 76...
+            factor = 1.5 ** min(iterations, 6)  # Cap at 6 iterations
+            wait_time = min(int(base_wait * factor), 90)  # Max 90s wait
+        elif elapsed_seconds > 120:  # Task running > 2 minutes
+            factor = 1.3 ** min(iterations, 4)
+            wait_time = min(int(base_wait * factor), 45)
+        elif elapsed_seconds > 60:  # Task running > 1 minute
+            factor = 1.2 ** min(iterations, 3)
+            wait_time = min(int(base_wait * factor), 30)
+        else:
+            # Early stage, use base wait with slight increase per iteration
+            wait_time = base_wait + (iterations * 2)
+
+        # Record this wait time for history
+        if task_id not in self._wait_history:
+            self._wait_history[task_id] = []
+        self._wait_history[task_id].append(wait_time)
+
+        return wait_time
+
+    def record_completion(self, task_id: str, duration_seconds: float) -> None:
+        """Record task completion time for future pattern learning."""
+        # Clean up history to prevent memory leaks
+        self._wait_history.pop(task_id, None)
+
+
+# Global smart wait strategy instance
+_smart_wait_strategy = SmartWaitStrategy()
 
 
 def _extract_structured_response(events_buffer: list[Any]) -> dict[str, Any] | None:
