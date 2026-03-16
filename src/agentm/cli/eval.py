@@ -27,7 +27,6 @@ async def run_eval(
     stat_only: bool,
     max_steps: int,
     timeout: float,
-    dataset_path: str | None,
 ) -> None:
     """Orchestrate preprocess → rollout → judge → stat pipeline."""
 
@@ -46,7 +45,9 @@ async def run_eval(
 
     benchmark = BaseBenchmark(
         eval_config,
-        # source_path_fn=lambda source: os.path.join(dataset_path, "data", source),
+        source_path_fn=lambda source: os.path.join(
+            "/Users/bytedance/origin_data", source, "converted"
+        ),
     )
 
     if stat_only:

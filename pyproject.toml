@@ -28,7 +28,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-rcabench-platform = { path = "/home/nn/workspace/proj/rcabench-platform", editable = true }
+rcabench-platform = { path = "../rcabench-platform", editable = true }
 
 [dependency-groups]
 dev = [
@@ -46,3 +46,6 @@ agentm = "agentm:main"
 [build-system]
 requires = ["uv_build>=0.10.9,<0.11.0"]
 build-backend = "uv_build"
+
+[tool.uv]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
