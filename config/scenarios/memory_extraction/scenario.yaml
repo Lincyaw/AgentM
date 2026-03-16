@@ -13,10 +13,16 @@ orchestrator:
   tools:
     - dispatch_agent
     - check_tasks
-    - knowledge_search
-    - knowledge_list
-    - knowledge_read
-    - knowledge_write
+    - vault_write
+    - vault_read
+    - vault_edit
+    - vault_delete
+    - vault_rename
+    - vault_search
+    - vault_list
+    - vault_backlinks
+    - vault_traverse
+    - vault_lint
     - read_trajectory
     - get_checkpoint_history
 
@@ -33,10 +39,12 @@ agents:
     tools:
       - read_trajectory
       - get_checkpoint_history
-      - knowledge_search
-      - knowledge_list
-      - knowledge_read
-      # No knowledge_write — workers are read-only
+      - vault_read
+      - vault_search
+      - vault_list
+      - vault_backlinks
+      - vault_traverse
+      # Workers are read-only — no vault_write/vault_edit/vault_delete
     execution:
       max_steps: 20
       timeout: 120
