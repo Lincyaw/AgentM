@@ -106,9 +106,10 @@ class TestCheckTasksSignature:
     def test_is_async(self, orch_tools):
         assert inspect.iscoroutinefunction(orch_tools["check_tasks"])
 
-    def test_has_wait_seconds_parameter(self, orch_tools):
+    def test_no_wait_seconds_parameter(self, orch_tools):
+        """wait_seconds removed — SmartWaitStrategy controls timing."""
         sig = inspect.signature(orch_tools["check_tasks"])
-        assert "wait_seconds" in sig.parameters
+        assert "wait_seconds" not in sig.parameters
 
     def test_has_tool_call_id_parameter(self, orch_tools):
         sig = inspect.signature(orch_tools["check_tasks"])
