@@ -572,6 +572,15 @@ class AgentSystemBuilder:
                 config=scenario_config.orchestrator,
             )
 
+            # --- Vault (memory_extraction only) ---
+            VAULT_TOOLS: dict[str, Any] = {}
+            if system_type == "memory_extraction":
+                from agentm.tools.vault import MarkdownVault, create_vault_tools
+
+                vault_dir = Path(resolved_kb_dir) / "vault"
+                vault = MarkdownVault(vault_dir)
+                VAULT_TOOLS = create_vault_tools(vault)
+
             # Load scenario-specific tools based on system_type
             format_context = None  # may be overridden by scenario-specific block below
             if system_type == "hypothesis_driven":
@@ -664,6 +673,15 @@ class AgentSystemBuilder:
                 elif name in MEMORY_TOOLS:
                     # Memory tools (standalone functions with checkpointer injected)
                     func = MEMORY_TOOLS[name]
+                    tool = StructuredTool.from_function(
+                        func=func,
+                        name=name,
+                        description=func.__doc__ or name,
+                    )
+                    tools.append(tool)
+                elif name in VAULT_TOOLS:
+                    # Vault tools (MarkdownVault backend, memory_extraction only)
+                    func = VAULT_TOOLS[name]
                     tool = StructuredTool.from_function(
                         func=func,
                         name=name,
