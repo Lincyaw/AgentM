@@ -16,6 +16,15 @@ class RateLimitConfig(BaseModel):
     requests_per_second: float
     max_bucket_size: int
 
+    def create_rate_limiter(self) -> "InMemoryRateLimiter":
+        """Create a LangChain InMemoryRateLimiter from this config."""
+        from langchain_core.rate_limiters import InMemoryRateLimiter
+
+        return InMemoryRateLimiter(
+            requests_per_second=self.requests_per_second,
+            max_bucket_size=self.max_bucket_size,
+        )
+
 
 class ModelConfig(BaseModel):
     """Configuration for a single LLM model."""
@@ -23,6 +32,7 @@ class ModelConfig(BaseModel):
     api_key: str
     base_url: Optional[str] = None
     rate_limit: Optional[RateLimitConfig] = None
+    max_retries: int = 20
 
 
 class StorageBackendConfig(BaseModel):

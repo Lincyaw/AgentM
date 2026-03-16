@@ -101,6 +101,9 @@ def build_worker_subgraph(
         llm_kwargs["api_key"] = model_config.api_key
         if model_config.base_url:
             llm_kwargs["base_url"] = model_config.base_url
+        if getattr(model_config, "rate_limit", None):
+            llm_kwargs["rate_limiter"] = model_config.rate_limit.create_rate_limiter()
+        llm_kwargs["max_retries"] = model_config.max_retries
 
     model_plain = ChatOpenAI(**llm_kwargs)
 

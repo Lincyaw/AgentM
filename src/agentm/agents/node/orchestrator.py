@@ -133,6 +133,9 @@ def create_node_orchestrator(
             llm_kwargs["api_key"] = model_config.api_key
         if getattr(model_config, "base_url", None):
             llm_kwargs["base_url"] = model_config.base_url
+        if getattr(model_config, "rate_limit", None):
+            llm_kwargs["rate_limiter"] = model_config.rate_limit.create_rate_limiter()
+        llm_kwargs["max_retries"] = model_config.max_retries
 
     model_plain = ChatOpenAI(**llm_kwargs)
     model_with_tools = model_plain.bind_tools(tools)
