@@ -24,7 +24,11 @@ dependencies = [
     "langchain>=1.2.10",
     "python-dotenv>=1.2.2",
     "sentence-transformers>=3.0",
+    "rcabench-platform[llm-eval]",
 ]
+
+[tool.uv.sources]
+rcabench-platform = { path = "/home/nn/workspace/proj/rcabench-platform", editable = true }
 
 [dependency-groups]
 dev = [
