@@ -27,3 +27,4 @@ knowledge
 # Environment variables (contains secrets)
 .env
 .env.local
+eval-data

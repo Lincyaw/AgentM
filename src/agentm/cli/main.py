@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from agentm.exceptions import AgentMError
 
 from agentm.cli.debug import analyze_trajectory
+from agentm.cli.eval import run_eval
 from agentm.cli.run import (
     resume_investigation,
     run_investigation,
@@ -242,5 +243,49 @@ def resume(
             dashboard_port=port,
             dashboard_host=dashboard_host,
             verbose=verbose,
+        )
+    )
+
+
+@app.command()
+def eval(
+    config: str = typer.Argument(..., help="Path to eval config YAML"),
+    scenario: str = typer.Option(
+        "config/scenarios/rca_hypothesis",
+        "--scenario",
+        help="Scenario directory",
+    ),
+    system_config: str = typer.Option(
+        "config/system.yaml",
+        "--system-config",
+        help="System config YAML",
+    ),
+    exp_id: str | None = typer.Option(
+        None, "--exp-id", help="Override exp_id from config"
+    ),
+    judge_only: bool = typer.Option(
+        False, "--judge-only", help="Skip rollout, run judge+stat only"
+    ),
+    stat_only: bool = typer.Option(False, "--stat-only", help="Run stat only"),
+    max_steps: int = typer.Option(
+        100, "--max-steps", help="Maximum orchestrator steps per sample"
+    ),
+    timeout: float = typer.Option(
+        600.0,
+        "--timeout",
+        help="Per-sample timeout in seconds (0 = no timeout)",
+    ),
+) -> None:
+    """Batch LLM evaluation: preprocess → rollout → judge → stat."""
+    asyncio.run(
+        run_eval(
+            config_path=config,
+            scenario_dir=scenario,
+            system_config_path=system_config,
+            exp_id_override=exp_id,
+            judge_only=judge_only,
+            stat_only=stat_only,
+            max_steps=max_steps,
+            timeout=timeout,
         )
     )

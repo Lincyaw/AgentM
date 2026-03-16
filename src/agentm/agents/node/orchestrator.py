@@ -301,7 +301,11 @@ def create_node_orchestrator(
                     example[name] = f"<{field_info.description or name}>"
                 elif ann is bool:
                     example[name] = False
-                elif ann is not None and hasattr(ann, "__origin__") and ann.__origin__ is list:
+                elif (
+                    ann is not None
+                    and hasattr(ann, "__origin__")
+                    and ann.__origin__ is list
+                ):
                     example[name] = []
                 else:
                     example[name] = f"<{field_info.description or name}>"

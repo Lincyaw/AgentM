@@ -617,3 +617,198 @@ def _print_checkpoints(snapshots: list) -> None:
         next_node = snap.next[0] if getattr(snap, "next", None) else "END"
         marker = " ← latest" if i == 0 else ""
         console.print(f"{i:>3}  {cid:<40}  {step:>5}  {ts}  {next_node}{marker}")
+
+
+# ---------------------------------------------------------------------------
+# Headless runner (for batch eval)
+# ---------------------------------------------------------------------------
+
+# NOTE: set_data_directory + duckdb_register_tables modify process-level global
+# state and are not safe for concurrent use.  This lock serialises all headless
+# runs within the same process.  True concurrency can be achieved by running
+# each sample in a separate subprocess; that optimisation is left for future work.
+_DATA_DIR_LOCK: asyncio.Lock | None = None
+
+
+def _get_data_dir_lock() -> asyncio.Lock:
+    """Return (or lazily create) the module-level data-dir lock."""
+    global _DATA_DIR_LOCK  # noqa: PLW0603
+    if _DATA_DIR_LOCK is None:
+        _DATA_DIR_LOCK = asyncio.Lock()
+    return _DATA_DIR_LOCK
+
+
+def _langchain_msg_to_openai(msg: Any) -> dict[str, Any]:
+    """Convert a LangChain message to OpenAI chat-completion message format.
+
+    Role mapping: ai -> assistant, human -> user, system -> system, tool -> tool.
+    AI messages with tool_calls include the ``tool_calls`` array in OpenAI format.
+    Tool messages include ``tool_call_id``.
+    """
+    role = getattr(msg, "type", "unknown")
+    content = getattr(msg, "content", "") or ""
+
+    openai_role = {
+        "ai": "assistant",
+        "human": "user",
+        "system": "system",
+        "tool": "tool",
+    }.get(role, role)
+
+    entry: dict[str, Any] = {"role": openai_role, "content": content}
+
+    if role == "ai":
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        if tool_calls:
+            entry["tool_calls"] = [
+                {
+                    "id": tc.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": tc.get("name", ""),
+                        "arguments": json.dumps(tc.get("args", {}), ensure_ascii=False),
+                    },
+                }
+                for tc in tool_calls
+            ]
+    elif role == "tool":
+        entry["name"] = getattr(msg, "name", "")
+        tool_call_id = getattr(msg, "tool_call_id", None)
+        if tool_call_id:
+            entry["tool_call_id"] = tool_call_id
+
+    return entry
+
+
+def _build_trajectory_json(run_id: str, messages: list[dict[str, Any]]) -> str:
+    """Pack collected OpenAI-format messages into rcabench Span JSON."""
+    span = {
+        "trajectories": [
+            {
+                "trajectory_id": run_id,
+                "agent_name": "agentm-orchestrator",
+                "messages": messages,
+            }
+        ]
+    }
+    return json.dumps(span, ensure_ascii=False)
+
+
+async def run_investigation_headless(
+    data_dir: str,
+    incident: str,
+    scenario_dir: str,
+    config_path: str,
+    max_steps: int = 100,
+    timeout: float = 600.0,
+) -> tuple[str | None, str | None]:
+    """Run an RCA investigation without any console output or dashboard.
+
+    Returns ``(structured_response_json, trajectory_json)`` where either value
+    may be ``None`` if not produced.  Raises on configuration errors; runtime
+    errors during streaming are caught and result in ``(None, None)``.
+    """
+    async with _get_data_dir_lock():
+        return await _run_headless_locked(
+            data_dir=data_dir,
+            incident=incident,
+            scenario_dir=scenario_dir,
+            config_path=config_path,
+            max_steps=max_steps,
+            timeout=timeout,
+        )
+
+
+async def _run_headless_locked(
+    data_dir: str,
+    incident: str,
+    scenario_dir: str,
+    config_path: str,
+    max_steps: int,
+    timeout: float,
+) -> tuple[str | None, str | None]:
+    """Inner headless run; called while holding _DATA_DIR_LOCK."""
+    import uuid
+
+    system_config, scenario_config, _ = _load_and_override(
+        scenario_dir, config_path, debug_mode=False, verbose=False
+    )
+    # Disable console live so no Rich output is produced
+    system_config.debug.console_live = False
+
+    result = obs_tools.set_data_directory(data_dir)
+    init_info = json.loads(result)
+    if "error" in init_info:
+        from agentm.exceptions import DataInitError
+
+        raise DataInitError(init_info["error"])
+
+    duckdb_register_tables(
+        {
+            Path(f).stem: str(Path(data_dir) / f)
+            for f in init_info["files"]
+            if Path(f).parent == Path(".")
+        }
+    )
+
+    system = AgentSystemBuilder.build(
+        system_type="hypothesis_driven",
+        scenario_config=scenario_config,
+        system_config=system_config,
+    )
+
+    run_id = f"headless-{uuid.uuid4().hex[:12]}"
+    initial_state: dict[str, Any] = {"messages": [HumanMessage(content=incident)]}
+
+    structured_response_json: str | None = None
+    collected_messages: list[dict[str, Any]] = []
+
+    try:
+
+        async def _stream() -> None:
+            nonlocal structured_response_json
+            step = 0
+            async for event in system.stream(initial_state):
+                step += 1
+                for node_name, node_data in event.items():
+                    if node_name == "__interrupt__" or not isinstance(node_data, dict):
+                        continue
+                    # Capture structured response from synthesis nodes
+                    if node_name in ("generate_structured_response", "synthesize"):
+                        sr = node_data.get("structured_response")
+                        if sr is not None:
+                            if hasattr(sr, "model_dump"):
+                                structured_response_json = json.dumps(
+                                    sr.model_dump(), ensure_ascii=False
+                                )
+                            elif isinstance(sr, str):
+                                structured_response_json = sr
+                            else:
+                                structured_response_json = json.dumps(
+                                    sr, ensure_ascii=False
+                                )
+                    # Collect messages for trajectory
+                    for msg in node_data.get("messages", []):
+                        collected_messages.append(_langchain_msg_to_openai(msg))
+                if step > max_steps:
+                    break
+
+        if timeout > 0:
+            await asyncio.wait_for(_stream(), timeout=timeout)
+        else:
+            await _stream()
+
+    except asyncio.TimeoutError:
+        pass  # Return whatever was collected so far
+    except Exception:
+        pass  # Isolate per-sample errors; caller decides how to handle
+    finally:
+        await system._close_checkpointer()
+        if system.trajectory is not None:
+            await system.trajectory.close()
+
+    trajectory_json: str | None = None
+    if collected_messages:
+        trajectory_json = _build_trajectory_json(run_id, collected_messages)
+
+    return structured_response_json, trajectory_json
