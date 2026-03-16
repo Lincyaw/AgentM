@@ -30,26 +30,20 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
     # 1. vault_write
     # ------------------------------------------------------------------
 
-    def vault_write(
-        path: str | None = None,
-        frontmatter: dict | None = None,
-        body: str | None = None,
-        entries: list[dict] | None = None,
-    ) -> str:
+    def vault_write(entries: list[dict]) -> str:
         """Create or overwrite one or more notes in the vault.
 
-        Single mode: provide path, frontmatter, body.
-        Batch mode: provide entries (list of dicts with path/frontmatter/body keys).
-        Returns warnings if the note has structural issues (missing fields, dead links).
+        Each entry is a dict with path, frontmatter, body keys.
+        Pass a single-element list for one note.
+        Returns warnings if any note has structural issues.
         """
         try:
-            if entries is not None:
-                warnings = vault.write_batch(entries)
-                return _ok(count=len(entries), warnings=warnings)
-            if path is not None:
-                warnings = vault.write(path, frontmatter or {}, body or "")
-                return _ok(path=path, warnings=warnings)
-            return _err("Provide (path, frontmatter, body) or entries=list")
+            if len(entries) == 1:
+                e = entries[0]
+                warnings = vault.write(e["path"], e.get("frontmatter", {}), e.get("body", ""))
+                return _ok(path=e["path"], warnings=warnings)
+            warnings = vault.write_batch(entries)
+            return _ok(count=len(entries), warnings=warnings)
         except Exception as exc:
             return _err(str(exc))
 
@@ -114,11 +108,11 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
     def vault_list(
         path: str,
         depth: int = 1,
-        type_filter: str | None = None,
+        type_filter: str = "",
     ) -> str:
         """Browse notes under a path. Use path="" for root."""
         try:
-            notes = vault.list_notes(path, depth=depth, type_filter=type_filter)
+            notes = vault.list_notes(path, depth=depth, type_filter=type_filter or None)
             return json.dumps({"notes": notes}, ensure_ascii=False)
         except Exception as exc:
             return _err(str(exc))
@@ -129,7 +123,7 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
 
     def vault_search(
         query: str,
-        filters: dict | None = None,
+        filters: dict = {},
         mode: str = "hybrid",
         limit: int = 10,
     ) -> str:
@@ -139,21 +133,20 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
         """
         try:
             conn = vault._get_conn()
-            f = filters or {}
 
             if mode == "keyword":
-                hits = keyword_search(conn, query, f, limit)
+                hits = keyword_search(conn, query, filters, limit)
             elif mode == "semantic":
                 if vault._embedding_model is None:
                     return _err("No embedding model configured; use mode='keyword'")
                 # Build embedding function from model name
-                hits = semantic_search(conn, query, _get_embed_fn(vault), f, limit)
+                hits = semantic_search(conn, query, _get_embed_fn(vault), filters, limit)
             elif mode == "hybrid":
                 if vault._embedding_model is None:
                     # Fallback to keyword-only when no embedding
-                    hits = keyword_search(conn, query, f, limit)
+                    hits = keyword_search(conn, query, filters, limit)
                 else:
-                    hits = hybrid_search(conn, query, _get_embed_fn(vault), f, limit)
+                    hits = hybrid_search(conn, query, _get_embed_fn(vault), filters, limit)
             else:
                 return _err(f"Unknown search mode: {mode}")
 

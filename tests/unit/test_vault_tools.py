@@ -61,7 +61,7 @@ class TestFactory:
 class TestVaultWrite:
     def test_should_write_single_note(self, tools, vault):
         result = json.loads(tools["vault_write"](
-            path="skill/timeout", frontmatter={"type": "skill"}, body="# Timeout\n\nBody."
+            entries=[{"path": "skill/timeout", "frontmatter": {"type": "skill"}, "body": "# Timeout\n\nBody."}]
         ))
         assert result["status"] == "ok"
         note = vault.read("skill/timeout")
@@ -78,10 +78,6 @@ class TestVaultWrite:
         assert result["count"] == 2
         assert vault.read("a") is not None
         assert vault.read("b") is not None
-
-    def test_should_return_error_on_missing_params(self, tools):
-        result = json.loads(tools["vault_write"]())
-        assert "error" in result
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +305,7 @@ class TestJsonContract:
         vault.write("y", {}, "body")
 
         calls = [
-            ("vault_write", {"path": "z", "frontmatter": {}, "body": "new"}),
+            ("vault_write", {"entries": [{"path": "z", "frontmatter": {}, "body": "new"}]}),
             ("vault_read", {"path": "x"}),
             ("vault_edit", {"path": "x", "operation": "replace_string", "params": {"old": "Body", "new": "Updated"}}),
             ("vault_list", {"path": ""}),
