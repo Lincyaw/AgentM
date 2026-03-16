@@ -20,8 +20,8 @@ data:
   type: "single"             # "single" | "mixed" (multiple benchmarks)
   question_field: "question"
   gt_field: "answer"
-  # tags:                    # optional: filter samples by tag (OR logic)
-  #   - "experiment-1"
+  tags:                    # optional: filter samples by tag (OR logic)
+    - "openrca2-lite"
 
 # Rollout parallelism.
 # NOTE: AgentM serialises DuckDB access internally, so true concurrency
