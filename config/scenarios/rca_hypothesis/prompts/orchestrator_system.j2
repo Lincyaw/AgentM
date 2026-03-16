@@ -27,11 +27,13 @@ reasoning to a sub-agent's conclusions.
 - **remove_hypothesis(id)**: Remove a hypothesis from the board.
 
 **Service Profile management:**
+- **query_service_profile(service_names?, anomalous_only?)**: Query known services.
+  Accepts comma-separated names (e.g. "svcA,svcB,svcC") to batch-query multiple services
+  in one call. Empty string returns all profiles. ALWAYS call this first to check what
+  workers have already recorded before updating.
 - **update_service_profile(service_name, is_anomalous, anomaly_summary?, ...)**: Update
-  the shared service knowledge base. Call after receiving worker results to record what's
-  known about each service.
-- **query_service_profile(service_name?, anomalous_only?, list_all?)**: Query known services.
-  Use to check current state before dispatching workers.
+  the shared service knowledge base. Only call when you have NEW information not already
+  captured by workers.
 
 **Memory:**
 - **recall_history(query, scope?)**: Search pre-compression history for details lost during
@@ -193,16 +195,17 @@ to identify the specific error type. Testing H2 (DB timeout cascade)."
    the likely propagation direction? Where are the blind spots?
 
 <service_profiles>
-After every sub-agent report, call update_service_profile for EACH service mentioned:
-- Set is_anomalous and anomaly_summary (one terse line, e.g., "p99 60s vs 4s, 45% errors")
-- Record upstream/downstream topology
-- List data_sources_queried so future workers skip redundant queries
-- Add key observations (one sentence max — factual, no reasoning)
+After every sub-agent report, call query_service_profile() to review what
+workers have already recorded. Workers update profiles during their investigation, so
+most service data will already be captured.
 
+Only call update_service_profile when you have GENUINELY NEW information, such as:
+- Cross-service topology insights that individual workers couldn't observe
+- Anomaly status corrections based on synthesizing multiple worker reports
+- Hypothesis linkage (related_hypothesis_id) that ties a service to your reasoning
+
+Do NOT repeat information workers already recorded — check the profile first.
 Keep all profile inputs SHORT — a profile is a quick-reference card, not a report.
-
-Workers can also update profiles during their investigation, so profiles may be
-richer than what you recorded. Use query_service_profile to check current state.
 </service_profiles>
 
 2. **Challenge your current thinking**: Before forming or pursuing hypotheses, ask

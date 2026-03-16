@@ -124,7 +124,24 @@ def create_rca_tools(
             Keep all inputs SHORT — a profile is a quick-reference card, not a report.
             - anomaly_summary: one terse line, e.g., "p99 60s vs 4s, 45% errors"
             - key_observation: one sentence max, factual, no reasoning
+
+            NOTE: Workers also update profiles during investigation. Before calling
+            this, use query_service_profile to check if workers have already recorded
+            the information you intend to add. Only call this to add genuinely NEW
+            information not already captured by workers.
             """
+            # Check existing profile before update to generate hint
+            existing = profile_store.get(service_name)
+            worker_obs = (
+                [
+                    o
+                    for o in existing.observations
+                    if o.source_agent_id != "orchestrator"
+                ]
+                if existing
+                else []
+            )
+
             profile = profile_store.update(
                 service_name,
                 agent_id=source_agent_id,
@@ -138,6 +155,16 @@ def create_rca_tools(
                 related_hypothesis_id=related_hypothesis_id,
             )
             content = profile_store.format_profile(profile.service_name)
+
+            # Hint: if workers already contributed, remind orchestrator
+            if worker_obs:
+                hint = (
+                    f"NOTE: This profile already had {len(worker_obs)} observation(s) "
+                    f"from worker agents. Consider using query_service_profile first "
+                    f"to review existing data before adding updates.\n\n"
+                )
+                content = hint + content
+
             return Command(
                 update={
                     "messages": [
@@ -147,13 +174,20 @@ def create_rca_tools(
             )
 
         async def query_service_profile(
-            service_name: str,
+            service_names: str = "",
             anomalous_only: bool = False,
-            list_all: bool = False,
             tool_call_id: Annotated[str, InjectedToolCallId] = "",
         ) -> Command:
-            """Query the shared Service Profile store. Pass service_name="" to query all."""
-            content = _do_query(profile_store, service_name, anomalous_only, list_all)
+            """Query the shared Service Profile store.
+
+            Args:
+                service_names: One or more service names, comma-separated.
+                    E.g. "serviceA" or "serviceA,serviceB,serviceC".
+                    Empty string returns ALL profiles grouped by anomalous/healthy.
+                anomalous_only: If True, return only anomalous services (ignored
+                    when service_names is non-empty).
+            """
+            content = _do_query(profile_store, service_names, anomalous_only)
             return Command(
                 update={
                     "messages": [
@@ -184,7 +218,14 @@ def create_rca_tools(
             Keep all inputs SHORT — a profile is a quick-reference card, not a report.
             - anomaly_summary: one terse line, e.g., "p99 60s vs 4s, 45% errors"
             - key_observation: one sentence max, factual, no reasoning
+
+            TIP: Call query_service_profile first to check if another agent has
+            already recorded findings for this service. Only add NEW information.
             """
+            # Check existing profile before update to generate hint
+            existing = profile_store.get(service_name)
+            existing_obs_count = len(existing.observations) if existing else 0
+
             profile = profile_store.update(
                 service_name,
                 agent_id=source_agent_id,
@@ -197,15 +238,32 @@ def create_rca_tools(
                 key_observation=key_observation,
                 related_hypothesis_id=related_hypothesis_id,
             )
-            return profile_store.format_profile(profile.service_name)
+            content = profile_store.format_profile(profile.service_name)
+
+            if existing_obs_count > 0:
+                hint = (
+                    f"NOTE: This profile already had {existing_obs_count} observation(s) "
+                    f"from other agents. Use query_service_profile to review existing "
+                    f"data before adding more updates.\n\n"
+                )
+                content = hint + content
+
+            return content
 
         def query_service_profile_worker(
-            service_name: str,
+            service_names: str = "",
             anomalous_only: bool = False,
-            list_all: bool = False,
         ) -> str:
-            """Query the shared Service Profile store. Pass service_name="" to query all."""
-            return _do_query(profile_store, service_name, anomalous_only, list_all)
+            """Query the shared Service Profile store.
+
+            Args:
+                service_names: One or more service names, comma-separated.
+                    E.g. "serviceA" or "serviceA,serviceB,serviceC".
+                    Empty string returns ALL profiles grouped by anomalous/healthy.
+                anomalous_only: If True, return only anomalous services (ignored
+                    when service_names is non-empty).
+            """
+            return _do_query(profile_store, service_names, anomalous_only)
 
         # Build StructuredTool instances with LLM-facing names (no _worker suffix)
         worker_update = StructuredTool.from_function(
@@ -225,16 +283,24 @@ def create_rca_tools(
 
 def _do_query(
     store: ServiceProfileStore,
-    service_name: str,
+    service_names: str,
     anomalous_only: bool,
-    list_all: bool,
 ) -> str:
-    """Shared query logic for both orchestrator and worker versions."""
-    if service_name:
-        return store.format_profile(service_name)
-    if list_all:
-        text = store.format_for_llm()
-        return text if text else "No service profiles recorded yet."
+    """Shared query logic for both orchestrator and worker versions.
+
+    *service_names* may be a single name, comma-separated names, or empty.
+    When empty, returns all profiles grouped by anomalous/healthy status.
+    """
+    if service_names:
+        names = [n.strip() for n in service_names.split(",") if n.strip()]
+        if len(names) == 1:
+            return store.format_profile(names[0])
+        # Multiple names — batch query
+        parts: list[str] = []
+        for name in names:
+            parts.append(store.format_profile(name))
+        return "\n\n".join(parts)
+    # No names specified — return all profiles
     if anomalous_only:
         profiles = store.query(anomalous_only=True)
         if not profiles:

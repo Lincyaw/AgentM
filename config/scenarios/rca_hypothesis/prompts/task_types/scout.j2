@@ -61,8 +61,10 @@ The `think` tool is always available for structured reasoning between queries.
 <service_knowledge>
 You have access to a shared Service Profile store. Use it to avoid redundant work:
 
-**Before investigating**: Call `query_service_profile(service_name="X")` or
-`query_service_profile(list_all=true)` to see what's already known.
+**Before investigating a service**: ALWAYS call `query_service_profile(service_name="X")`
+first to check if other agents have already recorded findings. If the profile already
+has observations and data sources, focus on what's MISSING — do not re-investigate or
+re-record what's already there.
 
 **During investigation**: Call `update_service_profile(...)` to record your discoveries.
 Other agents running in parallel can immediately see your updates.
