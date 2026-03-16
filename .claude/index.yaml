@@ -115,7 +115,7 @@ concepts:
   memory_system:
     description: "Two-layer memory: intra-task (context compression + recall_history tool backed by checkpoint chain, see orchestrator.md) and cross-task (Memory Extraction agent system producing KnowledgeEntry items with three confidence levels — FACT/PATTERN/HEURISTIC — in LangGraph Store, see generic-state-wrapper.md)"
     design: "designs/orchestrator.md"
-    related_concepts: [orchestrator, generic_state_wrapper, trajectory_system]
+    related_concepts: [orchestrator, generic_state_wrapper, trajectory_system, memory_vault]
     related_designs: ["designs/generic-state-wrapper.md"]
     plans: ["plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
@@ -251,7 +251,7 @@ concepts:
 
   storage_backend:
     description: "StorageBackend Protocol (read/write/ls/glob/grep/exists/mkdir). FilesystemBackend for local fs with path traversal prevention. CompositeBackend for prefix-based routing to sub-backends (modeled after Deep Agents CompositeBackend)"
-    related_concepts: [generic_state_wrapper, builder, memory_system]
+    related_concepts: [generic_state_wrapper, builder, memory_system, memory_vault]
     plans: []
     tasks: []
     tests:
@@ -261,6 +261,21 @@ concepts:
           - "FilesystemBackend CRUD operations"
           - "CompositeBackend prefix routing"
           - "Path traversal prevention"
+
+  memory_vault:
+    description: "Markdown + YAML frontmatter persistent knowledge vault with SQLite-backed three-layer index (structural, link graph, FTS5 + sqlite-vec). Replaces JSON-based KnowledgeStore. [[wikilink]] bidirectional linking, atomic write flow, vault_edit with 4 incremental edit primitives (replace_string, set_frontmatter, replace_section, append_section), rebuildable index."
+    design: "designs/memory-vault.md"
+    related_concepts: [memory_system, generic_state_wrapper, builder, storage_backend, configuration_system]
+    plans: ["plans/2026-03-16-memory-vault.md"]
+    tasks:
+      - "tasks/2026-03-16-vault-parser.md"
+      - "tasks/2026-03-16-vault-schema.md"
+      - "tasks/2026-03-16-vault-store.md"
+      - "tasks/2026-03-16-vault-search.md"
+      - "tasks/2026-03-16-vault-graph.md"
+      - "tasks/2026-03-16-vault-tools.md"
+      - "tasks/2026-03-16-vault-migration.md"
+      - "tasks/2026-03-16-vault-integration.md"
 
   tool_dedup:
     description: "Two-layer tool call deduplication: pre-model hook (soft limit, HumanMessage reminder) + tool wrapper (hard limit, short rejection). DedupTracker with OrderedDict FIFO eviction. Excludes think tool. Per-agent-invocation cache. All code in middleware/dedup.py"

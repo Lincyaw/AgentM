@@ -25,6 +25,7 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "sentence-transformers>=3.0",
     "rcabench-platform[llm-eval]",
+    "sqlite-vec>=0.1.6",
 ]
 
 [tool.uv.sources]
