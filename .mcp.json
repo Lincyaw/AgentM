@@ -8,7 +8,8 @@
         "vault-mcp"
       ],
       "env": {
-        "VAULT_DIR": "./vault"
+        "VAULT_DIR": "./vault",
+        "VAULT_EMBEDDING_MODEL": "sentence-transformers/all-MiniLM-L6-v2"
       }
     }
   }

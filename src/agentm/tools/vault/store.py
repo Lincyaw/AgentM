@@ -6,7 +6,9 @@ import hashlib
 import json
 import os
 import sqlite3
+import struct
 import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,10 +39,16 @@ class MarkdownVault:
     transaction.
     """
 
-    def __init__(self, vault_dir: str | Path, embedding_model: str | None = None) -> None:
+    def __init__(
+        self,
+        vault_dir: str | Path,
+        embedding_model: str | None = None,
+        embed_fn: Callable[[str], list[float]] | None = None,
+    ) -> None:
         self._vault_dir = Path(vault_dir)
         self._vault_dir.mkdir(parents=True, exist_ok=True)
         self._embedding_model = embedding_model
+        self._embed_fn = embed_fn
         self._lock = threading.Lock()
         self._conn: sqlite3.Connection | None = None
         # Eagerly create schema so the DB file exists immediately.
@@ -115,12 +123,71 @@ class MarkdownVault:
             (path, title, body, tags_str),
         )
 
+        # Embedding (if embed_fn configured)
+        if self._embed_fn is not None:
+            self._upsert_embedding(conn, path, body)
+
     def _remove_index(self, conn: sqlite3.Connection, path: str) -> None:
         """Remove all index entries for *path*."""
         conn.execute("DELETE FROM notes WHERE path = ?", (path,))
         conn.execute("DELETE FROM links WHERE source = ?", (path,))
         conn.execute("DELETE FROM tags WHERE path = ?", (path,))
         conn.execute("DELETE FROM notes_fts WHERE path = ?", (path,))
+        self._remove_embedding(conn, path)
+
+    # ------------------------------------------------------------------
+    # Embedding helpers
+    # ------------------------------------------------------------------
+
+    def _upsert_embedding(
+        self, conn: sqlite3.Connection, path: str, body: str
+    ) -> None:
+        """Compute and store embedding for a note."""
+        assert self._embed_fn is not None
+        vec = self._embed_fn(body)
+        dim = len(vec)
+        blob = struct.pack(f"{dim}f", *vec)
+
+        # Try notes_vec (sqlite-vec) first — create lazily with correct dim
+        from agentm.tools.vault.schema import has_vec_support
+
+        if has_vec_support(conn):
+            has_vec = conn.execute(
+                "SELECT name FROM sqlite_master WHERE name='notes_vec'"
+            ).fetchone()
+            if not has_vec:
+                conn.executescript(
+                    f"CREATE VIRTUAL TABLE IF NOT EXISTS notes_vec USING vec0("
+                    f"path TEXT PRIMARY KEY, embedding FLOAT[{dim}]);"
+                )
+            self._remove_embedding(conn, path)
+            conn.execute(
+                "INSERT INTO notes_vec (path, embedding) VALUES (?, ?)",
+                (path, blob),
+            )
+        else:
+            # Fallback: note_embeddings table
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS note_embeddings "
+                "(path TEXT PRIMARY KEY, embedding BLOB)"
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO note_embeddings (path, embedding) VALUES (?, ?)",
+                (path, blob),
+            )
+
+    def _remove_embedding(self, conn: sqlite3.Connection, path: str) -> None:
+        """Remove stored embedding for a note."""
+        has_vec = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name='notes_vec'"
+        ).fetchone()
+        if has_vec:
+            conn.execute("DELETE FROM notes_vec WHERE path = ?", (path,))
+        has_emb = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name='note_embeddings'"
+        ).fetchone()
+        if has_emb:
+            conn.execute("DELETE FROM note_embeddings WHERE path = ?", (path,))
 
     # ------------------------------------------------------------------
     # Validation

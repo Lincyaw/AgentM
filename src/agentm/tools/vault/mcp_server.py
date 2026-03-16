@@ -1,7 +1,9 @@
 """Memory Vault MCP Server — expose vault tools over MCP protocol."""
 
 import json
+import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass
@@ -27,17 +29,26 @@ async def lifespan(server: FastMCP) -> AsyncIterator[VaultContext]:
     """Initialize vault on startup, close on shutdown."""
     vault_dir = os.environ.get("VAULT_DIR", "./vault")
     embedding_model = os.environ.get("VAULT_EMBEDDING_MODEL") or None
-    vault = MarkdownVault(vault_dir, embedding_model=embedding_model)
 
     embed_fn = None
     if embedding_model:
         try:
-            from sentence_transformers import SentenceTransformer
+            # Suppress stderr during model loading to avoid interfering
+            # with MCP stdio transport (progress bars, warnings, etc.)
+            _stderr = sys.stderr
+            sys.stderr = open(os.devnull, "w")  # noqa: SIM115, PTH123
+            try:
+                from sentence_transformers import SentenceTransformer
 
-            model = SentenceTransformer(embedding_model)
-            embed_fn = lambda text: model.encode(text).tolist()  # noqa: E731
+                model = SentenceTransformer(embedding_model)
+                embed_fn = lambda text: model.encode(text).tolist()  # noqa: E731
+            finally:
+                sys.stderr.close()
+                sys.stderr = _stderr
         except Exception:
             pass
+
+    vault = MarkdownVault(vault_dir, embedding_model=embedding_model, embed_fn=embed_fn)
 
     yield VaultContext(vault=vault, embed_fn=embed_fn)
 

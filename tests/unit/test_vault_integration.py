@@ -73,9 +73,11 @@ class TestVaultToolRoundTrip:
         tools = create_vault_tools(vault)
 
         result = tools["vault_write"](
-            path="test/note",
-            frontmatter={"type": "insight", "tags": ["demo"]},
-            body="# Hello\n\nThis is a test note.",
+            entries=[{
+                "path": "test/note",
+                "frontmatter": {"type": "insight", "tags": ["demo"]},
+                "body": "# Hello\n\nThis is a test note.",
+            }],
         )
         data = json.loads(result)
         assert data["status"] == "ok"
@@ -93,9 +95,11 @@ class TestVaultToolRoundTrip:
         tools = create_vault_tools(vault)
 
         tools["vault_write"](
-            path="services/api",
-            frontmatter={"type": "service", "tags": ["api"]},
-            body="# API Service\n\nHandles REST requests.",
+            entries=[{
+                "path": "services/api",
+                "frontmatter": {"type": "service", "tags": ["api"]},
+                "body": "# API Service\n\nHandles REST requests.",
+            }],
         )
 
         result = tools["vault_search"](query="REST requests", mode="keyword")
