@@ -142,6 +142,74 @@ if __name__ == "__main__":
 }
 ```
 
+### Prerequisites: Populate the Dataset DB
+
+`agentm eval` reads from the rcabench-platform DB (`data` table). The table must contain `DatasetSample` rows with `dataset="RCABench"` before you can run eval. Each row's `meta` field must include `source_data_dir` pointing to the local datapack directory (the folder with parquet files + `causal_graph.json`).
+
+Use the rcabench-platform tooling to import your dataset:
+
+```bash
+# In the rcabench-platform repo
+LLM_EVAL_DB_URL=sqlite:///path/to/eval.db \
+  python cli/dataset_transform/make_rcabench.py run
+```
+
+Or insert samples directly in Python:
+
+```python
+import os
+os.environ["LLM_EVAL_DB_URL"] = "sqlite:///eval.db"
+
+from rcabench_platform.v3.sdk.llm_eval.db import DatasetSample
+from rcabench_platform.v3.sdk.llm_eval.utils import SQLModelUtils
+
+samples = [
+    DatasetSample(
+        dataset="RCABench",
+        index=1,
+        source="my-datapack-001",
+        question="",          # filled by preprocess
+        answer="mysql-primary",
+        meta={"source_data_dir": "/path/to/my-datapack-001"},
+    ),
+    # ... more samples
+]
+
+with SQLModelUtils.create_session() as session:
+    session.add_all(samples)
+    session.commit()
+```
+
+### Run Full Pipeline
+
+```bash
+uv run agentm eval config/eval/example.yaml \
+  --scenario config/scenarios/rca_hypothesis \
+  --system-config config/system.yaml
+```
+
+### Run Specific Phases
+
+```bash
+# Re-judge already-rolled-out results (skip rollout)
+uv run agentm eval config/eval/test.yaml --judge-only
+
+# Show stats from judged results only
+uv run agentm eval config/eval/test.yaml --stat-only
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--scenario` | `config/scenarios/rca_hypothesis` | Scenario directory |
+| `--system-config` | `config/system.yaml` | System config YAML |
+| `--exp-id` | _(from config)_ | Override experiment ID |
+| `--judge-only` | false | Skip rollout, run judge + stat |
+| `--stat-only` | false | Run stat only |
+| `--max-steps` | 100 | Max orchestrator steps per sample |
+| `--timeout` | 600.0 | Per-sample timeout in seconds (0 = none) |
+
 ### Environment Variables
 
 | Variable | Required | Description |
@@ -150,86 +218,4 @@ if __name__ == "__main__":
 | `AGENTM_API_BASE_URL` | No | Custom API base URL (OpenAI-compatible) |
 | `AGENTM_ORCHESTRATOR_MODEL` | No | Override orchestrator model name |
 | `AGENTM_WORKER_MODEL` | No | Override worker model name |
-
-### Data Directory Structure
-
-The `data_dir` should contain observability parquet files:
-
-```
-data_dir/
-  abnormal_metrics.parquet
-  normal_metrics.parquet
-  abnormal_traces.parquet
-  normal_traces.parquet
-  abnormal_logs.parquet
-  normal_logs.parquet
-  ...
-```
-
-## Batch Evaluation
-
-```python
-import asyncio
-import json
-from pathlib import Path
-
-
-async def evaluate_batch(cases_dir: str, output_path: str):
-    """Run RCA on multiple incident cases and collect results."""
-    results = []
-    for case_dir in sorted(Path(cases_dir).iterdir()):
-        if not case_dir.is_dir():
-            continue
-
-        # Each case has: data/ (parquets) + incident.txt
-        incident_file = case_dir / "incident.txt"
-        data_dir = case_dir / "data"
-        if not incident_file.exists() or not data_dir.exists():
-            continue
-
-        incident = incident_file.read_text().strip()
-        print(f"Running: {case_dir.name}")
-
-        try:
-            from readme_example import run_rca  # or inline the function
-            causal_graph = await run_rca(
-                data_dir=str(data_dir),
-                incident=incident,
-            )
-            results.append({
-                "case": case_dir.name,
-                "status": "success",
-                "causal_graph": causal_graph,
-            })
-        except Exception as e:
-            results.append({
-                "case": case_dir.name,
-                "status": "error",
-                "error": str(e),
-            })
-
-    Path(output_path).write_text(
-        json.dumps(results, indent=2, ensure_ascii=False)
-    )
-    print(f"Results saved to {output_path}")
-
-
-if __name__ == "__main__":
-    asyncio.run(evaluate_batch("./eval_cases", "./eval_results.json"))
-```
-
-## Architecture
-
-```
-Orchestrator (LLM + tools)
-  ├── dispatch_agent → Sub-Agent (scout/verify/deep_analyze)
-  │     └── query_sql / describe_tables (DuckDB over parquet)
-  ├── update_hypothesis / remove_hypothesis
-  ├── knowledge_search / knowledge_read
-  ├── check_tasks / inject_instruction / abort_task
-  └── recall_history (post-compression retrieval)
-```
-
-- **Orchestrator**: Manages hypotheses, dispatches workers, synthesizes CausalGraph
-- **Sub-Agents**: Query observability data via SQL, report structured findings
-- **Knowledge Store**: File-system backed store with inverted index + hybrid search
+| `LLM_EVAL_DB_URL` | No | Override eval DB URL (auto-set from config) |
