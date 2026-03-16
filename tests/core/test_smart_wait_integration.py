@@ -212,8 +212,7 @@ class TestSmartWaitIntegration:
         check_tasks = tools["check_tasks"]
 
         # Call check_tasks with no running tasks
-        result = await check_tasks("no tasks running", wait_seconds=None)
+        result = await check_tasks("no tasks running")
 
-        # Should use default 10s wait
-        # (This is tested by ensuring no exception is raised)
+        # Should return immediately with wait_seconds=0
         assert result is not None
