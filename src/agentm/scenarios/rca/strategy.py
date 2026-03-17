@@ -132,17 +132,25 @@ class HypothesisDrivenStrategy:
         Accepts ``trajectory`` and ``vault`` keyword arguments from the builder.
         """
         from agentm.scenarios.rca.formatters import format_rca_context
+        from agentm.scenarios.rca.hypothesis_store import HypothesisStore
         from agentm.scenarios.rca.service_profile import ServiceProfileStore
         from agentm.scenarios.rca.tools import create_rca_tools
 
         trajectory = kwargs.get("trajectory")
         profile_store = ServiceProfileStore()
+        hypothesis_store = HypothesisStore()
         rca_tools = create_rca_tools(
-            trajectory=trajectory, profile_store=profile_store
+            trajectory=trajectory,
+            profile_store=profile_store,
+            hypothesis_store=hypothesis_store,
         )
 
         worker_profile_tools = rca_tools.pop("_worker_profile_tools", [])
-        format_context_fn = partial(format_rca_context, profile_store=profile_store)
+        format_context_fn = partial(
+            format_rca_context,
+            profile_store=profile_store,
+            hypothesis_store=hypothesis_store,
+        )
 
         return ScenarioToolBundle(
             orchestrator_tools=rca_tools,

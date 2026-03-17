@@ -550,6 +550,7 @@ class AgentSystemBuilder:
                 agent_pool,
                 trajectory=trajectory,
                 config=scenario_config.orchestrator,
+                model_config=orch_model_config,
             )
 
             # --- Vault ---

@@ -18,11 +18,10 @@ from typing import Any, Literal, cast
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
-from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
 from agentm.agents.node.state import WorkerResult, WorkerState
-from agentm.config.schema import AgentConfig, ModelConfig
+from agentm.config.schema import AgentConfig, ModelConfig, create_chat_model
 from agentm.middleware import NodePipeline
 from agentm.middleware.budget import BudgetMiddleware
 from agentm.middleware.compression import CompressionMiddleware
@@ -94,19 +93,11 @@ def build_worker_subgraph(
     # ------------------------------------------------------------------
     # Models
     # ------------------------------------------------------------------
-    llm_kwargs: dict[str, Any] = {
-        "model": config.model,
-        "temperature": config.temperature,
-    }
-    if model_config is not None:
-        llm_kwargs["api_key"] = model_config.api_key
-        if model_config.base_url:
-            llm_kwargs["base_url"] = model_config.base_url
-        if getattr(model_config, "rate_limit", None):
-            llm_kwargs["rate_limiter"] = model_config.rate_limit.create_rate_limiter()
-        llm_kwargs["max_retries"] = model_config.max_retries
-
-    model_plain = ChatOpenAI(**llm_kwargs)
+    model_plain = create_chat_model(
+        model=config.model,
+        temperature=config.temperature,
+        model_config=model_config,
+    )
 
     # ------------------------------------------------------------------
     # Tools
@@ -163,7 +154,7 @@ def build_worker_subgraph(
     budget_mw: BudgetMiddleware = middlewares[0]  # type: ignore[assignment]
     middlewares.append(LoopDetectionMiddleware(threshold=5, window_size=15))
     if config.compression is not None:
-        middlewares.append(CompressionMiddleware(config.compression))
+        middlewares.append(CompressionMiddleware(config.compression, model_config=model_config))
     if trajectory is not None:
         middlewares.append(
             TrajectoryMiddleware(

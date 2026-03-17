@@ -18,7 +18,7 @@ from typing import Any, Callable
 import tiktoken
 from langchain_core.messages import SystemMessage
 
-from agentm.config.schema import CompressionConfig
+from agentm.config.schema import CompressionConfig, ModelConfig
 from agentm.middleware import AgentMMiddleware
 
 # ---------------------------------------------------------------------------
@@ -102,19 +102,23 @@ def _format_messages_for_summary(messages: list[Any]) -> list[str]:
             tool_info = ", ".join(tc.get("name", "?") for tc in msg.tool_calls)
             formatted.append(f"[{role}] Called tools: {tool_info}")
         elif content:
-            preview = content[:500] + "..." if len(content) > 500 else content
+            preview = content
             formatted.append(f"[{role}] {preview}")
     return formatted
 
 
-def _summarize_messages(messages: list[Any], model: str = "gpt-4o-mini") -> str:
+def _summarize_messages(
+    messages: list[Any],
+    model: str = "gpt-4o-mini",
+    model_config: ModelConfig | None = None,
+) -> str:
     """Summarize a list of messages using an LLM, chunking if needed.
 
     When the formatted messages exceed the compression model's context window,
     they are split into chunks. Each chunk is summarized independently, then
     the chunk summaries are combined into a final summary.
     """
-    from langchain_openai import ChatOpenAI
+    from agentm.config.schema import create_chat_model
     from langchain_core.messages import HumanMessage as LCHumanMessage
 
     formatted_lines = _format_messages_for_summary(messages)
@@ -141,7 +145,7 @@ def _summarize_messages(messages: list[Any], model: str = "gpt-4o-mini") -> str:
     if current_chunk:
         chunks.append("\n".join(current_chunk))
 
-    llm = ChatOpenAI(model=model, temperature=0)
+    llm = create_chat_model(model=model, temperature=0, model_config=model_config)
 
     if len(chunks) == 1:
         # Single chunk — summarize directly
@@ -229,7 +233,10 @@ def sub_agent_compression_hook(state: dict[str, Any]) -> dict[str, Any]:
     return {"llm_input_messages": [summary_msg] + recent_messages}
 
 
-def build_compression_hook(config: CompressionConfig) -> Callable:
+def build_compression_hook(
+    config: CompressionConfig,
+    model_config: ModelConfig | None = None,
+) -> Callable:
     """Build a pre_model_hook function for Sub-Agent compression, configured from agent config.
 
     Returns a callable with the same interface as sub_agent_compression_hook,
@@ -251,7 +258,11 @@ def build_compression_hook(config: CompressionConfig) -> Callable:
         older = messages[:-preserve_n]
         recent = messages[-preserve_n:]
 
-        summary_text = _summarize_messages(older, model=config.compression_model)
+        summary_text = _summarize_messages(
+            older,
+            model=config.compression_model,
+            model_config=model_config,
+        )
         summary_msg = SystemMessage(
             content=f"[Compressed History Summary]\n{summary_text}"
         )
@@ -277,9 +288,13 @@ def build_compression_hook(config: CompressionConfig) -> Callable:
 class CompressionMiddleware(AgentMMiddleware):
     """Pre-model middleware that compresses message history when threshold exceeded."""
 
-    def __init__(self, config: CompressionConfig) -> None:
+    def __init__(
+        self,
+        config: CompressionConfig,
+        model_config: ModelConfig | None = None,
+    ) -> None:
         self._config = config
-        self._hook = build_compression_hook(config)
+        self._hook = build_compression_hook(config, model_config=model_config)
 
     def before_model(self, state: dict[str, Any]) -> dict[str, Any]:
         return self._hook(state)

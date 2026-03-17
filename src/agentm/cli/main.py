@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 import typer
 from dotenv import load_dotenv
@@ -100,17 +101,22 @@ def debug(
 
 def main() -> None:
     load_dotenv()
+    log_level = os.environ.get("AGENTM_LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
+    # Apply custom log level only to agentm loggers
+    if log_level != "INFO":
+        logging.getLogger("agentm").setLevel(getattr(logging, log_level, logging.INFO))
     # Suppress noisy third-party loggers
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.WARNING)
     logging.getLogger("langchain").setLevel(logging.WARNING)
     logging.getLogger("langsmith").setLevel(logging.WARNING)
+    logging.getLogger("aiosqlite").setLevel(logging.WARNING)
     try:
         app()
     except AgentMError as e:

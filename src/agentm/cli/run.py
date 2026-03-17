@@ -599,7 +599,7 @@ def _print_event(event: dict, step: int, verbose: bool) -> None:
             elif role == "tool":
                 tool_name = getattr(msg, "name", "?")
                 if content:
-                    preview = content[:500] if verbose else content[:200]
+                    preview = content
                     console.print(f"\n  [green]<- {tool_name}:[/] {preview}")
                     if len(content) > len(preview):
                         console.print(f"     [dim]... ({len(content)} chars total)[/]")
@@ -815,7 +815,9 @@ async def run_investigation_headless(
                         sr = node_data.get("structured_response")
                         if sr is not None:
                             if hasattr(sr, "model_dump"):
-                                sr_dict = _normalize_structured_response(sr.model_dump())
+                                sr_dict = _normalize_structured_response(
+                                    sr.model_dump()
+                                )
                                 structured_response_json = json.dumps(
                                     sr_dict, ensure_ascii=False
                                 )
@@ -831,15 +833,15 @@ async def run_investigation_headless(
                                     sr, ensure_ascii=False
                                 )
                             # Log what we captured
-                            is_fallback = (
-                                isinstance(sr, dict) and "raw_text" in sr
-                            )
+                            is_fallback = isinstance(sr, dict) and "raw_text" in sr
                             logger.info(
                                 "headless captured structured_response "
                                 "(node=%s, is_fallback=%s, len=%d)",
                                 node_name,
                                 is_fallback,
-                                len(structured_response_json) if structured_response_json else 0,
+                                len(structured_response_json)
+                                if structured_response_json
+                                else 0,
                             )
                     # Collect messages for trajectory
                     for msg in node_data.get("messages", []):
