@@ -37,7 +37,6 @@ from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
 from agentm.middleware import AgentMMiddleware
 from agentm.models.state import S
-from agentm.tools import knowledge as knowledge_module
 from agentm.tools import memory as memory_module
 from agentm.tools.orchestrator import create_orchestrator_tools
 from agentm.tools.think import think
@@ -392,7 +391,7 @@ class GenericAgentSystemBuilder(Generic[S]):
         # --- Trajectory ---
         trajectory: TrajectoryCollector | None = None
         if system_config is not None and system_config.debug.trajectory.enabled:
-            run_id = f"{strategy.name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            run_id = f"{strategy.name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
             checkpoint_db_path = ""
             if system_config.storage.checkpointer.backend == "sqlite":
                 db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
@@ -549,7 +548,7 @@ class AgentSystemBuilder:
             # --- Trajectory ---
             trajectory: TrajectoryCollector | None = None
             if system_config is not None and system_config.debug.trajectory.enabled:
-                run_id = f"{system_type}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                run_id = f"{system_type}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
                 # Compute checkpoint db path for metadata
                 checkpoint_db_path = ""
                 if system_config.storage.checkpointer.backend == "sqlite":
@@ -572,14 +571,13 @@ class AgentSystemBuilder:
                 config=scenario_config.orchestrator,
             )
 
-            # --- Vault (memory_extraction only) ---
+            # --- Vault ---
             VAULT_TOOLS: dict[str, Any] = {}
-            if system_type == "memory_extraction":
-                from agentm.tools.vault import MarkdownVault, create_vault_tools
+            from agentm.tools.vault import MarkdownVault, create_vault_tools
 
-                vault_dir = Path(resolved_kb_dir) / "vault"
-                vault = MarkdownVault(vault_dir)
-                VAULT_TOOLS = create_vault_tools(vault)
+            vault_dir = Path(resolved_kb_dir) / "vault"
+            vault = MarkdownVault(vault_dir)
+            VAULT_TOOLS = create_vault_tools(vault)
 
             # Load scenario-specific tools based on system_type
             format_context = None  # may be overridden by scenario-specific block below
@@ -618,22 +616,10 @@ class AgentSystemBuilder:
             # Extract graph reference setter before tool registration (not a real tool)
             set_graph_ref = injected_tools.pop("_set_graph_ref", None)
 
-            # --- Knowledge Store ---
-            knowledge_module.init(base_dir=resolved_kb_dir)
-
             # Wire checkpointer DB path into memory module for memory-extraction system
             if system_config is not None:
                 db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
                 memory_module.set_db_path(str(Path(db_url).resolve()))
-
-            # Knowledge tools are standalone functions (file-system backend)
-            KNOWLEDGE_TOOLS: dict[str, Any] = {
-                "knowledge_search": knowledge_module.knowledge_search,
-                "knowledge_list": knowledge_module.knowledge_list,
-                "knowledge_read": knowledge_module.knowledge_read,
-                "knowledge_write": knowledge_module.knowledge_write,
-                "knowledge_delete": knowledge_module.knowledge_delete,
-            }
 
             # Memory tools are standalone functions (checkpointer injected above)
             MEMORY_TOOLS: dict[str, Any] = {
@@ -660,15 +646,6 @@ class AgentSystemBuilder:
                             name=name,
                             description=func.__doc__ or name,
                         )
-                    tools.append(tool)
-                elif name in KNOWLEDGE_TOOLS:
-                    # Knowledge tools (file-system backend, initialized via init())
-                    func = KNOWLEDGE_TOOLS[name]
-                    tool = StructuredTool.from_function(
-                        func=func,
-                        name=name,
-                        description=func.__doc__ or name,
-                    )
                     tools.append(tool)
                 elif name in MEMORY_TOOLS:
                     # Memory tools (standalone functions with checkpointer injected)

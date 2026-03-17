@@ -74,7 +74,7 @@ class TestScenarioConfigComposition:
                     model="gpt-4o-mini",
                     temperature=0.0,
                     prompt="prompts/db.j2",
-                    tools=["knowledge_search"],
+                    tools=["vault_search"],
                 )
             },
         )

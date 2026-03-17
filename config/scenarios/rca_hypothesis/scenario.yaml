@@ -20,9 +20,9 @@ orchestrator:
     - inject_instruction
     - abort_task
     - recall_history
-    - knowledge_search
-    - knowledge_list
-    - knowledge_read
+    - vault_search
+    - vault_list
+    - vault_read
 
   feature_gates:
     adversarial_review: false
@@ -63,9 +63,9 @@ agents:
       - describe_tables
       - query_sql
     execution:
-      max_steps: 100
+      max_steps: 40
       timeout: 180
-      tool_call_budget: 60
+      tool_call_budget: 30
       dedup:
         enabled: true
         max_cache_size: 50
