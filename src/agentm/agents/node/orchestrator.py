@@ -37,6 +37,7 @@ from pydantic import BaseModel
 from agentm.config.schema import OrchestratorConfig
 from agentm.config.schema import create_chat_model
 from agentm.middleware import NodePipeline
+from agentm.middleware.loop_detection import _count_trailing_think_only
 from agentm.middleware.trajectory import TrajectoryMiddleware
 from agentm.core.prompt import load_prompt_template
 from agentm.core.trajectory import TrajectoryCollector
@@ -48,6 +49,9 @@ logger = logging.getLogger(__name__)
 # Maximum number of retries when synthesize structured output fails validation.
 # Total attempts = 1 (initial) + _SYNTH_MAX_RETRIES.
 _SYNTH_MAX_RETRIES = 2
+
+# Consecutive think-only rounds before a forced action warning is injected.
+_THINK_STALL_LIMIT = 3
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +122,31 @@ def _parse_decision(text: str) -> str:
     if match:
         return match.group(1).strip().lower()
     return "dispatch"
+
+
+_THINK_TOOL_NAME = "think"
+
+
+def _last_round_had_action(messages: list[Any]) -> bool:
+    """Check whether the most recent AI message used any tool besides think.
+
+    Returns ``True`` if:
+    - There are no AI messages yet (first round).
+    - The last AI message called at least one non-think tool.
+    - The last AI message had no tool calls at all (plain text).
+
+    Returns ``False`` only when the last AI message's sole tool call
+    was ``think`` — meaning no state-changing action was taken.
+    """
+    for msg in reversed(messages):
+        if getattr(msg, "type", "") != "ai":
+            continue
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        if not tool_calls:
+            return True  # plain text response, not a think loop
+        tool_names = {tc.get("name", "") for tc in tool_calls}
+        return tool_names != {_THINK_TOOL_NAME}
+    return True  # no AI messages yet
 
 
 # ---------------------------------------------------------------------------
@@ -265,14 +294,28 @@ def create_node_orchestrator(
             [0]   SystemMessage   — static prompt (cacheable prefix)
             [1..N] history        — recent conversation messages
             [N+1] HumanMessage    — notebook + service profiles + round context
+                                    (only when state has changed)
 
         The state snapshot is placed LAST so it sits closest to the
         generation cursor, maximising the LLM's attention on current
         investigation state.
+
+        **Context injection policy**: The context message is only appended
+        when investigation state has actually changed (new hypothesis,
+        service profile update, dispatch result, etc.).  If the last
+        orchestrator action was think-only, the context is skipped to
+        avoid reinforcing a repetitive pattern with identical state
+        snapshots.
         """
-        context_msg = _build_context_message(state, round_num)
         history = list(state.get("messages", []))
-        messages = [_system_msg, *history, context_msg]
+        messages = [_system_msg, *history]
+
+        # Only inject context message when state has progressed.
+        # Check: did the last AI round use any tool other than think?
+        last_had_action = _last_round_had_action(history)
+        if last_had_action or round_num <= 2:
+            context_msg = _build_context_message(state, round_num)
+            messages.append(context_msg)
 
         if compression_hook is not None:
             hook_out = compression_hook({"messages": messages})
@@ -307,6 +350,26 @@ def create_node_orchestrator(
             }
 
         llm_messages = _prepare_messages(state, round_num)
+
+        # Think-stall detection: if the LLM has only called `think` for
+        # the last N rounds, inject a warning forcing it to take action.
+        think_streak = _count_trailing_think_only(
+            state.get("messages", [])
+        )
+        if think_streak >= _THINK_STALL_LIMIT:
+            llm_messages.append(
+                HumanMessage(
+                    content=(
+                        f"THINK-STALL WARNING: You have called only `think` for "
+                        f"the last {think_streak} rounds without taking any action. "
+                        f"Thinking does not advance the investigation.\n\n"
+                        f"You MUST call an action tool NOW — dispatch_agent, "
+                        f"update_hypothesis, or finalize with "
+                        f"<decision>finalize</decision>.\n"
+                        f"Do NOT call think again until you have taken an action."
+                    )
+                )
+            )
 
         # Pre-model pipeline: trajectory(llm_start)
         if pipeline is not None:
