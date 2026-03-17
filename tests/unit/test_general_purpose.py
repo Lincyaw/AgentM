@@ -198,20 +198,18 @@ class TestGeneralPurposeFormatter:
 class TestGeneralAnswer:
     """GeneralAnswer schema for worker structured output."""
 
-    def test_default_action_items_empty(self):
+    def test_answer_field(self):
         from agentm.scenarios.general_purpose.answer_schemas import GeneralAnswer
 
-        answer = GeneralAnswer(findings="test findings")
-        assert answer.action_items == []
+        answer = GeneralAnswer(answer="The service is healthy.")
+        assert answer.answer == "The service is healthy."
 
-    def test_with_action_items(self):
+    def test_answer_required(self):
         from agentm.scenarios.general_purpose.answer_schemas import GeneralAnswer
+        import pydantic
 
-        answer = GeneralAnswer(
-            findings="found issues",
-            action_items=["fix A", "fix B"],
-        )
-        assert len(answer.action_items) == 2
+        with pytest.raises(pydantic.ValidationError):
+            GeneralAnswer()
 
 
 # ---------------------------------------------------------------------------
