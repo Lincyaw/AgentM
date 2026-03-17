@@ -28,6 +28,8 @@ def discover() -> None:
 
     from agentm.scenarios.rca import register as register_rca
     from agentm.scenarios.memory_extraction import register as register_mem
+    from agentm.scenarios.general_purpose import register as register_gp
 
     register_rca()
     register_mem()
+    register_gp()

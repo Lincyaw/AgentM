@@ -10,10 +10,13 @@ Consolidates logic previously spread across:
 
 from __future__ import annotations
 
+from functools import partial
+from typing import Any
+
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
-from agentm.models.data import PhaseDefinition
+from agentm.models.data import PhaseDefinition, ScenarioToolBundle
 from agentm.scenarios.rca.answer_schemas import (
     DeepAnalyzeAnswer,
     ScoutAnswer,
@@ -122,3 +125,27 @@ class HypothesisDrivenStrategy:
 
     def state_schema(self) -> type[HypothesisDrivenState]:
         return HypothesisDrivenState
+
+    def create_scenario_tools(self, **kwargs: Any) -> ScenarioToolBundle:
+        """Create RCA-specific tools: hypothesis management + service profiles.
+
+        Accepts ``trajectory`` and ``vault`` keyword arguments from the builder.
+        """
+        from agentm.scenarios.rca.formatters import format_rca_context
+        from agentm.scenarios.rca.service_profile import ServiceProfileStore
+        from agentm.scenarios.rca.tools import create_rca_tools
+
+        trajectory = kwargs.get("trajectory")
+        profile_store = ServiceProfileStore()
+        rca_tools = create_rca_tools(
+            trajectory=trajectory, profile_store=profile_store
+        )
+
+        worker_profile_tools = rca_tools.pop("_worker_profile_tools", [])
+        format_context_fn = partial(format_rca_context, profile_store=profile_store)
+
+        return ScenarioToolBundle(
+            orchestrator_tools=rca_tools,
+            worker_tools=worker_profile_tools,
+            format_context_override=format_context_fn,
+        )

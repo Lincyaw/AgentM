@@ -2,7 +2,7 @@
 
 A ``ReasoningStrategy[S]`` encapsulates everything that makes one agent system
 different from another: state initialization, phase definitions, context
-formatting, termination logic, and answer schemas.
+formatting, termination logic, answer schemas, and scenario-specific tools.
 
 Framework components (builder, middleware, task manager) are parameterized over
 ``S`` and delegate domain-specific behavior to the strategy.
@@ -10,11 +10,11 @@ Framework components (builder, middleware, task manager) are parameterized over
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
-from agentm.models.data import PhaseDefinition
+from agentm.models.data import PhaseDefinition, ScenarioToolBundle
 from agentm.models.state import S
 
 
@@ -84,3 +84,19 @@ class ReasoningStrategy(Protocol[S]):
     def state_schema(self) -> type[S]:
         """Return the TypedDict class used as the LangGraph state schema."""
         ...
+
+
+def get_scenario_tools(strategy: ReasoningStrategy[Any], **kwargs: Any) -> ScenarioToolBundle:
+    """Call ``create_scenario_tools`` on a strategy if it implements the hook.
+
+    This is an optional extension point: strategies that need scenario-specific
+    tools (e.g. RCA's hypothesis tools, GP's skill tools) implement
+    ``create_scenario_tools(**kwargs) -> ScenarioToolBundle``.  Strategies that
+    don't need custom tools simply omit the method and get an empty bundle.
+
+    The builder calls this function instead of branching on ``system_type``.
+    """
+    factory = getattr(strategy, "create_scenario_tools", None)
+    if factory is not None:
+        return factory(**kwargs)
+    return ScenarioToolBundle()
