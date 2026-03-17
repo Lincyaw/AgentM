@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import typer
 from dotenv import load_dotenv
@@ -99,6 +100,17 @@ def debug(
 
 def main() -> None:
     load_dotenv()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    # Suppress noisy third-party loggers
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("langchain").setLevel(logging.WARNING)
+    logging.getLogger("langsmith").setLevel(logging.WARNING)
     try:
         app()
     except AgentMError as e:
@@ -271,12 +283,23 @@ def eval(
         100, "--max-steps", help="Maximum orchestrator steps per sample"
     ),
     timeout: float = typer.Option(
-        600.0,
+        1800,
         "--timeout",
         help="Per-sample timeout in seconds (0 = no timeout)",
     ),
+    dashboard: bool = typer.Option(
+        False, "--dashboard", help="Start web dashboard for real-time eval monitoring"
+    ),
+    port: int = typer.Option(
+        8765, "--port", help="Dashboard server port (requires --dashboard)"
+    ),
+    dashboard_host: str = typer.Option(
+        "0.0.0.0",
+        "--dashboard-host",
+        help="Dashboard server bind address (default: 0.0.0.0)",
+    ),
 ) -> None:
-    """Batch LLM evaluation: preprocess → rollout → judge → stat."""
+    """Batch LLM evaluation: preprocess \u2192 rollout \u2192 judge \u2192 stat."""
     asyncio.run(
         run_eval(
             config_path=config,
@@ -287,5 +310,8 @@ def eval(
             stat_only=stat_only,
             max_steps=max_steps,
             timeout=timeout,
+            dashboard=dashboard,
+            dashboard_port=port,
+            dashboard_host=dashboard_host,
         )
     )
