@@ -3,6 +3,7 @@
 Serves the single-file HTML dashboard and provides:
 - WebSocket endpoint for real-time event streaming
 - REST API for topology, checkpoint history, replay, and fork
+- Eval dashboard endpoints for batch evaluation monitoring
 """
 
 from __future__ import annotations
@@ -177,6 +178,7 @@ def create_dashboard_app(
     trajectory: Any | None = None,
     thread_id: str | None = None,
     broadcaster: Broadcaster | None = None,
+    eval_tracker: Any | None = None,
 ) -> FastAPI:
     """Create the FastAPI dashboard application.
 
@@ -188,6 +190,8 @@ def create_dashboard_app(
         thread_id: LangGraph thread_id for checkpoint APIs.
         broadcaster: Broadcaster instance for WebSocket client management.
             If ``None``, uses the module-level default broadcaster.
+        eval_tracker: EvalTracker instance for batch evaluation monitoring.
+            If ``None``, eval endpoints return inactive status.
     """
     if broadcaster is None:
         broadcaster = _default_broadcaster
@@ -201,6 +205,7 @@ def create_dashboard_app(
     app.state.trajectory = trajectory
     app.state.thread_id = thread_id
     app.state.broadcaster = broadcaster
+    app.state.eval_tracker = eval_tracker
 
     # ── HTML dashboard ─────────────────────────────────────────────────
 
@@ -237,6 +242,25 @@ def create_dashboard_app(
                 except (WebSocketDisconnect, ConnectionError, RuntimeError):
                     bc.remove(websocket)
                     return
+        # Send eval snapshot if eval tracker is active
+        et = app.state.eval_tracker
+        if et is not None:
+            try:
+                summary = et.get_summary()
+                samples, total = et.get_samples(offset=0, limit=50)
+                snapshot = json.dumps(
+                    {
+                        "channel": "eval",
+                        "event_type": "eval_snapshot",
+                        "data": {"summary": summary, "samples": samples, "total": total},
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                    default=str,
+                )
+                await websocket.send_text(snapshot)
+            except (WebSocketDisconnect, ConnectionError, RuntimeError):
+                bc.remove(websocket)
+                return
         try:
             while True:
                 await websocket.receive_text()
@@ -398,5 +422,74 @@ def create_dashboard_app(
             if isinstance(result, dict)
             else str(result),
         }
+
+    # ── Eval endpoints ────────────────────────────────────────────────
+
+    @app.get("/api/eval/status")
+    async def eval_status() -> dict[str, Any]:
+        et = app.state.eval_tracker
+        if et is None:
+            return {"enabled": False}
+        summary = et.get_summary()
+        return {"enabled": True, **summary}
+
+    @app.get("/api/eval/samples")
+    async def eval_samples(
+        offset: int = 0,
+        limit: int = 50,
+        status: str | None = None,
+        search: str | None = None,
+    ) -> dict[str, Any]:
+        et = app.state.eval_tracker
+        if et is None:
+            return {"samples": [], "total": 0}
+        samples, total = et.get_samples(
+            offset=offset, limit=limit, status_filter=status, search=search
+        )
+        return {"samples": samples, "total": total, "offset": offset, "limit": limit}
+
+    @app.get("/api/eval/samples/{sample_id}")
+    async def eval_sample_detail(sample_id: str) -> dict[str, Any]:
+        et = app.state.eval_tracker
+        if et is None:
+            return {"error": "Eval not active"}
+        info = et.get_sample(sample_id)
+        if info is None:
+            return {"error": "Sample not found"}
+        return info
+
+    @app.get("/api/eval/samples/{sample_id}/events")
+    async def eval_sample_events(sample_id: str) -> dict[str, Any]:
+        """Read trajectory events from JSONL file for a specific sample."""
+        et = app.state.eval_tracker
+        if et is None:
+            return {"error": "Eval not active", "events": []}
+        info = et.get_sample(sample_id)
+        if info is None:
+            return {"error": "Sample not found", "events": []}
+        traj_path = info.get("trajectory_path")
+        if not traj_path:
+            return {"events": [], "status": info.get("status", "unknown")}
+        path = Path(traj_path)
+        if not path.exists():
+            return {"events": [], "status": info.get("status", "unknown")}
+        events: list[dict[str, Any]] = []
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        parsed = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    # Skip metadata lines
+                    if "_meta" in parsed:
+                        continue
+                    events.append(parsed)
+        except OSError:
+            pass
+        return {"events": events, "status": info.get("status", "unknown")}
 
     return app
