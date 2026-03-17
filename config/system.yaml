@@ -3,26 +3,38 @@ models:
     api_key: "${AGENTM_API_KEY}"
     base_url: "${AGENTM_API_BASE_URL:}"
     rate_limit:
-      requests_per_second: 5
-      max_bucket_size: 10
+      requests_per_second: 20
+      max_bucket_size: 50
   gpt-5.1-mini:
     api_key: "${AGENTM_API_KEY}"
     base_url: "${AGENTM_API_BASE_URL:}"
     rate_limit:
       requests_per_second: 20
-      max_bucket_size: 30
+      max_bucket_size: 50
   MiniMax-M2.5:
     api_key: "${AGENTM_API_KEY}"
     base_url: "${AGENTM_API_BASE_URL:}"
     rate_limit:
-      requests_per_second: 10
-      max_bucket_size: 20
+      requests_per_second: 20
+      max_bucket_size: 50
+  GLM-5:
+    api_key: "${AGENTM_API_KEY}"
+    base_url: "${AGENTM_API_BASE_URL:}"
+    rate_limit:
+      requests_per_second: 20
+      max_bucket_size: 50
   ep-20250919144417-j2j4b:
     api_key: "${AGENTM_API_KEY}"
     base_url: "${AGENTM_API_BASE_URL:}"
     rate_limit:
-      requests_per_second: 10
-      max_bucket_size: 20
+      requests_per_second: 20
+      max_bucket_size: 50
+  claude-sonnet-4-6:
+    api_key: "${AGENTM_API_KEY}"
+    base_url: "${AGENTM_API_BASE_URL:}"
+    rate_limit:
+      requests_per_second: 20
+      max_bucket_size: 50
 
 storage:
   checkpointer:

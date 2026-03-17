@@ -49,6 +49,7 @@ def create_orchestrator_tools(
         # Each tool-call step uses ~3 graph nodes (pre_model_hook + call_model
         # + tools), plus a final generate_structured_response node.
         max_steps = agent_pool.worker_max_steps
+        timeout = agent_pool.worker_timeout
         recursion_limit = max_steps * 3 + 20
         task_id = await task_manager.submit(
             agent_id,
@@ -60,6 +61,7 @@ def create_orchestrator_tools(
             task_id=task_id,
             trajectory_self_reported=agent_pool.worker_self_reports_trajectory,
             max_steps=max_steps,
+            timeout=timeout,
         )
 
         # Auto-block: if this is the only running task and it has a real

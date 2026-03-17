@@ -174,6 +174,7 @@ def create_rca_tools(
             )
 
         async def query_service_profile(
+            request: str,
             service_names: str = "",
             anomalous_only: bool = False,
             tool_call_id: Annotated[str, InjectedToolCallId] = "",
@@ -181,6 +182,7 @@ def create_rca_tools(
             """Query the shared Service Profile store.
 
             Args:
+                request: A short description of what you want to look up.
                 service_names: One or more service names, comma-separated.
                     E.g. "serviceA" or "serviceA,serviceB,serviceC".
                     Empty string returns ALL profiles grouped by anomalous/healthy.

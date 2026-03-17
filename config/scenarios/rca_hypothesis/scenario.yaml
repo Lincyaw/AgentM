@@ -64,8 +64,8 @@ agents:
       - query_sql
     execution:
       max_steps: 40
-      timeout: 180
-      tool_call_budget: 30
+      timeout: 540
+      tool_call_budget: 20
       dedup:
         enabled: true
         max_cache_size: 50

@@ -72,6 +72,7 @@ class TaskManager:
         logger.info("Task %s submitted: agent=%s type=%s", task_id, agent_id, task_type)
         trajectory_self_reported: bool = kwargs.pop("trajectory_self_reported", False)
         max_steps: int | None = kwargs.pop("max_steps", None)
+        timeout: int | None = kwargs.pop("timeout", None)
 
         subgraph = kwargs.get("subgraph")
         config: dict[str, Any] = kwargs.get("config", {})
@@ -82,6 +83,7 @@ class TaskManager:
             instruction=instruction,
             hypothesis_id=hypothesis_id,
             max_steps=max_steps,
+            timeout=timeout,
             started_at=datetime.now().isoformat(),
             subgraph_config=config,
             trajectory_self_reported=trajectory_self_reported,
@@ -183,14 +185,16 @@ class TaskManager:
                     started = datetime.fromisoformat(task.started_at)
                     elapsed = (datetime.now() - started).total_seconds()
 
-                running_info.append({
-                    "task_id": task_id,
-                    "agent_id": task.agent_id,
-                    "task_type": getattr(task, "task_type", "scout"),
-                    "elapsed_seconds": elapsed,
-                    "current_step": task.current_step,
-                    "max_steps": task.max_steps,
-                })
+                running_info.append(
+                    {
+                        "task_id": task_id,
+                        "agent_id": task.agent_id,
+                        "task_type": getattr(task, "task_type", "scout"),
+                        "elapsed_seconds": elapsed,
+                        "current_step": task.current_step,
+                        "max_steps": task.max_steps,
+                    }
+                )
         return running_info
 
     def get_running_count(self) -> int:
@@ -322,6 +326,10 @@ class TaskManager:
         and stores results upon completion.  No task-level retry —
         transient failures (network, rate-limit) are retried at the
         LLM request level by ChatOpenAI's built-in retry.
+
+        If ``managed.timeout`` is set, the streaming loop is wrapped in
+        ``asyncio.wait_for`` — exceeding the limit marks the task as
+        FAILED with partial results salvaged from events collected so far.
         """
         input_data = {"messages": [HumanMessage(content=managed.instruction)]}
         worker_config = {
@@ -334,25 +342,32 @@ class TaskManager:
 
         try:
             managed.events_buffer = []
-            async for namespace, mode, data in subgraph.astream(
-                input_data,
-                worker_config,
-                stream_mode=["updates", "custom"],
-                subgraphs=True,
-            ):
-                managed.events_buffer.append(data)
 
-                # Track step progress from llm_call node outputs
-                if isinstance(data, dict):
-                    llm_data = data.get("llm_call")
-                    if isinstance(llm_data, dict):
-                        for msg in llm_data.get("messages", []):
-                            if getattr(msg, "type", "") == "ai":
-                                managed.current_step += 1
+            async def _stream() -> None:
+                async for namespace, mode, data in subgraph.astream(
+                    input_data,
+                    worker_config,
+                    stream_mode=["updates", "custom"],
+                    subgraphs=True,
+                ):
+                    managed.events_buffer.append(data)
 
-                if self._trajectory is not None and isinstance(data, dict):
-                    if not managed.trajectory_self_reported:
-                        await self._record_subagent_event(managed, data)
+                    # Track step progress from llm_call node outputs
+                    if isinstance(data, dict):
+                        llm_data = data.get("llm_call")
+                        if isinstance(llm_data, dict):
+                            for msg in llm_data.get("messages", []):
+                                if getattr(msg, "type", "") == "ai":
+                                    managed.current_step += 1
+
+                    if self._trajectory is not None and isinstance(data, dict):
+                        if not managed.trajectory_self_reported:
+                            await self._record_subagent_event(managed, data)
+
+            if managed.timeout and managed.timeout > 0:
+                await asyncio.wait_for(_stream(), timeout=managed.timeout)
+            else:
+                await _stream()
 
             managed.status = AgentRunStatus.COMPLETED
             managed.result = _extract_structured_response(managed.events_buffer)
@@ -374,6 +389,36 @@ class TaskManager:
                         "agent_id": managed.agent_id,
                         "duration_seconds": managed.duration_seconds,
                         "result": managed.result,
+                    },
+                    task_id=managed.task_id,
+                )
+
+        except asyncio.TimeoutError:
+            managed.status = AgentRunStatus.FAILED
+            managed.error_summary = f"Timed out after {managed.timeout}s"
+            partial = _extract_structured_response(managed.events_buffer or [])
+            if partial:
+                managed.result = {
+                    **partial,
+                    "_partial": True,
+                    "_error": managed.error_summary,
+                }
+            managed.completed_at = datetime.now().isoformat()
+            logger.warning(
+                "Task %s timed out after %ds", managed.task_id, managed.timeout
+            )
+            self._completion_event.set()
+
+            if self._trajectory is not None:
+                await self._trajectory.record(
+                    event_type="task_timeout",
+                    agent_path=[managed.agent_id],
+                    data={
+                        "task_id": managed.task_id,
+                        "agent_id": managed.agent_id,
+                        "timeout_seconds": managed.timeout,
+                        "steps_completed": managed.current_step,
+                        "error_summary": managed.error_summary,
                     },
                     task_id=managed.task_id,
                 )
@@ -410,11 +455,11 @@ class TaskManager:
 class SmartWaitStrategy:
     """Linear-backoff waiting strategy for check_tasks.
 
-    Starts at 60 s, adds 30 s after each poll, caps at 300 s.
+    Starts at 180 s, adds 60 s after each poll, caps at 300 s.
     """
 
-    _BASE: float = 60.0
-    _INCREMENT: float = 30.0
+    _BASE: float = 180.0
+    _INCREMENT: float = 60.0
     _MAX: float = 300.0
 
     def __init__(self) -> None:
