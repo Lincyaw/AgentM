@@ -152,6 +152,8 @@ class TaskManager:
                 task.reported = True
             elif task.status == AgentRunStatus.FAILED and not task.reported:
                 entry["error_summary"] = task.error_summary
+                if task.result:
+                    entry["partial_result"] = task.result
                 result["failed"].append(entry)
                 task.reported = True
         return result
@@ -384,6 +386,10 @@ class TaskManager:
         except Exception as e:
             managed.status = AgentRunStatus.FAILED
             managed.error_summary = str(e)
+            # Salvage partial findings from events collected before failure
+            partial = _extract_structured_response(managed.events_buffer or [])
+            if partial:
+                managed.result = {**partial, "_partial": True, "_error": str(e)}
             managed.completed_at = datetime.now().isoformat()
             logger.warning("Task %s failed: %s", managed.task_id, e)
             self._completion_event.set()
@@ -415,7 +421,7 @@ class SmartWaitStrategy:
         task_type: str,
         elapsed_seconds: float,
         current_step: int,
-        max_steps: int,
+        max_steps: int | None,
     ) -> float:
         """Calculate optimal wait time based on task progress and history."""
 
@@ -432,7 +438,7 @@ class SmartWaitStrategy:
         iterations = len(self._wait_history.get(task_id, []))
 
         # Progress-based adjustments (take precedence over time-based)
-        if max_steps > 0 and current_step > 0:
+        if max_steps is not None and max_steps > 0 and current_step > 0:
             progress = current_step / max_steps
             if progress >= 0.9:  # Near completion (>=90%), reduce wait
                 return 6  # Fixed short wait when almost done

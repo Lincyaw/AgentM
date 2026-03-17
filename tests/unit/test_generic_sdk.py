@@ -270,11 +270,48 @@ class TestMiddlewareBase:
 class TestBudgetMiddleware:
     """BudgetMiddleware injects warnings when step budget is low."""
 
+    def _ai_with_tools(self, name: str = "query_sql") -> Any:
+        """Create a minimal AI message with a tool_call."""
+        from langchain_core.messages import AIMessage
+
+        return AIMessage(
+            content="",
+            tool_calls=[{"id": "tc1", "name": name, "args": {}}],
+        )
+
     def test_no_warning_when_budget_plentiful(self):
         mw = BudgetMiddleware(max_steps=20)
         state = {"messages": []}
         result = mw.before_model(state)
         assert result == {"messages": []}
+
+    def test_think_is_counted_as_step(self):
+        """Think tool calls must count toward the budget (prevents think-loops)."""
+        mw = BudgetMiddleware(max_steps=5)
+        think_msgs = [self._ai_with_tools("think") for _ in range(4)]
+        result = mw.before_model({"messages": think_msgs})
+        # 4/5 used → 1 remaining ≤ 3 → should inject WARNING
+        last = result["messages"][-1]
+        assert "WARNING" in last.content
+        assert "1/5" in last.content
+
+    def test_exhausted_property_false_initially(self):
+        mw = BudgetMiddleware(max_steps=10)
+        assert mw.exhausted is False
+
+    def test_exhausted_property_true_when_budget_depleted(self):
+        mw = BudgetMiddleware(max_steps=3)
+        msgs = [self._ai_with_tools() for _ in range(3)]
+        mw.before_model({"messages": msgs})
+        assert mw.exhausted is True
+
+    def test_exhausted_urgency_message_content(self):
+        mw = BudgetMiddleware(max_steps=2)
+        msgs = [self._ai_with_tools() for _ in range(2)]
+        result = mw.before_model({"messages": msgs})
+        last = result["messages"][-1]
+        assert "BUDGET EXHAUSTED" in last.content
+        assert "do NOT call any tool including think" in last.content
 
     def test_middleware_is_agentm_middleware(self):
         assert isinstance(BudgetMiddleware(10), AgentMMiddleware)

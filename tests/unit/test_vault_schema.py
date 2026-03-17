@@ -170,13 +170,24 @@ class TestCreateSchemaVec:
         ).fetchall()
         assert len(rows) == 0
 
-    def test_should_create_vec_table_when_available(
+    def test_should_create_vec_table_lazily_when_available(
         self, conn: sqlite3.Connection
     ):
-        """When sqlite-vec is available, notes_vec must be created."""
+        """notes_vec is NOT created by create_schema — it is created lazily
+        on first embedding write. Verify the lazy path works."""
         if not has_vec_support(conn):
             pytest.skip("sqlite-vec not installed")
         create_schema(conn)
+        # create_schema does NOT create notes_vec
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name='notes_vec'"
+        ).fetchall()
+        assert len(rows) == 0
+        # Lazy creation (as production code does)
+        conn.executescript(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS notes_vec USING vec0("
+            "path TEXT PRIMARY KEY, embedding FLOAT[512]);"
+        )
         rows = conn.execute(
             "SELECT name FROM sqlite_master WHERE name='notes_vec'"
         ).fetchall()
@@ -232,6 +243,11 @@ class TestClearAll:
         if not has_vec_support(conn):
             pytest.skip("sqlite-vec not installed")
         create_schema(conn)
+        # Lazily create notes_vec (as production code does in store.py)
+        conn.executescript(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS notes_vec USING vec0("
+            "path TEXT PRIMARY KEY, embedding FLOAT[512]);"
+        )
         conn.execute(
             "INSERT INTO notes_vec (path, embedding) VALUES (?, ?)",
             ("a.md", b"\x00" * 2048),  # 512 floats x 4 bytes

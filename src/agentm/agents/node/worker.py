@@ -26,6 +26,7 @@ from agentm.config.schema import AgentConfig, ModelConfig
 from agentm.middleware import NodePipeline
 from agentm.middleware.budget import BudgetMiddleware
 from agentm.middleware.compression import CompressionMiddleware
+from agentm.middleware.loop_detection import LoopDetectionMiddleware
 from agentm.middleware.trajectory import TrajectoryMiddleware
 from agentm.core.prompt import load_prompt_template
 from agentm.core.tool_registry import ToolRegistry
@@ -156,6 +157,8 @@ def build_worker_subgraph(
     # Middleware pipeline (replaces inline budget/compression/trajectory)
     # ------------------------------------------------------------------
     middlewares: list = [BudgetMiddleware(config.execution.max_steps)]
+    budget_mw: BudgetMiddleware = middlewares[0]  # type: ignore[assignment]
+    middlewares.append(LoopDetectionMiddleware(threshold=5, window_size=15))
     if config.compression is not None:
         middlewares.append(CompressionMiddleware(config.compression))
     if trajectory is not None:
@@ -207,13 +210,17 @@ def build_worker_subgraph(
     async def llm_call(state: WorkerState) -> dict[str, Any]:
         messages = list(state.get("messages", []))
 
-        # Pre-model pipeline: budget → compression → trajectory(llm_start)
+        # Pre-model pipeline: budget → loop detection → compression → trajectory(llm_start)
         prepared = pipeline.before({"messages": messages})
         llm_messages = prepared.get("llm_input_messages") or prepared.get(
             "messages", messages
         )
 
-        response = await model_with_tools.ainvoke(llm_messages)
+        if budget_mw.exhausted:
+            # No tools — force plain text response that exits the loop
+            response = await model_plain.ainvoke(llm_messages)
+        else:
+            response = await model_with_tools.ainvoke(llm_messages)
 
         # Post-model pipeline: trajectory(tool_call / llm_end)
         await pipeline.after({"messages": messages}, response)
