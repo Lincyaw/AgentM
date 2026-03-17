@@ -28,3 +28,4 @@ knowledge
 .env
 .env.local
 eval-data
+logs
