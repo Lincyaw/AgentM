@@ -1,4 +1,4 @@
-"""Think tool — a scratchpad for structured reasoning between tool calls.
+"""Think tool — a scratchpad for structured reasoning.
 
 This tool performs NO I/O. It simply returns the agent's thought back,
 giving the LLM a designated space to reason without polluting the final
@@ -13,14 +13,15 @@ from langchain_core.tools import tool
 
 @tool
 def think(thought: str) -> str:
-    """Use this tool to think step-by-step between data queries.
+    """A scratchpad for recording your reasoning process. This tool has NO
+    side effects — it simply stores your thought and returns it.
 
-    Call this BEFORE making tool calls to plan your next move, and AFTER
-    receiving results to analyze what you learned. This helps you:
-    - Decide which tools to call next and with what parameters
-    - Compare abnormal vs normal data and assess significance
-    - Track which hypotheses are supported or contradicted
-    - Avoid wasting tool budget on redundant queries
+    Use this to record analysis, compare data, or track hypothesis status.
+
+    IMPORTANT: Think does NOT advance the investigation. After thinking,
+    you MUST call an action tool (dispatch_agent, update_hypothesis, etc.)
+    in the SAME response or the very next response. Never call think
+    multiple times in a row without an action in between.
 
     Your thought is private — it will NOT appear in your final output.
     """
