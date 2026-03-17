@@ -3,6 +3,7 @@ const NAV_ITEMS = [
   { id: 'execution', icon: '\u25B6', label: 'Execution' },
   { id: 'conversation', icon: '\u25C8', label: 'Conversation' },
   { id: 'debug', icon: '\u2699', label: 'Debug' },
+  { id: 'eval', icon: '\u2261', label: 'Eval' },
 ];
 
 function App() {
@@ -12,6 +13,7 @@ function App() {
   const [topology, setTopology] = useState(null);
   const [scenarioState, setScenarioState] = useState({});
   const [threadId, setThreadId] = useState(null);
+  const [evalMode, setEvalMode] = useState(false);
 
   // Determine active plugin
   const plugin = useMemo(() => {
@@ -27,10 +29,23 @@ function App() {
       setTopology(data);
       if (data.thread_id) setThreadId(data.thread_id);
     }).catch(() => { });
+    // Detect eval mode
+    fetch('/api/eval/status').then(r => r.json()).then(data => {
+      if (data.enabled) {
+        setEvalMode(true);
+        setPage('eval');
+      }
+    }).catch(() => { });
   }, []);
 
   // WebSocket event handler
   const handleEvent = useCallback((event) => {
+    // Eval channel events — forward to EvalPage, skip agent state updates
+    if (event.channel === 'eval') {
+      window.dispatchEvent(new CustomEvent('eval_event', { detail: event }));
+      return;
+    }
+
     setEvents(prev => [...prev, event]);
 
     const agentPath = event.agent_path || [];
@@ -321,6 +336,7 @@ function App() {
       if (e.key === '2') setPage('execution');
       if (e.key === '3') setPage('conversation');
       if (e.key === '4') setPage('debug');
+      if (e.key === '5') setPage('eval');
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -344,6 +360,7 @@ function App() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           {plugin && <Tag text={plugin.label} color={C.purple} />}
+          {evalMode && <Tag text="EVAL" color={C.orange} />}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 }}>
             <span style={{
               width: 8, height: 8, borderRadius: '50%',
@@ -401,6 +418,7 @@ function App() {
           {page === 'execution' && <ExecutionPage agents={agents} events={events} />}
           {page === 'conversation' && <ConversationPage state={scenarioState} events={events} plugin={plugin} />}
           {page === 'debug' && <DebugPage threadId={threadId} />}
+          {page === 'eval' && <EvalPage />}
         </div>
       </div>
     </>

@@ -27,4 +27,5 @@ const STATUS_COLORS = {
   running: C.teal,
   completed: C.green,
   failed: C.red,
+  skipped: C.yellow,
 };
