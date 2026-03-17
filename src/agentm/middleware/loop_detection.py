@@ -1,12 +1,18 @@
 """Loop detection middleware -- detects repetitive tool call patterns.
 
-When an agent repeatedly calls the same tool with similar arguments, it
-is likely stuck in a "doom loop".  This middleware counts recent tool
-calls within a sliding window and injects a warning ``HumanMessage``
-when the repetition count exceeds a configurable threshold.
+Two detection modes:
 
-The warning nudges the LLM to reconsider its approach rather than
-retrying the same action.
+1. **Exact-match** (original): counts identical ``(tool_name, args)`` pairs
+   in a sliding window.  Effective for tools with deterministic arguments
+   (e.g. ``query_sql`` with the same SQL).
+
+2. **Think-stall**: counts consecutive AI messages where the *only* tool
+   call is ``think`` (arguments ignored, since every thought is unique).
+   Detects "planning paralysis" where the LLM keeps reasoning but never
+   takes an action.
+
+Both modes inject a ``HumanMessage`` warning when their threshold is
+exceeded, nudging the LLM to take a concrete action.
 """
 
 from __future__ import annotations
@@ -19,8 +25,10 @@ from langchain_core.messages import HumanMessage
 
 from agentm.middleware import AgentMMiddleware
 
+_THINK_TOOL = "think"
+
 # ---------------------------------------------------------------------------
-# Hook factory
+# Hook factory — exact-match detection
 # ---------------------------------------------------------------------------
 
 
@@ -81,6 +89,70 @@ def build_loop_detection_hook(
 
 
 # ---------------------------------------------------------------------------
+# Hook factory — think-stall detection
+# ---------------------------------------------------------------------------
+
+
+def _count_trailing_think_only(messages: list[Any]) -> int:
+    """Count consecutive AI messages from the tail where the only tool is ``think``.
+
+    Walks backward through the message list. An AI message counts as
+    "think-only" if it carries exactly one tool call named ``think``
+    (or carries no tool calls at all — pure text continuation).  The
+    streak breaks as soon as an AI message invokes any other tool.
+    """
+    streak = 0
+    for msg in reversed(messages):
+        if getattr(msg, "type", "") != "ai":
+            continue
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        tool_names = {tc.get("name", "") for tc in tool_calls}
+        if tool_names and tool_names != {_THINK_TOOL}:
+            break  # found an action tool — streak ends
+        streak += 1
+    return streak
+
+
+def build_think_stall_hook(
+    max_consecutive: int = 3,
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """Build a ``pre_model_hook`` that breaks think-only stalls.
+
+    When the last *max_consecutive* AI messages contain only ``think``
+    tool calls (no action tools), injects a directive telling the LLM
+    to take a concrete action immediately.
+
+    Parameters
+    ----------
+    max_consecutive:
+        Number of consecutive think-only rounds before the warning fires.
+    """
+
+    def hook(state: dict[str, Any]) -> dict[str, Any]:
+        messages = state.get("llm_input_messages") or state.get("messages", [])
+        use_llm_input = "llm_input_messages" in state
+        out_key = "llm_input_messages" if use_llm_input else "messages"
+
+        streak = _count_trailing_think_only(messages)
+        if streak >= max_consecutive:
+            warning_text = (
+                f"THINK-STALL WARNING: You have called only `think` for the "
+                f"last {streak} rounds without taking any action. Thinking "
+                f"alone does not advance the investigation.\n\n"
+                f"You MUST call an action tool NOW — one of:\n"
+                f"- dispatch_agent (to send a worker for data collection)\n"
+                f"- update_hypothesis (to formalize your reasoning)\n"
+                f"- finalize via <decision>finalize</decision>\n\n"
+                f"Do NOT call think again until you have taken an action."
+            )
+            return {out_key: [*messages, HumanMessage(content=warning_text)]}
+
+        return {out_key: messages}
+
+    return hook
+
+
+# ---------------------------------------------------------------------------
 # Middleware class
 # ---------------------------------------------------------------------------
 
@@ -88,23 +160,37 @@ def build_loop_detection_hook(
 class LoopDetectionMiddleware(AgentMMiddleware):
     """Detect and warn about repetitive tool call patterns.
 
-    Tracks per-tool-call counts within a sliding window of recent AI
-    messages.  When the same tool is called with identical arguments
-    more than ``threshold`` times, injects a ``HumanMessage`` warning
-    the agent to reconsider its approach.
+    Combines two detection strategies:
+
+    1. **Exact-match**: identical ``(tool_name, args)`` repeated within a
+       sliding window → warns about specific repeated calls.
+    2. **Think-stall**: consecutive rounds where the only tool is ``think``
+       → forces the LLM to take a concrete action.
     """
 
     def __init__(
         self,
         threshold: int = 5,
         window_size: int = 20,
+        think_stall_limit: int = 3,
     ) -> None:
         self._threshold = threshold
         self._window_size = window_size
-        self._hook = build_loop_detection_hook(
+        self._think_stall_limit = think_stall_limit
+        self._exact_hook = build_loop_detection_hook(
             threshold=threshold,
             window_size=window_size,
         )
+        self._think_hook = build_think_stall_hook(
+            max_consecutive=think_stall_limit,
+        )
 
     def before_model(self, state: dict[str, Any]) -> dict[str, Any]:
-        return self._hook(state)
+        # Think-stall fires first (more specific); exact-match as fallback.
+        result = self._think_hook(state)
+        # If think-stall already injected a warning, skip exact-match.
+        messages_in = state.get("llm_input_messages") or state.get("messages", [])
+        messages_out = result.get("llm_input_messages") or result.get("messages", [])
+        if len(messages_out) > len(messages_in):
+            return result
+        return self._exact_hook(state)
