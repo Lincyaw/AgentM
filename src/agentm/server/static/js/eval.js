@@ -152,6 +152,278 @@ function EvalSampleTable({ samples, total, onSelect, selectedId, statusFilter, o
   );
 }
 
+// ── Event tree builder ───────────────────────────────────────────────
+
+function buildEventTree(events) {
+  // Map agentId -> { dispatchEvent, taskId, taskType, agentId, children[], status, duration }
+  const agentGroups = new Map();
+  // Set of known subagent IDs (from task_dispatch events)
+  const subagentIds = new Set();
+  // Ordered root-level items: either an event object or { type: 'group', agentId }
+  const rootItems = [];
+
+  // First pass: collect all task_dispatch events to know subagent IDs
+  for (const ev of events) {
+    if (ev.event_type === 'task_dispatch') {
+      const data = ev.data || {};
+      const agentId = data.agent_id || '';
+      const taskId = data.task_id || '';
+      if (agentId) {
+        subagentIds.add(agentId);
+        agentGroups.set(agentId, {
+          dispatchEvent: ev,
+          taskId,
+          taskType: data.task_type || 'task',
+          agentId,
+          children: [],
+          status: 'running',
+          duration: null,
+        });
+      }
+    }
+  }
+
+  // Second pass: distribute events
+  for (const ev of events) {
+    const eventType = ev.event_type || '';
+    const agentPath = ev.agent_path || [];
+    const lastAgent = agentPath[agentPath.length - 1] || '';
+    const data = ev.data || {};
+
+    if (eventType === 'llm_start') continue;
+
+    // task_complete / task_fail / task_abort update group status
+    if (eventType === 'task_complete' || eventType === 'task_fail' || eventType === 'task_abort') {
+      const agentId = data.agent_id || lastAgent;
+      const group = agentGroups.get(agentId);
+      if (group) {
+        group.status = eventType === 'task_complete' ? 'completed'
+          : eventType === 'task_abort' ? 'aborted' : 'failed';
+        group.duration = data.duration_seconds || null;
+        continue;
+      }
+    }
+
+    // task_dispatch: insert group placeholder into root
+    if (eventType === 'task_dispatch') {
+      const agentId = data.agent_id || '';
+      if (agentGroups.has(agentId)) {
+        rootItems.push({ type: 'group', agentId });
+        continue;
+      }
+    }
+
+    // Check if this event belongs to a subagent
+    if (subagentIds.has(lastAgent) && agentGroups.has(lastAgent)) {
+      agentGroups.get(lastAgent).children.push(ev);
+      continue;
+    }
+
+    // Orchestrator-level event
+    rootItems.push({ type: 'event', event: ev });
+  }
+
+  return { rootItems, agentGroups };
+}
+
+// ── Single event row (shared by root and subagent views) ────────────
+
+function EventRow({ ev, index }) {
+  const eventType = ev.event_type || '';
+  const agentPath = ev.agent_path || [];
+  const agentId = agentPath[agentPath.length - 1] || '';
+  const data = ev.data || {};
+  const ts = ev.timestamp || '';
+  const shortTs = ts.length > 19 ? ts.substring(11, 19) : ts;
+
+  let icon = '\u25B8';
+  let color = C.teal;
+  let detail = eventType;
+
+  switch (eventType) {
+    case 'tool_call': icon = '\u2192'; color = C.yellow; detail = data.tool_name || 'tool'; break;
+    case 'tool_result': icon = '\u2190'; color = C.green; detail = `${data.tool_name || 'tool'}: ${(typeof data.result === 'string' ? data.result : '').slice(0, 80)}`; break;
+    case 'llm_end': icon = '\u25C7'; color = C.purple; detail = (data.content || '').slice(0, 80) || `${(data.tool_calls || []).length} tool call(s)`; break;
+    case 'task_dispatch': icon = '\u25B6'; color = C.teal; detail = `dispatch: ${data.task_type || 'task'}`; break;
+    case 'task_complete': icon = '\u2713'; color = C.green; detail = 'completed'; break;
+    case 'task_fail': icon = '\u2717'; color = C.red; detail = data.error || 'failed'; break;
+    case 'task_abort': icon = '\u2298'; color = C.yellow; detail = data.reason || 'aborted'; break;
+    case 'hypothesis_update': icon = '\u25C8'; color = C.purple; detail = `${data.hypothesis_id || ''} \u2192 ${data.status || ''}`; break;
+  }
+
+  return (
+    <CollapsibleContent
+      key={index}
+      title={
+        <span style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 }}>
+          <span style={{ color: C.muted, fontSize: 11, minWidth: 50 }}>{shortTs}</span>
+          <span style={{ color }}>{icon}</span>
+          <span style={{ color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{detail}</span>
+        </span>
+      }
+    >
+      <JsonCard data={ev.data} title={eventType} />
+    </CollapsibleContent>
+  );
+}
+
+// ── Agent event group (collapsible subagent section) ────────────────
+
+const AGENT_COLORS = [C.teal, C.purple, C.orange, C.yellow, C.green, C.red];
+
+function AgentEventGroup({ group, colorIndex }) {
+  const [open, setOpen] = useState(false);
+  const accentColor = AGENT_COLORS[colorIndex % AGENT_COLORS.length];
+  const statusColor = group.status === 'completed' ? C.green
+    : group.status === 'failed' ? C.red
+    : group.status === 'aborted' ? C.yellow
+    : C.teal;
+  const visibleChildren = group.children.filter(e => e.event_type !== 'llm_start');
+  const eventCount = visibleChildren.length;
+
+  return (
+    <div style={{
+      borderLeft: `2px solid ${accentColor}`,
+      marginLeft: 6,
+      marginTop: 2,
+      marginBottom: 2,
+      borderRadius: '0 4px 4px 0',
+      overflow: 'hidden',
+    }}>
+      {/* Group header */}
+      <div
+        onClick={() => setOpen(!open)}
+        style={{
+          padding: '7px 12px',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          background: accentColor + '0a',
+          userSelect: 'none',
+          transition: 'background 0.15s',
+        }}
+        onMouseEnter={e => e.currentTarget.style.background = accentColor + '15'}
+        onMouseLeave={e => e.currentTarget.style.background = accentColor + '0a'}
+      >
+        <span style={{
+          fontSize: 10,
+          color: accentColor,
+          transition: 'transform 0.2s',
+          transform: open ? 'rotate(90deg)' : 'rotate(0)',
+          display: 'inline-block',
+        }}>{'\u25B6'}</span>
+        <span style={{
+          width: 8, height: 8, borderRadius: '50%',
+          background: statusColor,
+          animation: group.status === 'running' ? 'pulse 1.5s infinite' : 'none',
+          flexShrink: 0,
+        }} />
+        <span style={{ color: accentColor, fontWeight: 600, fontSize: 12 }}>
+          {group.agentId}
+        </span>
+        <Tag text={group.taskType} color={accentColor} />
+        <span style={{ color: C.muted, fontSize: 11 }}>
+          {eventCount} event{eventCount !== 1 ? 's' : ''}
+        </span>
+        {group.duration != null && (
+          <span style={{ color: C.green, fontSize: 11 }}>{group.duration.toFixed(1)}s</span>
+        )}
+        <div style={{ flex: 1 }} />
+        <Tag text={group.status} color={statusColor} />
+      </div>
+      {/* Expanded children */}
+      {open && (
+        <div style={{ paddingLeft: 8, animation: 'fadeIn 0.15s ease-out' }}>
+          {visibleChildren.length === 0 && (
+            <div style={{ padding: '12px 16px', color: C.muted, fontSize: 11 }}>
+              No events recorded for this agent
+            </div>
+          )}
+          {visibleChildren.map((ev, i) => (
+            <EventRow key={`${group.agentId}-${i}`} ev={ev} index={i} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Agent timeline bar ──────────────────────────────────────────────
+
+function AgentTimeline({ events, agentGroups }) {
+  if (agentGroups.size === 0) return null;
+
+  // Compute time range from all events
+  const timestamps = events
+    .filter(e => e.timestamp)
+    .map(e => new Date(e.timestamp).getTime());
+  if (timestamps.length < 2) return null;
+
+  const minTs = Math.min(...timestamps);
+  const maxTs = Math.max(...timestamps);
+  const range = maxTs - minTs;
+  if (range <= 0) return null;
+
+  const groups = Array.from(agentGroups.values());
+
+  return (
+    <div style={{
+      padding: '8px 12px',
+      borderBottom: `1px solid ${C.line}`,
+    }}>
+      <div style={{ fontSize: 10, color: C.muted, marginBottom: 6 }}>Agent Timeline</div>
+      {/* Orchestrator bar */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+        <span style={{ fontSize: 10, color: C.muted, minWidth: 80, textAlign: 'right' }}>orchestrator</span>
+        <div style={{ flex: 1, height: 6, background: C.line, borderRadius: 3, position: 'relative' }}>
+          <div style={{ width: '100%', height: '100%', background: C.teal + '40', borderRadius: 3 }} />
+        </div>
+      </div>
+      {/* Subagent bars */}
+      {groups.map((g, i) => {
+        const childTs = g.children
+          .filter(e => e.timestamp)
+          .map(e => new Date(e.timestamp).getTime());
+        if (childTs.length === 0) return null;
+
+        const start = Math.min(...childTs);
+        const end = Math.max(...childTs);
+        const left = ((start - minTs) / range) * 100;
+        const width = Math.max(((end - start) / range) * 100, 1);
+        const color = AGENT_COLORS[i % AGENT_COLORS.length];
+        const statusColor = g.status === 'completed' ? C.green
+          : g.status === 'failed' ? C.red
+          : g.status === 'aborted' ? C.yellow : C.teal;
+
+        return (
+          <div key={g.agentId} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+            <span style={{ fontSize: 10, color, minWidth: 80, textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {g.agentId}
+            </span>
+            <div style={{ flex: 1, height: 6, background: C.line + '40', borderRadius: 3, position: 'relative' }}>
+              <div style={{
+                position: 'absolute',
+                left: `${left}%`,
+                width: `${width}%`,
+                height: '100%',
+                background: color + '80',
+                borderRadius: 3,
+                border: `1px solid ${color}`,
+              }} />
+            </div>
+            <span style={{
+              width: 6, height: 6, borderRadius: '50%',
+              background: statusColor,
+              flexShrink: 0,
+            }} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── Sample Detail ────────────────────────────────────────────────────
 function EvalSampleDetail({ sampleId, onClose }) {
   const [info, setInfo] = useState(null);
@@ -200,6 +472,9 @@ function EvalSampleDetail({ sampleId, onClose }) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [events.length]);
 
+  // Build hierarchical tree from flat events
+  const tree = useMemo(() => buildEventTree(events), [events]);
+
   if (loading) {
     return (
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.muted }}>
@@ -217,6 +492,10 @@ function EvalSampleDetail({ sampleId, onClose }) {
   }
 
   const statusColor = STATUS_COLORS[info.status] || C.muted;
+  const visibleEventCount = events.filter(e => e.event_type !== 'llm_start').length;
+  const agentCount = tree.agentGroups.size;
+  // Track color index for subagent groups
+  let groupColorIndex = 0;
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -239,56 +518,30 @@ function EvalSampleDetail({ sampleId, onClose }) {
         {info.run_id && <span>Run: <span style={{ color: C.text }}>{info.run_id}</span></span>}
         {info.error && <span>Error: <span style={{ color: C.red }}>{info.error}</span></span>}
       </div>
-      {/* Events */}
-      <div style={{ padding: '6px 12px', borderBottom: `1px solid ${C.line}`, fontSize: 12, color: C.muted }}>
-        Events: {events.filter(e => e.event_type !== 'llm_start').length}{info.status === 'running' && <span style={{ color: C.teal, marginLeft: 8, animation: 'pulse 1.5s infinite' }}>polling...</span>}
+      {/* Agent timeline */}
+      <AgentTimeline events={events} agentGroups={tree.agentGroups} />
+      {/* Events summary */}
+      <div style={{ padding: '6px 12px', borderBottom: `1px solid ${C.line}`, fontSize: 12, color: C.muted, display: 'flex', gap: 12, alignItems: 'center' }}>
+        <span>Events: {visibleEventCount}</span>
+        {agentCount > 0 && <span>Agents: {agentCount}</span>}
+        {info.status === 'running' && <span style={{ color: C.teal, animation: 'pulse 1.5s infinite' }}>polling...</span>}
       </div>
+      {/* Hierarchical event list */}
       <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto' }}>
         {events.length === 0 && (
           <div style={{ padding: 40, textAlign: 'center', color: C.muted, fontSize: 12 }}>
             {info.status === 'pending' ? 'Waiting to start...' : info.status === 'skipped' ? 'Sample was skipped' : 'No events recorded'}
           </div>
         )}
-        {events.map((ev, i) => {
-          const eventType = ev.event_type || '';
-          const agentPath = ev.agent_path || [];
-          const agentId = agentPath.slice(-1)[0] || '';
-          const data = ev.data || {};
-          const ts = ev.timestamp || '';
-          const shortTs = ts.length > 19 ? ts.substring(11, 19) : ts;
-
-          let icon = '\u25B8';
-          let color = C.teal;
-          let detail = eventType;
-          let hidden = false;
-
-          switch (eventType) {
-            case 'llm_start': hidden = true; break;
-            case 'tool_call': icon = '\u2192'; color = C.yellow; detail = data.tool_name || 'tool'; break;
-            case 'tool_result': icon = '\u2190'; color = C.green; detail = `${data.tool_name || 'tool'}: ${(typeof data.result === 'string' ? data.result : '').slice(0, 80)}`; break;
-            case 'llm_end': icon = '\u25C6'; color = C.purple; detail = (data.content || '').slice(0, 80) || `${(data.tool_calls || []).length} tool call(s)`; break;
-            case 'task_dispatch': icon = '\u25B6'; color = C.teal; detail = `dispatch: ${data.task_type || 'task'}`; break;
-            case 'task_complete': icon = '\u2713'; color = C.green; detail = 'completed'; break;
-            case 'task_fail': icon = '\u2717'; color = C.red; detail = data.error || 'failed'; break;
+        {tree.rootItems.map((item, i) => {
+          if (item.type === 'group') {
+            const group = tree.agentGroups.get(item.agentId);
+            if (!group) return null;
+            const ci = groupColorIndex++;
+            return <AgentEventGroup key={`group-${item.agentId}`} group={group} colorIndex={ci} />;
           }
-
-          if (hidden) return null;
-
-          return (
-            <CollapsibleContent
-              key={i}
-              title={
-                React.createElement('span', { style: { display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 } },
-                  React.createElement('span', { style: { color: C.muted, fontSize: 11, minWidth: 50 } }, shortTs),
-                  agentId && React.createElement('span', { style: { color: C.teal, fontSize: 11 } }, agentId),
-                  React.createElement('span', { style: { color } }, icon),
-                  React.createElement('span', { style: { color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, detail)
-                )
-              }
-            >
-              <JsonCard data={ev.data} title={eventType} />
-            </CollapsibleContent>
-          );
+          // Root-level event
+          return <EventRow key={`root-${i}`} ev={item.event} index={i} />;
         })}
       </div>
     </div>
@@ -373,12 +626,23 @@ function EvalPage() {
     return () => window.removeEventListener('eval_event', handleEvalEvent);
   }, [statusFilter]);
 
+  const [leftWidth, setLeftWidth] = useState(40);
+  const containerRef = useRef(null);
+
+  const handleDrag = useCallback((clientX) => {
+    const container = containerRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const pct = ((clientX - rect.left) / rect.width) * 100;
+    setLeftWidth(Math.max(20, Math.min(80, pct)));
+  }, []);
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <EvalProgressBar summary={summary} />
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+      <div ref={containerRef} style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {/* Sample list */}
-        <div style={{ width: selectedId ? '40%' : '100%', minWidth: 300, borderRight: selectedId ? `1px solid ${C.line}` : 'none', display: 'flex', flexDirection: 'column', transition: 'width 0.2s' }}>
+        <div style={{ width: selectedId ? `${leftWidth}%` : '100%', minWidth: 200, display: 'flex', flexDirection: 'column', transition: selectedId ? 'none' : 'width 0.2s' }}>
           <EvalSampleTable
             samples={samples}
             total={total}
@@ -393,12 +657,15 @@ function EvalPage() {
             pageSize={pageSize}
           />
         </div>
-        {/* Detail panel */}
+        {/* Drag handle + Detail panel */}
         {selectedId && (
-          <EvalSampleDetail
-            sampleId={selectedId}
-            onClose={() => setSelectedId(null)}
-          />
+          <>
+            <DragHandle onDrag={handleDrag} />
+            <EvalSampleDetail
+              sampleId={selectedId}
+              onClose={() => setSelectedId(null)}
+            />
+          </>
         )}
       </div>
     </div>

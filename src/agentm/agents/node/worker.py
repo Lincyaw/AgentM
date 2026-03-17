@@ -156,7 +156,10 @@ def build_worker_subgraph(
     # ------------------------------------------------------------------
     # Middleware pipeline (replaces inline budget/compression/trajectory)
     # ------------------------------------------------------------------
-    middlewares: list = [BudgetMiddleware(config.execution.max_steps)]
+    middlewares: list = [BudgetMiddleware(
+        config.execution.max_steps,
+        tool_call_budget=config.execution.tool_call_budget,
+    )]
     budget_mw: BudgetMiddleware = middlewares[0]  # type: ignore[assignment]
     middlewares.append(LoopDetectionMiddleware(threshold=5, window_size=15))
     if config.compression is not None:
@@ -402,6 +405,10 @@ class AgentPool:
     @property
     def worker_max_steps(self) -> int:
         return self._worker_config.execution.max_steps
+
+    @property
+    def worker_timeout(self) -> int:
+        return self._worker_config.execution.timeout
 
     @property
     def worker_self_reports_trajectory(self) -> bool:

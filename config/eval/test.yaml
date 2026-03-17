@@ -3,7 +3,7 @@
 
 # Experiment identifier — used to group results in the DB.
 # Change this for each new experiment to avoid mixing results.
-exp_id: "agentm-v2"
+exp_id: "agentm-v3"
 
 # Agent / model labels written to every result row for filtering in stat.
 # model_name is optional — auto-read from scenario orchestrator.model if omitted.

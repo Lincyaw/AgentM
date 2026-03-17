@@ -81,6 +81,7 @@ class ManagedTask:
     status: AgentRunStatus = AgentRunStatus.RUNNING
     current_step: int = 0
     max_steps: Optional[int] = None
+    timeout: Optional[int] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     duration_seconds: Optional[float] = None

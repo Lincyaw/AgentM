@@ -48,4 +48,3 @@ agents:
     execution:
       max_steps: 20
       timeout: 120
-      subgraph_mode: "node"

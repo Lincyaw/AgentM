@@ -104,10 +104,8 @@ class ExecutionConfig(BaseModel):
 
     max_steps: int = 20
     timeout: int = 120
-    interrupt_before: Optional[list[str]] = None
     tool_call_budget: Optional[int] = None
     dedup: Optional[DedupConfig] = None
-    subgraph_mode: str = "node"  # "react" | "node"
 
 
 class CompressionConfig(BaseModel):
