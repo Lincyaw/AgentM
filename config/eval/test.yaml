@@ -3,7 +3,7 @@
 
 # Experiment identifier — used to group results in the DB.
 # Change this for each new experiment to avoid mixing results.
-exp_id: "agentm-v1"
+exp_id: "agentm-v2"
 
 # Agent / model labels written to every result row for filtering in stat.
 # model_name is optional — auto-read from scenario orchestrator.model if omitted.
@@ -24,9 +24,7 @@ data:
     - "openrca2-lite"
 
 # Rollout parallelism.
-# NOTE: AgentM serialises DuckDB access internally, so true concurrency
-# requires multiple processes. Keep at 1 unless you use multiprocessing.
-concurrency: 1
+concurrency: 2
 
 # Cap the number of samples to roll out (null = all).
 max_samples: 2
