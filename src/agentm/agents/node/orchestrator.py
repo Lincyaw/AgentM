@@ -292,7 +292,12 @@ def create_node_orchestrator(
         import json as _json
 
         def _schema_to_example(schema_cls: type[BaseModel]) -> dict:
-            """Create a placeholder dict from Pydantic schema fields."""
+            """Create a placeholder dict from Pydantic schema fields.
+
+            Recursively expands nested BaseModel types so the LLM sees
+            the full structure (e.g. ``list[ComponentMapping]`` becomes
+            ``[{component_name: ..., service_name: ...}]``).
+            """
             example: dict = {}
             for name, field_info in schema_cls.model_fields.items():
                 ann = field_info.annotation
@@ -309,7 +314,17 @@ def create_node_orchestrator(
                     and hasattr(ann, "__origin__")
                     and ann.__origin__ is list
                 ):
-                    example[name] = []
+                    args = getattr(ann, "__args__", ())
+                    if (
+                        args
+                        and isinstance(args[0], type)
+                        and issubclass(args[0], BaseModel)
+                    ):
+                        example[name] = [_schema_to_example(args[0])]
+                    else:
+                        example[name] = []
+                elif isinstance(ann, type) and issubclass(ann, BaseModel):
+                    example[name] = _schema_to_example(ann)
                 else:
                     example[name] = f"<{field_info.description or name}>"
             return example
@@ -337,15 +352,24 @@ def create_node_orchestrator(
                 structured = (
                     result.model_dump() if hasattr(result, "model_dump") else result
                 )
+                logger.info(
+                    "synthesize attempt %d/%d succeeded, keys=%s",
+                    attempt + 1,
+                    1 + _SYNTH_MAX_RETRIES,
+                    list(structured.keys()) if isinstance(structured, dict) else type(structured).__name__,
+                )
                 break  # success
             except Exception as exc:
+                raw_json = _extract_raw_from_error(exc)
                 if attempt < _SYNTH_MAX_RETRIES:
-                    logger.info(
-                        "synthesize attempt %d failed, retrying with feedback: %s",
+                    logger.warning(
+                        "synthesize attempt %d/%d failed (%s), "
+                        "retrying with error feedback. raw_json_preview=%.300s",
                         attempt + 1,
+                        1 + _SYNTH_MAX_RETRIES,
                         exc,
+                        raw_json,
                     )
-                    raw_json = _extract_raw_from_error(exc)
                     attempt_messages.append(AIMessage(content=raw_json))
                     attempt_messages.append(
                         HumanMessage(
@@ -357,17 +381,26 @@ def create_node_orchestrator(
                         )
                     )
                 else:
-                    logger.warning(
-                        "synthesize structured output failed after %d attempts (%s), "
-                        "falling back to plain LLM",
+                    logger.error(
+                        "synthesize FAILED all %d attempts, last error: %s. "
+                        "Falling back to plain LLM. raw_json_preview=%.500s",
                         attempt + 1,
                         exc,
+                        raw_json,
                     )
                     try:
                         raw = await model_plain.ainvoke(attempt_messages)
                         raw_text = str(getattr(raw, "content", raw))
+                        logger.warning(
+                            "synthesize fallback produced raw_text (len=%d), "
+                            "preview=%.300s",
+                            len(raw_text),
+                            raw_text,
+                        )
                     except Exception as exc2:
-                        logger.warning("synthesize fallback also failed: %s", exc2)
+                        logger.error(
+                            "synthesize fallback also FAILED: %s", exc2,
+                        )
                         raw_text = ""
                     structured = {"raw_text": raw_text}
 
