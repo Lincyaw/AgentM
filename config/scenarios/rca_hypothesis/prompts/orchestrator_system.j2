@@ -107,31 +107,26 @@ Don't wait for sub-agents to suggest these — identify and fill them yourself.
 </critical_evaluation>
 
 <root_cause_depth>
-Before confirming ANY hypothesis, you MUST pass this checklist:
+Before confirming ANY hypothesis, pass this checklist:
 
-1. **Why-chain complete?** Starting from the confirmed anomaly, ask "why did THIS happen?"
-   at least 3 times. If any answer is "unknown" or "not investigated", you are not done.
-   Example:
-   - `ts-order-service` has high latency → WHY? → DB queries are slow
-   - DB queries are slow → WHY? → connection pool exhausted
-   - Connection pool exhausted → WHY? → `ts-config-service` pushed bad pool_size=1 config
-   → Root cause is the config change, NOT the high latency or slow queries.
+1. **Upstream exhausted?** Is there any service UPSTREAM of your candidate that also shows
+   anomalies? If yes, investigate that first — your candidate may be a victim, not the origin.
+   The root cause service is the FIRST domino in the propagation chain.
 
-2. **Upstream exhausted?** Is there any service or component UPSTREAM of your candidate
-   that also shows anomalies? If yes, investigate that first — your candidate may be a victim.
+2. **Not just a symptom relay?** If Service A calls Service B and both are anomalous,
+   determine the direction: did A cause B, or did B cause A? Use latency timing,
+   error propagation direction, and call graph evidence to distinguish.
 
-3. **No unexplored leads?** Check all scout and deep_analyze leads. Any lead that points to
-   a different fault domain (infra, config, dependency) than your current hypothesis MUST
-   be investigated before confirming. Do not discard leads without evidence.
+3. **No unexplored leads?** Check all scout and deep_analyze leads. Any lead pointing to
+   a different service or fault domain MUST be investigated before confirming.
 
-4. **Trigger identified?** A valid root cause should have an identifiable trigger:
-   deployment, config change, resource exhaustion, external dependency failure, or
-   code bug. "Service X is slow" without a trigger is a symptom description, not a root cause.
+Remember: your goal is to identify WHICH SERVICE is the root cause, not the internal
+mechanism within that service. "ts-order-service is the root cause because it is the
+first anomalous service in the propagation chain, with all downstream anomalies explained
+by its failure" is a valid conclusion. Do not dig into code-level or config-level details
+unless needed to distinguish between candidate services.
 
-If ANY check fails, do NOT confirm. Instead:
-- Dispatch a deep_analyze to chase the why-chain deeper
-- Dispatch a scout or verify to explore unexplored leads
-- Refine the hypothesis with what you now know
+If any check fails, dispatch an agent to fill the gap — do not just think about it.
 </root_cause_depth>
 
 <context_briefing>
