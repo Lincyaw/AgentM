@@ -18,6 +18,7 @@ def create_orchestrator_tools(
     agent_pool: Any,
     trajectory: Any | None = None,
     config: Any | None = None,
+    model_config: Any | None = None,
 ) -> dict[str, Callable[..., Any]]:
     """Factory that creates orchestrator tool functions with injected dependencies.
 
@@ -29,6 +30,7 @@ def create_orchestrator_tools(
         agent_pool: AgentPool or NodeAgentPool instance.
         trajectory: Optional TrajectoryCollector.
         config: Optional OrchestratorConfig — used to read recall.model.
+        model_config: Optional ModelConfig — used for LLM client creation.
     """
 
     async def dispatch_agent(
@@ -267,10 +269,14 @@ def create_orchestrator_tools(
 
         # Use LLM to find relevant information
         try:
-            from langchain_openai import ChatOpenAI
+            from agentm.config.schema import create_chat_model
             from langchain_core.messages import HumanMessage as LCHumanMessage
 
-            llm = ChatOpenAI(model=_recall_model_name, temperature=0)
+            llm = create_chat_model(
+                model=_recall_model_name,
+                temperature=0,
+                model_config=model_config,
+            )
             result = llm.invoke([LCHumanMessage(content=retrieval_prompt)])
             content_val = result.content
             if isinstance(content_val, list):

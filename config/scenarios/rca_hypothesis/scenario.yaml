@@ -27,7 +27,7 @@ orchestrator:
   feature_gates:
     adversarial_review: false
     parallel_verification: false
-    auto_refine_partial: true
+    auto_refine_partial: false
     min_verifications_before_confirm: 2
     deep_exploration: false
 

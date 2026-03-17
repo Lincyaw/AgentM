@@ -24,17 +24,18 @@ The prompt must instruct the LLM to always include a <decision> tag.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any, Callable, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel
 
 from agentm.config.schema import OrchestratorConfig
+from agentm.config.schema import create_chat_model
 from agentm.middleware import NodePipeline
 from agentm.middleware.trajectory import TrajectoryMiddleware
 from agentm.core.prompt import load_prompt_template
@@ -52,6 +53,46 @@ _SYNTH_MAX_RETRIES = 2
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_MSG_PREVIEW_LEN = int(os.environ.get("AGENTM_MSG_PREVIEW_LEN", "0"))
+
+
+def _debug_log_messages(messages: list[Any], round_num: int) -> None:
+    """Log the full message list sent to the LLM for debugging.
+
+    Enable with DEBUG log level:
+        AGENTM_LOG_LEVEL=DEBUG uv run agentm run ...
+
+    Control content truncation:
+        AGENTM_MSG_PREVIEW_LEN=500  — truncate each message to 500 chars
+        AGENTM_MSG_PREVIEW_LEN=0    — no truncation (default)
+    """
+    limit = _MSG_PREVIEW_LEN
+    parts: list[str] = [f"\n{'=' * 60} LLM INPUT (round {round_num}) {'=' * 60}"]
+    for i, msg in enumerate(messages):
+        role = getattr(msg, "type", type(msg).__name__)
+        content = getattr(msg, "content", "")
+        tool_calls = getattr(msg, "tool_calls", None)
+
+        header = f"[{i}] {role}"
+        if tool_calls:
+            tool_names = ", ".join(tc.get("name", "?") for tc in tool_calls)
+            header += f"  tools=[{tool_names}]"
+
+        parts.append(f"\n--- {header} ---")
+        if isinstance(content, str) and content:
+            if limit and len(content) > limit:
+                parts.append(content[:limit] + f"\n... ({len(content)} chars total)")
+            else:
+                parts.append(content)
+        elif content:
+            text = str(content)
+            if limit and len(text) > limit:
+                parts.append(text[:limit] + f"\n... ({len(text)} chars total)")
+            else:
+                parts.append(text)
+    parts.append(f"\n{'=' * 60} END LLM INPUT ({len(messages)} messages) {'=' * 60}")
+    logger.debug("\n".join(parts))
 
 
 def _extract_raw_from_error(exc: Exception) -> str:
@@ -124,20 +165,11 @@ def create_node_orchestrator(
     # ------------------------------------------------------------------
     # Model setup
     # ------------------------------------------------------------------
-    llm_kwargs: dict[str, Any] = {
-        "model": config.model,
-        "temperature": config.temperature,
-    }
-    if model_config is not None:
-        if getattr(model_config, "api_key", None):
-            llm_kwargs["api_key"] = model_config.api_key
-        if getattr(model_config, "base_url", None):
-            llm_kwargs["base_url"] = model_config.base_url
-        if getattr(model_config, "rate_limit", None):
-            llm_kwargs["rate_limiter"] = model_config.rate_limit.create_rate_limiter()
-        llm_kwargs["max_retries"] = model_config.max_retries
-
-    model_plain = ChatOpenAI(**llm_kwargs)
+    model_plain = create_chat_model(
+        model=config.model,
+        temperature=config.temperature,
+        model_config=model_config,
+    )
     model_with_tools = model_plain.bind_tools(tools)
 
     # ------------------------------------------------------------------
@@ -150,7 +182,7 @@ def create_node_orchestrator(
     if compression_cfg is not None and compression_cfg.enabled:
         from agentm.middleware.compression import build_compression_hook
 
-        compression_hook = build_compression_hook(compression_cfg)
+        compression_hook = build_compression_hook(compression_cfg, model_config=model_config)
 
     # Structured output schema for synthesize node (optional)
     output_schema = None
@@ -172,23 +204,31 @@ def create_node_orchestrator(
     # Message preparation helpers
     # ------------------------------------------------------------------
 
-    def _build_system_prompt(state: dict, round_num: int) -> str:
-        """Rebuild system prompt with current working memory and round context."""
+    # Build the static system prompt once — it never changes across rounds.
+    # Dynamic content (notebook/context, round info) goes into a user message
+    # prepended to the history, enabling prompt caching on the system message.
+    if system_prompt_template:
+        _static_system_prompt: str = load_prompt_template(
+            system_prompt_template,
+            # Pass empty strings so templates render without errors.
+            # The actual content is injected as a user message.
+            notebook="",
+            context="",
+        )
+    else:
+        _static_system_prompt = "You are an agent orchestrator."
+
+    _system_msg = SystemMessage(content=_static_system_prompt)
+
+    def _build_context_message(state: dict, round_num: int) -> HumanMessage:
+        """Build a user message with dynamic context: notebook/state + round info."""
         context_text = _format_context(state)
 
-        if system_prompt_template:
-            # Pass notebook= for backward compat with RCA prompt templates that
-            # use {{ notebook }}, and context= for new templates.
-            base = load_prompt_template(
-                system_prompt_template,
-                notebook=context_text,
-                context=context_text,
-            )
-        else:
-            base = f"You are an agent orchestrator.\n\n{context_text}"
+        parts: list[str] = []
+        if context_text:
+            parts.append(f"<current_state>\n{context_text}\n</current_state>")
 
-        # Inject round context and finalize signal
-        round_block = f"\n\n<round_context>\nRound: {round_num}/{max_rounds}\n"
+        round_block = f"<round_context>\nRound: {round_num}/{max_rounds}\n"
         if round_num >= max_rounds:
             round_block += (
                 "\n⚠️ LAST ROUND — you MUST output "
@@ -201,20 +241,47 @@ def create_node_orchestrator(
                 "Consider finalizing if evidence is sufficient.\n"
             )
         round_block += "</round_context>"
+        parts.append(round_block)
 
-        return base + round_block
+        # Nudge: prompt the LLM to evaluate progress and decide next action
+        parts.append(
+            "<next_action>\n"
+            "Review the current state above. Then decide:\n"
+            "1. Is there enough cross-validated evidence to confirm a root cause? "
+            "If yes, finalize.\n"
+            "2. Are there blind spots, unexplored leads, or untested hypotheses? "
+            "If yes, dispatch the right agent type.\n"
+            "3. Is the current hypothesis a SYMPTOM rather than a root cause? "
+            "If yes, dig deeper with deep_analyze.\n"
+            "</next_action>"
+        )
+
+        return HumanMessage(content="\n\n".join(parts))
 
     def _prepare_messages(state: dict, round_num: int) -> list[Any]:
-        """Build message list: system prompt + history, with optional compression."""
-        system_msg = SystemMessage(content=_build_system_prompt(state, round_num))
+        """Build message list for the LLM call.
+
+        Layout (optimised for prompt caching and recency bias):
+            [0]   SystemMessage   — static prompt (cacheable prefix)
+            [1..N] history        — recent conversation messages
+            [N+1] HumanMessage    — notebook + service profiles + round context
+
+        The state snapshot is placed LAST so it sits closest to the
+        generation cursor, maximising the LLM's attention on current
+        investigation state.
+        """
+        context_msg = _build_context_message(state, round_num)
         history = list(state.get("messages", []))
-        messages = [system_msg, *history]
+        messages = [_system_msg, *history, context_msg]
 
         if compression_hook is not None:
             hook_out = compression_hook({"messages": messages})
-            return hook_out.get("llm_input_messages") or hook_out.get(
+            messages = hook_out.get("llm_input_messages") or hook_out.get(
                 "messages", messages
             )
+
+        if logger.isEnabledFor(logging.DEBUG):
+            _debug_log_messages(messages, round_num)
 
         return messages
 

@@ -8,13 +8,14 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolCallId, StructuredTool
 from langgraph.types import Command
 
-from agentm.scenarios.rca.enums import HypothesisStatus
+from agentm.scenarios.rca.hypothesis_store import HypothesisStore
 from agentm.scenarios.rca.service_profile import ServiceProfileStore
 
 
 def create_rca_tools(
     trajectory: Any | None = None,
     profile_store: ServiceProfileStore | None = None,
+    hypothesis_store: HypothesisStore | None = None,
 ) -> dict[str, Any]:
     """Create RCA-specific orchestrator tools.
 
@@ -42,8 +43,16 @@ def create_rca_tools(
         parent_id: Optional[str] = None,
         tool_call_id: Annotated[str, InjectedToolCallId] = "",
     ) -> Command:
-        """Create or update a hypothesis in the DiagnosticNotebook."""
-        HypothesisStatus(status)  # validate the value matches enum
+        """Create or update a hypothesis in the investigation."""
+        if hypothesis_store is not None:
+            hypothesis_store.update(
+                id=id,
+                description=description,
+                status=status,
+                evidence_summary=evidence_summary,
+                parent_id=parent_id,
+            )
+
         content = f"Hypothesis {id} updated: {status} — {description}"
 
         if trajectory is not None:
@@ -70,7 +79,10 @@ def create_rca_tools(
         id: str,
         tool_call_id: Annotated[str, InjectedToolCallId] = "",
     ) -> Command:
-        """Remove a hypothesis from the DiagnosticNotebook."""
+        """Remove a hypothesis from the investigation."""
+        if hypothesis_store is not None:
+            hypothesis_store.remove(id)
+
         if trajectory is not None:
             await trajectory.record(
                 event_type="hypothesis_update",

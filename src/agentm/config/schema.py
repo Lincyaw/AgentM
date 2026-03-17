@@ -5,7 +5,7 @@ Fully implemented — these are value objects validated at startup.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -33,6 +33,54 @@ class ModelConfig(BaseModel):
     base_url: Optional[str] = None
     rate_limit: Optional[RateLimitConfig] = None
     max_retries: int = 20
+    provider: Literal["openai", "anthropic"] = "openai"
+
+
+def create_chat_model(
+    model: str,
+    temperature: float = 0,
+    model_config: ModelConfig | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Create a ChatOpenAI or ChatAnthropic instance based on model_config.provider.
+
+    Centralizes all LLM client instantiation so that switching between
+    OpenAI-compatible and Anthropic endpoints requires only a config change.
+
+    Returns:
+        BaseChatModel instance (ChatOpenAI or ChatAnthropic).
+    """
+    llm_kwargs: dict[str, Any] = {
+        "model": model,
+        "temperature": temperature,
+        **kwargs,
+    }
+
+    provider = "openai"
+    if model_config is not None:
+        provider = model_config.provider
+        if model_config.api_key:
+            llm_kwargs["api_key"] = model_config.api_key
+        if model_config.base_url:
+            llm_kwargs["base_url"] = model_config.base_url
+        if model_config.rate_limit is not None:
+            llm_kwargs["rate_limiter"] = model_config.rate_limit.create_rate_limiter()
+        llm_kwargs["max_retries"] = model_config.max_retries
+
+    if provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+
+        # ChatAnthropic uses 'anthropic_api_key', not 'api_key'
+        if "api_key" in llm_kwargs:
+            llm_kwargs["anthropic_api_key"] = llm_kwargs.pop("api_key")
+        # ChatAnthropic uses 'anthropic_api_url', not 'base_url'
+        if "base_url" in llm_kwargs:
+            llm_kwargs["anthropic_api_url"] = llm_kwargs.pop("base_url")
+        return ChatAnthropic(**llm_kwargs)
+
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(**llm_kwargs)
 
 
 class StorageBackendConfig(BaseModel):

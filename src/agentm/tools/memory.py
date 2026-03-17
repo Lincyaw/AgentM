@@ -65,7 +65,7 @@ class MemoryStore:
                 )
                 lines.append(f"[{i}] {role.upper()}: [tool_calls: {tc_str}]")
             elif content:
-                preview = content[:500] + ("..." if len(content) > 500 else "")
+                preview = content
                 lines.append(f"[{i}] {role.upper()}: {preview}")
             else:
                 lines.append(f"[{i}] {role.upper()}: (empty)")
