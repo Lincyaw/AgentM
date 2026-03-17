@@ -202,7 +202,7 @@ function MessageBubble({ msg, index }) {
 function MessageListView({ llmStartEvents }) {
   const [selectedTurn, setSelectedTurn] = useState(llmStartEvents.length - 1);
   const turn = llmStartEvents[selectedTurn];
-  const fullMessages = turn?.data?.full_messages || turn?.data?.messages || [];
+  const fullMessages = turn?.data?.messages || [];
 
   useEffect(() => {
     setSelectedTurn(llmStartEvents.length - 1);
@@ -226,12 +226,12 @@ function MessageListView({ llmStartEvents }) {
         >
           {llmStartEvents.map((ev, i) => (
             <option key={i} value={i}>
-              Turn {i + 1} — {ev.data?.message_count || 0} messages
+              Turn {i + 1} — {ev.data?.new_message_count || ev.data?.message_count || 0} new / {ev.data?.message_count || 0} total
             </option>
           ))}
         </select>
         <span style={{ fontSize: 10, color: C.muted }}>
-          {fullMessages.length} messages{turn?.data?.full_messages ? '' : ' (truncated)'}
+          {fullMessages.length} new messages
         </span>
       </div>
       {/* Messages */}
