@@ -292,8 +292,12 @@ def vault_traverse(
 
 
 @mcp.tool()
-def vault_lint(ctx: Context = None) -> str:
-    """Check vault health: find dead [[wikilinks]] and orphan notes with no connections."""
+def vault_lint(request: str, ctx: Context = None) -> str:
+    """Check vault health: find dead [[wikilinks]] and orphan notes with no connections.
+
+    Args:
+        request: A short description of what you want to check (e.g. "check all links").
+    """
     vc = _vc(ctx)
     conn = vc.vault._get_conn()
     result = lint(conn)
