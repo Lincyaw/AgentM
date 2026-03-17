@@ -156,7 +156,7 @@ async def _stream_and_finalize(
     except KeyboardInterrupt:
         console.print(f"\n[yellow][!] {label} interrupted by user.[/]")
     except Exception as e:
-        console.print(f"\n[red][ERROR] {e}[/]")
+        console.print(f"\n[red][ERROR] {e}[/red]")
         if verbose:
             traceback.print_exc()
     finally:
@@ -506,7 +506,7 @@ async def resume_investigation(
     except KeyboardInterrupt:
         console.print("\n[yellow][!] Interrupted by user.[/]")
     except Exception as e:
-        console.print(f"\n[red][ERROR] {e}[/]")
+        console.print(f"\n[red][ERROR] {e}[/red]")
         if verbose:
             traceback.print_exc()
     finally:
