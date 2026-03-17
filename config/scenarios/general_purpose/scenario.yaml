@@ -1,0 +1,49 @@
+system:
+  type: "general_purpose"
+
+orchestrator:
+  model: "gpt-4o"
+  temperature: 0.7
+  orchestrator_mode: "node"
+  max_rounds: 30
+
+  prompts:
+    system: "prompts/orchestrator_system.j2"
+
+  tools:
+    - dispatch_agent
+    - check_tasks
+    - skill_list
+    - skill_load
+    - skill_search
+    - vault_read
+    - vault_search
+    - vault_write
+    - vault_edit
+    - vault_list
+
+  compression:
+    enabled: true
+    compression_threshold: 0.8
+    preserve_latest_n: 3
+
+  feature_gates:
+    auto_skill_suggestion: true
+    persist_conversation_facts: true
+
+agents:
+  worker:
+    model: "gpt-4o-mini"
+    temperature: 0.3
+    task_type_prompts:
+      execute: "prompts/task_types/execute.j2"
+    tools:
+      - vault_read
+      - vault_search
+      - vault_list
+    execution:
+      max_steps: 20
+      timeout: 120
+      dedup:
+        enabled: true
+        max_cache_size: 30

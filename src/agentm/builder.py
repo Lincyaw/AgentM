@@ -31,7 +31,7 @@ from agentm.agents.node.worker import AgentPool
 from agentm.config.schema import ScenarioConfig, StorageConfig
 from agentm.core.backend import StorageBackend
 from agentm.core.state_registry import get_state_schema
-from agentm.core.strategy import ReasoningStrategy
+from agentm.core.strategy import ReasoningStrategy, get_scenario_tools
 from agentm.core.task_manager import TaskManager
 from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
@@ -40,25 +40,6 @@ from agentm.models.state import S
 from agentm.tools import memory as memory_module
 from agentm.tools.orchestrator import create_orchestrator_tools
 from agentm.tools.think import think
-
-
-def _resolve_format_context(system_type: str) -> Any:
-    """Lazily resolve the context formatter for a system type.
-
-    Imports scenario formatters on demand.  By this point
-    ``scenarios.discover()`` has already run.
-    """
-    if system_type == "hypothesis_driven":
-        from agentm.scenarios.rca.formatters import format_rca_context
-
-        return format_rca_context
-    if system_type == "memory_extraction":
-        from agentm.scenarios.memory_extraction.formatters import (
-            format_memory_extraction_context,
-        )
-
-        return format_memory_extraction_context
-    return None
 
 
 def _serialize_notebook(notebook: Any) -> dict[str, Any]:
@@ -579,32 +560,17 @@ class AgentSystemBuilder:
             vault = MarkdownVault(vault_dir)
             VAULT_TOOLS = create_vault_tools(vault)
 
-            # Load scenario-specific tools based on system_type
-            format_context = None  # may be overridden by scenario-specific block below
-            if system_type == "hypothesis_driven":
-                from functools import partial
+            # Scenario-specific tools via strategy protocol (no if/else branching)
+            from agentm.core.strategy_registry import get_strategy
 
-                from agentm.scenarios.rca.formatters import format_rca_context
-                from agentm.scenarios.rca.service_profile import ServiceProfileStore
-                from agentm.scenarios.rca.tools import create_rca_tools
-
-                profile_store = ServiceProfileStore()
-                rca_tools = create_rca_tools(
-                    trajectory=trajectory, profile_store=profile_store
-                )
-
-                # Extract worker tools before registering orchestrator tools
-                worker_profile_tools = rca_tools.pop("_worker_profile_tools", [])
-                injected_tools.update(rca_tools)
-
-                # Wire profile store into format_context (replaces lazy-resolved one)
-                format_context = partial(
-                    format_rca_context, profile_store=profile_store
-                )
-
-                # Inject profile tools into worker pool
-                if worker_profile_tools:
-                    agent_pool._extra_worker_tools = worker_profile_tools
+            strategy = get_strategy(system_type)
+            bundle = get_scenario_tools(
+                strategy, vault=vault, trajectory=trajectory
+            )
+            injected_tools.update(bundle.orchestrator_tools)
+            if bundle.worker_tools:
+                agent_pool._extra_worker_tools = bundle.worker_tools
+            format_context = bundle.format_context_override
 
             # Wire trajectory into task_manager
             if trajectory is not None:
@@ -677,7 +643,7 @@ class AgentSystemBuilder:
             # Resolve state schema and context formatter for this system type
             state_schema = get_state_schema(system_type)
             if format_context is None:
-                format_context = _resolve_format_context(system_type)
+                format_context = strategy.format_context
 
             graph = create_node_orchestrator(
                 config=scenario_config.orchestrator,

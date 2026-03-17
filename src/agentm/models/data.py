@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 from agentm.models.enums import AgentRunStatus
 
@@ -48,6 +48,23 @@ class PhaseDefinition:
     next_phases: list[str] = field(default_factory=list)
     on_enter: Optional[object] = None
     on_exit: Optional[object] = None
+
+
+# --- Scenario Tool Bundle (SDK) ---
+
+
+@dataclass
+class ScenarioToolBundle:
+    """Tools and overrides returned by a strategy's ``create_scenario_tools``.
+
+    Allows each scenario to supply its own orchestrator tools, worker tools,
+    and format_context override without the builder needing scenario-specific
+    knowledge.
+    """
+
+    orchestrator_tools: dict[str, Any] = field(default_factory=dict)
+    worker_tools: list[Any] = field(default_factory=list)
+    format_context_override: Optional[Callable[..., str]] = None
 
 
 # --- TaskManager (SDK) ---
