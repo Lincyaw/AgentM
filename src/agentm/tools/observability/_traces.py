@@ -72,6 +72,7 @@ async def _query_trace_stats(
 
 @_safe_tool
 async def query_trace_stats_abnormal(
+    request: str,
     group_by: str = "service_name",
     interval: str = "5m",
     start_time: str | None = None,
@@ -84,6 +85,7 @@ async def query_trace_stats_abnormal(
     grouped by service or span name.
 
     Args:
+        request: A short description of what you want to look up.
         group_by: "service_name" or "span_name" (default "service_name").
         interval: Bucket interval -- "1m", "5m", or "15m" (default "5m").
         start_time: Optional start time (ISO format).
@@ -97,6 +99,7 @@ async def query_trace_stats_abnormal(
 
 @_safe_tool
 async def query_trace_stats_normal(
+    request: str,
     group_by: str = "service_name",
     interval: str = "5m",
     start_time: str | None = None,
@@ -108,6 +111,7 @@ async def query_trace_stats_normal(
     Use to compare baseline latency against the abnormal period.
 
     Args:
+        request: A short description of what you want to look up.
         group_by: "service_name" or "span_name" (default "service_name").
         interval: Bucket interval -- "1m", "5m", or "15m" (default "5m").
         start_time: Optional start time (ISO format).
@@ -164,6 +168,7 @@ async def _get_service_call_graph(
 
 @_safe_tool
 async def get_service_call_graph_abnormal(
+    request: str,
     start_time: str | None = None,
     end_time: str | None = None,
     filters: str | None = None,
@@ -173,6 +178,7 @@ async def get_service_call_graph_abnormal(
     Builds service-to-service edges with call counts, latency, and errors.
 
     Args:
+        request: A short description of what you want to look up.
         start_time: Optional start time (ISO format).
         end_time: Optional end time (ISO format).
         filters: Optional JSON filters on child spans.
@@ -186,6 +192,7 @@ async def get_service_call_graph_abnormal(
 
 @_safe_tool
 async def get_service_call_graph_normal(
+    request: str,
     start_time: str | None = None,
     end_time: str | None = None,
     filters: str | None = None,
@@ -195,6 +202,7 @@ async def get_service_call_graph_normal(
     Use to compare baseline call patterns against the abnormal period.
 
     Args:
+        request: A short description of what you want to look up.
         start_time: Optional start time (ISO format).
         end_time: Optional end time (ISO format).
         filters: Optional JSON filters on child spans.

@@ -10,6 +10,7 @@ from agentm.tools.observability._core import _enforce_token_limit, _query, _safe
 
 @_safe_tool
 async def get_deployment_graph(
+    request: str,
     service_name: str | None = None,
 ) -> str:
     """Infrastructure deployment topology: which services run on which pods and nodes.
@@ -18,6 +19,7 @@ async def get_deployment_graph(
     resource attributes during the abnormal period.
 
     Args:
+        request: A short description of what you want to look up.
         service_name: Optional filter to show only this service's deployment.
 
     Returns:

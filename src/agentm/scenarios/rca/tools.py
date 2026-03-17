@@ -251,12 +251,14 @@ def create_rca_tools(
             return content
 
         def query_service_profile_worker(
+            request: str,
             service_names: str = "",
             anomalous_only: bool = False,
         ) -> str:
             """Query the shared Service Profile store.
 
             Args:
+                request: A short description of what you want to look up.
                 service_names: One or more service names, comma-separated.
                     E.g. "serviceA" or "serviceA,serviceB,serviceC".
                     Empty string returns ALL profiles grouped by anomalous/healthy.
