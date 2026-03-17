@@ -408,11 +408,17 @@ class TaskManager:
 
 
 class SmartWaitStrategy:
-    """Intelligent waiting strategy for check_tasks to reduce polling frequency."""
+    """Linear-backoff waiting strategy for check_tasks.
+
+    Starts at 60 s, adds 30 s after each poll, caps at 300 s.
+    """
+
+    _BASE: float = 60.0
+    _INCREMENT: float = 30.0
+    _MAX: float = 300.0
 
     def __init__(self) -> None:
-        self._wait_history: dict[str, list[float]] = {}  # task_id -> [wait_times...]
-        self._task_patterns: dict[str, float] = {}  # (agent_id, task_type) -> avg_completion_time
+        self._poll_counts: dict[str, int] = {}  # task_id -> polls so far
 
     def calculate_wait_time(
         self,
@@ -423,55 +429,15 @@ class SmartWaitStrategy:
         current_step: int,
         max_steps: int | None,
     ) -> float:
-        """Calculate optimal wait time based on task progress and history."""
-
-        # Base wait times by task type (in seconds)
-        base_waits = {
-            "scout": 15,      # scout tasks need more time for data collection
-            "verify": 10,     # verify tasks are usually faster
-            "deep_analyze": 20 # deep_analyze tasks need most time
-        }
-
-        base_wait = base_waits.get(task_type, 12)  # default to 12s if unknown type
-
-        # Get iteration count for this task
-        iterations = len(self._wait_history.get(task_id, []))
-
-        # Progress-based adjustments (take precedence over time-based)
-        if max_steps is not None and max_steps > 0 and current_step > 0:
-            progress = current_step / max_steps
-            if progress >= 0.9:  # Near completion (>=90%), reduce wait
-                return 6  # Fixed short wait when almost done
-            elif progress >= 0.7:  # Most way done (>=70%), moderate wait
-                return int(base_wait * 0.7)
-            # If progress < 0.7, continue to time-based logic
-
-        # Time-based exponential backoff
-        if elapsed_seconds > 180:  # Task running > 3 minutes
-            # Exponential backoff: 15, 22, 34, 51, 76...
-            factor = 1.5 ** min(iterations, 6)  # Cap at 6 iterations
-            wait_time = min(int(base_wait * factor), 90)  # Max 90s wait
-        elif elapsed_seconds > 120:  # Task running > 2 minutes
-            factor = 1.3 ** min(iterations, 4)
-            wait_time = min(int(base_wait * factor), 45)
-        elif elapsed_seconds > 60:  # Task running > 1 minute
-            factor = 1.2 ** min(iterations, 3)
-            wait_time = min(int(base_wait * factor), 30)
-        else:
-            # Early stage, use base wait with slight increase per iteration
-            wait_time = base_wait + (iterations * 2)
-
-        # Record this wait time for history
-        if task_id not in self._wait_history:
-            self._wait_history[task_id] = []
-        self._wait_history[task_id].append(wait_time)
-
-        return wait_time
+        """Return seconds to wait before the next check_tasks call."""
+        n = self._poll_counts.get(task_id, 0)
+        wait = min(self._BASE + n * self._INCREMENT, self._MAX)
+        self._poll_counts[task_id] = n + 1
+        return wait
 
     def record_completion(self, task_id: str, duration_seconds: float) -> None:
-        """Record task completion time for future pattern learning."""
-        # Clean up history to prevent memory leaks
-        self._wait_history.pop(task_id, None)
+        """Clean up state for a finished task."""
+        self._poll_counts.pop(task_id, None)
 
 
 # Global smart wait strategy instance
