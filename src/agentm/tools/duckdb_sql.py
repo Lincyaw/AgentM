@@ -22,19 +22,14 @@ from __future__ import annotations
 
 import contextvars
 import json
-import math
 import os
 import tempfile
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import duckdb
 
-# ---------------------------------------------------------------------------
-# Token budget (same constant used across observability tools)
-# ---------------------------------------------------------------------------
-TOKEN_LIMIT = 5000
+from agentm.tools._shared import enforce_token_budget, serialize_for_json
 
 
 # ---------------------------------------------------------------------------
@@ -81,65 +76,6 @@ def register_tables(tables: dict[str, TableSource]) -> None:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-def _serialize(obj: Any) -> Any:
-    """Recursively convert datetime / NaN / Inf to JSON-safe values."""
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
-        return None
-    if isinstance(obj, dict):
-        return {k: _serialize(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_serialize(item) for item in obj]
-    return obj
-
-
-def _estimate_tokens(text: str) -> int:
-    return (len(text) + 2) // 3
-
-
-def _enforce_budget(payload: str, context: str) -> str:
-    """Truncate oversized results and embed a hint instead of blowing the budget."""
-    if _estimate_tokens(payload) <= TOKEN_LIMIT:
-        return payload
-
-    estimated = _estimate_tokens(payload)
-    ratio = TOKEN_LIMIT / estimated
-    parsed = json.loads(payload)
-
-    if isinstance(parsed, list):
-        original = len(parsed)
-        keep = max(1, int(original * ratio * 0.8))
-        return json.dumps(
-            {
-                "_truncated": True,
-                "_total_rows": original,
-                "_rows_returned": keep,
-                "_context": context,
-                "_suggestion": (
-                    "Result too large. Narrow with WHERE / LIMIT, "
-                    "select fewer columns, or use aggregation."
-                ),
-                "data": parsed[:keep],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-
-    # Scalar / unknown shape — return a budget-exceeded error
-    return json.dumps(
-        {
-            "error": "Result exceeds token budget",
-            "context": context,
-            "estimated_tokens": estimated,
-            "token_limit": TOKEN_LIMIT,
-            "suggestion": "Add WHERE / LIMIT or use aggregation to reduce output size.",
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
 
 
 def _open_conn() -> tuple[duckdb.DuckDBPyConnection, dict[str, str | list[dict]]]:
@@ -313,9 +249,9 @@ async def query_sql(sql: str) -> str:
         result = conn.execute(sql).fetchall()
         columns = [desc[0] for desc in conn.description]
         rows = [dict(zip(columns, row, strict=False)) for row in result]
-        serialized = _serialize(rows)
+        serialized = serialize_for_json(rows)
         payload = json.dumps(serialized, ensure_ascii=False, indent=2)
-        return _enforce_budget(payload, "query_sql")
+        return enforce_token_budget(payload, "query_sql")
 
     except duckdb.Error as e:
         error_msg = str(e)

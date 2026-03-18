@@ -6,10 +6,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from agentm.tools._shared import enforce_token_budget
 from agentm.tools.observability._core import (
     _FILE_MAP,
     _data_dir_var,
-    _enforce_token_limit,
     _query,
 )
 
@@ -66,7 +66,7 @@ def _build_time_clause(
 
 def _result(rows: list[dict], context: str) -> str:
     payload = json.dumps(rows, ensure_ascii=False, indent=2)
-    return _enforce_token_limit(payload, context)
+    return enforce_token_budget(payload, context)
 
 
 def _empty_hint(file: str, context: str, extra: dict | None = None) -> str:

@@ -102,21 +102,17 @@ class TestOrchestratorCreationImports:
 class TestHooksModuleExports:
     """Ref: designs/sub-agent.md § Instruction Queue, designs/orchestrator.md § Instruction Injection
 
-    The hooks module must export both hook builders.
+    The hooks module must export the instruction hook builder.
+    Hook chaining is handled by compose_middleware / NodePipeline.
 
-    Bug: build_combined_hook missing → Sub-Agents can't chain instruction
-    injection with compression → one of the two hooks silently doesn't fire.
+    Bug: build_instruction_hook missing → Sub-Agents can't inject
+    instructions → pending instructions silently dropped.
     """
 
     def test_build_instruction_hook_exists(self):
         from agentm.middleware.instruction import build_instruction_hook
 
         assert callable(build_instruction_hook)
-
-    def test_build_combined_hook_exists(self):
-        from agentm.middleware.instruction import build_combined_hook
-
-        assert callable(build_combined_hook)
 
 
 class TestCompressionRefLayerValues:

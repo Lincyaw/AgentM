@@ -10,8 +10,7 @@ task manager) to be generic over user-defined state types that extend
 
 from __future__ import annotations
 
-import operator
-from typing import Annotated, Any, TypedDict, TypeVar
+from typing import Annotated, TypedDict, TypeVar
 
 from langgraph.graph.message import add_messages
 
@@ -45,18 +44,3 @@ class SubAgentState(TypedDict):
     observations: list[str]
     tool_call_count: int
     compression_refs: list[CompressionRef]
-
-
-class SequentialDiagnosisState(BaseExecutorState):
-    """Sequential step-by-step diagnosis state."""
-
-    steps: Annotated[list[dict], operator.add]
-    current_step_index: int
-
-
-class DecisionTreeState(BaseExecutorState):
-    """Decision tree classification state."""
-
-    decision_path: list[str]
-    current_node_id: str
-    feature_values: dict[str, Any]

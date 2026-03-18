@@ -13,13 +13,12 @@ from agentm.tools.observability._builders import (
     _resolve_file,
     _result,
 )
-from agentm.tools.observability._core import _enforce_token_limit, _query, _safe_tool
-
-_INTERVAL_MAP: dict[str, str] = {
-    "1m": "1 minute",
-    "5m": "5 minutes",
-    "15m": "15 minutes",
-}
+from agentm.tools._shared import enforce_token_budget
+from agentm.tools.observability._core import (
+    INTERVAL_MAP,
+    _query,
+    _safe_tool,
+)
 
 _VALID_GROUP_BY: frozenset[str] = frozenset({"service_name", "span_name"})
 
@@ -37,7 +36,7 @@ async def _query_trace_stats(
     limit: int = 200,
 ) -> str:
     file = _resolve_file("traces", period)
-    db_interval = _INTERVAL_MAP.get(interval, "5 minutes")
+    db_interval = INTERVAL_MAP.get(interval, "5 minutes")
     if group_by not in _VALID_GROUP_BY:
         group_by = "service_name"
     fc, fc_params = _build_filter_clauses(filters)
@@ -163,7 +162,7 @@ async def _get_service_call_graph(
     edges = _query(sql_edges, edge_params)
     result: dict[str, Any] = {"nodes": nodes, "edges": edges}
     payload = json.dumps(result, ensure_ascii=False, indent=2)
-    return _enforce_token_limit(payload, "get_service_call_graph")
+    return enforce_token_budget(payload, "get_service_call_graph")
 
 
 @_safe_tool

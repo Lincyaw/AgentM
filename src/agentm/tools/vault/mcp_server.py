@@ -1,27 +1,28 @@
-"""Memory Vault MCP Server — expose vault tools over MCP protocol."""
+"""Memory Vault MCP Server — expose vault tools over MCP protocol.
 
-import json
-import logging
+Thin MCP wrappers that delegate to the shared tool implementations
+in ``tools.py`` via ``create_vault_tools()``.
+"""
+
 import os
 import sys
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
-from dataclasses import asdict, dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from agentm.tools.vault.graph import get_backlinks, lint, traverse
-from agentm.tools.vault.search import hybrid_search, keyword_search, semantic_search
 from agentm.tools.vault.store import MarkdownVault
+from agentm.tools.vault.tools import create_vault_tools
 
 
 @dataclass
 class VaultContext:
-    """Holds the long-lived MarkdownVault instance."""
+    """Holds the long-lived MarkdownVault instance and pre-built tool closures."""
 
     vault: MarkdownVault
-    embed_fn: Any = None
+    tools: dict[str, Any] = field(default_factory=dict)
 
 
 @asynccontextmanager
@@ -49,15 +50,17 @@ async def lifespan(server: FastMCP) -> AsyncIterator[VaultContext]:
             pass
 
     vault = MarkdownVault(vault_dir, embedding_model=embedding_model, embed_fn=embed_fn)
+    tools = create_vault_tools(vault)
 
-    yield VaultContext(vault=vault, embed_fn=embed_fn)
+    yield VaultContext(vault=vault, tools=tools)
 
 
 mcp = FastMCP("Memory Vault", lifespan=lifespan)
 
 
-def _vc(ctx: Context) -> VaultContext:
-    return ctx.request_context.lifespan_context
+def _tools(ctx: Context) -> dict[str, Any]:
+    """Extract the pre-built tools dict from the MCP lifespan context."""
+    return ctx.request_context.lifespan_context.tools
 
 
 # ---------------------------------------------------------------------------
@@ -81,9 +84,9 @@ def vault_write(
 
     Returns warnings if the note has structural issues.
     """
-    vc = _vc(ctx)
-    warnings = vc.vault.write(path, frontmatter, body)
-    return json.dumps({"status": "ok", "path": path, "warnings": warnings}, ensure_ascii=False)
+    return _tools(ctx)["vault_write"](
+        [{"path": path, "frontmatter": frontmatter, "body": body}]
+    )
 
 
 @mcp.tool()
@@ -98,12 +101,7 @@ def vault_write_batch(
 
     All notes are written together — if one fails, none are committed.
     """
-    vc = _vc(ctx)
-    warnings = vc.vault.write_batch(entries)
-    return json.dumps(
-        {"status": "ok", "count": len(entries), "warnings": warnings},
-        ensure_ascii=False,
-    )
+    return _tools(ctx)["vault_write"](entries)
 
 
 @mcp.tool()
@@ -113,11 +111,7 @@ def vault_read(path: str, ctx: Context = None) -> str:
     Args:
         path: Note path (e.g. "concept/connection-pooling")
     """
-    vc = _vc(ctx)
-    result = vc.vault.read(path)
-    if result is None:
-        return json.dumps({"error": f"Note not found: {path}"})
-    return json.dumps(result, ensure_ascii=False)
+    return _tools(ctx)["vault_read"](path)
 
 
 @mcp.tool()
@@ -140,15 +134,7 @@ def vault_edit(
 
     Returns warnings if the edit introduces structural issues.
     """
-    vc = _vc(ctx)
-    try:
-        warnings = vc.vault.edit(path, operation, params)
-        return json.dumps(
-            {"status": "ok", "path": path, "operation": operation, "warnings": warnings},
-            ensure_ascii=False,
-        )
-    except (FileNotFoundError, ValueError) as exc:
-        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    return _tools(ctx)["vault_edit"](path, operation, params)
 
 
 @mcp.tool()
@@ -158,12 +144,7 @@ def vault_delete(path: str, ctx: Context = None) -> str:
     Args:
         path: Note path to delete.
     """
-    vc = _vc(ctx)
-    try:
-        vc.vault.delete(path)
-        return json.dumps({"status": "ok", "path": path}, ensure_ascii=False)
-    except FileNotFoundError as exc:
-        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    return _tools(ctx)["vault_delete"](path)
 
 
 @mcp.tool()
@@ -174,15 +155,7 @@ def vault_rename(old_path: str, new_path: str, ctx: Context = None) -> str:
         old_path: Current note path.
         new_path: New note path.
     """
-    vc = _vc(ctx)
-    try:
-        vc.vault.rename(old_path, new_path)
-        return json.dumps(
-            {"status": "ok", "old_path": old_path, "new_path": new_path},
-            ensure_ascii=False,
-        )
-    except FileNotFoundError as exc:
-        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    return _tools(ctx)["vault_rename"](old_path, new_path)
 
 
 # ---------------------------------------------------------------------------
@@ -204,9 +177,7 @@ def vault_list(
         depth: How many levels deep to list (default 1).
         type_filter: Only return notes of this type (e.g. "skill", "concept").
     """
-    vc = _vc(ctx)
-    notes = vc.vault.list_notes(path, depth=depth, type_filter=type_filter)
-    return json.dumps({"notes": notes}, ensure_ascii=False)
+    return _tools(ctx)["vault_list"](path, depth=depth, type_filter=type_filter or "")
 
 
 @mcp.tool()
@@ -227,26 +198,7 @@ def vault_search(
 
     Returns rich results with path, score, title, type, confidence, tags, and snippet.
     """
-    vc = _vc(ctx)
-    conn = vc.vault._get_conn()
-    f = filters or {}
-
-    if mode == "keyword":
-        hits = keyword_search(conn, query, f, limit)
-    elif mode == "semantic":
-        if vc.embed_fn is None:
-            return json.dumps({"error": "No embedding model configured; use mode='keyword'"})
-        hits = semantic_search(conn, query, vc.embed_fn, f, limit)
-    elif mode == "hybrid":
-        if vc.embed_fn is None:
-            hits = keyword_search(conn, query, f, limit)
-        else:
-            hits = hybrid_search(conn, query, vc.embed_fn, f, limit)
-    else:
-        return json.dumps({"error": f"Unknown search mode: {mode}"})
-
-    results = [asdict(h) for h in hits]
-    return json.dumps({"results": results}, ensure_ascii=False)
+    return _tools(ctx)["vault_search"](query, filters=filters or {}, mode=mode, limit=limit)
 
 
 @mcp.tool()
@@ -256,10 +208,7 @@ def vault_backlinks(path: str, ctx: Context = None) -> str:
     Args:
         path: Target note path.
     """
-    vc = _vc(ctx)
-    conn = vc.vault._get_conn()
-    links = get_backlinks(conn, path)
-    return json.dumps({"backlinks": links}, ensure_ascii=False)
+    return _tools(ctx)["vault_backlinks"](path)
 
 
 @mcp.tool()
@@ -276,19 +225,9 @@ def vault_traverse(
         depth: How many hops to follow (default 2).
         direction: "forward" (outgoing links), "backward" (incoming), or "both".
 
-    Returns nodes with depth and directed edges (source → target).
+    Returns nodes with depth and directed edges (source -> target).
     """
-    vc = _vc(ctx)
-    conn = vc.vault._get_conn()
-    result = traverse(conn, start, depth, direction)
-    return json.dumps(
-        {
-            "start": result.start,
-            "nodes": [asdict(n) for n in result.nodes],
-            "edges": [asdict(e) for e in result.edges],
-        },
-        ensure_ascii=False,
-    )
+    return _tools(ctx)["vault_traverse"](start, depth=depth, direction=direction)
 
 
 @mcp.tool()
@@ -298,16 +237,7 @@ def vault_lint(request: str, ctx: Context = None) -> str:
     Args:
         request: A short description of what you want to check (e.g. "check all links").
     """
-    vc = _vc(ctx)
-    conn = vc.vault._get_conn()
-    result = lint(conn)
-    return json.dumps(
-        {
-            "dead_links": [list(pair) for pair in result.dead_links],
-            "orphan_notes": result.orphan_notes,
-        },
-        ensure_ascii=False,
-    )
+    return _tools(ctx)["vault_lint"](request)
 
 
 # ---------------------------------------------------------------------------

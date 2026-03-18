@@ -1,6 +1,7 @@
 """Observability tools for querying metrics, traces, logs, and topology from parquet files."""
 
 from agentm.tools.observability._core import (
+    ALLOWED_TABLE_FILES,
     QueryError,
     TOKEN_LIMIT,
     set_data_directory,
@@ -24,6 +25,7 @@ from agentm.tools.observability._traces import (
 )
 
 __all__ = [
+    "ALLOWED_TABLE_FILES",
     "QueryError",
     "TOKEN_LIMIT",
     "set_data_directory",

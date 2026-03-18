@@ -164,22 +164,30 @@ class CompressionConfig(BaseModel):
     compression_model: str = "gpt-5.1-mini"
     preserve_latest_n: int = 2
     prompt: Optional[str] = None
-    notebook: Optional[dict[str, Any]] = None
     recall: Optional[dict[str, Any]] = None
 
 
-class AgentConfig(BaseModel):
-    """Configuration for a single Sub-Agent."""
+class LLMConfig(BaseModel):
+    """Shared configuration for LLM-backed components (agents and orchestrator).
+
+    Fields common to both AgentConfig and OrchestratorConfig are defined here
+    to avoid duplication.
+    """
 
     model: str
     temperature: float
+    compression: Optional[CompressionConfig] = None
+    skills: list[str] = []
+
+
+class AgentConfig(LLMConfig):
+    """Configuration for a single Sub-Agent."""
+
     prompt: Optional[str] = None
     tools: list[str]
     tool_settings: dict[str, dict[str, Any]] = {}
     task_type_prompts: Optional[dict[str, str]] = None
     execution: ExecutionConfig = ExecutionConfig()
-    compression: Optional[CompressionConfig] = None
-    skills: list[str] = []
 
 
 class FeatureGatesConfig(BaseModel):
@@ -214,23 +222,20 @@ class OutputConfig(BaseModel):
     schema_name: str = "CausalGraph"
 
 
-class OrchestratorConfig(BaseModel):
+class OrchestratorConfig(LLMConfig):
     """Orchestrator configuration within a scenario."""
 
-    model: str
     temperature: float = 0.7
     orchestrator_mode: str = "node"  # "react" | "node"
     prompts: dict[str, str] = {}
     tools: list[str] = []
     feature_gates: FeatureGatesConfig = FeatureGatesConfig()
-    compression: Optional[CompressionConfig] = None
     monitoring: Optional[dict[str, Any]] = None
     output: Optional[OutputConfig] = None
     max_rounds: int = 20  # node mode only: max LLM rounds before forced synthesize
     disable_tool_binding: bool = (
         False  # set True for models that don't support bind_tools (e.g. MiniMax)
     )
-    skills: list[str] = []
 
 
 class SystemTypeConfig(BaseModel):
