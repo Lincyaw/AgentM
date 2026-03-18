@@ -21,7 +21,6 @@ env/
 .coverage
 *.db*
 trajectories
-knowledge
 *.log
 
 # Environment variables (contains secrets)

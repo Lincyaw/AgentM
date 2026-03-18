@@ -56,7 +56,7 @@ The `think` tool is always available for structured reasoning between queries.
 
 ## Quick start
 1. Call `describe_tables` to see all available tables and columns.
-2. Call `vault_read` with path `skill/diagnose-sql` to get critical query rules (column quoting, correct column names, duration units) and a recipe index. **Skipping this causes query errors.**
+2. Call `vault_read` with path `skill/diagnose-sql` to get critical query rules (column quoting, correct column names, duration units) and a recipe index, load corresponding sub-skills if needed. **Skipping this causes query errors.**
 3. Tables come in pairs: `abnormal_*` (incident window) and `normal_*` (baseline).
 4. Write SQL to query data. Always include LIMIT.
 </tooling>

@@ -24,7 +24,7 @@ class SkillMiddleware(AgentMMiddleware):
 
     At init time, reads each skill's frontmatter from the vault and caches
     ``{path, name, description}``.  At each ``before_model`` call, appends
-    an ``## Available Skills`` section to the first ``SystemMessage``.
+    a ``<skills>`` section to the first ``SystemMessage``.
 
     Each middleware instance is independent — different agents can configure
     different skill sets.
@@ -57,43 +57,37 @@ class SkillMiddleware(AgentMMiddleware):
         return len(self._skill_descriptions)
 
     def _build_skills_section(self) -> str:
-        """Build the ``## Available Skills`` markdown section."""
+        """Build the ``<skills>`` XML section for the system prompt."""
         if not self._skill_descriptions:
             return ""
-        lines = [
-            "## Available Skills",
-            "",
-            "Skills are domain-specific instructions stored in the knowledge "
-            "vault as notes with `type: skill`.",
-            "",
-            "### How to use skills",
-            "",
-            "1. **Browse**: Review the skill list below. Each entry shows a "
-            "short description to help you decide relevance.",
-            "2. **Load**: Call `vault_read` with the skill path "
-            "(e.g. `vault_read(path=\"skill/diagnose-sql\")`) to load its "
-            "full instructions.",
-            "3. **Follow sub-skills**: A loaded skill may reference "
-            "**sub-skills** via `[[wikilinks]]` — more specific instruction "
-            "sets nested under it (e.g. `[[skill/diagnose-sql/traces]]`). "
-            "Load them on demand with `vault_read` when you need deeper "
-            "guidance for a particular area.",
-            "4. **Search**: If you need knowledge beyond the listed skills, "
-            "use `vault_search` to find relevant notes by keyword or "
-            "semantic similarity. Filter with `{\"type\": \"skill\"}` to "
-            "restrict results to skills.",
-            "5. **Explore**: Use `vault_list` to browse the vault directory "
-            "structure and discover related notes.",
-            "6. **Apply**: Follow the loaded instructions for your current task.",
-            "",
-            "### Skill list",
-            "",
-        ]
-        for s in self._skill_descriptions:
-            lines.append(
-                f"- **{s['name']}** (`{s['path']}`): {s['description']}"
-            )
-        return "\n".join(lines)
+
+        skill_entries = "\n".join(
+            f'  <skill path="{s["path"]}">'
+            f'{s["name"]}: {s["description"]}'
+            f"</skill>"
+            for s in self._skill_descriptions
+        )
+
+        return (
+            "<skills>\n"
+            "You have access to domain-specific skills stored in the knowledge vault.\n"
+            "\n"
+            "<skill_list>\n"
+            f"{skill_entries}\n"
+            "</skill_list>\n"
+            "\n"
+            "<usage>\n"
+            "1. Review the skill list above to find relevant skills for your task.\n"
+            '2. Load a skill: `vault_read(path="skill/diagnose-sql")` to get full instructions.\n'
+            "3. Follow references: loaded skills may contain `[[wikilinks]]` pointing to\n"
+            "   sub-skills or related notes. Load them with `vault_read` to go deeper.\n"
+            "4. Discover more: use `vault_search(query=..., filters={\"type\": \"skill\"})` to\n"
+            "   find skills beyond this list, or `vault_list(path=\"skill\")` to browse.\n"
+            "5. Notes are interconnected — a skill can reference concepts, other skills, or\n"
+            "   episodic memories. Follow the links to build the context you need.\n"
+            "</usage>\n"
+            "</skills>"
+        )
 
     def before_model(self, state: dict[str, Any]) -> dict[str, Any] | None:
         if not self._skill_descriptions:
