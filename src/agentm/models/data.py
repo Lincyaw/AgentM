@@ -97,6 +97,9 @@ class ManagedTask:
     pending_instructions: list[str] = field(default_factory=list)
     parent_thread_id: Optional[str] = None
     parent_dispatch_step: Optional[int] = None
+    tool_call_counts: dict[str, int] = field(default_factory=dict)
+    last_tool_call: Optional[dict] = None
+    llm_call_count: int = 0
 
 
 # --- Orchestrator Hooks (SDK) ---

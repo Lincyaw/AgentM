@@ -12,10 +12,6 @@ from __future__ import annotations
 import pytest
 
 from agentm.core.state_registry import get_state_schema
-from agentm.models.state import (
-    DecisionTreeState,
-    SequentialDiagnosisState,
-)
 from agentm.scenarios import discover
 from agentm.scenarios.rca.state import HypothesisDrivenState
 from agentm.scenarios.memory_extraction.state import MemoryExtractionState
@@ -35,9 +31,7 @@ class TestGetStateSchema:
         "system_type,expected",
         [
             ("hypothesis_driven", HypothesisDrivenState),
-            ("sequential", SequentialDiagnosisState),
             ("memory_extraction", MemoryExtractionState),
-            ("decision_tree", DecisionTreeState),
         ],
     )
     def test_resolves_all_registered_types(self, system_type, expected):

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 
+from agentm.tools._shared import enforce_token_budget
 from agentm.tools.observability._builders import _resolve_file
-from agentm.tools.observability._core import _enforce_token_limit, _query, _safe_tool
+from agentm.tools.observability._core import _query, _safe_tool
 
 
 @_safe_tool
@@ -75,4 +76,4 @@ async def get_deployment_graph(
         )
     rows = [{k: v for k, v in r.items() if v is not None and v != ""} for r in rows]
     payload = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
-    return _enforce_token_limit(payload, "get_deployment_graph")
+    return enforce_token_budget(payload, "get_deployment_graph")

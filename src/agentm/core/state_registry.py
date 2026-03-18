@@ -3,19 +3,11 @@
 Registries are populated by scenario ``register()`` functions called
 via ``agentm.scenarios.discover()``.  The SDK core never imports from
 ``scenarios/`` directly.
-
-SDK-only state schemas (SequentialDiagnosisState, DecisionTreeState)
-are registered at module load time since they live in ``models/state.py``.
 """
 
 from __future__ import annotations
 
-from agentm.models.state import DecisionTreeState, SequentialDiagnosisState
-
-STATE_SCHEMAS: dict[str, type] = {
-    "sequential": SequentialDiagnosisState,
-    "decision_tree": DecisionTreeState,
-}
+STATE_SCHEMAS: dict[str, type] = {}
 
 
 def register_state(system_type: str, state_schema: type) -> None:

@@ -146,6 +146,10 @@ class TaskManager:
             if task.status == AgentRunStatus.RUNNING:
                 entry["step"] = task.current_step
                 entry["max_steps"] = task.max_steps
+                entry["tool_call_counts"] = task.tool_call_counts
+                entry["total_tool_calls"] = sum(task.tool_call_counts.values())
+                entry["llm_call_count"] = task.llm_call_count
+                entry["last_tool_call"] = task.last_tool_call
                 result["running"].append(entry)
             elif task.status == AgentRunStatus.COMPLETED and not task.reported:
                 entry["duration_seconds"] = task.duration_seconds
@@ -285,6 +289,9 @@ class TaskManager:
                 tool_calls = getattr(msg, "tool_calls", [])
                 if tool_calls:
                     for tc in tool_calls:
+                        name = tc.get("name", "unknown")
+                        managed.tool_call_counts[name] = managed.tool_call_counts.get(name, 0) + 1
+                        managed.last_tool_call = {"name": name, "args": tc.get("args", {})}
                         await trajectory.record(
                             event_type="tool_call",
                             agent_path=["orchestrator", managed.agent_id],
@@ -295,6 +302,7 @@ class TaskManager:
                             task_id=managed.task_id,
                         )
                 if content:
+                    managed.llm_call_count += 1
                     await trajectory.record(
                         event_type="llm_end",
                         agent_path=["orchestrator", managed.agent_id],

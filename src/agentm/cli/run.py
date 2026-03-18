@@ -263,6 +263,7 @@ async def run_investigation(
             Path(f).stem: str(Path(data_dir) / f)
             for f in init_info["files"]
             if Path(f).parent == Path(".")
+            and Path(f).name in obs_tools.ALLOWED_TABLE_FILES
         }
     )
 
@@ -463,6 +464,7 @@ async def resume_investigation(
                 Path(f).stem: str(Path(data_dir) / f)
                 for f in init_info["files"]
                 if Path(f).parent == Path(".")
+                and Path(f).name in obs_tools.ALLOWED_TABLE_FILES
             }
         )
 
@@ -879,6 +881,7 @@ async def run_investigation_headless(
             Path(f).stem: str(Path(data_dir) / f)
             for f in init_info["files"]
             if Path(f).parent == Path(".")
+            and Path(f).name in obs_tools.ALLOWED_TABLE_FILES
         }
     )
 
