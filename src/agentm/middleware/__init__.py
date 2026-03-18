@@ -85,6 +85,28 @@ class AgentMMiddleware:
         return hook
 
 
+def _apply_before(
+    middlewares: list[AgentMMiddleware], state: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply all ``before_model`` hooks in order, threading state through each.
+
+    Shared implementation used by both ``compose_middleware`` (React-mode) and
+    ``NodePipeline.before`` (Node-mode).
+    """
+    result = state
+    for mw in middlewares:
+        hook_result = mw.before_model(result)
+        if hook_result is not None:
+            result = hook_result
+        else:
+            # Pass through — preserve llm_input_messages if present
+            if "llm_input_messages" in result:
+                result = {"llm_input_messages": result["llm_input_messages"]}
+            else:
+                result = {"messages": result.get("messages", [])}
+    return result
+
+
 def compose_middleware(
     middlewares: list[AgentMMiddleware],
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -94,13 +116,11 @@ def compose_middleware(
     of the next.  This is the recommended way to build a hook pipeline
     for ``create_react_agent``.
     """
-    hooks = [m.to_pre_model_hook() for m in middlewares]
+    # Capture middleware list so the returned callable is self-contained
+    mws = list(middlewares)
 
     def chained(state: dict[str, Any]) -> dict[str, Any]:
-        result = state
-        for hook in hooks:
-            result = hook(result)
-        return result
+        return _apply_before(mws, state)
 
     return chained
 
@@ -126,8 +146,7 @@ class NodePipeline:
     """
 
     def __init__(self, middlewares: list[AgentMMiddleware]) -> None:
-        self._middlewares = middlewares
-        self._pre_hook = compose_middleware(middlewares)
+        self._middlewares = list(middlewares)
 
     def before(self, state: dict[str, Any]) -> dict[str, Any]:
         """Run all ``before_model`` hooks in order.
@@ -135,7 +154,7 @@ class NodePipeline:
         Returns the prepared state dict (may contain ``messages`` or
         ``llm_input_messages``).
         """
-        return self._pre_hook(state)
+        return _apply_before(self._middlewares, state)
 
     async def after(self, state: dict[str, Any], response: Any = None) -> None:
         """Run all ``aafter_model`` hooks in order.

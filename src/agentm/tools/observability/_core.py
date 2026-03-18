@@ -5,14 +5,15 @@ from __future__ import annotations
 import contextvars
 import functools
 import json
-import math
 import os
-from datetime import datetime
 from typing import Any, cast
 
 import duckdb
 
-TOKEN_LIMIT = 5000
+from agentm.tools._shared import (
+    TOKEN_LIMIT,  # noqa: F401  (re-exported via observability/__init__)
+    serialize_for_json,
+)
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -35,82 +36,21 @@ _FILE_MAP: dict[tuple[str, str], str] = {
     ("logs", "normal"): "normal_logs.parquet",
 }
 
+# Allowed parquet file names for DuckDB table registration.
+# Only observability data tables (logs, traces, metrics) are permitted;
+# result files like conclusion.parquet are excluded.
+ALLOWED_TABLE_FILES: frozenset[str] = frozenset(_FILE_MAP.values())
+
+# Shared interval shorthand -> SQL INTERVAL string, used by _traces and _metrics.
+INTERVAL_MAP: dict[str, str] = {
+    "1m": "1 minute",
+    "5m": "5 minutes",
+    "15m": "15 minutes",
+}
+
 
 class QueryError(Exception):
     """Raised when a DuckDB query fails. Contains a user-friendly error message."""
-
-
-def _serialize_datetime(obj: Any) -> Any:
-    """Convert datetime objects to ISO format strings and handle NaN/Infinity."""
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    elif isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    elif isinstance(obj, dict):
-        return {k: _serialize_datetime(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [_serialize_datetime(item) for item in obj]
-    return obj
-
-
-def _estimate_token_count(text: str) -> int:
-    return (len(text) + 2) // 3
-
-
-def _enforce_token_limit(payload: str, context: str) -> str:
-    """Enforce token budget on tool results.
-
-    When the payload fits within TOKEN_LIMIT, returns it as-is.
-    When it exceeds the limit, truncates the data to fit and appends
-    a warning with the original row count so the agent can refine.
-    """
-    if _estimate_token_count(payload) <= TOKEN_LIMIT:
-        return payload
-    estimated_tokens = _estimate_token_count(payload)
-    ratio = TOKEN_LIMIT / estimated_tokens
-    parsed = json.loads(payload)
-
-    if isinstance(parsed, list):
-        original_count = len(parsed)
-        keep = max(1, int(original_count * ratio * 0.8))
-        truncated = parsed[:keep]
-        result = {
-            "_truncated": True,
-            "_total_rows": original_count,
-            "_rows_returned": keep,
-            "_context": context,
-            "_suggestion": "Add more filters, a narrower time range, or specify a LIMIT to get complete data.",
-            "data": truncated,
-        }
-        return json.dumps(result, ensure_ascii=False, indent=2)
-
-    if isinstance(parsed, dict):
-        # For dict payloads (e.g. call graphs with {nodes, edges}), truncate each list
-        truncated_dict: dict[str, Any] = {}
-        meta: dict[str, Any] = {"_truncated": True, "_context": context}
-        for k, v in parsed.items():
-            if isinstance(v, list):
-                keep = max(1, int(len(v) * ratio * 0.8))
-                truncated_dict[k] = v[:keep]
-                meta[f"_{k}_total"] = len(v)
-                meta[f"_{k}_returned"] = keep
-            else:
-                truncated_dict[k] = v
-        meta["_suggestion"] = "Add more filters or a narrower time range."
-        truncated_dict.update(meta)
-        return json.dumps(truncated_dict, ensure_ascii=False, indent=2)
-
-    # Scalar or unknown — return warning only
-    warning = {
-        "error": "Result exceeds token budget",
-        "context": context,
-        "estimated_tokens": estimated_tokens,
-        "token_limit": TOKEN_LIMIT,
-        "suggestion": "Add more filters or reduce the LIMIT.",
-    }
-    return json.dumps(warning, ensure_ascii=False, indent=2)
 
 
 def _query(sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
@@ -119,7 +59,7 @@ def _query(sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
         result = conn.execute(sql, params or []).fetchall()
         columns = [desc[0] for desc in conn.description]
         rows = [dict(zip(columns, row, strict=False)) for row in result]
-        return cast(list[dict[str, Any]], _serialize_datetime(rows))
+        return cast(list[dict[str, Any]], serialize_for_json(rows))
     except duckdb.Error as e:
         error_msg = str(e)
         raise QueryError(error_msg) from e

@@ -42,6 +42,17 @@ from agentm.tools.orchestrator import create_orchestrator_tools
 from agentm.tools.think import think
 
 
+def _func_to_tool(name: str, func: Any) -> StructuredTool:
+    """Convert a plain function (sync or async) into a StructuredTool."""
+    if asyncio.iscoroutinefunction(func):
+        return StructuredTool.from_function(
+            coroutine=func, name=name, description=func.__doc__ or name
+        )
+    return StructuredTool.from_function(
+        func=func, name=name, description=func.__doc__ or name
+    )
+
+
 def _serialize_notebook(notebook: Any) -> dict[str, Any]:
     """Serialize a DiagnosticNotebook dataclass to a JSON-safe dict."""
     if hasattr(notebook, "__dataclass_fields__"):
@@ -606,29 +617,10 @@ class AgentSystemBuilder:
             for name in scenario_config.orchestrator.tools:
                 if name in injected_tools:
                     # Factory-created tool (has closure over task_manager/agent_pool)
-                    func = injected_tools[name]
-                    if asyncio.iscoroutinefunction(func):
-                        tool = StructuredTool.from_function(
-                            coroutine=func,
-                            name=name,
-                            description=func.__doc__ or name,
-                        )
-                    else:
-                        tool = StructuredTool.from_function(
-                            func=func,
-                            name=name,
-                            description=func.__doc__ or name,
-                        )
-                    tools.append(tool)
+                    tools.append(_func_to_tool(name, injected_tools[name]))
                 elif name in MEMORY_TOOLS:
                     # Memory tools (standalone functions with checkpointer injected)
-                    func = MEMORY_TOOLS[name]
-                    tool = StructuredTool.from_function(
-                        func=func,
-                        name=name,
-                        description=func.__doc__ or name,
-                    )
-                    tools.append(tool)
+                    tools.append(_func_to_tool(name, MEMORY_TOOLS[name]))
                 elif tool_registry.has(name):
                     # Registry tool (YAML-declared or vault tools registered above)
                     tools.append(tool_registry.get(name).create_with_config())

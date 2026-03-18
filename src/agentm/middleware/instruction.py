@@ -34,28 +34,6 @@ def build_instruction_hook(task_manager: TaskManager, task_id: str) -> Callable:
     return hook
 
 
-def build_combined_hook(
-    instruction_hook: Callable, compression_hook: Callable
-) -> Callable:
-    """Chain instruction + compression hooks into a single pre_model_hook.
-
-    Applies instruction_hook first (to inject messages), then compression_hook
-    (to compress if needed). Both hooks follow the pre_model_hook protocol:
-    receive state dict, return dict with 'messages' or 'llm_input_messages'.
-
-    Ref: designs/orchestrator.md § Instruction Injection
-    """
-
-    def hook(state: dict[str, Any]) -> dict[str, Any]:
-        intermediate = instruction_hook(state)
-        result = compression_hook(intermediate)
-        if "llm_input_messages" in result:
-            return {"llm_input_messages": result["llm_input_messages"]}
-        return {"messages": result["messages"]}
-
-    return hook
-
-
 class InstructionInjectionMiddleware(AgentMMiddleware):
     """Pre-model middleware that injects pending instructions as HumanMessages."""
 

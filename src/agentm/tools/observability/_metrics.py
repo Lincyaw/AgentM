@@ -10,13 +10,7 @@ from agentm.tools.observability._builders import (
     _resolve_file,
     _result,
 )
-from agentm.tools.observability._core import _query, _safe_tool
-
-_INTERVAL_MAP: dict[str, str] = {
-    "1m": "1 minute",
-    "5m": "5 minutes",
-    "15m": "15 minutes",
-}
+from agentm.tools.observability._core import INTERVAL_MAP, _query, _safe_tool
 
 
 async def _query_metrics_ohlc(
@@ -29,7 +23,7 @@ async def _query_metrics_ohlc(
     limit: int = 200,
 ) -> str:
     file = _resolve_file("metrics", period)
-    db_interval = _INTERVAL_MAP.get(interval, "5 minutes")
+    db_interval = INTERVAL_MAP.get(interval, "5 minutes")
     fc, fc_params = _build_filter_clauses(filters)
     tc, tc_params = _build_time_clause(start_time, end_time)
 
