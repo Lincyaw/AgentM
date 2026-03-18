@@ -21,7 +21,7 @@ from agentm.builder import AgentSystemBuilder
 from agentm.config.loader import load_scenario_config, load_system_config
 from agentm.core.debug_console import DebugConsole
 from agentm.core.trajectory import TrajectoryCollector
-from agentm.server.app import broadcast_event, create_dashboard_app
+from agentm.server.app import Broadcaster, create_dashboard_app
 
 
 console = Console()
@@ -72,29 +72,61 @@ async def _setup_debug_and_dashboard(
     dashboard: bool,
     dashboard_host: str,
     dashboard_port: int,
-) -> tuple[Any | None, Any | None]:
-    """Wire up DebugConsole and optional dashboard.
+    *,
+    data_dir: str = "",
+) -> tuple[Any | None, Any | None, Any | None, str | None]:
+    """Wire up DebugConsole and optional dashboard with EvalTracker.
 
-    Returns (debug_console, dashboard_server_task).
+    Returns (debug_console, dashboard_server_task, eval_tracker, sample_id).
     """
+    from agentm.server.eval_tracker import EvalTracker
+
     debug_console = None
     if system_config.debug.console_live:
         debug_console = DebugConsole(verbose=verbose)
         debug_console.start()
 
     dashboard_server_task = None
-    dashboard_broadcast = None
+    eval_tracker = None
+    sample_id = None
+    bc: Broadcaster | None = None
     if dashboard:
+        bc = Broadcaster()
+        tracker = EvalTracker()
+        sample_id = system.thread_id
+
+        tracker.register_sample(sample_id, dataset_index=0, data_dir=data_dir)
+        tracker.mark_running(sample_id, run_id=sample_id)
+        if system.trajectory is not None:
+            tracker.update_trajectory_path(
+                sample_id, str(system.trajectory.file_path)
+            )
+
+        # Wire tracker → WebSocket
+        _loop = asyncio.get_running_loop()
+
+        def _tracker_to_ws(event: dict) -> None:
+            try:
+                _loop.call_soon_threadsafe(
+                    _loop.create_task, bc.broadcast(event)
+                )
+            except RuntimeError:
+                pass
+
+        tracker.add_listener(_tracker_to_ws)
+        eval_tracker = tracker
+
         app = create_dashboard_app(
             graph=system.graph,
             scenario_config=system.scenario_config,
             task_manager=system.task_manager,
             trajectory=system.trajectory,
             thread_id=system.thread_id,
+            broadcaster=bc,
+            eval_tracker=tracker,
         )
         if system.task_manager is not None:
-            system.task_manager.set_broadcast_callback(broadcast_event)
-        dashboard_broadcast = broadcast_event
+            system.task_manager.set_broadcast_callback(bc.broadcast)
 
         uvi_config = uvicorn.Config(
             app, host=dashboard_host, port=dashboard_port, log_level="warning"
@@ -111,10 +143,10 @@ async def _setup_debug_and_dashboard(
     if system.trajectory is not None:
         if debug_console is not None:
             system.trajectory.add_listener(debug_console.on_trajectory_event)
-        if dashboard_broadcast is not None:
+        if dashboard and bc is not None:
 
             async def _traj_to_ws(event: dict) -> None:
-                await dashboard_broadcast(
+                await bc.broadcast(
                     {
                         "event_type": event.get("event_type", ""),
                         "agent_path": event.get("agent_path", []),
@@ -126,7 +158,7 @@ async def _setup_debug_and_dashboard(
 
             system.trajectory.add_listener(_traj_to_ws)
 
-    return debug_console, dashboard_server_task
+    return debug_console, dashboard_server_task, eval_tracker, sample_id
 
 
 async def _stream_and_finalize(
@@ -139,10 +171,13 @@ async def _stream_and_finalize(
     verbose: bool,
     max_steps: int,
     label: str,
+    eval_tracker: Any | None = None,
+    sample_id: str | None = None,
 ) -> None:
     """Stream execution, handle shutdown, and optionally keep dashboard alive."""
     console.rule(f"Starting {label}")
     step = 0
+    stream_error: Exception | None = None
     try:
         async for event in system.stream(initial_state):
             step += 1
@@ -156,7 +191,8 @@ async def _stream_and_finalize(
     except KeyboardInterrupt:
         console.print(f"\n[yellow][!] {label} interrupted by user.[/]")
     except Exception as e:
-        console.print(f"\n[red][ERROR] {e}[/red]")
+        stream_error = e
+        console.print(f"\n[ERROR] {e}", style="red", markup=False)
         if verbose:
             traceback.print_exc()
     finally:
@@ -171,6 +207,12 @@ async def _stream_and_finalize(
             if path:
                 console.print(f"Trajectory saved: [green]{path}[/]")
             console.print(f"Thread ID: [dim]{system.thread_id}[/]")
+        # Update eval tracker status
+        if eval_tracker is not None and sample_id is not None:
+            if stream_error is not None:
+                eval_tracker.mark_failed(sample_id, str(stream_error))
+            else:
+                eval_tracker.mark_completed(sample_id)
 
     if dashboard_server_task is not None:
         console.print(
@@ -230,8 +272,16 @@ async def run_investigation(
         system_config=system_config,
     )
 
-    debug_console, dashboard_task = await _setup_debug_and_dashboard(
-        system, system_config, verbose, dashboard, dashboard_host, dashboard_port
+    debug_console, dashboard_task, eval_tracker, sample_id = (
+        await _setup_debug_and_dashboard(
+            system,
+            system_config,
+            verbose,
+            dashboard,
+            dashboard_host,
+            dashboard_port,
+            data_dir=data_dir,
+        )
     )
 
     initial_state = {"messages": [HumanMessage(content=incident)]}
@@ -248,6 +298,8 @@ async def run_investigation(
         verbose,
         max_steps,
         "investigation",
+        eval_tracker=eval_tracker,
+        sample_id=sample_id,
     )
 
 
@@ -306,8 +358,15 @@ async def run_memory_extraction(
         system_config=system_config,
     )
 
-    debug_console, dashboard_task = await _setup_debug_and_dashboard(
-        system, system_config, verbose, dashboard, dashboard_host, dashboard_port
+    debug_console, dashboard_task, eval_tracker, sample_id = (
+        await _setup_debug_and_dashboard(
+            system,
+            system_config,
+            verbose,
+            dashboard,
+            dashboard_host,
+            dashboard_port,
+        )
     )
 
     if not task:
@@ -341,6 +400,8 @@ async def run_memory_extraction(
         verbose,
         max_steps,
         "extraction",
+        eval_tracker=eval_tracker,
+        sample_id=sample_id,
     )
 
 
@@ -455,21 +516,51 @@ async def resume_investigation(
 
     # Dashboard
     dashboard_server_task = None
+    eval_tracker = None
+    sample_id = None
     if dashboard:
+        from agentm.server.eval_tracker import EvalTracker
+
+        bc = Broadcaster()
+        tracker = EvalTracker()
+        sample_id = thread_id
+
+        tracker.register_sample(sample_id, dataset_index=0, data_dir=data_dir)
+        tracker.mark_running(sample_id, run_id=sample_id)
+        if system.trajectory is not None:
+            tracker.update_trajectory_path(
+                sample_id, str(system.trajectory.file_path)
+            )
+
+        _loop = asyncio.get_running_loop()
+
+        def _tracker_to_ws(event: dict) -> None:
+            try:
+                _loop.call_soon_threadsafe(
+                    _loop.create_task, bc.broadcast(event)
+                )
+            except RuntimeError:
+                pass
+
+        tracker.add_listener(_tracker_to_ws)
+        eval_tracker = tracker
+
         app = create_dashboard_app(
             graph=system.graph,
             scenario_config=system.scenario_config,
             task_manager=system.task_manager,
             trajectory=system.trajectory,
             thread_id=thread_id,
+            broadcaster=bc,
+            eval_tracker=tracker,
         )
         if system.task_manager is not None:
-            system.task_manager.set_broadcast_callback(broadcast_event)
+            system.task_manager.set_broadcast_callback(bc.broadcast)
 
         if system.trajectory is not None:
 
             async def _traj_to_ws(event: dict) -> None:
-                await broadcast_event(
+                await bc.broadcast(
                     {
                         "event_type": event.get("event_type", ""),
                         "agent_path": event.get("agent_path", []),
@@ -494,6 +585,7 @@ async def resume_investigation(
 
     console.rule("Resuming")
     step = 0
+    stream_error: Exception | None = None
     try:
         async for event in system.graph.astream(None, config=resume_config):
             step += 1
@@ -506,6 +598,7 @@ async def resume_investigation(
     except KeyboardInterrupt:
         console.print("\n[yellow][!] Interrupted by user.[/]")
     except Exception as e:
+        stream_error = e
         console.print(f"\n[red][ERROR] {e}[/red]")
         if verbose:
             traceback.print_exc()
@@ -513,6 +606,11 @@ async def resume_investigation(
         await system._close_checkpointer()
         console.rule("Resume complete")
         console.print(f"Steps executed: {step}")
+        if eval_tracker is not None and sample_id is not None:
+            if stream_error is not None:
+                eval_tracker.mark_failed(sample_id, str(stream_error))
+            else:
+                eval_tracker.mark_completed(sample_id)
 
     if dashboard_server_task is not None:
         console.print(
@@ -587,20 +685,24 @@ def _print_event(event: dict, step: int, verbose: bool) -> None:
                 if content:
                     console.print(f"\n[bold cyan][Orchestrator step {step}][/]")
                     limit = 2000 if verbose else 500
-                    console.print(content[:limit])
+                    console.print(content[:limit], markup=False)
                     if len(content) > limit:
                         console.print(f"  [dim]... ({len(content)} chars total)[/]")
 
                 tool_calls = getattr(msg, "tool_calls", [])
                 for tc in tool_calls:
                     args_str = json.dumps(tc["args"], ensure_ascii=False)
-                    console.print(f"\n  [yellow]-> {tc['name']}[/]({args_str[:300]})")
+                    console.print(
+                        f"\n  -> {tc['name']}({args_str[:300]})", markup=False
+                    )
 
             elif role == "tool":
                 tool_name = getattr(msg, "name", "?")
                 if content:
                     preview = content
-                    console.print(f"\n  [green]<- {tool_name}:[/] {preview}")
+                    console.print(
+                        f"\n  <- {tool_name}: {preview}", markup=False
+                    )
                     if len(content) > len(preview):
                         console.print(f"     [dim]... ({len(content)} chars total)[/]")
 

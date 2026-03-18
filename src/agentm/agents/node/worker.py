@@ -14,6 +14,7 @@ Architecture (4 nodes, self-controlled ReAct loop):
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal, cast
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -32,6 +33,8 @@ from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
 from agentm.models.types import TaskType
 from agentm.tools.think import think
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +84,7 @@ def build_worker_subgraph(
     task_id: str | None = None,
     checkpointer: Any = None,
     extra_tools: list[BaseTool] | None = None,
+    extra_middleware: list[Any] | None = None,
 ) -> Any:
     """Build and compile the node-based worker subgraph.
 
@@ -108,6 +112,11 @@ def build_worker_subgraph(
     ]
     if extra_tools:
         tools.extend(extra_tools)
+        logger.info(
+            "Worker %s: extra tools injected: %s",
+            agent_id,
+            [t.name for t in extra_tools],
+        )
     tools.append(think)
     tools_by_name = {t.name: t for t in tools}
 
@@ -147,14 +156,21 @@ def build_worker_subgraph(
     # ------------------------------------------------------------------
     # Middleware pipeline (replaces inline budget/compression/trajectory)
     # ------------------------------------------------------------------
-    middlewares: list = [BudgetMiddleware(
-        config.execution.max_steps,
-        tool_call_budget=config.execution.tool_call_budget,
-    )]
-    budget_mw: BudgetMiddleware = middlewares[0]  # type: ignore[assignment]
+    middlewares: list = []
+    if extra_middleware:
+        middlewares.extend(extra_middleware)
+    middlewares.append(
+        BudgetMiddleware(
+            config.execution.max_steps,
+            tool_call_budget=config.execution.tool_call_budget,
+        )
+    )
+    budget_mw: BudgetMiddleware = middlewares[-1]  # type: ignore[assignment]
     middlewares.append(LoopDetectionMiddleware(threshold=5, window_size=15))
     if config.compression is not None:
-        middlewares.append(CompressionMiddleware(config.compression, model_config=model_config))
+        middlewares.append(
+            CompressionMiddleware(config.compression, model_config=model_config)
+        )
     if trajectory is not None:
         middlewares.append(
             TrajectoryMiddleware(
@@ -170,15 +186,12 @@ def build_worker_subgraph(
     # ------------------------------------------------------------------
 
     async def dispatch(state: WorkerState) -> dict[str, Any]:
-        msgs: list[Any] = []
-
-        # System prompt with optional tool tips
+        # Build system prompt with optional tool tips
         sp_parts = [system_prompt] if system_prompt else []
         tips_section = _format_tool_tips(state.get("tool_tips", []))
         if tips_section:
             sp_parts.append(tips_section)
-        if sp_parts:
-            msgs.append(SystemMessage(content="\n\n".join(sp_parts)))
+        full_system_prompt = "\n\n".join(sp_parts) if sp_parts else ""
 
         # ``instruction`` may come from two sources:
         # 1. WorkerState.instruction (populated when caller builds full state)
@@ -191,9 +204,10 @@ def build_worker_subgraph(
                     instruction = str(m.content)
                     break
 
-        if instruction:
-            msgs.append(HumanMessage(content=instruction))
-        return {"messages": msgs}
+        return {
+            "instruction": instruction,
+            "system_prompt_text": full_system_prompt,
+        }
 
     # ------------------------------------------------------------------
     # Node 2: llm_call
@@ -202,22 +216,32 @@ def build_worker_subgraph(
     # ------------------------------------------------------------------
 
     async def llm_call(state: WorkerState) -> dict[str, Any]:
-        messages = list(state.get("messages", []))
+        # Build canonical message list: System first, then conversation history.
+        # system_prompt_text is set by dispatch; raw state["messages"] contains
+        # only the HumanMessage(instruction) from TaskManager input.
+        sp = state.get("system_prompt_text", "")
+        llm_messages: list[Any] = []
+        if sp:
+            llm_messages.append(SystemMessage(content=sp))
+        # Append conversation messages, skipping any stale SystemMessages
+        for m in state.get("messages", []):
+            if not isinstance(m, SystemMessage):
+                llm_messages.append(m)
 
         # Pre-model pipeline: budget → loop detection → compression → trajectory(llm_start)
-        prepared = pipeline.before({"messages": messages})
-        llm_messages = prepared.get("llm_input_messages") or prepared.get(
-            "messages", messages
+        prepared = pipeline.before({"messages": llm_messages})
+        llm_input = prepared.get("llm_input_messages") or prepared.get(
+            "messages", llm_messages
         )
 
         if budget_mw.exhausted:
             # No tools — force plain text response that exits the loop
-            response = await model_plain.ainvoke(llm_messages)
+            response = await model_plain.ainvoke(llm_input)
         else:
-            response = await model_with_tools.ainvoke(llm_messages)
+            response = await model_with_tools.ainvoke(llm_input)
 
         # Post-model pipeline: trajectory(tool_call / llm_end)
-        await pipeline.after({"messages": messages}, response)
+        await pipeline.after({"messages": llm_messages}, response)
 
         return {"messages": [response]}
 
@@ -385,6 +409,7 @@ class AgentPool:
         trajectory: TrajectoryCollector | None = None,
         checkpointer: Any = None,
         extra_worker_tools: list[BaseTool] | None = None,
+        extra_worker_middleware: list[Any] | None = None,
     ) -> None:
         self._worker_config = scenario_config.agents["worker"]
         self._tool_registry = tool_registry
@@ -392,6 +417,7 @@ class AgentPool:
         self._trajectory = trajectory
         self._checkpointer = checkpointer
         self._extra_worker_tools = extra_worker_tools or []
+        self._extra_worker_middleware = extra_worker_middleware or []
 
     @property
     def worker_max_steps(self) -> int:
@@ -423,4 +449,5 @@ class AgentPool:
             task_id=task_id,
             checkpointer=self._checkpointer,
             extra_tools=self._extra_worker_tools or None,
+            extra_middleware=self._extra_worker_middleware or None,
         )
