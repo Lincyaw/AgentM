@@ -179,6 +179,10 @@ Keep all profile inputs SHORT — a profile is a quick-reference card, not a rep
    - Scout: for broad coverage of unexplored areas
    - Deep Analyze: for tracing causal mechanisms along a specific chain
    - Verify: for stress-testing a hypothesis you're considering confirming
+   When warranted, dispatch MULTIPLE agents in parallel to accelerate the investigation.
+   Each agent's task MUST be isolated — no overlapping scope. For example, assign
+   different hypotheses, different services, or different evidence types to each agent.
+   Do not send two agents to investigate the same area.
 5. **Collect**: If multiple workers are running, call check_tasks. Single worker auto-blocks.
 6. **Repeat** until a hypothesis is confirmed or all are exhausted.
 
@@ -199,16 +203,3 @@ Agent investigations take minutes. This is normal.
 - Do NOT re-dispatch the same task if a worker is still running.
 </patience>
 
-{% if feature_gates is defined and feature_gates.adversarial_review %}
-<adversarial_review>
-Before confirming any hypothesis, spawn a verify worker with explicit instructions to find
-evidence that CONTRADICTS it. Only confirm after this adversarial check returns.
-</adversarial_review>
-{% endif %}
-
-{% if feature_gates is defined and feature_gates.min_verifications_before_confirm is defined and feature_gates.min_verifications_before_confirm > 1 %}
-<verification_threshold>
-Before confirming a root cause, verify and rule out at least
-{{ feature_gates.min_verifications_before_confirm }} alternative hypotheses with evidence.
-</verification_threshold>
-{% endif %}

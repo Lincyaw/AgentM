@@ -65,10 +65,10 @@ class TestSkillMiddlewareInjection:
         sys_msg = messages[0]
         assert isinstance(sys_msg, SystemMessage)
         content = str(sys_msg.content)
-        assert "## Available Skills" in content
+        assert "<skills>" in content
         assert "DuckDB Query Guide" in content
         assert "Log Analysis" in content
-        assert "skill/duckdb-query" in content
+        assert 'path="skill/duckdb-query"' in content
         assert "vault_read" in content  # usage instruction
 
     def test_vault_search_mentioned(self, vault: MarkdownVault):
