@@ -13,9 +13,6 @@ orchestrator:
   tools:
     - dispatch_agent
     - check_tasks
-    - skill_list
-    - skill_load
-    - skill_search
     - vault_read
     - vault_search
     - vault_write

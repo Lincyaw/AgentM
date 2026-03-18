@@ -58,5 +58,8 @@ class WorkerState(TypedDict):
     # Injected by TaskManager before dispatch (optional cross-worker tips)
     tool_tips: list[dict[str, Any]]
 
+    # Built by dispatch — full system prompt (base + task_type overlay + tips)
+    system_prompt_text: str
+
     # Written by collect_and_compress — must be a declared field
     structured_response: WorkerResult
