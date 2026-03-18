@@ -16,7 +16,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
-from agentm.models.data import PhaseDefinition, ScenarioToolBundle
+from agentm.models.data import OrchestratorHooks, PhaseDefinition, ScenarioToolBundle
 from agentm.scenarios.rca.answer_schemas import (
     DeepAnalyzeAnswer,
     ScoutAnswer,
@@ -125,6 +125,22 @@ class HypothesisDrivenStrategy:
 
     def state_schema(self) -> type[HypothesisDrivenState]:
         return HypothesisDrivenState
+
+    def orchestrator_hooks(self) -> OrchestratorHooks:
+        return OrchestratorHooks(
+            think_stall_enabled=True,
+            think_stall_limit=3,
+            think_stall_warning=(
+                "THINK-STALL WARNING: You have called only `think` for the "
+                "last {streak} rounds without taking any action. "
+                "Thinking does not advance the investigation.\n\n"
+                "You MUST call an action tool NOW — dispatch_agent, "
+                "update_hypothesis, or finalize with "
+                "<decision>finalize</decision>.\n"
+                "Do NOT call think again until you have taken an action."
+            ),
+            skip_context_on_think_only=True,
+        )
 
     def create_scenario_tools(self, **kwargs: Any) -> ScenarioToolBundle:
         """Create RCA-specific tools: hypothesis management + service profiles.

@@ -14,7 +14,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
-from agentm.models.data import PhaseDefinition, ScenarioToolBundle
+from agentm.models.data import OrchestratorHooks, PhaseDefinition, ScenarioToolBundle
 from agentm.models.state import S
 
 
@@ -83,6 +83,14 @@ class ReasoningStrategy(Protocol[S]):
 
     def state_schema(self) -> type[S]:
         """Return the TypedDict class used as the LangGraph state schema."""
+        ...
+
+    def orchestrator_hooks(self) -> OrchestratorHooks:
+        """Return orchestrator behavior customizations.
+
+        Default: generic hooks suitable for most scenarios.
+        Override to customize think-stall detection, context injection, etc.
+        """
         ...
 
 

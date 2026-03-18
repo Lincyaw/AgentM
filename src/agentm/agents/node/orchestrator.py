@@ -28,30 +28,25 @@ import os
 import re
 from typing import Any, Callable, Literal
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
-from pydantic import BaseModel
 
+from agentm.agents.node.synthesize import create_synthesize_node
 from agentm.config.schema import OrchestratorConfig
 from agentm.config.schema import create_chat_model
+from agentm.core.strategy import ReasoningStrategy
 from agentm.middleware import NodePipeline
-from agentm.middleware.loop_detection import _count_trailing_think_only
+from agentm.middleware.loop_detection import LoopDetectionMiddleware
 from agentm.middleware.trajectory import TrajectoryMiddleware
 from agentm.core.prompt import load_prompt_template
 from agentm.core.trajectory import TrajectoryCollector
+from agentm.models.data import OrchestratorHooks
 from agentm.models.output import get_output_schema
 from agentm.models.state import BaseExecutorState
 
 logger = logging.getLogger(__name__)
-
-# Maximum number of retries when synthesize structured output fails validation.
-# Total attempts = 1 (initial) + _SYNTH_MAX_RETRIES.
-_SYNTH_MAX_RETRIES = 2
-
-# Consecutive think-only rounds before a forced action warning is injected.
-_THINK_STALL_LIMIT = 3
 
 
 # ---------------------------------------------------------------------------
@@ -97,19 +92,6 @@ def _debug_log_messages(messages: list[Any], round_num: int) -> None:
                 parts.append(text)
     parts.append(f"\n{'=' * 60} END LLM INPUT ({len(messages)} messages) {'=' * 60}")
     logger.debug("\n".join(parts))
-
-
-def _extract_raw_from_error(exc: Exception) -> str:
-    """Extract the raw LLM JSON text from a structured-output failure.
-
-    LangChain's ``OutputParserException`` carries an ``llm_output`` attribute
-    with the text the model actually produced.  Walk the exception chain to
-    find it; fall back to ``str(exc)`` so the feedback message is still useful.
-    """
-    for e in (exc, getattr(exc, "__cause__", None), getattr(exc, "__context__", None)):
-        if e is not None and hasattr(e, "llm_output") and e.llm_output:
-            return str(e.llm_output)
-    return str(exc)
 
 
 def _parse_decision(text: str) -> str:
@@ -163,6 +145,8 @@ def create_node_orchestrator(
     format_context: Callable[..., str] | None = None,
     model_config: Any | None = None,
     trajectory: TrajectoryCollector | None = None,
+    extra_middleware: list[Any] | None = None,
+    strategy: ReasoningStrategy | None = None,
 ) -> Any:
     """Build the node-based Orchestrator as a CompiledStateGraph.
 
@@ -176,13 +160,23 @@ def create_node_orchestrator(
         checkpointer: LangGraph checkpointer (or None).
         store: LangGraph store backend (or None).
         state_schema: TypedDict class for the StateGraph. Defaults to
-            HypothesisDrivenState (backward-compatible).
+            BaseExecutorState (backward-compatible).
         format_context: Callable ``(state: dict) -> str`` that produces the
-            working-memory section of the system prompt. Defaults to
-            ``format_rca_context`` (notebook-based, backward-compatible).
+            working-memory section of the system prompt.
         model_config: Optional model configuration (API key, base_url).
         trajectory: Optional TrajectoryCollector for event recording.
+        extra_middleware: Optional list of middleware to include in the pipeline.
+        strategy: Optional ReasoningStrategy for behavior customization via hooks.
     """
+    # ------------------------------------------------------------------
+    # Strategy hooks
+    # ------------------------------------------------------------------
+    hooks: OrchestratorHooks
+    if strategy is not None and hasattr(strategy, "orchestrator_hooks"):
+        hooks = strategy.orchestrator_hooks()
+    else:
+        hooks = OrchestratorHooks()
+
     # Default formatter: plain state description (no domain coupling)
     if format_context is not None:
         _format_context: Callable[[dict], str] = format_context
@@ -211,7 +205,9 @@ def create_node_orchestrator(
     if compression_cfg is not None and compression_cfg.enabled:
         from agentm.middleware.compression import build_compression_hook
 
-        compression_hook = build_compression_hook(compression_cfg, model_config=model_config)
+        compression_hook = build_compression_hook(
+            compression_cfg, model_config=model_config
+        )
 
     # Structured output schema for synthesize node (optional)
     output_schema = None
@@ -221,10 +217,23 @@ def create_node_orchestrator(
         output_prompt_text = load_prompt_template(config.output.prompt)
 
     # ------------------------------------------------------------------
-    # Middleware pipeline (trajectory only — compression is handled
-    # inside _prepare_messages because it needs the dynamic system prompt)
+    # Middleware pipeline
     # ------------------------------------------------------------------
     middlewares: list = []
+
+    # Think-stall detection via LoopDetectionMiddleware (strategy-driven)
+    if hooks.think_stall_enabled:
+        middlewares.append(
+            LoopDetectionMiddleware(
+                threshold=5,
+                window_size=15,
+                think_stall_limit=hooks.think_stall_limit,
+                think_stall_warning=hooks.think_stall_warning,
+            )
+        )
+
+    if extra_middleware:
+        middlewares.extend(extra_middleware)
     if trajectory is not None:
         middlewares.append(TrajectoryMiddleware(trajectory, ["orchestrator"]))
     pipeline = NodePipeline(middlewares) if middlewares else None
@@ -249,8 +258,14 @@ def create_node_orchestrator(
 
     _system_msg = SystemMessage(content=_static_system_prompt)
 
-    def _build_context_message(state: dict, round_num: int) -> HumanMessage:
-        """Build a user message with dynamic context: notebook/state + round info."""
+    def _build_context_message(state: dict, round_num: int) -> AIMessage:
+        """Build an AIMessage prefill with dynamic context: state + round info.
+
+        Using AIMessage (assistant prefill) instead of HumanMessage avoids
+        the LLM treating the context as a new instruction to respond to.
+        The LLM sees it as its own prior reasoning and naturally continues
+        with an action decision.
+        """
         context_text = _format_context(state)
 
         parts: list[str] = []
@@ -272,20 +287,12 @@ def create_node_orchestrator(
         round_block += "</round_context>"
         parts.append(round_block)
 
-        # Nudge: prompt the LLM to evaluate progress and decide next action
-        parts.append(
-            "<next_action>\n"
-            "Review the current state above. Then decide:\n"
-            "1. Is there enough cross-validated evidence to confirm a root cause? "
-            "If yes, finalize.\n"
-            "2. Are there blind spots, unexplored leads, or untested hypotheses? "
-            "If yes, dispatch the right agent type.\n"
-            "3. Is the current hypothesis a SYMPTOM rather than a root cause? "
-            "If yes, dig deeper with deep_analyze.\n"
-            "</next_action>"
-        )
+        parts.append("Based on the current state, my next action:")
 
-        return HumanMessage(content="\n\n".join(parts))
+        return AIMessage(content="\n\n".join(parts))
+
+    # Context injection policy driven by hooks
+    _skip_context_on_think_only = hooks.skip_context_on_think_only
 
     def _prepare_messages(state: dict, round_num: int) -> list[Any]:
         """Build message list for the LLM call.
@@ -293,27 +300,28 @@ def create_node_orchestrator(
         Layout (optimised for prompt caching and recency bias):
             [0]   SystemMessage   — static prompt (cacheable prefix)
             [1..N] history        — recent conversation messages
-            [N+1] HumanMessage    — notebook + service profiles + round context
+            [N+1] AIMessage       — state prefill + round context
                                     (only when state has changed)
 
         The state snapshot is placed LAST so it sits closest to the
         generation cursor, maximising the LLM's attention on current
         investigation state.
 
-        **Context injection policy**: The context message is only appended
-        when investigation state has actually changed (new hypothesis,
-        service profile update, dispatch result, etc.).  If the last
-        orchestrator action was think-only, the context is skipped to
-        avoid reinforcing a repetitive pattern with identical state
-        snapshots.
+        **Context injection policy**: When ``skip_context_on_think_only``
+        is enabled (via OrchestratorHooks), the context message is skipped
+        if the last orchestrator action was think-only, to avoid reinforcing
+        a repetitive pattern with identical state snapshots.
         """
         history = list(state.get("messages", []))
         messages = [_system_msg, *history]
 
-        # Only inject context message when state has progressed.
-        # Check: did the last AI round use any tool other than think?
-        last_had_action = _last_round_had_action(history)
-        if last_had_action or round_num <= 2:
+        # Determine whether to inject context this round
+        should_inject = True
+        if _skip_context_on_think_only:
+            last_had_action = _last_round_had_action(history)
+            should_inject = last_had_action or round_num <= 2
+
+        if should_inject:
             context_msg = _build_context_message(state, round_num)
             messages.append(context_msg)
 
@@ -351,29 +359,12 @@ def create_node_orchestrator(
 
         llm_messages = _prepare_messages(state, round_num)
 
-        # Think-stall detection: if the LLM has only called `think` for
-        # the last N rounds, inject a warning forcing it to take action.
-        think_streak = _count_trailing_think_only(
-            state.get("messages", [])
-        )
-        if think_streak >= _THINK_STALL_LIMIT:
-            llm_messages.append(
-                HumanMessage(
-                    content=(
-                        f"THINK-STALL WARNING: You have called only `think` for "
-                        f"the last {think_streak} rounds without taking any action. "
-                        f"Thinking does not advance the investigation.\n\n"
-                        f"You MUST call an action tool NOW — dispatch_agent, "
-                        f"update_hypothesis, or finalize with "
-                        f"<decision>finalize</decision>.\n"
-                        f"Do NOT call think again until you have taken an action."
-                    )
-                )
-            )
-
-        # Pre-model pipeline: trajectory(llm_start)
+        # Pre-model pipeline: think-stall → skill injection → trajectory(llm_start)
         if pipeline is not None:
-            pipeline.before({"messages": llm_messages})
+            prepared = pipeline.before({"messages": llm_messages})
+            llm_messages = prepared.get("llm_input_messages") or prepared.get(
+                "messages", llm_messages
+            )
 
         response = await model_with_tools.ainvoke(llm_messages)
 
@@ -404,137 +395,12 @@ def create_node_orchestrator(
     # otherwise passes the last AI response through unchanged.
     # ------------------------------------------------------------------
 
-    synthesize_model = (
-        model_plain.with_structured_output(output_schema, method="json_mode")
-        if output_schema is not None
-        else None
+    synthesize = create_synthesize_node(
+        output_schema=output_schema,
+        output_prompt_text=output_prompt_text,
+        model_plain=model_plain,
+        max_retries=hooks.synthesize_max_retries,
     )
-
-    async def synthesize(state: dict) -> dict[str, Any]:
-        if synthesize_model is None:
-            return {}
-
-        messages = list(state.get("messages", []))
-        non_system = [m for m in messages if not isinstance(m, SystemMessage)]
-
-        # Build a field-level example from the schema so the model sees
-        # field names + types, NOT the raw JSON Schema meta-object.
-        import json as _json
-
-        def _schema_to_example(schema_cls: type[BaseModel]) -> dict:
-            """Create a placeholder dict from Pydantic schema fields.
-
-            Recursively expands nested BaseModel types so the LLM sees
-            the full structure (e.g. ``list[ComponentMapping]`` becomes
-            ``[{component_name: ..., service_name: ...}]``).
-            """
-            example: dict = {}
-            for name, field_info in schema_cls.model_fields.items():
-                ann = field_info.annotation
-                if ann is int:
-                    example[name] = 0
-                elif ann is float:
-                    example[name] = 0.0
-                elif ann is str:
-                    example[name] = f"<{field_info.description or name}>"
-                elif ann is bool:
-                    example[name] = False
-                elif (
-                    ann is not None
-                    and hasattr(ann, "__origin__")
-                    and ann.__origin__ is list
-                ):
-                    args = getattr(ann, "__args__", ())
-                    if (
-                        args
-                        and isinstance(args[0], type)
-                        and issubclass(args[0], BaseModel)
-                    ):
-                        example[name] = [_schema_to_example(args[0])]
-                    else:
-                        example[name] = []
-                elif isinstance(ann, type) and issubclass(ann, BaseModel):
-                    example[name] = _schema_to_example(ann)
-                else:
-                    example[name] = f"<{field_info.description or name}>"
-            return example
-
-        example_obj = _schema_to_example(output_schema) if output_schema else {}
-        json_instruction = (
-            "\n\nYou MUST respond with a single valid JSON object with these fields "
-            "(fill in actual values, not placeholders):\n"
-            f"{_json.dumps(example_obj, indent=2)}\n"
-            "Do NOT include any explanation or markdown — output raw JSON only."
-        )
-
-        attempt_messages = [
-            SystemMessage(content=output_prompt_text + json_instruction),
-            *non_system,
-            HumanMessage(
-                content="Produce your final structured report now. Output raw JSON only."
-            ),
-        ]
-
-        structured: dict[str, Any] | None = None
-        for attempt in range(1 + _SYNTH_MAX_RETRIES):
-            try:
-                result = await synthesize_model.ainvoke(attempt_messages)
-                structured = (
-                    result.model_dump() if hasattr(result, "model_dump") else result
-                )
-                logger.info(
-                    "synthesize attempt %d/%d succeeded, keys=%s",
-                    attempt + 1,
-                    1 + _SYNTH_MAX_RETRIES,
-                    list(structured.keys()) if isinstance(structured, dict) else type(structured).__name__,
-                )
-                break  # success
-            except Exception as exc:
-                raw_json = _extract_raw_from_error(exc)
-                if attempt < _SYNTH_MAX_RETRIES:
-                    logger.warning(
-                        "synthesize attempt %d/%d failed (%s), "
-                        "retrying with error feedback. raw_json_preview=%.300s",
-                        attempt + 1,
-                        1 + _SYNTH_MAX_RETRIES,
-                        exc,
-                        raw_json,
-                    )
-                    attempt_messages.append(AIMessage(content=raw_json))
-                    attempt_messages.append(
-                        HumanMessage(
-                            content=(
-                                f"Your JSON output had validation errors:\n{exc}\n\n"
-                                f"Your previous output:\n{raw_json}\n\n"
-                                "Fix the errors and output valid JSON matching the schema exactly."
-                            )
-                        )
-                    )
-                else:
-                    logger.error(
-                        "synthesize FAILED all %d attempts, last error: %s. "
-                        "Falling back to plain LLM. raw_json_preview=%.500s",
-                        attempt + 1,
-                        exc,
-                        raw_json,
-                    )
-                    try:
-                        raw = await model_plain.ainvoke(attempt_messages)
-                        raw_text = str(getattr(raw, "content", raw))
-                        logger.warning(
-                            "synthesize fallback produced raw_text (len=%d), "
-                            "preview=%.300s",
-                            len(raw_text),
-                            raw_text,
-                        )
-                    except Exception as exc2:
-                        logger.error(
-                            "synthesize fallback also FAILED: %s", exc2,
-                        )
-                        raw_text = ""
-                    structured = {"raw_text": raw_text}
-
-        return {"structured_response": structured}
 
     # ------------------------------------------------------------------
     # Routing — driven by <decision> tag, NOT by tool_calls presence

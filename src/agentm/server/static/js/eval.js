@@ -429,6 +429,7 @@ function EvalSampleDetail({ sampleId, onClose }) {
   const [info, setInfo] = useState(null);
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState('timeline');
   const pollRef = useRef(null);
   const scrollRef = useRef(null);
 
@@ -437,6 +438,7 @@ function EvalSampleDetail({ sampleId, onClose }) {
     if (!sampleId) return;
     setLoading(true);
     setEvents([]);
+    setActiveTab('timeline');
     fetch(`/api/eval/samples/${encodeURIComponent(sampleId)}`)
       .then(r => r.json())
       .then(data => { setInfo(data); setLoading(false); })
@@ -469,11 +471,31 @@ function EvalSampleDetail({ sampleId, onClose }) {
   // Auto-scroll events
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [events.length]);
+    if (el && activeTab === 'timeline') el.scrollTop = el.scrollHeight;
+  }, [events.length, activeTab]);
 
   // Build hierarchical tree from flat events
   const tree = useMemo(() => buildEventTree(events), [events]);
+
+  // Extract system prompts from all agents' first llm_start events
+  // LangChain messages use "type" (not "role"): "system", "human", "ai", "tool"
+  const agentPrompts = useMemo(() => {
+    const seen = new Set();
+    const result = [];
+    for (const ev of events) {
+      if (ev.event_type !== 'llm_start') continue;
+      const agentPath = ev.agent_path || [];
+      const agentKey = agentPath.join('/') || 'unknown';
+      if (seen.has(agentKey)) continue;
+      seen.add(agentKey);
+      const msgs = ev.data?.messages || [];
+      const sys = msgs.find(m => m.type === 'system' || m.role === 'system');
+      if (sys && sys.content) {
+        result.push({ agent: agentKey, content: sys.content });
+      }
+    }
+    return result;
+  }, [events]);
 
   if (loading) {
     return (
@@ -497,6 +519,11 @@ function EvalSampleDetail({ sampleId, onClose }) {
   // Track color index for subagent groups
   let groupColorIndex = 0;
 
+  const TABS = [
+    { id: 'timeline', label: 'Timeline' },
+    { id: 'prompt', label: 'Prompt' },
+  ];
+
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Header */}
@@ -518,31 +545,160 @@ function EvalSampleDetail({ sampleId, onClose }) {
         {info.run_id && <span>Run: <span style={{ color: C.text }}>{info.run_id}</span></span>}
         {info.error && <span>Error: <span style={{ color: C.red }}>{info.error}</span></span>}
       </div>
-      {/* Agent timeline */}
-      <AgentTimeline events={events} agentGroups={tree.agentGroups} />
-      {/* Events summary */}
-      <div style={{ padding: '6px 12px', borderBottom: `1px solid ${C.line}`, fontSize: 12, color: C.muted, display: 'flex', gap: 12, alignItems: 'center' }}>
-        <span>Events: {visibleEventCount}</span>
-        {agentCount > 0 && <span>Agents: {agentCount}</span>}
-        {info.status === 'running' && <span style={{ color: C.teal, animation: 'pulse 1.5s infinite' }}>polling...</span>}
-      </div>
-      {/* Hierarchical event list */}
-      <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto' }}>
-        {events.length === 0 && (
-          <div style={{ padding: 40, textAlign: 'center', color: C.muted, fontSize: 12 }}>
-            {info.status === 'pending' ? 'Waiting to start...' : info.status === 'skipped' ? 'Sample was skipped' : 'No events recorded'}
-          </div>
-        )}
-        {tree.rootItems.map((item, i) => {
-          if (item.type === 'group') {
-            const group = tree.agentGroups.get(item.agentId);
-            if (!group) return null;
-            const ci = groupColorIndex++;
-            return <AgentEventGroup key={`group-${item.agentId}`} group={group} colorIndex={ci} />;
-          }
-          // Root-level event
-          return <EventRow key={`root-${i}`} ev={item.event} index={i} />;
+      {/* Tab bar */}
+      <div style={{ display: 'flex', borderBottom: `1px solid ${C.line}`, paddingLeft: 12 }}>
+        {TABS.map(tab => {
+          const isActive = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              style={{
+                padding: '6px 14px',
+                background: 'none',
+                border: 'none',
+                borderBottom: isActive ? `2px solid ${C.teal}` : '2px solid transparent',
+                color: isActive ? C.teal : C.muted,
+                cursor: 'pointer',
+                fontSize: 12,
+                fontWeight: isActive ? 600 : 400,
+                fontFamily: 'inherit',
+                transition: 'all 0.15s',
+              }}
+            >{tab.label}</button>
+          );
         })}
+      </div>
+      {/* Tab content */}
+      {activeTab === 'timeline' && (
+        <>
+          {/* Agent timeline */}
+          <AgentTimeline events={events} agentGroups={tree.agentGroups} />
+          {/* Events summary */}
+          <div style={{ padding: '6px 12px', borderBottom: `1px solid ${C.line}`, fontSize: 12, color: C.muted, display: 'flex', gap: 12, alignItems: 'center' }}>
+            <span>Events: {visibleEventCount}</span>
+            {agentCount > 0 && <span>Agents: {agentCount}</span>}
+            {info.status === 'running' && <span style={{ color: C.teal, animation: 'pulse 1.5s infinite' }}>polling...</span>}
+          </div>
+          {/* Hierarchical event list */}
+          <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto' }}>
+            {events.length === 0 && (
+              <div style={{ padding: 40, textAlign: 'center', color: C.muted, fontSize: 12 }}>
+                {info.status === 'pending' ? 'Waiting to start...' : info.status === 'skipped' ? 'Sample was skipped' : 'No events recorded'}
+              </div>
+            )}
+            {tree.rootItems.map((item, i) => {
+              if (item.type === 'group') {
+                const group = tree.agentGroups.get(item.agentId);
+                if (!group) return null;
+                const ci = groupColorIndex++;
+                return <AgentEventGroup key={`group-${item.agentId}`} group={group} colorIndex={ci} />;
+              }
+              // Root-level event
+              return <EventRow key={`root-${i}`} ev={item.event} index={i} />;
+            })}
+          </div>
+        </>
+      )}
+      {activeTab === 'prompt' && (
+        <PromptTabContent agentPrompts={agentPrompts} />
+      )}
+    </div>
+  );
+}
+
+// ── Prompt Tab Content ──────────────────────────────────────────────
+function PromptTabContent({ agentPrompts }) {
+  const [selectedAgent, setSelectedAgent] = useState(null);
+  const [copied, setCopied] = useState(false);
+
+  // Auto-select first agent
+  useEffect(() => {
+    if (agentPrompts.length > 0 && !selectedAgent) {
+      setSelectedAgent(agentPrompts[0].agent);
+    }
+  }, [agentPrompts, selectedAgent]);
+
+  const current = agentPrompts.find(p => p.agent === selectedAgent);
+  const content = current?.content || '';
+
+  const handleCopy = useCallback(() => {
+    if (!content) return;
+    navigator.clipboard.writeText(content).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {});
+  }, [content]);
+
+  if (agentPrompts.length === 0) {
+    return (
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.muted, fontSize: 12, padding: 40 }}>
+        No system prompts found. Prompts are extracted from llm_start events.
+      </div>
+    );
+  }
+
+  const charCount = content.length;
+  const wordCount = content.split(/\s+/).filter(Boolean).length;
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* Agent selector + toolbar */}
+      <div style={{ padding: '6px 12px', borderBottom: `1px solid ${C.line}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          {agentPrompts.map((p, i) => {
+            const isActive = selectedAgent === p.agent;
+            const color = AGENT_COLORS[i % AGENT_COLORS.length];
+            return (
+              <button
+                key={p.agent}
+                onClick={() => { setSelectedAgent(p.agent); setCopied(false); }}
+                style={{
+                  background: isActive ? color + '20' : 'transparent',
+                  border: `1px solid ${isActive ? color : C.line}`,
+                  color: isActive ? color : C.muted,
+                  padding: '2px 10px',
+                  borderRadius: 3,
+                  cursor: 'pointer',
+                  fontSize: 11,
+                  fontWeight: isActive ? 600 : 400,
+                  fontFamily: 'inherit',
+                }}
+              >{p.agent}</button>
+            );
+          })}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 11, color: C.muted }}>
+            {wordCount.toLocaleString()} words / {charCount.toLocaleString()} chars
+          </span>
+          <button
+            onClick={handleCopy}
+            style={{
+              background: copied ? C.green + '20' : C.line,
+              border: `1px solid ${copied ? C.green : C.line}`,
+              color: copied ? C.green : C.text,
+              padding: '2px 10px',
+              borderRadius: 3,
+              cursor: 'pointer',
+              fontSize: 11,
+              fontFamily: 'inherit',
+              transition: 'all 0.15s',
+            }}
+          >{copied ? 'Copied!' : 'Copy'}</button>
+        </div>
+      </div>
+      {/* Prompt content */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
+        <pre style={{
+          margin: 0,
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+          fontSize: 12,
+          lineHeight: 1.5,
+          color: C.text,
+          fontFamily: 'inherit',
+        }}>{content}</pre>
       </div>
     </div>
   );

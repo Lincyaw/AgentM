@@ -179,6 +179,7 @@ class AgentConfig(BaseModel):
     task_type_prompts: Optional[dict[str, str]] = None
     execution: ExecutionConfig = ExecutionConfig()
     compression: Optional[CompressionConfig] = None
+    skills: list[str] = []
 
 
 class FeatureGatesConfig(BaseModel):
@@ -229,6 +230,7 @@ class OrchestratorConfig(BaseModel):
     disable_tool_binding: bool = (
         False  # set True for models that don't support bind_tools (e.g. MiniMax)
     )
+    skills: list[str] = []
 
 
 class SystemTypeConfig(BaseModel):

@@ -115,6 +115,7 @@ def _count_trailing_think_only(messages: list[Any]) -> int:
 
 def build_think_stall_hook(
     max_consecutive: int = 3,
+    warning_template: str | None = None,
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
     """Build a ``pre_model_hook`` that breaks think-only stalls.
 
@@ -126,7 +127,22 @@ def build_think_stall_hook(
     ----------
     max_consecutive:
         Number of consecutive think-only rounds before the warning fires.
+    warning_template:
+        Custom warning message template.  May contain ``{streak}`` which
+        is replaced with the actual streak count.  When ``None``, a
+        generic default is used.
     """
+    _default_template = (
+        "THINK-STALL WARNING: You have called only `think` for the "
+        "last {streak} rounds without taking any action. Thinking "
+        "alone does not advance the investigation.\n\n"
+        "You MUST call an action tool NOW — one of:\n"
+        "- dispatch_agent (to send a worker for data collection)\n"
+        "- update_hypothesis (to formalize your reasoning)\n"
+        "- finalize via <decision>finalize</decision>\n\n"
+        "Do NOT call think again until you have taken an action."
+    )
+    template = warning_template if warning_template is not None else _default_template
 
     def hook(state: dict[str, Any]) -> dict[str, Any]:
         messages = state.get("llm_input_messages") or state.get("messages", [])
@@ -135,16 +151,7 @@ def build_think_stall_hook(
 
         streak = _count_trailing_think_only(messages)
         if streak >= max_consecutive:
-            warning_text = (
-                f"THINK-STALL WARNING: You have called only `think` for the "
-                f"last {streak} rounds without taking any action. Thinking "
-                f"alone does not advance the investigation.\n\n"
-                f"You MUST call an action tool NOW — one of:\n"
-                f"- dispatch_agent (to send a worker for data collection)\n"
-                f"- update_hypothesis (to formalize your reasoning)\n"
-                f"- finalize via <decision>finalize</decision>\n\n"
-                f"Do NOT call think again until you have taken an action."
-            )
+            warning_text = template.format(streak=streak)
             return {out_key: [*messages, HumanMessage(content=warning_text)]}
 
         return {out_key: messages}
@@ -173,6 +180,7 @@ class LoopDetectionMiddleware(AgentMMiddleware):
         threshold: int = 5,
         window_size: int = 20,
         think_stall_limit: int = 3,
+        think_stall_warning: str | None = None,
     ) -> None:
         self._threshold = threshold
         self._window_size = window_size
@@ -183,6 +191,7 @@ class LoopDetectionMiddleware(AgentMMiddleware):
         )
         self._think_hook = build_think_stall_hook(
             max_consecutive=think_stall_limit,
+            warning_template=think_stall_warning,
         )
 
     def before_model(self, state: dict[str, Any]) -> dict[str, Any]:

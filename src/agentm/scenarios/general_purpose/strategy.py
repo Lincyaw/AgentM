@@ -124,12 +124,5 @@ class GeneralPurposeStrategy:
         return GeneralPurposeState
 
     def create_scenario_tools(self, **kwargs: Any) -> ScenarioToolBundle:
-        """Create skill management tools with closure over the vault instance."""
-        vault = kwargs.get("vault")
-        if vault is None:
-            return ScenarioToolBundle()
-
-        from agentm.scenarios.general_purpose.skill_tools import create_skill_tools
-
-        skill_tools = create_skill_tools(vault)
-        return ScenarioToolBundle(orchestrator_tools=skill_tools)
+        """Return empty bundle — skill access is unified via vault tools."""
+        return ScenarioToolBundle()

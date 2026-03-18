@@ -409,6 +409,8 @@ class GenericAgentSystemBuilder(Generic[S]):
             format_context=format_context,
             model_config=orch_model_config,
             trajectory=trajectory,
+            extra_middleware=self._middleware or None,
+            strategy=strategy,
         )
 
         return AgentSystem(
@@ -554,12 +556,16 @@ class AgentSystemBuilder:
             )
 
             # --- Vault ---
-            VAULT_TOOLS: dict[str, Any] = {}
             from agentm.tools.vault import MarkdownVault, create_vault_tools
 
             vault_dir = Path(resolved_kb_dir) / "vault"
             vault = MarkdownVault(vault_dir)
             VAULT_TOOLS = create_vault_tools(vault)
+
+            # Register vault tools into tool_registry so both orchestrator
+            # and worker can resolve them uniformly via config.tools
+            for vt_name, vt_func in VAULT_TOOLS.items():
+                tool_registry.register(vt_name, vt_func, {})
 
             # Scenario-specific tools via strategy protocol (no if/else branching)
             from agentm.core.strategy_registry import get_strategy
@@ -594,7 +600,7 @@ class AgentSystemBuilder:
                 "get_checkpoint_history": memory_module.get_checkpoint_history,
             }
 
-            # Build orchestrator tools: YAML-registered + factory-injected + knowledge + memory
+            # Build orchestrator tools: factory-injected + memory + registry (incl. vault)
             tools: list[Any] = []
 
             for name in scenario_config.orchestrator.tools:
@@ -623,17 +629,8 @@ class AgentSystemBuilder:
                         description=func.__doc__ or name,
                     )
                     tools.append(tool)
-                elif name in VAULT_TOOLS:
-                    # Vault tools (MarkdownVault backend, memory_extraction only)
-                    func = VAULT_TOOLS[name]
-                    tool = StructuredTool.from_function(
-                        func=func,
-                        name=name,
-                        description=func.__doc__ or name,
-                    )
-                    tools.append(tool)
                 elif tool_registry.has(name):
-                    # YAML-registered tool (module-level function)
+                    # Registry tool (YAML-declared or vault tools registered above)
                     tools.append(tool_registry.get(name).create_with_config())
                 else:
                     raise ConfigError(f"Tool {name!r} not found in registry or factory")
@@ -646,6 +643,23 @@ class AgentSystemBuilder:
             if format_context is None:
                 format_context = strategy.format_context
 
+            # --- Skill middleware (config-driven, per-agent) ---
+            from agentm.middleware.skill import SkillMiddleware
+
+            orch_skill_mw: list[AgentMMiddleware] = []
+            if scenario_config.orchestrator.skills:
+                orch_skill_mw.append(
+                    SkillMiddleware(vault, scenario_config.orchestrator.skills)
+                )
+
+            worker_cfg = scenario_config.agents.get("worker")
+            worker_skill_mw: list[AgentMMiddleware] = []
+            if worker_cfg is not None and worker_cfg.skills:
+                worker_skill_mw.append(
+                    SkillMiddleware(vault, worker_cfg.skills)
+                )
+            agent_pool._extra_worker_middleware = worker_skill_mw
+
             graph = create_node_orchestrator(
                 config=scenario_config.orchestrator,
                 tools=tools,
@@ -655,6 +669,8 @@ class AgentSystemBuilder:
                 format_context=format_context,
                 model_config=orch_model_config,
                 trajectory=trajectory,
+                extra_middleware=orch_skill_mw or None,
+                strategy=strategy,
             )
 
             # Wire graph reference for recall_history (must happen after graph compilation)

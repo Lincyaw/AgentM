@@ -1,17 +1,15 @@
 """Tests for the general_purpose scenario: state, strategy, answer schemas,
-registration, skill tools, ScenarioToolBundle, and builder integration.
+registration, ScenarioToolBundle, and builder integration.
 
 Each test prevents a specific class of bugs:
 - Strategy protocol compliance → missing methods → crash at graph execution
 - State schema correctness → wrong field types → LangGraph reducer errors
-- Skill tool safety → exception on vault access → tool call failure
 - Registration → missing types → builder lookup crash
-- ScenarioToolBundle → strategy returns wrong tools → builder wiring crash
+- ScenarioToolBundle → strategy returns correct (empty) bundle → builder wiring
 """
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
@@ -247,80 +245,6 @@ class TestRegistration:
 
 
 # ---------------------------------------------------------------------------
-# Skill Tools
-# ---------------------------------------------------------------------------
-
-
-class TestSkillTools:
-    """Skill tools return valid JSON and handle errors gracefully."""
-
-    @pytest.fixture()
-    def vault_and_tools(self, tmp_path):
-        """Create a real vault with a sample skill note."""
-        from agentm.tools.vault.store import MarkdownVault
-
-        vault = MarkdownVault(tmp_path / "vault")
-        vault.write(
-            "skill/test-skill",
-            {
-                "type": "skill",
-                "confidence": "fact",
-                "name": "test-skill",
-                "description": "A test skill for unit testing",
-                "trigger_patterns": ["run test", "test something"],
-                "tags": ["test"],
-            },
-            "# Test Skill\n\nUse this for testing purposes.",
-        )
-
-        from agentm.scenarios.general_purpose.skill_tools import create_skill_tools
-
-        tools = create_skill_tools(vault)
-        return vault, tools
-
-    def test_skill_list(self, vault_and_tools):
-        _, tools = vault_and_tools
-        result = json.loads(tools["skill_list"]("list"))
-        assert "skills" in result
-        assert len(result["skills"]) == 1
-        assert result["skills"][0]["name"] == "test-skill"
-        assert result["skills"][0]["description"] == "A test skill for unit testing"
-
-    def test_skill_load_by_path(self, vault_and_tools):
-        _, tools = vault_and_tools
-        result = json.loads(tools["skill_load"]("skill/test-skill"))
-        assert result["status"] == "loaded"
-        assert result["path"] == "skill/test-skill"
-        assert "Test Skill" in result["body"]
-
-    def test_skill_load_not_found(self, vault_and_tools):
-        _, tools = vault_and_tools
-        result = json.loads(tools["skill_load"]("skill/nonexistent"))
-        assert "error" in result
-
-    def test_skill_search(self, vault_and_tools):
-        _, tools = vault_and_tools
-        result = json.loads(tools["skill_search"]("test"))
-        assert "results" in result
-        assert len(result["results"]) >= 1
-
-    def test_all_tools_return_json(self, vault_and_tools):
-        """Bug prevented: tool returns non-JSON → ToolMessage parsing crash."""
-        _, tools = vault_and_tools
-        for name, func in tools.items():
-            if name == "skill_list":
-                result = func("test")
-            elif name == "skill_load":
-                result = func("skill/test-skill")
-            elif name == "skill_search":
-                result = func("test")
-            else:
-                continue
-            parsed = json.loads(result)
-            assert isinstance(parsed, dict)
-
-
-# ---------------------------------------------------------------------------
 # ScenarioToolBundle (strategy-based tool injection)
 # ---------------------------------------------------------------------------
 
@@ -328,8 +252,8 @@ class TestSkillTools:
 class TestScenarioToolBundle:
     """Strategy.create_scenario_tools returns correct bundles."""
 
-    def test_gp_strategy_returns_skill_tools(self, tmp_path):
-        """Bug prevented: strategy returns empty bundle → skill tools missing."""
+    def test_gp_strategy_returns_empty_bundle(self, tmp_path):
+        """GP strategy returns empty bundle — skill access is via vault tools."""
         from agentm.tools.vault.store import MarkdownVault
         from agentm.scenarios.general_purpose.strategy import GeneralPurposeStrategy
 
@@ -337,9 +261,7 @@ class TestScenarioToolBundle:
         strategy = GeneralPurposeStrategy()
         bundle = strategy.create_scenario_tools(vault=vault)
 
-        assert "skill_list" in bundle.orchestrator_tools
-        assert "skill_load" in bundle.orchestrator_tools
-        assert "skill_search" in bundle.orchestrator_tools
+        assert bundle.orchestrator_tools == {}
         assert bundle.format_context_override is None
         assert bundle.worker_tools == []
 
