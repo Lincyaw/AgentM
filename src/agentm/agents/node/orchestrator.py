@@ -275,15 +275,17 @@ def create_node_orchestrator(
         round_block = f"<round_context>\nRound: {round_num}/{max_rounds}\n"
         if round_num >= max_rounds:
             round_block += (
-                "\n⚠️ LAST ROUND — you MUST output "
+                "\n⚠️ LAST ROUND — I MUST output "
                 "<decision>finalize</decision> now. "
                 "Do NOT dispatch any more workers.\n"
             )
         elif round_num >= max_rounds - 1:
             round_block += (
                 f"\n⚠️ Round {round_num}/{max_rounds} — 1 round remaining. "
-                "Consider finalizing if evidence is sufficient.\n"
+                "I should consider finalizing if evidence is sufficient.\n"
             )
+        else:
+            round_block += "tips: if I have gathered sufficient evidence, I can finalize early to save tokens, by emitting `<decision>finalize</decision>` in my response.\n"
         round_block += "</round_context>"
         parts.append(round_block)
 
