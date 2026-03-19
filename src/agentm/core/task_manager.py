@@ -207,26 +207,30 @@ class TaskManager:
             1 for t in self._tasks.values() if t.status == AgentRunStatus.RUNNING
         )
 
-    async def inject(self, task_id: str, instruction: str) -> None:
-        """Inject a new instruction into a running Sub-Agent."""
-        task = self.get_task(task_id)
-        if task.status != AgentRunStatus.RUNNING:
-            raise ValueError(
-                f"Task {task_id!r} is not running (status={task.status!r})"
-            )
-        task.pending_instructions.append(instruction)
+    async def inject(self, task_id: str, instruction: str) -> bool:
+        """Inject a new instruction into a running Sub-Agent.
 
-    async def abort(self, task_id: str, reason: str) -> None:
-        """Abort a running Sub-Agent task."""
+        Returns True if injected, False if the task is no longer running.
+        """
         task = self.get_task(task_id)
         if task.status != AgentRunStatus.RUNNING:
-            raise ValueError(
-                f"Task {task_id!r} is not running (status={task.status!r})"
-            )
+            return False
+        task.pending_instructions.append(instruction)
+        return True
+
+    async def abort(self, task_id: str, reason: str) -> bool:
+        """Abort a running Sub-Agent task.
+
+        Returns True if aborted, False if the task is no longer running.
+        """
+        task = self.get_task(task_id)
+        if task.status != AgentRunStatus.RUNNING:
+            return False
         if task.asyncio_task is not None:
             task.asyncio_task.cancel()
         task.status = AgentRunStatus.FAILED
         task.error_summary = f"Aborted: {reason}"
+        return True
         self._completion_event.set()
         if self._trajectory is not None:
             await self._trajectory.record(

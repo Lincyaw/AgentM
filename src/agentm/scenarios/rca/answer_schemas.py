@@ -8,27 +8,15 @@ from agentm.models.answer_schemas import _BaseAnswer
 
 
 class ScoutAnswer(_BaseAnswer):
-    """Scout agent output: structural map of the incident + investigation leads."""
+    """Scout agent output: structural map of the incident."""
 
-    leads: list[str] = Field(
-        description=(
-            "3-6 divergent investigation directions. Each lead is one sentence: "
-            "'[service/component] may [cause] because [evidence]'. "
-            "Cover different fault domains (network, resource, dependency, config, code)."
-        ),
-    )
+    pass
 
 
 class DeepAnalyzeAnswer(_BaseAnswer):
-    """Deep-analyze agent output: causal mechanism + refined hypotheses."""
+    """Deep-analyze agent output: causal mechanism explanation."""
 
-    leads: list[str] = Field(
-        description=(
-            "1-3 refined hypotheses about specific causal mechanisms. Narrow "
-            "and evidence-heavy — only include leads that scout-level analysis "
-            "could NOT have produced."
-        ),
-    )
+    pass
 
 
 class VerifyAnswer(_BaseAnswer):

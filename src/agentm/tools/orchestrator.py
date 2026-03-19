@@ -157,12 +157,16 @@ def create_orchestrator_tools(
 
     async def inject_instruction(task_id: str, instruction: str) -> str:
         """Inject a new instruction into a running Sub-Agent."""
-        await task_manager.inject(task_id, instruction)
+        ok = await task_manager.inject(task_id, instruction)
+        if not ok:
+            return f"Task {task_id} is no longer running — instruction not injected. Use check_tasks to collect its result."
         return f"Instruction injected into task {task_id}"
 
     async def abort_task(task_id: str, reason: str) -> str:
         """Abort a running Sub-Agent task."""
-        await task_manager.abort(task_id, reason)
+        ok = await task_manager.abort(task_id, reason)
+        if not ok:
+            return f"Task {task_id} is no longer running — cannot abort. Use check_tasks to collect its result."
         return f"Task {task_id} aborted: {reason}"
 
     # --- Mutable references for recall_history ---
