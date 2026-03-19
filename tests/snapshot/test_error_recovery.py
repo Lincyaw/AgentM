@@ -18,29 +18,26 @@ from agentm.tools.orchestrator import create_orchestrator_tools
 
 
 class TestInjectInstructionRejected:
-    """P4: inject_instruction for COMPLETED task raises error."""
+    """P4: inject_instruction for COMPLETED task returns False (not injected)."""
 
     @pytest.mark.asyncio
-    async def test_inject_for_completed_task_raises(
+    async def test_inject_for_completed_task_returns_false(
         self, task_manager_with_completed_task: TaskManager
     ) -> None:
-        """inject_instruction should raise ValueError for a non-RUNNING task."""
-        with pytest.raises(ValueError, match="not running"):
-            await task_manager_with_completed_task.inject(
-                "task-completed-001", "new instruction"
-            )
+        """inject should return False for a non-RUNNING task."""
+        ok = await task_manager_with_completed_task.inject(
+            "task-completed-001", "new instruction"
+        )
+        assert ok is False
 
     @pytest.mark.asyncio
     async def test_inject_instruction_not_queued_for_completed(
         self, task_manager_with_completed_task: TaskManager
     ) -> None:
         """After rejection, instruction must NOT be in pending list."""
-        try:
-            await task_manager_with_completed_task.inject(
-                "task-completed-001", "new instruction"
-            )
-        except ValueError:
-            pass
+        await task_manager_with_completed_task.inject(
+            "task-completed-001", "new instruction"
+        )
 
         task = task_manager_with_completed_task.get_task("task-completed-001")
         assert len(task.pending_instructions) == 0
@@ -88,9 +85,9 @@ class TestAbortTask:
         assert asyncio_task.cancelling() > 0
 
     @pytest.mark.asyncio
-    async def test_abort_on_failed_task_raises(
+    async def test_abort_on_failed_task_returns_false(
         self, task_manager_with_failed_task: TaskManager
     ) -> None:
-        """abort_task via TaskManager.abort should reject non-RUNNING tasks."""
-        with pytest.raises(ValueError, match="not running"):
-            await task_manager_with_failed_task.abort("task-failed-001", "cleanup")
+        """abort should return False for non-RUNNING tasks."""
+        ok = await task_manager_with_failed_task.abort("task-failed-001", "cleanup")
+        assert ok is False

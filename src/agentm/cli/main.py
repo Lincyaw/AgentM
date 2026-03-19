@@ -289,7 +289,7 @@ def eval(
         100, "--max-steps", help="Maximum orchestrator steps per sample"
     ),
     timeout: float = typer.Option(
-        1800,
+        0,
         "--timeout",
         help="Per-sample timeout in seconds (0 = no timeout)",
     ),
