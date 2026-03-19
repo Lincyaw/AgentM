@@ -10,6 +10,9 @@ orchestrator:
   prompts:
     system: "prompts/orchestrator_system.j2"
 
+  skills:
+    - "skill/rca-orchestrator-guide"
+
   tools:
     - dispatch_agent
     - check_tasks
@@ -72,6 +75,7 @@ agents:
         max_cache_size: 50
     skills:
       - "skill/diagnose-sql"
+      - "skill/rca-worker-guide"
     # compression:
     #   compression_model: "gpt-5.1-mini"
     #   prompt: "prompts/compression/sub_agent_compress.j2"
