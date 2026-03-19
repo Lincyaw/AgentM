@@ -284,8 +284,6 @@ def create_node_orchestrator(
                 f"\n⚠️ Round {round_num}/{max_rounds} — 1 round remaining. "
                 "I should consider finalizing if evidence is sufficient.\n"
             )
-        else:
-            round_block += "tips: if I have gathered sufficient evidence, I can finalize early to save tokens, by emitting `<decision>finalize</decision>` in my response.\n"
         round_block += "</round_context>"
         parts.append(round_block)
 
