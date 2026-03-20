@@ -269,7 +269,11 @@ anomaly could be causing the symptoms you see in OTHER services' traces.
 When traces show a latency gap (time unaccounted for by child spans), the explanation
 lives outside the trace data — in metrics (resource stalls), logs (errors, retries),
 or infrastructure (network, scheduling). Do not fill the gap with speculation;
-switch signals and investigate.
+switch signals and investigate. A common form of this: a caller span that normally
+produces a child span to a downstream service, but in the abnormal period the child span
+vanishes — this means the downstream service was unreachable, not that the caller stopped
+calling it. The "internal time" accounting in such cases is an artifact of missing spans,
+not real internal processing.
 
 **The strongest causal argument combines all three signals.**
 - Trace: shows WHERE the latency lives (which service, which edge)

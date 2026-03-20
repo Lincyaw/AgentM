@@ -160,6 +160,8 @@ FROM child_totals
 - `internal_pct` < 30% → most time spent in downstream calls; investigate children
 - Always compare against the same query on `normal_traces` to see if internal_pct changed.
 
+**Beware of vanishing children.** High `internal_pct` does not always mean the service itself is slow. If the same span type normally has downstream calls (fan_out > 0 in baseline) but those calls disappear in the abnormal period (fan_out drops toward 0), the "internal time" is likely spent waiting for a downstream service that is too overloaded to respond — the child span is missing because the callee never processed the request, not because the caller didn't make the call. Compare fan_out between abnormal and normal periods; a significant drop combined with error spans is a strong signal that the downstream service is unreachable.
+
 ## Latency distribution (percentiles)
 
 ```sql

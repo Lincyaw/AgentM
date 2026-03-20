@@ -36,6 +36,12 @@ The key measurement for cause-vs-victim is **internal time**: total span duratio
 of ALL child span durations. If internal time is normal (compared to baseline), the service is
 almost certainly a victim. If internal time is anomalous, it has its own independent problem.
 
+But internal time can be misleading when child spans are missing. A service whose downstream
+dependency is completely unreachable will show 100% "internal time" — not because it's doing
+internal work, but because the failed outbound call produced no child span. Always check whether
+the span's child count (fan-out) dropped compared to baseline before interpreting high internal
+time as an independent problem.
+
 Beware of fan-out: a parent span with 7 child calls, each taking 8s, has ~0% internal time
 even though each individual child is shorter than the parent. Always SUM all children.
 </diagnostic_philosophy>
@@ -68,6 +74,11 @@ even though each individual child is shorter than the parent. Always SUM all chi
 6. **Traces can have blind spots.** When traces show unexplained latency (no slow child spans,
    time unaccounted for), the answer is NOT "internal processing bottleneck" — it's "traces
    cannot explain this, I need to check resources and logs." Switch signals instead of guessing.
+   In particular: if a span normally calls a downstream service but the child span is absent in
+   the abnormal period — especially on error paths — the "internal time" is likely time spent
+   waiting for a downstream service that couldn't respond. The missing child span means the
+   callee was unreachable, not that the caller had an internal problem. Always compare the
+   fan-out (child count) between abnormal and normal periods for the same span type.
 7. **Read the logs**: logs contain specific error messages — connection timeout, pool exhausted, query timeout, OOM.
 8. **When a service has errors, decompose them.** Don't just report "33% error rate." Ask:
    - What are the HTTP status codes? (500 vs 502 vs 503 vs null — each tells a different story)

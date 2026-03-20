@@ -42,6 +42,11 @@ Verdict:
 2. **Steel-man then attack**: assume correct, understand what evidence should look like, then design queries to find CONTRADICTING evidence.
 3. **Upstream always**: first query should check upstream of the candidate, not the candidate itself.
 4. **Absence of evidence**: untestable conditions = INCONCLUSIVE, not SUPPORTED.
+   Similarly, "error spans have no child spans pointing to service B" does not mean "the errors
+   are unrelated to B." If B is so overloaded that it cannot respond at all, the child span
+   will never be created — yet the error is entirely caused by B's unavailability. Compare
+   child span counts (fan-out) between abnormal and normal periods before concluding that
+   a downstream service is uninvolved.
 5. **Explanatory completeness**: before concluding SUPPORTED, run the error rate delta query
    (diagnose-sql/traces "Error rate delta by service") for ALL services. If you find anomalous
    services not covered by the hypothesis, report them as contradicting findings. The hypothesis
