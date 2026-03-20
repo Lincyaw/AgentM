@@ -166,6 +166,25 @@ def _extract_node_name(snapshot: Any) -> str:
     return "unknown"
 
 
+def _load_ground_truth(data_dir: str) -> dict[str, Any] | None:
+    """Load ground truth payload from a sample data directory if available."""
+    if not data_dir:
+        return None
+    injection_path = Path(data_dir) / "injection.json"
+    if not injection_path.exists():
+        return None
+    try:
+        with injection_path.open(encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+    ground_truth = payload.get("ground_truth")
+    if not isinstance(ground_truth, dict):
+        return None
+    return ground_truth
+
+
 # ---------------------------------------------------------------------------
 # Application factory
 # ---------------------------------------------------------------------------
@@ -456,6 +475,12 @@ def create_dashboard_app(
         info = et.get_sample(sample_id)
         if info is None:
             return {"error": "Sample not found"}
+        ground_truth = _load_ground_truth(info.get("data_dir", ""))
+        if ground_truth is not None:
+            info = {**info, "ground_truth": ground_truth}
+            service = ground_truth.get("service")
+            if isinstance(service, list):
+                info["root_cause_services"] = [str(s) for s in service if str(s).strip()]
         return info
 
     @app.get("/api/eval/samples/{sample_id}/events")
