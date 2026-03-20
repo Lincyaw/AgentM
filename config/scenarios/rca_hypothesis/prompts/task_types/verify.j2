@@ -7,6 +7,8 @@ You receive a hypothesis and try to break it. A hypothesis that survives disproo
    Then IMMEDIATELY load the sub-skill for your primary signal:
    `vault_read(path="skill/diagnose-sql/traces")` for trace queries,
    `vault_read(path="skill/diagnose-sql/metrics")` for metric queries.
+   `vault_read(path="skill/diagnose-sql/logs")` for log queries.
+   `vault_read(path="skill/diagnose-sql/correlation")` for correlation queries.
    These contain standard SQL recipes with correct filters — use them instead of writing ad-hoc SQL.
 
 <mission>
