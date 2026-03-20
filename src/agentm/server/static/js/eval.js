@@ -516,6 +516,30 @@ function EvalSampleDetail({ sampleId, onClose }) {
   const statusColor = STATUS_COLORS[info.status] || C.muted;
   const visibleEventCount = events.filter(e => e.event_type !== 'llm_start').length;
   const agentCount = tree.agentGroups.size;
+  const groundTruth = info.ground_truth || info.groundtruth;
+  const normalizedRootCauseServices = [];
+  const serviceCandidates = [
+    info.root_cause_services,
+    info.rootCauseServices,
+    groundTruth?.service,
+  ];
+  for (const candidate of serviceCandidates) {
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) {
+        const value = String(item || '').trim();
+        if (value && !normalizedRootCauseServices.includes(value)) {
+          normalizedRootCauseServices.push(value);
+        }
+      }
+    } else if (typeof candidate === 'string') {
+      const value = candidate.trim();
+      if (value && !normalizedRootCauseServices.includes(value)) {
+        normalizedRootCauseServices.push(value);
+      }
+    }
+    if (normalizedRootCauseServices.length > 0) break;
+  }
+  const rootCauseServices = normalizedRootCauseServices;
   // Track color index for subagent groups
   let groupColorIndex = 0;
 
@@ -543,6 +567,11 @@ function EvalSampleDetail({ sampleId, onClose }) {
         <span>Index: <span style={{ color: C.text }}>{info.dataset_index}</span></span>
         <span>Dir: <span style={{ color: C.text }}>{info.data_dir}</span></span>
         {info.run_id && <span>Run: <span style={{ color: C.text }}>{info.run_id}</span></span>}
+        {rootCauseServices.length > 0 && (
+          <span>
+            Root Cause(Service): <span style={{ color: C.red }}>{rootCauseServices.join(', ')}</span>
+          </span>
+        )}
         {info.error && <span>Error: <span style={{ color: C.red }}>{info.error}</span></span>}
       </div>
       {/* Tab bar */}
