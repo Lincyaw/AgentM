@@ -13,6 +13,7 @@ from agentm.exceptions import AgentMError
 
 from agentm.cli.debug import analyze_trajectory
 from agentm.cli.eval import run_eval
+from agentm.cli.export_eval import export_eval_batch, export_eval_result
 from agentm.cli.run import (
     resume_investigation,
     run_investigation,
@@ -321,3 +322,67 @@ def eval(
             dashboard_host=dashboard_host,
         )
     )
+
+
+@app.command("export-result")
+def export_result(
+    trajectory_file: str = typer.Argument(help="Path to trajectory .jsonl file"),
+    output: str | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help=(
+            "Output JSON path. "
+            "Default: same directory as trajectory with suffix .export.json"
+        ),
+    ),
+) -> None:
+    """Export case_dir + ground_truth + final outputs for one trajectory."""
+    from rich.console import Console
+
+    console = Console()
+    out_path = export_eval_result(trajectory_file=trajectory_file, output_file=output)
+    console.print(f"Exported: [green]{out_path}[/]")
+
+
+@app.command("export-batch")
+def export_batch(
+    trajectory_dir: str = typer.Argument(help="Directory containing trajectory .jsonl files"),
+    pattern: str = typer.Option(
+        "*.jsonl",
+        "--pattern",
+        "-p",
+        help="Glob pattern under trajectory_dir (default: *.jsonl)",
+    ),
+    output_dir: str | None = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help=(
+            "Directory for exported JSON files. "
+            "Default: write next to each trajectory file."
+        ),
+    ),
+) -> None:
+    """Batch export case_dir + ground_truth + final outputs from trajectories."""
+    from rich.console import Console
+
+    console = Console()
+    success, failed = export_eval_batch(
+        trajectory_dir=trajectory_dir,
+        pattern=pattern,
+        output_dir=output_dir,
+    )
+
+    console.print(f"Exported: [green]{len(success)}[/] files")
+    if success:
+        preview = success[:5]
+        for item in preview:
+            console.print(f"  - [green]{item}[/]")
+        if len(success) > len(preview):
+            console.print(f"  ... and {len(success) - len(preview)} more")
+
+    if failed:
+        console.print(f"Failed: [red]{len(failed)}[/] files")
+        for traj, err in failed[:10]:
+            console.print(f"  - [red]{traj}[/]: {err}")
