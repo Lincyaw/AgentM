@@ -28,3 +28,4 @@ trajectories
 .env.local
 eval-data
 logs
+debug
