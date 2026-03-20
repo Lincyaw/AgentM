@@ -25,7 +25,7 @@ Guide for querying OpenTelemetry observability data in DuckDB during root cause 
 All data comes in **paired tables**: `abnormal_*` (incident window) vs `normal_*` (baseline).
 An anomaly only exists if the delta between the two periods is significant.
 
-## Sub-Skills (load on demand)
+## Sub-Skills (load before querying)
 
 | Skill path | Signal | Use when |
 |------------|--------|----------|
@@ -34,7 +34,12 @@ An anomaly only exists if the delta between the two periods is significant.
 | [[skill/diagnose-sql/metrics]] | Metrics | CPU/memory, JVM, DB pools, network (Hubble), HTTP latency |
 | [[skill/diagnose-sql/correlation]] | Cross-signal | Triangulating cause vs victim, multi-signal drill-down |
 
-Use `skill_load` with the path (e.g. `skill/diagnose-sql/traces`) to load the full recipe collection.
+**IMPORTANT**: This index provides ground rules only. The sub-skills contain actual SQL recipes
+with correct column names, JOIN patterns, and standard filters. **Load the sub-skill matching
+your primary signal BEFORE writing your first query for that signal type.** Ad-hoc SQL without
+consulting the recipes is the #1 cause of measurement errors.
+
+Load with: `vault_read(path="skill/diagnose-sql/traces")` (or `/metrics`, `/logs`, `/correlation`)
 
 ## Ground Rules
 
@@ -64,6 +69,16 @@ The tool enforces a 5000-token output cap — oversized results get truncated.
 ### Delta = the only truth
 A 500ms latency means nothing in isolation. Only the ratio `abnormal / normal` matters.
 Always compare against the corresponding `normal_*` table before calling anything anomalous.
+
+### Standard error rate definition (CRITICAL)
+OpenTelemetry `attr.status_code` values vary across instrumentations: `'Error'`, `'STATUS_CODE_ERROR'`, `'error'`, etc.
+ALWAYS use this combined filter to avoid false negatives:
+```sql
+COUNT(*) FILTER (WHERE "attr.status_code" IN ('Error', 'STATUS_CODE_ERROR')
+                 OR "attr.http.response.status_code" >= 400) AS errors
+```
+If you use a narrower filter (e.g., only `'STATUS_CODE_ERROR'`), you MUST note it in your findings
+so the orchestrator knows you used a non-standard definition.
 
 ### Three metric tables, not one
 | Table | Type | Value columns | Use for |

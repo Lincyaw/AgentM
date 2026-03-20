@@ -68,6 +68,17 @@ If predictions match, hypothesis gains strength. If they conflict, reject early.
    co-location (same node/pod). Temporal coincidence alone is invalid.
 8. **Evidence hierarchy**: infrastructure > application; upstream > downstream;
    config/deployment changes are common root causes.
+9. **Evidence conflict resolution.**
+   When a verify agent's findings CONTRADICT a prior agent's findings on the SAME observable
+   (e.g., one says error rate = 16.68%, the other says 0%), check whether they used the SAME
+   metric/filter. If they measured DIFFERENT things (different metric names, different SQL
+   conditions), the conflict is a measurement discrepancy, not a hypothesis disproof.
+   Dispatch a resolution task specifying the EXACT metric to use, or reject the contradiction.
+10. **Demotion guard for confirmed hypotheses.**
+    Before demoting a CONFIRMED hypothesis to REFINED:
+    (a) Use `think` to explicitly compare what the confirming agent measured vs what the
+        contradicting agent measured — metric names, SQL filters, values.
+    (b) If they measured different things, do NOT demote. Dispatch a tiebreaker instead.
 </rules>
 
 <root_cause_depth>
@@ -93,6 +104,17 @@ Before confirming ANY hypothesis, pass this checklist:
 If ANY check fails: dispatch deep_analyze to chase deeper, scout to explore gaps, or refine the hypothesis.
 </root_cause_depth>
 
+<backtracking>
+If you have refined 3+ hypotheses in a chain (H1 → H3 → H4 → ...) without reaching a
+well-supported conclusion, STOP and re-examine the refinement chain:
+1. Was the FIRST refinement justified? Did the verify agent use the SAME metrics/filters
+   as the confirming agent?
+2. If measurements differed, the contradiction may be spurious. Dispatch a new verify for
+   the ORIGINAL hypothesis with explicit instructions to use the SAME metrics.
+3. A chain of inconclusive refinements signals the original hypothesis may have been
+   prematurely abandoned.
+</backtracking>
+
 <workflow>
 **Round 1 (no data yet):**
 Dispatch scouts to survey the incident. Multiple entry points or distinct clusters = 2 parallel scouts
@@ -110,6 +132,9 @@ Load `skill/rca-orchestrator-guide` on first round for dispatch protocols.
    Call update_hypothesis.
 4. **Dispatch — default to parallel**: formulate 2-3 independent tasks whenever possible.
    Single dispatch should be the exception.
+   **Dispatch quality check**: before every dispatch, verify your task instruction includes
+   the target service, specific metric names/values from prior findings, the hypothesis being
+   tested, and forward predictions. Vague instructions produce unreliable results.
 5. **Collect**: multiple workers -> check_tasks. Single worker auto-blocks.
 6. **Repeat** until confirmed. If evidence invalidates candidates, refine or create new ones.
 

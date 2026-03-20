@@ -71,8 +71,8 @@ LIMIT 30
 WITH calc AS (
   SELECT service_name, source,
          count(*) AS total,
-         count(*) FILTER (WHERE "attr.status_code" = 'Error'
-                          OR "attr.http.response.status_code" >= 500) AS errors
+         count(*) FILTER (WHERE "attr.status_code" IN ('Error', 'STATUS_CODE_ERROR')
+                          OR "attr.http.response.status_code" >= 400) AS errors
   FROM {TABLE} GROUP BY service_name, source
 )
 SELECT service_name,
