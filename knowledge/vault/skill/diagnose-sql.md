@@ -31,13 +31,17 @@ An anomaly only exists if the delta between the two periods is significant.
 |------------|--------|----------|
 | [[skill/diagnose-sql/traces]] | Traces | Building topology, latency delta, error rates, span drill-down |
 | [[skill/diagnose-sql/logs]] | Logs | Error scanning, pattern grouping, keyword search, log-trace joins |
-| [[skill/diagnose-sql/metrics]] | Metrics | CPU/memory, JVM, DB pools, network (Hubble), HTTP latency |
-| [[skill/diagnose-sql/correlation]] | Cross-signal | Triangulating cause vs victim, multi-signal drill-down |
+| [[skill/diagnose-sql/metrics]] | Metrics | Resource health scan (MANDATORY per service), JVM, DB pools, network |
+| [[skill/diagnose-sql/correlation]] | Cross-signal | Choosing entry signal, cause vs victim, cross-signal reasoning |
 
 **IMPORTANT**: This index provides ground rules only. The sub-skills contain actual SQL recipes
 with correct column names, JOIN patterns, and standard filters. **Load the sub-skill matching
 your primary signal BEFORE writing your first query for that signal type.** Ad-hoc SQL without
 consulting the recipes is the #1 cause of measurement errors.
+
+**No signal has priority.** Traces, logs, and metrics are equal investigative channels.
+Which to start with depends on what lead you have — see [[skill/diagnose-sql/correlation]]
+for guidance on choosing your entry signal.
 
 Load with: `vault_read(path="skill/diagnose-sql/traces")` (or `/metrics`, `/logs`, `/correlation`)
 

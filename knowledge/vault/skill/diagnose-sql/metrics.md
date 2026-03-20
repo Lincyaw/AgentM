@@ -1,8 +1,8 @@
 ---
 confidence: fact
-description: 'DuckDB recipes for infrastructure and application metrics: CPU/memory,
-  JVM GC/heap, DB connection pools, network (Hubble/Cilium), HTTP latency percentiles,
-  and metric delta patterns.'
+description: 'DuckDB recipes for infrastructure and application metrics. Organized as:
+  mandatory full-scan first, then targeted drill-down recipes, with domain knowledge
+  for interpreting compound signals.'
 name: Metric Query Recipes
 tags:
 - sql
@@ -28,75 +28,121 @@ Common columns: `time`, `metric`, `service_name`, `"attr.k8s.pod.name"`, `"attr.
 
 **Important**: The column is `metric`, not `metric_name`.
 
-## Discover available metrics
+## Step 1: Full metric scan (MANDATORY for every investigated service)
 
-Always check what's available before querying. Different environments export different metrics.
-```sql
-SELECT DISTINCT metric FROM abnormal_metrics ORDER BY metric
-```
-Repeat for `abnormal_metrics_sum` and `abnormal_metrics_histogram`.
-
-## Resource usage by pod (CPU, memory)
+Do NOT pre-select which metrics to query. Let the data show you what's anomalous.
 
 ```sql
-SELECT "attr.k8s.pod.name" AS pod,
-       metric,
-       round(avg(value), 4)  AS avg_val,
-       round(max(value), 4)  AS max_val
-FROM abnormal_metrics
-WHERE metric IN ('container.cpu.usage', 'container.memory.usage',
-                 'container.memory.working_set')
-  AND "attr.k8s.pod.name" ILIKE '%TARGET%'
-GROUP BY pod, metric
-ORDER BY avg_val DESC
-LIMIT 20
-```
-
-## JVM metrics (GC, threads, heap)
-
-```sql
--- GC duration from histogram
-SELECT service_name,
-       "attr.jvm.gc.action" AS gc_action,
-       round(sum / nullif(count, 0), 4) AS avg_gc_sec,
-       max AS max_gc_sec,
-       count AS gc_events
-FROM abnormal_metrics_histogram
-WHERE metric = 'jvm.gc.duration'
-ORDER BY avg_gc_sec DESC
-LIMIT 15
-```
-
-```sql
--- Heap usage from sum metrics
-SELECT service_name, metric,
-       round(avg(value) / 1e6, 2) AS avg_mb
-FROM abnormal_metrics_sum
-WHERE metric IN ('jvm.memory.used', 'jvm.memory.committed', 'jvm.memory.limit')
-GROUP BY service_name, metric
-ORDER BY avg_mb DESC
-LIMIT 20
-```
-
-```sql
--- Thread count
-SELECT service_name, round(avg(value), 0) AS avg_threads
-FROM abnormal_metrics_sum
-WHERE metric = 'jvm.thread.count'
-GROUP BY service_name
-ORDER BY avg_threads DESC
-```
-
-## DB connection pool health
-
-```sql
--- Pool usage and pending requests
-SELECT service_name, metric, round(avg(value), 2) AS avg_val
-FROM abnormal_metrics_sum
-WHERE metric LIKE 'db.client.connections%'
-GROUP BY service_name, metric
-ORDER BY service_name, metric
+-- Gauge metrics: full delta ranking for a service
+SELECT metric,
+       round(avg(a.value), 4) AS abn_avg,
+       round(avg(n.value), 4) AS nml_avg,
+       round(avg(a.value) / nullif(avg(n.value), 0), 2) AS ratio
+FROM abnormal_metrics a
+FULL OUTER JOIN normal_metrics n USING (metric, service_name)
+WHERE a.service_name = 'TARGET' OR n.service_name = 'TARGET'
+GROUP BY metric
+ORDER BY ratio DESC NULLS FIRST
 LIMIT 30
+```
+
+If the query above fails due to row-level FULL JOIN on unpaired tables, use this alternative:
+```sql
+WITH abn AS (
+  SELECT metric, round(avg(value), 4) AS val
+  FROM abnormal_metrics WHERE service_name = 'TARGET'
+  GROUP BY metric
+), nml AS (
+  SELECT metric, round(avg(value), 4) AS val
+  FROM normal_metrics WHERE service_name = 'TARGET'
+  GROUP BY metric
+)
+SELECT coalesce(a.metric, n.metric) AS metric,
+       a.val AS abn_avg, n.val AS nml_avg,
+       round(a.val / nullif(n.val, 0), 2) AS ratio
+FROM abn a FULL OUTER JOIN nml n USING (metric)
+ORDER BY ratio DESC NULLS FIRST
+LIMIT 30
+```
+
+After the scan, use `think` to answer:
+1. Which metrics have the largest deviation (both increases AND decreases)?
+2. Do any of the top deviations relate to each other? (see Domain Knowledge below)
+3. Can these resource signals explain the latency or error symptoms being investigated?
+
+## Step 2: Targeted drill-down recipes
+
+Use these AFTER Step 1 identifies which area to investigate deeper.
+
+### JVM GC duration (histogram)
+
+```sql
+-- GC duration delta between periods
+WITH abn AS (
+  SELECT "attr.jvm.gc.action" AS action,
+         round(sum / nullif(count, 0), 4) AS avg_sec,
+         count AS events
+  FROM abnormal_metrics_histogram
+  WHERE metric = 'jvm.gc.duration' AND service_name = 'TARGET'
+), nml AS (
+  SELECT "attr.jvm.gc.action" AS action,
+         round(sum / nullif(count, 0), 4) AS avg_sec,
+         count AS events
+  FROM normal_metrics_histogram
+  WHERE metric = 'jvm.gc.duration' AND service_name = 'TARGET'
+)
+SELECT coalesce(a.action, n.action) AS gc_action,
+       a.avg_sec AS abn_avg, n.avg_sec AS nml_avg,
+       a.events AS abn_events, n.events AS nml_events
+FROM abn a FULL OUTER JOIN nml n USING (action)
+```
+
+### JVM heap and threads (sum metrics)
+
+```sql
+WITH abn AS (
+  SELECT metric, round(avg(value), 2) AS val
+  FROM abnormal_metrics_sum
+  WHERE service_name = 'TARGET'
+    AND metric IN ('jvm.memory.used', 'jvm.memory.committed',
+                   'jvm.memory.limit', 'jvm.thread.count')
+  GROUP BY metric
+), nml AS (
+  SELECT metric, round(avg(value), 2) AS val
+  FROM normal_metrics_sum
+  WHERE service_name = 'TARGET'
+    AND metric IN ('jvm.memory.used', 'jvm.memory.committed',
+                   'jvm.memory.limit', 'jvm.thread.count')
+  GROUP BY metric
+)
+SELECT coalesce(a.metric, n.metric) AS metric,
+       a.val AS abn_val, n.val AS nml_val,
+       round(a.val / nullif(n.val, 0), 2) AS ratio
+FROM abn a FULL OUTER JOIN nml n USING (metric)
+ORDER BY ratio DESC NULLS FIRST
+```
+
+### DB connection pool health
+
+```sql
+-- Pool usage and pending requests (delta)
+WITH abn AS (
+  SELECT metric, round(avg(value), 2) AS val
+  FROM abnormal_metrics_sum
+  WHERE metric LIKE 'db.client.connections%' AND service_name = 'TARGET'
+  GROUP BY metric
+), nml AS (
+  SELECT metric, round(avg(value), 2) AS val
+  FROM normal_metrics_sum
+  WHERE metric LIKE 'db.client.connections%' AND service_name = 'TARGET'
+  GROUP BY metric
+)
+SELECT coalesce(a.metric, n.metric) AS metric,
+       a.val AS abn_val, n.val AS nml_val,
+       round(a.val / nullif(n.val, 0), 2) AS ratio
+FROM abn a FULL OUTER JOIN nml n USING (metric)
+ORDER BY ratio DESC NULLS FIRST
+LIMIT 20
 ```
 
 ```sql
@@ -110,12 +156,7 @@ ORDER BY avg_ms DESC
 LIMIT 15
 ```
 
-Key signals:
-- `create_time` spike → DB unreachable or slow DNS
-- `wait_time` spike → pool exhaustion (all connections busy)
-- `use_time` spike → slow queries or transactions
-
-## Network-level metrics (Hubble/Cilium)
+### Network-level metrics (Hubble/Cilium)
 
 ```sql
 SELECT "attr.source_workload" AS src,
@@ -130,7 +171,7 @@ ORDER BY avg_val DESC
 LIMIT 20
 ```
 
-## HTTP latency percentiles (Hubble gauges)
+### HTTP latency percentiles (Hubble gauges)
 
 ```sql
 SELECT service_name,
@@ -144,24 +185,31 @@ ORDER BY p99 DESC NULLS LAST
 LIMIT 20
 ```
 
-## Metric delta between periods
+## Domain Knowledge: interpreting compound signals
 
-```sql
-WITH abn AS (
-  SELECT "attr.k8s.pod.name" AS pod, metric, round(avg(value), 4) AS val
-  FROM abnormal_metrics
-  WHERE metric = 'container.cpu.usage'
-  GROUP BY pod, metric
-), nml AS (
-  SELECT "attr.k8s.pod.name" AS pod, metric, round(avg(value), 4) AS val
-  FROM normal_metrics
-  WHERE metric = 'container.cpu.usage'
-  GROUP BY pod, metric
-)
-SELECT coalesce(a.pod, n.pod) AS pod,
-       a.val AS abn_val, n.val AS nml_val,
-       round(a.val / nullif(n.val, 0), 2) AS ratio
-FROM abn a FULL OUTER JOIN nml n USING (pod, metric)
-ORDER BY ratio DESC NULLS FIRST
-LIMIT 20
-```
+Individual metrics can mislead. The diagnostic value comes from reading metrics TOGETHER.
+
+**CPU and memory are linked through GC.** In JVM services, high CPU often comes from garbage
+collection, not application logic. When you see elevated CPU, always check GC metrics before
+concluding "CPU saturation." Frequent GC keeps heap usage LOW (because it keeps reclaiming
+memory) while burning CPU — so low `jvm.memory.used` alongside high CPU is a signal of memory
+pressure, not a sign of health.
+
+**page_faults reveal what memory.usage hides.** `container.memory.usage` shows how much memory
+the OS has allocated to the container. It can appear stable even under severe memory pressure —
+the OS pages memory in and out instead of growing the allocation. `page_faults` (both
+`container.memory.page_faults` and `k8s.pod.memory.page_faults`) expose this hidden thrashing.
+
+**Average latency hides tail problems.** Resource exhaustion (GC pauses, pool waits, page faults)
+typically causes intermittent stalls — a few requests get hit hard while most are fine.
+This shows as normal avg latency but elevated p99/p999. If a service has resource anomalies
+but normal avg latency, check latency percentiles before ruling it out.
+
+**DB connection pool signals have a specific causal order:**
+- `create_time` spike → DB unreachable or slow DNS
+- `wait_time` spike → pool exhaustion (all connections busy)
+- `use_time` spike → slow queries or long-held transactions
+
+**Absence can be a signal.** A metric present in normal but missing in abnormal (or vice versa)
+may indicate a pod restart, deployment change, or crash. Null ratios in the full scan
+deserve attention, not just high ratios.
