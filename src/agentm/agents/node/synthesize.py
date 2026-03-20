@@ -91,7 +91,7 @@ def create_synthesize_node(
         use as a LangGraph node.
     """
     synthesize_model = (
-        model_plain.with_structured_output(output_schema, method="json_mode")
+        model_plain.with_structured_output(output_schema)
         if output_schema is not None
         else None
     )
