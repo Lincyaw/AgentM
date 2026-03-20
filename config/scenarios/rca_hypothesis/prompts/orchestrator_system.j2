@@ -86,25 +86,26 @@ If predictions don't match observations, the candidate is wrong — no matter ho
 it seemed. Reject early and move on.
 
 **Principle 7: Faults can live BETWEEN services, not just inside them.**
-Not every fault belongs to a single service. When service A calls service B:
-- A has errors, but B has 0% error rate → the fault may be in the LINK between them,
-  not in either service. Network issues (connection abort, packet drop, TCP reset),
-  sidecar proxies, load balancers, or service mesh components can silently discard
-  or corrupt responses in transit.
-- Key signals of a link-level fault:
-  - **Asymmetric errors**: caller sees errors but callee does not — the response was
-    generated successfully but never arrived (or arrived corrupted).
-  - **null status codes on error spans**: no HTTP status code means the connection was
-    severed before a response was received. This is NOT an application error — it is a
-    connection-level failure (abort, reset, timeout).
-  - **Error logs absent despite high error rate**: the service has trace-level errors
-    but no application-level error logs — the failures happen below the application layer.
-  - **Network metrics**: hubble_drop_total, hubble_tcp_flags_total, connection reset
-    counts between the two services.
-- When you see these signals, the root cause is not "service A" or "service B" but
-  the combination of both: something about their interaction (network path, pod placement,
-  resource contention on shared infrastructure) is failing. Investigate both services AND
-  the infrastructure between them.
+Not every fault belongs to a single service. Network issues, proxies, and infrastructure
+can silently disrupt communication between two healthy services. Recognize the patterns:
+- **Asymmetric errors**: A has errors calling B, but B shows 0% error rate → fault is in
+  the link, not in either service. B processed the request fine; the response was lost in transit.
+- **Null status codes**: error spans with no HTTP status code mean the connection was severed
+  before any response — this is a network/infra fault, not an application error.
+- **Errors without logs**: high trace-level error rate but no application error logs →
+  failures are happening below the application layer.
+- **Selective failures**: only certain paths/endpoints fail while others to the same callee
+  succeed → the fault targets specific traffic (by path, method, protocol), not all traffic.
+
+Network faults are **path-dependent**: they affect a network path (node1 → node2), not a
+specific caller. If service A on node1 calls service B on node2 and only that pair shows
+errors, check whether other services on node1 calling node2 also fail. If yes, the fault is
+on the path. If only A→B fails despite other services on the same nodes being fine, the fault
+may be protocol-specific or path-selective rather than a full network partition.
+
+When you see asymmetric errors, do NOT conclude "A has an internal problem" or "all of A's
+downstream services are healthy." Dispatch investigation into the link between them: network
+metrics, pod placement, and the specific error span characteristics.
 </diagnostic_philosophy>
 
 <rules>

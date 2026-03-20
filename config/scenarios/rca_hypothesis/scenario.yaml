@@ -68,7 +68,7 @@ agents:
       - vault_read
     execution:
       max_steps: 40
-      timeout: 540
+      timeout: 900
       tool_call_budget: 20
       dedup:
         enabled: true
