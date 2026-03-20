@@ -109,64 +109,22 @@ ORDER BY avg_val DESC LIMIT 20
 
 ## Understanding network and link-level faults
 
-Network faults between services come in many forms. They can affect all traffic on a link
-(TCP-level) or only specific protocols/paths (HTTP-level). The observability signatures differ
-significantly, so recognizing the pattern helps you narrow the fault type.
+Network faults between services come in many forms. Recognize the pattern by its observability signature:
 
-### Fault patterns by observability signature
+**Pattern A: Connection-level failure** — caller error spans with null HTTP status, callee has
+no corresponding span. Network metrics: hubble_drop_total elevated, TCP reset flags.
 
-**Pattern A: Connection-level failure (TCP abort, reset, partition)**
-Observable as: caller error spans with null HTTP status code (no response received), callee
-has no corresponding span at all (request never arrived or response never sent).
-- Caller: error rate elevated, many spans with `attr.status_code = Error` but `attr.http.response.status_code = null`
-- Callee: error rate 0%, may have reduced call volume (some requests never arrive)
-- Logs: caller may have connection timeout / connection refused / connection reset messages; callee has no error logs
-- Network metrics: hubble_drop_total elevated, tcp reset flags
+**Pattern B: Response abort** — callee span shows SUCCESS but caller gets error (asymmetric).
+Callee processed the request; the response was lost in transit.
 
-**Pattern B: Response abort/corruption (response dropped or truncated in transit)**
-Observable as: caller error spans with null or partial status code, callee spans show SUCCESS
-(callee thinks it responded normally but the response was lost/corrupted in transit).
-- Caller: error rate elevated, null status codes on error spans
-- Callee: error rate 0%, latency NORMAL, span status SUCCESS — callee has no idea anything went wrong
-- This is the classic **asymmetric error** pattern. The key diagnostic: callee processed the
-  request successfully (span exists, status OK) but caller still got an error.
+**Pattern C: HTTP-level selective fault** — specific HTTP errors (502/503) only on certain
+paths/endpoints, other requests to the same callee succeed. May be proxy/sidecar injecting errors.
 
-**Pattern C: HTTP-level fault (selective request/response manipulation)**
-Observable as: specific HTTP error codes (502, 503, 500) on caller error spans, but the fault
-only affects certain paths or endpoints, not all traffic between the two services.
-- Caller: error rate elevated, but only for specific `span_name` or `http.route` values
-- Callee: may have 0% error rate if a proxy/sidecar is injecting the error before the request
-  reaches the callee, or may have matching errors if the fault corrupts the request in a way
-  that causes the callee to fail
-- Latency: may be normal (if requests are rejected fast) or elevated (if requests are delayed)
-- Key differentiator from application bugs: the fault is **selective** — it affects a subset
-  of requests by path, method, or header, while other requests to the same callee succeed normally
+**Pattern D: Latency injection** — elevated latency between two services, no errors, no resource
+anomalies on either side. The delay is added in transit, not by either service's processing.
 
-**Pattern D: Latency injection (delay without errors)**
-Observable as: elevated latency between two specific services with no errors and no resource
-anomalies on either side. Both caller and callee spans exist and show success, but the duration
-is inflated.
-- Caller: latency elevated, error rate 0%
-- Callee: latency may appear normal (the delay is added in transit, not by the callee's processing)
-- Resource metrics: both services normal — no CPU/memory/GC explanation for the latency
-- Key differentiator: the latency gap lives between the caller's outgoing call and the callee's
-  incoming span — neither service's internal time explains it
-
-### Network faults are PATH-dependent, not caller-dependent
-
-A critical reasoning principle: network faults affect a **network path** (e.g., node1 → node2),
-not a specific caller. If service A on node1 calls service B on node2, and the node1→node2
-link has packet loss, then ALL services on node1 calling ANY service on node2 are affected —
-not just A calling B.
-
-Conversely, if only one specific caller→callee pair shows errors while other callers of the
-same callee are fine, check whether they share the same network path (same source node, same
-destination node). If they do, the fault is on that path. If different callers on different
-nodes call the same callee and only one caller fails, the fault is path-specific to that caller's
-node.
-
-When investigating: check `attr.k8s.node.name` for the caller and callee pods to determine
-if they share a network path, and correlate with hubble/network metrics on that path.
+**Network faults are path-dependent**: they affect a network path (node1→node2), not a specific
+caller. Check `attr.k8s.node.name` for pod placement and correlate with hubble metrics.
 
 ## Recipe: asymmetric error detection (link-level faults)
 
@@ -260,32 +218,24 @@ If SERVICE_A's latency spike precedes SERVICE_B's by N minutes, A is likely upst
 
 ## Cross-signal reasoning principles
 
-**Traces and metrics can tell different stories — and both can be right.**
-A service with normal trace latency but abnormal resource metrics is not healthy — it may be
-causing intermittent problems that don't show in averages. Always consider whether the resource
-anomaly could be causing the symptoms you see in OTHER services' traces.
+**Traces and metrics can disagree — trust metrics for resource state, traces for call flow.**
+A service with normal latency but abnormal resources (6x CPU, GC storms) is NOT healthy — it
+may be partially failing. Successful requests are fast; failing requests show up as timeouts
+in the caller, not as high latency in the callee. When resource anomalies and latency disagree,
+check callers' error patterns and call volume changes before eliminating the service.
 
-**Absence of trace evidence is not evidence of absence.**
-When traces show a latency gap (time unaccounted for by child spans), the explanation
-lives outside the trace data — in metrics (resource stalls), logs (errors, retries),
-or infrastructure (network, scheduling). Do not fill the gap with speculation;
-switch signals and investigate. A common form of this: a caller span that normally
-produces a child span to a downstream service, but in the abnormal period the child span
-vanishes — this means the downstream service was unreachable, not that the caller stopped
-calling it. The "internal time" accounting in such cases is an artifact of missing spans,
-not real internal processing.
+**Missing trace evidence points to infrastructure faults, not healthy services.**
+When a caller span normally has a child span to a downstream service but the child vanishes in
+the abnormal period, the downstream is unreachable — not "uninvolved." The caller's inflated
+"internal time" is an artifact. The attribution recipe (traces.md) shows this as `fan_out`
+dropping between periods.
 
 **The strongest causal argument combines all three signals.**
-- Trace: shows WHERE the latency lives (which service, which edge)
-- Metric: shows WHAT resource is stressed (CPU, memory, connections)
-- Log: shows the specific MECHANISM (error message, exception, timeout)
-If you can connect all three for the same service in the same timeframe, you have strong evidence.
-If you only have one signal, flag it as a lead, not a conclusion.
+- Trace: WHERE the latency lives (which service, which edge)
+- Metric: WHAT resource is stressed (CPU, memory, connections)
+- Log: the specific MECHANISM (error message, exception, timeout)
+One signal is a lead. Three signals for the same service in the same timeframe is strong evidence.
 
 **Asymmetric errors point to link-level faults.**
-When service A has errors calling service B, but B shows 0% error rate, do NOT conclude
-"A has an internal problem" or "all downstream services are healthy." The fault is likely
-in the link between them — network, proxy, or infrastructure. Use the asymmetric error
-detection recipe above to confirm. The combination of: (1) caller errors with null status
-codes, (2) callee showing 0% errors, and (3) no application-level error logs in the caller
-is the classic fingerprint of a network-level fault (connection abort, packet drop, TCP reset).
+Caller has errors calling callee, but callee shows 0% error rate → fault is in the link.
+See the asymmetric error detection recipe above.
