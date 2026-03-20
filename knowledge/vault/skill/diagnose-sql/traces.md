@@ -41,6 +41,9 @@ Run on both `abnormal_traces` and `normal_traces` to compare topology changes (d
 ## Latency delta by service
 
 Side-by-side comparison to find which services deviate most.
+
+**CRITICAL: Do NOT add WHERE service_name IN (...) to this query.** Run it unfiltered.
+
 ```sql
 WITH abn AS (
   SELECT service_name,
@@ -67,24 +70,35 @@ LIMIT 30
 
 ## Error rate delta by service
 
+**CRITICAL: Do NOT add WHERE service_name IN (...) to this query.** Run it unfiltered against
+ALL services. A service you think is healthy may have a high error rate that you haven't checked.
+Filtering to a pre-selected list is the #1 cause of missed root causes in RCA.
+
 ```sql
-WITH calc AS (
-  SELECT service_name, source,
+WITH abn AS (
+  SELECT service_name,
          count(*) AS total,
          count(*) FILTER (WHERE "attr.status_code" IN ('Error', 'STATUS_CODE_ERROR')
                           OR "attr.http.response.status_code" >= 400) AS errors
-  FROM {TABLE} GROUP BY service_name, source
+  FROM abnormal_traces GROUP BY service_name
+), nml AS (
+  SELECT service_name,
+         count(*) AS total,
+         count(*) FILTER (WHERE "attr.status_code" IN ('Error', 'STATUS_CODE_ERROR')
+                          OR "attr.http.response.status_code" >= 400) AS errors
+  FROM normal_traces GROUP BY service_name
 )
-SELECT service_name,
-       total,
-       errors,
-       round(100.0 * errors / nullif(total, 0), 2) AS error_pct
-FROM calc
-WHERE errors > 0
-ORDER BY error_pct DESC
-LIMIT 20
+SELECT coalesce(a.service_name, n.service_name) AS service_name,
+       round(100.0 * a.errors / nullif(a.total, 0), 2) AS abn_error_pct,
+       round(100.0 * n.errors / nullif(n.total, 0), 2) AS nml_error_pct,
+       a.errors AS abn_errors, a.total AS abn_total,
+       n.total AS nml_total
+FROM abn a
+FULL OUTER JOIN nml n USING (service_name)
+ORDER BY abn_error_pct DESC NULLS LAST
+LIMIT 30
 ```
-Replace `{TABLE}` with `abnormal_traces` then `normal_traces`. Compare `error_pct`.
+This returns ALL services with their error rates in both periods — no pre-filtering.
 
 ## Drill into a slow service (child span breakdown)
 

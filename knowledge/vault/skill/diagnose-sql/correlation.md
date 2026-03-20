@@ -107,6 +107,67 @@ HAVING avg_val > 0
 ORDER BY avg_val DESC LIMIT 20
 ```
 
+## Understanding network and link-level faults
+
+Network faults between services come in many forms. They can affect all traffic on a link
+(TCP-level) or only specific protocols/paths (HTTP-level). The observability signatures differ
+significantly, so recognizing the pattern helps you narrow the fault type.
+
+### Fault patterns by observability signature
+
+**Pattern A: Connection-level failure (TCP abort, reset, partition)**
+Observable as: caller error spans with null HTTP status code (no response received), callee
+has no corresponding span at all (request never arrived or response never sent).
+- Caller: error rate elevated, many spans with `attr.status_code = Error` but `attr.http.response.status_code = null`
+- Callee: error rate 0%, may have reduced call volume (some requests never arrive)
+- Logs: caller may have connection timeout / connection refused / connection reset messages; callee has no error logs
+- Network metrics: hubble_drop_total elevated, tcp reset flags
+
+**Pattern B: Response abort/corruption (response dropped or truncated in transit)**
+Observable as: caller error spans with null or partial status code, callee spans show SUCCESS
+(callee thinks it responded normally but the response was lost/corrupted in transit).
+- Caller: error rate elevated, null status codes on error spans
+- Callee: error rate 0%, latency NORMAL, span status SUCCESS — callee has no idea anything went wrong
+- This is the classic **asymmetric error** pattern. The key diagnostic: callee processed the
+  request successfully (span exists, status OK) but caller still got an error.
+
+**Pattern C: HTTP-level fault (selective request/response manipulation)**
+Observable as: specific HTTP error codes (502, 503, 500) on caller error spans, but the fault
+only affects certain paths or endpoints, not all traffic between the two services.
+- Caller: error rate elevated, but only for specific `span_name` or `http.route` values
+- Callee: may have 0% error rate if a proxy/sidecar is injecting the error before the request
+  reaches the callee, or may have matching errors if the fault corrupts the request in a way
+  that causes the callee to fail
+- Latency: may be normal (if requests are rejected fast) or elevated (if requests are delayed)
+- Key differentiator from application bugs: the fault is **selective** — it affects a subset
+  of requests by path, method, or header, while other requests to the same callee succeed normally
+
+**Pattern D: Latency injection (delay without errors)**
+Observable as: elevated latency between two specific services with no errors and no resource
+anomalies on either side. Both caller and callee spans exist and show success, but the duration
+is inflated.
+- Caller: latency elevated, error rate 0%
+- Callee: latency may appear normal (the delay is added in transit, not by the callee's processing)
+- Resource metrics: both services normal — no CPU/memory/GC explanation for the latency
+- Key differentiator: the latency gap lives between the caller's outgoing call and the callee's
+  incoming span — neither service's internal time explains it
+
+### Network faults are PATH-dependent, not caller-dependent
+
+A critical reasoning principle: network faults affect a **network path** (e.g., node1 → node2),
+not a specific caller. If service A on node1 calls service B on node2, and the node1→node2
+link has packet loss, then ALL services on node1 calling ANY service on node2 are affected —
+not just A calling B.
+
+Conversely, if only one specific caller→callee pair shows errors while other callers of the
+same callee are fine, check whether they share the same network path (same source node, same
+destination node). If they do, the fault is on that path. If different callers on different
+nodes call the same callee and only one caller fails, the fault is path-specific to that caller's
+node.
+
+When investigating: check `attr.k8s.node.name` for the caller and callee pods to determine
+if they share a network path, and correlate with hubble/network metrics on that path.
+
 ## Recipe: asymmetric error detection (link-level faults)
 
 When service A has errors but its downstream service B does not, the fault may be in
@@ -136,28 +197,49 @@ ORDER BY error_calls DESC
 ```
 
 Interpretation:
-- `callee_errors` = 0 but `error_calls` > 0 → callee succeeded but caller still failed = link fault
+- `callee_errors` = 0 but `error_calls` > 0 → callee succeeded but caller still failed = link fault (Pattern B)
 - `callee_errors` ≈ `error_calls` → callee is actually failing = callee is the problem
+- no child spans found for error calls → request never reached callee = connection-level fault (Pattern A)
 
 ```sql
 -- Step 2: Check error span status codes for the caller
--- null status_code = connection-level failure (abort/reset/timeout), not application error
-SELECT "attr.http.response.status_code" AS status_code,
+-- Classify errors by status code to identify the fault pattern
+SELECT "attr.http.response.status_code" AS http_code,
        "attr.status_code" AS span_status,
-       count(*) AS cnt
+       count(*) AS cnt,
+       round(100.0 * count(*) / sum(count(*)) OVER (), 1) AS pct
 FROM abnormal_traces
 WHERE service_name = 'CALLER_SERVICE'
   AND ("attr.status_code" IN ('Error', 'STATUS_CODE_ERROR')
-       OR "attr.http.response.status_code" >= 400
-       OR "attr.http.response.status_code" IS NULL)
-GROUP BY status_code, span_status
+       OR "attr.http.response.status_code" >= 400)
+GROUP BY http_code, span_status
 ORDER BY cnt DESC LIMIT 20
 ```
 
 Interpretation:
-- Many `status_code = null` with `span_status = Error` → connection severed before response
-- `status_code = 502/503` → upstream proxy/LB error, callee may be unreachable
-- `status_code = 500` → application error (callee returned an error response)
+- `http_code = null` + `span_status = Error` → connection severed before response (Pattern A/B)
+- `http_code = 502/503` → proxy/LB returned error, callee may be unreachable
+- `http_code = 500` → application error in callee
+- Mix of null and 500 → possibly both link-level and application-level failures co-occurring
+
+```sql
+-- Step 3: Check if the error is path-selective
+-- (does the error only affect calls to specific endpoints/paths?)
+SELECT span_name,
+       count(*) AS total,
+       count(*) FILTER (WHERE "attr.status_code" IN ('Error', 'STATUS_CODE_ERROR')
+                         OR "attr.http.response.status_code" >= 400) AS errors,
+       round(100.0 * count(*) FILTER (WHERE "attr.status_code" IN ('Error', 'STATUS_CODE_ERROR')
+                         OR "attr.http.response.status_code" >= 400) / nullif(count(*), 0), 1) AS error_pct
+FROM abnormal_traces
+WHERE service_name = 'CALLER_SERVICE'
+GROUP BY span_name
+ORDER BY error_pct DESC LIMIT 20
+```
+
+Interpretation:
+- All span_names have similar error_pct → fault is indiscriminate (TCP-level, Pattern A)
+- Only specific span_names have errors → fault is selective (HTTP-level, Pattern C)
 
 ## Recipe: temporal correlation
 
