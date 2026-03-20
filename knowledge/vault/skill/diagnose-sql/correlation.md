@@ -29,7 +29,8 @@ No single signal is always the right starting point. Choose based on what you al
 
 **Your lead is "service X has high latency"** → start with traces
 1. Trace topology → identify which edges/services are anomalous
-2. Child span breakdown → where is time spent?
+2. Child span breakdown → where is time spent? Use the fan-out aware attribution query
+   (traces.md "Internal vs downstream attribution") to correctly separate internal vs downstream time.
 3. If no slow child spans found → do NOT conclude "internal processing bottleneck."
    Absence of child spans means traces cannot explain the latency. Switch to metrics
    (resource scan) and logs (error scan) for this service.
@@ -47,8 +48,11 @@ No single signal is always the right starting point. Choose based on what you al
 
 **You have no clear lead yet** → start broad
 1. Trace latency delta across all services → find highest-deviation services
-2. For EACH anomalous service, run the metric full scan — not just the most latency-anomalous one
-3. Log error delta across all services → find new error patterns
+2. Error rate delta across all services → find services with new errors
+3. Call volume delta across all services → find services with traffic changes
+4. For EACH anomalous service (in ANY dimension), run the metric full scan
+5. A service is only "healthy" when ALL four dimensions (latency, error rate, call volume,
+   resources) have been checked and show no deviation. Until then, it is "partially observed."
 
 ## Recipe: upstream vs downstream (cause vs victim)
 
@@ -103,6 +107,58 @@ HAVING avg_val > 0
 ORDER BY avg_val DESC LIMIT 20
 ```
 
+## Recipe: asymmetric error detection (link-level faults)
+
+When service A has errors but its downstream service B does not, the fault may be in
+the network link between them — not in either service. This recipe detects such asymmetry.
+
+```sql
+-- Step 1: Find which downstream services the caller's error spans are targeting
+-- (join caller error spans with their child spans to see which callee was being called)
+WITH caller_errors AS (
+  SELECT trace_id, span_id, span_name, duration
+  FROM abnormal_traces
+  WHERE service_name = 'CALLER_SERVICE'
+    AND ("attr.status_code" IN ('Error', 'STATUS_CODE_ERROR')
+         OR "attr.http.response.status_code" >= 400)
+)
+SELECT child.service_name AS target_callee,
+       count(*) AS error_calls,
+       round(avg(child.duration)/1e6, 2) AS callee_avg_ms,
+       count(*) FILTER (WHERE child."attr.status_code" IN ('Error', 'STATUS_CODE_ERROR')
+                         OR child."attr.http.response.status_code" >= 400) AS callee_errors
+FROM caller_errors ce
+JOIN abnormal_traces child
+  ON child.trace_id = ce.trace_id
+ AND child.parent_span_id = ce.span_id
+GROUP BY child.service_name
+ORDER BY error_calls DESC
+```
+
+Interpretation:
+- `callee_errors` = 0 but `error_calls` > 0 → callee succeeded but caller still failed = link fault
+- `callee_errors` ≈ `error_calls` → callee is actually failing = callee is the problem
+
+```sql
+-- Step 2: Check error span status codes for the caller
+-- null status_code = connection-level failure (abort/reset/timeout), not application error
+SELECT "attr.http.response.status_code" AS status_code,
+       "attr.status_code" AS span_status,
+       count(*) AS cnt
+FROM abnormal_traces
+WHERE service_name = 'CALLER_SERVICE'
+  AND ("attr.status_code" IN ('Error', 'STATUS_CODE_ERROR')
+       OR "attr.http.response.status_code" >= 400
+       OR "attr.http.response.status_code" IS NULL)
+GROUP BY status_code, span_status
+ORDER BY cnt DESC LIMIT 20
+```
+
+Interpretation:
+- Many `status_code = null` with `span_status = Error` → connection severed before response
+- `status_code = 502/503` → upstream proxy/LB error, callee may be unreachable
+- `status_code = 500` → application error (callee returned an error response)
+
 ## Recipe: temporal correlation
 
 When two services show anomalies, check if they are correlated in time:
@@ -139,3 +195,11 @@ switch signals and investigate.
 - Log: shows the specific MECHANISM (error message, exception, timeout)
 If you can connect all three for the same service in the same timeframe, you have strong evidence.
 If you only have one signal, flag it as a lead, not a conclusion.
+
+**Asymmetric errors point to link-level faults.**
+When service A has errors calling service B, but B shows 0% error rate, do NOT conclude
+"A has an internal problem" or "all downstream services are healthy." The fault is likely
+in the link between them — network, proxy, or infrastructure. Use the asymmetric error
+detection recipe above to confirm. The combination of: (1) caller errors with null status
+codes, (2) callee showing 0% errors, and (3) no application-level error logs in the caller
+is the classic fingerprint of a network-level fault (connection abort, packet drop, TCP reset).

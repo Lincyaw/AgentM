@@ -105,6 +105,47 @@ ORDER BY avg_ms DESC
 LIMIT 20
 ```
 
+## Internal vs downstream attribution (fan-out aware)
+
+When determining how much of a service's latency is "internal processing" vs "waiting on
+downstream calls," you MUST sum ALL child span durations — not compare a single child to the
+parent. A parent span with 7 sequential children, each taking 8s, has ~0% internal time even
+though each individual child (8s) is shorter than the parent (56s).
+
+```sql
+WITH parent_spans AS (
+  SELECT trace_id, span_id, duration AS parent_dur
+  FROM abnormal_traces
+  WHERE service_name = 'TARGET_SERVICE'
+    AND span_name = 'TARGET_SPAN'  -- optional: filter to specific endpoint
+),
+child_totals AS (
+  SELECT p.trace_id, p.span_id,
+         p.parent_dur,
+         coalesce(sum(c.duration), 0) AS total_child_dur,
+         count(c.span_id) AS child_count
+  FROM parent_spans p
+  LEFT JOIN abnormal_traces c
+    ON c.trace_id = p.trace_id
+   AND c.parent_span_id = p.span_id
+  GROUP BY p.trace_id, p.span_id, p.parent_dur
+)
+SELECT round(avg(parent_dur)/1e6, 2)     AS avg_parent_ms,
+       round(avg(total_child_dur)/1e6, 2) AS avg_total_child_ms,
+       round(avg(parent_dur - total_child_dur)/1e6, 2) AS avg_internal_ms,
+       round(100.0 * avg(parent_dur - total_child_dur) / nullif(avg(parent_dur), 0), 1)
+         AS internal_pct,
+       round(avg(child_count), 1) AS avg_fan_out
+FROM child_totals
+```
+
+**Interpretation:**
+- `internal_pct` > 70% AND `avg_fan_out` ≈ 0 → truly internal (no downstream calls)
+- `internal_pct` > 70% AND `avg_fan_out` > 1 → SUSPICIOUS: children may overlap (parallel calls).
+  Check if children are sequential or concurrent before concluding "internal bottleneck."
+- `internal_pct` < 30% → most time spent in downstream calls; investigate children
+- Always compare against the same query on `normal_traces` to see if internal_pct changed.
+
 ## Latency distribution (percentiles)
 
 ```sql
