@@ -305,7 +305,7 @@ def build_worker_subgraph(
 
     _discover_scenarios()
     answer_schema = ANSWER_SCHEMA[task_type]
-    compress_model = model_plain.with_structured_output(answer_schema)
+    compress_model = model_plain.with_structured_output(answer_schema, method="function_calling")
 
     _compress_system = (
         "You are synthesizing a sub-agent investigation into a structured report. "
