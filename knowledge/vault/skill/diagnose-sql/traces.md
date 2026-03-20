@@ -126,41 +126,66 @@ downstream calls," you MUST sum ALL child span durations — not compare a singl
 parent. A parent span with 7 sequential children, each taking 8s, has ~0% internal time even
 though each individual child (8s) is shorter than the parent (56s).
 
+**Always run this query against both periods in a single query** so you can compare fan-out
+and internal_pct between abnormal and normal. A large shift in either value is diagnostic.
+
 ```sql
-WITH parent_spans AS (
+WITH abn_parents AS (
   SELECT trace_id, span_id, duration AS parent_dur
   FROM abnormal_traces
   WHERE service_name = 'TARGET_SERVICE'
     AND span_name = 'TARGET_SPAN'  -- optional: filter to specific endpoint
 ),
-child_totals AS (
-  SELECT p.trace_id, p.span_id,
-         p.parent_dur,
+abn_child AS (
+  SELECT p.trace_id, p.span_id, p.parent_dur,
          coalesce(sum(c.duration), 0) AS total_child_dur,
          count(c.span_id) AS child_count
-  FROM parent_spans p
+  FROM abn_parents p
   LEFT JOIN abnormal_traces c
-    ON c.trace_id = p.trace_id
-   AND c.parent_span_id = p.span_id
+    ON c.trace_id = p.trace_id AND c.parent_span_id = p.span_id
+  GROUP BY p.trace_id, p.span_id, p.parent_dur
+),
+nml_parents AS (
+  SELECT trace_id, span_id, duration AS parent_dur
+  FROM normal_traces
+  WHERE service_name = 'TARGET_SERVICE'
+    AND span_name = 'TARGET_SPAN'
+),
+nml_child AS (
+  SELECT p.trace_id, p.span_id, p.parent_dur,
+         coalesce(sum(c.duration), 0) AS total_child_dur,
+         count(c.span_id) AS child_count
+  FROM nml_parents p
+  LEFT JOIN normal_traces c
+    ON c.trace_id = p.trace_id AND c.parent_span_id = p.span_id
   GROUP BY p.trace_id, p.span_id, p.parent_dur
 )
-SELECT round(avg(parent_dur)/1e6, 2)     AS avg_parent_ms,
-       round(avg(total_child_dur)/1e6, 2) AS avg_total_child_ms,
+SELECT 'abnormal' AS period,
+       round(avg(parent_dur)/1e6, 2) AS avg_parent_ms,
+       round(avg(total_child_dur)/1e6, 2) AS avg_child_ms,
        round(avg(parent_dur - total_child_dur)/1e6, 2) AS avg_internal_ms,
-       round(100.0 * avg(parent_dur - total_child_dur) / nullif(avg(parent_dur), 0), 1)
-         AS internal_pct,
+       round(100.0 * avg(parent_dur - total_child_dur) / nullif(avg(parent_dur), 0), 1) AS internal_pct,
        round(avg(child_count), 1) AS avg_fan_out
-FROM child_totals
+FROM abn_child
+UNION ALL
+SELECT 'normal',
+       round(avg(parent_dur)/1e6, 2),
+       round(avg(total_child_dur)/1e6, 2),
+       round(avg(parent_dur - total_child_dur)/1e6, 2),
+       round(100.0 * avg(parent_dur - total_child_dur) / nullif(avg(parent_dur), 0), 1),
+       round(avg(child_count), 1)
+FROM nml_child
 ```
 
-**Interpretation:**
-- `internal_pct` > 70% AND `avg_fan_out` ≈ 0 → truly internal (no downstream calls)
-- `internal_pct` > 70% AND `avg_fan_out` > 1 → SUSPICIOUS: children may overlap (parallel calls).
-  Check if children are sequential or concurrent before concluding "internal bottleneck."
-- `internal_pct` < 30% → most time spent in downstream calls; investigate children
-- Always compare against the same query on `normal_traces` to see if internal_pct changed.
-
-**Beware of vanishing children.** High `internal_pct` does not always mean the service itself is slow. If the same span type normally has downstream calls (fan_out > 0 in baseline) but those calls disappear in the abnormal period (fan_out drops toward 0), the "internal time" is likely spent waiting for a downstream service that is too overloaded to respond — the child span is missing because the callee never processed the request, not because the caller didn't make the call. Compare fan_out between abnormal and normal periods; a significant drop combined with error spans is a strong signal that the downstream service is unreachable.
+**Interpretation — read the abnormal-vs-normal delta, not just the abnormal values:**
+- `internal_pct` high in both periods → truly internal characteristic of this span type
+- `internal_pct` jumped (e.g. 8% → 80%) → something changed. Check `avg_fan_out`:
+  - fan_out also dropped → **vanishing children**: downstream unreachable, missing child spans
+    inflate "internal time." The caller is a victim, not the cause.
+  - fan_out unchanged → genuine internal slowdown; check caller's resource metrics for mechanism
+- `internal_pct` low in both periods → latency is downstream; investigate children
+- fan_out dropped but no corresponding resource anomaly in the caller → the caller itself is
+  fine; its downstream dependency is failing silently
 
 ## Latency distribution (percentiles)
 
