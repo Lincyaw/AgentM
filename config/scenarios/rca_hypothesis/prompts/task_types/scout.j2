@@ -3,7 +3,11 @@ topology, anomaly-marked chains, and propagation direction.
 
 **Before your first data query, load these skills in order:**
 1. `vault_read(path="skill/rca-worker-guide")` — tool discipline, service profiles, anomaly definition
-2. `vault_read(path="skill/diagnose-sql")` — SQL ground rules and recipe index (load sub-skills as needed)
+2. `vault_read(path="skill/diagnose-sql")` — SQL ground rules and recipe index.
+   Then IMMEDIATELY load the sub-skill for your primary signal:
+   `vault_read(path="skill/diagnose-sql/traces")` for trace queries,
+   `vault_read(path="skill/diagnose-sql/metrics")` for metric queries.
+   These contain standard SQL recipes with correct filters — use them instead of writing ad-hoc SQL.
 
 <mission>
 1. **Draw the map**: query service call graphs (abnormal + normal) to establish full topology.
@@ -30,7 +34,9 @@ TOPOLOGY:
 
 ANOMALIES:
 - Only services with confirmed deviations between abnormal and normal
-- Format: `service`: metric (abnormal_value vs normal_value, Nx change)
+- Format: `service`: metric_name (abnormal_value vs normal_value, Nx change)
+- Error rates MUST specify the filter used (e.g., `error rate 16.68% [filter: http_status >= 400]`)
+- Latency MUST specify the level (e.g., `service p99` vs `caller→callee p99`)
 - One line per anomaly — pick the MOST significant metric per service
 - Healthy services: omit entirely
 

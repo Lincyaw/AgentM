@@ -39,7 +39,9 @@ You have access to a shared Service Profile store — use it to avoid redundant 
 - **During investigation**: call `update_service_profile(...)` to record discoveries. Other parallel agents see your updates immediately.
 - **Keep it SHORT** — a profile is a quick-reference card:
   - `anomaly_summary`: one terse line (e.g., "p99 60s vs 4s, 45% errors")
-  - `key_observation`: one factual sentence, no reasoning
+  - `key_observation`: one factual sentence with the metric/field name used.
+    - GOOD: "error rate 16.68% (filter: attr.http.response.status_code >= 400); CPU jvm.cpu.recent_utilization 0.002 vs 0.0003 (6.5x)"
+    - BAD: "high error rate and CPU bottleneck" (which metric? what filter? what values?)
   - Only record what's NEW
 
 ## Tool Discipline

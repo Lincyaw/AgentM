@@ -22,21 +22,50 @@ Operational knowledge for the RCA orchestrator. Load this on your first round fo
 
 ## Context Briefing Protocol
 
-Sub-agents run in ISOLATION — they ONLY see what you write in the `task` parameter. Instruction quality directly determines investigation quality.
+Sub-agents run in ISOLATION — they ONLY see what you write in the `task` parameter.
+Instruction quality directly determines investigation quality.
+
+### Required elements (ALL dispatches)
 
 Every `dispatch_agent` call MUST include in `task`:
-- Key prior findings: service names, timestamps, anomalies, call chains
-- Specific signals to investigate: time range, services, anomaly types
-- Which hypothesis is being tested and current evidence
-- What would constitute supporting vs contradicting evidence
-- **Scope boundaries**: how wide the agent should look
-- **Forward predictions**: predicted consequences so the agent knows WHAT to look for
 
-Example of a GOOD dispatch instruction:
-> "ts-order-service showed 45% error rate in abnormal traces after timestamp 1699900054000000000. Check abnormal logs for ts-order-service errors in that timeframe to identify the specific error type. Testing H2 (DB timeout cascade). If H2 is correct, we expect: (1) connection timeout errors in ts-order-service logs, (2) outbound calls to MongoDB showing elevated latency, (3) MongoDB connection metrics near pool limit. Check all three."
+1. **Target** (WHO): which service(s) to investigate, with known topology (caller → callee)
+2. **Observable** (WHAT): specific anomaly being investigated — metric name, abnormal value, normal value, delta
+3. **Timeframe** (WHEN): abnormal vs normal period identifiers (the agent uses `abnormal_*` / `normal_*` tables)
+4. **Hypothesis** (WHY): which hypothesis is being tested, what the causal chain claims
+5. **Data basis** (HOW it was measured): metric names, SQL filter conditions, or query approach
+   that produced the prior findings — so the agent can reproduce or cross-validate
+6. **Forward predictions**: if hypothesis is correct, what should be observable? If wrong, what would contradict it?
+7. **Scope boundary**: how wide to look (single service internals? upstream? downstream?)
 
-For scout: instruct comprehensive scope — survey full topology, all call chains, all anomalous services.
-For verify: include the full causal chain and explicit per-link evidence to challenge.
+### Dispatch template by task type
+
+**Scout** (broad survey):
+> Survey the topology around `{service}`. Map call chains, identify anomalous services
+> (latency delta > 2x OR error rate delta > 0), mark propagation direction.
+> Known context: {prior findings with metric names and values}.
+> Blind spots to fill: {what hasn't been checked yet}.
+
+**Deep Analyze** (causal mechanism):
+> Investigate WHY `{service}` shows {anomaly: metric_name value_abn vs value_nml (Nx)}.
+> Known call chain: `A` → `B` → `C`. Prior findings: {agent_id found X using metric_name}.
+> Testing H{n}: {hypothesis description}.
+> Check these specific signals: {metric names or log patterns to look for}.
+> If H{n} is correct, expect: (1) ... (2) ... (3) ...
+
+**Verify** (adversarial disproof):
+> Adversarially test: {full causal chain with each link}.
+> Key data points to cross-validate (use these EXACT metrics/filters):
+> - {metric_name}: {value_abn} vs {value_nml} ({delta}) [from {agent_id}]
+> - {metric_name}: {value_abn} vs {value_nml} ({delta}) [from {agent_id}]
+> - error rate: {value}% [filter: {exact SQL condition used}] [from {agent_id}]
+> Verify each data point using the SAME metric/filter. If you use a different one, note it explicitly.
+> What would contradict: {specific conditions that would break the chain}.
+
+### Anti-patterns (DO NOT)
+- "Investigate ts-preserve-service" — missing: what anomaly? what metric? what hypothesis?
+- "Check CPU/memory/network" — missing: which CPU metric? what's the baseline?
+- "Verify the causal chain: A → B → C" — missing: data points, metric names, filter conditions
 
 ## Service Profile Protocol
 
