@@ -354,14 +354,18 @@ function AgentEventGroup({ group, colorIndex }) {
 function AgentTimeline({ events, agentGroups }) {
   if (agentGroups.size === 0) return null;
 
-  // Compute time range from all events
-  const timestamps = events
-    .filter(e => e.timestamp)
-    .map(e => new Date(e.timestamp).getTime());
-  if (timestamps.length < 2) return null;
+  // Compute time range from all events using a loop (safe for large arrays,
+  // unlike Math.min/max(...spread) which can overflow the call stack).
+  let minTs = Infinity;
+  let maxTs = -Infinity;
+  for (const e of events) {
+    if (!e.timestamp) continue;
+    const t = new Date(e.timestamp).getTime();
+    if (t < minTs) minTs = t;
+    if (t > maxTs) maxTs = t;
+  }
+  if (!isFinite(minTs) || !isFinite(maxTs)) return null;
 
-  const minTs = Math.min(...timestamps);
-  const maxTs = Math.max(...timestamps);
   const range = maxTs - minTs;
   if (range <= 0) return null;
 
@@ -382,13 +386,15 @@ function AgentTimeline({ events, agentGroups }) {
       </div>
       {/* Subagent bars */}
       {groups.map((g, i) => {
-        const childTs = g.children
-          .filter(e => e.timestamp)
-          .map(e => new Date(e.timestamp).getTime());
-        if (childTs.length === 0) return null;
-
-        const start = Math.min(...childTs);
-        const end = Math.max(...childTs);
+        let start = Infinity;
+        let end = -Infinity;
+        for (const e of g.children) {
+          if (!e.timestamp) continue;
+          const t = new Date(e.timestamp).getTime();
+          if (t < start) start = t;
+          if (t > end) end = t;
+        }
+        if (!isFinite(start)) return null;
         const left = ((start - minTs) / range) * 100;
         const width = Math.max(((end - start) / range) * 100, 1);
         const color = AGENT_COLORS[i % AGENT_COLORS.length];
@@ -445,15 +451,27 @@ function EvalSampleDetail({ sampleId, onClose }) {
       .catch(() => setLoading(false));
   }, [sampleId]);
 
-  // Fetch events + poll for running samples
+  // Fetch events + poll for running samples (incremental)
   useEffect(() => {
     if (!sampleId) return;
 
+    // Track how many events we already have to request only new ones
+    let knownCount = 0;
+
     function fetchEvents() {
-      fetch(`/api/eval/samples/${encodeURIComponent(sampleId)}/events`)
+      const afterParam = knownCount > 0 ? `?after=${knownCount}` : '';
+      fetch(`/api/eval/samples/${encodeURIComponent(sampleId)}/events${afterParam}`)
         .then(r => r.json())
         .then(data => {
-          setEvents(data.events || []);
+          const newEvents = data.events || [];
+          if (knownCount === 0) {
+            // First fetch — full replacement
+            setEvents(newEvents);
+          } else if (newEvents.length > 0) {
+            // Incremental — append only new events
+            setEvents(prev => [...prev, ...newEvents]);
+          }
+          knownCount = data.total || (knownCount + newEvents.length);
           // Stop polling once completed/failed/skipped
           if (data.status && data.status !== 'running' && data.status !== 'pending') {
             if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
@@ -463,8 +481,8 @@ function EvalSampleDetail({ sampleId, onClose }) {
     }
 
     fetchEvents();
-    // Poll every 2s for running samples
-    pollRef.current = setInterval(fetchEvents, 2000);
+    // Poll every 3s for running samples (was 2s; slightly relaxed for large trajectories)
+    pollRef.current = setInterval(fetchEvents, 3000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [sampleId]);
 
@@ -743,6 +761,31 @@ function EvalPage() {
   const [searchText, setSearchText] = useState('');
   const [offset, setOffset] = useState(0);
   const pageSize = 50;
+  // Track whether a page re-fetch is needed (debounced)
+  const refetchTimerRef = useRef(null);
+  const filterRef = useRef({ statusFilter, searchText, offset });
+  filterRef.current = { statusFilter, searchText, offset };
+
+  // Helper: fetch current page of samples from server
+  const fetchSamplesPage = useCallback(() => {
+    const { statusFilter: sf, searchText: st, offset: off } = filterRef.current;
+    const params = new URLSearchParams({ offset: String(off), limit: String(pageSize) });
+    if (sf) params.set('status', sf);
+    if (st) params.set('search', st);
+    fetch(`/api/eval/samples?${params}`).then(r => r.json()).then(data => {
+      setSamples(data.samples || []);
+      setTotal(data.total || 0);
+    }).catch(() => {});
+  }, [pageSize]);
+
+  // Schedule a debounced page re-fetch (coalesce rapid WS events)
+  const scheduleRefetch = useCallback(() => {
+    if (refetchTimerRef.current) return; // already scheduled
+    refetchTimerRef.current = setTimeout(() => {
+      refetchTimerRef.current = null;
+      fetchSamplesPage();
+    }, 300);
+  }, [fetchSamplesPage]);
 
   // Initial fetch
   useEffect(() => {
@@ -756,14 +799,8 @@ function EvalPage() {
 
   // Fetch samples with filters
   useEffect(() => {
-    const params = new URLSearchParams({ offset: String(offset), limit: String(pageSize) });
-    if (statusFilter) params.set('status', statusFilter);
-    if (searchText) params.set('search', searchText);
-    fetch(`/api/eval/samples?${params}`).then(r => r.json()).then(data => {
-      setSamples(data.samples || []);
-      setTotal(data.total || 0);
-    }).catch(() => {});
-  }, [offset, statusFilter, searchText]);
+    fetchSamplesPage();
+  }, [offset, statusFilter, searchText, fetchSamplesPage]);
 
   // Reset offset when filters change
   useEffect(() => { setOffset(0); }, [statusFilter, searchText]);
@@ -783,14 +820,11 @@ function EvalPage() {
 
       if (event.event_type === 'sample_status') {
         const s = event.data || {};
-        // Update summary
-        fetch('/api/eval/status').then(r => r.json()).then(data => {
-          if (data.enabled) {
-            const { enabled, ...rest } = data;
-            setSummary(rest);
-          }
-        }).catch(() => {});
-        // Update sample in list
+        // Update summary from the event payload — no HTTP round-trip
+        if (event.summary) setSummary(event.summary);
+        // Update in-place if sample is on current page; otherwise schedule a
+        // debounced re-fetch so newly visible samples appear without flooding
+        // the server with requests.
         setSamples(prev => {
           const idx = prev.findIndex(x => x.sample_id === s.sample_id);
           if (idx >= 0) {
@@ -798,18 +832,20 @@ function EvalPage() {
             updated[idx] = s;
             return updated;
           }
-          // New sample — add to list if it passes current filter
-          if (!statusFilter || s.status === statusFilter) {
-            return [...prev, s];
-          }
+          // Sample not on current page — schedule a background re-fetch
+          // instead of blindly appending (which caused unbounded growth).
+          scheduleRefetch();
           return prev;
         });
       }
     }
 
     window.addEventListener('eval_event', handleEvalEvent);
-    return () => window.removeEventListener('eval_event', handleEvalEvent);
-  }, [statusFilter]);
+    return () => {
+      window.removeEventListener('eval_event', handleEvalEvent);
+      if (refetchTimerRef.current) clearTimeout(refetchTimerRef.current);
+    };
+  }, [scheduleRefetch]);
 
   const [leftWidth, setLeftWidth] = useState(40);
   const containerRef = useRef(null);

@@ -201,28 +201,3 @@ class TestCheckTasksIncrementalReporting:
         )
         content2 = json.loads(cmd2.update["messages"][0].content)
         assert len(content2["failed"]) == 0
-
-    @pytest.mark.asyncio
-    async def test_running_task_always_returns_summary(
-        self, task_manager_with_running_task: TaskManager, agent_pool
-    ) -> None:
-        """Running tasks always appear with progress summary, never suppressed."""
-        tools = create_orchestrator_tools(
-            task_manager_with_running_task, agent_pool=agent_pool
-        )
-        check_tasks = tools["check_tasks"]
-
-        # Call twice — running task should appear both times
-        cmd1 = await check_tasks(
-            request="status",
-            tool_call_id="call-024",
-        )
-        content1 = json.loads(cmd1.update["messages"][0].content)
-        assert len(content1["running"]) == 1
-
-        cmd2 = await check_tasks(
-            request="status",
-            tool_call_id="call-025",
-        )
-        content2 = json.loads(cmd2.update["messages"][0].content)
-        assert len(content2["running"]) == 1

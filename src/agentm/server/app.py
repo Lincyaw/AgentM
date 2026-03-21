@@ -484,21 +484,37 @@ def create_dashboard_app(
         return info
 
     @app.get("/api/eval/samples/{sample_id}/events")
-    async def eval_sample_events(sample_id: str) -> dict[str, Any]:
-        """Read trajectory events from JSONL file for a specific sample."""
+    async def eval_sample_events(
+        sample_id: str, after: int = 0
+    ) -> dict[str, Any]:
+        """Read trajectory events from JSONL file for a specific sample.
+
+        Args:
+            after: Skip the first ``after`` events (0-based). When the client
+                already has N events, pass ``after=N`` to receive only new ones.
+        """
         et = app.state.eval_tracker
         if et is None:
-            return {"error": "Eval not active", "events": []}
+            return {"error": "Eval not active", "events": [], "total": 0}
         info = et.get_sample(sample_id)
         if info is None:
-            return {"error": "Sample not found", "events": []}
+            return {"error": "Sample not found", "events": [], "total": 0}
         traj_path = info.get("trajectory_path")
         if not traj_path:
-            return {"events": [], "status": info.get("status", "unknown")}
+            return {
+                "events": [],
+                "total": 0,
+                "status": info.get("status", "unknown"),
+            }
         path = Path(traj_path)
         if not path.exists():
-            return {"events": [], "status": info.get("status", "unknown")}
+            return {
+                "events": [],
+                "total": 0,
+                "status": info.get("status", "unknown"),
+            }
         events: list[dict[str, Any]] = []
+        event_index = 0
         try:
             with open(path, encoding="utf-8") as f:
                 for line in f:
@@ -512,9 +528,15 @@ def create_dashboard_app(
                     # Skip metadata lines
                     if "_meta" in parsed:
                         continue
-                    events.append(parsed)
+                    if event_index >= after:
+                        events.append(parsed)
+                    event_index += 1
         except OSError:
             pass
-        return {"events": events, "status": info.get("status", "unknown")}
+        return {
+            "events": events,
+            "total": event_index,
+            "status": info.get("status", "unknown"),
+        }
 
     return app

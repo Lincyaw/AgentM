@@ -32,7 +32,26 @@ models:
   claude-sonnet-4-6:
     api_key: "${AGENTM_API_KEY}"
     base_url: "${AGENTM_API_BASE_URL:}"
-    provider: anthropic
+    provider: "anthropic"
+    rate_limit:
+      requests_per_second: 20
+      max_bucket_size: 50
+  glm-5:
+    api_key: "${AGENTM_API_KEY}"
+    base_url: "${AGENTM_API_BASE_URL:}"
+    rate_limit:
+      requests_per_second: 20
+      max_bucket_size: 50
+  deepseek-v3.2:
+    api_key: "${AGENTM_API_KEY}"
+    base_url: "${AGENTM_API_BASE_URL:}"
+    rate_limit:
+      requests_per_second: 20
+      max_bucket_size: 50
+  claude-haiku-4-5-20251001:
+    api_key: "${AGENTM_API_KEY}"
+    base_url: "${AGENTM_API_BASE_URL:}"
+    provider: "anthropic"
     rate_limit:
       requests_per_second: 20
       max_bucket_size: 50
