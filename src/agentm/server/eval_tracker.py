@@ -49,6 +49,8 @@ class EvalTracker:
         self._order: list[str] = []  # insertion-order sample ids
         self._listeners: list[Callable[[dict[str, Any]], Any]] = []
         self._trajectory_dir = trajectory_dir
+        # Per-status index: status_value -> set of sample_ids
+        self._status_index: dict[str, set[str]] = {s.value: set() for s in SampleStatus}
 
     # -- Registration ----------------------------------------------------------
 
@@ -66,6 +68,7 @@ class EvalTracker:
             )
             self._samples[sample_id] = info
             self._order.append(sample_id)
+            self._status_index[info.status.value].add(sample_id)
 
     # -- Status transitions ----------------------------------------------------
 
@@ -83,7 +86,9 @@ class EvalTracker:
                 trajectory_path=traj_path,
             )
             self._samples[sample_id] = updated
-        self._notify(updated)
+            self._update_status_index(sample_id, info.status.value, SampleStatus.running.value)
+            summary = self._get_summary_unlocked()
+        self._notify(updated, summary)
 
     def mark_completed(self, sample_id: str) -> None:
         with self._lock:
@@ -105,7 +110,9 @@ class EvalTracker:
                 duration_seconds=duration,
             )
             self._samples[sample_id] = updated
-        self._notify(updated)
+            self._update_status_index(sample_id, info.status.value, SampleStatus.completed.value)
+            summary = self._get_summary_unlocked()
+        self._notify(updated, summary)
 
     def mark_failed(self, sample_id: str, error: str = "") -> None:
         with self._lock:
@@ -128,7 +135,9 @@ class EvalTracker:
                 error=error,
             )
             self._samples[sample_id] = updated
-        self._notify(updated)
+            self._update_status_index(sample_id, info.status.value, SampleStatus.failed.value)
+            summary = self._get_summary_unlocked()
+        self._notify(updated, summary)
 
     def mark_skipped(self, sample_id: str, reason: str = "") -> None:
         with self._lock:
@@ -141,7 +150,9 @@ class EvalTracker:
                 error=reason,
             )
             self._samples[sample_id] = updated
-        self._notify(updated)
+            self._update_status_index(sample_id, info.status.value, SampleStatus.skipped.value)
+            summary = self._get_summary_unlocked()
+        self._notify(updated, summary)
 
     def update_trajectory_path(self, sample_id: str, trajectory_path: str) -> None:
         """Update the trajectory file path for a sample after the real path is known."""
@@ -157,11 +168,7 @@ class EvalTracker:
 
     def get_summary(self) -> dict[str, int]:
         with self._lock:
-            counts = {s.value: 0 for s in SampleStatus}
-            for info in self._samples.values():
-                counts[info.status.value] += 1
-            counts["total"] = len(self._samples)
-            return counts
+            return self._get_summary_unlocked()
 
     def get_samples(
         self,
@@ -171,20 +178,30 @@ class EvalTracker:
         search: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         with self._lock:
-            filtered: list[SampleInfo] = []
-            for sid in self._order:
-                info = self._samples[sid]
-                if status_filter and info.status.value != status_filter:
-                    continue
-                if search:
-                    q = search.lower()
-                    if (
-                        q not in info.sample_id.lower()
-                        and q not in info.data_dir.lower()
-                        and q not in str(info.dataset_index)
-                    ):
+            # Fast path: use status index when filtering by status without search
+            if status_filter and not search:
+                sids = self._status_index.get(status_filter)
+                if sids is None:
+                    return [], 0
+                # Preserve insertion order by iterating _order
+                filtered = [
+                    self._samples[sid] for sid in self._order if sid in sids
+                ]
+            else:
+                filtered: list[SampleInfo] = []
+                for sid in self._order:
+                    info = self._samples[sid]
+                    if status_filter and info.status.value != status_filter:
                         continue
-                filtered.append(info)
+                    if search:
+                        q = search.lower()
+                        if (
+                            q not in info.sample_id.lower()
+                            and q not in info.data_dir.lower()
+                            and q not in str(info.dataset_index)
+                        ):
+                            continue
+                    filtered.append(info)
 
             total = len(filtered)
             page = filtered[offset : offset + limit]
@@ -202,11 +219,25 @@ class EvalTracker:
     def add_listener(self, callback: Callable[[dict[str, Any]], Any]) -> None:
         self._listeners.append(callback)
 
-    def _notify(self, info: SampleInfo) -> None:
+    def _update_status_index(
+        self, sample_id: str, old_status: str, new_status: str
+    ) -> None:
+        """Move a sample between status index sets. Caller must hold the lock."""
+        self._status_index[old_status].discard(sample_id)
+        self._status_index[new_status].add(sample_id)
+
+    def _get_summary_unlocked(self) -> dict[str, int]:
+        """Compute summary counts from the status index. Caller must hold the lock."""
+        counts = {s: len(sids) for s, sids in self._status_index.items()}
+        counts["total"] = len(self._samples)
+        return counts
+
+    def _notify(self, info: SampleInfo, summary: dict[str, int]) -> None:
         event = {
             "channel": "eval",
             "event_type": "sample_status",
             "data": _sample_to_dict(info),
+            "summary": summary,
         }
         for listener in self._listeners:
             try:
