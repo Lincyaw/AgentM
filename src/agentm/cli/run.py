@@ -951,7 +951,7 @@ async def run_investigation_headless(
                     # Collect messages for trajectory
                     for msg in node_data.get("messages", []):
                         collected_messages.append(_langchain_msg_to_openai(msg))
-                if step > max_steps:
+                if step > max_steps and structured_response_json is not None:
                     break
 
         if timeout > 0:
