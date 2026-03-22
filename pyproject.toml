@@ -30,8 +30,8 @@ dependencies = [
     "mcp[cli]>=1.0",
 ]
 
-[tool.uv.sources]
-rcabench-platform = { path = "../proj/rcabench-platform", editable = true }
+# [tool.uv.sources]
+# rcabench-platform = { path = "../proj/rcabench-platform", editable = true }
 
 [dependency-groups]
 dev = [

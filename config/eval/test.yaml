@@ -3,7 +3,7 @@
 
 # Experiment identifier — used to group results in the DB.
 # Change this for each new experiment to avoid mixing results.
-exp_id: "agentm-v4"
+exp_id: "agentm-v11"
 
 # Agent / model labels written to every result row for filtering in stat.
 # model_name is optional — auto-read from scenario orchestrator.model if omitted.
@@ -24,10 +24,10 @@ data:
     - "openrca2-lite"
 
 # Rollout parallelism.
-concurrency: 2
+concurrency: 10
 
 # Cap the number of samples to roll out (null = all).
-max_samples: 2
+max_samples: null
 
 # Judge model — called after rollout to score CausalGraph predictions.
 judge_concurrency: 4
@@ -36,7 +36,7 @@ judge_model:
     type: "chat.completions"
     model: "gpt-4o-mini"
     base_url: "https://bobdong.cn/v1"
-    api_key: "sk-nTS4PVnmc24hYSCkAuYZSRY9aXcbfxHLQAJ9zrOpiovV3kvQ"
+    api_key: ""
   rate_limit:
     rpm: 500
     tpm: 800000
