@@ -18,12 +18,18 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from rcabench_platform.v3.sdk.llm_eval.eval import dashboard as _sdk_dashboard
+
+load_ground_truth = _sdk_dashboard.load_ground_truth
 
 # ---------------------------------------------------------------------------
 # Static HTML path
 # ---------------------------------------------------------------------------
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# SDK shared static (eval.js, constants, hooks, components, styles)
+SDK_STATIC_DIR = Path(_sdk_dashboard.__file__).resolve().parent / "static"
 
 # ---------------------------------------------------------------------------
 # Request / Response models
@@ -166,25 +172,6 @@ def _extract_node_name(snapshot: Any) -> str:
     return "unknown"
 
 
-def _load_ground_truth(data_dir: str) -> dict[str, Any] | None:
-    """Load ground truth payload from a sample data directory if available."""
-    if not data_dir:
-        return None
-    injection_path = Path(data_dir) / "injection.json"
-    if not injection_path.exists():
-        return None
-    try:
-        with injection_path.open(encoding="utf-8") as f:
-            payload = json.load(f)
-    except (OSError, json.JSONDecodeError, TypeError):
-        return None
-
-    ground_truth = payload.get("ground_truth")
-    if not isinstance(ground_truth, dict):
-        return None
-    return ground_truth
-
-
 # ---------------------------------------------------------------------------
 # Application factory
 # ---------------------------------------------------------------------------
@@ -234,6 +221,10 @@ def create_dashboard_app(
         return HTMLResponse(html_path.read_text(encoding="utf-8"))
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    # Serve SDK shared static (eval.js, constants, hooks, components, styles)
+    app.mount(
+        "/sdk-static", StaticFiles(directory=str(SDK_STATIC_DIR)), name="sdk-static"
+    )
 
     # ── WebSocket ──────────────────────────────────────────────────────
 
@@ -271,7 +262,11 @@ def create_dashboard_app(
                     {
                         "channel": "eval",
                         "event_type": "eval_snapshot",
-                        "data": {"summary": summary, "samples": samples, "total": total},
+                        "data": {
+                            "summary": summary,
+                            "samples": samples,
+                            "total": total,
+                        },
                         "timestamp": datetime.now().isoformat(),
                     },
                     default=str,
@@ -475,18 +470,18 @@ def create_dashboard_app(
         info = et.get_sample(sample_id)
         if info is None:
             return {"error": "Sample not found"}
-        ground_truth = _load_ground_truth(info.get("data_dir", ""))
+        ground_truth = load_ground_truth(info.get("data_dir", ""))
         if ground_truth is not None:
             info = {**info, "ground_truth": ground_truth}
             service = ground_truth.get("service")
             if isinstance(service, list):
-                info["root_cause_services"] = [str(s) for s in service if str(s).strip()]
+                info["root_cause_services"] = [
+                    str(s) for s in service if str(s).strip()
+                ]
         return info
 
     @app.get("/api/eval/samples/{sample_id}/events")
-    async def eval_sample_events(
-        sample_id: str, after: int = 0
-    ) -> dict[str, Any]:
+    async def eval_sample_events(sample_id: str, after: int = 0) -> dict[str, Any]:
         """Read trajectory events from JSONL file for a specific sample.
 
         Args:

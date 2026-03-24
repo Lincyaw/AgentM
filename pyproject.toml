@@ -30,8 +30,8 @@ dependencies = [
     "mcp[cli]>=1.0",
 ]
 
-# [tool.uv.sources]
-# rcabench-platform = { path = "../proj/rcabench-platform", editable = true }
+[tool.uv.sources]
+rcabench-platform = { path = "../proj/rcabench-platform", editable = true }
 
 [dependency-groups]
 dev = [
@@ -46,6 +46,9 @@ dev = [
 [project.scripts]
 agentm = "agentm:main"
 vault-mcp = "agentm.tools.vault.mcp_server:main"
+
+[project.entry-points."llm_eval.agents"]
+agentm = "agentm.agents.eval_agent:AgentMAgent"
 
 [build-system]
 requires = ["uv_build>=0.10.9,<0.11.0"]
