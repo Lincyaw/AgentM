@@ -22,25 +22,24 @@ Analyze completed RCA trajectories and extract reusable knowledge.
 ```bash
 # Successful trajectory — extract what went right
 agentm analyze trajectories/rca-20260311-162834.jsonl \
-    --feedback "success: correctly identified mysql connection pool as root cause"
+    --task "success: correctly identified mysql connection pool as root cause"
 
 # Failed trajectory — analyze what went wrong
 agentm analyze trajectories/rca-20260312-091500.jsonl \
-    --feedback "failure: missed ts-order-service, anchored on ts-preserve-service"
+    --task "failure: missed ts-order-service, anchored on ts-preserve-service"
 
-# Multiple files with custom task
+# Multiple files
 agentm analyze trajectories/rca-*.jsonl \
-    --task "Focus on database failure patterns" \
-    --feedback "2/3 succeeded, 1 failed on cascade identification"
+    --task "2/3 succeeded, 1 failed on cascade identification"
 
 # With live dashboard
-agentm analyze trajectories/rca-20260311-162834.jsonl --dashboard --port 8765
+agentm analyze trajectories/rca-20260311-162834.jsonl \
+    --task "success: root cause identified" --dashboard --port 8765
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--feedback` | _(empty)_ | Evaluation feedback (success/failure + details) |
-| `--task` | _(auto-generated)_ | Custom analysis task description |
+| `--task` | _(required)_ | Analysis task with evaluation feedback |
 | `--scenario` | `config/scenarios/trajectory_analysis` | Scenario directory |
 | `--config` | `config/system.yaml` | System config YAML |
 | `--max-steps` | 60 | Maximum orchestrator steps |

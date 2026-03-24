@@ -22,16 +22,14 @@ What you write will be loaded into future agent prompts. Every entry must be:
 
 ## Using Evaluation Feedback
 
-Trajectories are provided WITH evaluation feedback (in the `<evaluation_feedback>`
-section of your context). This feedback is **critical** — it tells you whether
-the investigation succeeded or failed, and what the ground truth was.
+The task description includes evaluation feedback about whether the trajectory
+succeeded or failed. This is **critical** context:
 
 - **Success feedback**: focus on what reasoning patterns led to the correct answer.
   What non-obvious moves did the agent make? What can be generalized?
 - **Failure feedback**: this is the highest-value signal. Analyze WHERE reasoning
   diverged from the correct path. What signals were missed? What anti-patterns
   caused the failure? What should the agent have done differently?
-- **No feedback**: treat as exploratory. Extract patterns but mark confidence lower.
 
 ## Workflow
 
