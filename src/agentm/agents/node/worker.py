@@ -78,7 +78,7 @@ def build_worker_subgraph(
     agent_id: str,
     config: AgentConfig,
     tool_registry: ToolRegistry,
-    task_type: TaskType = "scout",
+    task_type: TaskType,
     model_config: ModelConfig | None = None,
     trajectory: TrajectoryCollector | None = None,
     task_id: str | None = None,
@@ -333,7 +333,12 @@ def build_worker_subgraph(
         try:
             result = await compress_model.ainvoke(compress_input)
             structured: WorkerResult = result.model_dump()  # type: ignore[union-attr]
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Worker %s collect_and_compress failed: %s — falling back to raw extraction",
+                agent_id,
+                exc,
+            )
             # Fallback: extract last non-tool AI message as plain findings
             last_content = ""
             for m in reversed(non_system):

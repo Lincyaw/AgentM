@@ -193,21 +193,12 @@ class AgentConfig(LLMConfig):
 class FeatureGatesConfig(BaseModel):
     """Feature gates for the Orchestrator.
 
-    Domain-specific feature gates can be added via ``model_config = ConfigDict(extra="allow")``.
-    Subclasses (e.g. ``RCAFeatureGates``, ``MemoryFeatureGates``) define
-    domain-specific fields while this base accepts any extra keys.
+    This base class is intentionally empty — domain-specific gates belong in
+    scenario subclasses (e.g. ``RCAFeatureGates``, ``MemoryFeatureGates``).
+    ``extra="allow"`` lets scenario configs pass through without schema errors.
     """
 
     model_config = {"extra": "allow"}
-
-    adversarial_review: bool = False
-    parallel_verification: bool = False
-    auto_refine_partial: bool = False
-    min_verifications_before_confirm: int = 1
-    deep_exploration: bool = False
-    dedup_against_existing: bool = False
-    auto_merge_similar: bool = False
-    min_evidence_for_pattern: int = 2
 
 
 class OutputConfig(BaseModel):

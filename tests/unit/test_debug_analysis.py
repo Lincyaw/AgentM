@@ -28,7 +28,7 @@ def sample_trajectory(tmp_path: Path) -> Path:
             "event_type": "llm_end",
             "data": {"content": "Let me investigate"},
             "task_id": None,
-            "hypothesis_id": None,
+            "metadata": {},
             "parent_seq": None,
         },
         {
@@ -40,7 +40,7 @@ def sample_trajectory(tmp_path: Path) -> Path:
             "event_type": "tool_call",
             "data": {"tool_name": "spawn_worker", "args": {"task_type": "scout"}},
             "task_id": None,
-            "hypothesis_id": None,
+            "metadata": {},
             "parent_seq": None,
         },
         {
@@ -56,7 +56,7 @@ def sample_trajectory(tmp_path: Path) -> Path:
                 "task_type": "scout",
             },
             "task_id": "t-1",
-            "hypothesis_id": None,
+            "metadata": {},
             "parent_seq": None,
         },
         {
@@ -72,7 +72,7 @@ def sample_trajectory(tmp_path: Path) -> Path:
                 "duration_seconds": 12.3,
             },
             "task_id": "t-1",
-            "hypothesis_id": None,
+            "metadata": {},
             "parent_seq": None,
         },
         {
@@ -83,12 +83,12 @@ def sample_trajectory(tmp_path: Path) -> Path:
             "node_name": "agent",
             "event_type": "hypothesis_update",
             "data": {
-                "hypothesis_id": "H1",
+                "metadata": {"hypothesis_id": "H1"},
                 "status": "formed",
                 "description": "DB connection pool exhaustion",
             },
             "task_id": None,
-            "hypothesis_id": "H1",
+            "metadata": {"hypothesis_id": "H1"},
             "parent_seq": None,
         },
         {
@@ -99,12 +99,12 @@ def sample_trajectory(tmp_path: Path) -> Path:
             "node_name": "agent",
             "event_type": "hypothesis_update",
             "data": {
-                "hypothesis_id": "H1",
+                "metadata": {"hypothesis_id": "H1"},
                 "status": "confirmed",
                 "description": "DB connection pool exhaustion",
             },
             "task_id": None,
-            "hypothesis_id": "H1",
+            "metadata": {"hypothesis_id": "H1"},
             "parent_seq": None,
         },
     ]

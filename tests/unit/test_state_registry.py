@@ -14,7 +14,7 @@ import pytest
 from agentm.core.state_registry import get_state_schema
 from agentm.scenarios import discover
 from agentm.scenarios.rca.state import HypothesisDrivenState
-from agentm.scenarios.memory_extraction.state import MemoryExtractionState
+from agentm.scenarios.trajectory_analysis.state import TrajectoryAnalysisState
 
 # Ensure scenario registrations are loaded for all tests in this module.
 discover()
@@ -31,7 +31,7 @@ class TestGetStateSchema:
         "system_type,expected",
         [
             ("hypothesis_driven", HypothesisDrivenState),
-            ("memory_extraction", MemoryExtractionState),
+            ("trajectory_analysis", TrajectoryAnalysisState),
         ],
     )
     def test_resolves_all_registered_types(self, system_type, expected):

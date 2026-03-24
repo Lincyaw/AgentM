@@ -27,9 +27,9 @@ def discover() -> None:
     _discovered = True
 
     from agentm.scenarios.rca import register as register_rca
-    from agentm.scenarios.memory_extraction import register as register_mem
+    from agentm.scenarios.trajectory_analysis import register as register_ta
     from agentm.scenarios.general_purpose import register as register_gp
 
     register_rca()
-    register_mem()
+    register_ta()
     register_gp()

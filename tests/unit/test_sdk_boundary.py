@@ -119,7 +119,7 @@ class TestSDKBoundary:
         assert scenarios.exists(), "scenarios/ directory not found"
         assert (scenarios / "__init__.py").exists()
         assert (scenarios / "rca" / "__init__.py").exists()
-        assert (scenarios / "memory_extraction" / "__init__.py").exists()
+        assert (scenarios / "trajectory_analysis" / "__init__.py").exists()
 
     def test_scenarios_import_from_sdk(self) -> None:
         """Scenario files should import from SDK (not from other scenarios)."""

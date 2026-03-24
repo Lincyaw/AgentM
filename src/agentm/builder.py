@@ -53,16 +53,15 @@ def _func_to_tool(name: str, func: Any) -> StructuredTool:
     )
 
 
-def _serialize_notebook(notebook: Any) -> dict[str, Any]:
-    """Serialize a DiagnosticNotebook dataclass to a JSON-safe dict."""
-    if hasattr(notebook, "__dataclass_fields__"):
-        raw = asdict(notebook)
-    elif isinstance(notebook, dict):
-        raw = notebook
-    else:
-        return {}
-    # asdict converts enums to their value automatically
-    return raw
+def _serialize_value(value: Any) -> Any:
+    """Serialize a state field value to a JSON-safe representation."""
+    if hasattr(value, "__dataclass_fields__"):
+        return asdict(value)
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (str, int, float, bool, list)):
+        return value
+    return str(value)
 
 
 class AgentSystem(Generic[S]):
@@ -166,29 +165,25 @@ class AgentSystem(Generic[S]):
         if self.trajectory is None:
             return
 
-        # Broadcast notebook state updates for the Conversation View
-        notebook = node_data.get("notebook")
-        if notebook is not None:
-            notebook_data = _serialize_notebook(notebook)
-            task_id = (
-                notebook_data.get("task_id", "")
-                if isinstance(notebook_data, dict)
-                else ""
-            )
-            raw_phase = node_data.get("current_phase", "")
-            current_phase = (
-                raw_phase.value if hasattr(raw_phase, "value") else str(raw_phase)
-            )
+        # Broadcast non-message state field updates (scenario-agnostic).
+        # Each scenario's state may contain different fields (e.g. notebook
+        # for RCA, conversation_facts for general_purpose). We serialize
+        # whatever the node returned, excluding messages.
+        state_delta = {
+            k: _serialize_value(v)
+            for k, v in node_data.items()
+            if k != "messages" and v is not None
+        }
+        if state_delta:
+            raw_phase = state_delta.get("current_phase", "")
+            if hasattr(raw_phase, "value"):
+                state_delta["current_phase"] = raw_phase.value
+            state_delta["step"] = step
             await self.trajectory.record(
                 event_type="state_update",
                 agent_path=["orchestrator"],
                 node_name=node_name,
-                data={
-                    "notebook": notebook_data,
-                    "task_id": task_id,
-                    "current_phase": current_phase,
-                    "step": step,
-                },
+                data=state_delta,
             )
 
         # llm_call events are already recorded by NodePipeline
@@ -600,7 +595,7 @@ class AgentSystemBuilder:
             # Extract graph reference setter before tool registration (not a real tool)
             set_graph_ref = injected_tools.pop("_set_graph_ref", None)
 
-            # Wire checkpointer DB path into memory module for memory-extraction system
+            # Wire checkpointer DB path into memory module for trajectory-analysis system
             if system_config is not None:
                 db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
                 memory_module.set_db_path(str(Path(db_url).resolve()))

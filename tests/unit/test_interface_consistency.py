@@ -47,16 +47,15 @@ class TestTaskTypeLiteralConsistency:
                 f"ANSWER_SCHEMA missing RCA task type: {task_type!r}"
             )
 
-    def test_answer_schema_covers_memory_extraction_task_types(self):
-        """ANSWER_SCHEMA must include the four memory-extraction worker task types."""
+    def test_answer_schema_covers_trajectory_analysis_task_types(self):
+        """ANSWER_SCHEMA must include the trajectory-analysis worker task type."""
         from agentm.models.answer_schemas import ANSWER_SCHEMA
         from agentm.scenarios import discover
 
         discover()
-        for task_type in ("collect", "analyze", "extract", "refine"):
-            assert task_type in ANSWER_SCHEMA, (
-                f"ANSWER_SCHEMA missing memory-extraction task type: {task_type!r}"
-            )
+        assert "analyze" in ANSWER_SCHEMA, (
+            "ANSWER_SCHEMA missing trajectory-analysis task type: 'analyze'"
+        )
 
     def test_task_type_is_str_annotation(self, dispatch_agent_func):
         """dispatch_agent task_type must be annotated as str (not Literal)."""

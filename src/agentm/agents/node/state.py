@@ -53,7 +53,6 @@ class WorkerState(TypedDict):
     task_id: str
     task_type: TaskType
     instruction: str
-    hypothesis_id: str | None
 
     # Injected by TaskManager before dispatch (optional cross-worker tips)
     tool_tips: list[dict[str, Any]]

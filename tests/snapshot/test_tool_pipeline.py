@@ -53,6 +53,7 @@ class TestDispatchAgentPipeline:
         cmd = await self.dispatch_agent(
             agent_id="db",
             task="check connections",
+            task_type="scout",
             tool_call_id="call-002",
         )
 
@@ -65,13 +66,13 @@ class TestDispatchAgentPipeline:
         assert content["result"] is not None
 
     @pytest.mark.asyncio
-    async def test_dispatch_with_hypothesis_id(self) -> None:
-        """dispatch_agent should pass hypothesis_id to TaskManager."""
+    async def test_dispatch_with_metadata(self) -> None:
+        """dispatch_agent should pass metadata to TaskManager."""
         await self.dispatch_agent(
             agent_id="db",
             task="verify H1",
             task_type="verify",
-            hypothesis_id="H1",
+            metadata={"hypothesis_id": "H1"},
             tool_call_id="call-003",
         )
 
@@ -79,7 +80,7 @@ class TestDispatchAgentPipeline:
         # Auto-block completes the single task
         completed = status["completed"]
         assert len(completed) == 1
-        assert completed[0]["hypothesis_id"] == "H1"
+        assert completed[0]["metadata"]["hypothesis_id"] == "H1"
 
 
 class TestCheckTasksPipeline:

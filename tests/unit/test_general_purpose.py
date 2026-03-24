@@ -285,9 +285,9 @@ class TestScenarioToolBundle:
 
     def test_get_scenario_tools_fallback(self):
         """Strategy without create_scenario_tools returns empty bundle."""
-        from agentm.scenarios.memory_extraction.strategy import MemoryExtractionStrategy
+        from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
 
-        strategy = MemoryExtractionStrategy()
+        strategy = TrajectoryAnalysisStrategy()
         bundle = get_scenario_tools(strategy)
 
         assert bundle.orchestrator_tools == {}
@@ -313,6 +313,6 @@ class TestBuilderIntegration:
         """All registered strategies provide format_context via protocol."""
         from agentm.core.strategy_registry import get_strategy
 
-        for system_type in ("hypothesis_driven", "memory_extraction", "general_purpose"):
+        for system_type in ("hypothesis_driven", "trajectory_analysis", "general_purpose"):
             strategy = get_strategy(system_type)
             assert callable(strategy.format_context)

@@ -1,0 +1,49 @@
+system:
+  type: "trajectory_analysis"
+  # skill: "memory-extraction"    # Uncomment for config-driven mode
+
+orchestrator:
+  model: "gpt-5.1"
+  temperature: 0.3
+  orchestrator_mode: "node"
+  max_rounds: 20
+
+  prompts:
+    system: "prompts/orchestrator_system.j2"
+
+  tools:
+    - dispatch_agent
+    - check_tasks
+    - vault_write
+    - vault_read
+    - vault_edit
+    - vault_delete
+    - vault_rename
+    - vault_search
+    - vault_list
+    - vault_backlinks
+    - vault_traverse
+    - vault_lint
+    - read_trajectory
+    - get_checkpoint_history
+
+  output:
+    prompt: "prompts/output/analysis_report.j2"
+    schema_name: "AnalysisReport"
+
+agents:
+  worker:
+    model: "gpt-5.1-mini"
+    temperature: 0.2
+    prompt: "workers/trajectory-reader.md"
+    tools:
+      - read_trajectory
+      - get_checkpoint_history
+      - vault_read
+      - vault_search
+      - vault_list
+      - vault_backlinks
+      - vault_traverse
+    execution:
+      max_steps: 20
+      timeout: 120
