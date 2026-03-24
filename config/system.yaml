@@ -55,6 +55,12 @@ models:
     rate_limit:
       requests_per_second: 20
       max_bucket_size: 50
+  Doubao-Seed-2.0-pro:
+    api_key: "${AGENTM_API_KEY}"
+    base_url: "${AGENTM_API_BASE_URL:}"
+    rate_limit:
+      requests_per_second: 20
+      max_bucket_size: 50 
 
 storage:
   checkpointer:

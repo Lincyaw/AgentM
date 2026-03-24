@@ -12,7 +12,7 @@ agent_type: "agentm"
 
 # Database that stores rollout results, judgements, and stats.
 # Defaults to env var LLM_EVAL_DB_URL if not set here.
-db_url: "sqlite:///eval.db"
+db_url: ""
 
 # Dataset to evaluate against.
 data:
@@ -25,6 +25,10 @@ data:
 
 # Rollout parallelism.
 concurrency: 10
+
+# Root path for dataset sources.
+# Resolved as: {source_path}/{source}/converted
+source_path: "/mnt/jfs/rcabench_dataset"
 
 # Cap the number of samples to roll out (null = all).
 max_samples: 1

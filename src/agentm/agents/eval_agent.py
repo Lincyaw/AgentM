@@ -39,6 +39,7 @@ class AgentMAgent(BaseAgent):
             (e.g. ``config/system.yaml``).
         max_steps: Maximum orchestrator steps per sample.
         timeout: Per-sample timeout in seconds (``0`` = no limit).
+        exp_id: Experiment identifier from the eval framework.
     """
 
     def __init__(
@@ -47,11 +48,14 @@ class AgentMAgent(BaseAgent):
         config_path: str = "config/system.yaml",
         max_steps: int = 100,
         timeout: float = 0,
+        exp_id: str | None = None,
+        **_kwargs: Any,
     ) -> None:
         self._scenario_dir = scenario_dir
         self._config_path = config_path
         self._max_steps = max_steps
         self._timeout = timeout
+        self._exp_id = exp_id
 
     @staticmethod
     def name() -> str:
@@ -91,6 +95,7 @@ class AgentMAgent(BaseAgent):
             max_steps=max_steps,
             timeout=timeout,
             on_start=_on_headless_start,
+            exp_id=self._exp_id,
         )
 
         trajectory = None
@@ -105,6 +110,7 @@ class AgentMAgent(BaseAgent):
             trajectory=trajectory,
             metadata={
                 "run_id": run_id,
+                "exp_id": self._exp_id,
                 "trajectory_file": traj_file_path,
             },
         )

@@ -758,6 +758,7 @@ async def run_investigation_headless(
     max_steps: int = 100,
     timeout: float = 600.0,
     on_start: Callable[[str, str | None], None] | None = None,
+    exp_id: str | None = None,
 ) -> tuple[str | None, str | None, str | None, str | None]:
     """Run an RCA investigation without any console output or dashboard.
 
@@ -786,6 +787,11 @@ async def run_investigation_headless(
     )
     # Disable console live so no Rich output is produced
     system_config.debug.console_live = False
+
+    # Route trajectory files into an exp_id sub-directory
+    if exp_id:
+        base_dir = system_config.debug.trajectory.output_dir
+        system_config.debug.trajectory.output_dir = str(Path(base_dir) / exp_id)
 
     result = obs_tools.set_data_directory(data_dir)
     init_info = json.loads(result)
