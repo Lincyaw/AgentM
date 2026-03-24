@@ -12,7 +12,6 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-import yaml
 
 from agentm.tools.vault.parser import (
     append_to_section,
