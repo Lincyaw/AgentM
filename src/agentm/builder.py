@@ -601,9 +601,12 @@ class AgentSystemBuilder:
                 memory_module.set_db_path(str(Path(db_url).resolve()))
 
             # Memory tools are standalone functions (checkpointer injected above)
+            from agentm.tools import trajectory_reader as traj_reader_module
+
             MEMORY_TOOLS: dict[str, Any] = {
                 "read_trajectory": memory_module.read_trajectory,
                 "get_checkpoint_history": memory_module.get_checkpoint_history,
+                "jq_query": traj_reader_module.jq_query,
             }
 
             # Build orchestrator tools: factory-injected + memory + registry (incl. vault)

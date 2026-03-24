@@ -95,6 +95,16 @@ def analyze(
             "If omitted, a default task is generated automatically."
         ),
     ),
+    feedback: str = typer.Option(
+        "",
+        "--feedback",
+        help=(
+            "Evaluation feedback for the trajectory. "
+            "e.g. 'success: correctly identified mysql as root cause' or "
+            "'failure: missed the real root cause ts-order-service, "
+            "anchored on ts-preserve-service instead'"
+        ),
+    ),
     scenario: str = typer.Option(
         "config/scenarios/trajectory_analysis",
         "--scenario",
@@ -125,15 +135,18 @@ def analyze(
 
     Examples:
 
-      # Single trajectory file
-      agentm analyze trajectories/rca-20260311-162834.jsonl
+      # Successful trajectory — extract what went right
+      agentm analyze trajectories/rca-20260311-162834.jsonl \\
+          --feedback "success: correctly identified mysql connection pool as root cause"
 
-      # Multiple files
-      agentm analyze trajectories/rca-*.jsonl
+      # Failed trajectory — analyze what went wrong
+      agentm analyze trajectories/rca-20260312-091500.jsonl \\
+          --feedback "failure: missed ts-order-service as root cause, anchored on ts-preserve-service"
 
-      # Raw thread_id with custom task description
-      agentm analyze 41fcf339-4d23-4b89-b7b3-b59602becd40 \\
-          --task "Focus on database failure patterns only"
+      # Multiple files with custom task
+      agentm analyze trajectories/rca-*.jsonl \\
+          --task "Focus on database failure patterns" \\
+          --feedback "2/3 succeeded, 1 failed on cascade identification"
 
       # With live dashboard
       agentm analyze trajectories/rca-20260311-162834.jsonl --dashboard
@@ -149,6 +162,7 @@ def analyze(
         run_trajectory_analysis(
             trajectories=trajectories,
             task=task,
+            feedback=feedback,
             scenario_dir=scenario,
             config_path=config,
             debug_mode=debug,

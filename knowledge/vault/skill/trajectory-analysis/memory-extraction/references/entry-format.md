@@ -20,14 +20,17 @@ Example: `/diagnostic-principles/gc-cpu-memory-causal-link`
 ## Frontmatter
 
 ```yaml
-type: knowledge
-confidence: <fact|high|medium|low>
+type: <concept|episodic|failure-pattern|skill|system-knowledge>
+confidence: <fact|pattern|heuristic>
 tags: [tag1, tag2]
 source_trajectories: [thread_id_1, thread_id_2]
 ```
 
-- `type`: always `knowledge`
-- `confidence`: see confidence-levels.md for definitions
+- `type`: one of `concept` (transferable principle), `episodic` (case-specific lesson),
+  `failure-pattern` (recurring fault signature), `skill` (reusable procedure),
+  `system-knowledge` (architectural/operational fact)
+- `confidence`: `fact` (3+ trajectories), `pattern` (2+ or 1 with strong evidence),
+  `heuristic` (1 trajectory, plausible generalization)
 - `tags`: descriptive tags for search and discovery
 - `source_trajectories`: list of thread IDs that provided evidence for this entry
 
