@@ -6,6 +6,7 @@ Fully implemented — these are value objects validated at startup.
 from __future__ import annotations
 
 from typing import Any, Literal, Optional
+from langchain_core.rate_limiters import InMemoryRateLimiter
 
 from pydantic import BaseModel
 
@@ -16,9 +17,8 @@ class RateLimitConfig(BaseModel):
     requests_per_second: float
     max_bucket_size: int
 
-    def create_rate_limiter(self) -> "InMemoryRateLimiter":
+    def create_rate_limiter(self) -> InMemoryRateLimiter:
         """Create a LangChain InMemoryRateLimiter from this config."""
-        from langchain_core.rate_limiters import InMemoryRateLimiter
 
         return InMemoryRateLimiter(
             requests_per_second=self.requests_per_second,

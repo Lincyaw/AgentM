@@ -285,7 +285,6 @@ class TestScenarioToolBundle:
 
     def test_get_scenario_tools_fallback(self):
         """Strategy without create_scenario_tools returns empty bundle."""
-        from agentm.models.data import ScenarioToolBundle
         from agentm.scenarios.memory_extraction.strategy import MemoryExtractionStrategy
 
         strategy = MemoryExtractionStrategy()

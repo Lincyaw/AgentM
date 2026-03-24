@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import os
-import sqlite3
 import threading
 
 import pytest
-import yaml
 
 from agentm.tools.vault.store import MarkdownVault
 
