@@ -78,10 +78,10 @@ def main() -> None:
 
 
 @app.command()
-def extract(
+def analyze(
     trajectories: list[str] = typer.Argument(
         help=(
-            "One or more source trajectories to process. "
+            "One or more source trajectories to analyze. "
             "Each can be a path to a .jsonl file (thread_id read from metadata) "
             "or a raw thread_id UUID."
         ),
@@ -91,8 +91,8 @@ def extract(
         "",
         "--task",
         help=(
-            "Custom extraction task description. "
-            "If omitted, a default four-phase task is generated automatically."
+            "Custom analysis task description. "
+            "If omitted, a default task is generated automatically."
         ),
     ),
     scenario: str = typer.Option(
@@ -118,7 +118,7 @@ def extract(
         60, "--max-steps", help="Maximum orchestrator steps (default: 60)"
     ),
 ) -> None:
-    """Extract reusable knowledge from completed RCA trajectories.
+    """Analyze completed RCA trajectories and extract reusable knowledge.
 
     Each TRAJECTORY argument is either a path to a .jsonl trajectory file
     or a raw thread_id UUID. Multiple trajectories can be passed at once.
@@ -126,17 +126,17 @@ def extract(
     Examples:
 
       # Single trajectory file
-      agentm extract trajectories/rca-20260311-162834.jsonl
+      agentm analyze trajectories/rca-20260311-162834.jsonl
 
       # Multiple files
-      agentm extract trajectories/rca-*.jsonl
+      agentm analyze trajectories/rca-*.jsonl
 
       # Raw thread_id with custom task description
-      agentm extract 41fcf339-4d23-4b89-b7b3-b59602becd40 \\
+      agentm analyze 41fcf339-4d23-4b89-b7b3-b59602becd40 \\
           --task "Focus on database failure patterns only"
 
       # With live dashboard
-      agentm extract trajectories/rca-20260311-162834.jsonl --dashboard
+      agentm analyze trajectories/rca-20260311-162834.jsonl --dashboard
     """
     if not trajectories:
         typer.echo(
