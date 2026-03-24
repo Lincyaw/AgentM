@@ -78,28 +78,130 @@ source_trajectories: [97c166c3-...]
 ## Analysis Guidelines
 
 The task description contains evaluation feedback about whether the trajectory
-succeeded or failed. This feedback is critical context:
-
-- **If the trajectory succeeded**: extract what reasoning patterns led to success,
-  what tools/approaches were effective, what can be generalized.
-- **If the trajectory failed**: analyze WHERE the reasoning went wrong, what
-  signals were missed, what anti-patterns the agents fell into, what the correct
-  approach should have been.
-- **Always compare agent behavior against the feedback** to identify gaps between
-  what the agent did and what would have been optimal.
+succeeded or failed. This feedback is critical context.
 
 Focus on extracting **transferable diagnostic principles**, not case-specific facts.
 Write entries that teach reasoning approaches, not brittle rules.
 
+### Outcome Classification (two-level taxonomy)
+
+Every analysis MUST first classify the trajectory using this framework.
+
+**Level 1 — Outcome type (2×2 matrix):**
+
+| | Sound reasoning path | Flawed reasoning path |
+|---|---|---|
+| **Correct conclusion** | **CORRECT_SOUND** — best case, extract positive patterns | **CORRECT_FLAWED** — got the right answer despite reasoning gaps |
+| **Wrong conclusion** | **WRONG_NEAR_MISS** — had the right elements but failed at synthesis | **WRONG_DIVERGED** — reasoning chain itself went off track |
+
+Sub-types for CORRECT_FLAWED:
+- Incomplete evidence chain — conclusion correct but causal chain has gaps
+  (would fail on a harder variant)
+- Inefficient path — excessive dead ends before converging
+
+Sub-types for WRONG_NEAR_MISS:
+- Identified then abandoned — correct hypothesis proposed but later dropped
+- Confirmed but deprioritized — correct hypothesis confirmed but final answer
+  chose a secondary cause
+- Partial identification — found part of the causal chain but missed a key link
+
+Sub-types for WRONG_DIVERGED:
+- Never considered — correct hypothesis was never proposed
+- Wrong from start — initial framing excluded the correct direction
+- Anchoring — fixated on first anomaly, never broadened scope
+
+**Level 2 — Mechanism (WHY the outcome occurred):**
+
+Data layer:
+- **Coverage gap** — never queried signals related to the root cause
+- **Shallow query** — queried the right area but not deeply enough
+
+Interpretation layer:
+- **Signal misread** — saw relevant data but drew wrong conclusions
+- **Contradicting evidence ignored** — saw conflicting signals, dismissed them
+- **Threshold anchoring** — used arbitrary thresholds instead of causal reasoning
+
+Hypothesis management layer:
+- **Anchoring bias** — fixated on first hypothesis found
+- **Premature abandonment** — dropped correct hypothesis without sufficient
+  counter-evidence
+- **Confirmation bias** — only collected evidence supporting current hypothesis
+- **Priority inversion** — ranked secondary symptoms above primary cause
+
+Process layer:
+- **Premature termination** — stopped before completing investigation
+- **Scope creep** — investigated too many tangents, lost focus
+- **No final synthesis** — collected all evidence but didn't integrate into
+  a coherent causal chain
+
+Use the Level 1 label as a tag in vault entries (e.g., `outcome: WRONG_NEAR_MISS`)
+and describe the Level 2 mechanisms in the entry body.
+
 ## Workflow
 
-1. Read the task description carefully — it contains evaluation feedback
+Follow these phases **in order**. Do NOT skip to writing vault entries until
+you have completed the investigation phases. Shallow analysis produces shallow
+entries — invest the queries upfront.
+
+### Phase 1: Establish global picture
+
+Build a statistical overview before diving into details.
+
+1. Read the task description — it contains evaluation feedback (success/failure,
+   ground truth if available)
 2. Load the active skill via vault_read to understand the extraction methodology
-3. Survey existing knowledge: vault_list("/") + vault_search(mode="keyword")
-4. Use jq_query to explore trajectory structure, then query specific aspects
-5. Extract knowledge entries following the skill's methodology
-6. Deduplicate against existing vault entries before writing
-7. Write entries with correct frontmatter
-8. Output `<decision>finalize</decision>` when done
+3. Query trajectory overview:
+   - `length` — total event count
+   - Event type distribution: `group_by(.event_type)`
+   - Agent paths involved: `[.[] | .agent_path?] | unique`
+   - Time span: first and last timestamps
+4. **Find the agent's final answer/conclusion.** This is critical — you must know
+   WHAT the agent concluded before you can analyze WHY it was wrong (or right).
+   Look for: final `hypothesis_update` with status "confirmed", output/answer
+   events, or the last orchestrator reasoning step.
+
+### Phase 2: Reconstruct the reasoning timeline
+
+Map the agent's investigation path chronologically.
+
+1. **Hypothesis lifecycle**: for each hypothesis, trace created → investigated →
+   confirmed/rejected/removed. What evidence drove each transition?
+2. **Data collection inventory**: what tool calls did the agent make? What data
+   did it query? Group by service/component to see coverage.
+3. **Critical gap analysis**: compare the data the agent collected against what
+   would have been needed to reach the correct diagnosis (from the task feedback).
+   - Did the agent query data related to the ground truth? If yes, what did it
+     see and how did it interpret it?
+   - If no, why not? Was it never considered, or was it deprioritized?
+
+### Phase 3: Classify and locate the divergence point
+
+Apply the **Outcome Classification** taxonomy above.
+
+1. **Classify Level 1 outcome type.** Compare the agent's final answer against
+   the ground truth from the task description. Then assess the reasoning path:
+   - Was the reasoning logically sound even if the conclusion was wrong?
+   - Or was the conclusion correct despite flawed reasoning?
+2. **Classify Level 1 sub-type.** For wrong conclusions: did the agent ever
+   have the correct hypothesis? If yes, when and why was it lost? If no, was
+   the correct direction ever considered?
+3. **Identify Level 2 mechanisms.** Find the specific step(s) where things
+   went right or wrong. What data did the agent have at that point? What
+   decision did it make and why?
+   - For failures: locate the earliest point where the agent had enough
+     information to reach the correct conclusion but didn't.
+   - For successes: locate the step where the decisive insight occurred.
+     What made this move non-obvious?
+
+### Phase 4: Extract transferable principles
+
+Only now — with the full investigation complete — extract knowledge entries.
+
+1. Survey existing knowledge: vault_list("/") + vault_search(mode="keyword")
+2. For each candidate entry, formulate the **transferable principle** (not the
+   case fact). Use the what-to-extract and entry-quality references in the skill.
+3. Deduplicate against existing vault entries before writing
+4. Write entries with correct frontmatter
+5. Output `<decision>finalize</decision>` when done
 
 {{ context }}
