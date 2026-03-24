@@ -71,8 +71,8 @@ class TrajectoryReader:
             return f"jq error: {result.stderr.strip()}"
 
         output = result.stdout.strip()
-        if len(output) > 50000:
-            return output[:50000] + f"\n... (truncated, {len(output)} chars total)"
+        if len(output) > 8000:
+            return output[:8000] + f"\n... (truncated, {len(output)} chars total)"
         return output
 
 

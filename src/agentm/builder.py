@@ -609,6 +609,11 @@ class AgentSystemBuilder:
                 "jq_query": traj_reader_module.jq_query,
             }
 
+            # Register memory tools into tool_registry so workers can
+            # resolve them uniformly (same as vault tools above).
+            for mt_name, mt_func in MEMORY_TOOLS.items():
+                tool_registry.register(mt_name, mt_func, {})
+
             # Build orchestrator tools: factory-injected + memory + registry (incl. vault)
             tools: list[Any] = []
 

@@ -23,6 +23,16 @@ trajectory and return structured findings.
 4. Search existing vault knowledge: `vault_search(query=..., mode="keyword")`
 5. Return your findings in the structured format your task requests
 
+## Query Efficiency
+
+Output is truncated at 8000 chars. Keep results small:
+- **Project only fields you need**: `{seq, type: .event_type}` not full events
+- **Truncate text**: `[:200]` on long string fields like `.data.content`
+- **Use counts**: `| length` when you only need totals
+- **Cap arrays**: `[:10]` to limit large result sets
+- **Keyword search**: `select(.data?.content? // "" | test("keyword"; "i"))`
+  to find events by content without reading everything
+
 ## Key Principles
 
 - **Be thorough before reporting.** A shallow query produces shallow
