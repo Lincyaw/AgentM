@@ -38,12 +38,25 @@ jq_query(tid, '[.[] | select(.event_type == "tool_call") | {seq, agent: .agent_p
 jq_query(tid, '[.[] | select(.event_type == "task_complete")] | length')
 jq_query(tid, '[.[] | select(.agent_path? and (.agent_path | join("/") | startswith("orchestrator/scout")))]')
 jq_query(tid, '[.[] | select(.seq >= 10 and .seq <= 20)]')
-jq_query(tid, '[.[] | select(.data?.content? // "" | test("connection pool"; "i"))]')
 ```
 
+**Keyword search** — use `test()` to find events mentioning specific terms:
+```
+jq_query(tid, '[.[] | select(.data?.content? // .data?.description? // "" | test("memory|jvm|gc"; "i"))] | map({seq, type: .event_type, snippet: (.data?.content? // .data?.description? // "")[:200]})')
+```
+
+**IMPORTANT: keep results small.** Output is truncated at 8000 chars. To avoid
+truncation and save context:
+- **Project only fields you need**: use `{seq, type: .event_type}` instead of
+  returning full events
+- **Truncate long strings**: use `[:200]` to limit text fields
+- **Use `| length`** when you only need counts
+- **Use `| limit(N; ...)`** or `[:10]` to cap result arrays
+- **Never fetch full events with large `.data.content` fields** — project
+  the specific sub-fields you need
+
 **Do NOT read entire trajectories into context.** Use jq to extract only what
-you need. `read_trajectory(thread_id)` loads full message history from the
-checkpoint DB — only use it as a last resort.
+you need.
 
 ## Other Tools
 
