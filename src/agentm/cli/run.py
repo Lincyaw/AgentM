@@ -260,12 +260,8 @@ async def run_trajectory_analysis(
         if p.exists() and p.suffix == ".jsonl":
             meta = TrajectoryCollector.read_metadata(p)
             tid = meta.get("thread_id", "")
-            checkpoint_db = meta.get("checkpoint_db", "")
             if not tid:
                 raise CheckpointError(f"{entry} has no thread_id metadata.")
-            if checkpoint_db:
-                system_config.storage.checkpointer.backend = "sqlite"
-                system_config.storage.checkpointer.url = checkpoint_db
             # Register JSONL for structured query tools
             traj_reader.register(p)
             thread_ids.append(tid)
@@ -274,6 +270,10 @@ async def run_trajectory_analysis(
             )
         else:
             thread_ids.append(entry)
+
+    # Trajectory analysis is a one-shot task — no checkpointing needed
+    system_config.storage.checkpointer.backend = "memory"
+    system_config.storage.checkpointer.url = ""
 
     system = AgentSystemBuilder.build(
         system_type="trajectory_analysis",
