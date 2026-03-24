@@ -231,6 +231,7 @@ async def run_trajectory_analysis(
     task: str,
     scenario_dir: str,
     config_path: str,
+    feedback: str = "",
     debug_mode: bool = False,
     verbose: bool = False,
     dashboard: bool = False,
@@ -250,7 +251,10 @@ async def run_trajectory_analysis(
     console.print(f"Orchestrator: [cyan]{scenario_config.orchestrator.model}[/]")
     console.print(f"Worker: [cyan]{scenario_config.agents['worker'].model}[/]")
 
-    # Resolve thread_ids BEFORE build so checkpointer points at the right DB
+    # Resolve thread_ids and register JSONL files for structured querying
+    from agentm.tools.trajectory_reader import get_reader as get_traj_reader
+
+    traj_reader = get_traj_reader()
     thread_ids: list[str] = []
     for entry in trajectories:
         p = Path(entry)
@@ -263,6 +267,8 @@ async def run_trajectory_analysis(
             if checkpoint_db:
                 system_config.storage.checkpointer.backend = "sqlite"
                 system_config.storage.checkpointer.url = checkpoint_db
+            # Register JSONL for structured query tools
+            traj_reader.register(p)
             thread_ids.append(tid)
             console.print(
                 f"  Resolved [dim]{p.name}[/] → thread_id [cyan]{tid[:16]}…[/]"
@@ -292,20 +298,30 @@ async def run_trajectory_analysis(
 
     if not task:
         traj_list = "\n".join(f"- {tid}" for tid in thread_ids)
-        task = (
-            f"Extract reusable knowledge from the following completed RCA "
-            f"trajectories:\n\n{traj_list}"
-        )
+        parts = [
+            "Analyze the following completed RCA trajectories and extract "
+            "reusable diagnostic knowledge:",
+            "",
+            traj_list,
+        ]
+        if feedback:
+            parts.extend([
+                "",
+                "## Evaluation Feedback",
+                feedback,
+            ])
+        task = "\n".join(parts)
 
     initial_state = {
         "messages": [HumanMessage(content=task)],
         "task_id": system.thread_id,
         "task_description": task,
-        "current_phase": "exploration",
+        "current_phase": "analyze",
         "source_trajectories": thread_ids,
-        "extracted_patterns": [],
-        "knowledge_entries": [],
-        "existing_knowledge": [],
+        "analysis_results": [],
+        "skill_name": "",
+        "structured_output": None,
+        "feedback": feedback,
     }
 
     console.print(f"Task: {task[:200]}{'...' if len(task) > 200 else ''}")
