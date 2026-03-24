@@ -8,7 +8,10 @@ def register() -> None:
     from agentm.models.answer_schemas import ANSWER_SCHEMA
     from agentm.models.output import OUTPUT_SCHEMAS
 
-    from agentm.scenarios.trajectory_analysis.answer_schemas import AnalyzeAnswer
+    from agentm.scenarios.trajectory_analysis.answer_schemas import (
+        AnalyzeAnswer,
+        CritiqueAnswer,
+    )
     from agentm.scenarios.trajectory_analysis.output import AnalysisReport
     from agentm.scenarios.trajectory_analysis.state import TrajectoryAnalysisState
     from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
@@ -17,4 +20,5 @@ def register() -> None:
     register_strategy("trajectory_analysis", TrajectoryAnalysisStrategy())
 
     ANSWER_SCHEMA.setdefault("analyze", AnalyzeAnswer)
+    ANSWER_SCHEMA.setdefault("critique", CritiqueAnswer)
     OUTPUT_SCHEMAS.setdefault("AnalysisReport", AnalysisReport)
