@@ -12,11 +12,9 @@ from dotenv import load_dotenv
 from agentm.exceptions import AgentMError
 
 from agentm.cli.debug import analyze_trajectory
-from agentm.cli.eval import run_eval
 from agentm.cli.export_eval import export_eval_batch, export_eval_result
 from agentm.cli.run import (
     resume_investigation,
-    run_investigation,
     run_memory_extraction,
 )
 
@@ -26,56 +24,6 @@ app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
-
-
-@app.command()
-def run(
-    data_dir: str = typer.Option(
-        ..., "--data-dir", help="Observability data directory"
-    ),
-    incident: str = typer.Option(..., "--incident", help="Incident description"),
-    scenario: str = typer.Option(
-        "config/scenarios/rca_hypothesis",
-        "--scenario",
-        help="Scenario directory",
-    ),
-    config: str = typer.Option(
-        "config/system.yaml", "--config", help="System config YAML"
-    ),
-    debug: bool = typer.Option(False, "--debug", help="Enable rich debug terminal UI"),
-    verbose: bool = typer.Option(False, "--verbose", help="Extra detail in output"),
-    dashboard: bool = typer.Option(
-        False, "--dashboard", help="Start web dashboard for real-time monitoring"
-    ),
-    port: int = typer.Option(
-        8765, "--port", help="Dashboard server port (requires --dashboard)"
-    ),
-    dashboard_host: str = typer.Option(
-        "0.0.0.0",
-        "--dashboard-host",
-        help="Dashboard server bind address (default: 0.0.0.0)",
-    ),
-    max_steps: int = typer.Option(
-        100,
-        "--max-steps",
-        help="Maximum orchestrator steps (default: 100)",
-    ),
-) -> None:
-    """Run an RCA investigation."""
-    asyncio.run(
-        run_investigation(
-            data_dir=data_dir,
-            incident=incident,
-            scenario_dir=scenario,
-            config_path=config,
-            debug_mode=debug,
-            verbose=verbose,
-            dashboard=dashboard,
-            dashboard_port=port,
-            dashboard_host=dashboard_host,
-            max_steps=max_steps,
-        )
-    )
 
 
 @app.command()
@@ -262,64 +210,6 @@ def resume(
             dashboard_port=port,
             dashboard_host=dashboard_host,
             verbose=verbose,
-        )
-    )
-
-
-@app.command()
-def eval(
-    config: str = typer.Argument(..., help="Path to eval config YAML"),
-    scenario: str = typer.Option(
-        "config/scenarios/rca_hypothesis",
-        "--scenario",
-        help="Scenario directory",
-    ),
-    system_config: str = typer.Option(
-        "config/system.yaml",
-        "--system-config",
-        help="System config YAML",
-    ),
-    exp_id: str | None = typer.Option(
-        None, "--exp-id", help="Override exp_id from config"
-    ),
-    judge_only: bool = typer.Option(
-        False, "--judge-only", help="Skip rollout, run judge+stat only"
-    ),
-    stat_only: bool = typer.Option(False, "--stat-only", help="Run stat only"),
-    max_steps: int = typer.Option(
-        100, "--max-steps", help="Maximum orchestrator steps per sample"
-    ),
-    timeout: float = typer.Option(
-        0,
-        "--timeout",
-        help="Per-sample timeout in seconds (0 = no timeout)",
-    ),
-    dashboard: bool = typer.Option(
-        False, "--dashboard", help="Start web dashboard for real-time eval monitoring"
-    ),
-    port: int = typer.Option(
-        8765, "--port", help="Dashboard server port (requires --dashboard)"
-    ),
-    dashboard_host: str = typer.Option(
-        "0.0.0.0",
-        "--dashboard-host",
-        help="Dashboard server bind address (default: 0.0.0.0)",
-    ),
-) -> None:
-    """Batch LLM evaluation: preprocess \u2192 rollout \u2192 judge \u2192 stat."""
-    asyncio.run(
-        run_eval(
-            config_path=config,
-            scenario_dir=scenario,
-            system_config_path=system_config,
-            exp_id_override=exp_id,
-            judge_only=judge_only,
-            stat_only=stat_only,
-            max_steps=max_steps,
-            timeout=timeout,
-            dashboard=dashboard,
-            dashboard_port=port,
-            dashboard_host=dashboard_host,
         )
     )
 
