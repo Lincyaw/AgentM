@@ -7,15 +7,17 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/sdk-static/styles.css">
 </head>
 <body>
 <div id="root"></div>
-<script type="text/babel" src="/static/js/constants.js"></script>
-<script type="text/babel" src="/static/js/hooks.js"></script>
-<script type="text/babel" src="/static/js/components.js"></script>
+<!-- Shared components from SDK -->
+<script type="text/babel" src="/sdk-static/js/constants.js"></script>
+<script type="text/babel" src="/sdk-static/js/hooks.js"></script>
+<script type="text/babel" src="/sdk-static/js/components.js"></script>
+<script type="text/babel" src="/sdk-static/js/eval.js"></script>
+<!-- AgentM-specific -->
 <script type="text/babel" src="/static/js/debug.js"></script>
-<script type="text/babel" src="/static/js/eval.js"></script>
 <script type="text/babel" src="/static/js/app.js"></script>
 </body>
 </html>
