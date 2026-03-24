@@ -19,3 +19,4 @@ class TrajectoryAnalysisState(BaseExecutorState):
     skill_name: str
     analysis_results: Annotated[list[dict], operator.add]
     structured_output: Optional[Any]
+    feedback: str

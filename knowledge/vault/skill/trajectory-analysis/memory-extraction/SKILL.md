@@ -20,6 +20,19 @@ What you write will be loaded into future agent prompts. Every entry must be:
 - **Transferable** -- applies beyond the specific services in this trajectory
 - **Actionable but not prescriptive** -- teaches what to look for and why
 
+## Using Evaluation Feedback
+
+Trajectories are provided WITH evaluation feedback (in the `<evaluation_feedback>`
+section of your context). This feedback is **critical** — it tells you whether
+the investigation succeeded or failed, and what the ground truth was.
+
+- **Success feedback**: focus on what reasoning patterns led to the correct answer.
+  What non-obvious moves did the agent make? What can be generalized?
+- **Failure feedback**: this is the highest-value signal. Analyze WHERE reasoning
+  diverged from the correct path. What signals were missed? What anti-patterns
+  caused the failure? What should the agent have done differently?
+- **No feedback**: treat as exploratory. Extract patterns but mark confidence lower.
+
 ## Workflow
 
 ### 1. Survey existing knowledge
@@ -43,7 +56,7 @@ Call `vault_list("/")` to see what already exists. Never skip this step.
 
 ### 3. Deduplicate before writing
 
-For every candidate entry, `vault_search(query=<description>, mode="hybrid", limit=3)`.
+For every candidate entry, `vault_search(query=<description>, mode="keyword", limit=3)`.
 If a similar entry exists, `vault_read` it, then either:
 - **Merge**: `vault_edit` to strengthen the existing entry with new evidence
 - **Skip**: if the existing entry already covers the principle

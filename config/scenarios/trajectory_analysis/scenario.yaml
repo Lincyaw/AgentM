@@ -26,6 +26,7 @@ orchestrator:
     - vault_lint
     - read_trajectory
     - get_checkpoint_history
+    - jq_query
 
   output:
     prompt: "prompts/output/analysis_report.j2"
@@ -39,6 +40,7 @@ agents:
     tools:
       - read_trajectory
       - get_checkpoint_history
+      - jq_query
       - vault_read
       - vault_search
       - vault_list

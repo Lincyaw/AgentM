@@ -20,15 +20,18 @@ export AGENTM_API_BASE_URL="https://your-api-endpoint"  # optional, OpenAI-compa
 Analyze completed RCA trajectories and extract reusable knowledge.
 
 ```bash
-# Single trajectory file
-agentm analyze trajectories/rca-20260311-162834.jsonl
-
-# Multiple files
-agentm analyze trajectories/rca-*.jsonl
-
-# With custom task description
+# Successful trajectory — extract what went right
 agentm analyze trajectories/rca-20260311-162834.jsonl \
-    --task "Focus on database failure patterns only"
+    --feedback "success: correctly identified mysql connection pool as root cause"
+
+# Failed trajectory — analyze what went wrong
+agentm analyze trajectories/rca-20260312-091500.jsonl \
+    --feedback "failure: missed ts-order-service, anchored on ts-preserve-service"
+
+# Multiple files with custom task
+agentm analyze trajectories/rca-*.jsonl \
+    --task "Focus on database failure patterns" \
+    --feedback "2/3 succeeded, 1 failed on cascade identification"
 
 # With live dashboard
 agentm analyze trajectories/rca-20260311-162834.jsonl --dashboard --port 8765
@@ -36,7 +39,8 @@ agentm analyze trajectories/rca-20260311-162834.jsonl --dashboard --port 8765
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--task` | _(auto-generated)_ | Custom extraction task description |
+| `--feedback` | _(empty)_ | Evaluation feedback (success/failure + details) |
+| `--task` | _(auto-generated)_ | Custom analysis task description |
 | `--scenario` | `config/scenarios/trajectory_analysis` | Scenario directory |
 | `--config` | `config/system.yaml` | System config YAML |
 | `--max-steps` | 60 | Maximum orchestrator steps |

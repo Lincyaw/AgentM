@@ -5,29 +5,27 @@ tags: [trajectory-analysis, memory-extraction]
 
 # Confidence Levels
 
+The vault accepts three confidence levels. Use these exact values in frontmatter.
+
 ## fact
 
 Observed in 3+ trajectories with clear causal evidence. The pattern is well-established
 and can be relied upon.
 
-## high
+## pattern
 
 Observed in 2+ trajectories, or in 1 trajectory with very strong evidence (clear causal
 chain, unambiguous signal pattern).
 
-## medium
+## heuristic
 
 Observed in 1 trajectory with plausible generalization. The pattern seems transferable
 but has limited supporting evidence.
 
-## low
-
-Speculative inference that needs more evidence before acting on it.
-
 ## Writing Threshold
 
-Only write standalone entries with confidence >= medium.
+Only write standalone entries with confidence >= heuristic.
 
-Low-confidence observations should not be standalone entries. Instead, note them
+Very speculative observations should not be standalone entries. Instead, note them
 in existing related entries as "possible related pattern" to be confirmed by
 future trajectories.
