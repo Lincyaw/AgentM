@@ -35,6 +35,8 @@ agents:
     model: "gpt-5.1-mini"
     temperature: 0.2
     prompt: "workers/trajectory-reader.md"
+    task_type_prompts:
+      critique: "workers/analysis-critic.md"
     tools:
       - jq_query
       - vault_read
