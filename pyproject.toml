@@ -25,7 +25,7 @@ dependencies = [
     "langchain>=1.2.10",
     "python-dotenv>=1.2.2",
     "sentence-transformers>=3.0",
-    "rcabench-platform[llm-eval]",
+    "rcabench-platform[llm-eval]>=0.4.9",
     "sqlite-vec>=0.1.6",
     "mcp[cli]>=1.0",
 ]

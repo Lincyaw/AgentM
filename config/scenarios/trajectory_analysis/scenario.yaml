@@ -24,8 +24,6 @@ orchestrator:
     - vault_backlinks
     - vault_traverse
     - vault_lint
-    - read_trajectory
-    - get_checkpoint_history
     - jq_query
 
   output:
@@ -38,8 +36,6 @@ agents:
     temperature: 0.2
     prompt: "workers/trajectory-reader.md"
     tools:
-      - read_trajectory
-      - get_checkpoint_history
       - jq_query
       - vault_read
       - vault_search
