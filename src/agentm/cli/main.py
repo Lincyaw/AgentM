@@ -88,21 +88,14 @@ def analyze(
         default=None,
     ),
     task: str = typer.Option(
-        "",
+        ...,
         "--task",
         help=(
-            "Custom analysis task description. "
-            "If omitted, a default task is generated automatically."
-        ),
-    ),
-    feedback: str = typer.Option(
-        "",
-        "--feedback",
-        help=(
-            "Evaluation feedback for the trajectory. "
-            "e.g. 'success: correctly identified mysql as root cause' or "
-            "'failure: missed the real root cause ts-order-service, "
-            "anchored on ts-preserve-service instead'"
+            "Analysis task with evaluation feedback. Describe what to analyze "
+            "and whether the trajectory succeeded or failed. "
+            "e.g. 'success: correctly identified mysql as root cause, "
+            "extract the reasoning patterns that led to this' or "
+            "'failure: missed ts-order-service, anchored on ts-preserve-service'"
         ),
     ),
     scenario: str = typer.Option(
@@ -132,24 +125,21 @@ def analyze(
 
     Each TRAJECTORY argument is either a path to a .jsonl trajectory file
     or a raw thread_id UUID. Multiple trajectories can be passed at once.
+    --task is required and should include evaluation feedback.
 
     Examples:
 
       # Successful trajectory — extract what went right
       agentm analyze trajectories/rca-20260311-162834.jsonl \\
-          --feedback "success: correctly identified mysql connection pool as root cause"
+          --task "success: correctly identified mysql connection pool as root cause"
 
       # Failed trajectory — analyze what went wrong
       agentm analyze trajectories/rca-20260312-091500.jsonl \\
-          --feedback "failure: missed ts-order-service as root cause, anchored on ts-preserve-service"
+          --task "failure: missed ts-order-service, anchored on ts-preserve-service"
 
-      # Multiple files with custom task
+      # Multiple files
       agentm analyze trajectories/rca-*.jsonl \\
-          --task "Focus on database failure patterns" \\
-          --feedback "2/3 succeeded, 1 failed on cascade identification"
-
-      # With live dashboard
-      agentm analyze trajectories/rca-20260311-162834.jsonl --dashboard
+          --task "2/3 succeeded, 1 failed on cascade identification"
     """
     if not trajectories:
         typer.echo(
@@ -162,7 +152,6 @@ def analyze(
         run_trajectory_analysis(
             trajectories=trajectories,
             task=task,
-            feedback=feedback,
             scenario_dir=scenario,
             config_path=config,
             debug_mode=debug,
