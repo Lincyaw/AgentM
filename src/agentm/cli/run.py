@@ -79,7 +79,7 @@ async def _setup_debug_and_dashboard(
 
     Returns (debug_console, dashboard_server_task, eval_tracker, sample_id).
     """
-    from agentm.server.eval_tracker import EvalTracker
+    from rcabench_platform.v3.sdk.llm_eval.eval.tracker import EvalTracker
 
     debug_console = None
     if system_config.debug.console_live:
@@ -98,18 +98,14 @@ async def _setup_debug_and_dashboard(
         tracker.register_sample(sample_id, dataset_index=0, data_dir=data_dir)
         tracker.mark_running(sample_id, run_id=sample_id)
         if system.trajectory is not None:
-            tracker.update_trajectory_path(
-                sample_id, str(system.trajectory.file_path)
-            )
+            tracker.update_trajectory_path(sample_id, str(system.trajectory.file_path))
 
         # Wire tracker → WebSocket
         _loop = asyncio.get_running_loop()
 
         def _tracker_to_ws(event: dict) -> None:
             try:
-                _loop.call_soon_threadsafe(
-                    _loop.create_task, bc.broadcast(event)
-                )
+                asyncio.run_coroutine_threadsafe(bc.broadcast(event), _loop)
             except RuntimeError:
                 pass
 
@@ -273,16 +269,19 @@ async def run_investigation(
         system_config=system_config,
     )
 
-    debug_console, dashboard_task, eval_tracker, sample_id = (
-        await _setup_debug_and_dashboard(
-            system,
-            system_config,
-            verbose,
-            dashboard,
-            dashboard_host,
-            dashboard_port,
-            data_dir=data_dir,
-        )
+    (
+        debug_console,
+        dashboard_task,
+        eval_tracker,
+        sample_id,
+    ) = await _setup_debug_and_dashboard(
+        system,
+        system_config,
+        verbose,
+        dashboard,
+        dashboard_host,
+        dashboard_port,
+        data_dir=data_dir,
     )
 
     initial_state = {"messages": [HumanMessage(content=incident)]}
@@ -359,15 +358,18 @@ async def run_memory_extraction(
         system_config=system_config,
     )
 
-    debug_console, dashboard_task, eval_tracker, sample_id = (
-        await _setup_debug_and_dashboard(
-            system,
-            system_config,
-            verbose,
-            dashboard,
-            dashboard_host,
-            dashboard_port,
-        )
+    (
+        debug_console,
+        dashboard_task,
+        eval_tracker,
+        sample_id,
+    ) = await _setup_debug_and_dashboard(
+        system,
+        system_config,
+        verbose,
+        dashboard,
+        dashboard_host,
+        dashboard_port,
     )
 
     if not task:
@@ -521,7 +523,7 @@ async def resume_investigation(
     eval_tracker = None
     sample_id = None
     if dashboard:
-        from agentm.server.eval_tracker import EvalTracker
+        from rcabench_platform.v3.sdk.llm_eval.eval.tracker import EvalTracker
 
         bc = Broadcaster()
         tracker = EvalTracker()
@@ -530,17 +532,13 @@ async def resume_investigation(
         tracker.register_sample(sample_id, dataset_index=0, data_dir=data_dir)
         tracker.mark_running(sample_id, run_id=sample_id)
         if system.trajectory is not None:
-            tracker.update_trajectory_path(
-                sample_id, str(system.trajectory.file_path)
-            )
+            tracker.update_trajectory_path(sample_id, str(system.trajectory.file_path))
 
         _loop = asyncio.get_running_loop()
 
         def _tracker_to_ws(event: dict) -> None:
             try:
-                _loop.call_soon_threadsafe(
-                    _loop.create_task, bc.broadcast(event)
-                )
+                asyncio.run_coroutine_threadsafe(bc.broadcast(event), _loop)
             except RuntimeError:
                 pass
 
@@ -702,9 +700,7 @@ def _print_event(event: dict, step: int, verbose: bool) -> None:
                 tool_name = getattr(msg, "name", "?")
                 if content:
                     preview = content
-                    console.print(
-                        f"\n  <- {tool_name}: {preview}", markup=False
-                    )
+                    console.print(f"\n  <- {tool_name}: {preview}", markup=False)
                     if len(content) > len(preview):
                         console.print(f"     [dim]... ({len(content)} chars total)[/]")
 
@@ -863,6 +859,10 @@ async def run_investigation_headless(
     """
     import uuid
 
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
     system_config, scenario_config, _ = _load_and_override(
         scenario_dir, config_path, debug_mode=False, verbose=False
     )
@@ -969,7 +969,11 @@ async def run_investigation_headless(
             await system.trajectory.close()
 
     trajectory_json: str | None = None
-    if collected_messages:
+    if system.trajectory is not None and system.trajectory.events:
+        from agentm.core.trajectory_converter import build_trajectory_from_events
+
+        trajectory_json = build_trajectory_from_events(run_id, system.trajectory.events)
+    elif collected_messages:
         trajectory_json = _build_trajectory_json(run_id, collected_messages)
 
     return structured_response_json, trajectory_json, run_id, trajectory_file_path
