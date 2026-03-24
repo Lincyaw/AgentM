@@ -92,7 +92,7 @@ class TrajectoryAnalysisStrategy:
         )
 
     def format_context(self, state: TrajectoryAnalysisState) -> str:
-        """Render skill context, feedback, and source trajectories for the system prompt.
+        """Render skill context and source trajectories for the system prompt.
 
         Two modes:
         - Config-driven (pre-loaded skill): renders <active_skill> XML
@@ -100,7 +100,7 @@ class TrajectoryAnalysisStrategy:
         - Model-driven (no pre-loaded skill): renders <available_skills>
           XML catalog for model selection.
 
-        Appends source trajectories and evaluation feedback.
+        Appends source trajectories list.
         """
         lines: list[str] = []
 
@@ -126,13 +126,6 @@ class TrajectoryAnalysisStrategy:
         else:
             lines.append("")
             lines.append("(No source trajectories provided yet)")
-
-        feedback: str = state.get("feedback", "")
-        if feedback:
-            lines.append("")
-            lines.append("<evaluation_feedback>")
-            lines.append(feedback)
-            lines.append("</evaluation_feedback>")
 
         return "\n".join(lines)
 

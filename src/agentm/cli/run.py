@@ -231,7 +231,6 @@ async def run_trajectory_analysis(
     task: str,
     scenario_dir: str,
     config_path: str,
-    feedback: str = "",
     debug_mode: bool = False,
     verbose: bool = False,
     dashboard: bool = False,
@@ -296,22 +295,6 @@ async def run_trajectory_analysis(
         dashboard_port,
     )
 
-    if not task:
-        traj_list = "\n".join(f"- {tid}" for tid in thread_ids)
-        parts = [
-            "Analyze the following completed RCA trajectories and extract "
-            "reusable diagnostic knowledge:",
-            "",
-            traj_list,
-        ]
-        if feedback:
-            parts.extend([
-                "",
-                "## Evaluation Feedback",
-                feedback,
-            ])
-        task = "\n".join(parts)
-
     initial_state = {
         "messages": [HumanMessage(content=task)],
         "task_id": system.thread_id,
@@ -321,7 +304,6 @@ async def run_trajectory_analysis(
         "analysis_results": [],
         "skill_name": "",
         "structured_output": None,
-        "feedback": feedback,
     }
 
     console.print(f"Task: {task[:200]}{'...' if len(task) > 200 else ''}")
