@@ -77,7 +77,8 @@ class ManagedTask:
     task_id: str
     agent_id: str
     instruction: str
-    hypothesis_id: Optional[str] = None
+    task_type: str = ""
+    metadata: dict = field(default_factory=dict)
     status: AgentRunStatus = AgentRunStatus.RUNNING
     current_step: int = 0
     max_steps: Optional[int] = None
@@ -143,4 +144,4 @@ class TaskTraceRef:
     agent_thread_id: str
     parent_thread_id: str
     parent_dispatch_step: int
-    hypothesis_id: Optional[str] = None
+    metadata: dict = field(default_factory=dict)

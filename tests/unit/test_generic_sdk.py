@@ -50,10 +50,10 @@ class TestReasoningStrategyProtocol:
         strategy = HypothesisDrivenStrategy()
         assert isinstance(strategy, ReasoningStrategy)
 
-    def test_memory_extraction_satisfies_protocol(self):
-        from agentm.scenarios.memory_extraction.strategy import MemoryExtractionStrategy
+    def test_trajectory_analysis_satisfies_protocol(self):
+        from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
 
-        strategy = MemoryExtractionStrategy()
+        strategy = TrajectoryAnalysisStrategy()
         assert isinstance(strategy, ReasoningStrategy)
 
     def test_hypothesis_driven_name(self):
@@ -61,10 +61,10 @@ class TestReasoningStrategyProtocol:
 
         assert HypothesisDrivenStrategy().name == "hypothesis_driven"
 
-    def test_memory_extraction_name(self):
-        from agentm.scenarios.memory_extraction.strategy import MemoryExtractionStrategy
+    def test_trajectory_analysis_name(self):
+        from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
 
-        assert MemoryExtractionStrategy().name == "memory_extraction"
+        assert TrajectoryAnalysisStrategy().name == "trajectory_analysis"
 
 
 # ---------------------------------------------------------------------------
@@ -83,9 +83,9 @@ class TestStrategyRegistry:
         strategy = get_strategy("hypothesis_driven")
         assert strategy.name == "hypothesis_driven"
 
-    def test_get_memory_extraction(self):
-        strategy = get_strategy("memory_extraction")
-        assert strategy.name == "memory_extraction"
+    def test_get_trajectory_analysis(self):
+        strategy = get_strategy("trajectory_analysis")
+        assert strategy.name == "trajectory_analysis"
 
     def test_unknown_type_raises(self):
         with pytest.raises(ValueError, match="No strategy registered"):
@@ -94,7 +94,7 @@ class TestStrategyRegistry:
     def test_list_strategies_returns_registered(self):
         names = list_strategies()
         assert "hypothesis_driven" in names
-        assert "memory_extraction" in names
+        assert "trajectory_analysis" in names
 
     def test_register_custom_strategy(self):
         from agentm.scenarios.rca.strategy import HypothesisDrivenStrategy
@@ -187,37 +187,52 @@ class TestHypothesisDrivenStrategy:
 
 
 # ---------------------------------------------------------------------------
-# Memory-Extraction Strategy
+# Trajectory-Analysis Strategy
 # ---------------------------------------------------------------------------
 
 
-class TestMemoryExtractionStrategy:
-    """MemoryExtractionStrategy produces correct initial state and phase graph."""
+class TestTrajectoryAnalysisStrategy:
+    """TrajectoryAnalysisStrategy produces correct initial state and phase graph."""
 
     def test_initial_state_has_required_fields(self):
-        from agentm.scenarios.memory_extraction.strategy import MemoryExtractionStrategy
+        from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
 
-        strategy = MemoryExtractionStrategy()
-        state = strategy.initial_state("t1", "extract")
+        strategy = TrajectoryAnalysisStrategy()
+        state = strategy.initial_state("t1", "analyze trajectories")
         assert state["task_id"] == "t1"
-        assert state["current_phase"] == "collect"
+        assert state["current_phase"] == "analyze"
         assert state["source_trajectories"] == []
-        assert state["extracted_patterns"] == []
+        assert state["analysis_results"] == []
 
-    def test_phase_definitions_has_four_phases(self):
-        from agentm.scenarios.memory_extraction.strategy import MemoryExtractionStrategy
+    def test_phase_definitions_has_two_phases(self):
+        from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
 
-        phases = MemoryExtractionStrategy().phase_definitions()
-        assert set(phases.keys()) == {"collect", "analyze", "extract", "refine"}
+        phases = TrajectoryAnalysisStrategy().phase_definitions()
+        assert set(phases.keys()) == {"analyze", "synthesize"}
 
-    def test_answer_schemas_has_extraction_types(self):
-        from agentm.scenarios.memory_extraction.strategy import MemoryExtractionStrategy
+    def test_should_terminate_on_synthesize(self):
+        """Bug prevented: should_terminate never True -> infinite loop."""
+        from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
 
-        schemas = MemoryExtractionStrategy().get_answer_schemas()
-        assert "collect" in schemas
+        strategy = TrajectoryAnalysisStrategy()
+        state = strategy.initial_state("t1", "test")
+        assert strategy.should_terminate(state) is False
+        terminated_state = {**state, "current_phase": "synthesize"}
+        assert strategy.should_terminate(terminated_state) is True
+
+    def test_answer_schemas_has_analyze(self):
+        from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
+
+        schemas = TrajectoryAnalysisStrategy().get_answer_schemas()
         assert "analyze" in schemas
-        assert "extract" in schemas
-        assert "refine" in schemas
+
+    def test_orchestrator_hooks_returns_hooks(self):
+        """Bug prevented: missing orchestrator_hooks -> ReasoningStrategy protocol violation."""
+        from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
+        from agentm.models.data import OrchestratorHooks
+
+        hooks = TrajectoryAnalysisStrategy().orchestrator_hooks()
+        assert isinstance(hooks, OrchestratorHooks)
 
 
 # ---------------------------------------------------------------------------

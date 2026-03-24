@@ -66,7 +66,7 @@ def create_rca_tools(
                     "evidence_summary": evidence_summary,
                     "parent_id": parent_id,
                 },
-                hypothesis_id=id,
+                metadata={"hypothesis_id": id},
             )
 
         return Command(
@@ -92,7 +92,7 @@ def create_rca_tools(
                     "status": "removed",
                     "description": "",
                 },
-                hypothesis_id=id,
+                metadata={"hypothesis_id": id},
             )
 
         return Command(

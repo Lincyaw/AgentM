@@ -11,7 +11,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
-from agentm.models.data import PhaseDefinition, ScenarioToolBundle
+from agentm.models.data import OrchestratorHooks, PhaseDefinition, ScenarioToolBundle
 from agentm.scenarios.general_purpose.answer_schemas import GeneralAnswer
 from agentm.scenarios.general_purpose.state import GeneralPurposeState
 
@@ -122,6 +122,9 @@ class GeneralPurposeStrategy:
 
     def state_schema(self) -> type[GeneralPurposeState]:
         return GeneralPurposeState
+
+    def orchestrator_hooks(self) -> OrchestratorHooks:
+        return OrchestratorHooks()
 
     def create_scenario_tools(self, **kwargs: Any) -> ScenarioToolBundle:
         """Return empty bundle — skill access is unified via vault tools."""

@@ -182,6 +182,8 @@ class MemoryExtractionOrchestrator(BaseOrchestrator):
 
 ## Memory Extraction System
 
+> **⚠️ SUPERSEDED**: This section describes the original `memory_extraction` scenario design. It has been replaced by the [Trajectory Analysis](trajectory-analysis.md) scenario — a skill-driven, general-purpose trajectory analysis framework where memory extraction is one of many pluggable skills. The content below is retained for historical reference only.
+
 The Memory Extraction system is a concrete agent system built on the same SDK Wrapper. It processes completed RCA trajectories to build a cross-task knowledge base.
 
 ### Architecture

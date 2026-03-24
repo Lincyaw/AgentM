@@ -57,7 +57,7 @@ class TestManagedTaskRequiredFields:
             "task_id",
             "agent_id",
             "instruction",
-            "hypothesis_id",
+            "metadata",
             "status",
             "result",
             "error_summary",

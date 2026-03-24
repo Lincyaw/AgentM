@@ -727,16 +727,16 @@ Different agent system types share the same core framework (BaseOrchestrator, Ph
 # Hypothesis-driven RCA
 orchestrator = AgentSystemBuilder.build(system_type="hypothesis_driven", config=...)
 
-# Sequential diagnosis (only config changes)
-orchestrator = AgentSystemBuilder.build(system_type="sequential", config=...)
+# Trajectory Analysis — skill-driven analysis of completed trajectories
+analyzer = AgentSystemBuilder.build(system_type="trajectory_analysis", config=...)
 
-# Memory Extraction — cross-task knowledge building (same framework, different state + phases)
-memory_agent = AgentSystemBuilder.build(system_type="memory_extraction", config=...)
+# General Purpose — open-ended task execution with skill augmentation
+gp_agent = AgentSystemBuilder.build(system_type="general_purpose", config=...)
 ```
 
-The **Memory Extraction** system reuses the same Supervisor + Subgraph architecture to process completed RCA trajectories and extract failure patterns, diagnostic skills, and system knowledge into a persistent Knowledge Store (LangGraph Store). The RCA Orchestrator can then query this knowledge via `search_knowledge` tool during hypothesis generation.
+The **Trajectory Analysis** system reuses the same Supervisor + Subgraph architecture to process completed agent trajectories. Unlike the former `memory_extraction` (which was hardcoded to knowledge extraction), trajectory analysis is **skill-driven** — pluggable analysis skills (stored as Agent Skills directories in the vault) determine what to look for and what to produce. Memory extraction is the first skill; others include failure diagnosis, quality audit, and feature tagging.
 
-> Detail: See [generic-state-wrapper.md](generic-state-wrapper.md) for the full SDK wrapper design and Memory Extraction system.
+> Detail: See [trajectory-analysis.md](trajectory-analysis.md) for the full design. See [generic-state-wrapper.md](generic-state-wrapper.md) for the SDK wrapper architecture.
 
 ---
 
@@ -747,6 +747,7 @@ The **Memory Extraction** system reuses the same Supervisor + Subgraph architect
 | [orchestrator.md](orchestrator.md) | Orchestrator + DiagnosticNotebook + Four-phase flow + Verification model |
 | [sub-agent.md](sub-agent.md) | Sub-Agent architecture + Config + State isolation + Tool management |
 | [generic-state-wrapper.md](generic-state-wrapper.md) | Generic SDK wrapper for multiple diagnostic patterns |
+| [trajectory-analysis.md](trajectory-analysis.md) | Skill-driven trajectory analysis (replaces memory_extraction) |
 | [frontend-architecture.md](frontend-architecture.md) | Dashboard UI, WebSocket protocol, scenario plugin system |
 
 ---
