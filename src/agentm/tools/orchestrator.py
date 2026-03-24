@@ -36,8 +36,8 @@ def create_orchestrator_tools(
     async def dispatch_agent(
         agent_id: str,
         task: str,
-        task_type: TaskType = "scout",
-        hypothesis_id: Optional[str] = None,
+        task_type: TaskType,
+        metadata: Optional[dict] = None,
         tool_call_id: Annotated[str, InjectedToolCallId] = "",
     ) -> Command:
         """Launch a Sub-Agent. Auto-blocks when this is the only running task.
@@ -45,6 +45,14 @@ def create_orchestrator_tools(
         Single-worker: waits for completion and returns result directly,
         saving an LLM roundtrip through check_tasks.
         Multi-worker: returns immediately with status "running".
+
+        Args:
+            agent_id: Which agent to dispatch.
+            task: Natural language instruction for the agent.
+            task_type: Task type key (e.g. "scout", "verify", "execute").
+                Determines the answer schema and prompt overlay.
+            metadata: Optional scenario-specific key-value pairs
+                (e.g. {"hypothesis_id": "H1"} for RCA).
         """
         task_id = str(uuid.uuid4())
         subgraph = agent_pool.create_worker(agent_id, task_type, task_id=task_id)
@@ -57,7 +65,7 @@ def create_orchestrator_tools(
             agent_id,
             task,
             task_type,
-            hypothesis_id,
+            metadata=metadata,
             subgraph=subgraph,
             config={"recursion_limit": recursion_limit},
             task_id=task_id,
@@ -218,8 +226,8 @@ def create_orchestrator_tools(
         try:
             state = graph.get_state(graph_config)
             compression_refs = state.values.get("compression_refs", [])
-        except Exception:
-            compression_refs = []
+        except Exception as e:
+            return f"Error reading graph state for recall: {e}"
 
         if not compression_refs:
             return (

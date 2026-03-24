@@ -43,7 +43,7 @@ concepts:
   system_architecture:
     description: "LangGraph Supervisor+Subgraph multi-agent orchestration system with config-driven design, trajectory recording, monitoring, and failure recovery. Generic SDK layer: TypeVar S, ReasoningStrategy Protocol, AgentMMiddleware (self-contained modules in middleware/), StorageBackend, GenericAgentSystemBuilder. Plugin-based scenario registration via scenarios.discover() — SDK registries have zero hardcoded scenario imports. No separate agents/hooks, core/compression, or strategies/ directory"
     design: "designs/system-design-overview.md"
-    related_concepts: [orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner, builder, reasoning_strategy, middleware_system, storage_backend]
+    related_concepts: [orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner, builder, reasoning_strategy, middleware_system, storage_backend, trajectory_analysis]
     plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
     tasks: []
 
@@ -103,7 +103,7 @@ concepts:
           - "ReasoningStrategy Protocol runtime_checkable (§ Strategy)"
           - "StrategyRegistry lookup and registration (§ Strategy Registry)"
           - "HypothesisDrivenStrategy initial state and phase graph (§ Strategies)"
-          - "MemoryExtractionStrategy initial state and phase graph (§ Strategies)"
+          - "TrajectoryAnalysisStrategy initial state and phase graph (§ Strategies)"
           - "AgentMMiddleware compose_middleware chaining (§ Middleware)"
           - "BudgetMiddleware, DedupMiddleware class hierarchy (§ Middleware)"
           - "StorageBackend protocol satisfaction (§ Backend)"
@@ -113,10 +113,10 @@ concepts:
           - "GenericAgentSystemBuilder fluent API (§ Builder)"
 
   memory_system:
-    description: "Two-layer memory: intra-task (context compression + recall_history tool backed by checkpoint chain, see orchestrator.md) and cross-task (Memory Extraction agent system producing KnowledgeEntry items with three confidence levels — FACT/PATTERN/HEURISTIC — in LangGraph Store, see generic-state-wrapper.md)"
+    description: "Two-layer memory: intra-task (context compression + recall_history tool backed by checkpoint chain, see orchestrator.md) and cross-task (trajectory_analysis scenario with memory-extraction skill writing to vault, see trajectory-analysis.md)"
     design: "designs/orchestrator.md"
-    related_concepts: [orchestrator, generic_state_wrapper, trajectory_system, memory_vault]
-    related_designs: ["designs/generic-state-wrapper.md"]
+    related_concepts: [orchestrator, generic_state_wrapper, trajectory_system, memory_vault, trajectory_analysis]
+    related_designs: ["designs/trajectory-analysis.md"]
     plans: ["plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
     tests:
@@ -125,6 +125,19 @@ concepts:
           - "path_to_namespace — root, deep, trailing slash, empty string (§ Knowledge Store namespace)"
           - "path_to_namespace_and_key — key extraction, single segment (§ Knowledge Store)"
           - "Round-trip path↔namespace idempotency and normalization (§ Knowledge Store)"
+
+  trajectory_analysis:
+    description: "Skill-driven trajectory analysis scenario. Replaces memory_extraction. Agent Skills spec (SKILL.md + references/ + examples/) in vault under skill/trajectory-analysis/. Three-tier progressive disclosure: catalog → SKILL.md → references/. Model-driven or config-driven skill activation. Generic state (TrajectoryAnalysisState), two phases (analyze → synthesize)."
+    design: "designs/trajectory-analysis.md"
+    related_concepts: [system_architecture, generic_state_wrapper, memory_system, memory_vault, builder, reasoning_strategy, configuration_system]
+    plans: ["plans/2026-03-24-trajectory-analysis.md"]
+    tasks:
+      - "tasks/2026-03-24-ta-state-strategy.md"
+      - "tasks/2026-03-24-ta-schemas-registry.md"
+      - "tasks/2026-03-24-ta-config.md"
+      - "tasks/2026-03-24-ta-vault-skills.md"
+      - "tasks/2026-03-24-ta-integration.md"
+      - "tasks/2026-03-24-ta-tests.md"
 
   configuration_system:
     description: "Config system: system.yaml (global), tools/*.yaml (reusable tool defs), scenarios/<name>/ (scenario.yaml + prompts/*.j2). Pydantic schema validation + cross-reference validation at startup. Environment variable substitution"
@@ -220,7 +233,7 @@ concepts:
           - "Fluent API returns self for chaining (§ Builder)"
 
   reasoning_strategy:
-    description: "ReasoningStrategy[S] Protocol: pluggable domain logic. Defines initial_state, format_context, phase_definitions, should_terminate, compress_state, get_answer_schemas, state_schema. StrategyRegistry maps system-type names to instances. Concrete: HypothesisDrivenStrategy, MemoryExtractionStrategy"
+    description: "ReasoningStrategy[S] Protocol: pluggable domain logic. Defines initial_state, format_context, phase_definitions, should_terminate, compress_state, get_answer_schemas, state_schema. StrategyRegistry maps system-type names to instances. Concrete: HypothesisDrivenStrategy, TrajectoryAnalysisStrategy, GeneralPurposeStrategy"
     related_concepts: [generic_state_wrapper, builder, orchestrator]
     plans: []
     tasks: []

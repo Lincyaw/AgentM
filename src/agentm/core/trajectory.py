@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO, Any, Callable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ class TrajectoryEvent(BaseModel):
     event_type: str
     data: dict[str, Any]
     task_id: str | None = None
-    hypothesis_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
     parent_seq: int | None = None
 
 
@@ -128,10 +128,22 @@ class TrajectoryCollector:
         data: dict[str, Any],
         node_name: str = "",
         task_id: str | None = None,
-        hypothesis_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
         parent_seq: int | None = None,
+        **kwargs: Any,
     ) -> int:
-        """Record an event. Returns the assigned sequence number."""
+        """Record an event. Returns the assigned sequence number.
+
+        Scenarios can pass arbitrary key-value pairs via *metadata*
+        (e.g. ``metadata={"hypothesis_id": "H1"}``).
+        Legacy callers passing ``hypothesis_id=`` directly are handled
+        via **kwargs for backward compatibility.
+        """
+        # Merge legacy hypothesis_id kwarg into metadata
+        _meta = dict(metadata) if metadata else {}
+        if "hypothesis_id" in kwargs:
+            _meta.setdefault("hypothesis_id", kwargs.pop("hypothesis_id"))
+
         async with self._lock:
             self._seq += 1
             event = TrajectoryEvent(
@@ -143,7 +155,7 @@ class TrajectoryCollector:
                 event_type=event_type,
                 data=data,
                 task_id=task_id,
-                hypothesis_id=hypothesis_id,
+                metadata=_meta,
                 parent_seq=parent_seq,
             )
             dumped = event.model_dump()
@@ -166,14 +178,19 @@ class TrajectoryCollector:
         data: dict[str, Any],
         node_name: str = "",
         task_id: str | None = None,
-        hypothesis_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
         parent_seq: int | None = None,
+        **kwargs: Any,
     ) -> int:
         """Synchronous variant for use from sync tool functions.
 
         Writes directly without the async lock — only safe when called from
         within the event loop thread (which sync tool functions are).
         """
+        _meta = dict(metadata) if metadata else {}
+        if "hypothesis_id" in kwargs:
+            _meta.setdefault("hypothesis_id", kwargs.pop("hypothesis_id"))
+
         with self._sync_lock:
             self._seq += 1
             event = TrajectoryEvent(
@@ -185,7 +202,7 @@ class TrajectoryCollector:
                 event_type=event_type,
                 data=data,
                 task_id=task_id,
-                hypothesis_id=hypothesis_id,
+                metadata=_meta,
                 parent_seq=parent_seq,
             )
             dumped = event.model_dump()

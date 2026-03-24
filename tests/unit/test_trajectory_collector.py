@@ -92,7 +92,7 @@ async def test_events_buffer_matches_file(tmp_output: str) -> None:
 
 @pytest.mark.asyncio
 async def test_record_without_optional_fields(tmp_output: str) -> None:
-    """Optional fields (task_id, hypothesis_id, parent_seq) default to None."""
+    """Optional fields (task_id, metadata, parent_seq) default to None/empty."""
     collector = TrajectoryCollector(run_id="test-opt", output_dir=tmp_output)
     await collector.record("llm_end", ["orchestrator"], {"content": "hi"})
     path = await collector.close()
@@ -105,13 +105,13 @@ async def test_record_without_optional_fields(tmp_output: str) -> None:
     ]
     event = json.loads(all_lines[0])
     assert event["task_id"] is None
-    assert event["hypothesis_id"] is None
+    assert event["metadata"] == {}
     assert event["parent_seq"] is None
 
 
 @pytest.mark.asyncio
 async def test_record_with_linkage_fields(tmp_output: str) -> None:
-    """task_id, hypothesis_id, parent_seq must be preserved for trace reconstruction."""
+    """task_id, metadata, parent_seq must be preserved for trace reconstruction."""
     collector = TrajectoryCollector(run_id="test-link", output_dir=tmp_output)
     s1 = await collector.record(
         "tool_call", ["orchestrator"], {"tool": "spawn_worker"}, task_id="t-1"
@@ -121,7 +121,7 @@ async def test_record_with_linkage_fields(tmp_output: str) -> None:
         ["orchestrator"],
         {"result": "ok"},
         task_id="t-1",
-        hypothesis_id="H1",
+        metadata={"hypothesis_id": "H1"},
         parent_seq=s1,
     )
     path = await collector.close()
@@ -134,7 +134,7 @@ async def test_record_with_linkage_fields(tmp_output: str) -> None:
     ]
     e2 = json.loads(all_lines[1])
     assert e2["task_id"] == "t-1"
-    assert e2["hypothesis_id"] == "H1"
+    assert e2["metadata"]["hypothesis_id"] == "H1"
     assert e2["parent_seq"] == 1
 
 

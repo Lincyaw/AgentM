@@ -222,11 +222,11 @@ async def _stream_and_finalize(
 
 
 # ---------------------------------------------------------------------------
-# Memory extraction
+# Trajectory analysis
 # ---------------------------------------------------------------------------
 
 
-async def run_memory_extraction(
+async def run_trajectory_analysis(
     trajectories: list[str],
     task: str,
     scenario_dir: str,
@@ -238,12 +238,12 @@ async def run_memory_extraction(
     dashboard_host: str = "127.0.0.1",
     max_steps: int = 60,
 ) -> None:
-    """Run a memory extraction pass over one or more completed RCA trajectories."""
+    """Run a trajectory analysis pass over one or more completed RCA trajectories."""
     system_config, scenario_config, _ = _load_and_override(
         scenario_dir, config_path, debug_mode, verbose
     )
 
-    console.rule("AgentM — Memory Extraction")
+    console.rule("AgentM — Trajectory Analysis")
     console.print(f"Source trajectories: [cyan]{len(trajectories)}[/]")
     for t in trajectories:
         console.print(f"  • [dim]{t}[/]")
@@ -271,7 +271,7 @@ async def run_memory_extraction(
             thread_ids.append(entry)
 
     system = AgentSystemBuilder.build(
-        system_type="memory_extraction",
+        system_type="trajectory_analysis",
         scenario_config=scenario_config,
         system_config=system_config,
     )
@@ -320,7 +320,7 @@ async def run_memory_extraction(
         dashboard_port,
         verbose,
         max_steps,
-        "extraction",
+        "trajectory_analysis",
         eval_tracker=eval_tracker,
         sample_id=sample_id,
     )

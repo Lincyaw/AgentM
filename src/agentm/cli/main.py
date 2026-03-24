@@ -15,7 +15,7 @@ from agentm.cli.debug import analyze_trajectory
 from agentm.cli.export_eval import export_eval_batch, export_eval_result
 from agentm.cli.run import (
     resume_investigation,
-    run_memory_extraction,
+    run_trajectory_analysis,
 )
 
 app = typer.Typer(
@@ -96,9 +96,9 @@ def extract(
         ),
     ),
     scenario: str = typer.Option(
-        "config/scenarios/memory_extraction",
+        "config/scenarios/trajectory_analysis",
         "--scenario",
-        help="Scenario directory (default: config/scenarios/memory_extraction)",
+        help="Scenario directory (default: config/scenarios/trajectory_analysis)",
     ),
     config: str = typer.Option(
         "config/system.yaml", "--config", help="System config YAML"
@@ -146,7 +146,7 @@ def extract(
         raise typer.Exit(code=1)
 
     asyncio.run(
-        run_memory_extraction(
+        run_trajectory_analysis(
             trajectories=trajectories,
             task=task,
             scenario_dir=scenario,

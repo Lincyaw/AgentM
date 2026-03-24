@@ -57,8 +57,9 @@ class TaskManager:
         self,
         agent_id: str,
         instruction: str,
-        task_type: TaskType = "scout",
-        hypothesis_id: str | None = None,
+        task_type: TaskType,
+        *,
+        metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> str:
         """Submit a new task for a Sub-Agent. Returns task_id.
@@ -67,6 +68,9 @@ class TaskManager:
         a new UUID is generated.  This allows the caller to pre-generate the
         ID so that the same value can be baked into the compiled subgraph
         hooks before the task is submitted.
+
+        Scenario-specific data (e.g. hypothesis_id for RCA) should be passed
+        via *metadata*.
         """
         task_id = kwargs.pop("task_id", None) or str(uuid.uuid4())
         logger.info("Task %s submitted: agent=%s type=%s", task_id, agent_id, task_type)
@@ -81,7 +85,8 @@ class TaskManager:
             task_id=task_id,
             agent_id=agent_id,
             instruction=instruction,
-            hypothesis_id=hypothesis_id,
+            task_type=task_type,
+            metadata=metadata or {},
             max_steps=max_steps,
             timeout=timeout,
             started_at=datetime.now().isoformat(),
@@ -105,7 +110,7 @@ class TaskManager:
                     "agent_id": agent_id,
                     "task_type": task_type,
                     "instruction": instruction,
-                    "hypothesis_id": hypothesis_id,
+                    "metadata": metadata or {},
                 },
                 task_id=task_id,
             )
@@ -141,7 +146,7 @@ class TaskManager:
             entry: dict[str, Any] = {
                 "task_id": task_id,
                 "agent_id": task.agent_id,
-                "hypothesis_id": task.hypothesis_id,
+                "metadata": task.metadata,
             }
             if task.status == AgentRunStatus.RUNNING:
                 entry["step"] = task.current_step
@@ -193,7 +198,7 @@ class TaskManager:
                     {
                         "task_id": task_id,
                         "agent_id": task.agent_id,
-                        "task_type": getattr(task, "task_type", "scout"),
+                        "task_type": getattr(task, "task_type", "unknown"),
                         "elapsed_seconds": elapsed,
                         "current_step": task.current_step,
                         "max_steps": task.max_steps,
@@ -230,7 +235,6 @@ class TaskManager:
             task.asyncio_task.cancel()
         task.status = AgentRunStatus.FAILED
         task.error_summary = f"Aborted: {reason}"
-        return True
         self._completion_event.set()
         if self._trajectory is not None:
             await self._trajectory.record(
@@ -239,6 +243,7 @@ class TaskManager:
                 data={"task_id": task_id, "agent_id": task.agent_id, "reason": reason},
                 task_id=task_id,
             )
+        return True
 
     def consume_instructions(self, task_id: str) -> list[str]:
         """Dequeue and return all pending instructions for a task.

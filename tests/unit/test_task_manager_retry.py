@@ -52,7 +52,7 @@ class TestExecuteSuccess:
         subgraph = _make_subgraph(events)
 
         tm = TaskManager()
-        task_id = await tm.submit("db", "check connections", subgraph=subgraph)
+        task_id = await tm.submit("db", "check connections", "scout", subgraph=subgraph)
         managed = tm.get_task(task_id)
         assert managed.asyncio_task is not None
         await managed.asyncio_task
@@ -69,7 +69,7 @@ class TestExecuteFailure:
         subgraph = _make_subgraph(RuntimeError("recursion limit reached"))
 
         tm = TaskManager()
-        task_id = await tm.submit("db", "check connections", subgraph=subgraph)
+        task_id = await tm.submit("db", "check connections", "scout", subgraph=subgraph)
         managed = tm.get_task(task_id)
         assert managed.asyncio_task is not None
         await managed.asyncio_task
@@ -91,7 +91,7 @@ class TestCancelledNotSwallowed:
         mock.astream = _blocking_astream
 
         tm = TaskManager()
-        task_id = await tm.submit("db", "check connections", subgraph=mock)
+        task_id = await tm.submit("db", "check connections", "scout", subgraph=mock)
         managed = tm.get_task(task_id)
         assert managed.asyncio_task is not None
 

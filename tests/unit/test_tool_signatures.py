@@ -81,14 +81,20 @@ class TestDispatchAgentSignature:
         assert "task_type" in sig.parameters
 
     def test_task_type_is_str(self, orch_tools):
-        """task_type is str so memory-extraction types (collect, analyze, etc.) flow through."""
+        """task_type is str so trajectory-analysis types flow through alongside RCA types."""
         annotation = _resolve_annotation(orch_tools["dispatch_agent"], "task_type")
         assert annotation is str, f"task_type should be str, got: {annotation}"
 
-    def test_task_type_defaults_to_scout(self, orch_tools):
+    def test_task_type_is_required(self, orch_tools):
+        """task_type has no default — each scenario defines its own task types."""
         sig = inspect.signature(orch_tools["dispatch_agent"])
         param = sig.parameters["task_type"]
-        assert param.default == "scout"
+        assert param.default is inspect.Parameter.empty
+
+    def test_has_metadata_parameter(self, orch_tools):
+        """metadata replaces hypothesis_id — scenario-agnostic extension point."""
+        sig = inspect.signature(orch_tools["dispatch_agent"])
+        assert "metadata" in sig.parameters
 
     def test_has_tool_call_id_parameter(self, orch_tools):
         """Tool must accept tool_call_id for ToolMessage routing."""
@@ -173,18 +179,19 @@ class TestBuildWorkerSubgraphSignature:
         assert "task_type" in sig.parameters
 
     def test_task_type_is_str(self):
-        """task_type is str so memory-extraction types flow through alongside RCA types."""
+        """task_type is str so trajectory-analysis types flow through alongside RCA types."""
         from agentm.agents.node.worker import build_worker_subgraph
 
         annotation = _resolve_annotation(build_worker_subgraph, "task_type")
         assert annotation is str, f"task_type should be str, got: {annotation}"
 
-    def test_task_type_defaults_to_scout(self):
+    def test_task_type_is_required(self):
+        """task_type has no default — caller must specify the scenario's task type."""
         from agentm.agents.node.worker import build_worker_subgraph
 
         sig = inspect.signature(build_worker_subgraph)
         param = sig.parameters["task_type"]
-        assert param.default == "scout"
+        assert param.default is inspect.Parameter.empty
 
 
 class TestTaskManagerSubmitSignature:
