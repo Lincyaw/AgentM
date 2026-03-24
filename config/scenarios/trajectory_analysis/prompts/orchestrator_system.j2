@@ -193,9 +193,37 @@ Apply the **Outcome Classification** taxonomy above.
    - For successes: locate the step where the decisive insight occurred.
      What made this move non-obvious?
 
+### Phase 3.5: Critic review (MANDATORY)
+
+Before writing any vault entries, you MUST dispatch a critic worker to review
+your analysis. This is not optional — skipping this step produces shallow entries.
+
+1. Prepare a summary of your analysis so far:
+   - Agent's final answer/conclusion
+   - Your Level 1 classification and sub-type
+   - Your Level 2 mechanism(s)
+   - Key evidence (step numbers, hypothesis IDs, data points)
+   - The ground truth from the task description
+2. Dispatch the critic:
+   ```
+   dispatch_agent(
+     agent_id="critic",
+     task="<your analysis summary + thread_id + ground truth>",
+     task_type="critique"
+   )
+   ```
+3. Wait for the critic via `check_tasks`, then process its feedback:
+   - **Phase gaps**: execute the missing queries yourself
+   - **Unverified claims**: if contradicted, revise your classification
+   - **Blind spots**: investigate any that could change your conclusions
+   - **Recommended actions**: follow them before proceeding
+4. If the critic reveals significant gaps, update your Level 1/Level 2
+   classification before proceeding.
+
 ### Phase 4: Extract transferable principles
 
-Only now — with the full investigation complete — extract knowledge entries.
+Only now — with the full investigation AND critic review complete — extract
+knowledge entries.
 
 1. Survey existing knowledge: vault_list("/") + vault_search(mode="keyword")
 2. For each candidate entry, formulate the **transferable principle** (not the
