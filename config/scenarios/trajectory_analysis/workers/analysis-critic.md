@@ -51,6 +51,19 @@ yourself to determine what the orchestrator would have found.
 - [ ] **Contradicting evidence considered?** (e.g., verify workers that
       challenged the orchestrator's claims)
 
+## Format Detection
+
+Trajectories come in two formats. **Always detect first:**
+```
+jq_query(thread_id, 'has("_eval_meta")')
+```
+- `_eval_meta` present → **message format**: use `.trajectories[...]` queries
+  with role-based messages (`assistant`, `tool`, `sub_agent`).
+- `_meta` present → **event format**: use `.event_type` / `.seq` / `.agent_path`
+  queries.
+
+Adapt all verification queries below to the detected format.
+
 ## Verification Queries
 
 Do NOT just check boxes. For each critical claim in the orchestrator's summary,

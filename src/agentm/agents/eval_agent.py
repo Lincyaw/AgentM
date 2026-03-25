@@ -57,6 +57,25 @@ class AgentMAgent(BaseAgent):
         self._timeout = timeout
         self._exp_id = exp_id
 
+        # Resolve model name: env override > scenario config
+        import os
+        from pathlib import Path
+
+        self._model_name: str | None = os.environ.get("AGENTM_ORCHESTRATOR_MODEL")
+        if not self._model_name:
+            try:
+                from agentm.config.loader import load_scenario_config
+
+                scenario_yaml = Path(scenario_dir) / "scenario.yaml"
+                sc = load_scenario_config(scenario_yaml)
+                self._model_name = sc.orchestrator.model
+            except Exception:
+                pass
+
+    def model_name(self) -> str | None:
+        """Orchestrator model name (for eval DB tracking)."""
+        return self._model_name
+
     @staticmethod
     def name() -> str:
         return "agentm"

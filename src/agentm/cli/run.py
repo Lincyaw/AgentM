@@ -250,7 +250,7 @@ async def run_trajectory_analysis(
     console.print(f"Orchestrator: [cyan]{scenario_config.orchestrator.model}[/]")
     console.print(f"Worker: [cyan]{scenario_config.agents['worker'].model}[/]")
 
-    # Resolve thread_ids and register JSONL files for structured querying
+    # Resolve case IDs and register trajectory files for structured querying
     from agentm.tools.trajectory_reader import get_reader as get_traj_reader
 
     traj_reader = get_traj_reader()
@@ -262,11 +262,17 @@ async def run_trajectory_analysis(
             tid = meta.get("thread_id", "")
             if not tid:
                 raise CheckpointError(f"{entry} has no thread_id metadata.")
-            # Register JSONL for structured query tools
             traj_reader.register(p)
             thread_ids.append(tid)
             console.print(
                 f"  Resolved [dim]{p.name}[/] → thread_id [cyan]{tid[:16]}…[/]"
+            )
+        elif p.exists() and p.suffix == ".json":
+            # Message-format JSON (e.g. exported from eval DB)
+            case_id = traj_reader.register(p)
+            thread_ids.append(case_id)
+            console.print(
+                f"  Registered [dim]{p.name}[/] → case_id [cyan]{case_id}[/]"
             )
         else:
             thread_ids.append(entry)
@@ -785,6 +791,8 @@ async def run_investigation_headless(
     )
     # Disable console live so no Rich output is produced
     system_config.debug.console_live = False
+    # Use in-memory checkpointer to avoid SQLite lock contention under concurrency
+    system_config.storage.checkpointer.backend = "memory"
 
     # Route trajectory files into an exp_id sub-directory
     if exp_id:

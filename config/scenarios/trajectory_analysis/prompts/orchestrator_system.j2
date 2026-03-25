@@ -15,13 +15,25 @@ I have completed the analysis. Created 2 new entries and updated 1 existing entr
 
 ## Trajectory Query Tools
 
-Trajectories are JSONL files. Each line is a JSON object. The first line is
-metadata (`_meta` key), the rest are events.
+Trajectories come in **two formats**. Always detect the format first:
+```
+jq_query(tid, 'has("_eval_meta")')
+```
+- If this returns `true`, it is **message format** (JSON) — the input is the
+  root object directly.
+- If this returns `false`, it is **event format** (JSONL) — the input is a
+  slurped array of line objects.
 
 ### jq_query(thread_id, expression, raw?)
 
-Run a jq expression against a trajectory. The input is `--slurp`ed, so you
-receive an array of all JSON objects. Use this for all trajectory inspection.
+Run a jq expression against a trajectory file.
+
+---
+
+### Event Format (JSONL)
+
+Each line is a JSON object. The first line is metadata (`_meta` key), the rest
+are events. After slurp you get an array of line objects.
 
 **Start by exploring the schema:**
 ```
@@ -43,6 +55,44 @@ jq_query(tid, '[.[] | select(.seq >= 10 and .seq <= 20)]')
 **Keyword search** — use `test()` to find events mentioning specific terms:
 ```
 jq_query(tid, '[.[] | select(.data?.content? // .data?.description? // "" | test("memory|jvm|gc"; "i"))] | map({seq, type: .event_type, snippet: (.data?.content? // .data?.description? // "")[:200]})')
+```
+
+---
+
+### Message Format (JSON)
+
+A single JSON object with `_eval_meta` (evaluation metadata) and `trajectories`
+(array of agent conversation threads). The input is the root object directly
+(no slurp). Each trajectory has `trajectory_id`, `agent_name`, and `messages`
+(an array of role-based messages: `assistant`, `tool`, `sub_agent`).
+
+**Start by exploring the structure:**
+```
+jq_query(tid, '._eval_meta')                              # eval metadata (ground truth, correctness)
+jq_query(tid, '.trajectories | length')                    # number of agent trajectories
+jq_query(tid, '[.trajectories[] | {id: .trajectory_id, agent: .agent_name, msgs: (.messages | length)}]')
+```
+
+**Query tool calls and sub-agent dispatches:**
+```
+# All tool calls in orchestrator trajectory
+jq_query(tid, '[.trajectories[0].messages[] | select(.tool_calls?) | .tool_calls[] | .function.name]')
+
+# All sub-agent dispatches
+jq_query(tid, '[.trajectories[0].messages[] | select(.sub_agent_calls?) | .sub_agent_calls[] | {id: .id, agent: .name, task: .instructions[:200]}]')
+
+# Sub-agent results
+jq_query(tid, '[.trajectories[].messages[] | select(.role == "sub_agent") | {id: .sub_agent_call_id, result: .content[:300]}]')
+```
+
+**Keyword search across all messages:**
+```
+jq_query(tid, '[.trajectories[].messages[] | select(.content? // "" | test("keyword"; "i")) | {role: .role, content: .content[:200]}]')
+```
+
+**Get the agent's final answer (last assistant message in orchestrator):**
+```
+jq_query(tid, '[.trajectories[0].messages[] | select(.role == "assistant")] | last | .content[:500]')
 ```
 
 **IMPORTANT: keep results small.** Output is truncated at 8000 chars. To avoid
@@ -163,15 +213,19 @@ Build a statistical overview before diving into details.
 1. Read the task description — it contains evaluation feedback (success/failure,
    ground truth if available)
 2. Load the active skill via vault_read to understand the extraction methodology
-3. Query trajectory overview:
-   - `length` — total event count
-   - Event type distribution: `group_by(.event_type)`
-   - Agent paths involved: `[.[] | .agent_path?] | unique`
-   - Time span: first and last timestamps
-4. **Find the agent's final answer/conclusion.** This is critical — you must know
+3. **Detect trajectory format** — query `.[0] | has("_eval_meta")` to determine
+   if this is message format or event format, then use the appropriate queries.
+4. Query trajectory overview:
+   - Event format: `length`, event type distribution via `group_by(.event_type)`,
+     agent paths `[.[] | .agent_path?] | unique`, time span
+   - Message format: `._eval_meta` (ground truth, correctness),
+     `.trajectories | length`, agent names and message counts
+5. **Find the agent's final answer/conclusion.** This is critical — you must know
    WHAT the agent concluded before you can analyze WHY it was wrong (or right).
-   Look for: final `hypothesis_update` with status "confirmed", output/answer
-   events, or the last orchestrator reasoning step.
+   - Event format: final `hypothesis_update` with status "confirmed",
+     output/answer events, or the last orchestrator reasoning step
+   - Message format: last assistant message in the orchestrator trajectory,
+     or `._eval_meta.extracted_final_answer`
 
 ### Phase 2: Reconstruct the reasoning timeline
 

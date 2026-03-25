@@ -82,8 +82,8 @@ def analyze(
     trajectories: list[str] = typer.Argument(
         help=(
             "One or more source trajectories to analyze. "
-            "Each can be a path to a .jsonl file (thread_id read from metadata) "
-            "or a raw thread_id UUID."
+            "Each can be a .jsonl file (event format), a .json file "
+            "(message format from eval DB export), or a raw thread_id UUID."
         ),
         default=None,
     ),
@@ -123,19 +123,19 @@ def analyze(
 ) -> None:
     """Analyze completed RCA trajectories and extract reusable knowledge.
 
-    Each TRAJECTORY argument is either a path to a .jsonl trajectory file
-    or a raw thread_id UUID. Multiple trajectories can be passed at once.
+    Each TRAJECTORY argument can be a .jsonl file (event format), a .json file
+    (message format from eval DB export), or a raw thread_id UUID.
     --task is required and should include evaluation feedback.
 
     Examples:
 
-      # Successful trajectory — extract what went right
+      # Analyze an event-format trajectory (JSONL)
       agentm analyze trajectories/rca-20260311-162834.jsonl \\
-          --task "success: correctly identified mysql connection pool as root cause"
+          --task "failure: missed ts-order-service"
 
-      # Failed trajectory — analyze what went wrong
-      agentm analyze trajectories/rca-20260312-091500.jsonl \\
-          --task "failure: missed ts-order-service, anchored on ts-preserve-service"
+      # Analyze an exported eval case (JSON)
+      agentm analyze eval-trajectories/agentm-v11_7901_incorrect.json \\
+          --task "failure: ground truth is ts-basic-service,ts-price-service"
 
       # Multiple files
       agentm analyze trajectories/rca-*.jsonl \\
