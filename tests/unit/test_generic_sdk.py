@@ -16,7 +16,7 @@ from agentm.backends.composite import CompositeBackend
 from agentm.backends.filesystem import FilesystemBackend
 from agentm.core.backend import StorageBackend
 from agentm.models.state import BaseExecutorState
-from agentm.models.task_result import TaskResult
+
 from agentm.scenarios import discover
 
 # Ensure scenario registrations are loaded for all tests in this module.
@@ -287,43 +287,6 @@ class TestCompositeBackend:
         composite.write("/data/special/file.txt", "special")
         assert (dir_b / "file.txt").exists()
         assert not (dir_a / "special" / "file.txt").exists()
-
-
-# ---------------------------------------------------------------------------
-# TaskResult
-# ---------------------------------------------------------------------------
-
-
-class TestTaskResult:
-    """TaskResult[R] is a frozen generic dataclass for sub-agent results.
-
-    Bug prevented: mutable result dict shared between tasks -> one task's
-    modification corrupts another's result.
-    """
-
-    def test_frozen(self):
-        result = TaskResult(task_id="t1", agent_id="a1", status="completed")
-        with pytest.raises(AttributeError):
-            result.status = "failed"  # type: ignore[misc]
-
-    def test_typed_result(self):
-        result = TaskResult[dict](
-            task_id="t1",
-            agent_id="a1",
-            status="completed",
-            result={"findings": "root cause found"},
-        )
-        assert result.result == {"findings": "root cause found"}
-
-    def test_none_result_by_default(self):
-        result = TaskResult(task_id="t1", agent_id="a1", status="failed")
-        assert result.result is None
-
-    def test_metadata_independent(self):
-        r1 = TaskResult(task_id="t1", agent_id="a1", status="completed")
-        r2 = TaskResult(task_id="t2", agent_id="a2", status="completed")
-        # frozen=True + default_factory means each gets its own dict
-        assert r1.metadata is not r2.metadata
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,10 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+try:
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+except ImportError:
+    JsonPlusSerializer = None  # type: ignore[assignment,misc]
 
 
 def export_eval_result(trajectory_file: str, output_file: str | None = None) -> Path:

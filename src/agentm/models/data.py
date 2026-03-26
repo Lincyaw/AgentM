@@ -6,7 +6,7 @@ canonical locations under ``scenarios/``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 # --- Orchestrator Hooks (SDK) ---
@@ -36,18 +36,3 @@ class OrchestratorHooks:
 
     # Synthesize retries
     synthesize_max_retries: int = 2
-
-
-# --- Trajectory (SDK) ---
-
-
-@dataclass
-class TaskTraceRef:
-    """Links a Sub-Agent's checkpoint chain to the Orchestrator's timeline."""
-
-    task_id: str
-    agent_id: str
-    agent_thread_id: str
-    parent_thread_id: str
-    parent_dispatch_step: int
-    metadata: dict = field(default_factory=dict)

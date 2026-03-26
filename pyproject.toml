@@ -6,7 +6,6 @@ readme = "README.md"
 authors = [{ name = "Aoyang Fang", email = "aoyangfang@gmail.com" }]
 requires-python = ">=3.12"
 dependencies = [
-    "langgraph>=0.3",
     "langchain-core>=0.3",
     "langchain-openai>=0.3",
     "langchain-anthropic>=0.3",
@@ -20,9 +19,7 @@ dependencies = [
     "uvicorn[standard]>=0.34",
     "rich>=13.0",
     "typer>=0.15",
-    "langgraph-checkpoint-sqlite>=2.0",
     "aiosqlite>=0.22.1",
-    "langchain>=1.2.10",
     "python-dotenv>=1.2.2",
     "sentence-transformers>=3.0",
     "rcabench-platform[llm-eval]>=0.4.13",

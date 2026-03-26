@@ -194,9 +194,9 @@ class TestWorkerLoopFactorySignature:
 
 
 class TestInjectInstructionSignature:
-    """inject_instruction should be async to properly delegate to TaskManager.inject().
+    """inject_instruction should be async to properly delegate to AgentRuntime.send().
 
-    Bug: sync inject_instruction bypasses TaskManager.inject() status validation,
+    Bug: sync inject_instruction bypasses runtime status validation,
     allowing injection into completed/failed tasks.
     """
 
@@ -213,9 +213,9 @@ class TestInjectInstructionSignature:
 
 
 class TestAbortTaskSignature:
-    """abort_task should be async to properly delegate to TaskManager.abort().
+    """abort_task should be async to properly delegate to AgentRuntime.abort().
 
-    Bug: sync abort_task bypasses TaskManager.abort() status validation and
+    Bug: sync abort_task bypasses runtime status validation and
     trajectory recording, silently corrupting task state.
     """
 
