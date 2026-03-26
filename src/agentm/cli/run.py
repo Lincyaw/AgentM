@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 import uvicorn
-from langchain_core.messages import HumanMessage
 from rich.console import Console
 
 import agentm.tools.observability as obs_tools
@@ -113,16 +112,13 @@ async def _setup_debug_and_dashboard(
         eval_tracker = tracker
 
         app = create_dashboard_app(
-            graph=system.graph,
             scenario_config=system.scenario_config,
-            task_manager=system.task_manager,
+            runtime=system.runtime,
             trajectory=system.trajectory,
             thread_id=system.thread_id,
             broadcaster=bc,
             eval_tracker=tracker,
         )
-        if system.task_manager is not None:
-            system.task_manager.set_broadcast_callback(bc.broadcast)
 
         uvi_config = uvicorn.Config(
             app, host=dashboard_host, port=dashboard_port, log_level="warning"
@@ -302,7 +298,7 @@ async def run_trajectory_analysis(
     )
 
     initial_state = {
-        "messages": [HumanMessage(content=task)],
+        "messages": [{"role": "human", "content": task}],
         "task_id": system.thread_id,
         "task_description": task,
         "current_phase": "analyze",
@@ -403,7 +399,7 @@ async def resume_investigation(
 
     langgraph_config = {"configurable": {"thread_id": thread_id}}
     try:
-        snapshots = [s async for s in system.graph.aget_state_history(langgraph_config)]
+        snapshots = [s async for s in system.loop.aget_state_history(langgraph_config)]
     except Exception as e:
         raise CheckpointError(f"Error reading checkpoint history: {e}") from e
 
@@ -468,16 +464,13 @@ async def resume_investigation(
         eval_tracker = tracker
 
         app = create_dashboard_app(
-            graph=system.graph,
             scenario_config=system.scenario_config,
-            task_manager=system.task_manager,
+            runtime=system.runtime,
             trajectory=system.trajectory,
             thread_id=thread_id,
             broadcaster=bc,
             eval_tracker=tracker,
         )
-        if system.task_manager is not None:
-            system.task_manager.set_broadcast_callback(bc.broadcast)
 
         if system.trajectory is not None:
 
@@ -509,7 +502,7 @@ async def resume_investigation(
     step = 0
     stream_error: Exception | None = None
     try:
-        async for event in system.graph.astream(None, config=resume_config):
+        async for event in system.loop.astream(None, config=resume_config):
             step += 1
             _print_event(event, step, verbose)
             if system.trajectory is not None:
@@ -822,7 +815,7 @@ async def run_investigation_headless(
     )
 
     run_id = f"headless-{uuid.uuid4().hex[:12]}"
-    initial_state: dict[str, Any] = {"messages": [HumanMessage(content=incident)]}
+    initial_state: dict[str, Any] = {"messages": [{"role": "human", "content": incident}]}
 
     # Resolve the real trajectory file path (set by builder)
     trajectory_file_path: str | None = None

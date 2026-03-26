@@ -1,8 +1,8 @@
-"""Tests for the generic SDK architecture: strategy protocol, strategy registry,
+"""Tests for the generic SDK architecture: scenario registry,
 middleware composition, storage backend, composite backend, task result, and
 generic builder.
 
-Ref: designs/generic-state-wrapper.md § Generic SDK Redesign
+Ref: designs/generic-state-wrapper.md, designs/sdk-consistency.md
 """
 
 from __future__ import annotations
@@ -15,16 +15,7 @@ import pytest
 from agentm.backends.composite import CompositeBackend
 from agentm.backends.filesystem import FilesystemBackend
 from agentm.core.backend import StorageBackend
-from agentm.core.strategy import ReasoningStrategy
-from agentm.core.strategy_registry import (
-    get_strategy,
-    list_strategies,
-    register_strategy,
-)
-from agentm.middleware import AgentMMiddleware, compose_middleware
-from agentm.middleware.budget import BudgetMiddleware
-from agentm.middleware.dedup import DedupMiddleware
-from agentm.models.state import BaseExecutorState, S
+from agentm.models.state import BaseExecutorState
 from agentm.models.task_result import TaskResult
 from agentm.scenarios import discover
 
@@ -33,81 +24,48 @@ discover()
 
 
 # ---------------------------------------------------------------------------
-# Strategy Protocol
+# Scenario Registry (replaces old Strategy Registry)
 # ---------------------------------------------------------------------------
 
 
-class TestReasoningStrategyProtocol:
-    """ReasoningStrategy is runtime_checkable and satisfied by concrete strategies.
+class TestScenarioRegistry:
+    """ScenarioRegistry maps scenario names to Scenario instances.
 
-    Bug prevented: a strategy that doesn't implement all methods silently
-    accepted → crashes at runtime during execution.
-    """
-
-    def test_hypothesis_driven_satisfies_protocol(self):
-        from agentm.scenarios.rca.strategy import HypothesisDrivenStrategy
-
-        strategy = HypothesisDrivenStrategy()
-        assert isinstance(strategy, ReasoningStrategy)
-
-    def test_trajectory_analysis_satisfies_protocol(self):
-        from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
-
-        strategy = TrajectoryAnalysisStrategy()
-        assert isinstance(strategy, ReasoningStrategy)
-
-    def test_hypothesis_driven_name(self):
-        from agentm.scenarios.rca.strategy import HypothesisDrivenStrategy
-
-        assert HypothesisDrivenStrategy().name == "hypothesis_driven"
-
-    def test_trajectory_analysis_name(self):
-        from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
-
-        assert TrajectoryAnalysisStrategy().name == "trajectory_analysis"
-
-
-# ---------------------------------------------------------------------------
-# Strategy Registry
-# ---------------------------------------------------------------------------
-
-
-class TestStrategyRegistry:
-    """Strategy registry maps system-type strings to strategy instances.
-
-    Bug prevented: typo in system_type silently returns None → NoneType
+    Bug prevented: typo in scenario_name silently returns None -> NoneType
     attribute errors deep in the execution pipeline.
     """
 
     def test_get_hypothesis_driven(self):
-        strategy = get_strategy("hypothesis_driven")
-        assert strategy.name == "hypothesis_driven"
+        from agentm.harness.scenario import get_scenario
+
+        scenario = get_scenario("hypothesis_driven")
+        assert scenario.name == "hypothesis_driven"
 
     def test_get_trajectory_analysis(self):
-        strategy = get_strategy("trajectory_analysis")
-        assert strategy.name == "trajectory_analysis"
+        from agentm.harness.scenario import get_scenario
+
+        scenario = get_scenario("trajectory_analysis")
+        assert scenario.name == "trajectory_analysis"
+
+    def test_get_general_purpose(self):
+        from agentm.harness.scenario import get_scenario
+
+        scenario = get_scenario("general_purpose")
+        assert scenario.name == "general_purpose"
 
     def test_unknown_type_raises(self):
-        with pytest.raises(ValueError, match="No strategy registered"):
-            get_strategy("unknown_type")
+        from agentm.harness.scenario import get_scenario
 
-    def test_list_strategies_returns_registered(self):
-        names = list_strategies()
+        with pytest.raises(ValueError, match="Unknown scenario"):
+            get_scenario("unknown_type_xyz")
+
+    def test_list_scenarios_returns_registered(self):
+        from agentm.harness.scenario import list_scenarios
+
+        names = list_scenarios()
         assert "hypothesis_driven" in names
         assert "trajectory_analysis" in names
-
-    def test_register_custom_strategy(self):
-        from agentm.scenarios.rca.strategy import HypothesisDrivenStrategy
-
-        register_strategy("custom_test", HypothesisDrivenStrategy())
-        try:
-            strategy = get_strategy("custom_test")
-            assert strategy.name == "hypothesis_driven"
-        finally:
-            # Clean up
-            from agentm.core.strategy_registry import _STRATEGY_INSTANCES
-
-            _STRATEGY_INSTANCES.pop("custom_test", None)
+        assert "general_purpose" in names
 
 
 # ---------------------------------------------------------------------------
@@ -115,233 +73,88 @@ class TestStrategyRegistry:
 # ---------------------------------------------------------------------------
 
 
-class TestHypothesisDrivenStrategy:
-    """HypothesisDrivenStrategy produces correct initial state and phase graph.
+class TestRCAScenario:
+    """RCAScenario setup produces correct wiring."""
 
-    Bug prevented: missing field in initial state → KeyError during graph execution.
-    """
+    def test_setup_returns_orchestrator_tools(self):
+        from agentm.harness.scenario import SetupContext
+        from agentm.scenarios.rca.scenario import RCAScenario
 
-    def test_initial_state_has_required_fields(self):
-        from agentm.scenarios.rca.strategy import HypothesisDrivenStrategy
+        wiring = RCAScenario().setup(SetupContext(vault=None, trajectory=None, tool_registry=None))
+        tool_names = {t.name for t in wiring.orchestrator_tools}
+        assert "update_hypothesis" in tool_names
+        assert "remove_hypothesis" in tool_names
 
-        strategy = HypothesisDrivenStrategy()
-        state = strategy.initial_state("t1", "test task")
-        assert state["task_id"] == "t1"
-        assert state["task_description"] == "test task"
-        assert state["current_phase"] == "exploration"
-        assert state["notebook"] is not None
-        assert state["compression_refs"] == []
+    def test_setup_returns_worker_tools(self):
+        from agentm.harness.scenario import SetupContext
+        from agentm.scenarios.rca.scenario import RCAScenario
 
-    def test_phase_definitions_has_four_phases(self):
-        from agentm.scenarios.rca.strategy import HypothesisDrivenStrategy
+        wiring = RCAScenario().setup(SetupContext(vault=None, trajectory=None, tool_registry=None))
+        assert len(wiring.worker_tools) > 0
 
-        phases = HypothesisDrivenStrategy().phase_definitions()
-        assert set(phases.keys()) == {
-            "exploration",
-            "generation",
-            "verification",
-            "confirmation",
-        }
+    def test_setup_returns_answer_schemas(self):
+        from agentm.harness.scenario import SetupContext
+        from agentm.scenarios.rca.scenario import RCAScenario
 
-    def test_format_context_empty_notebook(self):
-        from agentm.scenarios.rca.strategy import HypothesisDrivenStrategy
+        wiring = RCAScenario().setup(SetupContext(vault=None, trajectory=None, tool_registry=None))
+        assert "scout" in wiring.answer_schemas
+        assert "deep_analyze" in wiring.answer_schemas
+        assert "verify" in wiring.answer_schemas
 
-        strategy = HypothesisDrivenStrategy()
-        state = strategy.initial_state("t1", "test")
-        result = strategy.format_context(state)
-        assert "Diagnostic Notebook" in result
+    def test_setup_returns_output_schema(self):
+        from agentm.harness.scenario import SetupContext
+        from agentm.scenarios.rca.scenario import RCAScenario
 
-    def test_format_context_no_notebook(self):
-        from agentm.scenarios.rca.strategy import HypothesisDrivenStrategy
+        wiring = RCAScenario().setup(SetupContext(vault=None, trajectory=None, tool_registry=None))
+        assert wiring.output_schema is not None
 
-        strategy = HypothesisDrivenStrategy()
-        state: dict[str, Any] = {
-            "messages": [],
-            "task_id": "t1",
-            "task_description": "t",
-            "current_phase": "x",
-        }
-        result = strategy.format_context(state)
-        assert "no data collected" in result
+    def test_format_context_is_callable(self):
+        from agentm.harness.scenario import SetupContext
+        from agentm.scenarios.rca.scenario import RCAScenario
 
-    def test_should_terminate_false_initially(self):
-        from agentm.scenarios.rca.strategy import HypothesisDrivenStrategy
+        wiring = RCAScenario().setup(SetupContext(vault=None, trajectory=None, tool_registry=None))
+        result = wiring.format_context()
+        assert isinstance(result, str)
 
-        strategy = HypothesisDrivenStrategy()
-        state = strategy.initial_state("t1", "test")
-        assert strategy.should_terminate(state) is False
+    def test_hooks_configured(self):
+        from agentm.harness.scenario import SetupContext
+        from agentm.scenarios.rca.scenario import RCAScenario
 
-    def test_answer_schemas_has_rca_types(self):
-        from agentm.scenarios.rca.strategy import HypothesisDrivenStrategy
-
-        schemas = HypothesisDrivenStrategy().get_answer_schemas()
-        assert "scout" in schemas
-        assert "deep_analyze" in schemas
-        assert "verify" in schemas
-
-    def test_state_schema_returns_correct_type(self):
-        from agentm.scenarios.rca.strategy import HypothesisDrivenStrategy
-        from agentm.scenarios.rca.state import HypothesisDrivenState
-
-        assert HypothesisDrivenStrategy().state_schema() is HypothesisDrivenState
+        wiring = RCAScenario().setup(SetupContext(vault=None, trajectory=None, tool_registry=None))
+        assert wiring.hooks.think_stall_enabled is True
+        assert wiring.hooks.think_stall_limit == 3
 
 
 # ---------------------------------------------------------------------------
-# Trajectory-Analysis Strategy
+# Trajectory-Analysis Scenario
 # ---------------------------------------------------------------------------
 
 
-class TestTrajectoryAnalysisStrategy:
-    """TrajectoryAnalysisStrategy produces correct initial state and phase graph."""
+class TestTrajectoryAnalysisScenario:
+    """TrajectoryAnalysisScenario setup produces correct wiring."""
 
-    def test_initial_state_has_required_fields(self):
-        from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
+    def test_setup_returns_answer_schemas(self):
+        from agentm.harness.scenario import SetupContext
+        from agentm.scenarios.trajectory_analysis.scenario import TrajectoryAnalysisScenario
 
-        strategy = TrajectoryAnalysisStrategy()
-        state = strategy.initial_state("t1", "analyze trajectories")
-        assert state["task_id"] == "t1"
-        assert state["current_phase"] == "analyze"
-        assert state["source_trajectories"] == []
-        assert state["analysis_results"] == []
+        wiring = TrajectoryAnalysisScenario().setup(SetupContext(vault=None, trajectory=None, tool_registry=None))
+        assert "analyze" in wiring.answer_schemas
 
-    def test_phase_definitions_has_two_phases(self):
-        from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
+    def test_setup_returns_output_schema(self):
+        from agentm.harness.scenario import SetupContext
+        from agentm.scenarios.trajectory_analysis.scenario import TrajectoryAnalysisScenario
 
-        phases = TrajectoryAnalysisStrategy().phase_definitions()
-        assert set(phases.keys()) == {"analyze", "synthesize"}
+        wiring = TrajectoryAnalysisScenario().setup(SetupContext(vault=None, trajectory=None, tool_registry=None))
+        assert wiring.output_schema is not None
 
-    def test_should_terminate_on_synthesize(self):
-        """Bug prevented: should_terminate never True -> infinite loop."""
-        from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
-
-        strategy = TrajectoryAnalysisStrategy()
-        state = strategy.initial_state("t1", "test")
-        assert strategy.should_terminate(state) is False
-        terminated_state = {**state, "current_phase": "synthesize"}
-        assert strategy.should_terminate(terminated_state) is True
-
-    def test_answer_schemas_has_analyze(self):
-        from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
-
-        schemas = TrajectoryAnalysisStrategy().get_answer_schemas()
-        assert "analyze" in schemas
-
-    def test_orchestrator_hooks_returns_hooks(self):
-        """Bug prevented: missing orchestrator_hooks -> ReasoningStrategy protocol violation."""
-        from agentm.scenarios.trajectory_analysis.strategy import TrajectoryAnalysisStrategy
+    def test_hooks_are_default(self):
+        from agentm.harness.scenario import SetupContext
         from agentm.models.data import OrchestratorHooks
+        from agentm.scenarios.trajectory_analysis.scenario import TrajectoryAnalysisScenario
 
-        hooks = TrajectoryAnalysisStrategy().orchestrator_hooks()
-        assert isinstance(hooks, OrchestratorHooks)
-
-
-# ---------------------------------------------------------------------------
-# Middleware
-# ---------------------------------------------------------------------------
-
-
-class TestMiddlewareBase:
-    """AgentMMiddleware base class and compose_middleware produce valid hooks.
-
-    Bug prevented: compose_middleware passes wrong state format between hooks →
-    missing 'messages' or 'llm_input_messages' key.
-    """
-
-    def test_base_middleware_passthrough(self):
-        mw = AgentMMiddleware()
-        state = {"messages": ["hello"]}
-        hook = mw.to_pre_model_hook()
-        result = hook(state)
-        assert result["messages"] == ["hello"]
-
-    def test_compose_empty_list(self):
-        hook = compose_middleware([])
-        state = {"messages": ["test"]}
-        result = hook(state)
-        assert result == state
-
-    def test_compose_preserves_llm_input_messages(self):
-        mw = AgentMMiddleware()
-        hook = compose_middleware([mw])
-        state = {"llm_input_messages": ["rewritten"]}
-        result = hook(state)
-        assert result["llm_input_messages"] == ["rewritten"]
-
-    def test_compose_chains_multiple(self):
-        class AddMarker(AgentMMiddleware):
-            def __init__(self, marker: str):
-                self._marker = marker
-
-            def before_model(self, state: dict[str, Any]) -> dict[str, Any]:
-                msgs = list(state.get("messages", []))
-                msgs.append(self._marker)
-                return {"messages": msgs}
-
-        hook = compose_middleware([AddMarker("A"), AddMarker("B")])
-        result = hook({"messages": []})
-        assert result["messages"] == ["A", "B"]
-
-
-class TestBudgetMiddleware:
-    """BudgetMiddleware injects warnings when step budget is low."""
-
-    def _ai_with_tools(self, name: str = "query_sql") -> Any:
-        """Create a minimal AI message with a tool_call."""
-        from langchain_core.messages import AIMessage
-
-        return AIMessage(
-            content="",
-            tool_calls=[{"id": "tc1", "name": name, "args": {}}],
-        )
-
-    def test_no_warning_when_budget_plentiful(self):
-        mw = BudgetMiddleware(max_steps=20)
-        state = {"messages": []}
-        result = mw.before_model(state)
-        assert result == {"messages": []}
-
-    def test_think_is_counted_as_step(self):
-        """Think tool calls must count toward the budget (prevents think-loops)."""
-        mw = BudgetMiddleware(max_steps=5)
-        think_msgs = [self._ai_with_tools("think") for _ in range(4)]
-        result = mw.before_model({"messages": think_msgs})
-        # 4/5 used → 1 remaining ≤ 3 → should inject WARNING
-        last = result["messages"][-1]
-        assert "WARNING" in last.content
-        assert "1/5" in last.content
-
-    def test_exhausted_property_false_initially(self):
-        mw = BudgetMiddleware(max_steps=10)
-        assert mw.exhausted is False
-
-    def test_exhausted_property_true_when_budget_depleted(self):
-        mw = BudgetMiddleware(max_steps=3)
-        msgs = [self._ai_with_tools() for _ in range(3)]
-        mw.before_model({"messages": msgs})
-        assert mw.exhausted is True
-
-    def test_exhausted_urgency_message_content(self):
-        mw = BudgetMiddleware(max_steps=2)
-        msgs = [self._ai_with_tools() for _ in range(2)]
-        result = mw.before_model({"messages": msgs})
-        last = result["messages"][-1]
-        assert "BUDGET EXHAUSTED" in last.content
-        assert "do NOT call any tool including think" in last.content
-
-    def test_middleware_is_agentm_middleware(self):
-        assert isinstance(BudgetMiddleware(10), AgentMMiddleware)
-
-
-class TestDedupMiddleware:
-    """DedupMiddleware wraps the existing DedupTracker hook."""
-
-    def test_tracker_accessible(self):
-        mw = DedupMiddleware()
-        assert mw.tracker is not None
-        assert mw.tracker.size == 0
-
-    def test_middleware_is_agentm_middleware(self):
-        assert isinstance(DedupMiddleware(), AgentMMiddleware)
+        wiring = TrajectoryAnalysisScenario().setup(SetupContext(vault=None, trajectory=None, tool_registry=None))
+        default_hooks = OrchestratorHooks()
+        assert wiring.hooks.think_stall_enabled == default_hooks.think_stall_enabled
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +166,7 @@ class TestStorageBackendProtocol:
     """StorageBackend is runtime_checkable and satisfied by FilesystemBackend.
 
     Bug prevented: a backend that claims to implement the protocol but
-    misses a method → runtime crash during knowledge I/O.
+    misses a method -> runtime crash during knowledge I/O.
     """
 
     def test_filesystem_satisfies_protocol(self):
@@ -484,7 +297,7 @@ class TestCompositeBackend:
 class TestTaskResult:
     """TaskResult[R] is a frozen generic dataclass for sub-agent results.
 
-    Bug prevented: mutable result dict shared between tasks → one task's
+    Bug prevented: mutable result dict shared between tasks -> one task's
     modification corrupts another's result.
     """
 
@@ -514,62 +327,28 @@ class TestTaskResult:
 
 
 # ---------------------------------------------------------------------------
-# TypeVar S
+# build_agent_system -- unknown scenario raises ValueError
 # ---------------------------------------------------------------------------
 
 
-class TestStateTypeVar:
-    """S = TypeVar('S', bound=BaseExecutorState) is available for generic use.
+class TestBuildAgentSystemValidation:
+    """build_agent_system raises on unknown scenario names.
 
-    Bug prevented: TypeVar not exported → framework components can't be
-    parameterized over user-defined state types.
+    Bug prevented: typo in scenario_name silently creates a broken system.
     """
 
-    def test_typevar_bound(self):
-        assert S.__bound__ is BaseExecutorState
+    def test_unknown_scenario_raises(self):
+        from agentm.builder import build_agent_system
+        from agentm.config.schema import (
+            OrchestratorConfig,
+            ScenarioConfig,
+            SystemTypeConfig,
+        )
 
-    def test_base_executor_state_current_phase_is_str(self):
-        # current_phase changed from Phase enum to str in Phase 1
-        annotations = BaseExecutorState.__annotations__
-        # With from __future__ import annotations, the annotation is a string
-        assert "current_phase" in annotations
-
-
-# ---------------------------------------------------------------------------
-# GenericAgentSystemBuilder
-# ---------------------------------------------------------------------------
-
-
-class TestGenericAgentSystemBuilder:
-    """GenericAgentSystemBuilder requires strategy and scenario.
-
-    Bug prevented: builder missing strategy → None attribute access during
-    graph compilation.
-    """
-
-    def test_build_without_strategy_raises(self):
-        from agentm.builder import GenericAgentSystemBuilder
-        from agentm.scenarios.rca.state import HypothesisDrivenState
-
-        builder = GenericAgentSystemBuilder(HypothesisDrivenState)
-        with pytest.raises(ValueError, match="Strategy is required"):
-            builder.build()
-
-    def test_build_without_scenario_raises(self):
-        from agentm.builder import GenericAgentSystemBuilder
-        from agentm.scenarios.rca.state import HypothesisDrivenState
-        from agentm.scenarios.rca.strategy import HypothesisDrivenStrategy
-
-        builder = GenericAgentSystemBuilder(HypothesisDrivenState)
-        builder.with_strategy(HypothesisDrivenStrategy())
-        with pytest.raises(ValueError, match="Scenario config is required"):
-            builder.build()
-
-    def test_fluent_api_returns_self(self):
-        from agentm.builder import GenericAgentSystemBuilder
-        from agentm.scenarios.rca.state import HypothesisDrivenState
-        from agentm.scenarios.rca.strategy import HypothesisDrivenStrategy
-
-        builder = GenericAgentSystemBuilder(HypothesisDrivenState)
-        result = builder.with_strategy(HypothesisDrivenStrategy())
-        assert result is builder
+        config = ScenarioConfig(
+            system=SystemTypeConfig(type="nonexistent"),
+            orchestrator=OrchestratorConfig(model="gpt-4o", temperature=0.7, tools=[]),
+            agents={},
+        )
+        with pytest.raises(ValueError, match="Unknown scenario"):
+            build_agent_system("nonexistent_scenario_xyz", config)

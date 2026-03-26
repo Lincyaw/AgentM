@@ -8,12 +8,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from agentm.middleware.compression import (
-    build_compression_hook,
-    sub_agent_compression_hook,
-)
 from agentm.scenarios.rca.compression import compress_completed_phase
-from agentm.config.schema import CompressionConfig
 from agentm.scenarios.rca.data import DiagnosticNotebook, ExplorationStep
 from agentm.scenarios.rca.enums import Phase
 
@@ -102,24 +97,3 @@ class TestPhaseCompressionIntegrity:
         assert len(nb.exploration_history) == 1  # original unchanged
 
 
-class TestCompressionHookThreshold:
-    """P6: Compression hook only fires when token count exceeds threshold."""
-
-    def test_below_threshold_passes_through(self) -> None:
-        """Below threshold, hook returns messages unchanged."""
-        state = {"messages": [{"content": "short message"}]}
-        result = sub_agent_compression_hook(state)
-        assert "messages" in result
-
-    def test_build_compression_hook_configurable(self) -> None:
-        """build_compression_hook respects config threshold."""
-        config = CompressionConfig(
-            compression_threshold=0.8,
-            compression_model="gpt-4o-mini",
-        )
-        hook = build_compression_hook(config)
-        assert callable(hook)
-
-        state = {"messages": [{"content": "short"}]}
-        result = hook(state)
-        assert "messages" in result

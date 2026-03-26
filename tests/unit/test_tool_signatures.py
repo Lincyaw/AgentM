@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import inspect
 from typing import Literal, get_args, get_origin, get_type_hints
-from unittest.mock import AsyncMock
 
 import pytest
 
 from agentm.tools.orchestrator import create_orchestrator_tools
+from agentm.harness.runtime import AgentRuntime
 
 
 def _resolve_annotation(func, param_name: str):
@@ -51,17 +51,27 @@ def _extract_literal_values(annotation) -> set[str] | None:
     return None
 
 
+class _MockWorkerFactory:
+    """Minimal WorkerFactory for signature testing."""
+
+    def create_worker(self, agent_id: str, task_type: str):
+        return None
+
+
 @pytest.fixture
 def orch_tools():
     """Create orchestrator tool functions via factory for signature testing."""
-    mock_tm = AsyncMock()
-    tools = create_orchestrator_tools(mock_tm, agent_pool=None)
+    runtime = AgentRuntime()
+    factory = _MockWorkerFactory()
+    tools = create_orchestrator_tools(runtime, factory)
 
-    # Also load RCA-specific tools for testing their signatures
-    from agentm.scenarios.rca.tools import create_rca_tools
+    # Also load RCA-specific tools from the Scenario protocol
+    from agentm.harness.scenario import SetupContext
+    from agentm.scenarios.rca.scenario import RCAScenario
 
-    rca_tools = create_rca_tools(trajectory=None)
-    tools.update(rca_tools)
+    wiring = RCAScenario().setup(SetupContext(vault=None, trajectory=None, tool_registry=None))
+    for tool in wiring.orchestrator_tools:
+        tools[tool.name] = tool.func
 
     return tools
 
@@ -96,10 +106,10 @@ class TestDispatchAgentSignature:
         sig = inspect.signature(orch_tools["dispatch_agent"])
         assert "metadata" in sig.parameters
 
-    def test_has_tool_call_id_parameter(self, orch_tools):
-        """Tool must accept tool_call_id for ToolMessage routing."""
+    def test_no_tool_call_id_parameter(self, orch_tools):
+        """tool_call_id removed — SimpleAgentLoop handles ToolMessage wrapping."""
         sig = inspect.signature(orch_tools["dispatch_agent"])
-        assert "tool_call_id" in sig.parameters
+        assert "tool_call_id" not in sig.parameters
 
 
 class TestCheckTasksSignature:
@@ -117,9 +127,10 @@ class TestCheckTasksSignature:
         sig = inspect.signature(orch_tools["check_tasks"])
         assert "wait_seconds" not in sig.parameters
 
-    def test_has_tool_call_id_parameter(self, orch_tools):
+    def test_no_tool_call_id_parameter(self, orch_tools):
+        """tool_call_id removed — SimpleAgentLoop handles ToolMessage wrapping."""
         sig = inspect.signature(orch_tools["check_tasks"])
-        assert "tool_call_id" in sig.parameters
+        assert "tool_call_id" not in sig.parameters
 
 
 class TestUpdateHypothesisSignature:
@@ -160,115 +171,26 @@ class TestUpdateHypothesisSignature:
             f"  Extra in Literal: {literal_values - enum_values}"
         )
 
-    def test_has_tool_call_id_parameter(self, orch_tools):
+    def test_no_tool_call_id_parameter(self, orch_tools):
+        """tool_call_id removed — SimpleAgentLoop handles ToolMessage wrapping."""
         sig = inspect.signature(orch_tools["update_hypothesis"])
-        assert "tool_call_id" in sig.parameters
+        assert "tool_call_id" not in sig.parameters
 
 
-class TestBuildWorkerSubgraphSignature:
-    """Ref: designs/sub-agent.md § Task Types
-
-    Bug: build_worker_subgraph ignores task_type → all workers use the same
-    generic prompt regardless of whether they're scouting or verifying.
-    """
+class TestWorkerLoopFactorySignature:
+    """WorkerLoopFactory.create_worker must accept agent_id and task_type."""
 
     def test_has_task_type_parameter(self):
-        from agentm.agents.node.worker import build_worker_subgraph
+        from agentm.harness.worker_factory import WorkerLoopFactory
 
-        sig = inspect.signature(build_worker_subgraph)
+        sig = inspect.signature(WorkerLoopFactory.create_worker)
         assert "task_type" in sig.parameters
 
-    def test_task_type_is_str(self):
-        """task_type is str so trajectory-analysis types flow through alongside RCA types."""
-        from agentm.agents.node.worker import build_worker_subgraph
+    def test_has_agent_id_parameter(self):
+        from agentm.harness.worker_factory import WorkerLoopFactory
 
-        annotation = _resolve_annotation(build_worker_subgraph, "task_type")
-        assert annotation is str, f"task_type should be str, got: {annotation}"
-
-    def test_task_type_is_required(self):
-        """task_type has no default — caller must specify the scenario's task type."""
-        from agentm.agents.node.worker import build_worker_subgraph
-
-        sig = inspect.signature(build_worker_subgraph)
-        param = sig.parameters["task_type"]
-        assert param.default is inspect.Parameter.empty
-
-
-class TestTaskManagerSubmitSignature:
-    """Ref: designs/orchestrator.md § TaskManager
-
-    Bug: TaskManager.submit() missing task_type → cannot specialize
-    Sub-Agent behavior based on task purpose.
-    """
-
-    def test_is_async(self):
-        from agentm.core.task_manager import TaskManager
-
-        assert inspect.iscoroutinefunction(TaskManager.submit)
-
-    def test_has_task_type_parameter(self):
-        from agentm.core.task_manager import TaskManager
-
-        sig = inspect.signature(TaskManager.submit)
-        assert "task_type" in sig.parameters
-
-    def test_task_type_is_str(self):
-        """task_type is str (widened from Literal) to support multiple scenario types."""
-        from agentm.core.task_manager import TaskManager
-
-        annotation = _resolve_annotation(TaskManager.submit, "task_type")
-        assert annotation is str, f"task_type should be str, got: {annotation}"
-
-
-class TestTaskManagerMethodContracts:
-    """Ref: designs/orchestrator.md § TaskManager, Instruction Injection
-
-    Bug: TaskManager missing consume_instructions → instruction hook has nothing
-    to dequeue → inject_instruction silently drops messages.
-    """
-
-    def test_has_consume_instructions_method(self):
-        from agentm.core.task_manager import TaskManager
-
-        assert hasattr(TaskManager, "consume_instructions")
-        assert callable(TaskManager.consume_instructions)
-
-    def test_has_get_task_method(self):
-        from agentm.core.task_manager import TaskManager
-
-        assert hasattr(TaskManager, "get_task")
-        assert callable(TaskManager.get_task)
-
-    def test_has_execute_agent_method(self):
-        from agentm.core.task_manager import TaskManager
-
-        assert hasattr(TaskManager, "_execute_agent")
-        assert inspect.iscoroutinefunction(TaskManager._execute_agent)
-
-
-class TestCompressionHookSignature:
-    """Ref: designs/sub-agent.md § Context Compression
-
-    Bug: build_compression_hook accepts untyped config → caller passes wrong
-    config shape → compression silently misconfigured at runtime.
-    """
-
-    def test_build_compression_hook_accepts_compression_config(self):
-        from agentm.middleware.compression import build_compression_hook
-
-        sig = inspect.signature(build_compression_hook)
-        param = sig.parameters["config"]
-        # Should accept CompressionConfig, not Any
-        assert param.annotation is not inspect.Parameter.empty
-        # The annotation should reference CompressionConfig
-        annotation_name = getattr(param.annotation, "__name__", str(param.annotation))
-        assert "CompressionConfig" in annotation_name
-
-    def test_build_compression_hook_returns_callable(self):
-        from agentm.middleware.compression import build_compression_hook
-
-        sig = inspect.signature(build_compression_hook)
-        assert sig.return_annotation is not inspect.Parameter.empty
+        sig = inspect.signature(WorkerLoopFactory.create_worker)
+        assert "agent_id" in sig.parameters
 
 
 class TestInjectInstructionSignature:

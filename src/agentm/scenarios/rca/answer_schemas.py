@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from agentm.models.answer_schemas import _BaseAnswer
+from agentm.models.base_answer import _BaseAnswer
 
 
 class ScoutAnswer(_BaseAnswer):

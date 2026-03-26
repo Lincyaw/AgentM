@@ -24,8 +24,8 @@ _AGENTM_ROOT = Path(__file__).resolve().parent.parent.parent / "src" / "agentm"
 _LAZY_LOADERS: set[str] = {
     # Builder resolves scenario formatters and tools lazily
     "builder.py",
-    # Agent factory calls scenarios.discover() inside function
-    "agents/node/worker.py",
+    # WorkerLoopFactory calls scenarios.discover() inside function
+    "harness/worker_factory.py",
 }
 
 # SDK modules to scan (everything except scenarios/ and __pycache__)
@@ -39,6 +39,7 @@ _SDK_DIRS = [
     "backends",
     "cli",
     "server",
+    "harness",
 ]
 
 

@@ -2,6 +2,20 @@
 # Maintenance rules: see CLAUDE.md "Design Documentation System"
 
 concepts:
+  sdk_consistency:
+    description: "SDK semantic consistency refactoring: unified Tool type (@tool decorator, no StructuredTool), Scenario protocol (setup() -> ScenarioWiring), single ScenarioRegistry (replaces 4 global registries), dead code removal, langchain boundary convergence (HumanMessage/StructuredTool removed from SDK internals)."
+    design: "designs/sdk-consistency.md"
+    related_concepts: [agent_harness, system_architecture, builder, reasoning_strategy, middleware_system]
+    plans: ["plans/2026-03-26-sdk-consistency.md"]
+    tasks: []
+
+  agent_harness:
+    description: "Core SDK redesign: AgentLoop Protocol, AgentRuntime (harness replacing TaskManager+AgentPool), Middleware protocol (3 hooks), bidirectional agent communication via inbox queues, CheckpointStore protocol. LangGraph removed from execution path."
+    design: "designs/agent-harness.md"
+    related_concepts: [sdk_consistency, system_architecture, orchestrator, sub_agent, generic_state_wrapper, execution_runner, middleware_system]
+    plans: []
+    tasks: []
+
   testing_strategy:
     description: "Four-layer testing architecture: deterministic invariants, snapshot-based pipeline integration (Mock LLM), LLM-as-Judge decision eval, and E2E scenario eval. Checkpoint-driven snapshot injection for mid-flow behavioral testing."
     design: "designs/testing-strategy.md"
@@ -41,9 +55,9 @@ concepts:
         layer: "L1 — Deterministic Invariants"
 
   system_architecture:
-    description: "LangGraph Supervisor+Subgraph multi-agent orchestration system with config-driven design, trajectory recording, monitoring, and failure recovery. Generic SDK layer: TypeVar S, ReasoningStrategy Protocol, AgentMMiddleware (self-contained modules in middleware/), StorageBackend, GenericAgentSystemBuilder. Plugin-based scenario registration via scenarios.discover() — SDK registries have zero hardcoded scenario imports. No separate agents/hooks, core/compression, or strategies/ directory"
+    description: "LangGraph Supervisor+Subgraph multi-agent orchestration system with config-driven design, trajectory recording, monitoring, and failure recovery. Generic SDK layer: TypeVar S, ReasoningStrategy Protocol, AgentMMiddleware (self-contained modules in middleware/), StorageBackend, GenericAgentSystemBuilder. Plugin-based scenario registration via scenarios.discover() — SDK registries have zero hardcoded scenario imports. No separate agents/hooks, core/compression, or strategies/ directory. Evolution: agent-harness.md proposes AgentRuntime + AgentLoop Protocol as next-gen SDK core."
     design: "designs/system-design-overview.md"
-    related_concepts: [orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner, builder, reasoning_strategy, middleware_system, storage_backend, trajectory_analysis]
+    related_concepts: [agent_harness, orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner, builder, reasoning_strategy, middleware_system, storage_backend, trajectory_analysis]
     plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
     tasks: []
 
