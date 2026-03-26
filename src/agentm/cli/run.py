@@ -190,7 +190,6 @@ async def _stream_and_finalize(
     finally:
         if debug_console is not None:
             debug_console.stop()
-        await system._close_checkpointer()
         if system.trajectory is not None:
             path = await system.trajectory.close()
             console.print()
@@ -388,154 +387,13 @@ async def resume_investigation(
             }
         )
 
-    system = AgentSystemBuilder.build(
-        system_type="hypothesis_driven",
-        scenario_config=scenario_config,
-        system_config=system_config,
-        existing_thread_id=thread_id,
+    # Checkpoint-based resume requires CheckpointStore integration with
+    # SimpleAgentLoop, which is not yet implemented in the harness SDK.
+    raise NotImplementedError(
+        "Checkpoint resume is not yet supported in the Agent Harness architecture. "
+        "The SimpleAgentLoop does not support LangGraph-style checkpoint recovery. "
+        "This will be re-implemented using the CheckpointStore protocol."
     )
-
-    await system._ensure_checkpointer()
-
-    langgraph_config = {"configurable": {"thread_id": thread_id}}
-    try:
-        snapshots = [s async for s in system.loop.aget_state_history(langgraph_config)]
-    except Exception as e:
-        raise CheckpointError(f"Error reading checkpoint history: {e}") from e
-
-    if not snapshots:
-        raise CheckpointError(
-            "No checkpoints found for this thread. "
-            "The checkpoint DB may have been moved or the thread_id is incorrect."
-        )
-
-    if list_only:
-        _print_checkpoints(snapshots)
-        await system._close_checkpointer()
-        return
-
-    if checkpoint_id is None:
-        _print_checkpoints(snapshots)
-        console.print()
-        raw = console.input(
-            "[bold]Enter checkpoint number (0 = latest, Enter = latest): [/]"
-        ).strip()
-        idx = int(raw) if raw else 0
-        if idx < 0 or idx >= len(snapshots):
-            await system._close_checkpointer()
-            raise CheckpointError(
-                f"Invalid index {idx}. Valid range: 0\u2013{len(snapshots) - 1}"
-            )
-        checkpoint_id = snapshots[idx].config["configurable"].get("checkpoint_id", "")
-
-    resume_config: dict = {
-        "configurable": {
-            "thread_id": thread_id,
-            "checkpoint_id": checkpoint_id,
-        }
-    }
-    console.print(f"\nResuming from checkpoint: [cyan]{checkpoint_id[:16]}…[/]")
-
-    # Dashboard
-    dashboard_server_task = None
-    eval_tracker = None
-    sample_id = None
-    if dashboard:
-        from rcabench_platform.v3.sdk.llm_eval.eval.tracker import EvalTracker
-
-        bc = Broadcaster()
-        tracker = EvalTracker()
-        sample_id = thread_id
-
-        tracker.register_sample(sample_id, dataset_index=0, data_dir=data_dir)
-        tracker.mark_running(sample_id, run_id=sample_id)
-        if system.trajectory is not None:
-            tracker.update_trajectory_path(sample_id, str(system.trajectory.file_path))
-
-        _loop = asyncio.get_running_loop()
-
-        def _tracker_to_ws(event: dict) -> None:
-            try:
-                asyncio.run_coroutine_threadsafe(bc.broadcast(event), _loop)
-            except RuntimeError:
-                pass
-
-        tracker.add_listener(_tracker_to_ws)
-        eval_tracker = tracker
-
-        app = create_dashboard_app(
-            scenario_config=system.scenario_config,
-            runtime=system.runtime,
-            trajectory=system.trajectory,
-            thread_id=thread_id,
-            broadcaster=bc,
-            eval_tracker=tracker,
-        )
-
-        if system.trajectory is not None:
-
-            async def _traj_to_ws(event: dict) -> None:
-                await bc.broadcast(
-                    {
-                        "event_type": event.get("event_type", ""),
-                        "agent_path": event.get("agent_path", []),
-                        "data": event.get("data", {}),
-                        "timestamp": event.get("timestamp", ""),
-                        "mode": "trajectory",
-                    }
-                )
-
-            system.trajectory.add_listener(_traj_to_ws)
-
-        uvi_config = uvicorn.Config(
-            app, host=dashboard_host, port=dashboard_port, log_level="warning"
-        )
-        server = uvicorn.Server(uvi_config)
-        dashboard_server_task = asyncio.create_task(server.serve())
-        await asyncio.sleep(0.3)
-        console.print(
-            f"Dashboard: [link=http://localhost:{dashboard_port}]"
-            f"http://localhost:{dashboard_port}[/link]"
-        )
-
-    console.rule("Resuming")
-    step = 0
-    stream_error: Exception | None = None
-    try:
-        async for event in system.loop.astream(None, config=resume_config):
-            step += 1
-            _print_event(event, step, verbose)
-            if system.trajectory is not None:
-                for node_name, node_data in event.items():
-                    if node_name == "__interrupt__" or not isinstance(node_data, dict):
-                        continue
-                    await system._record_node_event(node_name, node_data, step)
-    except KeyboardInterrupt:
-        console.print("\n[yellow][!] Interrupted by user.[/]")
-    except Exception as e:
-        stream_error = e
-        console.print(f"\n[red][ERROR] {e}[/red]")
-        if verbose:
-            traceback.print_exc()
-    finally:
-        await system._close_checkpointer()
-        console.rule("Resume complete")
-        console.print(f"Steps executed: {step}")
-        if eval_tracker is not None and sample_id is not None:
-            if stream_error is not None:
-                eval_tracker.mark_failed(sample_id, str(stream_error))
-            else:
-                eval_tracker.mark_completed(sample_id)
-
-    if dashboard_server_task is not None:
-        console.print(
-            f"\nDashboard running at [link=http://localhost:{dashboard_port}]"
-            f"http://localhost:{dashboard_port}[/link] — press Ctrl+C to stop."
-        )
-        try:
-            await dashboard_server_task
-        except asyncio.CancelledError:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -571,116 +429,56 @@ def _resolve_prompt_paths(scenario_config: Any, scenario_dir: Path) -> None:
 
 
 def _print_event(event: dict, step: int, verbose: bool) -> None:
-    """Print a streaming event in non-debug mode."""
-    for node_name, node_data in event.items():
-        if node_name == "__interrupt__":
-            continue
-        if not isinstance(node_data, dict):
-            continue
+    """Print a streaming event in non-debug mode.
 
-        if node_name in ("generate_structured_response", "synthesize"):
-            sr = node_data.get("structured_response")
-            if sr is not None:
+    Events from AgentSystem.stream() have the shape ``{"event": AgentEvent(...)}``.
+    AgentEvent.type is one of: llm_start, llm_end, tool_start, tool_end, complete.
+    """
+    agent_event = event.get("event")
+    if agent_event is None:
+        return
+
+    etype = getattr(agent_event, "type", "")
+    data = getattr(agent_event, "data", {})
+
+    if etype == "llm_end":
+        content = data.get("content", "")
+        if content:
+            console.print(f"\n[bold cyan][Orchestrator step {step}][/]")
+            limit = 2000 if verbose else 500
+            console.print(str(content)[:limit], markup=False)
+            if len(str(content)) > limit:
+                console.print(f"  [dim]... ({len(str(content))} chars total)[/]")
+
+    elif etype == "tool_start":
+        tool_name = data.get("tool", "?")
+        args = data.get("args", {})
+        args_str = json.dumps(args, ensure_ascii=False, default=str)
+        console.print(f"\n  -> {tool_name}({args_str[:300]})", markup=False)
+
+    elif etype == "tool_end":
+        tool_name = data.get("tool", "?")
+        result = data.get("result", "")
+        if result:
+            limit = 500 if not verbose else 2000
+            console.print(f"\n  <- {tool_name}: {str(result)[:limit]}", markup=False)
+            if len(str(result)) > limit:
+                console.print(f"     [dim]... ({len(str(result))} chars total)[/]")
+
+    elif etype == "complete":
+        result = data.get("result")
+        if result is not None:
+            output = getattr(result, "output", None)
+            if output is not None and isinstance(output, dict):
                 console.print("\n[bold green][Structured Output][/]")
-                if hasattr(sr, "model_dump"):
-                    output_str = json.dumps(
-                        sr.model_dump(), indent=2, ensure_ascii=False
-                    )
-                else:
-                    output_str = json.dumps(sr, indent=2, ensure_ascii=False)
-                console.print(output_str)
-            continue
-
-        messages = node_data.get("messages", [])
-        for msg in messages:
-            role = getattr(msg, "type", "unknown")
-            content = getattr(msg, "content", "")
-
-            if role == "ai":
-                if content:
-                    console.print(f"\n[bold cyan][Orchestrator step {step}][/]")
-                    limit = 2000 if verbose else 500
-                    console.print(content[:limit], markup=False)
-                    if len(content) > limit:
-                        console.print(f"  [dim]... ({len(content)} chars total)[/]")
-
-                tool_calls = getattr(msg, "tool_calls", [])
-                for tc in tool_calls:
-                    args_str = json.dumps(tc["args"], ensure_ascii=False)
-                    console.print(
-                        f"\n  -> {tc['name']}({args_str[:300]})", markup=False
-                    )
-
-            elif role == "tool":
-                tool_name = getattr(msg, "name", "?")
-                if content:
-                    preview = content
-                    console.print(f"\n  <- {tool_name}: {preview}", markup=False)
-                    if len(content) > len(preview):
-                        console.print(f"     [dim]... ({len(content)} chars total)[/]")
-
-
-def _print_checkpoints(snapshots: list) -> None:
-    """Print checkpoint list in a readable table."""
-    console.print("\n[bold]Available checkpoints:[/]")
-    console.print(
-        f"{'#':>3}  {'checkpoint_id':<40}  {'step':>5}  {'time':<19}  next_node"
-    )
-    console.print("-" * 90)
-    for i, snap in enumerate(snapshots):
-        cid = snap.config["configurable"].get("checkpoint_id", "")
-        step = snap.metadata.get("step", "?")
-        ts = snap.created_at[:19] if getattr(snap, "created_at", None) else "?"
-        next_node = snap.next[0] if getattr(snap, "next", None) else "END"
-        marker = " ← latest" if i == 0 else ""
-        console.print(f"{i:>3}  {cid:<40}  {step:>5}  {ts}  {next_node}{marker}")
+                console.print(
+                    json.dumps(output, indent=2, ensure_ascii=False, default=str)
+                )
 
 
 # ---------------------------------------------------------------------------
 # Headless runner (for batch eval)
 # ---------------------------------------------------------------------------
-
-
-def _langchain_msg_to_openai(msg: Any) -> dict[str, Any]:
-    """Convert a LangChain message to OpenAI chat-completion message format.
-
-    Role mapping: ai -> assistant, human -> user, system -> system, tool -> tool.
-    AI messages with tool_calls include the ``tool_calls`` array in OpenAI format.
-    Tool messages include ``tool_call_id``.
-    """
-    role = getattr(msg, "type", "unknown")
-    content = getattr(msg, "content", "") or ""
-
-    openai_role = {
-        "ai": "assistant",
-        "human": "user",
-        "system": "system",
-        "tool": "tool",
-    }.get(role, role)
-
-    entry: dict[str, Any] = {"role": openai_role, "content": content}
-
-    if role == "ai":
-        tool_calls = getattr(msg, "tool_calls", None) or []
-        if tool_calls:
-            entry["tool_calls"] = [
-                {
-                    "id": tc.get("id", ""),
-                    "type": "function",
-                    "function": {
-                        "name": tc.get("name", ""),
-                        "arguments": json.dumps(tc.get("args", {}), ensure_ascii=False),
-                    },
-                }
-                for tc in tool_calls
-            ]
-    elif role == "tool":
-        entry["name"] = getattr(msg, "name", "")
-        tool_call_id = getattr(msg, "tool_call_id", None)
-        if tool_call_id:
-            entry["tool_call_id"] = tool_call_id
-
-    return entry
 
 
 def _build_trajectory_json(run_id: str, messages: list[dict[str, Any]]) -> str:
@@ -835,45 +633,47 @@ async def run_investigation_headless(
             step = 0
             async for event in system.stream(initial_state):
                 step += 1
-                for node_name, node_data in event.items():
-                    if node_name == "__interrupt__" or not isinstance(node_data, dict):
-                        continue
-                    # Capture structured response from synthesis nodes
-                    if node_name in ("generate_structured_response", "synthesize"):
-                        sr = node_data.get("structured_response")
-                        if sr is not None:
-                            if hasattr(sr, "model_dump"):
-                                sr_dict = _normalize_structured_response(
-                                    sr.model_dump()
-                                )
+                agent_event = event.get("event")
+                if agent_event is None:
+                    continue
+                etype = getattr(agent_event, "type", "")
+                data = getattr(agent_event, "data", {})
+
+                # Capture structured output from the final "complete" event
+                if etype == "complete":
+                    result = data.get("result")
+                    if result is not None:
+                        output = getattr(result, "output", None)
+                        if output is not None:
+                            if isinstance(output, dict):
+                                sr_dict = _normalize_structured_response(output)
                                 structured_response_json = json.dumps(
                                     sr_dict, ensure_ascii=False
                                 )
-                            elif isinstance(sr, str):
-                                structured_response_json = sr
-                            elif isinstance(sr, dict):
-                                sr_dict = _normalize_structured_response(sr)
-                                structured_response_json = json.dumps(
-                                    sr_dict, ensure_ascii=False
-                                )
+                            elif isinstance(output, str):
+                                structured_response_json = output
                             else:
                                 structured_response_json = json.dumps(
-                                    sr, ensure_ascii=False
+                                    output, ensure_ascii=False, default=str
                                 )
-                            # Log what we captured
-                            is_fallback = isinstance(sr, dict) and "raw_text" in sr
+                            is_fallback = isinstance(output, dict) and "raw_text" in output
                             logger.info(
                                 "headless captured structured_response "
-                                "(node=%s, is_fallback=%s, len=%d)",
-                                node_name,
+                                "(is_fallback=%s, len=%d)",
                                 is_fallback,
                                 len(structured_response_json)
                                 if structured_response_json
                                 else 0,
                             )
-                    # Collect messages for trajectory
-                    for msg in node_data.get("messages", []):
-                        collected_messages.append(_langchain_msg_to_openai(msg))
+
+                # Collect LLM responses for trajectory fallback
+                if etype == "llm_end":
+                    content = data.get("content", "")
+                    if content:
+                        collected_messages.append(
+                            {"role": "assistant", "content": str(content)}
+                        )
+
                 if step > max_steps and structured_response_json is not None:
                     break
 
@@ -887,7 +687,6 @@ async def run_investigation_headless(
     except Exception:
         logger.error("headless stream failed", exc_info=True)
     finally:
-        await system._close_checkpointer()
         if system.trajectory is not None:
             await system.trajectory.close()
 
