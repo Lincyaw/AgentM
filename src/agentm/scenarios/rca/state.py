@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from agentm.models.data import CompressionRef
-from agentm.scenarios.rca.data import DiagnosticNotebook
 from agentm.models.state import BaseExecutorState
+from agentm.scenarios.rca.data import DiagnosticNotebook
 
 
 class HypothesisDrivenState(BaseExecutorState):
@@ -18,5 +17,5 @@ class HypothesisDrivenState(BaseExecutorState):
 
     notebook: DiagnosticNotebook
     current_hypothesis: Optional[str]
-    compression_refs: list[CompressionRef]
+    compression_refs: list[Any]
     structured_response: Optional[Any]

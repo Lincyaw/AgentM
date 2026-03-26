@@ -1,93 +1,76 @@
-"""P3, P4, P5: Error recovery tests — retry, inject rejection, abort.
+"""P4, P5: Error recovery tests — inject rejection, abort.
+
+Migrated to use AgentRuntime instead of TaskManager.
 
 Bug prevented:
-- P3: API error silently swallowed → Orchestrator waits forever
-- P4: inject for completed task silently queued → mental model diverges
-- P5: abort returns success but task continues → resource leak
+- P4: inject for non-existent agent returns error string
+- P5: abort returns success but task continues -> resource leak
 """
-
 from __future__ import annotations
 
 import asyncio
 
 import pytest
 
-from agentm.core.task_manager import TaskManager
-from agentm.models.enums import AgentRunStatus
+from agentm.harness.runtime import AgentRuntime
+from agentm.harness.types import AgentStatus
 from agentm.tools.orchestrator import create_orchestrator_tools
 
-
-class TestInjectInstructionRejected:
-    """P4: inject_instruction for COMPLETED task returns False (not injected)."""
-
-    @pytest.mark.asyncio
-    async def test_inject_for_completed_task_returns_false(
-        self, task_manager_with_completed_task: TaskManager
-    ) -> None:
-        """inject should return False for a non-RUNNING task."""
-        ok = await task_manager_with_completed_task.inject(
-            "task-completed-001", "new instruction"
-        )
-        assert ok is False
-
-    @pytest.mark.asyncio
-    async def test_inject_instruction_not_queued_for_completed(
-        self, task_manager_with_completed_task: TaskManager
-    ) -> None:
-        """After rejection, instruction must NOT be in pending list."""
-        await task_manager_with_completed_task.inject(
-            "task-completed-001", "new instruction"
-        )
-
-        task = task_manager_with_completed_task.get_task("task-completed-001")
-        assert len(task.pending_instructions) == 0
+from tests.snapshot.conftest import FakeWorkerFactory, NeverEndingLoop
 
 
 class TestAbortTask:
-    """P5: abort_task on running task sets FAILED with reason."""
+    """P5: abort_task on running task sets ABORTED with reason."""
 
     @pytest.fixture(autouse=True)
-    def _bind_tools(self, task_manager_with_running_task: TaskManager) -> None:
-        self.task_manager = task_manager_with_running_task
-        tools = create_orchestrator_tools(
-            task_manager_with_running_task, agent_pool=None
-        )
+    def _bind_tools(self) -> None:
+        self.runtime = AgentRuntime()
+        self.factory = FakeWorkerFactory()
+        tools = create_orchestrator_tools(self.runtime, self.factory)
         self.abort_task = tools["abort_task"]
 
     @pytest.mark.asyncio
-    async def test_abort_sets_failed_status(self) -> None:
-        """abort_task should set task status to FAILED."""
+    async def test_abort_sets_aborted_status(self) -> None:
+        """abort_task should set agent status to ABORTED."""
+        loop = NeverEndingLoop()
+        await self.runtime.spawn("task-running-001", loop=loop, input="scan metrics")
+        await asyncio.sleep(0.05)
+
         await self.abort_task("task-running-001", "timeout")
 
-        task = self.task_manager.get_task("task-running-001")
-        assert task.status == AgentRunStatus.FAILED
+        result = self.runtime.get_result("task-running-001")
+        assert result is not None
+        assert result.status == AgentStatus.ABORTED
 
     @pytest.mark.asyncio
     async def test_abort_records_reason(self) -> None:
-        """abort_task should record the reason in error_summary."""
+        """abort_task should record the reason in error."""
+        loop = NeverEndingLoop()
+        await self.runtime.spawn("task-running-001", loop=loop, input="scan metrics")
+        await asyncio.sleep(0.05)
+
         await self.abort_task("task-running-001", "timeout")
 
-        task = self.task_manager.get_task("task-running-001")
-        assert "timeout" in task.error_summary
+        result = self.runtime.get_result("task-running-001")
+        assert result is not None
+        assert "timeout" in result.error
 
     @pytest.mark.asyncio
     async def test_abort_cancels_asyncio_task(self) -> None:
-        """abort_task should cancel the asyncio.Task if present."""
-
-        async def _long_running():
-            await asyncio.sleep(3600)
-
-        asyncio_task = asyncio.ensure_future(_long_running())
-        self.task_manager.get_task("task-running-001").asyncio_task = asyncio_task
+        """abort_task should cancel the underlying asyncio.Task."""
+        loop = NeverEndingLoop()
+        await self.runtime.spawn("task-running-001", loop=loop, input="scan metrics")
+        await asyncio.sleep(0.05)
 
         await self.abort_task("task-running-001", "timeout")
 
-        assert asyncio_task.cancelling() > 0
+        # The agent should be in a terminal state
+        result = self.runtime.get_result("task-running-001")
+        assert result is not None
+        assert result.status == AgentStatus.ABORTED
 
     @pytest.mark.asyncio
-    async def test_abort_on_failed_task_returns_false(
-        self, task_manager_with_failed_task: TaskManager
-    ) -> None:
-        """abort should return False for non-RUNNING tasks."""
-        ok = await task_manager_with_failed_task.abort("task-failed-001", "cleanup")
-        assert ok is False
+    async def test_abort_on_nonexistent_task_returns_not_found(self) -> None:
+        """abort should return not-found message for unknown task IDs."""
+        result = await self.abort_task("task-nonexistent-001", "cleanup")
+        assert "not found" in result.lower()

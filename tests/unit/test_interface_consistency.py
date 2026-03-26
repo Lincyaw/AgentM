@@ -1,60 +1,72 @@
 """Tests for cross-module interface consistency.
 
-These tests verify that interfaces between modules are compatible —
+These tests verify that interfaces between modules are compatible --
 types, return values, and function signatures agree across module boundaries.
 
 Bug prevented: Module A expects Module B to accept type X, but Module B's
-signature says type Y → runtime TypeError when the modules interact.
+signature says type Y -> runtime TypeError when the modules interact.
 """
 
 from __future__ import annotations
 
 from typing import get_type_hints
-from unittest.mock import AsyncMock
 
 import pytest
 
+from agentm.harness.runtime import AgentRuntime
 from agentm.tools.orchestrator import create_orchestrator_tools
+
+
+class _MockWorkerFactory:
+    """Minimal WorkerFactory for signature testing."""
+
+    def create_worker(self, agent_id: str, task_type: str):
+        return None
 
 
 @pytest.fixture
 def dispatch_agent_func():
     """Get dispatch_agent function from factory for testing."""
-    mock_tm = AsyncMock()
-    tools = create_orchestrator_tools(mock_tm, agent_pool=None)
+    runtime = AgentRuntime()
+    factory = _MockWorkerFactory()
+    tools = create_orchestrator_tools(runtime, factory)
     return tools["dispatch_agent"]
 
 
 class TestTaskTypeLiteralConsistency:
-    """Ref: designs/sub-agent.md § Task Types, designs/orchestrator.md § dispatch_agent
+    """Ref: designs/sub-agent.md, designs/orchestrator.md
 
-    task_type is str (widened from Literal) so that memory-extraction task types
-    (collect, analyze, extract, refine) flow through alongside RCA types.
-    The ANSWER_SCHEMA registry is the single source of truth for valid values.
+    task_type is str (widened from Literal) so that all scenario task types
+    flow through. The answer_schemas dict in ScenarioWiring is the source
+    of truth for valid task_type values.
 
-    Bug prevented: ANSWER_SCHEMA missing a task_type that workers use →
+    Bug prevented: answer_schemas missing a task_type that workers use ->
     KeyError at runtime when creating the structured output model.
     """
 
     def test_answer_schema_covers_rca_task_types(self):
-        """ANSWER_SCHEMA must include the three RCA worker task types."""
-        from agentm.models.answer_schemas import ANSWER_SCHEMA
+        """RCA scenario wiring must include the three RCA worker task types."""
+        from agentm.harness.scenario import get_scenario, SetupContext
         from agentm.scenarios import discover
 
         discover()
+        scenario = get_scenario("hypothesis_driven")
+        wiring = scenario.setup(SetupContext(vault=None, trajectory=None, tool_registry=None))
         for task_type in ("scout", "verify", "deep_analyze"):
-            assert task_type in ANSWER_SCHEMA, (
-                f"ANSWER_SCHEMA missing RCA task type: {task_type!r}"
+            assert task_type in wiring.answer_schemas, (
+                f"RCA wiring missing task type: {task_type!r}"
             )
 
     def test_answer_schema_covers_trajectory_analysis_task_types(self):
-        """ANSWER_SCHEMA must include the trajectory-analysis worker task type."""
-        from agentm.models.answer_schemas import ANSWER_SCHEMA
+        """Trajectory analysis wiring must include the 'analyze' task type."""
+        from agentm.harness.scenario import get_scenario, SetupContext
         from agentm.scenarios import discover
 
         discover()
-        assert "analyze" in ANSWER_SCHEMA, (
-            "ANSWER_SCHEMA missing trajectory-analysis task type: 'analyze'"
+        scenario = get_scenario("trajectory_analysis")
+        wiring = scenario.setup(SetupContext(vault=None, trajectory=None, tool_registry=None))
+        assert "analyze" in wiring.answer_schemas, (
+            "Trajectory analysis wiring missing task type: 'analyze'"
         )
 
     def test_task_type_is_str_annotation(self, dispatch_agent_func):
@@ -65,72 +77,51 @@ class TestTaskTypeLiteralConsistency:
             f"dispatch_agent task_type should be str, got: {annotation}"
         )
 
-    def test_dispatch_agent_and_task_manager_submit_agree(self, dispatch_agent_func):
-        """Both dispatch_agent and TaskManager.submit must use str task_type."""
-        from agentm.core.task_manager import TaskManager
-
+    def test_dispatch_agent_task_type_is_str(self, dispatch_agent_func):
+        """dispatch_agent task_type must be str to support multiple scenario types."""
         dispatch_hints = get_type_hints(dispatch_agent_func, include_extras=True)
-        submit_hints = get_type_hints(TaskManager.submit, include_extras=True)
-
         dispatch_annotation = dispatch_hints.get("task_type")
-        submit_annotation = submit_hints.get("task_type")
 
         assert dispatch_annotation is str, (
             f"dispatch_agent task_type should be str, got: {dispatch_annotation}"
         )
-        assert submit_annotation is str, (
-            f"TaskManager.submit task_type should be str, got: {submit_annotation}"
-        )
-
-
-class TestOrchestratorCreationImports:
-    """Ref: designs/orchestrator.md § Orchestrator Creation
-
-    The node orchestrator module must export the expected factory function.
-
-    Bug: function renamed or moved → builder can't find it →
-    system startup fails.
-    """
-
-    def test_create_node_orchestrator_exists(self):
-        from agentm.agents.node.orchestrator import create_node_orchestrator
-
-        assert callable(create_node_orchestrator)
 
 
 class TestHooksModuleExports:
-    """Ref: designs/sub-agent.md § Instruction Queue, designs/orchestrator.md § Instruction Injection
+    """Instruction injection is now handled by AgentRuntime.send() +
+    AgentLoop.inject() -- no middleware hook needed.
 
-    The hooks module must export the instruction hook builder.
-    Hook chaining is handled by compose_middleware / NodePipeline.
-
-    Bug: build_instruction_hook missing → Sub-Agents can't inject
-    instructions → pending instructions silently dropped.
+    Verify the runtime has the send method and SimpleAgentLoop has inject.
     """
 
-    def test_build_instruction_hook_exists(self):
-        from agentm.middleware.instruction import build_instruction_hook
+    def test_runtime_has_send_method(self):
+        from agentm.harness.runtime import AgentRuntime
 
-        assert callable(build_instruction_hook)
+        assert hasattr(AgentRuntime, "send")
+
+    def test_simple_agent_loop_has_inject_method(self):
+        from agentm.harness.loops.simple import SimpleAgentLoop
+
+        assert hasattr(SimpleAgentLoop, "inject")
 
 
-class TestCompressionRefLayerValues:
-    """Ref: designs/orchestrator.md § Compression Architecture
+class TestOrchestratorToolsCleanup:
+    """Verify dead code has been removed from orchestrator tools.
 
-    CompressionRef.layer must be Literal["sub_agent", "orchestrator"].
-    This is enforced by the dataclass field type annotation.
-
-    Bug: layer accepts any string → recall_history can't filter by layer →
-    returns data from wrong compression scope.
+    Bug prevented: recall_history and _set_graph_ref still exported ->
+    stale LangGraph dependencies remain in the SDK boundary.
     """
 
-    def test_layer_annotation_is_literal(self):
-        from agentm.models.data import CompressionRef
+    def test_no_recall_history_in_tools(self):
+        """recall_history was removed in Phase 3A cleanup."""
+        runtime = AgentRuntime()
+        factory = _MockWorkerFactory()
+        tools = create_orchestrator_tools(runtime, factory)
+        assert "recall_history" not in tools
 
-        annotation = CompressionRef.__dataclass_fields__["layer"].type
-        # The annotation should be Literal["sub_agent", "orchestrator"]
-        # With from __future__ import annotations, it's stored as a string
-        assert "sub_agent" in str(annotation) and "orchestrator" in str(annotation), (
-            f"CompressionRef.layer annotation should be Literal['sub_agent', 'orchestrator'], "
-            f"got: {annotation}"
-        )
+    def test_no_set_graph_ref_in_tools(self):
+        """_set_graph_ref was removed in Phase 3A cleanup."""
+        runtime = AgentRuntime()
+        factory = _MockWorkerFactory()
+        tools = create_orchestrator_tools(runtime, factory)
+        assert "_set_graph_ref" not in tools

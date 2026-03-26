@@ -128,26 +128,3 @@ class TestHypothesisDrivenStateContract:
             )
 
 
-class TestSubAgentStateContract:
-    """Ref: designs/sub-agent.md § State Schema — SubAgentState
-
-    SubAgentState must contain all fields the sub-agent design requires.
-
-    Bug: missing field → sub-agent subgraph cannot track tool calls or compression.
-    """
-
-    def test_sub_agent_state_has_all_required_fields(self):
-        from agentm.models.state import SubAgentState
-
-        required = (
-            "messages",
-            "scratchpad",
-            "observations",
-            "tool_call_count",
-            "compression_refs",
-        )
-        annotations = SubAgentState.__annotations__
-        for field in required:
-            assert field in annotations, (
-                f"SubAgentState missing required field: {field}"
-            )

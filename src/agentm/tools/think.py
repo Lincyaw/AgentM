@@ -7,8 +7,9 @@ structured output (findings/leads/verdict).
 Inspired by Anthropic's "think" tool pattern for extended thinking in
 tool-use contexts.
 """
+from __future__ import annotations
 
-from langchain_core.tools import tool
+from agentm.harness.tool import tool
 
 
 @tool

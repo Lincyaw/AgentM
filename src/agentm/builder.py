@@ -1,96 +1,95 @@
-"""AgentSystem and builder entry points for all agent systems.
+"""AgentSystem and build_agent_system() — single entry point for all agent systems.
 
-Two builder paths:
+``build_agent_system()`` is the canonical way to construct an ``AgentSystem``.
+It uses the Scenario protocol to wire domain-specific behavior, and the SDK
+takes care of platform resources (vault, trajectory, runtime, tools).
 
-1. **``AgentSystemBuilder.build()``** (legacy) --- Config-driven factory that
-   resolves system_type from scenario config.  Backward-compatible with all
-   existing callers.
-
-2. **``GenericAgentSystemBuilder[S]``** --- New fluent builder parameterized
-   over a user-defined state type ``S``.  Accepts a ``ReasoningStrategy[S]``
-   and composes middleware, backend, and tools explicitly.
+Legacy ``AgentSystemBuilder.build()`` and ``build_from_type()`` are kept as
+backward-compatible aliases.
 """
 
 from __future__ import annotations
 
-import asyncio
+import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Generic
+from typing import Any
 
-from langchain_core.tools import StructuredTool
-from langgraph.checkpoint.memory import MemorySaver
-
-from dataclasses import asdict
-
-from agentm.exceptions import ConfigError
-from agentm.agents.node.orchestrator import create_node_orchestrator
-from agentm.agents.node.worker import AgentPool
-from agentm.config.schema import ScenarioConfig, StorageConfig
-from agentm.core.backend import StorageBackend
-from agentm.core.state_registry import get_state_schema
-from agentm.core.strategy import ReasoningStrategy, get_scenario_tools
-from agentm.core.task_manager import TaskManager
+from agentm.config.schema import ScenarioConfig, create_chat_model
+from agentm.core.prompt import load_prompt_template
 from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
-from agentm.middleware import AgentMMiddleware
-from agentm.models.state import S
-from agentm.tools import memory as memory_module
+from agentm.exceptions import ConfigError
+from agentm.harness.adapters import TrajectoryEventAdapter
+from agentm.harness.loops.simple import SimpleAgentLoop
+from agentm.harness.middleware import (
+    CompressionMiddleware,
+    DynamicContextMiddleware,
+    LoopDetectionMiddleware,
+    SkillMiddleware,
+    TrajectoryMiddleware,
+)
+from agentm.harness.runtime import AgentRuntime
+from agentm.harness.scenario import SetupContext, get_scenario
+from agentm.harness.tool import Tool, tool_from_function
+from agentm.harness.types import AgentResult, RunConfig
+from agentm.harness.worker_factory import WorkerLoopFactory
 from agentm.tools.orchestrator import create_orchestrator_tools
 from agentm.tools.think import think
 
 
-def _func_to_tool(name: str, func: Any) -> StructuredTool:
-    """Convert a plain function (sync or async) into a StructuredTool."""
-    if asyncio.iscoroutinefunction(func):
-        return StructuredTool.from_function(
-            coroutine=func, name=name, description=func.__doc__ or name
-        )
-    return StructuredTool.from_function(
-        func=func, name=name, description=func.__doc__ or name
-    )
+# ---------------------------------------------------------------------------
+# Decision-based termination (replaces <decision> routing in the LangGraph
+# orchestrator). The LLM emits <decision>finalize</decision> when it wants
+# to stop; otherwise it keeps calling tools.
+# ---------------------------------------------------------------------------
+
+_DECISION_RE = re.compile(r"<decision>(.*?)</decision>", re.DOTALL | re.IGNORECASE)
 
 
-def _serialize_value(value: Any) -> Any:
-    """Serialize a state field value to a JSON-safe representation."""
-    if hasattr(value, "__dataclass_fields__"):
-        return asdict(value)
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, (str, int, float, bool, list)):
-        return value
-    return str(value)
+def _orchestrator_should_terminate(response: Any) -> bool:
+    """Return True when the LLM signals finalize via <decision> tag.
+
+    Falls back to the standard no-tool-calls heuristic when the tag is
+    absent, for backward compatibility with prompts that don't emit it.
+    """
+    content = getattr(response, "content", "") or ""
+    match = _DECISION_RE.search(content)
+    if match:
+        return match.group(1).strip().lower() == "finalize"
+    # No decision tag: fall back to no-tool-calls = terminate
+    return not getattr(response, "tool_calls", None)
 
 
-class AgentSystem(Generic[S]):
+# ---------------------------------------------------------------------------
+# AgentSystem
+# ---------------------------------------------------------------------------
+
+
+class AgentSystem:
     """Unified interface for all agent systems.
 
-    Parameterized over ``S`` so that callers using the generic builder
-    get typed ``execute`` / ``stream`` signatures.
+    The orchestrator is a SimpleAgentLoop. ``execute()`` and ``stream()``
+    delegate to the loop's ``run()`` and ``stream()`` methods.
     """
 
     def __init__(
         self,
-        graph: Any,
-        config: dict[str, Any] | None = None,
+        loop: Any,
         scenario_config: ScenarioConfig | None = None,
-        task_manager: TaskManager | None = None,
+        runtime: AgentRuntime | None = None,
         trajectory: TrajectoryCollector | None = None,
         thread_id: str = "",
-        _pending_storage: StorageConfig | None = None,
     ) -> None:
-        self.graph = graph
-        self.langgraph_config = config or {}
+        self.loop = loop
         self.scenario_config = scenario_config
-        self.task_manager = task_manager
+        self.runtime = runtime
         self.trajectory = trajectory
         self.thread_id = thread_id
-        self._pending_storage = _pending_storage
-        self._initialized = _pending_storage is None
 
-    async def __aenter__(self) -> AgentSystem[S]:
+    async def __aenter__(self) -> AgentSystem:
         return self
 
     async def __aexit__(
@@ -98,36 +97,18 @@ class AgentSystem(Generic[S]):
     ) -> None:
         if self.trajectory is not None:
             await self.trajectory.close()
-        await self._close_checkpointer()
-
-    async def _close_checkpointer(self) -> None:
-        """Close the checkpointer's underlying connection if applicable."""
-        checkpointer = getattr(self.graph, "checkpointer", None)
-        if checkpointer is None:
-            return
-        conn = getattr(checkpointer, "conn", None)
-        if conn is not None and hasattr(conn, "close"):
-            try:
-                await conn.close()
-            except Exception:
-                pass
-
-    async def _ensure_checkpointer(self) -> None:
-        """Lazily create the async checkpointer on first use."""
-        if self._initialized:
-            return
-        self._initialized = True
-        if self._pending_storage is not None:
-            checkpointer = await _create_async_checkpointer(self._pending_storage)
-            if checkpointer is not None:
-                # Patch the compiled graph's checkpointer
-                self.graph.checkpointer = checkpointer
-            self._pending_storage = None
 
     async def execute(self, input_data: dict[str, Any]) -> dict[str, Any]:
-        """Execute the agent system with the given input. Returns final state."""
-        await self._ensure_checkpointer()
-        return await self.graph.ainvoke(input_data, config=self.langgraph_config)
+        """Execute the agent system with the given input. Returns final result."""
+        task = input_data.get("task_description") or input_data.get("messages", [{}])[0].get("content", "")
+        if isinstance(task, list):
+            # Handle LangChain message objects
+            task = str(task[0]) if task else ""
+        result: AgentResult = await self.loop.run(
+            str(task),
+            config=RunConfig(metadata={"agent_id": "orchestrator"}),
+        )
+        return {"output": result.output, "status": result.status.value, "steps": result.steps}
 
     async def stream(
         self,
@@ -135,337 +116,304 @@ class AgentSystem(Generic[S]):
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream events from the agent system execution.
 
-        Events are recorded to the TrajectoryCollector, which notifies all
-        registered listeners (DebugConsole, WebSocket broadcast, etc.).
+        Yields AgentEvent-like dicts from the SimpleAgentLoop's stream().
         """
-        await self._ensure_checkpointer()
-        step = 0
-        async for event in self.graph.astream(input_data, config=self.langgraph_config):
-            step += 1
+        task = input_data.get("task_description") or input_data.get("messages", [{}])[0].get("content", "")
+        if isinstance(task, list):
+            task = str(task[0]) if task else ""
 
-            # Record to trajectory --- listeners are notified automatically
-            for node_name, node_data in event.items():
-                if node_name == "__interrupt__":
-                    continue
-                if not isinstance(node_data, dict):
-                    continue
-                await self._record_node_event(node_name, node_data, step)
-
-            yield event
-
-    async def _record_node_event(
-        self, node_name: str, node_data: dict[str, Any], step: int
-    ) -> None:
-        """Parse node output and record structured trajectory events.
-
-        ``llm_call`` node events (tool_call, llm_end) are recorded by
-        ``NodePipeline`` inside the node itself --- only state_update and
-        tool_result events are recorded here from the stream.
-        """
-        if self.trajectory is None:
-            return
-
-        # Broadcast non-message state field updates (scenario-agnostic).
-        # Each scenario's state may contain different fields (e.g. notebook
-        # for RCA, conversation_facts for general_purpose). We serialize
-        # whatever the node returned, excluding messages.
-        state_delta = {
-            k: _serialize_value(v)
-            for k, v in node_data.items()
-            if k != "messages" and v is not None
-        }
-        if state_delta:
-            raw_phase = state_delta.get("current_phase", "")
-            if hasattr(raw_phase, "value"):
-                state_delta["current_phase"] = raw_phase.value
-            state_delta["step"] = step
-            await self.trajectory.record(
-                event_type="state_update",
-                agent_path=["orchestrator"],
-                node_name=node_name,
-                data=state_delta,
-            )
-
-        # llm_call events are already recorded by NodePipeline
-        if node_name == "llm_call":
-            return
-
-        messages = node_data.get("messages", [])
-        for msg in messages:
-            role = getattr(msg, "type", "unknown")
-            content = getattr(msg, "content", "")
-
-            if role == "ai":
-                tool_calls = getattr(msg, "tool_calls", [])
-                if tool_calls:
-                    for tc in tool_calls:
-                        await self.trajectory.record(
-                            event_type="tool_call",
-                            agent_path=["orchestrator"],
-                            node_name=node_name,
-                            data={
-                                "tool_name": tc["name"],
-                                "args": tc.get("args", {}),
-                                "step": step,
-                            },
-                        )
-                elif content:
-                    await self.trajectory.record(
-                        event_type="llm_end",
-                        agent_path=["orchestrator"],
-                        node_name=node_name,
-                        data={
-                            "content": content,
-                            "step": step,
-                        },
-                    )
-
-            elif role == "tool":
-                tool_name = getattr(msg, "name", "unknown")
-                await self.trajectory.record(
-                    event_type="tool_result",
-                    agent_path=["orchestrator"],
-                    node_name=node_name,
-                    data={
-                        "tool_name": tool_name,
-                        "result": content if content else "",
-                        "step": step,
-                    },
-                )
-
-
-def _create_checkpointer(storage_config: StorageConfig) -> Any:
-    """Create a LangGraph checkpointer from storage config.
-
-    For 'memory' backend, returns a MemorySaver directly.
-    For 'sqlite' backend, returns None here --- the AsyncSqliteSaver must be
-    created inside an async context. Use _create_async_checkpointer() instead.
-    """
-    backend = storage_config.checkpointer.backend
-
-    if backend == "memory":
-        return MemorySaver()
-
-    # sqlite and others handled by _create_async_checkpointer
-    return None
-
-
-async def _create_async_checkpointer(storage_config: StorageConfig) -> Any:
-    """Create an async checkpointer. Must be called from within an event loop."""
-    backend = storage_config.checkpointer.backend
-
-    if backend == "sqlite":
-        import aiosqlite
-        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver  # noqa: I001
-
-        url = storage_config.checkpointer.url or "./checkpoints.db"
-        conn = aiosqlite.connect(url)
-        saver = AsyncSqliteSaver(conn=conn)
-        await saver.setup()
-        return saver
-
-    return None
+        async for event in self.loop.stream(
+            str(task),
+            config=RunConfig(metadata={"agent_id": "orchestrator"}),
+        ):
+            yield {"event": event}
 
 
 _DEFAULT_TOOLS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "tools"
 
 
 # ---------------------------------------------------------------------------
-# New generic fluent builder
+# build_agent_system() — the single canonical builder
 # ---------------------------------------------------------------------------
 
 
-class GenericAgentSystemBuilder(Generic[S]):
-    """Fluent builder for constructing ``AgentSystem[S]`` instances.
+def build_agent_system(
+    scenario_name: str,
+    scenario_config: ScenarioConfig,
+    system_config: Any | None = None,
+    *,
+    thread_id: str | None = None,
+    tools_dir: Path | str | None = None,
+    knowledge_base_dir: str | None = None,
+) -> AgentSystem:
+    """Build an AgentSystem from a scenario name and config.
 
-    Uses explicit ``ReasoningStrategy[S]``, middleware, and backend
-    rather than inferring everything from a config file.
+    This is the single canonical entry point for constructing any agent
+    system.  It uses the Scenario protocol to wire domain-specific behavior.
 
-    Example::
+    Flow:
+    1. Discover scenarios, look up by name
+    2. Create platform resources (vault, trajectory, tool_registry)
+    3. Call scenario.setup(ctx) to get ScenarioWiring
+    4. Create AgentRuntime, WorkerLoopFactory
+    5. Build orchestrator tools (SDK + scenario + registry)
+    6. Build middleware stack (SDK + scenario)
+    7. Build SimpleAgentLoop
+    8. Return AgentSystem
 
-        system = (
-            GenericAgentSystemBuilder(SupportTicketState)
-            .with_strategy(SupportTicketStrategy())
-            .with_scenario(scenario_config)
-            .with_middleware([CompressionMiddleware(cfg), BudgetMiddleware(20)])
-            .build()
-        )
+    Args:
+        scenario_name: Registered scenario name (e.g. "hypothesis_driven").
+        scenario_config: Full scenario configuration.
+        system_config: Optional system-level config (models, storage, debug).
+        thread_id: Optional thread ID for checkpoint continuity.
+        tools_dir: Directory containing tool YAML definitions.
+        knowledge_base_dir: Path to the knowledge base (vault root).
     """
+    from agentm.scenarios import discover as _discover_scenarios
 
-    def __init__(self, state_schema: type[S]) -> None:
-        self._state_schema = state_schema
-        self._strategy: ReasoningStrategy[S] | None = None
-        self._scenario: ScenarioConfig | None = None
-        self._backend: StorageBackend | None = None
-        self._middleware: list[AgentMMiddleware] = []
-        self._tools: list[Any] = []
-        self._system_config: Any | None = None
-        self._thread_id: str | None = None
+    _discover_scenarios()
 
-    def with_strategy(
-        self, strategy: ReasoningStrategy[S]
-    ) -> GenericAgentSystemBuilder[S]:
-        """Set the reasoning strategy."""
-        self._strategy = strategy
-        return self
+    # 1. Look up the Scenario
+    scenario = get_scenario(scenario_name)
 
-    def with_scenario(self, config: ScenarioConfig) -> GenericAgentSystemBuilder[S]:
-        """Set the scenario configuration."""
-        self._scenario = config
-        return self
+    # --- Resolve directories ---
+    resolved_tools_dir = (
+        Path(tools_dir) if tools_dir is not None else _DEFAULT_TOOLS_DIR
+    )
+    resolved_kb_dir = (
+        knowledge_base_dir if knowledge_base_dir is not None else "./knowledge"
+    )
 
-    def with_backend(self, backend: StorageBackend) -> GenericAgentSystemBuilder[S]:
-        """Set the storage backend."""
-        self._backend = backend
-        return self
+    resolved_thread_id = thread_id if thread_id else str(uuid.uuid4())
 
-    def with_middleware(
-        self, middleware: Sequence[AgentMMiddleware]
-    ) -> GenericAgentSystemBuilder[S]:
-        """Set the middleware pipeline (replaces any previous list)."""
-        self._middleware = list(middleware)
-        return self
+    # --- Tool registry ---
+    tool_registry = ToolRegistry()
+    for yaml_file in sorted(resolved_tools_dir.glob("*.yaml")):
+        tool_registry.load_from_yaml(yaml_file)
 
-    def with_tools(self, tools: list[Any]) -> GenericAgentSystemBuilder[S]:
-        """Set additional tools for the orchestrator."""
-        self._tools = list(tools)
-        return self
+    # --- Resolve model config ---
+    orch_model_name = scenario_config.orchestrator.model
+    orch_model_config = (
+        system_config.models.get(orch_model_name)
+        if system_config is not None
+        else None
+    )
 
-    def with_system_config(self, system_config: Any) -> GenericAgentSystemBuilder[S]:
-        """Set the system-level config (models, storage, debug)."""
-        self._system_config = system_config
-        return self
+    worker_config = scenario_config.agents.get("worker")
+    worker_model_config = None
+    if worker_config is not None and system_config is not None:
+        worker_model_config = system_config.models.get(worker_config.model)
 
-    def with_thread_id(self, thread_id: str) -> GenericAgentSystemBuilder[S]:
-        """Set an explicit thread ID for checkpoint continuity."""
-        self._thread_id = thread_id
-        return self
-
-    def build(self) -> AgentSystem[S]:
-        """Build the ``AgentSystem[S]``.
-
-        Requires at least a strategy and scenario config.
-        """
-        from agentm.scenarios import discover as _discover_scenarios
-
-        _discover_scenarios()
-
-        if self._strategy is None:
-            raise ValueError("Strategy is required --- call with_strategy()")
-        if self._scenario is None:
-            raise ValueError("Scenario config is required --- call with_scenario()")
-
-        strategy = self._strategy
-        scenario = self._scenario
-        system_config = self._system_config
-
-        # --- Checkpointer ---
-        checkpointer = None
-        pending_storage: StorageConfig | None = None
-        if system_config is not None:
-            checkpointer = _create_checkpointer(system_config.storage)
-            if (
-                checkpointer is None
-                and system_config.storage.checkpointer.backend != "memory"
-            ):
-                pending_storage = system_config.storage
-
-        thread_id = self._thread_id or str(uuid.uuid4())
-        langgraph_config: dict[str, Any] = {
-            "configurable": {"thread_id": thread_id},
-        }
-
-        # --- Trajectory ---
-        trajectory: TrajectoryCollector | None = None
-        if system_config is not None and system_config.debug.trajectory.enabled:
-            run_id = f"{strategy.name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-            checkpoint_db_path = ""
-            if system_config.storage.checkpointer.backend == "sqlite":
-                db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
-                checkpoint_db_path = str(Path(db_url).resolve())
-            trajectory = TrajectoryCollector(
-                run_id=run_id,
-                output_dir=system_config.debug.trajectory.output_dir,
-                thread_id=thread_id,
-                checkpoint_db=checkpoint_db_path,
+    # --- Trajectory ---
+    trajectory: TrajectoryCollector | None = None
+    if system_config is not None and system_config.debug.trajectory.enabled:
+        run_id = f"{scenario_name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        checkpoint_db_path = ""
+        if system_config.storage.checkpointer.backend == "sqlite":
+            db_url = (
+                system_config.storage.checkpointer.url or "./checkpoints.db"
             )
-
-        # --- Tools ---
-        tools = list(self._tools)
-        tools.append(think)
-
-        # --- Format context via strategy ---
-        format_context = strategy.format_context
-
-        # --- State schema ---
-        state_schema = strategy.state_schema()
-
-        # --- Build graph ---
-        orch_model_config = None
-        if system_config is not None:
-            orch_model_name = scenario.orchestrator.model
-            orch_model_config = system_config.models.get(orch_model_name)
-
-        graph = create_node_orchestrator(
-            config=scenario.orchestrator,
-            tools=tools,
-            checkpointer=checkpointer,
-            store=None,
-            state_schema=state_schema,
-            format_context=format_context,
-            model_config=orch_model_config,
-            trajectory=trajectory,
-            extra_middleware=self._middleware or None,
-            strategy=strategy,
+            checkpoint_db_path = str(Path(db_url).resolve())
+        trajectory = TrajectoryCollector(
+            run_id=run_id,
+            output_dir=system_config.debug.trajectory.output_dir,
+            thread_id=resolved_thread_id,
+            checkpoint_db=checkpoint_db_path,
         )
 
-        return AgentSystem(
-            graph,
-            config=langgraph_config,
-            scenario_config=scenario,
-            trajectory=trajectory,
-            thread_id=thread_id,
-            _pending_storage=pending_storage,
+    # --- Vault ---
+    from agentm.tools.vault import MarkdownVault, create_vault_tools
+
+    vault_dir = Path(resolved_kb_dir) / "vault"
+    vault = MarkdownVault(vault_dir)
+    vault_tools = create_vault_tools(vault)
+
+    # Register vault tools into tool_registry
+    for vt_name, vt_func in vault_tools.items():
+        tool_registry.register(vt_name, vt_func, {})
+
+    # --- Memory tools ---
+    from agentm.tools import memory as memory_module
+    from agentm.tools import trajectory_reader as traj_reader_module
+
+    if system_config is not None:
+        db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
+        memory_module.set_db_path(str(Path(db_url).resolve()))
+
+    memory_tools: dict[str, Any] = {
+        "read_trajectory": memory_module.read_trajectory,
+        "get_checkpoint_history": memory_module.get_checkpoint_history,
+        "jq_query": traj_reader_module.jq_query,
+    }
+
+    for mt_name, mt_func in memory_tools.items():
+        tool_registry.register(mt_name, mt_func, {})
+
+    # 2. Create SetupContext and call scenario.setup()
+    ctx = SetupContext(
+        vault=vault,
+        trajectory=trajectory,
+        tool_registry=tool_registry,
+    )
+    wiring = scenario.setup(ctx)
+
+    # 3. Create AgentRuntime
+    event_handler = TrajectoryEventAdapter(trajectory) if trajectory is not None else None
+    runtime = AgentRuntime(event_handler=event_handler)
+
+    # 4. Create WorkerLoopFactory
+    worker_factory = WorkerLoopFactory(
+        scenario_config,
+        tool_registry,
+        worker_model_config,
+        extra_tools=wiring.worker_tools or None,
+        extra_middleware=wiring.worker_middleware or None,
+        trajectory=trajectory,
+        answer_schemas=wiring.answer_schemas or None,
+    )
+
+    # 5. Create SDK tools (dispatch, check, inject, abort)
+    sdk_tools_dict = create_orchestrator_tools(
+        runtime,
+        worker_factory,
+    )
+
+    # Build orchestrator-tools lookup from wiring
+    scenario_tools_by_name: dict[str, Tool] = {
+        t.name: t for t in wiring.orchestrator_tools
+    }
+
+    # 6. Build the tool list from config
+    tools: list[Tool] = []
+    for name in scenario_config.orchestrator.tools:
+        if name in sdk_tools_dict:
+            # SDK tool (has closure over runtime/worker_factory)
+            tools.append(tool_from_function(sdk_tools_dict[name], name=name))
+        elif name in scenario_tools_by_name:
+            # Scenario-provided tool — use directly
+            tools.append(scenario_tools_by_name[name])
+        elif name in memory_tools:
+            # Memory tools (standalone functions)
+            tools.append(tool_from_function(memory_tools[name], name=name))
+        elif tool_registry.has(name):
+            # Registry tool (YAML-declared or vault tools)
+            tools.append(tool_registry.get(name).create_tool())
+        else:
+            raise ConfigError(f"Tool {name!r} not found in registry or factory")
+
+    # Think tool is always available
+    tools.append(think)
+
+    # 7. Build middleware stack
+    hooks = wiring.hooks
+    format_context = wiring.format_context
+
+    # --- System prompt ---
+    config = scenario_config.orchestrator
+    system_prompt_template = config.prompts.get("system", "")
+    if system_prompt_template:
+        static_system_prompt: str = load_prompt_template(
+            system_prompt_template,
+            notebook="",
+            context="",
+        )
+    else:
+        static_system_prompt = "You are an agent orchestrator."
+
+    max_rounds: int = config.max_rounds
+
+    orch_middleware: list[Any] = []
+
+    # 7a. Dynamic context
+    orch_middleware.append(DynamicContextMiddleware(
+        format_context_fn=format_context if callable(format_context) else lambda: "",
+        base_system_prompt=static_system_prompt,
+        max_rounds=max_rounds,
+    ))
+
+    # 7b. Think-stall detection
+    if hooks.think_stall_enabled:
+        orch_middleware.append(
+            LoopDetectionMiddleware(
+                threshold=5,
+                window_size=15,
+                think_stall_limit=hooks.think_stall_limit,
+            )
         )
 
-    @staticmethod
-    def create(
-        strategy: ReasoningStrategy[S],
-        scenario_config: ScenarioConfig,
-        system_config: Any | None = None,
-        middleware: Sequence[AgentMMiddleware] | None = None,
-        tools: list[Any] | None = None,
-        thread_id: str | None = None,
-    ) -> AgentSystem[S]:
-        """Convenience factory --- builds an AgentSystem in one call."""
-        builder: GenericAgentSystemBuilder[S] = GenericAgentSystemBuilder(
-            strategy.state_schema()
+    # 7c. Compression
+    compression_cfg = config.compression
+    if compression_cfg is not None and compression_cfg.enabled:
+        orch_middleware.append(
+            CompressionMiddleware(compression_cfg, model_config=orch_model_config)
         )
-        builder.with_strategy(strategy).with_scenario(scenario_config)
-        if system_config is not None:
-            builder.with_system_config(system_config)
-        if middleware is not None:
-            builder.with_middleware(middleware)
-        if tools is not None:
-            builder.with_tools(tools)
-        if thread_id is not None:
-            builder.with_thread_id(thread_id)
-        return builder.build()
+
+    # 7d. Skills
+    if config.skills and vault is not None:
+        orch_middleware.append(SkillMiddleware(vault, config.skills))
+
+    # 7e. Scenario-specific middleware
+    if wiring.orchestrator_middleware:
+        orch_middleware.extend(wiring.orchestrator_middleware)
+
+    # 7f. Trajectory
+    if trajectory is not None:
+        orch_middleware.append(
+            TrajectoryMiddleware(trajectory, agent_path=["orchestrator"])
+        )
+
+    # 8. Build model
+    model_plain = create_chat_model(
+        model=config.model,
+        temperature=config.temperature,
+        model_config=orch_model_config,
+    )
+    if config.disable_tool_binding:
+        model_with_tools = model_plain
+    else:
+        model_with_tools = model_plain.bind_tools(
+            [t.to_openai_schema() for t in tools]
+        )
+
+    # --- Structured output ---
+    output_schema = wiring.output_schema
+    output_prompt_text = ""
+    if config.output is not None:
+        output_prompt_text = load_prompt_template(config.output.prompt)
+
+    # --- Termination ---
+    should_terminate = wiring.should_terminate or _orchestrator_should_terminate
+
+    # 9. Build SimpleAgentLoop
+    orch_loop = SimpleAgentLoop(
+        model=model_with_tools,
+        tools=tools,
+        system_prompt="",  # Managed by DynamicContextMiddleware
+        middleware=orch_middleware,
+        output_schema=output_schema,
+        output_prompt=output_prompt_text,
+        synthesize_retries=hooks.synthesize_max_retries,
+        should_terminate=should_terminate,
+    )
+
+    return AgentSystem(
+        orch_loop,
+        scenario_config=scenario_config,
+        runtime=runtime,
+        trajectory=trajectory,
+        thread_id=resolved_thread_id,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Legacy builder --- preserved for backward compatibility
+# Backward-compatible aliases
 # ---------------------------------------------------------------------------
 
 
 class AgentSystemBuilder:
-    """Unified entry point for building any agent system (legacy API).
+    """Legacy entry point — delegates to ``build_agent_system()``.
 
-    Internally selects the appropriate architecture based on system_type:
-    - ReAct-based (create_react_agent): For exploratory, non-linear scenarios like RCA
-    - StateGraph-based (custom graph with phase nodes): For linear, deterministic scenarios
-
-    For new code, prefer ``GenericAgentSystemBuilder[S]``.
+    Preserved for backward compatibility with existing callers.
     """
 
     @staticmethod
@@ -476,264 +424,15 @@ class AgentSystemBuilder:
         existing_thread_id: str | None = None,
         tools_dir: Path | str | None = None,
         knowledge_base_dir: str | None = None,
-    ) -> AgentSystem[Any]:
+    ) -> AgentSystem:
         """Build an AgentSystem from a system type and scenario config."""
-        from agentm.scenarios import discover as _discover_scenarios
-
-        _discover_scenarios()
-        get_state_schema(system_type)  # validate system_type exists
-
-        resolved_tools_dir = (
-            Path(tools_dir) if tools_dir is not None else _DEFAULT_TOOLS_DIR
-        )
-        resolved_kb_dir = (
-            knowledge_base_dir if knowledge_base_dir is not None else "./knowledge"
-        )
-
-        if scenario_config.orchestrator.orchestrator_mode in ("react", "node"):
-            tool_registry = ToolRegistry()
-
-            # Load all tool YAMLs
-            for yaml_file in sorted(resolved_tools_dir.glob("*.yaml")):
-                tool_registry.load_from_yaml(yaml_file)
-
-            # Resolve model config for the orchestrator model
-            orch_model_name = scenario_config.orchestrator.model
-            orch_model_config = (
-                system_config.models.get(orch_model_name)
-                if system_config is not None
-                else None
-            )
-
-            # Resolve model config for workers
-            worker_config = scenario_config.agents.get("worker")
-            worker_model_config = None
-            if worker_config is not None and system_config is not None:
-                worker_model_config = system_config.models.get(worker_config.model)
-
-            agent_pool = AgentPool(scenario_config, tool_registry, worker_model_config)
-
-            # --- Checkpointer ---
-            checkpointer = None
-            pending_storage: StorageConfig | None = None
-            if system_config is not None:
-                checkpointer = _create_checkpointer(system_config.storage)
-                if (
-                    checkpointer is None
-                    and system_config.storage.checkpointer.backend != "memory"
-                ):
-                    pending_storage = system_config.storage
-
-            # Wire checkpointer into agent_pool so workers persist per-task state
-            agent_pool._checkpointer = checkpointer
-
-            task_manager = TaskManager()
-
-            thread_id = existing_thread_id if existing_thread_id else str(uuid.uuid4())
-            langgraph_config: dict[str, Any] = {
-                "configurable": {"thread_id": thread_id},
-            }
-
-            # --- Trajectory ---
-            trajectory: TrajectoryCollector | None = None
-            if system_config is not None and system_config.debug.trajectory.enabled:
-                run_id = f"{system_type}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-                # Compute checkpoint db path for metadata
-                checkpoint_db_path = ""
-                if system_config.storage.checkpointer.backend == "sqlite":
-                    db_url = (
-                        system_config.storage.checkpointer.url or "./checkpoints.db"
-                    )
-                    checkpoint_db_path = str(Path(db_url).resolve())
-                trajectory = TrajectoryCollector(
-                    run_id=run_id,
-                    output_dir=system_config.debug.trajectory.output_dir,
-                    thread_id=thread_id,
-                    checkpoint_db=checkpoint_db_path,
-                )
-
-            # --- Dependency injection via closure factory ---
-            injected_tools = create_orchestrator_tools(
-                task_manager,
-                agent_pool,
-                trajectory=trajectory,
-                config=scenario_config.orchestrator,
-                model_config=orch_model_config,
-            )
-
-            # --- Vault ---
-            from agentm.tools.vault import MarkdownVault, create_vault_tools
-
-            vault_dir = Path(resolved_kb_dir) / "vault"
-            vault = MarkdownVault(vault_dir)
-            VAULT_TOOLS = create_vault_tools(vault)
-
-            # Register vault tools into tool_registry so both orchestrator
-            # and worker can resolve them uniformly via config.tools
-            for vt_name, vt_func in VAULT_TOOLS.items():
-                tool_registry.register(vt_name, vt_func, {})
-
-            # Scenario-specific tools via strategy protocol (no if/else branching)
-            from agentm.core.strategy_registry import get_strategy
-
-            strategy = get_strategy(system_type)
-            bundle = get_scenario_tools(
-                strategy, vault=vault, trajectory=trajectory
-            )
-            injected_tools.update(bundle.orchestrator_tools)
-            if bundle.worker_tools:
-                agent_pool._extra_worker_tools = bundle.worker_tools
-            format_context = bundle.format_context_override
-
-            # Wire trajectory into task_manager
-            if trajectory is not None:
-                task_manager.set_trajectory(trajectory)
-
-                # Wire trajectory into agent_pool for llm_start events
-                agent_pool._trajectory = trajectory
-
-            # Extract graph reference setter before tool registration (not a real tool)
-            set_graph_ref = injected_tools.pop("_set_graph_ref", None)
-
-            # Wire checkpointer DB path into memory module for trajectory-analysis system
-            if system_config is not None:
-                db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
-                memory_module.set_db_path(str(Path(db_url).resolve()))
-
-            # Memory tools are standalone functions (checkpointer injected above)
-            from agentm.tools import trajectory_reader as traj_reader_module
-
-            MEMORY_TOOLS: dict[str, Any] = {
-                "read_trajectory": memory_module.read_trajectory,
-                "get_checkpoint_history": memory_module.get_checkpoint_history,
-                "jq_query": traj_reader_module.jq_query,
-            }
-
-            # Register memory tools into tool_registry so workers can
-            # resolve them uniformly (same as vault tools above).
-            for mt_name, mt_func in MEMORY_TOOLS.items():
-                tool_registry.register(mt_name, mt_func, {})
-
-            # Build orchestrator tools: factory-injected + memory + registry (incl. vault)
-            tools: list[Any] = []
-
-            for name in scenario_config.orchestrator.tools:
-                if name in injected_tools:
-                    # Factory-created tool (has closure over task_manager/agent_pool)
-                    tools.append(_func_to_tool(name, injected_tools[name]))
-                elif name in MEMORY_TOOLS:
-                    # Memory tools (standalone functions with checkpointer injected)
-                    tools.append(_func_to_tool(name, MEMORY_TOOLS[name]))
-                elif tool_registry.has(name):
-                    # Registry tool (YAML-declared or vault tools registered above)
-                    tools.append(tool_registry.get(name).create_with_config())
-                else:
-                    raise ConfigError(f"Tool {name!r} not found in registry or factory")
-
-            # Think tool is always available for structured reasoning
-            tools.append(think)
-
-            # Resolve state schema and context formatter for this system type
-            state_schema = get_state_schema(system_type)
-            if format_context is None:
-                format_context = strategy.format_context
-
-            # --- Skill middleware (config-driven, per-agent) ---
-            from agentm.middleware.skill import SkillMiddleware
-
-            orch_skill_mw: list[AgentMMiddleware] = []
-            if scenario_config.orchestrator.skills:
-                orch_skill_mw.append(
-                    SkillMiddleware(vault, scenario_config.orchestrator.skills)
-                )
-
-            worker_cfg = scenario_config.agents.get("worker")
-            worker_skill_mw: list[AgentMMiddleware] = []
-            if worker_cfg is not None and worker_cfg.skills:
-                worker_skill_mw.append(
-                    SkillMiddleware(vault, worker_cfg.skills)
-                )
-            agent_pool._extra_worker_middleware = worker_skill_mw
-
-            graph = create_node_orchestrator(
-                config=scenario_config.orchestrator,
-                tools=tools,
-                checkpointer=checkpointer,
-                store=None,
-                state_schema=state_schema,
-                format_context=format_context,
-                model_config=orch_model_config,
-                trajectory=trajectory,
-                extra_middleware=orch_skill_mw or None,
-                strategy=strategy,
-            )
-
-            # Wire graph reference for recall_history (must happen after graph compilation)
-            if set_graph_ref is not None:
-                set_graph_ref(graph, langgraph_config)
-
-            return AgentSystem(
-                graph,
-                config=langgraph_config,
-                scenario_config=scenario_config,
-                task_manager=task_manager,
-                trajectory=trajectory,
-                thread_id=thread_id,
-                _pending_storage=pending_storage,
-            )
-
-        raise ConfigError(
-            f"Orchestrator mode {scenario_config.orchestrator.orchestrator_mode!r} not yet implemented"
-        )
-
-
-class AgentSystemBuilderFluent:
-    """Fluent builder for customized AgentSystem construction.
-
-    Usage::
-
-        system = (
-            AgentSystemBuilderFluent("hypothesis_driven", scenario_cfg)
-            .with_system_config(sys_cfg)
-            .with_tools_dir("/my/tools")
-            .with_knowledge_base_dir("/my/knowledge")
-            .build()
-        )
-    """
-
-    def __init__(self, system_type: str, scenario_config: ScenarioConfig) -> None:
-        self._system_type = system_type
-        self._scenario_config = scenario_config
-        self._system_config: Any | None = None
-        self._thread_id: str | None = None
-        self._tools_dir: Path | str | None = None
-        self._knowledge_base_dir: str | None = None
-
-    def with_system_config(self, config: Any) -> AgentSystemBuilderFluent:
-        self._system_config = config
-        return self
-
-    def with_thread_id(self, thread_id: str) -> AgentSystemBuilderFluent:
-        self._thread_id = thread_id
-        return self
-
-    def with_tools_dir(self, path: Path | str) -> AgentSystemBuilderFluent:
-        self._tools_dir = path
-        return self
-
-    def with_knowledge_base_dir(self, path: str) -> AgentSystemBuilderFluent:
-        self._knowledge_base_dir = path
-        return self
-
-    def build(self) -> AgentSystem[Any]:
-        """Build with all configured options."""
-        return AgentSystemBuilder.build(
-            system_type=self._system_type,
-            scenario_config=self._scenario_config,
-            system_config=self._system_config,
-            existing_thread_id=self._thread_id,
-            tools_dir=self._tools_dir,
-            knowledge_base_dir=self._knowledge_base_dir,
+        return build_agent_system(
+            system_type,
+            scenario_config,
+            system_config,
+            thread_id=existing_thread_id,
+            tools_dir=tools_dir,
+            knowledge_base_dir=knowledge_base_dir,
         )
 
 
@@ -742,11 +441,14 @@ def build_from_type(
     scenario_config: ScenarioConfig,
     system_config: Any | None = None,
     existing_thread_id: str | None = None,
-) -> AgentSystem[Any]:
-    """Bridge function --- delegates to ``AgentSystemBuilder.build()``.
+) -> AgentSystem:
+    """Bridge function --- delegates to ``build_agent_system()``.
 
     Provided for callers that prefer a plain function over a static method.
     """
-    return AgentSystemBuilder.build(
-        system_type, scenario_config, system_config, existing_thread_id
+    return build_agent_system(
+        system_type,
+        scenario_config,
+        system_config,
+        thread_id=existing_thread_id,
     )

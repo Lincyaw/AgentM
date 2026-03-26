@@ -10,16 +10,14 @@ if TYPE_CHECKING:
 
 
 def format_rca_context(
-    state: dict,
     *,
     profile_store: ServiceProfileStore | None = None,
     hypothesis_store: HypothesisStore | None = None,
 ) -> str:
     """Format RCA investigation state for the LLM context message.
 
-    Reads from independent stores (hypothesis + service profiles) rather
-    than from the LangGraph state notebook field. This ensures the context
-    is always up-to-date regardless of state injection limitations.
+    Reads from independent stores (hypothesis + service profiles).
+    No state dict needed — stores are the source of truth.
     """
     sections: list[str] = []
 

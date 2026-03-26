@@ -3,18 +3,13 @@
 SDK state types are defined here. Domain-specific states live in their
 canonical locations under ``scenarios/``.
 
-The global TypeVar ``S`` allows framework components (builder, middleware,
-task manager) to be generic over user-defined state types that extend
-``BaseExecutorState``.
+No LangGraph dependency — these are plain TypedDict schemas used as
+mutable dict templates by strategies and format_context functions.
 """
 
 from __future__ import annotations
 
-from typing import Annotated, TypedDict, TypeVar
-
-from langgraph.graph.message import add_messages
-
-from agentm.models.data import CompressionRef
+from typing import TypedDict
 
 
 class BaseExecutorState(TypedDict):
@@ -26,21 +21,7 @@ class BaseExecutorState(TypedDict):
     boundary.
     """
 
-    messages: Annotated[list, add_messages]
+    messages: list
     task_id: str
     task_description: str
     current_phase: str
-
-
-# Global TypeVar for generic framework components.
-S = TypeVar("S", bound=BaseExecutorState)
-
-
-class SubAgentState(TypedDict):
-    """State for independently compiled Sub-Agent subgraphs."""
-
-    messages: Annotated[list, add_messages]
-    scratchpad: list[str]
-    observations: list[str]
-    tool_call_count: int
-    compression_refs: list[CompressionRef]
