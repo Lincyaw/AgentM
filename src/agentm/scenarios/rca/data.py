@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
-from agentm.models.enums import AgentRunStatus
+from agentm.harness.types import AgentStatus
 from agentm.scenarios.rca.enums import HypothesisStatus, Phase, Verdict
 
 
@@ -43,7 +43,7 @@ class AgentOutcome:
 
     agent_id: str
     task_id: str
-    status: AgentRunStatus
+    status: AgentStatus
     duration_seconds: Optional[float] = None
     error: Optional[str] = None
 
