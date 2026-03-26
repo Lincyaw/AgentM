@@ -11,9 +11,11 @@ import json
 import sqlite3
 from typing import Any
 
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-
-_serde = JsonPlusSerializer()
+try:
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+    _serde = JsonPlusSerializer()
+except ImportError:
+    _serde = None  # type: ignore[assignment]
 
 
 class MemoryStore:
