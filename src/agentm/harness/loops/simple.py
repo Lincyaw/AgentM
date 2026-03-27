@@ -251,7 +251,14 @@ class SimpleAgentLoop:
 
                 # Build the call chain: mw_N( ... mw_1( actual_tool ) ... )
                 async def _actual_call(n: str, a: dict[str, Any]) -> str:
-                    return await self._tools[n].ainvoke(a)
+                    tool = self._tools.get(n)
+                    if tool is None:
+                        available = ", ".join(sorted(self._tools))
+                        return (
+                            f"Error: tool '{n}' does not exist. "
+                            f"Available tools: {available}"
+                        )
+                    return await tool.ainvoke(a)
 
                 chain = _actual_call
                 for mw in reversed(self._middleware):
