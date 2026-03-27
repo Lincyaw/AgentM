@@ -246,8 +246,25 @@ class MarkdownVault:
     # ------------------------------------------------------------------
 
     def _resolve(self, path: str) -> Path:
-        """Convert vault path to absolute filesystem path."""
-        return self._vault_dir / (path + ".md")
+        """Convert vault path to absolute filesystem path.
+
+        Normalizes the path to prevent escaping the vault directory:
+        - Strips leading ``/`` (would override the vault root via Path join)
+        - Strips trailing ``.md`` (appended automatically)
+        - Rejects ``..`` components (path traversal)
+        """
+        clean = path.strip().lstrip("/")
+        if clean.endswith(".md"):
+            clean = clean[:-3]
+        resolved = self._vault_dir / (clean + ".md")
+        # Ensure the resolved path is still inside the vault
+        try:
+            resolved.resolve().relative_to(self._vault_dir.resolve())
+        except ValueError:
+            raise ValueError(
+                f"Path escapes vault directory: {path!r}"
+            )
+        return resolved
 
     def _atomic_write(self, filepath: Path, content: str) -> None:
         filepath.parent.mkdir(parents=True, exist_ok=True)
