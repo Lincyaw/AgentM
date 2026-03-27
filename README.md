@@ -71,17 +71,17 @@ PostgreSQL (evaluation_data)               Local directory
 ```
 
 ```bash
-# Error analysis on failed cases (from exported directory)
-agentm analyze-batch config/batch/error_analysis.yaml
+# Error analysis on failed cases (default config)
+agentm analyze-batch config/batch/default.yaml
 
-# Feature extraction across all cases
-agentm analyze-batch config/batch/feature_extraction.yaml
+# Feature extraction — include correct cases too
+agentm analyze-batch config/batch/default.yaml --filter all
 
-# From database with CLI overrides
-agentm analyze-batch config/batch/from_db.yaml --exp-id agentm-v12 --limit 30
+# From database — change source.type to "database" in config, then:
+agentm analyze-batch config/batch/default.yaml --exp-id agentm-v12 --limit 30
 
 # Ad-hoc overrides
-agentm analyze-batch config/batch/error_analysis.yaml --batch-size 5 --verbose
+agentm analyze-batch config/batch/default.yaml --batch-size 5 --verbose
 ```
 
 | Option | Default | Description |
@@ -227,7 +227,7 @@ ok, fail = await benchmark.rollout(agent)
                          --exp-id agentm-v11 --correct false
                          |
                          v
-4. Batch analyze     agentm analyze-batch config/batch/error_analysis.yaml
+4. Batch analyze     agentm analyze-batch config/batch/default.yaml
                          |
                          v
 5. Knowledge         knowledge/vault/ (accumulated analysis entries)
