@@ -49,7 +49,7 @@ class MockModel:
         self.invocations.append(messages)
         return next(self._responses)
 
-    def with_structured_output(self, schema: type) -> MockStructuredModel:
+    def with_structured_output(self, schema: type, **kwargs: Any) -> MockStructuredModel:
         return MockStructuredModel(schema)
 
 
@@ -549,7 +549,7 @@ class MockModelWithStructuredControl(MockModel):
         super().__init__(responses)
         self._structured_model = structured_model
 
-    def with_structured_output(self, schema: type) -> Any:
+    def with_structured_output(self, schema: type, **kwargs: Any) -> Any:
         return self._structured_model
 
 

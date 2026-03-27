@@ -477,7 +477,6 @@ class TestBuilderProducesAgentSystemWithRuntime:
             patch("agentm.builder.create_chat_model") as mock_create_model,
             patch("agentm.builder.WorkerLoopFactory"),
             patch("agentm.builder.ToolRegistry") as mock_registry_cls,
-            patch("agentm.builder.TrajectoryEventAdapter"),
             patch("agentm.tools.vault.MarkdownVault"),
             patch("agentm.tools.vault.create_vault_tools", return_value={}),
             patch("agentm.scenarios.discover"),

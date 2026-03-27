@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -46,9 +47,11 @@ class AgentRuntime:
         *,
         checkpoint_store: CheckpointStore | None = None,
         event_handler: EventHandler | None = None,
+        trajectory: Any | None = None,
     ) -> None:
         self._checkpoint_store = checkpoint_store
         self._event_handler = event_handler
+        self._trajectory = trajectory
         self._agents: dict[str, _AgentEntry] = {}
 
     # --- Lifecycle ---
@@ -80,6 +83,22 @@ class AgentRuntime:
         )
         self._agents[agent_id] = entry
 
+        # Record task_dispatch trajectory event
+        if self._trajectory is not None:
+            original_agent_id = (metadata or {}).get("original_agent_id", agent_id)
+            self._trajectory.record_sync(
+                event_type="task_dispatch",
+                agent_path=[original_agent_id],
+                data={
+                    "task_id": agent_id,
+                    "agent_id": original_agent_id,
+                    "task_type": (metadata or {}).get("task_type", "unknown"),
+                    "instruction": input,
+                    "metadata": metadata or {},
+                },
+                task_id=agent_id,
+            )
+
         task = asyncio.create_task(
             self._run_agent(entry, input, config),
             name=f"agent-{agent_id}",
@@ -91,6 +110,8 @@ class AgentRuntime:
         self, entry: _AgentEntry, input: str, config: RunConfig
     ) -> None:
         """Run an agent's stream, forwarding events and handling completion."""
+        start_time = time.monotonic()
+        original_agent_id = entry.metadata.get("original_agent_id", entry.agent_id)
         try:
             async for event in entry.loop.stream(input, config=config):
                 entry.current_step = event.step
@@ -108,21 +129,63 @@ class AgentRuntime:
                             status=AgentStatus.COMPLETED,
                             output=result,
                         )
+            # Record task_complete
+            duration = time.monotonic() - start_time
+            if entry.result is not None:
+                entry.result.duration_seconds = duration
+            if self._trajectory is not None:
+                self._trajectory.record_sync(
+                    event_type="task_complete",
+                    agent_path=[original_agent_id],
+                    data={
+                        "task_id": entry.agent_id,
+                        "agent_id": original_agent_id,
+                        "duration_seconds": duration,
+                        "result": entry.result.output if entry.result else None,
+                    },
+                    task_id=entry.agent_id,
+                )
         except asyncio.CancelledError:
             if entry.status == AgentStatus.RUNNING:
                 entry.status = AgentStatus.ABORTED
+                duration = time.monotonic() - start_time
                 entry.result = AgentResult(
                     agent_id=entry.agent_id,
                     status=AgentStatus.ABORTED,
                     error="cancelled",
+                    duration_seconds=duration,
                 )
+                if self._trajectory is not None:
+                    self._trajectory.record_sync(
+                        event_type="task_abort",
+                        agent_path=[original_agent_id],
+                        data={
+                            "task_id": entry.agent_id,
+                            "agent_id": original_agent_id,
+                            "reason": "cancelled",
+                        },
+                        task_id=entry.agent_id,
+                    )
         except Exception as exc:
+            duration = time.monotonic() - start_time
             entry.status = AgentStatus.FAILED
             entry.result = AgentResult(
                 agent_id=entry.agent_id,
                 status=AgentStatus.FAILED,
                 error=str(exc),
+                duration_seconds=duration,
             )
+            if self._trajectory is not None:
+                self._trajectory.record_sync(
+                    event_type="task_fail",
+                    agent_path=[original_agent_id],
+                    data={
+                        "task_id": entry.agent_id,
+                        "agent_id": original_agent_id,
+                        "error_summary": str(exc),
+                    },
+                    task_id=entry.agent_id,
+                )
         finally:
             entry.done_event.set()
             # Cascade: abort running children when parent terminates
