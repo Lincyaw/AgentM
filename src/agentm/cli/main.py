@@ -174,7 +174,7 @@ def analyze(
 def analyze_batch(
     config_file: str = typer.Argument(
         ...,
-        help="Path to batch config YAML (e.g. config/batch/error_analysis.yaml)",
+        help="Path to batch config YAML (e.g. config/batch/default.yaml)",
     ),
     limit: int | None = typer.Option(
         None, "--limit", help="Override source.limit in config"
@@ -205,17 +205,17 @@ def analyze_batch(
 
     Examples:
 
-      # Error analysis on failed cases from a directory
-      agentm analyze-batch config/batch/error_analysis.yaml
+      # Error analysis on failed cases
+      agentm analyze-batch config/batch/default.yaml
 
-      # Feature extraction across all cases
-      agentm analyze-batch config/batch/feature_extraction.yaml
+      # Include correct cases too
+      agentm analyze-batch config/batch/default.yaml --filter all
 
-      # From database with overrides
-      agentm analyze-batch config/batch/from_db.yaml --exp-id agentm-v12 --limit 30
+      # Override experiment and limit
+      agentm analyze-batch config/batch/default.yaml --exp-id agentm-v12 --limit 30
 
       # Quick ad-hoc override
-      agentm analyze-batch config/batch/error_analysis.yaml --batch-size 5 --verbose
+      agentm analyze-batch config/batch/default.yaml --batch-size 5 --verbose
     """
     cfg = load_batch_config(config_file)
 
