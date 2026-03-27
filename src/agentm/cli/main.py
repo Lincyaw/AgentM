@@ -11,6 +11,12 @@ from dotenv import load_dotenv
 
 from agentm.exceptions import AgentMError
 
+from agentm.cli.batch import (
+    BatchConfig,
+    collect_cases,
+    load_batch_config,
+    run_batch_analysis,
+)
 from agentm.cli.debug import analyze_trajectory
 from agentm.cli.export_eval import export_eval_batch, export_eval_result
 from agentm.cli.run import (
@@ -162,6 +168,80 @@ def analyze(
             max_steps=max_steps,
         )
     )
+
+
+@app.command("analyze-batch")
+def analyze_batch(
+    config_file: str = typer.Argument(
+        ...,
+        help="Path to batch config YAML (e.g. config/batch/error_analysis.yaml)",
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", help="Override source.limit in config"
+    ),
+    batch_size: int | None = typer.Option(
+        None, "--batch-size", help="Override batch.size in config"
+    ),
+    concurrency: int | None = typer.Option(
+        None, "--concurrency", help="Override batch.concurrency in config"
+    ),
+    exp_id: str | None = typer.Option(
+        None, "--exp-id", help="Override source.exp_id in config"
+    ),
+    filter_correctness: str | None = typer.Option(
+        None,
+        "--filter",
+        help="Override source.filter (incorrect|correct|all)",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", help="Extra detail in output"),
+    dashboard: bool = typer.Option(False, "--dashboard", help="Start web dashboard"),
+    port: int = typer.Option(8765, "--port", help="Dashboard server port"),
+) -> None:
+    """Batch analyze evaluation trajectories from config file.
+
+    Load a batch config YAML that specifies data source (directory or DB),
+    batch grouping strategy, and analysis goals. Each batch groups N
+    trajectories into a single analysis run for cross-case pattern detection.
+
+    Examples:
+
+      # Error analysis on failed cases from a directory
+      agentm analyze-batch config/batch/error_analysis.yaml
+
+      # Feature extraction across all cases
+      agentm analyze-batch config/batch/feature_extraction.yaml
+
+      # From database with overrides
+      agentm analyze-batch config/batch/from_db.yaml --exp-id agentm-v12 --limit 30
+
+      # Quick ad-hoc override
+      agentm analyze-batch config/batch/error_analysis.yaml --batch-size 5 --verbose
+    """
+    cfg = load_batch_config(config_file)
+
+    # Apply CLI overrides
+    if limit is not None:
+        cfg.source.limit = limit
+    if batch_size is not None:
+        cfg.batch.size = batch_size
+    if concurrency is not None:
+        cfg.batch.concurrency = concurrency
+    if exp_id is not None:
+        cfg.source.exp_id = exp_id
+    if filter_correctness is not None:
+        cfg.source.filter = filter_correctness  # type: ignore[assignment]
+    if verbose:
+        cfg.output.verbose = True
+    if dashboard:
+        cfg.output.dashboard = True
+        cfg.output.dashboard_port = port
+
+    cases = collect_cases(cfg)
+    if not cases:
+        typer.echo("No cases matched the filter criteria.", err=True)
+        raise typer.Exit(code=1)
+
+    asyncio.run(run_batch_analysis(cfg, cases))
 
 
 @app.command()
