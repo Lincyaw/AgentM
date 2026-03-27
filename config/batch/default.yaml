@@ -1,0 +1,36 @@
+# Batch trajectory analysis configuration
+#
+# Usage:
+#   agentm analyze-batch config/batch/default.yaml
+#   agentm analyze-batch config/batch/default.yaml --filter all --limit 30
+#   agentm analyze-batch config/batch/default.yaml --exp-id agentm-v12
+
+# Data source — "directory" reads local JSON files, "database" queries eval DB
+source:
+  type: "directory"                    # "directory" or "database"
+  directory: "./eval-trajectories"     # used when type=directory
+  filter: "incorrect"                  # incorrect | correct | all
+  # exp_id: "agentm-v11"              # filter by experiment ID
+  # agent_type: "agentm"              # filter by agent type
+  # limit: 50                         # max total cases
+
+# Batch execution
+batch:
+  size: 10                             # trajectories per analysis run
+  concurrency: 1                       # parallel batch runs
+  max_steps: 60                        # max orchestrator steps per batch
+
+# Analysis goals — uncomment to override defaults
+# task:
+#   goals:
+#     - "Classify each case using Outcome Classification taxonomy"
+#     - "Cross-case error patterns and failure modes"
+#     - "Agent behavioral features: tool usage, hypothesis management"
+
+scenario: "config/scenarios/trajectory_analysis"
+system_config: "config/system.yaml"
+
+output:
+  export_dir: "./eval-trajectories"    # where DB exports land
+  verbose: false
+  dashboard: false
