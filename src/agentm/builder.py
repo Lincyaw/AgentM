@@ -270,6 +270,7 @@ def build_agent_system(
         extra_middleware=wiring.worker_middleware or None,
         trajectory=trajectory,
         answer_schemas=wiring.answer_schemas or None,
+        vault=vault,
     )
 
     # 5. Create SDK tools (dispatch, check, inject, abort)
