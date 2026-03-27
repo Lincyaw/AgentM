@@ -262,15 +262,20 @@ def build_agent_system(
     runtime = AgentRuntime(event_handler=event_handler)
 
     # 4. Create WorkerLoopFactory
+    # Compose worker middleware: scenario middleware + SkillMiddleware (if applicable)
+    worker_middleware: list[Any] = list(wiring.worker_middleware or [])
+    worker_config = scenario_config.agents.get("worker")
+    if worker_config is not None and worker_config.skills and vault is not None:
+        worker_middleware.append(SkillMiddleware(vault, worker_config.skills))
+
     worker_factory = WorkerLoopFactory(
         scenario_config,
         tool_registry,
         worker_model_config,
         extra_tools=wiring.worker_tools or None,
-        extra_middleware=wiring.worker_middleware or None,
+        extra_middleware=worker_middleware or None,
         trajectory=trajectory,
         answer_schemas=wiring.answer_schemas or None,
-        vault=vault,
     )
 
     # 5. Create SDK tools (dispatch, check, inject, abort)
