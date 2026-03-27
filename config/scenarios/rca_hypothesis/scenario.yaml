@@ -22,7 +22,6 @@ orchestrator:
     - query_service_profile
     - inject_instruction
     - abort_task
-    - recall_history
     - vault_search
     - vault_list
     - vault_read
