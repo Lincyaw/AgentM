@@ -50,6 +50,7 @@ class WorkerLoopFactory:
         extra_middleware: list[Any] | None = None,
         trajectory: TrajectoryCollector | None = None,
         answer_schemas: dict[str, type[BaseModel]] | None = None,
+        vault: Any | None = None,
     ) -> None:
         self._worker_config: AgentConfig = scenario_config.agents["worker"]
         self._tool_registry = tool_registry
@@ -57,6 +58,7 @@ class WorkerLoopFactory:
         self._extra_tools: list[Tool] = extra_tools or []
         self._extra_middleware = extra_middleware or []
         self._trajectory = trajectory
+        self._vault = vault
         self._answer_schemas: dict[str, type[BaseModel]] | None = answer_schemas
 
     @property
@@ -216,16 +218,7 @@ class WorkerLoopFactory:
             )
 
         # Skills
-        if config.skills:
-            try:
-                from agentm.tools.vault.store import MarkdownVault
-
-                vault = MarkdownVault()
-                middleware.append(SkillMiddleware(vault, config.skills))
-            except Exception:
-                logger.warning(
-                    "WorkerLoopFactory: failed to load SkillMiddleware, skipping",
-                    exc_info=True,
-                )
+        if config.skills and self._vault is not None:
+            middleware.append(SkillMiddleware(self._vault, config.skills))
 
         return middleware
