@@ -23,7 +23,6 @@ from agentm.harness.middleware import (
     CompressionMiddleware,
     DedupMiddleware,
     LoopDetectionMiddleware,
-    SkillMiddleware,
     TrajectoryMiddleware,
 )
 from agentm.harness.tool import Tool
@@ -50,7 +49,6 @@ class WorkerLoopFactory:
         extra_middleware: list[Any] | None = None,
         trajectory: TrajectoryCollector | None = None,
         answer_schemas: dict[str, type[BaseModel]] | None = None,
-        vault: Any | None = None,
     ) -> None:
         self._worker_config: AgentConfig = scenario_config.agents["worker"]
         self._tool_registry = tool_registry
@@ -58,7 +56,6 @@ class WorkerLoopFactory:
         self._extra_tools: list[Tool] = extra_tools or []
         self._extra_middleware = extra_middleware or []
         self._trajectory = trajectory
-        self._vault = vault
         self._answer_schemas: dict[str, type[BaseModel]] | None = answer_schemas
 
     @property
@@ -216,9 +213,5 @@ class WorkerLoopFactory:
                     max_cache_size=config.execution.dedup.max_cache_size
                 )
             )
-
-        # Skills
-        if config.skills and self._vault is not None:
-            middleware.append(SkillMiddleware(self._vault, config.skills))
 
         return middleware
