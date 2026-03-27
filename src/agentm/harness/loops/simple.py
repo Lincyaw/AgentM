@@ -79,7 +79,11 @@ class SimpleAgentLoop:
             last = messages[-1] if messages else None
             return getattr(last, "content", str(last))
 
-        structured_model = self._model.with_structured_output(self._output_schema)
+        # Use function_calling method for broader model compatibility.
+        # json_schema method is not supported by many models (e.g. Doubao).
+        structured_model = self._model.with_structured_output(
+            self._output_schema, method="function_calling"
+        )
 
         # Build synthesis messages: output_prompt + conversation history + instruction
         non_system = [

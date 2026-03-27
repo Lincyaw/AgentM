@@ -22,7 +22,6 @@ from agentm.core.prompt import load_prompt_template
 from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
 from agentm.exceptions import ConfigError
-from agentm.harness.adapters import TrajectoryEventAdapter
 from agentm.harness.loops.simple import SimpleAgentLoop
 from agentm.harness.middleware import (
     CompressionMiddleware,
@@ -258,8 +257,7 @@ def build_agent_system(
     wiring = scenario.setup(ctx)
 
     # 3. Create AgentRuntime
-    event_handler = TrajectoryEventAdapter(trajectory) if trajectory is not None else None
-    runtime = AgentRuntime(event_handler=event_handler)
+    runtime = AgentRuntime(trajectory=trajectory)
 
     # 4. Create WorkerLoopFactory
     # Compose worker middleware: scenario middleware + SkillMiddleware (if applicable)

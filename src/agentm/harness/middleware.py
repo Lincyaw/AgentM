@@ -495,15 +495,12 @@ class TrajectoryMiddleware:
         call_next: Callable[[str, dict[str, Any]], Awaitable[str]],
         ctx: LoopContext,
     ) -> str:
-        self._trajectory.record_sync(
-            event_type="tool_start",
-            agent_path=self._agent_path,
-            data={"tool_name": tool_name, "args": tool_args},
-            task_id=self._task_id,
-        )
+        # Note: tool_call event is already recorded in on_llm_end when
+        # the LLM decides to call a tool. Here we only record tool_result
+        # after actual execution, matching the format the frontend expects.
         result = await call_next(tool_name, tool_args)
         self._trajectory.record_sync(
-            event_type="tool_end",
+            event_type="tool_result",
             agent_path=self._agent_path,
             data={"tool_name": tool_name, "result": result},
             task_id=self._task_id,
