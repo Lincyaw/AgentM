@@ -45,6 +45,7 @@ class SourceConfig(BaseModel):
     exp_id: str | None = None
     agent_type: str | None = None
     limit: int | None = None
+    data_base_dir: str | None = None
 
 
 class BatchExecutionConfig(BaseModel):
@@ -120,6 +121,7 @@ class CaseInfo:
     model_name: str = ""
     dataset_index: int | None = None
     source: str = ""
+    data_dir: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +135,7 @@ def collect_from_directory(
     exp_id: str | None = None,
     agent_type: str | None = None,
     limit: int | None = None,
+    data_base_dir: str | None = None,
 ) -> list[CaseInfo]:
     """Scan a directory for exported eval JSON files and load metadata.
 
@@ -173,6 +176,14 @@ def collect_from_directory(
         if agent_type and meta.get("agent_type") != agent_type:
             continue
 
+        # Resolve data directory from source field + data_base_dir
+        source = meta.get("source", "") or ""
+        resolved_data_dir = ""
+        if data_base_dir and source:
+            candidate = Path(data_base_dir) / source
+            if candidate.is_dir():
+                resolved_data_dir = str(candidate)
+
         cases.append(
             CaseInfo(
                 file_path=path,
@@ -185,7 +196,8 @@ def collect_from_directory(
                 agent_type=meta.get("agent_type", "") or "",
                 model_name=meta.get("model_name", "") or "",
                 dataset_index=meta.get("dataset_index"),
-                source=meta.get("source", "") or "",
+                source=source,
+                data_dir=resolved_data_dir,
             )
         )
 
@@ -205,6 +217,7 @@ def collect_from_db(
     agent_type: str | None = None,
     limit: int | None = None,
     output_dir: str | None = None,
+    data_base_dir: str | None = None,
 ) -> list[CaseInfo]:
     """Query the eval DB and export cases to JSON files.
 
@@ -312,6 +325,13 @@ def collect_from_db(
             json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+        source = row.get("source", "") or ""
+        resolved_data_dir = ""
+        if data_base_dir and source:
+            candidate = Path(data_base_dir) / source
+            if candidate.is_dir():
+                resolved_data_dir = str(candidate)
+
         cases.append(
             CaseInfo(
                 file_path=filepath,
@@ -324,7 +344,8 @@ def collect_from_db(
                 agent_type=row["agent_type"] or "",
                 model_name=row["model_name"] or "",
                 dataset_index=row["dataset_index"],
-                source=row.get("source", "") or "",
+                source=source,
+                data_dir=resolved_data_dir,
             )
         )
 
@@ -349,6 +370,7 @@ def collect_cases(cfg: BatchConfig) -> list[CaseInfo]:
             agent_type=src.agent_type,
             limit=src.limit,
             output_dir=cfg.output.export_dir,
+            data_base_dir=src.data_base_dir,
         )
     return collect_from_directory(
         directory=src.directory,
@@ -356,6 +378,7 @@ def collect_cases(cfg: BatchConfig) -> list[CaseInfo]:
         exp_id=src.exp_id,
         agent_type=src.agent_type,
         limit=src.limit,
+        data_base_dir=src.data_base_dir,
     )
 
 
@@ -505,6 +528,10 @@ async def run_batch_analysis(cfg: BatchConfig, cases: list[CaseInfo]) -> None:
         async with semaphore:
             task = build_batch_task(batch, batch_idx, cfg.task)
             trajectories = [str(c.file_path) for c in batch]
+            # Build case_id -> data_dir mapping for observability data access
+            case_data_mapping = {
+                c.case_id: c.data_dir for c in batch if c.data_dir
+            }
             try:
                 await run_trajectory_analysis(
                     trajectories=trajectories,
@@ -516,6 +543,7 @@ async def run_batch_analysis(cfg: BatchConfig, cases: list[CaseInfo]) -> None:
                     dashboard=cfg.output.dashboard and batch_idx == 0,
                     dashboard_port=cfg.output.dashboard_port,
                     dashboard_host=cfg.output.dashboard_host,
+                    case_data_mapping=case_data_mapping or None,
                 )
                 completed += 1
             except Exception as e:

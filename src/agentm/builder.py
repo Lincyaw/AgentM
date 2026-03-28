@@ -234,6 +234,7 @@ def build_agent_system(
     # --- Memory tools ---
     from agentm.tools import memory as memory_module
     from agentm.tools import trajectory_reader as traj_reader_module
+    from agentm.tools import case_data as case_data_module
 
     if system_config is not None:
         db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
@@ -243,6 +244,7 @@ def build_agent_system(
         "read_trajectory": memory_module.read_trajectory,
         "get_checkpoint_history": memory_module.get_checkpoint_history,
         "jq_query": traj_reader_module.jq_query,
+        "load_case_data": case_data_module.load_case_data,
     }
 
     for mt_name, mt_func in memory_tools.items():
