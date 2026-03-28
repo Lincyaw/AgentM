@@ -398,6 +398,27 @@ def _reconstruct_orchestrator_style(
     return messages
 
 
+def _build_tc_entries(
+    tool_calls: list[dict[str, Any]],
+    ids: list[str],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": ids[i] if i < len(ids) else f"synth_tc_{i}",
+            "type": "function",
+            "function": {
+                "name": tc.get("tool_name", ""),
+                "arguments": (
+                    json.dumps(tc["args"], ensure_ascii=False)
+                    if isinstance(tc.get("args"), dict)
+                    else str(tc.get("args", ""))
+                ),
+            },
+        }
+        for i, tc in enumerate(tool_calls)
+    ]
+
+
 def _flush_tool_calls_with_ids(
     messages: list[dict[str, Any]],
     tool_calls: list[dict[str, Any]],
@@ -410,7 +431,6 @@ def _flush_tool_calls_with_ids(
     fields. We match them with tool_call events by position (both are ordered
     the same way).
     """
-    # Extract tool_call_ids from tool result messages in the next llm_start
     tool_result_ids: list[str] = []
     for msg in next_llm_start_data.get("messages", []):
         if isinstance(msg, dict) and msg.get("type") == "tool":
@@ -418,25 +438,7 @@ def _flush_tool_calls_with_ids(
             if tcid:
                 tool_result_ids.append(tcid)
 
-    tc_entries = []
-    for i, tc in enumerate(tool_calls):
-        # Use matching tool_call_id if available, otherwise generate one
-        tc_id = tool_result_ids[i] if i < len(tool_result_ids) else f"synth_tc_{i}"
-        tc_entries.append(
-            {
-                "id": tc_id,
-                "type": "function",
-                "function": {
-                    "name": tc.get("tool_name", ""),
-                    "arguments": (
-                        json.dumps(tc["args"], ensure_ascii=False)
-                        if isinstance(tc.get("args"), dict)
-                        else str(tc.get("args", ""))
-                    ),
-                },
-            }
-        )
-
+    tc_entries = _build_tc_entries(tool_calls, tool_result_ids)
     if tc_entries:
         messages.append(
             {
@@ -460,23 +462,8 @@ def _flush_pending_tool_calls(
     Since ``tool_call`` events from TrajectoryMiddleware don't include
     tool_call_id, we generate placeholder IDs.
     """
-    tc_entries = []
-    for i, tc in enumerate(tool_calls):
-        tc_entries.append(
-            {
-                "id": f"pending_tc_{i}",
-                "type": "function",
-                "function": {
-                    "name": tc.get("tool_name", ""),
-                    "arguments": (
-                        json.dumps(tc["args"], ensure_ascii=False)
-                        if isinstance(tc.get("args"), dict)
-                        else str(tc.get("args", ""))
-                    ),
-                },
-            }
-        )
-
+    ids = [f"pending_tc_{i}" for i in range(len(tool_calls))]
+    tc_entries = _build_tc_entries(tool_calls, ids)
     if tc_entries:
         messages.append(
             {

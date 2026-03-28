@@ -17,9 +17,6 @@ from agentm.harness.types import (
     AgentStatus,
     RunConfig,
 )
-from agentm.scenarios.rca.notebook import add_hypothesis, update_hypothesis_status
-from agentm.scenarios.rca.data import DiagnosticNotebook
-from agentm.scenarios.rca.enums import HypothesisStatus
 
 
 # ---------------------------------------------------------------------------
@@ -106,40 +103,6 @@ class FakeWorkerFactory:
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def notebook() -> DiagnosticNotebook:
-    """A minimal DiagnosticNotebook for testing."""
-    return DiagnosticNotebook(
-        task_id="test-task-001",
-        task_description="Database connection timeouts reported by users",
-        start_time="2026-03-08T10:00:00",
-    )
-
-
-@pytest.fixture
-def notebook_with_hypothesis() -> DiagnosticNotebook:
-    """A DiagnosticNotebook with one hypothesis in various states."""
-    nb = DiagnosticNotebook(
-        task_id="test-task-002",
-        task_description="DB connection pool investigation",
-        start_time="2026-03-08T10:00:00",
-    )
-    nb = add_hypothesis(
-        nb,
-        hypothesis_id="H1",
-        description="Connection pool exhaustion",
-        created_at="2026-03-08T10:05:00",
-    )
-    nb = update_hypothesis_status(
-        nb,
-        hypothesis_id="H1",
-        status=HypothesisStatus.INVESTIGATING,
-        last_updated="2026-03-08T10:05:00",
-        evidence=["Active connections 200/200"],
-    )
-    return nb
 
 
 @pytest.fixture

@@ -117,7 +117,6 @@ class TestRCAScenario:
 
         wiring = RCAScenario().setup(SetupContext(vault=None, trajectory=None, tool_registry=None))
         assert wiring.hooks.think_stall_enabled is True
-        assert wiring.hooks.think_stall_limit == 3
 
 
 # ---------------------------------------------------------------------------

@@ -121,6 +121,46 @@ class TrajectoryCollector:
     def file_path(self) -> Path:
         return self._output_dir / f"{self._run_id}.jsonl"
 
+    def _record_core(
+        self,
+        event_type: str,
+        agent_path: list[str],
+        data: dict[str, Any],
+        node_name: str,
+        task_id: str | None,
+        metadata: dict[str, Any] | None,
+        parent_seq: int | None,
+        **kwargs: Any,
+    ) -> tuple[dict[str, Any], int]:
+        _meta = dict(metadata) if metadata else {}
+        if "hypothesis_id" in kwargs:
+            _meta.setdefault("hypothesis_id", kwargs.pop("hypothesis_id"))
+
+        self._seq += 1
+        event = TrajectoryEvent(
+            run_id=self._run_id,
+            seq=self._seq,
+            timestamp=datetime.now().isoformat(),
+            agent_path=agent_path,
+            node_name=node_name,
+            event_type=event_type,
+            data=data,
+            task_id=task_id,
+            metadata=_meta,
+            parent_seq=parent_seq,
+        )
+        dumped = event.model_dump()
+        line = event.model_dump_json() + "\n"
+        self._ensure_file()
+        if self._file is None:
+            raise RuntimeError(
+                "Trajectory file not initialized after _ensure_file()"
+            )
+        self._file.write(line)
+        self._file.flush()
+        self._events.append(dumped)
+        return dumped, self._seq
+
     async def record(
         self,
         event_type: str,
@@ -139,37 +179,13 @@ class TrajectoryCollector:
         Legacy callers passing ``hypothesis_id=`` directly are handled
         via **kwargs for backward compatibility.
         """
-        # Merge legacy hypothesis_id kwarg into metadata
-        _meta = dict(metadata) if metadata else {}
-        if "hypothesis_id" in kwargs:
-            _meta.setdefault("hypothesis_id", kwargs.pop("hypothesis_id"))
-
         async with self._lock:
-            self._seq += 1
-            event = TrajectoryEvent(
-                run_id=self._run_id,
-                seq=self._seq,
-                timestamp=datetime.now().isoformat(),
-                agent_path=agent_path,
-                node_name=node_name,
-                event_type=event_type,
-                data=data,
-                task_id=task_id,
-                metadata=_meta,
-                parent_seq=parent_seq,
+            dumped, seq = self._record_core(
+                event_type, agent_path, data, node_name,
+                task_id, metadata, parent_seq, **kwargs,
             )
-            dumped = event.model_dump()
-            line = event.model_dump_json() + "\n"
-            self._ensure_file()
-            if self._file is None:
-                raise RuntimeError(
-                    "Trajectory file not initialized after _ensure_file()"
-                )
-            self._file.write(line)
-            self._file.flush()
-            self._events.append(dumped)
             await self._notify_listeners(dumped)
-            return self._seq
+            return seq
 
     def record_sync(
         self,
@@ -187,36 +203,13 @@ class TrajectoryCollector:
         Writes directly without the async lock — only safe when called from
         within the event loop thread (which sync tool functions are).
         """
-        _meta = dict(metadata) if metadata else {}
-        if "hypothesis_id" in kwargs:
-            _meta.setdefault("hypothesis_id", kwargs.pop("hypothesis_id"))
-
         with self._sync_lock:
-            self._seq += 1
-            event = TrajectoryEvent(
-                run_id=self._run_id,
-                seq=self._seq,
-                timestamp=datetime.now().isoformat(),
-                agent_path=agent_path,
-                node_name=node_name,
-                event_type=event_type,
-                data=data,
-                task_id=task_id,
-                metadata=_meta,
-                parent_seq=parent_seq,
+            dumped, seq = self._record_core(
+                event_type, agent_path, data, node_name,
+                task_id, metadata, parent_seq, **kwargs,
             )
-            dumped = event.model_dump()
-            line = event.model_dump_json() + "\n"
-            self._ensure_file()
-            if self._file is None:
-                raise RuntimeError(
-                    "Trajectory file not initialized after _ensure_file()"
-                )
-            self._file.write(line)
-            self._file.flush()
-            self._events.append(dumped)
             self._notify_listeners_sync(dumped)
-            return self._seq
+            return seq
 
     def _ensure_file(self) -> None:
         if self._file is None:

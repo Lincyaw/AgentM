@@ -16,7 +16,7 @@ from rich.console import Console
 import agentm.tools.observability as obs_tools
 from agentm.exceptions import CheckpointError, DataInitError
 from agentm.tools.duckdb_sql import register_tables as duckdb_register_tables
-from agentm.builder import AgentSystemBuilder
+from agentm.builder import build_agent_system
 from agentm.config.loader import load_scenario_config, load_system_config
 from agentm.core.debug_console import DebugConsole
 from agentm.core.trajectory import TrajectoryCollector
@@ -286,10 +286,10 @@ async def run_trajectory_analysis(
     system_config.storage.checkpointer.backend = "memory"
     system_config.storage.checkpointer.url = ""
 
-    system = AgentSystemBuilder.build(
-        system_type="trajectory_analysis",
-        scenario_config=scenario_config,
-        system_config=system_config,
+    system = build_agent_system(
+        "trajectory_analysis",
+        scenario_config,
+        system_config,
     )
 
     (
@@ -616,10 +616,10 @@ async def run_investigation_headless(
         }
     )
 
-    system = AgentSystemBuilder.build(
-        system_type="hypothesis_driven",
-        scenario_config=scenario_config,
-        system_config=system_config,
+    system = build_agent_system(
+        "hypothesis_driven",
+        scenario_config,
+        system_config,
     )
 
     run_id = f"headless-{uuid.uuid4().hex[:12]}"

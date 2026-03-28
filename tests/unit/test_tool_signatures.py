@@ -153,22 +153,22 @@ class TestUpdateHypothesisSignature:
         # Required means no default value
         assert param.default is inspect.Parameter.empty
 
-    def test_status_is_literal_matching_enum(self, orch_tools):
-        """Status must be Literal with values matching HypothesisStatus enum.
+    def test_status_is_literal_matching_store(self, orch_tools):
+        """Status must be Literal with values matching HypothesisStore._VALID_STATUSES.
 
-        Bug: Literal values drift from enum → LLM passes valid Literal
-        that the enum rejects downstream.
+        Bug: Literal values drift from store → LLM passes valid Literal
+        that the store rejects downstream.
         """
-        from agentm.scenarios.rca.enums import HypothesisStatus
+        from agentm.scenarios.rca.hypothesis_store import HypothesisStore
 
         annotation = _resolve_annotation(orch_tools["update_hypothesis"], "status")
         literal_values = _extract_literal_values(annotation)
         assert literal_values is not None, "status should be a Literal type"
-        enum_values = {member.value for member in HypothesisStatus}
-        assert literal_values == enum_values, (
+        store_values = HypothesisStore._VALID_STATUSES
+        assert literal_values == store_values, (
             f"Literal drift detected.\n"
-            f"  Missing from Literal: {enum_values - literal_values}\n"
-            f"  Extra in Literal: {literal_values - enum_values}"
+            f"  Missing from Literal: {store_values - literal_values}\n"
+            f"  Extra in Literal: {literal_values - store_values}"
         )
 
     def test_no_tool_call_id_parameter(self, orch_tools):
