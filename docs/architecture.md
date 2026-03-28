@@ -902,3 +902,11 @@ agents:
 6. **Structured output with retry**: `_synthesize_output` tries `with_structured_output` up to N times, with error feedback. Falls back to plain LLM on final failure.
 
 7. **Termination via XML tag**: Orchestrator signals completion with `<decision>finalize</decision>` in its response. Falls back to "no tool calls = done" when tag is absent.
+
+8. **LLM retry with exponential backoff**: `SimpleAgentLoop._invoke_with_retry()` retries transient LLM errors (rate limits, timeouts, 5xx) with configurable `RetryConfig(max_attempts, initial_interval, backoff_factor)`.
+
+9. **Parallel tool execution**: When the LLM returns multiple tool calls in one step, they are executed concurrently via `asyncio.gather`. Single tool calls skip the gather overhead.
+
+10. **Worker concurrency limit**: `dispatch_agent` uses an `asyncio.Semaphore` (configured via `ExecutionConfig.max_concurrent_workers`) to cap parallel workers and prevent rate-limit storms.
+
+11. **Phased builder**: `build_agent_system()` delegates to four composable phases — `_create_platform_resources`, `_create_worker_infrastructure`, `_assemble_orchestrator_tools`, `_build_orchestrator_loop` — each independently testable.

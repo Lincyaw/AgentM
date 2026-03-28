@@ -154,6 +154,8 @@ class ExecutionConfig(BaseModel):
     timeout: int = 120
     tool_call_budget: Optional[int] = None
     dedup: Optional[DedupConfig] = None
+    retry: RetryConfig = RetryConfig()
+    max_concurrent_workers: Optional[int] = None
 
 
 class CompressionConfig(BaseModel):
@@ -227,6 +229,7 @@ class OrchestratorConfig(LLMConfig):
     disable_tool_binding: bool = (
         False  # set True for models that don't support bind_tools (e.g. MiniMax)
     )
+    retry: RetryConfig = RetryConfig()
 
 
 class SystemTypeConfig(BaseModel):

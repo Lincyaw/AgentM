@@ -30,6 +30,7 @@ def create_orchestrator_tools(
     *,
     config: Any | None = None,
     model_config: Any | None = None,
+    max_concurrent_workers: int | None = None,
 ) -> dict[str, Callable[..., Any]]:
     """Factory that creates orchestrator tool functions backed by AgentRuntime.
 
@@ -41,7 +42,13 @@ def create_orchestrator_tools(
         worker_factory: Factory that creates AgentLoop instances per task type.
         config: Unused (kept for backward compatibility).
         model_config: Unused (kept for backward compatibility).
+        max_concurrent_workers: Max parallel workers. None = unlimited.
     """
+    _worker_semaphore: asyncio.Semaphore | None = (
+        asyncio.Semaphore(max_concurrent_workers)
+        if max_concurrent_workers is not None
+        else None
+    )
 
     async def dispatch_agent(
         agent_id: str,
@@ -55,6 +62,9 @@ def create_orchestrator_tools(
         saving an LLM roundtrip through check_tasks.
         Multi-worker: returns immediately with status "running".
 
+        When max_concurrent_workers is configured, blocks until a slot
+        is available before spawning.
+
         Args:
             agent_id: Which agent to dispatch.
             task: Natural language instruction for the agent.
@@ -63,6 +73,9 @@ def create_orchestrator_tools(
             metadata: Optional scenario-specific key-value pairs
                 (e.g. {"hypothesis_id": "H1"} for RCA).
         """
+        if _worker_semaphore is not None:
+            await _worker_semaphore.acquire()
+
         unique_id = f"{agent_id}-{uuid.uuid4().hex[:8]}"
         loop = worker_factory.create_worker(agent_id, task_type)
 
@@ -78,6 +91,15 @@ def create_orchestrator_tools(
             config=RunConfig(metadata=run_metadata),
             metadata=run_metadata,
         )
+
+        # Release semaphore when worker finishes
+        if _worker_semaphore is not None:
+            async def _release_on_done(aid: str) -> None:
+                try:
+                    await runtime.wait(aid)
+                finally:
+                    _worker_semaphore.release()
+            asyncio.create_task(_release_on_done(handle.agent_id))
 
         # Auto-block: if this is the only running worker, wait for completion
         running_ids = runtime.get_running_ids()

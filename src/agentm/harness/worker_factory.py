@@ -98,6 +98,9 @@ class WorkerLoopFactory:
         )
         model_with_tools = model.bind_tools([t.to_openai_schema() for t in tools])
 
+        # -- Retry config --
+        retry_cfg = config.execution.retry
+
         logger.info(
             "WorkerLoopFactory: created worker %s (task_type=%s, tools=%d, middleware=%d)",
             agent_id,
@@ -112,6 +115,9 @@ class WorkerLoopFactory:
             system_prompt=system_prompt,
             middleware=middleware,
             output_schema=output_schema,
+            retry_max_attempts=retry_cfg.max_attempts,
+            retry_initial_interval=retry_cfg.initial_interval,
+            retry_backoff_factor=retry_cfg.backoff_factor,
         )
 
     # ------------------------------------------------------------------
