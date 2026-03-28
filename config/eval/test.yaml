@@ -3,7 +3,7 @@
 
 # Experiment identifier — used to group results in the DB.
 # Change this for each new experiment to avoid mixing results.
-exp_id: "agentm-3.25"
+exp_id: "agentm-3.27"
 
 # Agent / model labels written to every result row for filtering in stat.
 # model_name is optional — auto-read from scenario orchestrator.model if omitted.
@@ -24,14 +24,14 @@ data:
     - "openrca2-lite"
 
 # Rollout parallelism.
-concurrency: 4
+concurrency: 2
 
 # Root path for dataset sources.
 # Resolved as: {source_path}/{source}/converted
 source_path: "/mnt/jfs/rcabench_dataset"
 
 # Cap the number of samples to roll out (null = all).
-max_samples: null
+max_samples: 1
 
 # Judge model — called after rollout to score CausalGraph predictions.
 judge_concurrency: 4

@@ -1,10 +1,9 @@
 system:
   type: "trajectory_analysis"
-  # skill: "memory-extraction"    # Uncomment for config-driven mode
 
 orchestrator:
   model: "gpt-5.1"
-  temperature: 0.3
+  temperature: 0.7
   orchestrator_mode: "node"
   max_rounds: 40
 
@@ -33,7 +32,7 @@ orchestrator:
 agents:
   worker:
     model: "gpt-5.1-mini"
-    temperature: 0.2
+    temperature: 0.7
     prompt: "workers/trajectory-reader.md"
     task_type_prompts:
       critique: "workers/analysis-critic.md"
@@ -48,5 +47,5 @@ agents:
       - describe_tables
       - query_sql
     execution:
-      max_steps: 30
+      max_steps: 60
       timeout: 180
