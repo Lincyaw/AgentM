@@ -19,6 +19,25 @@ def _err(msg: str) -> str:
     return json.dumps({"error": msg}, ensure_ascii=False)
 
 
+def _suggest_nearby(vault: MarkdownVault, path: str) -> str:
+    """Return a hint string listing notes under the parent directory of *path*."""
+    # Try listing the parent prefix to show what exists nearby
+    parts = path.strip("/").split("/")
+    for depth in range(len(parts) - 1, -1, -1):
+        prefix = "/".join(parts[:depth]) if depth > 0 else ""
+        try:
+            entries = vault.list_notes(path=prefix, depth=5)
+        except Exception:
+            continue
+        if entries:
+            paths = [e["path"] for e in entries[:8]]
+            listing = ", ".join(paths)
+            if len(entries) > 8:
+                listing += f" (+{len(entries) - 8} more)"
+            return f"Did you mean one of: {listing}"
+    return ""
+
+
 def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
     """Create vault tool functions with closure over vault instance.
 
@@ -56,7 +75,14 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
         try:
             result = vault.read(path)
             if result is None:
-                return _err(f"Note not found: {path}")
+                # Suggest nearby paths to help the LLM recover
+                hint = _suggest_nearby(vault, path)
+                msg = f"Note not found: {path}"
+                if hint:
+                    msg += f". {hint}"
+                else:
+                    msg += ". Use vault_list() to discover available entries."
+                return _err(msg)
             return json.dumps(result, ensure_ascii=False)
         except Exception as exc:
             return _err(str(exc))
