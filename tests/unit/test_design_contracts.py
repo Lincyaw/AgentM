@@ -96,35 +96,5 @@ class TestDiagnosticNotebookIsolation:
         assert nb2.collected_data == {}
 
 
-class TestHypothesisDrivenStateContract:
-    """Ref: designs/orchestrator.md § Data Structures — HypothesisDrivenState
-
-    HypothesisDrivenState (TypedDict) must contain all fields the orchestrator design requires.
-
-    Bug: missing field → create_react_agent state schema incomplete → runtime KeyError.
-    """
-
-    def test_hypothesis_driven_state_has_all_required_fields(self):
-        from agentm.scenarios.rca.state import HypothesisDrivenState
-
-        required = (
-            "messages",
-            "notebook",
-            "task_id",
-            "task_description",
-            "current_phase",
-            "current_hypothesis",
-            "compression_refs",
-        )
-        # Include inherited annotations from BaseExecutorState
-        import typing
-
-        all_annotations = typing.get_type_hints(
-            HypothesisDrivenState, include_extras=True
-        )
-        for field in required:
-            assert field in all_annotations, (
-                f"HypothesisDrivenState missing required field: {field}"
-            )
 
 

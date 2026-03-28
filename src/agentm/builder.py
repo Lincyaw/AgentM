@@ -43,7 +43,6 @@ from agentm.harness.tool import Tool, tool_from_function
 from agentm.harness.types import AgentResult, RunConfig
 from agentm.harness.worker_factory import WorkerLoopFactory
 from agentm.tools.orchestrator import create_orchestrator_tools
-from agentm.tools.think import think
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +328,9 @@ def _assemble_orchestrator_tools(
         else:
             raise ConfigError(f"Tool {name!r} not found in registry or factory")
 
-    tools.append(think)
+    if scenario_config.orchestrator.include_think_tool:
+        from agentm.tools.think import think
+        tools.append(think)
     return tools
 
 
@@ -372,11 +373,12 @@ def _build_orchestrator_loop(
     ))
 
     if hooks.think_stall_enabled:
+        ld = config.loop_detection
         orch_middleware.append(
             LoopDetectionMiddleware(
-                threshold=5,
-                window_size=15,
-                think_stall_limit=hooks.think_stall_limit,
+                threshold=ld.threshold,
+                window_size=ld.window_size,
+                think_stall_limit=ld.think_stall_limit,
             )
         )
 
@@ -487,6 +489,16 @@ def build_agent_system(
         tools_dir=tools_dir,
         knowledge_base_dir=knowledge_base_dir,
     )
+
+    # 2b. Validate cross-references
+    if system_config is not None:
+        from agentm.config.validator import validate_references
+
+        errors = validate_references(system_config, scenario_config, resources.tool_registry)
+        if errors:
+            raise ConfigError(
+                "Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+            )
 
     # 3. Call scenario.setup()
     ctx = SetupContext(

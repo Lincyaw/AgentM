@@ -31,6 +31,7 @@ def create_orchestrator_tools(
     config: Any | None = None,
     model_config: Any | None = None,
     max_concurrent_workers: int | None = None,
+    check_tasks_wait_seconds: float = 5.0,
 ) -> dict[str, Callable[..., Any]]:
     """Factory that creates orchestrator tool functions backed by AgentRuntime.
 
@@ -141,7 +142,7 @@ def create_orchestrator_tools(
         _ = request
 
         running_ids = runtime.get_running_ids()
-        wait_seconds = _calculate_wait(running_ids)
+        wait_seconds = _calculate_wait(running_ids, check_tasks_wait_seconds)
 
         # Wait for any agent to complete (or timeout)
         if running_ids and wait_seconds > 0:
@@ -223,14 +224,6 @@ def create_orchestrator_tools(
     return tools
 
 
-def _calculate_wait(running_ids: list[str]) -> float:
-    """Simple wait time based on number of running agents.
-
-    Returns a short wait when agents are running (to catch near-completions)
-    and zero when nothing is running.
-    """
-    if not running_ids:
-        return 0.0
-    # Fixed short wait -- enough to catch agents finishing soon,
-    # not so long that the orchestrator blocks unnecessarily.
-    return 5.0
+def _calculate_wait(running_ids: list[str], default_wait: float = 5.0) -> float:
+    """Return *default_wait* when agents are running, else 0."""
+    return default_wait if running_ids else 0.0

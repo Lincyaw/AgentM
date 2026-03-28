@@ -26,7 +26,6 @@ from agentm.harness.middleware import (
     TrajectoryMiddleware,
 )
 from agentm.harness.tool import Tool
-from agentm.tools.think import think
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +137,9 @@ class WorkerLoopFactory:
                 "WorkerLoopFactory: extra tools: %s",
                 [t.name for t in self._extra_tools],
             )
-        tools.append(think)
+        if self._worker_config.include_think_tool:
+            from agentm.tools.think import think
+            tools.append(think)
         return tools
 
     def _build_system_prompt(
@@ -193,7 +194,12 @@ class WorkerLoopFactory:
         middleware.append(budget_mw)
 
         # Loop detection
-        middleware.append(LoopDetectionMiddleware(threshold=5, window_size=15))
+        ld = config.execution.loop_detection
+        middleware.append(LoopDetectionMiddleware(
+            threshold=ld.threshold,
+            window_size=ld.window_size,
+            think_stall_limit=ld.think_stall_limit,
+        ))
 
         # Compression
         if config.compression is not None:
