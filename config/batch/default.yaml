@@ -13,6 +13,7 @@ source:
   # exp_id: "agentm-v11"              # filter by experiment ID
   # agent_type: "agentm"              # filter by agent type
   # limit: 50                         # max total cases
+  # data_base_dir: "/path/to/cases"   # base dir for observability data (resolved via _eval_meta.source)
 
 # Batch execution
 batch:

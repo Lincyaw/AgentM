@@ -232,6 +232,7 @@ async def run_trajectory_analysis(
     dashboard_port: int = 8765,
     dashboard_host: str = "127.0.0.1",
     max_steps: int = 60,
+    case_data_mapping: dict[str, str] | None = None,
 ) -> None:
     """Run a trajectory analysis pass over one or more completed RCA trajectories."""
     system_config, scenario_config, _ = _load_and_override(
@@ -244,6 +245,15 @@ async def run_trajectory_analysis(
         console.print(f"  • [dim]{t}[/]")
     console.print(f"Orchestrator: [cyan]{scenario_config.orchestrator.model}[/]")
     console.print(f"Worker: [cyan]{scenario_config.agents['worker'].model}[/]")
+
+    # Register case data mapping for observability data access
+    if case_data_mapping:
+        from agentm.tools.case_data import set_case_data_mapping
+
+        set_case_data_mapping(case_data_mapping)
+        console.print(
+            f"Case data: [green]{len(case_data_mapping)}[/] cases with observability data"
+        )
 
     # Resolve case IDs and register trajectory files for structured querying
     from agentm.tools.trajectory_reader import get_reader as get_traj_reader

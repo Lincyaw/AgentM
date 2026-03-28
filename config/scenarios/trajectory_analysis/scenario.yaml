@@ -44,6 +44,9 @@ agents:
       - vault_list
       - vault_backlinks
       - vault_traverse
+      - load_case_data
+      - describe_tables
+      - query_sql
     execution:
-      max_steps: 20
-      timeout: 120
+      max_steps: 30
+      timeout: 180
