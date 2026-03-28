@@ -503,7 +503,7 @@ One-time migration converts JSON entries to Markdown:
 
 ### builder.py
 
-- `AgentSystemBuilder.build()` creates `MarkdownVault` instance
+- `build_agent_system()` creates `MarkdownVault` instance in phase 1 (platform resources)
 - Injected into tool closures (same pattern as `ServiceProfileStore`)
 
 ### Configuration
@@ -546,7 +546,6 @@ vault:
 
 ## Related Concepts
 
-- [Generic State Wrapper](generic-state-wrapper.md) --- `MemoryExtractionState`, `ReasoningStrategy` protocol
-- [Builder](builder.md) --- Vault instance creation and tool injection
+- [Scenario Protocol](generic-state-wrapper.md) --- Scenario protocol, `build_agent_system()` vault wiring
 - [Sub-Agent](sub-agent.md) --- Worker agents executing vault tool calls
 - [System Design Overview](system-design-overview.md) --- Configuration, tool registration

@@ -173,11 +173,12 @@ When `skill` is set, the Strategy pre-loads the SKILL.md body and injects it int
 ## State Schema
 
 ```python
-class TrajectoryAnalysisState(BaseExecutorState):
+class TrajectoryAnalysisState:
     """Generic state for all trajectory analysis skills.
 
-    Inherits messages, task_id, task_description, current_phase
-    from BaseExecutorState.
+    In the current harness architecture, this state is managed via
+    DynamicContextMiddleware's format_context closure, not as an
+    explicit LangGraph state object.
     """
 
     source_trajectories: list[str]                          # Thread IDs to analyze
@@ -275,7 +276,7 @@ Relative paths in this skill resolve against the skill directory.
 
 ```python
 class TrajectoryAnalysisStrategy:
-    """ReasoningStrategy for skill-driven trajectory analysis.
+    """Scenario implementation for skill-driven trajectory analysis.
 
     At init time:
     - Scans vault for skills under skill/trajectory-analysis/
@@ -613,7 +614,6 @@ The current 145-line `orchestrator_system.j2` becomes the `memory-extraction` sk
 ## Related Concepts
 
 - [System Architecture](system-design-overview.md) — Overall multi-agent framework
-- [Generic SDK Wrapper](generic-state-wrapper.md) — ReasoningStrategy, state registry, builder
+- [Scenario Protocol](generic-state-wrapper.md) — Scenario protocol, `build_agent_system()` pipeline
 - [Memory Vault](memory-vault.md) — Vault infrastructure that hosts skills and knowledge
-- [Builder](builder.md) — AgentSystemBuilder that compiles the graph
-- [Orchestrator](orchestrator.md) — Node-based orchestrator that executes the analysis
+- [Orchestrator](orchestrator.md) — SimpleAgentLoop-based orchestrator that executes the analysis
