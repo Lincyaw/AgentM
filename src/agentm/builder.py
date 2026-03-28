@@ -10,8 +10,6 @@ The build process is decomposed into four phases:
 3. _assemble_orchestrator_tools — SDK + scenario + registry tools
 4. _build_orchestrator_loop — middleware stack + LLM + SimpleAgentLoop
 
-Legacy ``AgentSystemBuilder.build()`` and ``build_from_type()`` are kept as
-backward-compatible aliases.
 """
 
 from __future__ import annotations
@@ -19,7 +17,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -73,6 +71,18 @@ def _orchestrator_should_terminate(response: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _extract_task(input_data: dict[str, Any]) -> str:
+    """Extract the task string from agent input data.
+
+    Looks for ``task_description`` first, then falls back to the content
+    of the first message.  Handles LangChain message objects (lists).
+    """
+    task = input_data.get("task_description") or input_data.get("messages", [{}])[0].get("content", "")
+    if isinstance(task, list):
+        task = str(task[0]) if task else ""
+    return str(task)
+
+
 class AgentSystem:
     """Unified interface for all agent systems.
 
@@ -105,12 +115,9 @@ class AgentSystem:
 
     async def execute(self, input_data: dict[str, Any]) -> dict[str, Any]:
         """Execute the agent system with the given input. Returns final result."""
-        task = input_data.get("task_description") or input_data.get("messages", [{}])[0].get("content", "")
-        if isinstance(task, list):
-            # Handle LangChain message objects
-            task = str(task[0]) if task else ""
+        task = _extract_task(input_data)
         result: AgentResult = await self.loop.run(
-            str(task),
+            task,
             config=RunConfig(metadata={"agent_id": "orchestrator"}),
         )
         return {"output": result.output, "status": result.status.value, "steps": result.steps}
@@ -123,12 +130,10 @@ class AgentSystem:
 
         Yields AgentEvent-like dicts from the SimpleAgentLoop's stream().
         """
-        task = input_data.get("task_description") or input_data.get("messages", [{}])[0].get("content", "")
-        if isinstance(task, list):
-            task = str(task[0]) if task else ""
+        task = _extract_task(input_data)
 
         async for event in self.loop.stream(
-            str(task),
+            task,
             config=RunConfig(metadata={"agent_id": "orchestrator"}),
         ):
             yield {"event": event}
@@ -529,53 +534,4 @@ def build_agent_system(
         runtime=runtime,
         trajectory=resources.trajectory,
         thread_id=resources.thread_id,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Backward-compatible aliases
-# ---------------------------------------------------------------------------
-
-
-class AgentSystemBuilder:
-    """Legacy entry point — delegates to ``build_agent_system()``.
-
-    Preserved for backward compatibility with existing callers.
-    """
-
-    @staticmethod
-    def build(
-        system_type: str,
-        scenario_config: ScenarioConfig,
-        system_config: Any | None = None,
-        existing_thread_id: str | None = None,
-        tools_dir: Path | str | None = None,
-        knowledge_base_dir: str | None = None,
-    ) -> AgentSystem:
-        """Build an AgentSystem from a system type and scenario config."""
-        return build_agent_system(
-            system_type,
-            scenario_config,
-            system_config,
-            thread_id=existing_thread_id,
-            tools_dir=tools_dir,
-            knowledge_base_dir=knowledge_base_dir,
-        )
-
-
-def build_from_type(
-    system_type: str,
-    scenario_config: ScenarioConfig,
-    system_config: Any | None = None,
-    existing_thread_id: str | None = None,
-) -> AgentSystem:
-    """Bridge function --- delegates to ``build_agent_system()``.
-
-    Provided for callers that prefer a plain function over a static method.
-    """
-    return build_agent_system(
-        system_type,
-        scenario_config,
-        system_config,
-        thread_id=existing_thread_id,
     )
