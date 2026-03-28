@@ -5,14 +5,14 @@ concepts:
   sdk_consistency:
     description: "SDK semantic consistency refactoring: unified Tool type (@tool decorator, no StructuredTool), Scenario protocol (setup() -> ScenarioWiring), single ScenarioRegistry (replaces 4 global registries), dead code removal, langchain boundary convergence (HumanMessage/StructuredTool removed from SDK internals)."
     design: "designs/sdk-consistency.md"
-    related_concepts: [agent_harness, system_architecture, builder, reasoning_strategy, middleware_system]
+    related_concepts: [agent_harness, system_architecture, scenario_protocol, middleware_system]
     plans: ["plans/2026-03-26-sdk-consistency.md"]
     tasks: []
 
   agent_harness:
-    description: "Core SDK redesign: AgentLoop Protocol, AgentRuntime (harness replacing TaskManager+AgentPool), Middleware protocol (3 hooks), bidirectional agent communication via inbox queues, CheckpointStore protocol. LangGraph removed from execution path."
+    description: "Core SDK: AgentLoop Protocol, AgentRuntime (lifecycle management), SimpleAgentLoop (ReAct cycle), Middleware protocol (3 hooks: on_llm_start, on_llm_end, on_tool_call), bidirectional agent communication via inbox queues, CheckpointStore protocol. Pure Python, no LangGraph."
     design: "designs/agent-harness.md"
-    related_concepts: [sdk_consistency, system_architecture, orchestrator, sub_agent, generic_state_wrapper, execution_runner, middleware_system]
+    related_concepts: [sdk_consistency, system_architecture, orchestrator, sub_agent, execution_runner, middleware_system, scenario_protocol]
     plans: []
     tasks: []
 
@@ -23,127 +23,62 @@ concepts:
     plans: []
     tasks: []
     tests:
-      - file: "tests/unit/test_design_contracts.py"
-        layer: "L1 — Deterministic Invariants"
-      - file: "tests/unit/test_knowledge_path_utils.py"
-        layer: "L1 — Deterministic Invariants"
-      - file: "tests/unit/test_state_registry.py"
-        layer: "L1 — Deterministic Invariants"
       - file: "tests/unit/test_config_validation.py"
-        layer: "L1 — Deterministic Invariants"
-      - file: "tests/unit/test_hypothesis_state_machine.py"
-        layer: "L1 — Deterministic Invariants"
-      - file: "tests/unit/test_notebook_immutability.py"
-        layer: "L1 — Deterministic Invariants"
-      - file: "tests/unit/test_managed_task.py"
         layer: "L1 — Deterministic Invariants"
       - file: "tests/unit/test_interface_consistency.py"
         layer: "L1 — Deterministic Invariants"
       - file: "tests/unit/test_tool_signatures.py"
         layer: "L1 — Deterministic Invariants"
-      - file: "tests/unit/test_task_manager_retry.py"
-        layer: "L1 — Deterministic Invariants"
       - file: "tests/snapshot/test_tool_pipeline.py"
         layer: "L2 — Snapshot Pipeline"
       - file: "tests/snapshot/test_error_recovery.py"
-        layer: "L2 — Snapshot Pipeline"
-      - file: "tests/snapshot/test_hypothesis_lifecycle.py"
-        layer: "L2 — Snapshot Pipeline"
-      - file: "tests/snapshot/test_compression_recall.py"
         layer: "L2 — Snapshot Pipeline"
       - file: "tests/unit/test_generic_sdk.py"
         layer: "L1 — Deterministic Invariants"
 
   system_architecture:
-    description: "LangGraph Supervisor+Subgraph multi-agent orchestration system with config-driven design, trajectory recording, monitoring, and failure recovery. Generic SDK layer: TypeVar S, ReasoningStrategy Protocol, AgentMMiddleware (self-contained modules in middleware/), StorageBackend, GenericAgentSystemBuilder. Plugin-based scenario registration via scenarios.discover() — SDK registries have zero hardcoded scenario imports. No separate agents/hooks, core/compression, or strategies/ directory. Evolution: agent-harness.md proposes AgentRuntime + AgentLoop Protocol as next-gen SDK core."
+    description: "Pure Python multi-agent orchestration system. SimpleAgentLoop-based ReAct cycle, AgentRuntime for worker management, WorkerLoopFactory for config-driven worker creation, build_agent_system() single canonical builder, Scenario protocol for domain logic, Middleware protocol (3 hooks) for cross-cutting concerns. Config-driven design, trajectory recording, monitoring, and failure recovery."
     design: "designs/system-design-overview.md"
-    related_concepts: [agent_harness, orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner, builder, reasoning_strategy, middleware_system, storage_backend, trajectory_analysis]
+    related_concepts: [agent_harness, orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner, scenario_protocol, middleware_system, storage_backend, trajectory_analysis]
     plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
     tasks: []
 
   orchestrator:
-    description: "create_react_agent acting as hypothesis reasoner. Maintains DiagnosticNotebook, drives RCA flow in ReAct loop (phases are Notebook state markers, not graph nodes), context compression with checkpoint-backed recall. Dispatches Sub-Agents asynchronously via TaskManager, monitors/injects/aborts via tools"
+    description: "SimpleAgentLoop-based orchestrator with DynamicContextMiddleware for state injection. Dispatches workers via AgentRuntime. Monitors/injects/aborts via dispatch_agent/check_tasks/inject_instruction/abort_task tools. RCA scenario uses HypothesisStore for hypothesis reasoning."
     design: "designs/orchestrator.md"
     related_concepts: [system_architecture, sub_agent, trajectory_system, memory_system, execution_runner]
     plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
-    tests:
-      - file: "tests/unit/test_design_contracts.py"
-        covers:
-          - "HypothesisStatus enum matches update_hypothesis tool Literal (§ Orchestrator Tools)"
-          - "Verdict enum matches VerificationResult.verdict (§ Data Structures)"
-          - "Phase enum matches four diagnostic phases (§ Overview)"
-          - "DiagnosticNotebook instance isolation (§ Data Structures)"
-          - "ExecutorState has all required fields (§ Data Structures)"
-      - file: "tests/unit/test_hypothesis_state_machine.py"
-        covers:
-          - "Every HypothesisStatus has a transition entry (§ State Machine)"
-          - "Only confirmed is a terminal state (§ State Machine)"
-          - "Rejected cannot directly confirm (§ State Machine)"
-      - file: "tests/unit/test_notebook_immutability.py"
-        covers:
-          - "Notebook operations return new instances (§ Data Structures)"
-          - "Original notebook unchanged after mutation (§ Data Structures)"
-      - file: "tests/snapshot/test_hypothesis_lifecycle.py"
-        covers:
-          - "Illegal transitions rejected (§ State Machine)"
-          - "Set confirmed hypothesis consistency (§ Orchestrator Tools)"
 
   sub_agent:
-    description: "Node-based worker subgraphs (4-node StateGraph: dispatch → llm_call ↔ tool_node → collect_and_compress). Isolated State Schema, config-driven tools/prompts, NodePipeline middleware (budget, compression, trajectory), dedup tool wrapping, data-only constraint in RCA mode. AgentPool factory with extra_tools injection for cross-agent shared tools (service profile). Launched as asyncio.Tasks by TaskManager"
+    description: "Worker agents built by WorkerLoopFactory as SimpleAgentLoop instances. Config-driven tools/prompts, middleware stack (budget, compression, dedup, trajectory). Data-only constraint in RCA mode. Launched as asyncio.Tasks by AgentRuntime."
     design: "designs/sub-agent.md"
     related_concepts: [system_architecture, orchestrator, configuration_system, execution_runner, service_profile]
     plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
     tasks: []
-    tests:
-      - file: "tests/unit/test_design_contracts.py"
-        covers:
-          - "SubAgentState has all required fields (§ State Schema)"
 
   generic_state_wrapper:
-    description: "Generic SDK architecture: TypeVar S parameterizes framework over user-defined state types. ReasoningStrategy[S] Protocol, StrategyRegistry (plugin-based, no hardcoded defaults), GenericAgentSystemBuilder[S] fluent builder, AgentMMiddleware pipeline, StorageBackend protocol, TaskResult[R] typed results. Scenario registration via scenarios.discover() entry point"
+    description: "Scenario Protocol architecture: Scenario protocol (setup() -> ScenarioWiring), SetupContext (platform resources), ScenarioRegistry (register/discover), build_agent_system() 4-phase pipeline integration. 3 built-in scenarios: RCA (hypothesis_driven), trajectory_analysis, general_purpose."
     design: "designs/generic-state-wrapper.md"
-    related_concepts: [orchestrator, configuration_system, memory_system, builder, reasoning_strategy, middleware_system, storage_backend]
+    related_concepts: [agent_harness, orchestrator, configuration_system, memory_system, scenario_protocol, middleware_system, builder]
     plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
     tests:
-      - file: "tests/unit/test_state_registry.py"
-        covers:
-          - "State Schema Registry resolves all 4 system types to correct TypedDict (§ State Schema Registry)"
-          - "Unknown/partial system_type raises helpful error (§ State Schema Registry)"
       - file: "tests/unit/test_generic_sdk.py"
         layer: "L1 — Deterministic Invariants"
-        covers:
-          - "ReasoningStrategy Protocol runtime_checkable (§ Strategy)"
-          - "StrategyRegistry lookup and registration (§ Strategy Registry)"
-          - "HypothesisDrivenStrategy initial state and phase graph (§ Strategies)"
-          - "TrajectoryAnalysisStrategy initial state and phase graph (§ Strategies)"
-          - "AgentMMiddleware compose_middleware chaining (§ Middleware)"
-          - "BudgetMiddleware, DedupMiddleware class hierarchy (§ Middleware)"
-          - "StorageBackend protocol satisfaction (§ Backend)"
-          - "FilesystemBackend read/write/glob/grep/path traversal (§ Backend)"
-          - "CompositeBackend prefix routing (§ Backend)"
-          - "TaskResult[R] frozen generic dataclass (§ Message Protocol)"
-          - "GenericAgentSystemBuilder fluent API (§ Builder)"
 
   memory_system:
-    description: "Two-layer memory: intra-task (context compression + recall_history tool backed by checkpoint chain, see orchestrator.md) and cross-task (trajectory_analysis scenario with memory-extraction skill writing to vault, see trajectory-analysis.md)"
+    description: "Two-layer memory: intra-task (context compression via CompressionMiddleware, see orchestrator.md) and cross-task (trajectory_analysis scenario with memory-extraction skill writing to vault, see trajectory-analysis.md)"
     design: "designs/orchestrator.md"
-    related_concepts: [orchestrator, generic_state_wrapper, trajectory_system, memory_vault, trajectory_analysis]
+    related_concepts: [orchestrator, trajectory_system, memory_vault, trajectory_analysis]
     related_designs: ["designs/trajectory-analysis.md"]
     plans: ["plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
-    tests:
-      - file: "tests/unit/test_knowledge_path_utils.py"
-        covers:
-          - "path_to_namespace — root, deep, trailing slash, empty string (§ Knowledge Store namespace)"
-          - "path_to_namespace_and_key — key extraction, single segment (§ Knowledge Store)"
-          - "Round-trip path↔namespace idempotency and normalization (§ Knowledge Store)"
 
   trajectory_analysis:
     description: "Skill-driven trajectory analysis scenario. Replaces memory_extraction. Agent Skills spec (SKILL.md + references/ + examples/) in vault under skill/trajectory-analysis/. Three-tier progressive disclosure: catalog → SKILL.md → references/. Model-driven or config-driven skill activation. Generic state (TrajectoryAnalysisState), two phases (analyze → synthesize)."
     design: "designs/trajectory-analysis.md"
-    related_concepts: [system_architecture, generic_state_wrapper, memory_system, memory_vault, builder, reasoning_strategy, configuration_system]
+    related_concepts: [system_architecture, memory_system, memory_vault, scenario_protocol, configuration_system]
     plans: ["plans/2026-03-24-trajectory-analysis.md"]
     tasks:
       - "tasks/2026-03-24-ta-state-strategy.md"
@@ -166,55 +101,41 @@ concepts:
           - "ScenarioConfig composition — accepts complete valid scenario (§ Configuration — scenario.yaml)"
 
   trajectory_system:
-    description: "Hierarchical trace capture via TaskManager registry (TaskTraceRef). Independent checkpoint chains per agent, linked by task_id. Export to RL training format. CompressionRef stored in state. LLM input recording via middleware/trajectory.py (build_llm_input_hook)"
+    description: "Hierarchical trace capture via TrajectoryCollector (JSONL event recording). Independent checkpoint chains per agent, linked by task_id. Export to RL training format. LLM input recording via TrajectoryMiddleware (on_llm_start, on_tool_call, on_llm_end hooks)."
     design: "designs/orchestrator.md"
     related_concepts: [system_architecture, orchestrator, recovery_system, memory_system, execution_runner, trajectory, debug_console, middleware_system]
     plans: []
     tasks: []
 
   recovery_system:
-    description: "Four-layer error handling: Sub-Agent self-heal, API+Task retry (ChatOpenAI max_retries + TaskManager exponential backoff), Orchestrator decision (with error summary + last steps), manual system recovery via checkpoint resume. Debug replay via checkpoint fork"
+    description: "Four-layer error handling: Worker self-heal, API retry (ChatOpenAI max_retries + AgentRuntime retry logic), Orchestrator decision (with error summary + last steps), manual system recovery via checkpoint resume. Debug replay via checkpoint fork."
     design: "designs/system-design-overview.md"
     related_concepts: [system_architecture, trajectory_system, orchestrator, sub_agent, execution_runner]
     plans: []
     tasks: []
     tests:
-      - file: "tests/unit/test_task_manager_retry.py"
-        covers:
-          - "Exponential backoff retry in TaskManager (§ Recovery Layer 2)"
       - file: "tests/snapshot/test_error_recovery.py"
         covers:
           - "Inject/abort workflows (§ Recovery Layer 3)"
 
   execution_runner:
-    description: "TaskManager: manages async Sub-Agent execution as asyncio.Tasks. Provides backing for dispatch_agent/check_tasks/inject_instruction/abort_task tools. Injects instructions via interrupt+Command(resume). Streams events to frontend WebSocket"
+    description: "AgentRuntime: manages async worker execution. Provides dispatch_agent/check_tasks/inject_instruction/abort_task tools. Spawns workers as AgentHandle instances, bidirectional communication via inbox queues. Streams events to frontend WebSocket."
     design: "designs/orchestrator.md"
     related_concepts: [orchestrator, sub_agent, frontend_architecture, trajectory_system, trajectory, debug_console]
     plans: []
     tasks: []
     tests:
-      - file: "tests/unit/test_managed_task.py"
-        covers:
-          - "ManagedTask instruction isolation (§ TaskManager)"
-          - "ManagedTask required workflow fields (§ TaskManager)"
-          - "ManagedTask checkpoint linking fields (§ Trajectory)"
-      - file: "tests/unit/test_task_manager_retry.py"
-        covers:
-          - "Retry success after transient failure (§ Recovery Layer 2)"
-          - "Exhausted retries mark FAILED (§ Recovery Layer 2)"
-          - "CancelledError not retried (§ Recovery Layer 2)"
-          - "Exponential backoff schedule (§ Recovery Layer 2)"
       - file: "tests/snapshot/test_tool_pipeline.py"
         covers:
-          - "dispatch_agent creates managed task (§ Orchestrator Tools)"
+          - "dispatch_agent creates worker task (§ Orchestrator Tools)"
           - "check_tasks returns completed/failed results (§ Orchestrator Tools)"
       - file: "tests/snapshot/test_error_recovery.py"
         covers:
           - "inject_instruction rejected for non-running tasks (§ Instruction Injection)"
-          - "abort_task sets FAILED status and cancels asyncio.Task (§ TaskManager)"
+          - "abort_task cancels running worker (§ AgentRuntime)"
 
   frontend_architecture:
-    description: "Read-only observation dashboard: Agent Topology (d3.js), Execution Monitor (timeline+detail), Conversation View (scenario plugin), Debug Panel (checkpoint browser). Single HTML file, React + WebSocket + d3.js. Scenario plugin architecture for extensibility"
+    description: "Read-only observation dashboard: Agent Topology (d3.js), Execution Monitor (timeline+detail), Conversation View (scenario plugin), Debug Panel (checkpoint browser). Single HTML file, React + WebSocket + d3.js. Scenario plugin architecture for extensibility. Backend streams events via AgentRuntime."
     design: "designs/frontend-architecture.md"
     related_concepts: [system_architecture, trajectory_system, orchestrator, execution_runner, configuration_system, debug_console]
     plans: []
@@ -235,32 +156,21 @@ concepts:
     tasks: []
 
   builder:
-    description: "AgentSystemBuilder (legacy) + GenericAgentSystemBuilder[S] (new fluent builder). Factory closure DI, lazy async checkpointer, trajectory wiring. Generic builder accepts ReasoningStrategy[S], middleware pipeline, StorageBackend"
-    design: "designs/builder.md"
-    related_concepts: [system_architecture, orchestrator, sub_agent, trajectory, configuration_system, reasoning_strategy, middleware_system, storage_backend]
+    description: "build_agent_system() — single canonical 4-phase builder (platform resources -> worker infra -> orch tools -> orch loop). Scenario-driven, no legacy wrappers. Factory closure DI for tools, trajectory wiring."
+    related_concepts: [system_architecture, orchestrator, sub_agent, trajectory, configuration_system, scenario_protocol, middleware_system, storage_backend]
     plans: ["plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
-    tests:
-      - file: "tests/unit/test_generic_sdk.py"
-        covers:
-          - "GenericAgentSystemBuilder requires strategy and scenario (§ Builder)"
-          - "Fluent API returns self for chaining (§ Builder)"
 
-  reasoning_strategy:
-    description: "ReasoningStrategy[S] Protocol: pluggable domain logic. Defines initial_state, format_context, phase_definitions, should_terminate, compress_state, get_answer_schemas, state_schema. StrategyRegistry maps system-type names to instances. Concrete: HypothesisDrivenStrategy, TrajectoryAnalysisStrategy, GeneralPurposeStrategy"
-    related_concepts: [generic_state_wrapper, builder, orchestrator]
-    plans: []
+  scenario_protocol:
+    description: "Scenario Protocol: pluggable domain logic. setup(ctx) -> ScenarioWiring (orchestrator_tools, worker_tools, format_context, answer_schemas, output_schema, hooks, should_terminate, middleware). ScenarioRegistry maps names to instances. Concrete: RCAScenario (hypothesis_driven), TrajectoryAnalysisScenario, GeneralPurposeScenario."
+    design: "designs/sdk-consistency.md"
+    related_concepts: [agent_harness, builder, orchestrator]
+    plans: ["plans/2026-03-26-sdk-consistency.md"]
     tasks: []
-    tests:
-      - file: "tests/unit/test_generic_sdk.py"
-        covers:
-          - "Protocol runtime_checkable verification"
-          - "Strategy registry lookup and custom registration"
-          - "Concrete strategy initial state and phase definitions"
 
   middleware_system:
-    description: "AgentMMiddleware base class with before_model/abefore_model/aafter_model/awrap_tool_call hooks. compose_middleware() for React-mode pre_model_hook chaining. NodePipeline for Node-mode graphs (before + after lifecycle). Each middleware module is self-contained (hook factory + middleware class colocated): middleware/compression.py, middleware/dedup.py, middleware/instruction.py, middleware/trajectory.py (before: llm_start, after: tool_call/llm_end), middleware/budget.py, middleware/loop_detection.py, middleware/pre_completion.py, middleware/tool_output.py"
-    related_concepts: [generic_state_wrapper, builder, sub_agent, tool_dedup]
+    description: "Middleware protocol with 3 hooks: on_llm_start, on_llm_end, on_tool_call. Chain pattern for composing multiple middlewares. Concrete implementations: DynamicContextMiddleware, LoopDetectionMiddleware, CompressionMiddleware, BudgetMiddleware, DedupMiddleware, SkillMiddleware, TrajectoryMiddleware. Each middleware module is self-contained in middleware/."
+    related_concepts: [agent_harness, builder, sub_agent, tool_dedup]
     plans: []
     tasks: []
     tests:
@@ -269,16 +179,10 @@ concepts:
           - "Base middleware passthrough"
           - "compose_middleware chaining"
           - "Class hierarchy verification"
-      - file: "tests/unit/test_harness_middleware.py"
-        layer: "L1 — Deterministic Invariants"
-        covers:
-          - "LoopDetectionMiddleware threshold and window behavior"
-          - "PreCompletionChecklistMiddleware one-shot trigger"
-          - "ToolOutputOffloadMiddleware truncation with head+tail"
 
   storage_backend:
     description: "StorageBackend Protocol (read/write/ls/glob/grep/exists/mkdir). FilesystemBackend for local fs with path traversal prevention. CompositeBackend for prefix-based routing to sub-backends (modeled after Deep Agents CompositeBackend)"
-    related_concepts: [generic_state_wrapper, builder, memory_system, memory_vault]
+    related_concepts: [agent_harness, builder, memory_system, memory_vault]
     plans: []
     tasks: []
     tests:
@@ -292,7 +196,7 @@ concepts:
   memory_vault:
     description: "Markdown + YAML frontmatter persistent knowledge vault with SQLite-backed three-layer index (structural, link graph, FTS5 + sqlite-vec). Replaces JSON-based KnowledgeStore. [[wikilink]] bidirectional linking, atomic write flow, vault_edit with 4 incremental edit primitives (replace_string, set_frontmatter, replace_section, append_section), rebuildable index."
     design: "designs/memory-vault.md"
-    related_concepts: [memory_system, generic_state_wrapper, builder, storage_backend, configuration_system]
+    related_concepts: [memory_system, agent_harness, storage_backend, configuration_system]
     plans: ["plans/2026-03-16-memory-vault.md"]
     tasks:
       - "tasks/2026-03-16-vault-parser.md"
@@ -305,7 +209,7 @@ concepts:
       - "tasks/2026-03-16-vault-integration.md"
 
   tool_dedup:
-    description: "Two-layer tool call deduplication: pre-model hook (soft limit, HumanMessage reminder) + tool wrapper (hard limit, short rejection). DedupTracker with OrderedDict FIFO eviction. Excludes think tool. Per-agent-invocation cache. All code in middleware/dedup.py"
+    description: "Two-layer tool call deduplication: on_llm_start hook (soft limit, reminder injection) + tool wrapper (hard limit, short rejection). DedupTracker with OrderedDict FIFO eviction. Excludes think tool. Per-agent-invocation cache. All code in middleware/dedup.py"
     design: "designs/tool-dedup.md"
     related_concepts: [sub_agent, configuration_system, middleware_system]
     plans: []
@@ -319,7 +223,7 @@ concepts:
   service_profile:
     description: "Thread-safe, run-scoped shared service knowledge store (ServiceProfileStore). Orchestrator and workers both read/write via update_service_profile/query_service_profile tools. Merge semantics: topology union, observations append, anomaly upgrade only. Injected into workers via extra_tools, into orchestrator via format_context partial binding."
     design: "designs/sub-agent.md"
-    related_concepts: [orchestrator, sub_agent, builder, execution_runner]
+    related_concepts: [orchestrator, sub_agent, execution_runner]
     plans: []
     tasks: []
     tests:

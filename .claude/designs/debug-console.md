@@ -41,6 +41,8 @@ New entries push older ones off the bottom. This provides a real-time view of wh
 
 ### 3. Hypothesis Board
 
+> **Note**: The Hypothesis Board is RCA-scenario-specific (not SDK core). It only displays data when running the `hypothesis_driven` scenario.
+
 Displays the current hypothesis state:
 
 | Column | Source |
@@ -109,7 +111,7 @@ The console does not own the TrajectoryCollector -- it is a passive consumer.
 ## Related Documents
 
 - [Trajectory Collector](trajectory.md) -- Event source
-- [Builder](builder.md) -- Wires the console into the agent system
+- [SDK Consistency](sdk-consistency.md) -- build_agent_system() wires the console into the agent system
 - [Frontend Architecture](frontend-architecture.md) -- Web-based observation dashboard (complementary to terminal UI)
 
 ---

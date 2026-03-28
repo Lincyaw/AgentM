@@ -141,7 +141,7 @@ Agents start as `pending` (known from config but no events received yet). On fir
 
 ## Frontend Data Model
 
-The frontend maintains its own in-memory state, accumulated from WebSocket events. This is separate from the backend's `TaskManager` (which serves the Orchestrator's tools).
+The frontend maintains its own in-memory state, accumulated from WebSocket events. This is separate from the backend's `AgentRuntime` (which serves the Orchestrator's tools).
 
 ```typescript
 /** Frontend-side agent tracking, accumulated from WebSocket events */
@@ -181,7 +181,7 @@ interface AgentMessage {
 }
 ```
 
-**Key design**: The frontend accumulates tool call history and messages directly from WebSocket events, rather than requesting them from the backend. The backend's `TaskManager` serves a different consumer (the Orchestrator's tools like `check_tasks`) with a different interface (status snapshots, progress summaries).
+**Key design**: The frontend accumulates tool call history and messages directly from WebSocket events, rather than requesting them from the backend. The backend's `AgentRuntime` serves a different consumer (the Orchestrator's tools like `check_tasks`) with a different interface (status snapshots, progress summaries).
 
 ---
 
@@ -263,7 +263,7 @@ Selected agent's full execution trace:
 
 ## Page 3: Conversation View (RCA Scenario Component)
 
-Phase-based conversation flow rebuilt from DiagnosticNotebook. This page is **scenario-specific** — it is provided by the RCA scenario plugin.
+Conversation flow rebuilt from trajectory events. This page is **scenario-specific** — it is provided by the RCA scenario plugin.
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
@@ -337,7 +337,7 @@ Phase-based conversation flow rebuilt from DiagnosticNotebook. This page is **sc
 
 ### Data reconstruction
 
-The frontend reconstructs the conversation from `DiagnosticNotebook` via the `rebuildConversation()` function (see [orchestrator.md](orchestrator.md#frontend-conversation-reconstruction)). The notebook is received via WebSocket as part of the orchestrator's state updates.
+The frontend reconstructs the conversation from trajectory events streamed via WebSocket. Events include `llm_start`, `llm_end`, `tool_call`, `tool_result`, and lifecycle events (`task_dispatch`, `task_complete`).
 
 ---
 
@@ -408,7 +408,7 @@ Checkpoint browser and state inspector for post-hoc analysis, replay, and trajec
 
 ## WebSocket Event Protocol
 
-The frontend connects to `ws://{host}/ws` and receives JSON events from the TaskManager.
+The frontend connects to `ws://{host}/ws` and receives JSON events from the AgentRuntime.
 
 ### Event envelope
 
@@ -496,12 +496,9 @@ const RCAPlugin: ScenarioPlugin = {
   ConversationView: RCAConversationView,  // The Phase 1-4 view described above
 
   parseState: (data) => ({
-    notebook: data.notebook,                 // DiagnosticNotebook
-    hypotheses: data.notebook?.hypotheses,
-    currentPhase: data.notebook?.current_phase,
-    explorationHistory: data.notebook?.exploration_history,
-    collectedData: data.notebook?.collected_data,      // Per-agent raw results
-    phaseSummaries: data.notebook?.phase_summaries,     // Compressed phase summaries
+    hypotheses: data.hypotheses,             // From HypothesisStore via trajectory events
+    serviceProfiles: data.serviceProfiles,   // From ServiceProfileStore via trajectory events
+    agents: data.agents,                     // From AgentRuntime status
   }),
 
   decorateTopologyNode: (agentId, state) => {
@@ -533,7 +530,7 @@ FastAPI endpoints serving the frontend:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Serve the static HTML dashboard |
-| `/ws` | WebSocket | Real-time event stream from TaskManager |
+| `/ws` | WebSocket | Real-time event stream from AgentRuntime |
 | `/api/topology` | GET | Static agent topology (from scenario config) |
 | `/api/tasks/{thread_id}/state` | GET | Current graph state (for page refresh) |
 | `/api/tasks/{thread_id}/history` | GET | Checkpoint history for Debug Panel |
@@ -715,7 +712,7 @@ Shared components:
 ## Related Documents
 
 - [System Architecture](system-design-overview.md) — Overall system design, frontend overview
-- [Orchestrator](orchestrator.md) — TaskManager, WebSocket forwarding, conversation reconstruction
+- [Orchestrator](orchestrator.md) — AgentRuntime, WebSocket forwarding, conversation reconstruction
 - [Sub-Agent](sub-agent.md) — Agent configuration that informs topology
 
 ---
