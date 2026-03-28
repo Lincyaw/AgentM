@@ -28,7 +28,7 @@ class TrajectoryEvent(BaseModel):
     node_name: str                           # Graph node that produced the event (e.g., "agent", "tools")
     event_type: str                          # One of the defined event types (see below)
     data: dict[str, Any]                     # Event-type-specific payload
-    task_id: Optional[str] = None            # TaskManager task_id, if event relates to a task
+    task_id: Optional[str] = None            # AgentRuntime task_id, if event relates to a task
     hypothesis_id: Optional[str] = None      # Hypothesis ID, if event relates to hypothesis reasoning
     parent_seq: Optional[int] = None         # Sequence number of the parent event (for causal linking)
 ```
@@ -42,10 +42,10 @@ class TrajectoryEvent(BaseModel):
 | `tool_call` | Builder (orchestrator hooks) | `{tool_name, args}` |
 | `tool_result` | Builder (orchestrator hooks) | `{tool_name, result_preview}` |
 | `llm_end` | Builder (orchestrator hooks) | `{model, token_usage, content_preview}` |
-| `task_dispatch` | TaskManager | `{task_id, agent_id, task_type, instruction_preview}` |
-| `task_complete` | TaskManager | `{task_id, agent_id, duration_seconds, result_preview}` |
-| `task_fail` | TaskManager | `{task_id, agent_id, error}` |
-| `task_abort` | TaskManager | `{task_id, agent_id, reason}` |
+| `task_dispatch` | AgentRuntime | `{task_id, agent_id, task_type, instruction_preview}` |
+| `task_complete` | AgentRuntime | `{task_id, agent_id, duration_seconds, result_preview}` |
+| `task_fail` | AgentRuntime | `{task_id, agent_id, error}` |
+| `task_abort` | AgentRuntime | `{task_id, agent_id, reason}` |
 | `hypothesis_update` | Orchestrator tools | `{hypothesis_id, status, description}` |
 
 ---
@@ -106,11 +106,11 @@ Primary consumer: the [Debug Console](debug-console.md), which registers `on_tra
 
 | Component | Events Produced | Mechanism |
 |-----------|----------------|-----------|
-| **Builder** | `tool_call`, `tool_result`, `llm_end` | Registers LangGraph event hooks on the orchestrator graph |
-| **TaskManager** | `task_dispatch`, `task_complete`, `task_fail`, `task_abort` | Calls `record()` / `record_sync()` at task lifecycle transitions |
+| **TrajectoryMiddleware** | `tool_call`, `tool_result`, `llm_end` | Middleware hooks (on_llm_start, on_tool_call, on_llm_end) on SimpleAgentLoop |
+| **AgentRuntime** | `task_dispatch`, `task_complete`, `task_fail`, `task_abort` | Calls `record()` / `record_sync()` at task lifecycle transitions |
 | **Orchestrator tools** | `hypothesis_update` | `update_hypothesis` tool calls `record_sync()` after state update |
 
-The Builder creates the TrajectoryCollector during `build()` and injects it into the TaskManager via `set_trajectory()`. The TaskManager uses the collector to record all task lifecycle events.
+The `build_agent_system()` builder creates the TrajectoryCollector during build and injects it into the AgentRuntime. The AgentRuntime uses the collector to record all task lifecycle events. TrajectoryMiddleware is added to the middleware stack to capture LLM and tool events.
 
 ---
 
@@ -119,7 +119,7 @@ The Builder creates the TrajectoryCollector during `build()` and injects it into
 - [System Architecture](system-design-overview.md) -- Overall system design
 - [Orchestrator](orchestrator.md) -- Trajectory Registry (TaskTraceRef) for hierarchical trace linking
 - [Debug Console](debug-console.md) -- Real-time event consumer
-- [Builder](builder.md) -- Wires TrajectoryCollector into the agent system
+- [SDK Consistency](sdk-consistency.md) -- build_agent_system() wires TrajectoryCollector into the agent system
 
 ---
 
@@ -130,6 +130,6 @@ The Builder creates the TrajectoryCollector during `build()` and injects it into
 | JSONL format | Append-only, streaming-friendly, easy to parse line-by-line for analysis |
 | Pydantic model for events | Schema validation at creation time; serialization to dict/JSON is trivial |
 | Dual async/sync recording | Tools and hooks may run in sync or async contexts; both paths must be supported |
-| Listener fan-out | Decouples producers (Builder, TaskManager) from consumers (Debug Console, future analytics) |
+| Listener fan-out | Decouples producers (TrajectoryMiddleware, AgentRuntime) from consumers (Debug Console, future analytics) |
 | Lazy file init | Avoids creating empty trajectory files for runs that produce no events |
 | Sequence numbering | Enables causal ordering and parent-child linking across events |

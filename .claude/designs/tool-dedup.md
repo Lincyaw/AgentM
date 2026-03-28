@@ -7,7 +7,7 @@
 
 ## Overview
 
-Sub-Agents in the ReAct loop frequently repeat identical tool calls (same tool name + same arguments), wasting tokens on duplicate API responses. This module provides a **two-layer deduplication** system:
+Workers in SimpleAgentLoop frequently repeat identical tool calls (same tool name + same arguments), wasting tokens on duplicate API responses. This module provides a **two-layer deduplication** system:
 
 1. **Pre-model Hook (soft limit)**: Before each LLM call, scans message history for past tool calls, injects a short SystemMessage telling the LLM not to repeat those calls (no result content included — to save tokens).
 2. **Tool Wrapper (hard limit)**: Wraps each tool so that repeated `(tool_name, args)` calls are **blocked** with a short rejection message, without re-executing or returning cached results.
@@ -79,13 +79,13 @@ The hook scans all `AIMessage` tool calls and their corresponding `ToolMessage` 
 ## Wrapper: wrap_tool_with_dedup
 
 ```python
-def wrap_tool_with_dedup(tool: StructuredTool, tracker: DedupTracker) -> StructuredTool:
+def wrap_tool_with_dedup(tool: Tool, tracker: DedupTracker) -> Tool:
     """Wrap a tool so repeated (name, args) calls are blocked.
 
     - On first call: execute tool, record key in tracker, return result
     - On repeat call: return short rejection message ("BLOCKED: ...")
     - Does NOT return cached results — the goal is token savings
-    - Preserves tool name, description, and args_schema
+    - Preserves tool name, description, and parameters
     """
 ```
 
@@ -115,14 +115,13 @@ agents:
 
 ## Integration Points
 
-### create_sub_agent (sub_agent.py)
+### WorkerLoopFactory.create_worker
 
 When `config.execution.dedup` is set and enabled:
 
 1. Create `DedupTracker(max_cache_size=config.execution.dedup.max_cache_size)`
 2. Wrap all tools (except `think`) with `wrap_tool_with_dedup(tool, tracker)`
-3. Create dedup hook via `build_dedup_hook(tracker)`
-4. Chain into `pre_model_hook`: `budget → compression → dedup → llm_input`
+3. Add `DedupMiddleware` to the worker's middleware stack
 
 ### Exclusions
 
