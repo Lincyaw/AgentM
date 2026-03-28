@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Shared query logic (used by both orchestrator and worker profile tools)
+# Shared profile tool logic — single implementation, two call modes
 # ---------------------------------------------------------------------------
 
 def _do_query(
@@ -23,7 +23,7 @@ def _do_query(
     service_names: str,
     anomalous_only: bool,
 ) -> str:
-    """Shared query logic for both orchestrator and worker versions.
+    """Shared query logic for profile tools.
 
     *service_names* may be a single name, comma-separated names, or empty.
     When empty, returns all profiles grouped by anomalous/healthy status.
@@ -32,19 +32,49 @@ def _do_query(
         names = [n.strip() for n in service_names.split(",") if n.strip()]
         if len(names) == 1:
             return store.format_profile(names[0])
-        # Multiple names -- batch query
-        parts: list[str] = []
-        for name in names:
-            parts.append(store.format_profile(name))
-        return "\n\n".join(parts)
-    # No names specified -- return all profiles
+        return "\n\n".join(store.format_profile(n) for n in names)
     if anomalous_only:
         profiles = store.query(anomalous_only=True)
         if not profiles:
             return "No anomalous services recorded yet."
-        lines = [store.format_profile(p.service_name) for p in profiles]
-        return "\n".join(lines)
+        return "\n".join(store.format_profile(p.service_name) for p in profiles)
     return store.format_for_llm() or "No service profiles recorded yet."
+
+
+def _update_profile_core(
+    profile_store: Any,
+    service_name: str,
+    is_anomalous: bool,
+    anomaly_summary: str = "",
+    upstream_services: Optional[list[str]] = None,
+    downstream_services: Optional[list[str]] = None,
+    data_sources_queried: Optional[list[str]] = None,
+    key_observation: str = "",
+    source_agent_id: str = "",
+    source_task_type: str = "scout",
+    related_hypothesis_id: Optional[str] = None,
+) -> tuple[str, int]:
+    """Core profile update logic shared by orchestrator and worker tools.
+
+    Returns (formatted_content, existing_obs_count).
+    """
+    existing = profile_store.get(service_name)
+    existing_obs_count = len(existing.observations) if existing else 0
+
+    profile = profile_store.update(
+        service_name,
+        agent_id=source_agent_id,
+        task_type=source_task_type,
+        is_anomalous=is_anomalous,
+        anomaly_summary=anomaly_summary,
+        upstream_services=upstream_services,
+        downstream_services=downstream_services,
+        data_sources_queried=data_sources_queried,
+        key_observation=key_observation,
+        related_hypothesis_id=related_hypothesis_id,
+    )
+    content = profile_store.format_profile(profile.service_name)
+    return content, existing_obs_count
 
 
 # ---------------------------------------------------------------------------
@@ -56,10 +86,7 @@ def _build_rca_orchestrator_tools(
     hypothesis_store: Any,
     profile_store: Any,
 ) -> list[Any]:
-    """Build orchestrator-side RCA tools as SDK Tool instances.
-
-    Tools capture stores and trajectory via closure.
-    """
+    """Build orchestrator-side RCA tools as SDK Tool instances."""
     from agentm.harness.tool import Tool
 
     tools: list[Tool] = []
@@ -159,41 +186,19 @@ def _build_rca_orchestrator_tools(
             the information you intend to add. Only call this to add genuinely NEW
             information not already captured by workers.
             """
-            # Check existing profile before update to generate hint
-            existing = profile_store.get(service_name)
-            worker_obs = (
-                [
-                    o
-                    for o in existing.observations
-                    if o.source_agent_id != "orchestrator"
-                ]
-                if existing
-                else []
+            content, obs_count = _update_profile_core(
+                profile_store,
+                service_name, is_anomalous, anomaly_summary,
+                upstream_services, downstream_services, data_sources_queried,
+                key_observation, source_agent_id, source_task_type,
+                related_hypothesis_id,
             )
-
-            profile = profile_store.update(
-                service_name,
-                agent_id=source_agent_id,
-                task_type=source_task_type,
-                is_anomalous=is_anomalous,
-                anomaly_summary=anomaly_summary,
-                upstream_services=upstream_services,
-                downstream_services=downstream_services,
-                data_sources_queried=data_sources_queried,
-                key_observation=key_observation,
-                related_hypothesis_id=related_hypothesis_id,
-            )
-            content = profile_store.format_profile(profile.service_name)
-
-            # Hint: if workers already contributed, remind orchestrator
-            if worker_obs:
-                hint = (
-                    f"NOTE: This profile already had {len(worker_obs)} observation(s) "
-                    f"from worker agents. Consider using query_service_profile first "
-                    f"to review existing data before adding updates.\n\n"
-                )
-                content = hint + content
-
+            if obs_count > 0:
+                content = (
+                    f"NOTE: This profile already had {obs_count} observation(s) "
+                    f"from other agents. Use query_service_profile to review "
+                    f"existing data before adding more updates.\n\n"
+                ) + content
             return content
 
         async def query_service_profile(
@@ -206,10 +211,8 @@ def _build_rca_orchestrator_tools(
             Args:
                 request: A short description of what you want to look up.
                 service_names: One or more service names, comma-separated.
-                    E.g. "serviceA" or "serviceA,serviceB,serviceC".
                     Empty string returns ALL profiles grouped by anomalous/healthy.
-                anomalous_only: If True, return only anomalous services (ignored
-                    when service_names is non-empty).
+                anomalous_only: If True, return only anomalous services.
             """
             return _do_query(profile_store, service_names, anomalous_only)
 
@@ -222,8 +225,7 @@ def _build_rca_orchestrator_tools(
 def _build_rca_worker_tools(profile_store: Any) -> list[Any]:
     """Build worker-side RCA tools as SDK Tool instances.
 
-    Worker tools are sync (no trajectory recording) and use the same
-    LLM-facing names as the orchestrator versions.
+    Worker tools are sync and reuse the same core logic as orchestrator.
     """
     from agentm.harness.tool import Tool
 
@@ -247,38 +249,22 @@ def _build_rca_worker_tools(profile_store: Any) -> list[Any]:
         """Update the shared Service Profile for a service.
 
         Keep all inputs SHORT -- a profile is a quick-reference card, not a report.
-        - anomaly_summary: one terse line, e.g., "p99 60s vs 4s, 45% errors"
-        - key_observation: one sentence max, factual, no reasoning
-
         TIP: Call query_service_profile first to check if another agent has
         already recorded findings for this service. Only add NEW information.
         """
-        # Check existing profile before update to generate hint
-        existing = profile_store.get(service_name)
-        existing_obs_count = len(existing.observations) if existing else 0
-
-        profile = profile_store.update(
-            service_name,
-            agent_id=source_agent_id,
-            task_type=source_task_type,
-            is_anomalous=is_anomalous,
-            anomaly_summary=anomaly_summary,
-            upstream_services=upstream_services,
-            downstream_services=downstream_services,
-            data_sources_queried=data_sources_queried,
-            key_observation=key_observation,
-            related_hypothesis_id=related_hypothesis_id,
+        content, obs_count = _update_profile_core(
+            profile_store,
+            service_name, is_anomalous, anomaly_summary,
+            upstream_services, downstream_services, data_sources_queried,
+            key_observation, source_agent_id, source_task_type,
+            related_hypothesis_id,
         )
-        content = profile_store.format_profile(profile.service_name)
-
-        if existing_obs_count > 0:
-            hint = (
-                f"NOTE: This profile already had {existing_obs_count} observation(s) "
-                f"from other agents. Use query_service_profile to review existing "
-                f"data before adding more updates.\n\n"
-            )
-            content = hint + content
-
+        if obs_count > 0:
+            content = (
+                f"NOTE: This profile already had {obs_count} observation(s) "
+                f"from other agents. Use query_service_profile to review "
+                f"existing data before adding more updates.\n\n"
+            ) + content
         return content
 
     def query_service_profile_worker(
@@ -291,14 +277,11 @@ def _build_rca_worker_tools(profile_store: Any) -> list[Any]:
         Args:
             request: A short description of what you want to look up.
             service_names: One or more service names, comma-separated.
-                E.g. "serviceA" or "serviceA,serviceB,serviceC".
                 Empty string returns ALL profiles grouped by anomalous/healthy.
-            anomalous_only: If True, return only anomalous services (ignored
-                when service_names is non-empty).
+            anomalous_only: If True, return only anomalous services.
         """
         return _do_query(profile_store, service_names, anomalous_only)
 
-    # Use LLM-facing names (no _worker suffix)
     tools.append(tool_from_function(
         update_service_profile_worker,
         name="update_service_profile",
@@ -338,24 +321,20 @@ class RCAScenario:
         from agentm.scenarios.rca.output import CausalGraph
         from agentm.scenarios.rca.service_profile import ServiceProfileStore
 
-        # 1. Create domain stores
         hypothesis_store = HypothesisStore()
         profile_store = ServiceProfileStore()
 
-        # 2. Create tools
         orch_tools = _build_rca_orchestrator_tools(
             ctx.trajectory, hypothesis_store, profile_store,
         )
         worker_tools = _build_rca_worker_tools(profile_store)
 
-        # 3. format_context -- zero-arg callable via partial
         format_fn = partial(
             format_rca_context,
             profile_store=profile_store,
             hypothesis_store=hypothesis_store,
         )
 
-        # 4. Hooks -- same as HypothesisDrivenStrategy.orchestrator_hooks()
         hooks = OrchestratorHooks(
             think_stall_enabled=True,
             think_stall_limit=3,

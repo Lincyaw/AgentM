@@ -147,6 +147,14 @@ class DedupConfig(BaseModel):
     max_cache_size: int = 50
 
 
+class LoopDetectionConfig(BaseModel):
+    """Loop detection configuration for an agent or orchestrator."""
+
+    threshold: int = 5
+    window_size: int = 15
+    think_stall_limit: int = 3
+
+
 class ExecutionConfig(BaseModel):
     """Execution configuration for an agent."""
 
@@ -155,6 +163,7 @@ class ExecutionConfig(BaseModel):
     tool_call_budget: Optional[int] = None
     dedup: Optional[DedupConfig] = None
     retry: RetryConfig = RetryConfig()
+    loop_detection: LoopDetectionConfig = LoopDetectionConfig()
     max_concurrent_workers: Optional[int] = None
 
 
@@ -163,7 +172,8 @@ class CompressionConfig(BaseModel):
 
     enabled: bool = True
     compression_threshold: float = 0.8
-    compression_model: str = "gpt-5.1-mini"
+    compression_model: str = "gpt-4o-mini"
+    context_window: int = 128_000
     preserve_latest_n: int = 2
     prompt: Optional[str] = None
     recall: Optional[dict[str, Any]] = None
@@ -180,6 +190,7 @@ class LLMConfig(BaseModel):
     temperature: float
     compression: Optional[CompressionConfig] = None
     skills: list[str] = []
+    include_think_tool: bool = True
 
 
 class AgentConfig(LLMConfig):
@@ -230,6 +241,7 @@ class OrchestratorConfig(LLMConfig):
         False  # set True for models that don't support bind_tools (e.g. MiniMax)
     )
     retry: RetryConfig = RetryConfig()
+    loop_detection: LoopDetectionConfig = LoopDetectionConfig()
 
 
 class SystemTypeConfig(BaseModel):
