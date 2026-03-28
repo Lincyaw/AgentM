@@ -180,7 +180,7 @@ def collect_from_directory(
         source = meta.get("source", "") or ""
         resolved_data_dir = ""
         if data_base_dir and source:
-            candidate = Path(data_base_dir) / source
+            candidate = Path(data_base_dir) / source / "converted"
             if candidate.is_dir():
                 resolved_data_dir = str(candidate)
 
@@ -349,9 +349,7 @@ def collect_from_db(
             )
         )
 
-    console.print(
-        f"Exported [green]{len(cases)}[/] cases to [cyan]{out_dir}[/]"
-    )
+    console.print(f"Exported [green]{len(cases)}[/] cases to [cyan]{out_dir}[/]")
     return cases
 
 
@@ -439,7 +437,9 @@ def build_batch_task(
         label = (
             "INCORRECT"
             if c.correct is False
-            else "CORRECT" if c.correct is True else "UNKNOWN"
+            else "CORRECT"
+            if c.correct is True
+            else "UNKNOWN"
         )
         source_tag = f" source={c.source}" if c.source else ""
         agent_ans = (c.extracted_final_answer or "N/A")[:150]
@@ -470,9 +470,7 @@ def build_batch_task(
 # ---------------------------------------------------------------------------
 
 
-def group_into_batches(
-    cases: list[CaseInfo], batch_size: int
-) -> list[list[CaseInfo]]:
+def group_into_batches(cases: list[CaseInfo], batch_size: int) -> list[list[CaseInfo]]:
     """Split cases into groups of batch_size."""
     return [cases[i : i + batch_size] for i in range(0, len(cases), batch_size)]
 
@@ -529,9 +527,7 @@ async def run_batch_analysis(cfg: BatchConfig, cases: list[CaseInfo]) -> None:
             task = build_batch_task(batch, batch_idx, cfg.task)
             trajectories = [str(c.file_path) for c in batch]
             # Build case_id -> data_dir mapping for observability data access
-            case_data_mapping = {
-                c.case_id: c.data_dir for c in batch if c.data_dir
-            }
+            case_data_mapping = {c.case_id: c.data_dir for c in batch if c.data_dir}
             try:
                 await run_trajectory_analysis(
                     trajectories=trajectories,
