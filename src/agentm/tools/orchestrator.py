@@ -28,8 +28,6 @@ def create_orchestrator_tools(
     runtime: AgentRuntime,
     worker_factory: WorkerFactory,
     *,
-    config: Any | None = None,
-    model_config: Any | None = None,
     max_concurrent_workers: int | None = None,
     check_tasks_wait_seconds: float = 5.0,
 ) -> dict[str, Callable[..., Any]]:
@@ -41,8 +39,6 @@ def create_orchestrator_tools(
     Args:
         runtime: AgentRuntime instance for agent lifecycle management.
         worker_factory: Factory that creates AgentLoop instances per task type.
-        config: Unused (kept for backward compatibility).
-        model_config: Unused (kept for backward compatibility).
         max_concurrent_workers: Max parallel workers. None = unlimited.
     """
     _worker_semaphore: asyncio.Semaphore | None = (
