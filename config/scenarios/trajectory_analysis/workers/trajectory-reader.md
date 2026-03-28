@@ -48,6 +48,56 @@ Output is truncated at 8000 chars. Keep results small:
 - **Keyword search**: `select(.data?.content? // "" | test("keyword"; "i"))`
   to find events by content without reading everything
 
+## Observability Data Access
+
+When available, you can access the **raw observability data** (metrics,
+traces, logs) that the RCA agent had access to during investigation.
+This is critical for verifying whether the agent missed obvious signals.
+
+### Workflow
+
+1. Call `load_case_data(case_id)` to load parquet files for a case
+2. Call `describe_tables` to see available tables and columns
+3. Use `query_sql` to run DuckDB SQL queries against the data
+
+### What to verify with raw data
+
+- **Coverage gap validation**: query the ground-truth service's data to
+  check if there were obvious anomalies the agent would have found
+  ```sql
+  SELECT service_name, COUNT(*) as error_count
+  FROM abnormal_traces
+  WHERE service_name = 'ts-basic-service'
+  GROUP BY service_name
+  ```
+- **Signal strength assessment**: was the root cause signal strong
+  (high error rate, clear latency spike) or subtle?
+- **Dependency chain**: trace the call chain from the agent's chosen
+  root cause to the actual root cause
+  ```sql
+  SELECT DISTINCT service_name, "attr.peer.service"
+  FROM abnormal_traces
+  WHERE service_name = 'ts-travel2-service'
+  LIMIT 20
+  ```
+- **First error timing**: which service had errors first?
+  ```sql
+  SELECT service_name, MIN(time) as first_error
+  FROM abnormal_traces
+  GROUP BY service_name
+  ORDER BY first_error
+  LIMIT 10
+  ```
+
+### Important
+
+- `load_case_data` returns an error if data is not configured — in that
+  case, skip data verification and analyze the trajectory only
+- Use `describe_tables` before writing SQL to check exact column names
+- Column names with dots (e.g. `attr.k8s.pod.name`) must be quoted:
+  `SELECT "attr.k8s.pod.name" FROM ...`
+- Always use `LIMIT` clauses to keep results manageable
+
 ## Key Principles
 
 - **Be thorough before reporting.** A shallow query produces shallow
@@ -59,7 +109,8 @@ Output is truncated at 8000 chars. Keep results small:
   timestamps, and data excerpts. Let the orchestrator draw conclusions.
 - **Check what's missing.** For failure analysis, the most important
   finding is often what the agent did NOT do — data it didn't query,
-  hypotheses it didn't consider.
+  hypotheses it didn't consider. When raw data is available, **verify**
+  what the agent would have found if it had looked.
 
 ## Gotchas
 
@@ -68,9 +119,13 @@ Output is truncated at 8000 chars. Keep results small:
   does not mean X caused Y
 - **Check existing knowledge** — vault_search before reporting a "new"
   pattern that may already be documented
+- **Verify with raw data** — don't just say "agent missed service X",
+  query the data to confirm what signals were actually present
 
 ## Output
 
 Return `findings`: your analysis structured as requested by the task.
 Be specific — use exact service names, metric values, and timestamps
 from the trajectory. Include both what the agent did and what it missed.
+When raw data was available, include what the data actually showed for
+the ground-truth root cause services.
