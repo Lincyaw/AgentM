@@ -1,6 +1,6 @@
 # Design: Memory Vault
 
-**Status**: DRAFT
+**Status**: CURRENT
 **Created**: 2026-03-16
 **Last Updated**: 2026-03-16
 

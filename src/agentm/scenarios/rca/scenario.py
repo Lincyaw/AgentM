@@ -6,11 +6,14 @@ context formatting, answer schemas, output schema, and hooks.
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
-from agentm.harness.tool import tool_from_function
+from agentm.harness.tool import Tool, tool_from_function
+from agentm.scenarios.rca.hypothesis_store import HypothesisStore
+from agentm.scenarios.rca.service_profile import ServiceProfileStore
 
 if TYPE_CHECKING:
+    from agentm.core.trajectory import TrajectoryCollector
     from agentm.harness.scenario import ScenarioWiring, SetupContext
 
 
@@ -19,7 +22,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 def _do_query(
-    store: Any,
+    store: "ServiceProfileStore",
     service_names: str,
     anomalous_only: bool,
 ) -> str:
@@ -42,17 +45,17 @@ def _do_query(
 
 
 def _update_service_profile(
-    profile_store: Any,
+    profile_store: "ServiceProfileStore",
     service_name: str,
     is_anomalous: bool,
     anomaly_summary: str = "",
-    upstream_services: Optional[list[str]] = None,
-    downstream_services: Optional[list[str]] = None,
-    data_sources_queried: Optional[list[str]] = None,
+    upstream_services: "Optional[list[str]]" = None,
+    downstream_services: "Optional[list[str]]" = None,
+    data_sources_queried: "Optional[list[str]]" = None,
     key_observation: str = "",
     source_agent_id: str = "",
     source_task_type: str = "scout",
-    related_hypothesis_id: Optional[str] = None,
+    related_hypothesis_id: "Optional[str]" = None,
 ) -> str:
     """Update the shared Service Profile for a service.
 
@@ -90,7 +93,7 @@ def _update_service_profile(
 
 
 def _query_service_profile(
-    profile_store: Any,
+    profile_store: "ServiceProfileStore",
     request: str,
     service_names: str = "",
     anomalous_only: bool = False,
@@ -110,7 +113,7 @@ def _query_service_profile(
 # Tool builders
 # ---------------------------------------------------------------------------
 
-def _build_profile_tools(profile_store: Any) -> list[Any]:
+def _build_profile_tools(profile_store: "ServiceProfileStore | None") -> list[Tool]:
     """Build service profile tools (shared by orchestrator and worker)."""
     if profile_store is None:
         return []
@@ -132,10 +135,10 @@ def _build_profile_tools(profile_store: Any) -> list[Any]:
 
 
 def _build_rca_orchestrator_tools(
-    trajectory: Any | None,
-    hypothesis_store: Any,
-    profile_store: Any,
-) -> list[Any]:
+    trajectory: "TrajectoryCollector | None",
+    hypothesis_store: "HypothesisStore",
+    profile_store: "ServiceProfileStore",
+) -> list[Tool]:
     """Build orchestrator-side RCA tools as SDK Tool instances."""
     from agentm.harness.tool import Tool
 
@@ -215,7 +218,7 @@ def _build_rca_orchestrator_tools(
     return tools
 
 
-def _build_rca_worker_tools(profile_store: Any) -> list[Any]:
+def _build_rca_worker_tools(profile_store: "ServiceProfileStore") -> list[Tool]:
     """Build worker-side RCA tools as SDK Tool instances."""
     return _build_profile_tools(profile_store)
 

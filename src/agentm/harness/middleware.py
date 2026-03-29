@@ -15,7 +15,8 @@ import tiktoken
 
 from agentm.config.schema import CompressionConfig, ModelConfig
 from agentm.core.trajectory import TrajectoryCollector
-from agentm.harness.types import LoopContext
+from agentm.harness.types import LoopContext, Message
+from agentm.tools.vault.store import MarkdownVault
 
 logger = logging.getLogger(__name__)
 
@@ -25,28 +26,28 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def msg_role(msg: Any) -> str:
+def msg_role(msg: Message) -> str:
     """Extract the role/type string from a message (dict or LC object)."""
     if isinstance(msg, dict):
         return msg.get("role", "")
     return getattr(msg, "type", "")
 
 
-def msg_content(msg: Any) -> str:
+def msg_content(msg: Message) -> str:
     """Extract text content from a message."""
     if isinstance(msg, dict):
         return msg.get("content", "")
     return getattr(msg, "content", "")
 
 
-def msg_tool_calls(msg: Any) -> list[dict[str, Any]]:
+def msg_tool_calls(msg: Message) -> list[dict[str, Any]]:
     """Extract tool_calls list from a message."""
     if isinstance(msg, dict):
         return msg.get("tool_calls", [])
     return getattr(msg, "tool_calls", None) or []
 
 
-def msg_is_system(msg: Any) -> bool:
+def msg_is_system(msg: Message) -> bool:
     """Return True if the message is a system message."""
     if isinstance(msg, dict):
         return msg.get("role") == "system"
@@ -65,11 +66,11 @@ class MiddlewareBase:
     """
 
     async def on_llm_start(
-        self, messages: list[Any], ctx: LoopContext
-    ) -> list[Any]:
+        self, messages: list[Message], ctx: LoopContext
+    ) -> list[Message]:
         return messages
 
-    async def on_llm_end(self, response: Any, ctx: LoopContext) -> Any:
+    async def on_llm_end(self, response: object, ctx: LoopContext) -> object:
         return response
 
     async def on_tool_call(
@@ -95,7 +96,7 @@ _SUMMARIZE_PROMPT = (
 )
 
 
-def _get_encoding(model: str) -> Any:
+def _get_encoding(model: str) -> tiktoken.Encoding:
     """Get a tiktoken encoding, falling back to cl100k_base."""
     try:
         return tiktoken.encoding_for_model(model)
@@ -103,7 +104,7 @@ def _get_encoding(model: str) -> Any:
         return tiktoken.get_encoding("cl100k_base")
 
 
-def _count_tokens(messages: list[Any], model: str) -> int:
+def _count_tokens(messages: list[Message], model: str) -> int:
     """Count tokens across all messages using the model's tokenizer."""
     encoding = _get_encoding(model)
     total = 0
@@ -114,7 +115,7 @@ def _count_tokens(messages: list[Any], model: str) -> int:
     return total
 
 
-def _format_messages_for_summary(messages: list[Any]) -> list[str]:
+def _format_messages_for_summary(messages: list[Message]) -> list[str]:
     """Format messages into text lines for the summarization prompt."""
     formatted = []
     for msg in messages:
@@ -130,7 +131,7 @@ def _format_messages_for_summary(messages: list[Any]) -> list[str]:
 
 
 def _summarize_messages(
-    messages: list[Any],
+    messages: list[Message],
     model: str,
     model_config: ModelConfig | None = None,
 ) -> str:
@@ -209,8 +210,8 @@ class BudgetMiddleware(MiddlewareBase):
         return self._exhausted
 
     async def on_llm_start(
-        self, messages: list[Any], ctx: LoopContext
-    ) -> list[Any]:
+        self, messages: list[Message], ctx: LoopContext
+    ) -> list[Message]:
         step_remaining = max(0, self._max_steps - ctx.step)
         tool_remaining = (
             max(0, self._tool_call_budget - ctx.tool_call_count)
@@ -294,8 +295,8 @@ class CompressionMiddleware(MiddlewareBase):
         self._preserve_n = config.preserve_latest_n
 
     async def on_llm_start(
-        self, messages: list[Any], ctx: LoopContext
-    ) -> list[Any]:
+        self, messages: list[Message], ctx: LoopContext
+    ) -> list[Message]:
         token_count = _count_tokens(messages, model=self._config.compression_model)
 
         if token_count < self._threshold_tokens:
@@ -330,7 +331,7 @@ class CompressionMiddleware(MiddlewareBase):
 # ---------------------------------------------------------------------------
 
 
-def _count_trailing_think_only(messages: list[Any], think_tool: str) -> int:
+def _count_trailing_think_only(messages: list[Message], think_tool: str) -> int:
     """Count consecutive AI messages from the tail where the only tool is think."""
     streak = 0
     for msg in reversed(messages):
@@ -359,8 +360,8 @@ class LoopDetectionMiddleware(MiddlewareBase):
         self._think_tool_name = think_tool_name
 
     async def on_llm_start(
-        self, messages: list[Any], ctx: LoopContext
-    ) -> list[Any]:
+        self, messages: list[Message], ctx: LoopContext
+    ) -> list[Message]:
         # Think-stall detection
         streak = _count_trailing_think_only(messages, self._think_tool_name)
         if streak >= self._think_stall_limit:
@@ -420,8 +421,8 @@ class TrajectoryMiddleware(MiddlewareBase):
         self._last_message_count = 0
 
     async def on_llm_start(
-        self, messages: list[Any], ctx: LoopContext
-    ) -> list[Any]:
+        self, messages: list[Message], ctx: LoopContext
+    ) -> list[Message]:
         total = len(messages)
         new_messages = messages[self._last_message_count :]
         self._last_message_count = total
@@ -438,7 +439,7 @@ class TrajectoryMiddleware(MiddlewareBase):
         )
         return messages
 
-    async def on_llm_end(self, response: Any, ctx: LoopContext) -> Any:
+    async def on_llm_end(self, response: object, ctx: LoopContext) -> object:
         tool_calls = getattr(response, "tool_calls", None) or []
         content = getattr(response, "content", "")
 
@@ -532,8 +533,8 @@ class DedupMiddleware(MiddlewareBase):
         return self._tracker
 
     async def on_llm_start(
-        self, messages: list[Any], ctx: LoopContext
-    ) -> list[Any]:
+        self, messages: list[Message], ctx: LoopContext
+    ) -> list[Message]:
         if self._tracker.size == 0:
             return messages
 
@@ -591,7 +592,7 @@ class DedupMiddleware(MiddlewareBase):
 class SkillMiddleware(MiddlewareBase):
     """Injects skill context from a MarkdownVault into the system prompt."""
 
-    def __init__(self, vault: Any, skill_paths: list[str]) -> None:
+    def __init__(self, vault: MarkdownVault, skill_paths: list[str]) -> None:
         self._skill_descriptions: list[dict[str, str]] = []
         for path in skill_paths:
             note = vault.read(path)
@@ -647,14 +648,14 @@ class SkillMiddleware(MiddlewareBase):
         )
 
     async def on_llm_start(
-        self, messages: list[Any], ctx: LoopContext
-    ) -> list[Any]:
+        self, messages: list[Message], ctx: LoopContext
+    ) -> list[Message]:
         if not self._skill_descriptions:
             return messages
 
         skills_section = self._build_skills_section()
 
-        new_messages: list[Any] = []
+        new_messages: list[Message] = []
         injected = False
 
         for msg in messages:
@@ -697,8 +698,8 @@ class DynamicContextMiddleware(MiddlewareBase):
         self._max_rounds = max_rounds
 
     async def on_llm_start(
-        self, messages: list[Any], ctx: LoopContext
-    ) -> list[Any]:
+        self, messages: list[Message], ctx: LoopContext
+    ) -> list[Message]:
         context_text = self._format_fn()
 
         round_num = ctx.step + 1

@@ -29,7 +29,7 @@ def create_orchestrator_tools(
     worker_factory: WorkerFactory,
     *,
     max_concurrent_workers: int | None = None,
-    check_tasks_wait_seconds: float = 5.0,
+    check_tasks_wait_seconds: float = 600.0,
 ) -> dict[str, Callable[..., Any]]:
     """Factory that creates orchestrator tool functions backed by AgentRuntime.
 
@@ -91,11 +91,13 @@ def create_orchestrator_tools(
 
         # Release semaphore when worker finishes
         if _worker_semaphore is not None:
+
             async def _release_on_done(aid: str) -> None:
                 try:
                     await runtime.wait(aid)
                 finally:
                     _worker_semaphore.release()
+
             asyncio.create_task(_release_on_done(handle.agent_id))
 
         # Auto-block: if this is the only running worker, wait for completion
@@ -220,6 +222,6 @@ def create_orchestrator_tools(
     return tools
 
 
-def _calculate_wait(running_ids: list[str], default_wait: float = 5.0) -> float:
+def _calculate_wait(running_ids: list[str], default_wait: float = 600.0) -> float:
     """Return *default_wait* when agents are running, else 0."""
     return default_wait if running_ids else 0.0

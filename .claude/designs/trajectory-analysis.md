@@ -1,6 +1,6 @@
 # Design: Trajectory Analysis
 
-**Status**: DRAFT
+**Status**: CURRENT
 **Created**: 2026-03-24
 **Last Updated**: 2026-03-24
 

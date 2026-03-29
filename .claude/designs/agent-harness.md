@@ -1,6 +1,6 @@
 # Design: Agent Harness SDK
 
-**Status**: PROPOSAL
+**Status**: CURRENT
 **Created**: 2026-03-26
 
 ---

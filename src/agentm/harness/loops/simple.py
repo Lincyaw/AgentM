@@ -10,15 +10,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
+from agentm.harness.middleware import MiddlewareBase
+from agentm.harness.protocols import AgentLoop, CheckpointStore
 from agentm.harness.tool import Tool
 from agentm.harness.types import (
     AgentEvent,
     AgentResult,
     AgentStatus,
     LoopContext,
+    Message,
+    ModelProtocol,
     RunConfig,
 )
 
@@ -35,7 +39,7 @@ def _is_retryable(exc: Exception) -> bool:
     return any(s in msg for s in _RETRYABLE_SUBSTRINGS)
 
 
-class SimpleAgentLoop:
+class SimpleAgentLoop(AgentLoop):
     """Pure-Python agent loop. No LangGraph dependency.
 
     Implements the ReAct cycle: LLM -> tool calls -> LLM -> ... -> final answer.
@@ -47,15 +51,15 @@ class SimpleAgentLoop:
     def __init__(
         self,
         *,
-        model: Any,  # Protocol: async ainvoke(messages) -> response
+        model: ModelProtocol,  # Protocol: async ainvoke(messages) -> response
         tools: list[Tool],
         system_prompt: str,
-        middleware: list[Any] | None = None,
+        middleware: list[MiddlewareBase] | None = None,
         output_schema: type | None = None,
         output_prompt: str = "",
         synthesize_retries: int = 2,
-        should_terminate: Callable[[Any], bool] | None = None,
-        checkpoint_store: Any | None = None,
+        should_terminate: Callable[[object], bool] | None = None,
+        checkpoint_store: CheckpointStore | None = None,
         retry_max_attempts: int = 3,
         retry_initial_interval: float = 1.0,
         retry_backoff_factor: float = 2.0,
@@ -83,7 +87,7 @@ class SimpleAgentLoop:
         """
         self._inbox.append(message)
 
-    async def _invoke_with_retry(self, messages: list[Any]) -> Any:
+    async def _invoke_with_retry(self, messages: list[Message]) -> object:
         """Call the LLM with exponential backoff retry on transient errors."""
         last_exc: Exception | None = None
         delay = self._retry_initial_interval
@@ -107,7 +111,7 @@ class SimpleAgentLoop:
 
         raise last_exc  # type: ignore[misc]  # unreachable, satisfies type checker
 
-    async def _synthesize_output(self, messages: list[Any]) -> Any:
+    async def _synthesize_output(self, messages: list[Message]) -> object:
         """Produce final output, optionally using output_schema with retry/fallback.
 
         When output_schema is set, tries structured output up to
@@ -130,7 +134,7 @@ class SimpleAgentLoop:
         non_system = [
             m for m in messages if not (isinstance(m, dict) and m.get("role") == "system")
         ]
-        synth_messages: list[Any] = []
+        synth_messages: list[Message] = []
         if self._output_prompt:
             synth_messages.append({"role": "system", "content": self._output_prompt})
         synth_messages.extend(non_system)
@@ -192,7 +196,7 @@ class SimpleAgentLoop:
 
     def _build_tool_chain(
         self, ctx: LoopContext
-    ) -> Callable[[str, dict[str, Any]], Any]:
+    ) -> Callable[[str, dict[str, Any]], Awaitable[str]]:
         """Build the middleware-wrapped tool execution chain (once per step)."""
 
         async def _actual_call(n: str, a: dict[str, Any]) -> str:
@@ -205,15 +209,15 @@ class SimpleAgentLoop:
                 )
             return await tool.ainvoke(a)
 
-        chain = _actual_call
+        chain: Callable[[str, dict[str, Any]], Awaitable[str]] = _actual_call
         for mw in reversed(self._middleware):
             prev = chain
 
             async def _wrap(
                 n: str,
                 a: dict[str, Any],
-                _mw: Any = mw,
-                _prev: Any = prev,
+                _mw: MiddlewareBase = mw,
+                _prev: Callable[[str, dict[str, Any]], Awaitable[str]] = prev,
             ) -> str:
                 return await _mw.on_tool_call(n, a, _prev, ctx)
 
@@ -242,7 +246,7 @@ class SimpleAgentLoop:
         agent_id = config.metadata.get("agent_id", "")
 
         # Build initial message list: system prompt + user input
-        messages: list[Any] = [
+        messages: list[Message] = [
             {"role": "system", "content": self._system_prompt},
             {"role": "human", "content": input},
         ]
@@ -284,7 +288,7 @@ class SimpleAgentLoop:
             for mw in self._middleware:
                 response = await mw.on_llm_end(response, ctx)
 
-            messages.append(response)
+            messages.append(response)  # type: ignore[arg-type]
             yield AgentEvent(
                 type="llm_end",
                 agent_id=agent_id,
