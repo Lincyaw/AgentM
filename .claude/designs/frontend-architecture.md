@@ -402,7 +402,7 @@ Checkpoint browser and state inspector for post-hoc analysis, replay, and trajec
 | Fork here | Create a new branch from this checkpoint | `POST /api/tasks/{thread_id}/fork` with `{checkpoint_id, state_updates}` |
 | Export trajectory | Download full trajectory as JSONL | `GET /api/tasks/{thread_id}/trajectory` |
 
-> **Note**: These actions call the backend REST API, which internally uses `graph.invoke(None, checkpoint_config)` for replay and `graph.update_state()` for fork. See [system-design-overview.md](system-design-overview.md#failure-recovery) for the recovery mechanism.
+> **Note**: These actions call the backend REST API, which internally uses `AgentSystem.resume()` for replay and `AgentSystem.fork()` for fork. See [system-design-overview.md](system-design-overview.md#failure-recovery) for the recovery mechanism.
 
 ---
 
@@ -427,7 +427,7 @@ Frontend infers event type from `agent_path` and `data` content:
 
 | Condition | Interpreted As | UI Action |
 |-----------|---------------|-----------|
-| `agent_path = ["orchestrator"]` + `data.notebook` | Orchestrator state update | Update Conversation View, Topology phase |
+| `agent_path = ["orchestrator"]` + `data.state` | Orchestrator state update | Update Conversation View, Topology phase |
 | `agent_path = ["orchestrator"]` + `data.messages` | Orchestrator message | Append to timeline |
 | `agent_path = [agent_id]` + first event for agent | Agent started | Add node to Topology, add timeline entry |
 | `agent_path = [agent_id]` + `data.messages` with ToolMessage | Tool result | Update agent detail panel |
@@ -609,59 +609,48 @@ async def get_topology():
 
 @app.get("/api/tasks/{thread_id}/history")
 async def get_checkpoints(thread_id: str):
-    config = {"configurable": {"thread_id": thread_id}}
-    history = list(graph.get_state_history(config))
+    # Returns checkpoint history from TrajectoryCollector events
+    # Implementation reads from trajectory file, not LangGraph state
+    history = trajectory_store.get_history(thread_id)
     return [
         {
-            "step": s.metadata.get("step"),
-            "source": s.metadata.get("source"),
-            "checkpoint_id": s.config["configurable"]["checkpoint_id"],
-            "node_name": _extract_node_name(s),
-            "next_nodes": list(s.next),
+            "step": event.get("step"),
+            "source": event.get("source"),
+            "checkpoint_id": event.get("checkpoint_id"),
+            "node_name": event.get("agent_path", ["unknown"])[-1],
+            "timestamp": event.get("timestamp"),
         }
-        for s in reversed(history)
+        for event in history
     ]
 
 @app.get("/api/tasks/{thread_id}/history/{checkpoint_id}")
 async def get_checkpoint_state(thread_id: str, checkpoint_id: str):
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_id": checkpoint_id}}
-    state = graph.get_state(config)
+    # Returns state snapshot at a specific checkpoint
+    # Implementation reads from trajectory events, not LangGraph state
+    state = trajectory_store.get_checkpoint(thread_id, checkpoint_id)
     return {
-        "step": state.metadata.get("step"),
-        "source": state.metadata.get("source"),
-        "node_name": _extract_node_name(state),
-        "next_nodes": list(state.next),
-        "values": _serialize_state_values(state.values),
+        "step": state.get("step"),
+        "source": state.get("source"),
+        "node_name": state.get("agent_path", ["unknown"])[-1],
+        "timestamp": state.get("timestamp"),
+        "values": state.get("data", {}),
     }
 
 @app.post("/api/tasks/{thread_id}/resume")
 async def resume_from_checkpoint(thread_id: str, body: ResumeRequest):
-    config = {"configurable": {"thread_id": thread_id}}
-    if body.checkpoint_id:
-        config["configurable"]["checkpoint_id"] = body.checkpoint_id
-    result = await graph.ainvoke(None, config)
-    return {"status": "resumed", "result": _serialize_state_values(result)}
+    # Resume execution from a checkpoint
+    # Implementation uses AgentSystem with saved state, not LangGraph
+    result = await agent_system.resume(thread_id, body.checkpoint_id)
+    return {"status": "resumed", "result": result}
 
 @app.post("/api/tasks/{thread_id}/fork")
 async def fork_from_checkpoint(thread_id: str, body: ForkRequest):
-    config = {"configurable": {
-        "thread_id": thread_id,
-        "checkpoint_id": body.checkpoint_id,
-    }}
-    fork_config = graph.update_state(config, body.state_updates)
-    result = await graph.ainvoke(None, fork_config)
-    return {"status": "forked", "result": _serialize_state_values(result)}
-
-def _extract_node_name(snapshot) -> str:
-    """Extract the node name that produced this checkpoint."""
-    # From tasks (most reliable)
-    if snapshot.tasks:
-        return snapshot.tasks[0].name
-    # Fallback: from metadata writes
-    writes = snapshot.metadata.get("writes", {})
-    if writes:
-        return next(iter(writes.keys()), "unknown")
-    return "unknown"
+    # Fork execution from a checkpoint with state modifications
+    # Implementation creates new AgentSystem from saved state
+    new_thread_id = await agent_system.fork(
+        thread_id, body.checkpoint_id, body.state_updates
+    )
+    return {"status": "forked", "thread_id": new_thread_id}
 ```
 
 ---

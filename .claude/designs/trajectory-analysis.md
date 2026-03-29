@@ -26,21 +26,6 @@ The core insight: reading trajectories → analyzing with a specific lens → pr
 
 ---
 
-## Relationship to Former `memory_extraction`
-
-| Aspect | Former `memory_extraction` | New `trajectory_analysis` |
-|--------|--------------------------|--------------------------|
-| **Scope** | One fixed use case (knowledge extraction) | Any trajectory analysis task via skills |
-| **Phases** | Hardcoded 4: collect → analyze → extract → refine | Simplified 2: analyze → synthesize |
-| **State** | `KnowledgeEntry`, `extracted_patterns`, `existing_knowledge` | Generic: `analysis_results: list[dict]` |
-| **Prompt** | 145-line monolithic orchestrator_system.j2 | ~20-line skeleton + SKILL.md (<500 lines) + references/ (on demand) |
-| **Extensibility** | New use case = new scenario code | New use case = new SKILL.md file in vault |
-| **system_type** | `"memory_extraction"` | `"trajectory_analysis"` |
-
-The former `memory_extraction` functionality becomes the `memory-extraction` skill — the first and most mature skill in the trajectory analysis system.
-
----
-
 ## Skill Architecture
 
 ### What Is a Skill
@@ -197,16 +182,16 @@ Two phases instead of four:
 
 ```python
 phases = {
-    "analyze": PhaseDefinition(
-        name="analyze",
-        description="Activate skill, read trajectories, dispatch workers, collect findings",
-        next_phases=["synthesize"],
-    ),
-    "synthesize": PhaseDefinition(
-        name="synthesize",
-        description="Aggregate findings, produce output, write artifacts",
-        next_phases=[],
-    ),
+    "analyze": {
+        "name": "analyze",
+        "description": "Activate skill, read trajectories, dispatch workers, collect findings",
+        "next_phases": ["synthesize"],
+    },
+    "synthesize": {
+        "name": "synthesize",
+        "description": "Aggregate findings, produce output, write artifacts",
+        "next_phases": [],
+    },
 }
 ```
 
@@ -272,10 +257,10 @@ Relative paths in this skill resolve against the skill directory.
 
 ## Strategy
 
-### TrajectoryAnalysisStrategy
+### TrajectoryAnalysisScenario
 
 ```python
-class TrajectoryAnalysisStrategy:
+class TrajectoryAnalysisScenario:
     """Scenario implementation for skill-driven trajectory analysis.
 
     At init time:
@@ -292,31 +277,21 @@ class TrajectoryAnalysisStrategy:
     def name(self) -> str:
         return "trajectory_analysis"
 
-    def initial_state(self, task_id, task_description) -> TrajectoryAnalysisState:
-        return TrajectoryAnalysisState(
-            messages=[HumanMessage(content=task_description)],
-            task_id=task_id,
-            task_description=task_description,
-            current_phase="analyze",
-            source_trajectories=[],
-            skill_name="",
-            analysis_results=[],
-            structured_output=None,
-        )
+    def setup(self, ctx: SetupContext) -> ScenarioWiring:
+        # Creates format_context closure, answer_schemas, output_schema
+        # Returns ScenarioWiring with all domain-specific configuration
+        ...
 
     def format_context(self, state) -> str:
         # If config-driven: return pre-loaded skill body + source trajectories
         # If model-driven: return available_skills catalog + source trajectories
         ...
 
-    def phase_definitions(self) -> dict[str, PhaseDefinition]:
+    def phase_definitions(self) -> dict[str, dict]:
         return {"analyze": ..., "synthesize": ...}
 
     def should_terminate(self, state) -> bool:
         return state.get("current_phase") == "synthesize"
-
-    def state_schema(self) -> type:
-        return TrajectoryAnalysisState
 ```
 
 ### Skill Discovery
@@ -584,7 +559,7 @@ The current 145-line `orchestrator_system.j2` becomes the `memory-extraction` sk
 | Registry | Before | After |
 |----------|--------|-------|
 | `STATE_SCHEMAS` | `"memory_extraction"` → `MemoryExtractionState` | `"trajectory_analysis"` → `TrajectoryAnalysisState` |
-| `_STRATEGY_INSTANCES` | `"memory_extraction"` → `MemoryExtractionStrategy()` | `"trajectory_analysis"` → `TrajectoryAnalysisStrategy()` |
+| `_SCENARIOS` | `"memory_extraction"` → `TrajectoryAnalysisScenario()` | `"trajectory_analysis"` → `TrajectoryAnalysisScenario()` |
 | `ANSWER_SCHEMA` | `collect`, `analyze`, `extract`, `refine` | `analyze` (single generic worker type) |
 | `OUTPUT_SCHEMAS` | `KnowledgeSummary` | `AnalysisReport` |
 
