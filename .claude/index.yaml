@@ -6,7 +6,7 @@ concepts:
     description: "SDK semantic consistency refactoring: unified Tool type (@tool decorator, no StructuredTool), Scenario protocol (setup() -> ScenarioWiring), single ScenarioRegistry (replaces 4 global registries), dead code removal, langchain boundary convergence (HumanMessage/StructuredTool removed from SDK internals)."
     design: "designs/sdk-consistency.md"
     related_concepts: [agent_harness, system_architecture, scenario_protocol, middleware_system]
-    plans: ["plans/2026-03-26-sdk-consistency.md"]
+    plans: []
     tasks: []
 
   agent_harness:
@@ -68,7 +68,7 @@ concepts:
         layer: "L1 — Deterministic Invariants"
 
   memory_system:
-    description: "Two-layer memory: intra-task (context compression via CompressionMiddleware, see orchestrator.md) and cross-task (trajectory_analysis scenario with memory-extraction skill writing to vault, see trajectory-analysis.md)"
+    description: "Two-layer memory: intra-task (context compression via CompressionMiddleware, see orchestrator.md) and cross-task (trajectory_analysis scenario with trajectory-analysis skills writing to vault, see trajectory-analysis.md)"
     design: "designs/orchestrator.md"
     related_concepts: [orchestrator, trajectory_system, memory_vault, trajectory_analysis]
     related_designs: ["designs/trajectory-analysis.md"]
@@ -76,7 +76,7 @@ concepts:
     tasks: []
 
   trajectory_analysis:
-    description: "Skill-driven trajectory analysis scenario. Replaces memory_extraction. Agent Skills spec (SKILL.md + references/ + examples/) in vault under skill/trajectory-analysis/. Three-tier progressive disclosure: catalog → SKILL.md → references/. Model-driven or config-driven skill activation. Generic state (TrajectoryAnalysisState), two phases (analyze → synthesize)."
+    description: "Skill-driven trajectory analysis scenario. Agent Skills spec (SKILL.md + references/ + examples/) in vault under skill/trajectory-analysis/. Three-tier progressive disclosure: catalog → SKILL.md → references/. Model-driven or config-driven skill activation. Uses generic state via Scenario protocol, two phases (analyze → synthesize)."
     design: "designs/trajectory-analysis.md"
     related_concepts: [system_architecture, memory_system, memory_vault, scenario_protocol, configuration_system]
     plans: ["plans/2026-03-24-trajectory-analysis.md"]
@@ -108,7 +108,7 @@ concepts:
     tasks: []
 
   recovery_system:
-    description: "Four-layer error handling: Worker self-heal, API retry (ChatOpenAI max_retries + AgentRuntime retry logic), Orchestrator decision (with error summary + last steps), manual system recovery via checkpoint resume. Debug replay via checkpoint fork."
+    description: "Four-layer error handling: Worker self-heal, API retry (ChatOpenAI max_retries + SimpleAgentLoop._invoke_with_retry() logic), Orchestrator decision (with error summary + last steps), manual system recovery via checkpoint resume. Debug replay via checkpoint fork."
     design: "designs/system-design-overview.md"
     related_concepts: [system_architecture, trajectory_system, orchestrator, sub_agent, execution_runner]
     plans: []
@@ -165,11 +165,11 @@ concepts:
     description: "Scenario Protocol: pluggable domain logic. setup(ctx) -> ScenarioWiring (orchestrator_tools, worker_tools, format_context, answer_schemas, output_schema, hooks, should_terminate, middleware). ScenarioRegistry maps names to instances. Concrete: RCAScenario (hypothesis_driven), TrajectoryAnalysisScenario, GeneralPurposeScenario."
     design: "designs/sdk-consistency.md"
     related_concepts: [agent_harness, builder, orchestrator]
-    plans: ["plans/2026-03-26-sdk-consistency.md"]
+    plans: []
     tasks: []
 
   middleware_system:
-    description: "Middleware protocol with 3 hooks: on_llm_start, on_llm_end, on_tool_call. Chain pattern for composing multiple middlewares. Concrete implementations: DynamicContextMiddleware, LoopDetectionMiddleware, CompressionMiddleware, BudgetMiddleware, DedupMiddleware, SkillMiddleware, TrajectoryMiddleware. Each middleware module is self-contained in middleware/."
+    description: "Middleware protocol with 3 hooks: on_llm_start, on_llm_end, on_tool_call. Chain pattern for composing multiple middlewares. Concrete implementations: DynamicContextMiddleware, LoopDetectionMiddleware, CompressionMiddleware, BudgetMiddleware, DedupMiddleware, SkillMiddleware, TrajectoryMiddleware. All middleware code is in harness/middleware.py."
     related_concepts: [agent_harness, builder, sub_agent, tool_dedup]
     plans: []
     tasks: []
@@ -181,17 +181,11 @@ concepts:
           - "Class hierarchy verification"
 
   storage_backend:
-    description: "StorageBackend Protocol (read/write/ls/glob/grep/exists/mkdir). FilesystemBackend for local fs with path traversal prevention. CompositeBackend for prefix-based routing to sub-backends (modeled after Deep Agents CompositeBackend)"
-    related_concepts: [agent_harness, builder, memory_system, memory_vault]
+    description: "DELETED: StorageBackend Protocol, FilesystemBackend, and CompositeBackend were removed. The framework now uses direct filesystem operations and vault-based storage."
+    related_concepts: [memory_vault]
     plans: []
     tasks: []
-    tests:
-      - file: "tests/unit/test_generic_sdk.py"
-        covers:
-          - "Protocol runtime_checkable satisfaction"
-          - "FilesystemBackend CRUD operations"
-          - "CompositeBackend prefix routing"
-          - "Path traversal prevention"
+    tests: []
 
   memory_vault:
     description: "Markdown + YAML frontmatter persistent knowledge vault with SQLite-backed three-layer index (structural, link graph, FTS5 + sqlite-vec). Replaces JSON-based KnowledgeStore. [[wikilink]] bidirectional linking, atomic write flow, vault_edit with 4 incremental edit primitives (replace_string, set_frontmatter, replace_section, append_section), rebuildable index."

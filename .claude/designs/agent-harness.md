@@ -620,14 +620,24 @@ class SimpleAgentLoop:
         system_prompt: str,
         middleware: list[Middleware] | None = None,
         output_schema: type[BaseModel] | None = None,
-        checkpoint_store: CheckpointStore | None = None,
+        output_prompt: str = "",
+        synthesize_retries: int = 2,
+        should_terminate: Callable[[Any], bool] | None = None,
+        retry_max_attempts: int = 3,
+        retry_initial_interval: float = 1.0,
+        retry_backoff_factor: float = 2.0,
     ) -> None:
         self._model = model
         self._tools = {t.name: t for t in tools}
         self._system_prompt = system_prompt
         self._middleware = middleware or []
         self._output_schema = output_schema     # None = text output; set = structured
-        self._checkpoint_store = checkpoint_store
+        self._output_prompt = output_prompt
+        self._synthesize_retries = synthesize_retries
+        self._should_terminate = should_terminate
+        self._retry_max_attempts = retry_max_attempts
+        self._retry_initial_interval = retry_initial_interval
+        self._retry_backoff_factor = retry_backoff_factor
         self._inbox: list[str] = []
 
     def inject(self, message: str) -> None:
@@ -645,8 +655,8 @@ class SimpleAgentLoop:
         config = config or RunConfig()
         agent_id = config.metadata.get("agent_id", "")
         messages = [
-            SystemMessage(content=self._system_prompt),
-            HumanMessage(content=input),
+            {"role": "system", "content": self._system_prompt},
+            {"role": "human", "content": input},
         ]
         step = 0
         tool_call_count = 0
@@ -655,7 +665,7 @@ class SimpleAgentLoop:
             # 1. Drain inbox
             while self._inbox:
                 injected = self._inbox.pop(0)
-                messages.append(HumanMessage(content=f"[Injected message]\n{injected}"))
+                messages.append({"role": "human", "content": f"[Injected message]\n{injected}"})
                 yield AgentEvent(type="inject", agent_id=agent_id, step=step,
                                  data={"message": injected})
 
@@ -723,9 +733,11 @@ class SimpleAgentLoop:
                 yield AgentEvent(type="tool_end", agent_id=agent_id, step=step,
                                  data={"tool": name, "result": result_str})
 
-                messages.append(ToolMessage(
-                    content=result_str, tool_call_id=tc.get("id", ""),
-                ))
+                messages.append({
+                    "role": "tool",
+                    "content": result_str,
+                    "tool_call_id": tc.get("id", ""),
+                })
 
             step += 1
 
@@ -746,82 +758,9 @@ class SimpleAgentLoop:
 ```
 
 **Notes:**
-- Uses `langchain_core` message types for compatibility with existing tools and models. This is a data format dependency, not a framework dependency.
+- Messages are plain dicts with `role` and `content` keys, not LangChain message objects.
 - `ChatModel` protocol: any object with `async ainvoke(messages) -> response`. LangChain's `BaseChatModel` satisfies this. So does a plain wrapper around the Anthropic/OpenAI SDK.
 - `inject()` appends to a list. Single-process asyncio makes this safe without locks.
-
-### 5.2 LangGraphAgentLoop
-
-Wraps an existing LangGraph compiled graph (either `create_react_agent` or a custom `StateGraph`). Provides checkpointing and streaming from LangGraph while conforming to the `AgentLoop` protocol.
-
-```python
-class LangGraphAgentLoop:
-    """Wraps a LangGraph CompiledGraph as an AgentLoop.
-
-    Used when you need LangGraph-specific features:
-    - Full checkpoint history with time-travel
-    - Subgraph streaming
-    - interrupt_before / interrupt_after
-    - Complex multi-node graphs (orchestrator's 3-node decision graph)
-
-    For simple ReAct agents, prefer SimpleAgentLoop.
-    """
-
-    def __init__(self, compiled_graph: Any) -> None:
-        self._graph = compiled_graph
-        self._inbox: list[str] = []
-
-    def inject(self, message: str) -> None:
-        self._inbox.append(message)
-
-    async def run(self, input: str, *, config: RunConfig | None = None) -> AgentResult:
-        config = config or RunConfig()
-        graph_config = {
-            "configurable": {
-                "thread_id": config.thread_id or str(uuid.uuid4()),
-            },
-        }
-        if config.max_steps:
-            graph_config["recursion_limit"] = config.max_steps * 2
-
-        input_data = {"messages": [HumanMessage(content=input)]}
-        result = await self._graph.ainvoke(input_data, graph_config)
-
-        return AgentResult(
-            agent_id=config.metadata.get("agent_id", ""),
-            status=AgentStatus.COMPLETED,
-            output=result,
-        )
-
-    async def stream(self, input: str, *, config: RunConfig | None = None) -> AsyncIterator[AgentEvent]:
-        config = config or RunConfig()
-        graph_config = {
-            "configurable": {
-                "thread_id": config.thread_id or str(uuid.uuid4()),
-            },
-        }
-        input_data = {"messages": [HumanMessage(content=input)]}
-
-        async for namespace, mode, data in self._graph.astream(
-            input_data, graph_config,
-            stream_mode=["updates", "custom"],
-            subgraphs=True,
-        ):
-            yield AgentEvent(
-                type=mode,
-                agent_id=config.metadata.get("agent_id", ""),
-                data=data if isinstance(data, dict) else {"raw": data},
-            )
-```
-
-**When to use which:**
-
-| Scenario | Recommended Loop | Reason |
-|----------|-----------------|--------|
-| Simple workers (data collection, verification) | `SimpleAgentLoop` | No graph overhead, direct middleware control |
-| Complex orchestrator (multi-node decision routing) | `LangGraphAgentLoop` | Current orchestrator uses 3-node graph with `<decision>` routing |
-| Agents needing full checkpoint history | `LangGraphAgentLoop` | LangGraph checkpoint is production-grade |
-| New scenarios (prototyping) | `SimpleAgentLoop` | Faster iteration, no compile step |
 
 ---
 
@@ -830,7 +769,7 @@ class LangGraphAgentLoop:
 Scenarios build on the SDK by:
 1. Creating tools that wrap `AgentRuntime` methods
 2. Building `AgentLoop` instances with scenario-specific prompts and tools
-3. Using `ReasoningStrategy` for domain logic (unchanged)
+3. Using the `Scenario` protocol for domain logic
 
 ### 6.1 How an Orchestrator's Tools Map to AgentRuntime
 
@@ -1031,8 +970,7 @@ This allows incremental migration — existing middleware works immediately, and
 ### Phase 2: Implement SimpleAgentLoop
 
 - Build the pure-Python ReAct loop
-- Migrate simple workers (data collection, verification) from LangGraph to `SimpleAgentLoop`
-- Keep orchestrator on `LangGraphAgentLoop` (complex decision routing graph)
+- Migrate all agents (orchestrator and workers) to `SimpleAgentLoop`
 - Validate: same behavior, simpler code path
 
 ### Phase 3: Refactor Scenarios to Use AgentRuntime
@@ -1040,11 +978,10 @@ This allows incremental migration — existing middleware works immediately, and
 - Replace `AgentPool` with on-demand `runtime.spawn()` calls
 - Replace `TaskManager` usage with `AgentRuntime` methods
 - Add bidirectional communication where scenarios need it
-- `ReasoningStrategy` stays unchanged (it's scenario-level, correctly placed)
+- `Scenario` protocol replaces `ReasoningStrategy` as the extension point
 
 ### What Does NOT Change
 
-- `ReasoningStrategy[S]` protocol — correct abstraction, stays
 - `ToolRegistry` — tool definitions are orthogonal to agent loops
 - `TrajectoryCollector` — becomes an `EventHandler` adapter
 - Config system (`scenario.yaml`, `system.yaml`) — stays, drives agent loop creation
@@ -1059,9 +996,8 @@ This allows incremental migration — existing middleware works immediately, and
 | Multi-process spawn backend (`ProcessBackend`) | Needs picklable agent loops; current asyncio model works. Revisit when batch eval needs it. |
 | File-system persistence for AgentRuntime state | Wait for runtime interface to stabilize. In-memory is fine for v1. |
 | Agent-to-agent peer messaging (worker ↔ worker) | No scenario needs it yet. Runtime supports it (just `send(to, msg)`), but no scenario tools expose it. |
-| Distributed checkpointing (Redis/PostgreSQL) | Keep using LangGraph's checkpoint implementation via `LangGraphAgentLoop` for now. |
-| Custom graph topologies beyond ReAct | `SimpleAgentLoop` covers ReAct. Non-ReAct topologies stay on `LangGraphAgentLoop`. Long-term: consider a lightweight graph builder. |
-| Structured output (response_format) in SimpleAgentLoop | Use `LangGraphAgentLoop` for agents needing structured output until SimpleAgentLoop adds it. |
+| Distributed checkpointing (Redis/PostgreSQL) | Wait for SimpleAgentLoop checkpoint implementation to stabilize. |
+| Custom graph topologies beyond ReAct | `SimpleAgentLoop` covers ReAct. Non-ReAct topologies may need a lightweight graph builder. |
 
 ---
 
@@ -1076,10 +1012,9 @@ This allows incremental migration — existing middleware works immediately, and
 | `AgentResult.steps` + `tool_calls` as explicit fields | Every scenario needs these metrics. Forcing them into metadata is repetitive and error-prone. | Two more fields on a dataclass (negligible cost) |
 | AgentLoop as Protocol (not base class) | Allows any implementation; no inheritance required | No shared default behavior (each impl is standalone) |
 | SimpleAgentLoop as default for workers | Workers are straightforward ReAct — no need for graph overhead | Must reimplement checkpoint if needed (or use CheckpointStore directly) |
-| LangGraphAgentLoop for orchestrator | Orchestrator's 3-node decision graph benefits from LangGraph's StateGraph | Keeps LangGraph as a dependency for now |
 | AgentRuntime subsumes TaskManager | Unified interface; avoids two coordination layers | TaskManager's smart wait strategy is replaced by `wait_any()` with asyncio.Event |
 | Inbox as list (not asyncio.Queue) | Simpler; single-thread asyncio makes list safe | Must change to Queue if multi-process backend is added |
-| `langchain_core` message types kept | Huge ecosystem of tools and models use them | Light coupling to LangChain's data types (not framework) |
+| Plain dict messages | Simpler, framework-agnostic; works with any LLM client | Minor refactoring from LangChain message types |
 
 ---
 
@@ -1088,7 +1023,7 @@ This allows incremental migration — existing middleware works immediately, and
 | Document | Relationship |
 |----------|-------------|
 | [system-design-overview.md](system-design-overview.md) | Current architecture — this design evolves it |
-| [orchestrator.md](orchestrator.md) | Orchestrator stays on LangGraph via `LangGraphAgentLoop` |
-| [sub-agent.md](sub-agent.md) | Workers migrate to `SimpleAgentLoop` |
-| [generic-state-wrapper.md](generic-state-wrapper.md) | `ReasoningStrategy` unchanged; `GenericAgentSystemBuilder` evolves into scenario-level builder using `AgentRuntime` |
+| [orchestrator.md](orchestrator.md) | Orchestrator uses `SimpleAgentLoop` |
+| [sub-agent.md](sub-agent.md) | Workers use `SimpleAgentLoop` |
+| [generic-state-wrapper.md](generic-state-wrapper.md) | `Scenario` protocol replaces `ReasoningStrategy`; `GenericAgentSystemBuilder` evolves into scenario-level builder using `AgentRuntime` |
 | [Claude Code architecture reference](../../docs/references/claude-code-agent-team-architecture.md) | External reference that motivated this design |

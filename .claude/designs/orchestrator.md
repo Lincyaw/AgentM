@@ -151,6 +151,7 @@ Each round, the middleware:
 2. Rebuilds the message list with a fresh system prompt
 3. Appends a `<current_state>` block and `<round_context>` with round counter
 4. Injects last-round urgency warnings when approaching `max_rounds`
+5. Adds an assistant-role prefill message ("Based on the current state, my next action:") to guide the LLM's response
 
 ### 4.2 ScenarioWiring
 

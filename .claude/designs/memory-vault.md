@@ -8,7 +8,7 @@
 
 ## Overview
 
-The Memory Vault is a Markdown + YAML frontmatter based persistent knowledge store with bidirectional wikilinks, replacing the JSON-based `KnowledgeStore` in `tools/knowledge.py`. It serves as the toolset for the `scenarios/memory_extraction/` scenario, where an Agent processes session trajectories and extracts reusable knowledge into a vault of interconnected Markdown files indexed by SQLite.
+The Memory Vault is a Markdown + YAML frontmatter based persistent knowledge store with bidirectional wikilinks, replacing the JSON-based `KnowledgeStore` in `tools/knowledge.py`. It serves as a general-purpose toolset for scenarios that need persistent knowledge storage, allowing agents to read, write, search, and navigate interconnected Markdown files indexed by SQLite.
 
 ---
 
@@ -448,7 +448,7 @@ WHERE path NOT IN (SELECT source FROM links)
 
 ```
 Session (raw trajectory, not markdown)
-    |  memory_extraction agent processes
+    |  trajectory_analysis agent processes
     +-- episodic/2024-01-15-session-x.md   (session summary)
     +-- skill/new-skill-a.md               (extracted skill)
     +-- concept/some-concept.md            (update existing concept, via vault_edit)
@@ -468,7 +468,6 @@ src/agentm/tools/vault/
   schema.py            # SQLite schema creation + migration
   search.py            # FTS5, sqlite-vec, hybrid RRF
   graph.py             # Link graph operations, traverse, lint
-  migration.py         # KnowledgeStore JSON -> Markdown migration
   tools.py             # 10 tool functions (vault_write, vault_read, etc.)
 ```
 
@@ -495,11 +494,11 @@ One-time migration converts JSON entries to Markdown:
 
 ## Integration Points
 
-### scenarios/memory_extraction/
+### scenarios/rca/ and scenarios/trajectory_analysis/
 
-- `register()` registers vault tools alongside strategy and state
-- Strategy phases (`collect -> analyze -> extract -> refine`) use vault tools
-- Vault directory configured via `ScenarioConfig`
+- `register()` registers vault tools via the scenario's `setup()` method
+- Vault tools are available to both orchestrator and workers via `ScenarioWiring`
+- Vault directory configured via `ScenarioConfig` or system config
 
 ### builder.py
 
