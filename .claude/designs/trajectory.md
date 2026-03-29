@@ -29,7 +29,7 @@ class TrajectoryEvent(BaseModel):
     event_type: str                          # One of the defined event types (see below)
     data: dict[str, Any]                     # Event-type-specific payload
     task_id: Optional[str] = None            # AgentRuntime task_id, if event relates to a task
-    hypothesis_id: Optional[str] = None      # Hypothesis ID, if event relates to hypothesis reasoning
+    metadata: dict[str, Any] = Field(default_factory=dict)  # Additional metadata (e.g., hypothesis_id)
     parent_seq: Optional[int] = None         # Sequence number of the parent event (for causal linking)
 ```
 
@@ -56,17 +56,46 @@ class TrajectoryEvent(BaseModel):
 
 ```python
 class TrajectoryCollector:
-    async def record(self, event: TrajectoryEvent) -> None:
-        """Record an event asynchronously. Writes to JSONL file and notifies all listeners."""
+    async def record(
+        self,
+        event_type: str,
+        agent_path: list[str],
+        data: dict[str, Any],
+        node_name: str = "",
+        task_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        parent_seq: int | None = None,
+        **kwargs: Any,
+    ) -> int:
+        """Record an event. Returns the assigned sequence number.
 
-    def record_sync(self, event: TrajectoryEvent) -> None:
-        """Record an event from a synchronous context. Thread-safe.
-        Schedules the async write via the running event loop if available,
-        otherwise writes directly under a threading lock."""
+        Scenarios can pass arbitrary key-value pairs via *metadata*
+        (e.g. ``metadata={"hypothesis_id": "H1"}``).
+        Legacy callers passing ``hypothesis_id=`` directly are handled
+        via **kwargs for backward compatibility.
+        """
+
+    def record_sync(
+        self,
+        event_type: str,
+        agent_path: list[str],
+        data: dict[str, Any],
+        node_name: str = "",
+        task_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        parent_seq: int | None = None,
+        **kwargs: Any,
+    ) -> int:
+        """Synchronous variant for use from sync tool functions.
+
+        Writes directly without the async lock — only safe when called from
+        within the event loop thread (which sync tool functions are).
+        """
 
     def add_listener(self, callback: Callable) -> None:
         """Register a listener callback. Supports both sync and async callables.
-        Async listeners are awaited; sync listeners are called directly."""
+        Async listeners are awaited; sync listeners are called directly.
+        """
 
     async def close(self) -> None:
         """Flush and close the JSONL file. Must be called for clean shutdown."""
@@ -89,8 +118,8 @@ Primary consumer: the [Debug Console](debug-console.md), which registers `on_tra
 ## Thread Safety
 
 - **Async path** (`record`): Protected by `asyncio.Lock` to serialize file writes and listener notification.
-- **Sync path** (`record_sync`): Protected by `threading.Lock` for direct file writes from non-async contexts (e.g., sync tool callbacks).
-- Sequence number generation uses an `itertools.count()` or equivalent atomic counter.
+- **Sync path** (`record_sync`): Protected by `threading.Lock` for direct file writes from sync contexts (e.g., sync tool callbacks).
+- Sequence number generation uses an atomic counter (`self._seq += 1` under lock).
 
 ---
 

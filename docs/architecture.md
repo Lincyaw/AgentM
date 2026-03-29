@@ -97,7 +97,6 @@ src/agentm/
 │   └── validator.py         # Config validation
 │
 ├── core/                    # Shared core infrastructure
-│   ├── backend.py           # StorageBackend protocol
 │   ├── prompt.py            # Jinja2 prompt template loader
 │   ├── tool_registry.py     # ToolRegistry — dynamic YAML-based tool binding
 │   ├── trajectory.py        # TrajectoryCollector — JSONL event recording
@@ -105,22 +104,17 @@ src/agentm/
 │   └── debug_console.py     # Rich terminal UI for debug mode
 │
 ├── models/                  # Shared data types
+│   ├── base_answer.py       # _BaseAnswer (Pydantic base for answer schemas)
 │   ├── data.py              # OrchestratorHooks
-│   ├── state.py             # BaseExecutorState (TypedDict)
 │   └── types.py             # TaskType alias
 │
 ├── scenarios/               # ★ Domain-specific scenario plugins
 │   ├── __init__.py          # discover() — registers all built-in scenarios
 │   ├── rca/                 # Root Cause Analysis scenario
 │   │   ├── scenario.py      # RCAScenario: setup() returns wiring
-│   │   ├── state.py         # HypothesisDrivenState
 │   │   ├── hypothesis_store.py  # In-memory hypothesis management
 │   │   ├── service_profile.py   # ServiceProfileStore
-│   │   ├── notebook.py      # DiagnosticNotebook (immutable append-only)
-│   │   ├── data.py          # RCA data structures
-│   │   ├── enums.py         # Phase, HypothesisStatus enums
 │   │   ├── formatters.py    # format_rca_context()
-│   │   ├── compression.py   # RCA-specific compression
 │   │   ├── answer_schemas.py  # ScoutAnswer, VerifyAnswer, DeepAnalyzeAnswer
 │   │   └── output.py        # CausalGraph (final structured output)
 │   ├── trajectory_analysis/ # Trajectory Analysis scenario
@@ -155,10 +149,6 @@ src/agentm/
 │       ├── graph.py         # Backlinks, traverse, lint
 │       └── mcp_server.py    # MCP server for external vault access
 │
-├── backends/                # Storage backends
-│   ├── filesystem.py        # FilesystemBackend
-│   └── composite.py         # CompositeBackend (prefix routing)
-│
 ├── agents/                  # Specialized agent implementations
 │   └── eval_agent.py        # Eval agent for batch evaluation
 │
@@ -190,12 +180,12 @@ src/agentm/
 │  │ inject() │       │ on_tool_call │                  │
 │  └──────────┘       └──────────────┘                  │
 │                                                       │
-│  CheckpointStore     Scenario                         │
-│  ┌──────────────┐   ┌──────────────┐                  │
-│  │ save()       │   │ name         │                  │
-│  │ load()       │   │ setup(ctx)   │                  │
-│  │ list()       │   │  → Wiring    │                  │
-│  └──────────────┘   └──────────────┘                  │
+│  CheckpointStore          Scenario                    │
+│  ┌───────────────────┐   ┌──────────────┐             │
+│  │ save()            │   │ name         │             │
+│  │ load()            │   │ setup(ctx)   │             │
+│  │ list_checkpoints()│   │  → Wiring    │             │
+│  └───────────────────┘   └──────────────┘             │
 └───────────────────────────────────────────────────────┘
 ```
 
@@ -217,7 +207,7 @@ AgentStatus: RUNNING | COMPLETED | FAILED | ABORTED
 RunConfig(max_steps, timeout, thread_id, metadata)
 
 # Agent execution outcome
-AgentResult(agent_id, status, output, error, duration_seconds, steps, tool_calls)
+AgentResult(agent_id, status, output, error, duration_seconds, steps, tool_calls, metadata)
 
 # Streaming event
 AgentEvent(type, agent_id, data, step, timestamp)
@@ -559,7 +549,7 @@ get_scenario(name)            # retrieves by name
 | **format_context** | `format_rca_context` (hypothesis board + service profiles) | `_empty_context` | `_empty_context` |
 | **answer_schemas** | `scout: ScoutAnswer`, `deep_analyze: DeepAnalyzeAnswer`, `verify: VerifyAnswer` | `analyze: AnalyzeAnswer`, `critique: CritiqueAnswer` | `execute: GeneralAnswer` |
 | **output_schema** | `CausalGraph` | `AnalysisReport` | None |
-| **hooks** | think_stall=3, skip_context_on_think | defaults | defaults |
+| **hooks** | `think_stall_enabled=True`, `synthesize_max_retries=2` | defaults | defaults |
 
 ### 6.3 RCA Scenario Deep Dive
 

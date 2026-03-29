@@ -80,11 +80,10 @@ The hook scans all `AIMessage` tool calls and their corresponding `ToolMessage` 
 
 ```python
 def wrap_tool_with_dedup(tool: Tool, tracker: DedupTracker) -> Tool:
-    """Wrap a tool so repeated (name, args) calls are blocked.
+    """Wrap a tool so repeated (name, args) calls return cached results.
 
     - On first call: execute tool, record key in tracker, return result
-    - On repeat call: return short rejection message ("BLOCKED: ...")
-    - Does NOT return cached results — the goal is token savings
+    - On repeat call: return cached result from tracker (saves token cost)
     - Preserves tool name, description, and parameters
     """
 ```
@@ -147,4 +146,4 @@ When `config.execution.dedup` is set and enabled:
 | Exclude `think` tool | Think is a free scratchpad, no API cost, caching would break reasoning |
 | Per-task tracker | No cross-agent cache pollution. Each sub-agent invocation is independent |
 | SystemMessage injection | Consistent with budget_hook pattern — visible to LLM but not persisted in state |
-| No cached result in responses | Neither hook nor wrapper returns cached data — the entire goal is token savings |
+| Return cached results on duplicates | Saves token cost by returning the cached result instead of re-executing the tool |
