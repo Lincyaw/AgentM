@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Protocol, runtime_checkable
 
-from agentm.harness.types import AgentEvent, AgentResult, LoopContext, RunConfig
+from agentm.harness.types import AgentEvent, AgentResult, LoopContext, Message, RunConfig
 
 
 @runtime_checkable
@@ -32,7 +32,7 @@ class AgentLoop(Protocol):
         """
         ...
 
-    async def stream(
+    def stream(
         self, input: str, *, config: RunConfig | None = None
     ) -> AsyncIterator[AgentEvent]:
         """Run the agent loop, yielding events as they occur.
@@ -71,8 +71,8 @@ class Middleware(Protocol):
     """
 
     async def on_llm_start(
-        self, messages: list[Any], ctx: LoopContext
-    ) -> list[Any]:
+        self, messages: list[Message], ctx: LoopContext
+    ) -> list[Message]:
         """Called before each LLM invocation.
 
         May modify, filter, or append to the message list.
@@ -80,7 +80,7 @@ class Middleware(Protocol):
         """
         ...
 
-    async def on_llm_end(self, response: Any, ctx: LoopContext) -> Any:
+    async def on_llm_end(self, response: object, ctx: LoopContext) -> object:
         """Called after each LLM invocation.
 
         May inspect or modify the response.

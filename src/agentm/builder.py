@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from agentm.config.schema import ScenarioConfig, create_chat_model
+from agentm.config.schema import CompressionConfig, ModelConfig, ScenarioConfig, SystemConfig, create_chat_model
 from agentm.core.prompt import load_prompt_template
 from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
@@ -32,15 +32,18 @@ from agentm.harness.middleware import (
     CompressionMiddleware,
     DynamicContextMiddleware,
     LoopDetectionMiddleware,
+    MiddlewareBase,
     SkillMiddleware,
     TrajectoryMiddleware,
 )
 from agentm.harness.runtime import AgentRuntime
 from agentm.harness.scenario import ScenarioWiring, SetupContext, get_scenario
 from agentm.harness.tool import Tool, tool_from_function
-from agentm.harness.types import AgentResult, RunConfig
+from agentm.harness.types import AgentResult, RunConfig, ToolCallable
 from agentm.harness.worker_factory import WorkerLoopFactory
+from agentm.models.data import OrchestratorHooks
 from agentm.tools.orchestrator import create_orchestrator_tools
+from agentm.tools.vault.store import MarkdownVault
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +55,7 @@ from agentm.tools.orchestrator import create_orchestrator_tools
 _DECISION_RE = re.compile(r"<decision>(.*?)</decision>", re.DOTALL | re.IGNORECASE)
 
 
-def _orchestrator_should_terminate(response: Any) -> bool:
+def _orchestrator_should_terminate(response: object) -> bool:
     """Return True when the LLM signals finalize via <decision> tag.
 
     Falls back to the standard no-tool-calls heuristic when the tag is
@@ -64,6 +67,11 @@ def _orchestrator_should_terminate(response: Any) -> bool:
         return match.group(1).strip().lower() == "finalize"
     # No decision tag: fall back to no-tool-calls = terminate
     return not getattr(response, "tool_calls", None)
+
+
+def _default_hooks() -> OrchestratorHooks:
+    """Return default orchestrator hooks."""
+    return OrchestratorHooks()
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +100,7 @@ class AgentSystem:
 
     def __init__(
         self,
-        loop: Any,
+        loop: SimpleAgentLoop,
         scenario_config: ScenarioConfig | None = None,
         runtime: AgentRuntime | None = None,
         trajectory: TrajectoryCollector | None = None,
@@ -108,7 +116,7 @@ class AgentSystem:
         return self
 
     async def __aexit__(
-        self, exc_type: type | None, exc_val: BaseException | None, exc_tb: Any
+        self, exc_type: type | None, exc_val: BaseException | None, exc_tb: object | None
     ) -> None:
         if self.trajectory is not None:
             await self.trajectory.close()
@@ -152,11 +160,11 @@ class _PlatformResources:
     """Intermediate container holding all platform resources created in phase 1."""
 
     tool_registry: ToolRegistry
-    vault: Any
+    vault: MarkdownVault | None
     trajectory: TrajectoryCollector | None
-    memory_tools: dict[str, Any]
-    orch_model_config: Any | None
-    worker_model_config: Any | None
+    memory_tools: dict[str, ToolCallable]
+    orch_model_config: ModelConfig | None
+    worker_model_config: ModelConfig | None
     thread_id: str
 
 
@@ -168,7 +176,7 @@ class _PlatformResources:
 def _create_platform_resources(
     scenario_name: str,
     scenario_config: ScenarioConfig,
-    system_config: Any | None,
+    system_config: SystemConfig | None,
     *,
     thread_id: str | None,
     tools_dir: Path | str | None,
@@ -239,7 +247,7 @@ def _create_platform_resources(
         db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
         memory_module.set_db_path(str(Path(db_url).resolve()))
 
-    memory_tools: dict[str, Any] = {
+    memory_tools: dict[str, ToolCallable] = {
         "read_trajectory": memory_module.read_trajectory,
         "get_checkpoint_history": memory_module.get_checkpoint_history,
         "jq_query": traj_reader_module.jq_query,
@@ -273,7 +281,9 @@ def _create_worker_infrastructure(
     runtime = AgentRuntime(trajectory=resources.trajectory)
 
     # Compose worker middleware: scenario middleware + SkillMiddleware
-    worker_middleware: list[Any] = list(wiring.worker_middleware or [])
+    from agentm.harness.middleware import MiddlewareBase
+
+    worker_middleware: list[MiddlewareBase] = list(wiring.worker_middleware or [])
     worker_config = scenario_config.agents.get("worker")
     if worker_config is not None and worker_config.skills and resources.vault is not None:
         worker_middleware.append(SkillMiddleware(resources.vault, worker_config.skills))
@@ -369,7 +379,10 @@ def _build_orchestrator_loop(
     format_context = wiring.format_context
 
     # Middleware stack
-    orch_middleware: list[Any] = []
+    orch_middleware: list[MiddlewareBase] = []
+
+    # Hooks should never be None after __post_init__, but mypy doesn't know that
+    hooks_safe = hooks or _default_hooks()
 
     orch_middleware.append(DynamicContextMiddleware(
         format_context_fn=format_context if callable(format_context) else lambda: "",
@@ -377,7 +390,7 @@ def _build_orchestrator_loop(
         max_rounds=max_rounds,
     ))
 
-    if hooks.think_stall_enabled:
+    if hooks_safe.think_stall_enabled:
         ld = config.loop_detection
         orch_middleware.append(
             LoopDetectionMiddleware(
@@ -436,7 +449,7 @@ def _build_orchestrator_loop(
         middleware=orch_middleware,
         output_schema=output_schema,
         output_prompt=output_prompt_text,
-        synthesize_retries=hooks.synthesize_max_retries,
+        synthesize_retries=hooks_safe.synthesize_max_retries,
         should_terminate=should_terminate,
         retry_max_attempts=retry_cfg.max_attempts,
         retry_initial_interval=retry_cfg.initial_interval,
@@ -452,7 +465,7 @@ def _build_orchestrator_loop(
 def build_agent_system(
     scenario_name: str,
     scenario_config: ScenarioConfig,
-    system_config: Any | None = None,
+    system_config: SystemConfig | None = None,
     *,
     thread_id: str | None = None,
     tools_dir: Path | str | None = None,

@@ -58,8 +58,10 @@ async def lifespan(server: FastMCP) -> AsyncIterator[VaultContext]:
 mcp = FastMCP("Memory Vault", lifespan=lifespan)
 
 
-def _tools(ctx: Context) -> dict[str, Any]:
+def _tools(ctx: Context | None) -> dict[str, Any]:
     """Extract the pre-built tools dict from the MCP lifespan context."""
+    if ctx is None:
+        raise ValueError("MCP context is required but was not provided")
     return ctx.request_context.lifespan_context.tools
 
 
@@ -73,7 +75,7 @@ def vault_write(
     path: str,
     frontmatter: dict,
     body: str,
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> str:
     """Create or overwrite a note in the vault.
 
@@ -92,7 +94,7 @@ def vault_write(
 @mcp.tool()
 def vault_write_batch(
     entries: list[dict],
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> str:
     """Write multiple notes atomically in a single transaction.
 
@@ -105,7 +107,7 @@ def vault_write_batch(
 
 
 @mcp.tool()
-def vault_read(path: str, ctx: Context = None) -> str:
+def vault_read(path: str, ctx: Context | None = None) -> str:
     """Read a note from the vault. Returns its frontmatter and body.
 
     Args:
@@ -119,7 +121,7 @@ def vault_edit(
     path: str,
     operation: str,
     params: dict,
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> str:
     """Apply an incremental edit to an existing note without rewriting the full content.
 
@@ -138,7 +140,7 @@ def vault_edit(
 
 
 @mcp.tool()
-def vault_delete(path: str, ctx: Context = None) -> str:
+def vault_delete(path: str, ctx: Context | None = None) -> str:
     """Delete a note and remove it from all indexes.
 
     Args:
@@ -148,7 +150,7 @@ def vault_delete(path: str, ctx: Context = None) -> str:
 
 
 @mcp.tool()
-def vault_rename(old_path: str, new_path: str, ctx: Context = None) -> str:
+def vault_rename(old_path: str, new_path: str, ctx: Context | None = None) -> str:
     """Rename or move a note. All [[backlinks]] in other notes are rewritten automatically.
 
     Args:
@@ -168,7 +170,7 @@ def vault_list(
     path: str,
     depth: int = 1,
     type_filter: str | None = None,
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> str:
     """Browse notes under a path.
 
@@ -186,7 +188,7 @@ def vault_search(
     filters: dict | None = None,
     mode: str = "hybrid",
     limit: int = 10,
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> str:
     """Search the vault by keyword, semantic similarity, or both.
 
@@ -202,7 +204,7 @@ def vault_search(
 
 
 @mcp.tool()
-def vault_backlinks(path: str, ctx: Context = None) -> str:
+def vault_backlinks(path: str, ctx: Context | None = None) -> str:
     """Find all notes that contain a [[wikilink]] to the given path.
 
     Args:
@@ -216,7 +218,7 @@ def vault_traverse(
     start: str,
     depth: int = 2,
     direction: str = "both",
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> str:
     """Explore the link graph around a note via BFS traversal.
 
@@ -231,7 +233,7 @@ def vault_traverse(
 
 
 @mcp.tool()
-def vault_lint(request: str, ctx: Context = None) -> str:
+def vault_lint(request: str, ctx: Context | None = None) -> str:
     """Check vault health: find dead [[wikilinks]] and orphan notes with no connections.
 
     Args:

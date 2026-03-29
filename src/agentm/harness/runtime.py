@@ -77,7 +77,7 @@ class AgentRuntime:
         entry = _AgentEntry(
             agent_id=agent_id,
             loop=loop,
-            task=None,  # type: ignore[arg-type] — set below
+            task=None,  # type: ignore[arg-type]  # set below
             parent_id=parent_id,
             metadata=metadata or {},
         )
@@ -113,7 +113,7 @@ class AgentRuntime:
         start_time = time.monotonic()
         original_agent_id = entry.metadata.get("original_agent_id", entry.agent_id)
         try:
-            async for event in entry.loop.stream(input, config=config):
+            async for event in entry.loop.stream(input, config=config):  # type: ignore[attr-defined]
                 entry.current_step = event.step
                 if self._event_handler is not None:
                     await self._event_handler.on_event(event)

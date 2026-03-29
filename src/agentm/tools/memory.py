@@ -8,14 +8,10 @@ Builder calls memory_module.set_db_path(path) at startup.
 from __future__ import annotations
 
 import json
-import sqlite3
 from typing import Any
 
-try:
-    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-    _serde = JsonPlusSerializer()
-except ImportError:
-    _serde = None  # type: ignore[assignment]
+from agentm.utils.db import sqlite_cursor
+from agentm.utils.serde import deserialize_typed
 
 
 class MemoryStore:
@@ -31,14 +27,13 @@ class MemoryStore:
             thread_id: The thread ID of the trajectory to read.
         """
         try:
-            conn = sqlite3.connect(self._db_path)
-            row = conn.execute(
-                "SELECT type, checkpoint FROM checkpoints "
-                "WHERE thread_id=? AND checkpoint_ns='' "
-                "ORDER BY checkpoint_id DESC LIMIT 1",
-                (thread_id,),
-            ).fetchone()
-            conn.close()
+            with sqlite_cursor(self._db_path) as cur:
+                row = cur.execute(
+                    "SELECT type, checkpoint FROM checkpoints "
+                    "WHERE thread_id=? AND checkpoint_ns='' "
+                    "ORDER BY checkpoint_id DESC LIMIT 1",
+                    (thread_id,),
+                ).fetchone()
         except Exception as exc:
             return f"Error reading trajectory {thread_id!r}: {exc}"
 
@@ -46,7 +41,7 @@ class MemoryStore:
             return f"No checkpoint found for thread_id={thread_id!r}."
 
         try:
-            obj = _serde.loads_typed((row[0], row[1]))
+            obj = deserialize_typed((row[0], row[1]))
         except Exception as exc:
             return f"Error deserializing checkpoint for {thread_id!r}: {exc}"
 
@@ -85,14 +80,13 @@ class MemoryStore:
             limit: Maximum number of checkpoints to return (default 50).
         """
         try:
-            conn = sqlite3.connect(self._db_path)
-            rows = conn.execute(
-                "SELECT checkpoint_id, type, checkpoint FROM checkpoints "
-                "WHERE thread_id=? AND checkpoint_ns='' "
-                "ORDER BY checkpoint_id DESC LIMIT ?",
-                (thread_id, limit),
-            ).fetchall()
-            conn.close()
+            with sqlite_cursor(self._db_path) as cur:
+                rows = cur.execute(
+                    "SELECT checkpoint_id, type, checkpoint FROM checkpoints "
+                    "WHERE thread_id=? AND checkpoint_ns='' "
+                    "ORDER BY checkpoint_id DESC LIMIT ?",
+                    (thread_id, limit),
+                ).fetchall()
         except Exception as exc:
             return f"Error listing checkpoint history for {thread_id!r}: {exc}"
 
@@ -102,7 +96,7 @@ class MemoryStore:
         entries: list[dict[str, Any]] = []
         for i, (checkpoint_id, type_, data) in enumerate(rows):
             try:
-                obj = _serde.loads_typed((type_, data))
+                obj = deserialize_typed((type_, data))
                 ts = obj.get("ts", "")
                 channels = list(obj.get("channel_versions", {}).keys())
             except Exception:

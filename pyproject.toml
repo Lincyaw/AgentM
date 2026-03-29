@@ -51,5 +51,8 @@ agentm = "agentm.agents.eval_agent:AgentMAgent"
 requires = ["uv_build>=0.10.9,<0.11.0"]
 build-backend = "uv_build"
 
+[tool.setuptools.package-data]
+agentm = ["py.typed"]
+
 # [tool.uv]
 # index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"

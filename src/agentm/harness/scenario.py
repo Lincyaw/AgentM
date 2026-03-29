@@ -6,13 +6,17 @@ to run a particular use-case: tools, schemas, hooks, and context formatting.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
 
+    from agentm.core.tool_registry import ToolRegistry
+    from agentm.core.trajectory import TrajectoryCollector
+    from agentm.harness.middleware import MiddlewareBase
     from agentm.harness.tool import Tool
     from agentm.models.data import OrchestratorHooks
+    from agentm.tools.vault.store import MarkdownVault
 
 
 # ---------------------------------------------------------------------------
@@ -32,9 +36,9 @@ def _empty_context() -> str:
 class SetupContext:
     """Resources the harness provides to a scenario during setup."""
 
-    vault: Any | None
-    trajectory: Any | None
-    tool_registry: Any
+    vault: MarkdownVault | None
+    trajectory: TrajectoryCollector | None
+    tool_registry: ToolRegistry
 
 
 # ---------------------------------------------------------------------------
@@ -57,14 +61,14 @@ class ScenarioWiring:
     output_schema: type[BaseModel] | None = None
 
     # Behavior customization
-    hooks: OrchestratorHooks = field(default=None)  # type: ignore[assignment]
+    hooks: OrchestratorHooks | None = field(default=None)
 
     # Termination logic (None = default <decision> tag parser)
-    should_terminate: Callable[[Any], bool] | None = None
+    should_terminate: Callable[[object], bool] | None = None
 
     # Scenario-specific middleware (appended after SDK middleware)
-    orchestrator_middleware: list[Any] = field(default_factory=list)
-    worker_middleware: list[Any] = field(default_factory=list)
+    orchestrator_middleware: list[MiddlewareBase] = field(default_factory=list)
+    worker_middleware: list[MiddlewareBase] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.hooks is None:

@@ -1,6 +1,6 @@
 # Design: Tool Call Deduplication
 
-**Status**: DRAFT
+**Status**: CURRENT
 **Last Updated**: 2026-03-09
 
 ---

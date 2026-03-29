@@ -8,7 +8,7 @@ import logging
 import os
 import traceback
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import uvicorn
 from rich.console import Console
@@ -16,11 +16,16 @@ from rich.console import Console
 import agentm.tools.observability as obs_tools
 from agentm.exceptions import CheckpointError, DataInitError
 from agentm.tools.duckdb_sql import register_tables as duckdb_register_tables
-from agentm.builder import build_agent_system
+from agentm.builder import AgentSystem, build_agent_system
 from agentm.config.loader import load_scenario_config, load_system_config
+from agentm.config.schema import SystemConfig, ScenarioConfig
 from agentm.core.debug_console import DebugConsole
 from agentm.core.trajectory import TrajectoryCollector
+from agentm.harness.types import JsonDict
 from agentm.server.app import Broadcaster, create_dashboard_app
+
+if TYPE_CHECKING:
+    from rcabench_platform.v3.sdk.llm_eval.eval.tracker import EvalTracker
 
 
 console = Console()
@@ -32,12 +37,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+from agentm.harness.types import JsonDict
+from agentm.config.schema import SystemConfig, ScenarioConfig
+
+
 def _load_and_override(
     scenario_dir: str,
     config_path: str,
     debug_mode: bool,
     verbose: bool,
-) -> tuple[Any, Any, Path]:
+) -> tuple[SystemConfig, ScenarioConfig, Path]:
     """Load configs, apply env overrides and CLI flags.
 
     Returns (system_config, scenario_config, scenario_path).
@@ -65,15 +74,15 @@ def _load_and_override(
 
 
 async def _setup_debug_and_dashboard(
-    system: Any,
-    system_config: Any,
+    system: AgentSystem,
+    system_config: SystemConfig,
     verbose: bool,
     dashboard: bool,
     dashboard_host: str,
     dashboard_port: int,
     *,
     data_dir: str = "",
-) -> tuple[Any | None, Any | None, Any | None, str | None]:
+) -> tuple[DebugConsole | None, asyncio.Task | None, EvalTracker | None, str | None]:
     """Wire up DebugConsole and optional dashboard with EvalTracker.
 
     Returns (debug_console, dashboard_server_task, eval_tracker, sample_id).
@@ -154,16 +163,16 @@ async def _setup_debug_and_dashboard(
 
 
 async def _stream_and_finalize(
-    system: Any,
-    initial_state: dict[str, Any],
-    system_config: Any,
-    debug_console: Any | None,
-    dashboard_server_task: Any | None,
+    system: AgentSystem,
+    initial_state: JsonDict,
+    system_config: SystemConfig,
+    debug_console: DebugConsole | None,
+    dashboard_server_task: asyncio.Task | None,
     dashboard_port: int,
     verbose: bool,
     max_steps: int,
     label: str,
-    eval_tracker: Any | None = None,
+    eval_tracker: EvalTracker | None = None,
     sample_id: str | None = None,
 ) -> None:
     """Stream execution, handle shutdown, and optionally keep dashboard alive."""
@@ -411,7 +420,7 @@ async def resume_investigation(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_prompt_paths(scenario_config: Any, scenario_dir: Path) -> None:
+def _resolve_prompt_paths(scenario_config: ScenarioConfig, scenario_dir: Path) -> None:
     """Resolve relative prompt paths in scenario config against scenario_dir."""
     if scenario_config.orchestrator.prompts:
         scenario_config.orchestrator.prompts = {
@@ -491,7 +500,7 @@ def _print_event(event: dict, step: int, verbose: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_trajectory_json(run_id: str, messages: list[dict[str, Any]]) -> str:
+def _build_trajectory_json(run_id: str, messages: list[JsonDict]) -> str:
     """Pack collected OpenAI-format messages into rcabench Span JSON."""
     span = {
         "trajectories": [
@@ -505,7 +514,7 @@ def _build_trajectory_json(run_id: str, messages: list[dict[str, Any]]) -> str:
     return json.dumps(span, ensure_ascii=False)
 
 
-def _normalize_structured_response(data: dict[str, Any]) -> dict[str, Any]:
+def _normalize_structured_response(data: JsonDict) -> JsonDict:
     """Convert agent-internal schema to eval-compatible format.
 
     Handles two transformations:
