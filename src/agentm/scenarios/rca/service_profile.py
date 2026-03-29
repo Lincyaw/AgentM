@@ -8,9 +8,10 @@ observations append, anomaly upgrade).
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+
+from agentm.utils.threadsafe_store import ThreadSafeStore
 
 
 @dataclass(frozen=True)
@@ -52,15 +53,14 @@ def _unique_tuple(existing: tuple[str, ...], new: list[str] | None) -> tuple[str
     return tuple(merged)
 
 
-class ServiceProfileStore:
+class ServiceProfileStore(ThreadSafeStore[str, ServiceProfile]):
     """Thread-safe, run-scoped shared service profile store.
 
     Accessible by both orchestrator and all workers via closure injection.
     """
 
     def __init__(self) -> None:
-        self._profiles: dict[str, ServiceProfile] = {}
-        self._lock = threading.Lock()
+        super().__init__()
 
     # ------------------------------------------------------------------
     # Mutations
@@ -90,7 +90,7 @@ class ServiceProfileStore:
         now = datetime.now(timezone.utc).isoformat()
 
         with self._lock:
-            existing = self._profiles.get(service_name)
+            existing = self._data.get(service_name)
 
             if existing is None:
                 obs: tuple[ServiceObservation, ...] = ()
@@ -152,7 +152,7 @@ class ServiceProfileStore:
                     ),
                 )
 
-            self._profiles[service_name] = profile
+            self._data[service_name] = profile
             return profile
 
     # ------------------------------------------------------------------
@@ -161,13 +161,11 @@ class ServiceProfileStore:
 
     def get(self, service_name: str) -> ServiceProfile | None:
         """Return the profile for *service_name*, or ``None``."""
-        with self._lock:
-            return self._profiles.get(service_name)
+        return super().get(service_name)
 
     def get_all(self) -> dict[str, ServiceProfile]:
         """Return a snapshot of all profiles."""
-        with self._lock:
-            return dict(self._profiles)
+        return super().get_all()
 
     def query(
         self,
@@ -177,7 +175,7 @@ class ServiceProfileStore:
     ) -> list[ServiceProfile]:
         """Filter profiles by anomaly status or topology relationship."""
         with self._lock:
-            profiles = list(self._profiles.values())
+            profiles = list(self._data.values())
 
         if anomalous_only:
             profiles = [p for p in profiles if p.is_anomalous]
@@ -200,7 +198,7 @@ class ServiceProfileStore:
         Groups profiles into anomalous and healthy sections.
         """
         with self._lock:
-            profiles = list(self._profiles.values())
+            profiles = list(self._data.values())
 
         if not profiles:
             return ""
@@ -227,7 +225,7 @@ class ServiceProfileStore:
     def format_profile(self, service_name: str) -> str:
         """Format a single profile for tool output."""
         with self._lock:
-            profile = self._profiles.get(service_name)
+            profile = self._data.get(service_name)
         if profile is None:
             return f"No profile found for '{service_name}'"
         return self._format_single(profile)

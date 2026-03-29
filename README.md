@@ -1,6 +1,6 @@
 # AgentM
 
-Hypothesis-driven multi-agent orchestration framework for Root Cause Analysis (RCA).
+A generic multi-agent orchestration SDK built on LangGraph. Supports custom state types, pluggable reasoning strategies, and middleware pipelines for diverse agent workflows.
 
 ## Quick Start
 
@@ -239,8 +239,8 @@ ok, fail = await benchmark.rollout(agent)
 |----------|----------|-------------|
 | `AGENTM_API_KEY` | Yes | LLM API key |
 | `AGENTM_API_BASE_URL` | No | Custom API base URL (OpenAI-compatible) |
-| `AGENTM_ORCHESTRATOR_MODEL` | No | Override orchestrator model name |
-| `AGENTM_WORKER_MODEL` | No | Override worker model name |
+| `AGENTM_ORCHESTRATOR_MODEL` | No | Override orchestrator model name (default: from config) |
+| `AGENTM_WORKER_MODEL` | No | Override worker model name (default: from config) |
 | `AGENTM_LOG_LEVEL` | No | Log level for agentm loggers (default: `INFO`) |
 | `LLM_EVAL_DB_URL` | For DB mode | PostgreSQL connection URL for eval database |
 

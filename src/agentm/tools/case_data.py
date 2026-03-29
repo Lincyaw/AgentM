@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextvars
 import json
 from pathlib import Path
+from typing import Any
 
 from agentm.tools.duckdb_sql import register_tables
 
@@ -102,7 +103,7 @@ async def load_case_data(case_id: str) -> str:
         )
 
     # Discover parquet files
-    tables: dict[str, str] = {}
+    tables: dict[str, Any] = {}
     for f in sorted(data_path.iterdir()):
         if f.name in _ALLOWED_PARQUET_FILES and f.is_file():
             table_name = f.stem  # e.g. "abnormal_traces"

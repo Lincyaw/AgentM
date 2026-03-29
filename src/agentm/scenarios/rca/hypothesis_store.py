@@ -7,8 +7,9 @@ output via format_context each round.
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass
+
+from agentm.utils.threadsafe_store import ThreadSafeStore
 
 
 @dataclass(frozen=True)
@@ -23,7 +24,7 @@ class HypothesisEntry:
     parent_id: str | None = None
 
 
-class HypothesisStore:
+class HypothesisStore(ThreadSafeStore[str, HypothesisEntry]):
     """Thread-safe, run-scoped hypothesis store.
 
     Mirrors ServiceProfileStore's design — tools hold a closure reference,
@@ -35,9 +36,8 @@ class HypothesisStore:
     )
 
     def __init__(self) -> None:
-        self._hypotheses: dict[str, HypothesisEntry] = {}
+        super().__init__()
         self._confirmed_id: str | None = None
-        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Mutations
@@ -56,7 +56,7 @@ class HypothesisStore:
             raise ValueError(f"Invalid status: {status!r}")
 
         with self._lock:
-            existing = self._hypotheses.get(id)
+            existing = self._data.get(id)
             if existing is None:
                 entry = HypothesisEntry(
                     id=id,
@@ -77,7 +77,7 @@ class HypothesisStore:
                     counter_evidence=existing.counter_evidence,
                     parent_id=parent_id or existing.parent_id,
                 )
-            self._hypotheses[id] = entry
+            self._data[id] = entry
 
             if status == "confirmed":
                 self._confirmed_id = id
@@ -87,8 +87,8 @@ class HypothesisStore:
     def remove(self, id: str) -> bool:
         """Remove a hypothesis. Returns True if it existed."""
         with self._lock:
-            if id in self._hypotheses:
-                del self._hypotheses[id]
+            if id in self._data:
+                del self._data[id]
                 if self._confirmed_id == id:
                     self._confirmed_id = None
                 return True
@@ -99,12 +99,12 @@ class HypothesisStore:
     # ------------------------------------------------------------------
 
     def get(self, id: str) -> HypothesisEntry | None:
-        with self._lock:
-            return self._hypotheses.get(id)
+        """Return the hypothesis for *id*, or ``None``."""
+        return super().get(id)
 
     def get_all(self) -> dict[str, HypothesisEntry]:
-        with self._lock:
-            return dict(self._hypotheses)
+        """Return a snapshot of all hypotheses."""
+        return super().get_all()
 
     @property
     def confirmed_id(self) -> str | None:
@@ -118,7 +118,7 @@ class HypothesisStore:
     def format_for_llm(self) -> str:
         """Format all hypotheses for the LLM context message."""
         with self._lock:
-            hypotheses = list(self._hypotheses.values())
+            hypotheses = list(self._data.values())
             confirmed = self._confirmed_id
 
         if not hypotheses:

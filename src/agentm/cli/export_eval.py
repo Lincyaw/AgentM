@@ -8,10 +8,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-try:
-    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-except ImportError:
-    JsonPlusSerializer = None  # type: ignore[assignment,misc]
+from agentm.utils.db import sqlite_cursor
+from agentm.utils.serde import deserialize_typed
 
 
 def export_eval_result(trajectory_file: str, output_file: str | None = None) -> Path:
@@ -198,32 +196,25 @@ def _load_structured_response_from_db(
         return None
 
     try:
-        con = sqlite3.connect(str(db_path))
-        cur = con.cursor()
-        row = cur.execute(
-            """
-            SELECT type, value
-            FROM writes
-            WHERE thread_id = ? AND channel = 'structured_response'
-            ORDER BY rowid DESC
-            LIMIT 1
-            """,
-            (thread_id,),
-        ).fetchone()
+        with sqlite_cursor(str(db_path)) as cur:
+            row = cur.execute(
+                """
+                SELECT type, value
+                FROM writes
+                WHERE thread_id = ? AND channel = 'structured_response'
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (thread_id,),
+            ).fetchone()
     except sqlite3.Error:
         return None
-    finally:
-        try:
-            con.close()
-        except Exception:
-            pass
 
     if row is None:
         return None
 
     data_type, value = row
     try:
-        serde = JsonPlusSerializer()
-        return serde.loads_typed((data_type, value))
+        return deserialize_typed((data_type, value))
     except Exception:
         return None

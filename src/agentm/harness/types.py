@@ -3,7 +3,60 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from langchain_core.messages import BaseMessage
+
+
+# ---------------------------------------------------------------------------
+# Protocols
+# ---------------------------------------------------------------------------
+
+class ModelProtocol(Protocol):
+    """Protocol for LLM model interface.
+
+    Supports both plain models and models with bound tools.
+    """
+
+    async def ainvoke(self, messages: list[Message]) -> object:
+        """Invoke the model with messages. Returns a response object."""
+        ...
+
+    def with_structured_output(self, schema: type, *, method: str = "function_calling") -> "ModelProtocol":
+        """Return a model configured for structured output."""
+        ...
+
+    def bind_tools(self, tools: list[JsonDict]) -> "ModelProtocol":
+        """Bind tools to the model."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Type aliases for common patterns
+# ---------------------------------------------------------------------------
+
+# JSON-compatible value
+JsonValue: TypeAlias = "str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]"
+
+# Message type - supports dict and LangChain BaseMessage
+Message: TypeAlias = "dict[str, JsonValue] | BaseMessage"
+
+# Tool result type - all tools return strings (JSON-encoded)
+ToolResult: TypeAlias = str
+
+# JSON-compatible dict
+JsonDict: TypeAlias = "dict[str, JsonValue]"
+
+# Tool callable type - async or sync function returning ToolResult
+ToolCallable: TypeAlias = "Callable[..., ToolResult | Awaitable[ToolResult]]"
+
+
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
 
 
 class AgentStatus(Enum):
@@ -22,7 +75,7 @@ class RunConfig:
     max_steps: int | None = None
     timeout: float | None = None
     thread_id: str | None = None  # for checkpointing
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: JsonDict = field(default_factory=dict)
 
 
 @dataclass
@@ -31,12 +84,12 @@ class AgentResult:
 
     agent_id: str
     status: AgentStatus
-    output: Any = None  # final response (str, dict, Pydantic model)
+    output: JsonValue = None  # final response (str, dict, Pydantic model)
     error: str | None = None
     duration_seconds: float | None = None
     steps: int = 0  # total LLM call rounds
     tool_calls: int = 0  # total tool invocations
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: JsonDict = field(default_factory=dict)
 
 
 @dataclass
@@ -49,7 +102,7 @@ class AgentEvent:
 
     type: str
     agent_id: str
-    data: dict[str, Any] = field(default_factory=dict)
+    data: JsonDict = field(default_factory=dict)
     step: int = 0
     timestamp: str = ""
 
@@ -63,7 +116,7 @@ class AgentInfo:
     parent_id: str | None = None
     current_step: int = 0
     started_at: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: JsonDict = field(default_factory=dict)
     result: AgentResult | None = None
 
 
@@ -75,4 +128,4 @@ class LoopContext:
     step: int
     max_steps: int | None
     tool_call_count: int
-    metadata: dict[str, Any]
+    metadata: JsonDict
