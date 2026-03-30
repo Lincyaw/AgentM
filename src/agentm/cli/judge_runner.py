@@ -204,9 +204,9 @@ def _load_injection_context(data_dir: str) -> str:
 
     parts: list[str] = []
 
-    fault_type = injection.get("fault_type")
-    if fault_type is not None:
-        parts.append(f"- **Fault Type**: {fault_type}")
+    # NOTE: fault_type is a numeric code (e.g. 28) — not human-readable.
+    # The readable fault name comes from meta.difficulty.fault_type in reasoning.
+    # We only extract injection target details from display_config here.
 
     # Parse display_config for injection point details
     display_config_raw = injection.get("display_config")
