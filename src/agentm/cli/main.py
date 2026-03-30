@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from pathlib import Path
 
 import typer
 from dotenv import load_dotenv
@@ -15,7 +14,6 @@ from agentm.exceptions import AgentMError
 from agentm.cli.batch import (
     collect_cases,
     load_batch_config,
-    parse_ground_truth,
     run_batch_analysis,
 )
 from agentm.cli.debug import analyze_trajectory
@@ -448,19 +446,13 @@ def judge(
         typer.echo("No cases matched the filter criteria.", err=True)
         raise typer.Exit(code=1)
 
-    # Build (case_id, file_path, ground_truth) tuples for run_judging
-    cases = [
-        (ci.case_id, ci.file_path, parse_ground_truth(ci.correct_answer))
-        for ci in case_infos
-    ]
-
     # Load configs via the shared loader (same pattern as analyze/run)
     system_config, scenario_config, _ = _load_and_override(
         scenario, config, debug_mode=False, verbose=verbose,
     )
 
     asyncio.run(run_judging(
-        cases,
+        case_infos,
         system_config=system_config,
         scenario_config=scenario_config,
         output_path=output,
