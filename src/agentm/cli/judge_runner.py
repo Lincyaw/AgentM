@@ -95,6 +95,7 @@ async def _judge_single_case(
     system_config: SystemConfig,
     scenario_config: ScenarioConfig,
     broadcaster: object | None = None,
+    eval_tracker: object | None = None,
 ) -> TrajectoryLabel | None:
     """Run trajectory_judger on a single case via AgentSystem.execute()."""
     # Register trajectory file for jq_query access
@@ -106,6 +107,11 @@ async def _judge_single_case(
         scenario_config,
         system_config,
     )
+
+    # Update tracker with the real trajectory file path so the REST events
+    # endpoint (/api/eval/samples/{id}/events) can read from the correct file.
+    if eval_tracker is not None and system.trajectory is not None:
+        eval_tracker.update_trajectory_path(case_id, str(system.trajectory.file_path))
 
     # Wire trajectory events → dashboard WebSocket
     if broadcaster is not None and system.trajectory is not None:
@@ -236,6 +242,7 @@ async def run_judging(
             system_config=system_config,
             scenario_config=scenario_config,
             broadcaster=broadcaster,
+            eval_tracker=tracker,
         )
 
         if label is not None:
