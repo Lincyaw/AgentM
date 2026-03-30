@@ -18,6 +18,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Literal
 
 import yaml
@@ -47,6 +48,12 @@ class SourceConfig(BaseModel):
     agent_type: str | None = None
     limit: int | None = None
     data_base_dir: str | None = None
+    source_path_pattern: str | None = None
+    """Pattern for resolving source → data directory.
+
+    Placeholders: ``{data_base_dir}``, ``{source}``.
+    Default (when only *data_base_dir* is set): ``{data_base_dir}/{source}``
+    """
 
 
 class BatchExecutionConfig(BaseModel):
@@ -137,6 +144,8 @@ def collect_from_directory(
     agent_type: str | None = None,
     limit: int | None = None,
     data_base_dir: str | None = None,
+    source_path_pattern: str | None = None,
+    source_path_fn: SourcePathFn | None = None,
 ) -> list[CaseInfo]:
     """Scan a directory for exported eval JSON files and load metadata.
 
@@ -146,10 +155,15 @@ def collect_from_directory(
         exp_id: Optional experiment ID filter.
         agent_type: Optional agent type filter.
         limit: Maximum number of cases to return.
+        data_base_dir: Root directory for dataset sources.
+        source_path_pattern: Pattern for resolving source → data dir.
+        source_path_fn: Explicit resolver (takes priority over pattern/base_dir).
     """
     base = Path(directory)
     if not base.is_dir():
         raise NotADirectoryError(f"Not a directory: {directory}")
+
+    resolve_fn = source_path_fn or build_source_path_fn(data_base_dir, source_path_pattern)
 
     meta_filter = _EvalMetaFilter(
         filter_correctness=filter_correctness,
@@ -176,9 +190,8 @@ def collect_from_directory(
         if not meta_filter.matches(correct, meta.get("exp_id", ""), meta.get("agent_type", "") or ""):
             continue
 
-        # Resolve data directory from source field + data_base_dir
         source = meta.get("source", "") or ""
-        resolved_data_dir = _resolve_data_dir(source, data_base_dir, suffix="converted")
+        resolved_data_dir = _resolve_data_dir(source, resolve_fn)
 
         cases.append(
             CaseInfo(
@@ -214,6 +227,8 @@ def collect_from_db(
     limit: int | None = None,
     output_dir: str | None = None,
     data_base_dir: str | None = None,
+    source_path_pattern: str | None = None,
+    source_path_fn: SourcePathFn | None = None,
 ) -> list[CaseInfo]:
     """Query the eval DB and export cases to JSON files.
 
@@ -256,6 +271,8 @@ def collect_from_db(
     out_dir = Path(output_dir) if output_dir else Path("eval-trajectories")
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    resolve_fn = source_path_fn or build_source_path_fn(data_base_dir, source_path_pattern)
+
     cases: list[CaseInfo] = []
     for row in rows:
         row = dict(row)
@@ -290,7 +307,7 @@ def collect_from_db(
         )
 
         source = row.get("source", "") or ""
-        resolved_data_dir = _resolve_data_dir(source, data_base_dir)
+        resolved_data_dir = _resolve_data_dir(source, resolve_fn)
 
         # Enrich reasoning with fault context from meta when not already present
         base_reasoning = row["reasoning"] or ""
@@ -394,11 +411,40 @@ def _extract_fault_context_from_meta(meta: dict[str, Any] | None) -> str:
     return "; ".join(parts)
 
 
-def _resolve_data_dir(source: str, data_base_dir: str | None, suffix: str = "") -> str:
-    """Resolve data directory from source and base dir."""
-    if not data_base_dir or not source:
+SourcePathFn = Callable[[str], str]
+"""Callable that maps a source name to a data directory path."""
+
+_DEFAULT_SOURCE_PATTERN = "{data_base_dir}/{source}"
+
+
+def build_source_path_fn(
+    data_base_dir: str | None,
+    pattern: str | None = None,
+) -> SourcePathFn | None:
+    """Build a source path resolver from base dir and optional pattern.
+
+    When *pattern* is provided, placeholders ``{data_base_dir}`` and
+    ``{source}`` are expanded at call time.  Otherwise the default
+    pattern ``{data_base_dir}/{source}`` is used.
+
+    Returns ``None`` when *data_base_dir* is not set.
+    """
+    if not data_base_dir:
+        return None
+    _root = data_base_dir
+    _pat = pattern or _DEFAULT_SOURCE_PATTERN
+
+    def _resolve(source: str) -> str:
+        return _pat.format(data_base_dir=_root, source=source)
+
+    return _resolve
+
+
+def _resolve_data_dir(source: str, source_path_fn: SourcePathFn | None) -> str:
+    """Resolve data directory using the source path function."""
+    if not source_path_fn or not source:
         return ""
-    candidate = Path(data_base_dir) / source / suffix if suffix else Path(data_base_dir) / source
+    candidate = Path(source_path_fn(source))
     return str(candidate) if candidate.is_dir() else ""
 
 
@@ -492,6 +538,7 @@ def collect_cases(cfg: BatchConfig) -> list[CaseInfo]:
             limit=src.limit,
             output_dir=cfg.output.export_dir,
             data_base_dir=src.data_base_dir,
+            source_path_pattern=src.source_path_pattern,
         )
     return collect_from_directory(
         directory=src.directory,
@@ -500,6 +547,7 @@ def collect_cases(cfg: BatchConfig) -> list[CaseInfo]:
         agent_type=src.agent_type,
         limit=src.limit,
         data_base_dir=src.data_base_dir,
+        source_path_pattern=src.source_path_pattern,
     )
 
 
