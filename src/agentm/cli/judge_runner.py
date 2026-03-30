@@ -269,7 +269,7 @@ def _build_db_query(src: SourceConfig) -> tuple[str, list[Any]]:
     query = (
         "SELECT e.id, e.exp_id, e.dataset_index, e.correct, e.correct_answer,"
         "       e.extracted_final_answer, e.agent_type, e.model_name, e.reasoning,"
-        "       e.source, e.trajectories, e.meta,"
+        "       e.source, e.trajectories,"
         "       d.meta AS data_meta "
         "FROM evaluation_data e "
         "LEFT JOIN data d ON e.dataset = d.dataset AND e.source = d.source "
@@ -326,13 +326,6 @@ def _collect_from_db(src: SourceConfig, output_dir: str | None = None) -> list[C
 
         source = row.get("source", "") or ""
 
-        row_meta = row.get("meta")
-        if isinstance(row_meta, str):
-            try:
-                row_meta = json.loads(row_meta)
-            except json.JSONDecodeError:
-                row_meta = None
-
         data_meta = row.get("data_meta")
         if isinstance(data_meta, str):
             try:
@@ -340,18 +333,12 @@ def _collect_from_db(src: SourceConfig, output_dir: str | None = None) -> list[C
             except json.JSONDecodeError:
                 data_meta = None
 
-        # Prefer data table meta for fault context (has fault_type/category);
-        # fall back to evaluation_data meta.
-        fault_meta = data_meta if isinstance(data_meta, dict) else row_meta
         base_reasoning = row["reasoning"] or ""
-        fault_ctx = _extract_fault_context(fault_meta)
+        fault_ctx = _extract_fault_context(data_meta)
         reasoning = _enrich_reasoning(base_reasoning, fault_ctx)
 
-        # Merge difficulty from data table if evaluation_data doesn't have it
         difficulty = None
-        if isinstance(row_meta, dict) and row_meta.get("difficulty"):
-            difficulty = row_meta["difficulty"]
-        elif isinstance(data_meta, dict) and data_meta.get("difficulty"):
+        if isinstance(data_meta, dict) and data_meta.get("difficulty"):
             difficulty = data_meta["difficulty"]
 
         eval_meta: dict[str, Any] = {
