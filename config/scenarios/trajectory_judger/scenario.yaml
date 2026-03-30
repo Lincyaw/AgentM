@@ -13,6 +13,11 @@ orchestrator:
   tools:
     - jq_query
 
+  skeleton:
+    exclude_tools: ["think", "reflect"]
+    max_args_length: 500
+    response_preview_length: 100
+
 agents:
   worker:
     model: "gpt-5.1-mini"

@@ -229,6 +229,20 @@ class OutputConfig(BaseModel):
     schema_name: str = "CausalGraph"
 
 
+class SkeletonConfig(BaseModel):
+    """Configuration for trajectory skeleton injection into judge prompts.
+
+    The skeleton gives the LLM an at-a-glance view of all tool calls
+    (with args but without full responses), so it can reason about the
+    agent's behaviour and selectively query responses via jq_query.
+    """
+
+    exclude_tools: list[str] = []
+    include_tools: list[str] = []
+    max_args_length: int = 500
+    response_preview_length: int = 100
+
+
 class OrchestratorConfig(LLMConfig):
     """Orchestrator configuration within a scenario."""
 
@@ -245,6 +259,7 @@ class OrchestratorConfig(LLMConfig):
     )
     retry: RetryConfig = RetryConfig()
     loop_detection: LoopDetectionConfig = LoopDetectionConfig()
+    skeleton: Optional[SkeletonConfig] = None
 
 
 class SystemTypeConfig(BaseModel):
