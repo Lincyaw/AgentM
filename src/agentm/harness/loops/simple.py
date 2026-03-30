@@ -271,13 +271,6 @@ class SimpleAgentLoop(AgentLoop):
         step = 0
         tool_call_count = 0
 
-        yield AgentEvent(
-            type="loop_start",
-            agent_id=agent_id,
-            step=0,
-            data={"input": input, "user_messages": user_messages},
-        )
-
         while config.max_steps is None or step < config.max_steps:
             # 1. Drain inbox
             while self._inbox:
