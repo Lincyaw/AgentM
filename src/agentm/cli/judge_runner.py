@@ -57,6 +57,9 @@ class CaseInfo:
     dataset_index: int | None = None
     source: str = ""
     data_dir: str = ""
+    fault_type: str = ""
+    fault_category: str = ""
+    difficulty: dict[str, Any] | None = None
 
 
 def parse_ground_truth(correct_answer: str) -> list[str]:
@@ -150,6 +153,17 @@ def _matches_filter(
     return True
 
 
+def _get_difficulty_field(meta: dict[str, Any] | None, field: str) -> str:
+    """Extract a field from meta.difficulty (or meta directly if it has the field)."""
+    if not isinstance(meta, dict):
+        return ""
+    difficulty = meta.get("difficulty")
+    if isinstance(difficulty, dict):
+        return str(difficulty.get(field, "")) if difficulty.get(field) else ""
+    # meta itself might be the difficulty dict (from directory path)
+    return str(meta.get(field, "")) if meta.get(field) else ""
+
+
 def _extract_fault_context(meta: dict[str, Any] | None) -> str:
     """Extract fault injection context from evaluation metadata."""
     if not meta:
@@ -222,6 +236,9 @@ def _collect_from_directory(src: SourceConfig) -> list[CaseInfo]:
                 dataset_index=meta.get("dataset_index"),
                 source=source,
                 data_dir=_resolve_data_dir(source, resolve_fn),
+                fault_type=_get_difficulty_field(meta.get("difficulty"), "fault_type"),
+                fault_category=_get_difficulty_field(meta.get("difficulty"), "fault_category"),
+                difficulty=meta.get("difficulty") if isinstance(meta.get("difficulty"), dict) else None,
             )
         )
 
@@ -381,6 +398,9 @@ def _collect_from_db(src: SourceConfig, output_dir: str | None = None) -> list[C
                 dataset_index=row["dataset_index"],
                 source=source,
                 data_dir=_resolve_data_dir(source, resolve_fn),
+                fault_type=_get_difficulty_field(data_meta, "fault_type"),
+                fault_category=_get_difficulty_field(data_meta, "fault_category"),
+                difficulty=difficulty,
             )
         )
 
