@@ -158,15 +158,21 @@ async def _setup_debug_and_dashboard(
         if debug_console is not None:
             system.trajectory.add_listener(debug_console.on_trajectory_event)
         if dashboard and bc is not None:
+            _sid = sample_id
 
             async def _traj_to_ws(event: dict) -> None:
+                traj_event = {
+                    "event_type": event.get("event_type", ""),
+                    "agent_path": event.get("agent_path", []),
+                    "data": event.get("data", {}),
+                    "timestamp": event.get("timestamp", ""),
+                }
                 await bc.broadcast(
                     {
-                        "event_type": event.get("event_type", ""),
-                        "agent_path": event.get("agent_path", []),
-                        "data": event.get("data", {}),
-                        "timestamp": event.get("timestamp", ""),
-                        "mode": "trajectory",
+                        "channel": "eval",
+                        "event_type": "sample_trajectory_event",
+                        "sample_id": _sid,
+                        "data": traj_event,
                     }
                 )
 
