@@ -184,6 +184,70 @@ def extract_skeleton(
     return _extract_skeleton_from_jsonl(file_path, config)
 
 
+def _load_injection_context(data_dir: str) -> str:
+    """Load injection.json from data_dir and format key fault details.
+
+    Returns a compact summary string, or empty string if unavailable.
+    """
+    if not data_dir:
+        return ""
+    injection_path = Path(data_dir) / "injection.json"
+    if not injection_path.exists():
+        return ""
+    try:
+        injection = json.loads(injection_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return ""
+
+    parts: list[str] = []
+
+    fault_type = injection.get("fault_type")
+    if fault_type is not None:
+        parts.append(f"- **Fault Type**: {fault_type}")
+
+    # Parse display_config for injection point details
+    display_config_raw = injection.get("display_config")
+    if display_config_raw:
+        try:
+            dc = json.loads(display_config_raw) if isinstance(display_config_raw, str) else display_config_raw
+            ip = dc.get("injection_point", {})
+            if ip:
+                target_parts = []
+                if ip.get("app_name"):
+                    target_parts.append(ip["app_name"])
+                if ip.get("class_name"):
+                    target_parts.append(ip["class_name"])
+                if ip.get("method_name"):
+                    target_parts.append(ip["method_name"])
+                if target_parts:
+                    parts.append(f"- **Injection Target**: {' / '.join(target_parts)}")
+            duration = dc.get("duration")
+            if duration:
+                parts.append(f"- **Duration**: {duration} min")
+            mem_type = dc.get("mem_type")
+            if mem_type is not None:
+                label = "Heap" if mem_type == 1 else "Stack" if mem_type == 2 else str(mem_type)
+                parts.append(f"- **Memory Type**: {label}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    gt = injection.get("ground_truth", {})
+    if gt:
+        if gt.get("service"):
+            parts.append(f"- **GT Service**: {', '.join(gt['service'])}")
+        if gt.get("function"):
+            parts.append(f"- **GT Function**: {', '.join(gt['function'])}")
+        if gt.get("metric"):
+            parts.append(f"- **GT Metric**: {', '.join(gt['metric'])}")
+
+    start = injection.get("start_time")
+    end = injection.get("end_time")
+    if start and end:
+        parts.append(f"- **Time Window**: {start} ~ {end}")
+
+    return "\n".join(parts)
+
+
 def format_skeleton(steps: list[dict]) -> str:
     """Format skeleton steps as compact text for LLM consumption."""
     if not steps:
@@ -310,8 +374,16 @@ async def _judge_single_case(
         f"- **jq_query thread_id**: `{case_id}`",
     ]
 
-    if case.reasoning:
-        parts.extend(["", "## Fault Context", "", case.reasoning])
+    # Fault context: injection details from data_dir + eval reasoning
+    injection_ctx = _load_injection_context(case.data_dir)
+    if injection_ctx or case.reasoning:
+        parts.extend(["", "## Fault Context", ""])
+        if injection_ctx:
+            parts.append(injection_ctx)
+        if case.reasoning:
+            if injection_ctx:
+                parts.append("")
+            parts.append(f"**Eval Reasoning**: {case.reasoning}")
 
     if skeleton_steps:
         parts.extend([
