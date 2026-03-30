@@ -314,9 +314,7 @@ async def _judge_single_case(
 
     try:
         async with system:
-            result = await system.execute(
-                {"task_description": f"Analyze trajectory {case_id}", "messages": [{"role": "human", "content": task_content}]}
-            )
+            result = await system.execute({"task_description": task_content})
         return _parse_label(result.get("output"), case_id, ground_truth)
     except (AgentMError, asyncio.TimeoutError) as e:
         logger.error("Error judging case %s: %s", case_id, e)
