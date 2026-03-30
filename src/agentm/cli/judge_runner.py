@@ -16,6 +16,7 @@ from rich.console import Console
 from rich.table import Table
 
 from agentm.builder import build_agent_system
+from agentm.cli.batch import CaseInfo, parse_ground_truth
 from agentm.config.schema import ScenarioConfig, SkeletonConfig, SystemConfig
 from agentm.exceptions import AgentMError
 from agentm.scenarios.trajectory_judger.data import TrajectoryLabel
@@ -265,15 +266,17 @@ def _parse_label(output: object, case_id: str, ground_truth: list[str]) -> Traje
 
 
 async def _judge_single_case(
-    case_id: str,
-    file_path: Path,
-    ground_truth: list[str],
+    case: CaseInfo,
     system_config: SystemConfig,
     scenario_config: ScenarioConfig,
     broadcaster: object | None = None,
     eval_tracker: object | None = None,
 ) -> TrajectoryLabel | None:
     """Run trajectory_judger on a single case via AgentSystem.execute()."""
+    case_id = case.case_id
+    file_path = case.file_path
+    ground_truth = parse_ground_truth(case.correct_answer)
+
     # Register trajectory file for jq_query access
     if file_path.exists():
         get_reader().register(str(file_path))
@@ -298,24 +301,27 @@ async def _judge_single_case(
     skeleton_steps = extract_skeleton(file_path, skeleton_config)
     skeleton_text = format_skeleton(skeleton_steps)
 
-    task_payload: dict = {
-        "trajectory_id": case_id,
-        "case_id": case_id,
-        "ground_truth": ground_truth,
-    }
+    gt_str = ", ".join(ground_truth)
+    parts = [
+        f"## Case {case_id}",
+        "",
+        f"- **Trajectory ID**: {case_id}",
+        f"- **Ground Truth**: {gt_str}",
+        f"- **jq_query thread_id**: `{case_id}`",
+    ]
+
+    if case.reasoning:
+        parts.extend(["", "## Fault Context", "", case.reasoning])
 
     if skeleton_steps:
-        task_payload["trajectory_skeleton"] = skeleton_text
-        task_payload["note"] = (
-            f"The skeleton above shows all tool calls with args and response previews. "
-            f"Use jq_query with thread_id='{case_id}' to fetch full tool responses for specific steps."
-        )
-    else:
-        task_payload["note"] = (
-            f"Use jq_query tool with thread_id='{case_id}' to query trajectory data"
-        )
+        parts.extend([
+            "",
+            "## Trajectory Skeleton",
+            "",
+            skeleton_text,
+        ])
 
-    task_content = json.dumps(task_payload, ensure_ascii=False, indent=2)
+    task_content = "\n".join(parts)
 
     try:
         async with system:
@@ -373,7 +379,7 @@ def _save_results(results: list[TrajectoryLabel], total: int, failed_count: int,
 
 
 async def run_judging(
-    cases: list[tuple[str, Path, list[str]]],
+    cases: list[CaseInfo],
     system_config: SystemConfig,
     scenario_config: ScenarioConfig,
     output_path: str | None = None,
@@ -384,7 +390,7 @@ async def run_judging(
     """Run trajectory_judger scenario on each case.
 
     Args:
-        cases: List of (case_id, file_path, ground_truth) tuples.
+        cases: List of CaseInfo objects.
         system_config: Loaded system configuration.
         scenario_config: Loaded scenario configuration.
         output_path: Optional JSON file to write results.
@@ -409,23 +415,25 @@ async def run_judging(
     # Optional dashboard setup
     tracker, broadcaster, dashboard_task = None, None, None
     if dashboard:
+        dashboard_tuples = [
+            (c.case_id, c.file_path, parse_ground_truth(c.correct_answer))
+            for c in cases
+        ]
         tracker, broadcaster, dashboard_task = await _start_dashboard(
-            cases, scenario_config, dashboard_host, dashboard_port,
+            dashboard_tuples, scenario_config, dashboard_host, dashboard_port,
         )
 
     results: list[TrajectoryLabel] = []
     failed_cases: list[str] = []
 
-    for i, (case_id, file_path, ground_truth) in enumerate(cases, 1):
-        console.print(f"[{i}/{len(cases)}] Judging case {case_id}...")
+    for i, case in enumerate(cases, 1):
+        console.print(f"[{i}/{len(cases)}] Judging case {case.case_id}...")
 
         if tracker is not None:
-            tracker.mark_running(case_id, run_id=case_id)
+            tracker.mark_running(case.case_id, run_id=case.case_id)
 
         label = await _judge_single_case(
-            case_id=case_id,
-            file_path=file_path,
-            ground_truth=ground_truth,
+            case=case,
             system_config=system_config,
             scenario_config=scenario_config,
             broadcaster=broadcaster,
@@ -437,12 +445,12 @@ async def run_judging(
             color = _CATEGORY_COLORS.get(label.category, "white")
             console.print(f"    [{color}]{label.category}[/] — {label.reasoning[:80]}...")
             if tracker is not None:
-                tracker.mark_completed(case_id)
+                tracker.mark_completed(case.case_id)
         else:
-            failed_cases.append(case_id)
+            failed_cases.append(case.case_id)
             console.print("    [red]FAILED[/]")
             if tracker is not None:
-                tracker.mark_failed(case_id, "classification failed")
+                tracker.mark_failed(case.case_id, "classification failed")
 
     _print_summary(results, total=len(cases), failed_count=len(failed_cases))
 
