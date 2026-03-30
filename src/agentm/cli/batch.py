@@ -292,6 +292,20 @@ def collect_from_db(
         source = row.get("source", "") or ""
         resolved_data_dir = _resolve_data_dir(source, data_base_dir)
 
+        # Enrich reasoning with fault context from meta when not already present
+        base_reasoning = row["reasoning"] or ""
+        row_meta = row.get("meta")
+        if isinstance(row_meta, str):
+            try:
+                row_meta = json.loads(row_meta)
+            except json.JSONDecodeError:
+                row_meta = None
+        fault_ctx = _extract_fault_context_from_meta(row_meta)
+        if fault_ctx and "Fault type:" not in base_reasoning:
+            reasoning = f"{base_reasoning} | {fault_ctx}" if base_reasoning else fault_ctx
+        else:
+            reasoning = base_reasoning
+
         cases.append(
             CaseInfo(
                 file_path=filepath,
@@ -300,7 +314,7 @@ def collect_from_db(
                 correct=row["correct"],
                 correct_answer=row["correct_answer"] or "",
                 extracted_final_answer=row["extracted_final_answer"] or "",
-                reasoning=row["reasoning"] or "",
+                reasoning=reasoning,
                 agent_type=row["agent_type"] or "",
                 model_name=row["model_name"] or "",
                 dataset_index=row["dataset_index"],
@@ -351,6 +365,33 @@ class _EvalMetaFilter:
 def parse_ground_truth(correct_answer: str) -> list[str]:
     """Parse comma-separated ground truth services into a list."""
     return [s.strip() for s in correct_answer.split(",") if s.strip()]
+
+
+def _extract_fault_context_from_meta(meta: dict[str, Any] | None) -> str:
+    """Extract fault injection context from evaluation_data.meta.
+
+    meta.difficulty contains fault_type and fault_category.
+    meta.datapack_name encodes the injection target.
+    Falls back gracefully when fields are missing.
+    """
+    if not meta:
+        return ""
+    parts: list[str] = []
+
+    difficulty = meta.get("difficulty")
+    if isinstance(difficulty, dict):
+        ft = difficulty.get("fault_type")
+        fc = difficulty.get("fault_category")
+        if ft:
+            parts.append(f"Fault type: {ft}")
+        if fc:
+            parts.append(f"Fault category: {fc}")
+
+    datapack = meta.get("datapack_name")
+    if datapack:
+        parts.append(f"Datapack: {datapack}")
+
+    return "; ".join(parts)
 
 
 def _resolve_data_dir(source: str, data_base_dir: str | None, suffix: str = "") -> str:
@@ -423,7 +464,7 @@ def _build_db_query(
     query = (
         "SELECT id, exp_id, dataset_index, correct, correct_answer,"
         "       extracted_final_answer, agent_type, model_name, reasoning,"
-        "       source, trajectories "
+        "       source, trajectories, meta "
         "FROM evaluation_data "
         f"WHERE {' AND '.join(conditions)} "
         "ORDER BY id"
