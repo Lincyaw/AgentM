@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+from typing import Any, cast
 
 from agentm.harness.middleware import MiddlewareBase
 from agentm.harness.protocols import AgentLoop, CheckpointStore
@@ -20,6 +20,7 @@ from agentm.harness.types import (
     AgentEvent,
     AgentResult,
     AgentStatus,
+    JsonValue,
     LoopContext,
     Message,
     ModelProtocol,
@@ -111,7 +112,7 @@ class SimpleAgentLoop(AgentLoop):
 
         raise last_exc  # type: ignore[misc]  # unreachable, satisfies type checker
 
-    async def _synthesize_output(self, messages: list[Message]) -> object:
+    async def _synthesize_output(self, messages: list[Message]) -> JsonValue:
         """Produce final output, optionally using output_schema with retry/fallback.
 
         When output_schema is set, tries structured output up to
@@ -122,7 +123,7 @@ class SimpleAgentLoop(AgentLoop):
         if not self._output_schema:
             # No schema — return the last AI message content
             last = messages[-1] if messages else None
-            return getattr(last, "content", str(last))
+            return cast(JsonValue, getattr(last, "content", str(last)))
 
         # Use function_calling method for broader model compatibility.
         # json_schema method is not supported by many models (e.g. Doubao).
@@ -145,7 +146,10 @@ class SimpleAgentLoop(AgentLoop):
         for attempt in range(1 + self._synthesize_retries):
             try:
                 result = await structured_model.ainvoke(synth_messages)
-                output = result.model_dump() if hasattr(result, "model_dump") else result
+                output: JsonValue = cast(
+                    JsonValue,
+                    result.model_dump() if hasattr(result, "model_dump") else result,
+                )
                 logger.info(
                     "synthesize attempt %d/%d succeeded",
                     attempt + 1,
@@ -229,10 +233,12 @@ class SimpleAgentLoop(AgentLoop):
         self, input: str | list[Message], *, config: RunConfig | None = None
     ) -> AgentResult:
         """Convenience: iterate stream(), return final result."""
-        result = None
+        result: AgentResult | None = None
         async for event in self.stream(input, config=config):
             if event.type == "complete":
-                result = event.data.get("result")
+                raw = event.data.get("result")
+                if isinstance(raw, AgentResult):
+                    result = raw
         if result is None:
             raise RuntimeError("Agent loop finished without producing a result")
         return result
@@ -245,7 +251,7 @@ class SimpleAgentLoop(AgentLoop):
         The last event is always type="complete" with data={"result": AgentResult}.
         """
         config = config or RunConfig()
-        agent_id = config.metadata.get("agent_id", "")
+        agent_id = str(config.metadata.get("agent_id", ""))
 
         # Build initial message list: system prompt + user input
         # The loop always owns the system prompt; strip any system messages

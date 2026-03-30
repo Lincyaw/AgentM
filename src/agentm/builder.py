@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from agentm.config.schema import CompressionConfig, ModelConfig, ScenarioConfig, SystemConfig, create_chat_model
+from agentm.config.schema import ModelConfig, ScenarioConfig, SystemConfig, create_chat_model
 from agentm.core.prompt import load_prompt_template
 from agentm.core.tool_registry import ToolRegistry
 from agentm.core.trajectory import TrajectoryCollector
@@ -287,9 +287,7 @@ def _create_worker_infrastructure(
     runtime = AgentRuntime(trajectory=resources.trajectory)
 
     # Compose worker middleware: scenario middleware + SkillMiddleware
-    from agentm.harness.middleware import MiddlewareBase
-
-    worker_middleware: list[MiddlewareBase] = list(wiring.worker_middleware or [])
+    worker_middleware = list(wiring.worker_middleware or [])
     worker_config = scenario_config.agents.get("worker")
     if worker_config is not None and worker_config.skills and resources.vault is not None:
         worker_middleware.append(SkillMiddleware(resources.vault, worker_config.skills))
