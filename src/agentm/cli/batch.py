@@ -414,8 +414,6 @@ def _extract_fault_context_from_meta(meta: dict[str, Any] | None) -> str:
 SourcePathFn = Callable[[str], str]
 """Callable that maps a source name to a data directory path."""
 
-_DEFAULT_SOURCE_PATTERN = "{data_base_dir}/{source}"
-
 
 def build_source_path_fn(
     data_base_dir: str | None,
@@ -423,16 +421,17 @@ def build_source_path_fn(
 ) -> SourcePathFn | None:
     """Build a source path resolver from base dir and optional pattern.
 
-    When *pattern* is provided, placeholders ``{data_base_dir}`` and
-    ``{source}`` are expanded at call time.  Otherwise the default
-    pattern ``{data_base_dir}/{source}`` is used.
+    *pattern* uses ``{data_base_dir}`` and ``{source}`` placeholders,
+    e.g. ``"{data_base_dir}/{source}/converted"``.
+
+    When *pattern* is ``None``, falls back to ``{data_base_dir}/{source}``.
 
     Returns ``None`` when *data_base_dir* is not set.
     """
     if not data_base_dir:
         return None
     _root = data_base_dir
-    _pat = pattern or _DEFAULT_SOURCE_PATTERN
+    _pat = pattern or "{data_base_dir}/{source}"
 
     def _resolve(source: str) -> str:
         return _pat.format(data_base_dir=_root, source=source)

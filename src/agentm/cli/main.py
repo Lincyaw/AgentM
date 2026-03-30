@@ -196,6 +196,13 @@ def analyze_batch(
     verbose: bool = typer.Option(False, "--verbose", help="Extra detail in output"),
     dashboard: bool = typer.Option(False, "--dashboard", help="Start web dashboard"),
     port: int = typer.Option(8765, "--port", help="Dashboard server port"),
+    data_base_dir: str | None = typer.Option(
+        None, "--data-base-dir", help="Override source.data_base_dir in config",
+    ),
+    source_path_pattern: str | None = typer.Option(
+        None, "--source-path-pattern",
+        help="Override source.source_path_pattern in config",
+    ),
 ) -> None:
     """Batch analyze evaluation trajectories from config file.
 
@@ -235,6 +242,10 @@ def analyze_batch(
     if dashboard:
         cfg.output.dashboard = True
         cfg.output.dashboard_port = port
+    if data_base_dir is not None:
+        cfg.source.data_base_dir = data_base_dir
+    if source_path_pattern is not None:
+        cfg.source.source_path_pattern = source_path_pattern
 
     cases = collect_cases(cfg)
     if not cases:
