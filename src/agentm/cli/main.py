@@ -385,6 +385,10 @@ def judge(
     dashboard_host: str = typer.Option(
         "0.0.0.0", "--dashboard-host", help="Dashboard server bind address",
     ),
+    data_base_dir: str | None = typer.Option(
+        None, "--data-base-dir",
+        help="Root directory of dataset (contains injection.json per case)",
+    ),
 ) -> None:
     """Judge trajectories using decision-tree classification.
 
@@ -429,6 +433,7 @@ def judge(
                 agent_type=agent_type,
                 limit=limit,
                 output_dir=export_dir,
+                data_base_dir=data_base_dir,
             )
         else:
             case_infos = collect_from_directory(
@@ -437,6 +442,7 @@ def judge(
                 exp_id=exp_id,
                 agent_type=agent_type,
                 limit=limit,
+                data_base_dir=data_base_dir,
             )
     except Exception as e:
         typer.echo(f"ERROR: Failed to collect cases: {e}", err=True)
