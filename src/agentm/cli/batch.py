@@ -281,7 +281,26 @@ def collect_from_db(
         label = "correct" if row["correct"] else "incorrect"
         filename = f"{row_exp_id}_{row_id}_{label}.json"
 
-        eval_meta = {
+        source = row.get("source", "") or ""
+        resolved_data_dir = _resolve_data_dir(source, resolve_fn)
+
+        # Extract fault context from DB meta
+        row_meta = row.get("meta")
+        if isinstance(row_meta, str):
+            try:
+                row_meta = json.loads(row_meta)
+            except json.JSONDecodeError:
+                row_meta = None
+
+        base_reasoning = row["reasoning"] or ""
+        fault_ctx = _extract_fault_context_from_meta(row_meta)
+        if fault_ctx and "Fault type:" not in base_reasoning:
+            reasoning = f"{base_reasoning} | {fault_ctx}" if base_reasoning else fault_ctx
+        else:
+            reasoning = base_reasoning
+
+        # Build eval_meta with enriched reasoning and difficulty
+        eval_meta: dict[str, Any] = {
             "id": row_id,
             "exp_id": row_exp_id,
             "dataset_index": row["dataset_index"],
@@ -290,9 +309,11 @@ def collect_from_db(
             "extracted_final_answer": row["extracted_final_answer"],
             "agent_type": row["agent_type"],
             "model_name": row["model_name"],
-            "reasoning": row["reasoning"],
-            "source": row.get("source", ""),
+            "reasoning": reasoning,
+            "source": source,
         }
+        if isinstance(row_meta, dict) and row_meta.get("difficulty"):
+            eval_meta["difficulty"] = row_meta["difficulty"]
 
         trajectories = _parse_trajectory_data(row["trajectories"])
 
@@ -305,23 +326,6 @@ def collect_from_db(
         filepath.write_text(
             json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-
-        source = row.get("source", "") or ""
-        resolved_data_dir = _resolve_data_dir(source, resolve_fn)
-
-        # Enrich reasoning with fault context from meta when not already present
-        base_reasoning = row["reasoning"] or ""
-        row_meta = row.get("meta")
-        if isinstance(row_meta, str):
-            try:
-                row_meta = json.loads(row_meta)
-            except json.JSONDecodeError:
-                row_meta = None
-        fault_ctx = _extract_fault_context_from_meta(row_meta)
-        if fault_ctx and "Fault type:" not in base_reasoning:
-            reasoning = f"{base_reasoning} | {fault_ctx}" if base_reasoning else fault_ctx
-        else:
-            reasoning = base_reasoning
 
         cases.append(
             CaseInfo(
