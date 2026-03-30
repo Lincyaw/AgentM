@@ -369,14 +369,18 @@ def export_batch(
 
 @app.command()
 def judge(
+    batch_config: str | None = typer.Option(
+        None, "--batch-config",
+        help="Batch config YAML for source settings (data_base_dir, source_path_pattern, etc.)",
+    ),
     exp_id: str | None = typer.Option(None, "--exp-id", help="Experiment ID filter"),
     limit: int | None = typer.Option(None, "--limit", help="Max cases to process"),
     filter_correctness: str = typer.Option("all", "--filter", help="Filter: incorrect/correct/all"),
     agent_type: str | None = typer.Option(None, "--agent-type", help="Agent type filter"),
-    source: str = typer.Option("database", "--source", help="Source: database or directory"),
+    source: str | None = typer.Option(None, "--source", help="Source: database or directory"),
     directory: str | None = typer.Option(None, "--dir", help="Directory path (if source=directory)"),
-    export_dir: str = typer.Option(
-        "./eval-trajectories", "--export-dir",
+    export_dir: str | None = typer.Option(
+        None, "--export-dir",
         help="Directory for DB-exported JSON files",
     ),
     output: str | None = typer.Option(None, "-o", "--output", help="Output JSON file for results"),
@@ -398,11 +402,11 @@ def judge(
     ),
     data_base_dir: str | None = typer.Option(
         None, "--data-base-dir",
-        help="Root directory of dataset (contains injection.json per case)",
+        help="Root directory of dataset (overrides batch config)",
     ),
     source_path_pattern: str | None = typer.Option(
         None, "--source-path-pattern",
-        help="Pattern for resolving source → data dir, e.g. '{data_base_dir}/{source}/converted'",
+        help="Pattern for resolving source → data dir (overrides batch config)",
     ),
 ) -> None:
     """Judge trajectories using decision-tree classification.
@@ -410,13 +414,20 @@ def judge(
     Classifies each trajectory as: success, lucky_hit, exploration_fail,
     confirmation_fail, or judgment_fail with detailed reasoning.
 
+    Source settings (data_base_dir, source_path_pattern, filter, etc.) can be
+    specified in a batch config YAML via --batch-config. CLI options override
+    the config file values.
+
     Examples:
 
-      # Judge one case from database
-      agentm judge --limit 1
+      # Judge using batch config (recommended)
+      agentm judge --batch-config config/batch/default.yaml --limit 5
 
-      # Judge all incorrect cases from an experiment
-      agentm judge --exp-id agentm-v12 --filter incorrect
+      # Judge one case from database (no config file)
+      agentm judge --source database --limit 1
+
+      # Override config values via CLI
+      agentm judge --batch-config config/batch/default.yaml --exp-id agentm-v12 --filter incorrect
 
       # Judge cases from a directory
       agentm judge --source directory --dir ./eval-trajectories --limit 10
@@ -424,42 +435,63 @@ def judge(
       # Save results to JSON
       agentm judge --limit 50 -o judgment_results.json
     """
-    if filter_correctness not in ("incorrect", "correct", "all"):
+    from agentm.cli.batch import (
+        collect_from_db,
+        collect_from_directory,
+        load_batch_config,
+    )
+    from agentm.cli.run import _load_and_override
+
+    # Load batch config as base, then apply CLI overrides
+    if batch_config:
+        cfg = load_batch_config(batch_config)
+    else:
+        cfg = None
+
+    # Resolve effective values: CLI > batch config > defaults
+    eff_source = source or (cfg.source.type if cfg else "database")
+    eff_filter = filter_correctness
+    eff_exp_id = exp_id or (cfg.source.exp_id if cfg else None)
+    eff_agent_type = agent_type or (cfg.source.agent_type if cfg else None)
+    eff_limit = limit if limit is not None else (cfg.source.limit if cfg else None)
+    eff_export_dir = export_dir or (cfg.output.export_dir if cfg else "./eval-trajectories")
+    eff_directory = directory or (cfg.source.directory if cfg else None)
+    eff_data_base_dir = data_base_dir or (cfg.source.data_base_dir if cfg else None)
+    eff_source_path_pattern = source_path_pattern or (cfg.source.source_path_pattern if cfg else None)
+
+    if eff_filter not in ("incorrect", "correct", "all"):
         typer.echo("ERROR: --filter must be one of: incorrect, correct, all", err=True)
         raise typer.Exit(code=1)
 
-    if source not in ("database", "directory"):
+    if eff_source not in ("database", "directory"):
         typer.echo("ERROR: --source must be one of: database, directory", err=True)
         raise typer.Exit(code=1)
 
-    if source == "directory" and not directory:
+    if eff_source == "directory" and not eff_directory:
         typer.echo("ERROR: --dir is required when --source=directory", err=True)
         raise typer.Exit(code=1)
 
-    from agentm.cli.batch import collect_from_db, collect_from_directory
-    from agentm.cli.run import _load_and_override
-
-    # Collect cases — use return value directly (no double-collect)
+    # Collect cases
     try:
-        if source == "database":
+        if eff_source == "database":
             case_infos = collect_from_db(
-                exp_id=exp_id,
-                filter_correctness=filter_correctness,
-                agent_type=agent_type,
-                limit=limit,
-                output_dir=export_dir,
-                data_base_dir=data_base_dir,
-                source_path_pattern=source_path_pattern,
+                exp_id=eff_exp_id,
+                filter_correctness=eff_filter,
+                agent_type=eff_agent_type,
+                limit=eff_limit,
+                output_dir=eff_export_dir,
+                data_base_dir=eff_data_base_dir,
+                source_path_pattern=eff_source_path_pattern,
             )
         else:
             case_infos = collect_from_directory(
-                directory=directory,  # type: ignore[arg-type]  # validated above
-                filter_correctness=filter_correctness,
-                exp_id=exp_id,
-                agent_type=agent_type,
-                limit=limit,
-                data_base_dir=data_base_dir,
-                source_path_pattern=source_path_pattern,
+                directory=eff_directory,  # type: ignore[arg-type]  # validated above
+                filter_correctness=eff_filter,
+                exp_id=eff_exp_id,
+                agent_type=eff_agent_type,
+                limit=eff_limit,
+                data_base_dir=eff_data_base_dir,
+                source_path_pattern=eff_source_path_pattern,
             )
     except Exception as e:
         typer.echo(f"ERROR: Failed to collect cases: {e}", err=True)
