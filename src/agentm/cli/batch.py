@@ -277,13 +277,12 @@ def collect_from_db(
             "source": row.get("source", ""),
         }
 
-        trajectory_data = _parse_trajectory_data(row["trajectories"])
+        trajectories = _parse_trajectory_data(row["trajectories"])
 
-        output = {"_eval_meta": eval_meta}
-        if isinstance(trajectory_data, dict):
-            output.update(trajectory_data)
-        else:
-            output["trajectories"] = trajectory_data
+        output: dict[str, Any] = {
+            "_eval_meta": eval_meta,
+            "trajectories": trajectories,
+        }
 
         filepath = out_dir / filename
         filepath.write_text(
@@ -362,33 +361,37 @@ def _resolve_data_dir(source: str, data_base_dir: str | None, suffix: str = "") 
     return str(candidate) if candidate.is_dir() else ""
 
 
-def _parse_trajectory_data(raw_trajectories: str | dict | None) -> dict:
-    """Parse trajectory data from various formats.
+def _parse_trajectory_data(raw_trajectories: str | dict | None) -> list[dict]:
+    """Parse trajectory data from DB into a list of trajectory dicts.
 
-    Handles nested formats like {"trajectories": [...]} by extracting
-    the inner trajectory array, as well as direct formats.
+    Always returns a list so the exported file has a consistent
+    ``{"_eval_meta": ..., "trajectories": [...]}`` structure.
+
+    Handles:
+    - ``{"trajectories": [t1, t2, ...]}`` — extracts the list
+    - ``[t1, t2, ...]`` — returns as-is
+    - ``{"messages": [...], ...}`` — wraps as single-element list
     """
     if raw_trajectories is None:
-        return {}
+        return []
 
-    # Parse string JSON
     if isinstance(raw_trajectories, str):
         data = json.loads(raw_trajectories)
     else:
         data = raw_trajectories
 
-    # Handle nested format: {"trajectories": [...]}
-    if isinstance(data, dict) and "trajectories" in data:
-        trajectories = data["trajectories"]
-        if isinstance(trajectories, list) and len(trajectories) > 0:
-            # Return the first trajectory (or wrap the list appropriately)
-            first_traj = trajectories[0]
-            if isinstance(first_traj, dict):
-                return first_traj
-            return {"trajectories": trajectories}
+    # Already a list of trajectories
+    if isinstance(data, list):
         return data
 
-    return data
+    if isinstance(data, dict):
+        # Nested wrapper: {"trajectories": [...]}
+        if "trajectories" in data and isinstance(data["trajectories"], list):
+            return data["trajectories"]
+        # Single trajectory dict (has "messages" or other trajectory fields)
+        return [data]
+
+    return []
 
 
 def _build_db_query(
