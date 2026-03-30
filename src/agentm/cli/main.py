@@ -247,7 +247,7 @@ def analyze_batch(
 
 
 @app.command()
-def resume(
+def resume(  # noqa: ARG001  — CLI params reserved for future checkpoint resume
     trajectory_file: str = typer.Argument(help="Path to trajectory .jsonl file"),
     data_dir: str = typer.Option("", "--data-dir", help="Observability data directory"),
     scenario: str = typer.Option(
@@ -258,21 +258,21 @@ def resume(
     config: str = typer.Option(
         "config/system.yaml", "--config", help="System config YAML"
     ),
-    checkpoint: str | None = typer.Option(
+    checkpoint: str | None = typer.Option(  # noqa: ARG001
         None,
         "--checkpoint",
         help="Checkpoint ID to restore (skips interactive selection)",
     ),
-    list_checkpoints: bool = typer.Option(
+    list_checkpoints: bool = typer.Option(  # noqa: ARG001
         False, "--list", help="List available checkpoints without executing"
     ),
-    dashboard: bool = typer.Option(
+    dashboard: bool = typer.Option(  # noqa: ARG001
         False, "--dashboard", help="Start web dashboard after resuming"
     ),
-    port: int = typer.Option(
+    port: int = typer.Option(  # noqa: ARG001
         8765, "--port", help="Dashboard server port (requires --dashboard)"
     ),
-    dashboard_host: str = typer.Option(
+    dashboard_host: str = typer.Option(  # noqa: ARG001
         "0.0.0.0", "--dashboard-host", help="Dashboard server bind address"
     ),
     verbose: bool = typer.Option(False, "--verbose", help="Extra detail in output"),
@@ -289,11 +289,6 @@ def resume(
             data_dir=data_dir,
             scenario_dir=scenario,
             config_path=config,
-            checkpoint_id=checkpoint,
-            list_only=list_checkpoints,
-            dashboard=dashboard,
-            dashboard_port=port,
-            dashboard_host=dashboard_host,
             verbose=verbose,
         )
     )
@@ -469,7 +464,6 @@ def judge(
         system_config=system_config,
         scenario_config=scenario_config,
         output_path=output,
-        verbose=verbose,
         dashboard=dashboard,
         dashboard_port=port,
         dashboard_host=dashboard_host,

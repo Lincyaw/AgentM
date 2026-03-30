@@ -47,8 +47,7 @@ def build_trajectory_from_events(
     Returns:
         JSON string in the rcabench ``{"trajectories": [...]}`` format.
     """
-    dispatch_map = _build_dispatch_map(events)
-    agent_groups = _group_events_by_agent(events, dispatch_map)
+    agent_groups = _group_events_by_agent(events)
 
     trajectories: list[dict[str, Any]] = []
 
@@ -104,32 +103,9 @@ def build_trajectory_from_events(
 # ---------------------------------------------------------------------------
 
 
-def _build_dispatch_map(
-    events: list[dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    """Build task_id -> dispatch info from task_dispatch events.
-
-    Also builds agent_id -> list[task_id] for correlation.
-    """
-    dispatch_map: dict[str, dict[str, Any]] = {}
-    for event in events:
-        if event.get("event_type") != "task_dispatch":
-            continue
-        data = event.get("data", {})
-        task_id = data.get("task_id", "")
-        if task_id:
-            dispatch_map[task_id] = {
-                "agent_id": data.get("agent_id", ""),
-                "task_type": data.get("task_type", ""),
-                "instruction": data.get("instruction", ""),
-                "seq": event.get("seq", 0),
-            }
-    return dispatch_map
-
 
 def _group_events_by_agent(
     events: list[dict[str, Any]],
-    dispatch_map: dict[str, dict[str, Any]],
 ) -> dict[tuple[str, ...], list[dict[str, Any]]]:
     """Group conversation events by agent, using task_id to disambiguate
     multiple dispatches to the same agent_id.

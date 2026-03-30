@@ -94,7 +94,7 @@ def _update_service_profile(
 
 def _query_service_profile(
     profile_store: "ServiceProfileStore",
-    request: str,
+    request: str,  # noqa: ARG001  (LLM prompt parameter)
     service_names: str = "",
     anomalous_only: bool = False,
 ) -> str:

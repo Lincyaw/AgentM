@@ -17,7 +17,7 @@ class GeneralPurposeScenario:
     def name(self) -> str:
         return "general_purpose"
 
-    def setup(self, ctx: SetupContext) -> ScenarioWiring:
+    def setup(self, _ctx: SetupContext) -> ScenarioWiring:
         """Wire up GP scenario: only answer schemas needed."""
         from agentm.harness.scenario import ScenarioWiring
         from agentm.scenarios.general_purpose.answer_schemas import GeneralAnswer

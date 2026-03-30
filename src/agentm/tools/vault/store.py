@@ -193,7 +193,7 @@ class MarkdownVault:
     # ------------------------------------------------------------------
 
     def _validate_note(
-        self, path: str, frontmatter: dict, body: str
+        self, _path: str, frontmatter: dict, body: str
     ) -> list[str]:
         """Check a note for structural issues. Returns a list of warnings."""
         warnings: list[str] = []

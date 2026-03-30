@@ -1,3 +1,4 @@
+# ruff: noqa: ARG002  — ctx parameter is required by the MiddlewareBase protocol
 """Harness middleware implementations for SimpleAgentLoop.
 
 Each class extends MiddlewareBase and overrides only the hooks it needs.

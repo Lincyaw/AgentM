@@ -69,7 +69,7 @@ def _result(rows: list[dict], context: str) -> str:
     return enforce_token_budget(payload, context)
 
 
-def _empty_hint(file: str, context: str, extra: dict | None = None) -> str:
+def _empty_hint(file: str, _context: str, extra: dict | None = None) -> str:
     tr = _get_time_range(file)
     hint: dict[str, Any] = {
         "warning": "No data found for the given parameters.",

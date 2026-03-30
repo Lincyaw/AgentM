@@ -159,7 +159,6 @@ async def run_judging(
     system_config: SystemConfig,
     scenario_config: ScenarioConfig,
     output_path: str | None = None,
-    verbose: bool = False,
     dashboard: bool = False,
     dashboard_port: int = 8765,
     dashboard_host: str = "0.0.0.0",
@@ -171,7 +170,6 @@ async def run_judging(
         system_config: Loaded system configuration.
         scenario_config: Loaded scenario configuration.
         output_path: Optional JSON file to write results.
-        verbose: Print detailed progress.
         dashboard: Start web dashboard for real-time monitoring.
         dashboard_port: Dashboard server port.
         dashboard_host: Dashboard server bind address.
