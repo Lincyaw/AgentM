@@ -250,29 +250,31 @@ def _parse_trajectory_data(raw_trajectories: str | dict | None) -> list[dict]:
 
 
 def _build_db_query(src: SourceConfig) -> tuple[str, list[Any]]:
-    conditions = ["stage = 'judged'", "trajectories IS NOT NULL"]
+    conditions = ["e.stage = 'judged'", "e.trajectories IS NOT NULL"]
     params: list[Any] = []
 
     if src.exp_id:
-        conditions.append("exp_id = %s")
+        conditions.append("e.exp_id = %s")
         params.append(src.exp_id)
     if src.filter == "incorrect":
-        conditions.append("correct = %s")
+        conditions.append("e.correct = %s")
         params.append(False)
     elif src.filter == "correct":
-        conditions.append("correct = %s")
+        conditions.append("e.correct = %s")
         params.append(True)
     if src.agent_type:
-        conditions.append("agent_type = %s")
+        conditions.append("e.agent_type = %s")
         params.append(src.agent_type)
 
     query = (
-        "SELECT id, exp_id, dataset_index, correct, correct_answer,"
-        "       extracted_final_answer, agent_type, model_name, reasoning,"
-        "       source, trajectories, meta "
-        "FROM evaluation_data "
+        "SELECT e.id, e.exp_id, e.dataset_index, e.correct, e.correct_answer,"
+        "       e.extracted_final_answer, e.agent_type, e.model_name, e.reasoning,"
+        "       e.source, e.trajectories, e.meta,"
+        "       d.meta AS data_meta "
+        "FROM evaluation_data e "
+        "LEFT JOIN data d ON e.dataset = d.dataset AND e.source = d.source "
         f"WHERE {' AND '.join(conditions)} "
-        "ORDER BY id"
+        "ORDER BY e.id"
     )
     if src.limit:
         query += " LIMIT %s"
@@ -331,9 +333,26 @@ def _collect_from_db(src: SourceConfig, output_dir: str | None = None) -> list[C
             except json.JSONDecodeError:
                 row_meta = None
 
+        data_meta = row.get("data_meta")
+        if isinstance(data_meta, str):
+            try:
+                data_meta = json.loads(data_meta)
+            except json.JSONDecodeError:
+                data_meta = None
+
+        # Prefer data table meta for fault context (has fault_type/category);
+        # fall back to evaluation_data meta.
+        fault_meta = data_meta if isinstance(data_meta, dict) else row_meta
         base_reasoning = row["reasoning"] or ""
-        fault_ctx = _extract_fault_context(row_meta)
+        fault_ctx = _extract_fault_context(fault_meta)
         reasoning = _enrich_reasoning(base_reasoning, fault_ctx)
+
+        # Merge difficulty from data table if evaluation_data doesn't have it
+        difficulty = None
+        if isinstance(row_meta, dict) and row_meta.get("difficulty"):
+            difficulty = row_meta["difficulty"]
+        elif isinstance(data_meta, dict) and data_meta.get("difficulty"):
+            difficulty = data_meta["difficulty"]
 
         eval_meta: dict[str, Any] = {
             "id": row_id,
@@ -347,8 +366,8 @@ def _collect_from_db(src: SourceConfig, output_dir: str | None = None) -> list[C
             "reasoning": reasoning,
             "source": source,
         }
-        if isinstance(row_meta, dict) and row_meta.get("difficulty"):
-            eval_meta["difficulty"] = row_meta["difficulty"]
+        if difficulty:
+            eval_meta["difficulty"] = difficulty
 
         trajectories = _parse_trajectory_data(row["trajectories"])
         output: dict[str, Any] = {
