@@ -149,7 +149,7 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
 
     def vault_search(
         query: str,
-        filters: dict = {},
+        filters: dict | None = None,
         mode: str = "hybrid",
         limit: int = 10,
     ) -> str:
@@ -158,6 +158,7 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
         Filters: {type, confidence, status, tags} narrow results.
         """
         try:
+            filters = filters or {}
             conn = vault._get_conn()
 
             if mode == "keyword":

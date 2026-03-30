@@ -5,10 +5,13 @@ Fully implemented — these are value objects validated at startup.
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
-from langchain_core.rate_limiters import InMemoryRateLimiter
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
+from langchain_core.rate_limiters import InMemoryRateLimiter
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from agentm.harness.types import ModelProtocol
 
 
 class RateLimitConfig(BaseModel):
@@ -41,7 +44,7 @@ def create_chat_model(
     temperature: float = 0,
     model_config: ModelConfig | None = None,
     **kwargs: Any,
-) -> Any:
+) -> ModelProtocol:
     """Create a ChatOpenAI or ChatAnthropic instance based on model_config.provider.
 
     Centralizes all LLM client instantiation so that switching between
@@ -76,11 +79,11 @@ def create_chat_model(
         # ChatAnthropic uses 'anthropic_api_url', not 'base_url'
         if "base_url" in llm_kwargs:
             llm_kwargs["anthropic_api_url"] = llm_kwargs.pop("base_url")
-        return ChatAnthropic(**llm_kwargs)
+        return cast("ModelProtocol", ChatAnthropic(**llm_kwargs))
 
     from langchain_openai import ChatOpenAI
 
-    return ChatOpenAI(**llm_kwargs)
+    return cast("ModelProtocol", ChatOpenAI(**llm_kwargs))
 
 
 class StorageBackendConfig(BaseModel):

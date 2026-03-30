@@ -4,7 +4,10 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from agentm.core.trajectory import TrajectoryCollector
 
 from agentm.harness.handle import AgentHandle
 from agentm.harness.protocols import (
@@ -47,7 +50,7 @@ class AgentRuntime:
         *,
         checkpoint_store: CheckpointStore | None = None,
         event_handler: EventHandler | None = None,
-        trajectory: Any | None = None,
+        trajectory: TrajectoryCollector | None = None,
     ) -> None:
         self._checkpoint_store = checkpoint_store
         self._event_handler = event_handler

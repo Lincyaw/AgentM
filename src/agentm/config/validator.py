@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from agentm.config.schema import ScenarioConfig, SystemConfig
+from agentm.core.tool_registry import ToolRegistry
 
 
 def validate_references(
     system: SystemConfig,
     scenario: ScenarioConfig,
-    tool_registry: object,
+    tool_registry: ToolRegistry,
 ) -> list[str]:
     """Validate cross-file references between system config, scenario config, and tool registry.
 
@@ -39,7 +40,7 @@ def validate_references(
     # Check 3: Agent tool references exist in tool registry
     for agent_name, agent_cfg in scenario.agents.items():
         for tool_name in agent_cfg.tools:
-            if not tool_registry.has(tool_name):  # type: ignore[attr-defined]
+            if not tool_registry.has(tool_name):
                 errors.append(
                     f"Agent '{agent_name}' references unknown tool '{tool_name}'"
                 )
@@ -49,10 +50,10 @@ def validate_references(
     # Check 5: Tool settings keys match tool's declared parameters
     for agent_name, agent_cfg in scenario.agents.items():
         for tool_name, settings in agent_cfg.tool_settings.items():
-            if not tool_registry.has(tool_name):  # type: ignore[attr-defined]
+            if not tool_registry.has(tool_name):
                 # Already reported in check 3; skip parameter check
                 continue
-            tool_def = tool_registry.get(tool_name)  # type: ignore[attr-defined]
+            tool_def = tool_registry.get(tool_name)
             declared = set(tool_def.parameters.keys())
             provided = set(settings.keys())
             unknown_keys = provided - declared

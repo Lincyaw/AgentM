@@ -145,3 +145,14 @@ class EventHandler(Protocol):
     async def on_event(self, event: AgentEvent) -> None:
         """Called for every event emitted by any agent in the runtime."""
         ...
+
+
+@runtime_checkable
+class NoteReader(Protocol):
+    """Protocol for reading notes/skills from a store.
+
+    Decouples middleware (e.g. SkillMiddleware) from concrete vault
+    implementations such as MarkdownVault.
+    """
+
+    def read(self, path: str) -> dict[str, Any] | None: ...

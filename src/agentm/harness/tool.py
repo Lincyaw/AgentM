@@ -9,6 +9,8 @@ from typing import Any, Callable, get_type_hints, overload
 
 from pydantic import TypeAdapter
 
+from agentm.harness.types import ToolCallable
+
 
 # ---------------------------------------------------------------------------
 # Internal helper
@@ -52,7 +54,7 @@ class Tool:
     name: str
     description: str
     parameters: dict[str, Any]
-    func: Callable[..., Any]
+    func: ToolCallable
 
     async def ainvoke(self, args: dict[str, Any]) -> str:
         """Execute the tool. Normalizes return to str."""

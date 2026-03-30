@@ -8,10 +8,13 @@ Builder calls memory_module.set_db_path(path) at startup.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from agentm.utils.db import sqlite_cursor
 from agentm.utils.serde import deserialize_typed
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryStore:
@@ -99,7 +102,8 @@ class MemoryStore:
                 obj = deserialize_typed((type_, data))
                 ts = obj.get("ts", "")
                 channels = list(obj.get("channel_versions", {}).keys())
-            except Exception:
+            except Exception as exc:
+                logger.debug("Failed to parse checkpoint %s: %s", checkpoint_id, exc)
                 ts = ""
                 channels = []
             entries.append(
@@ -125,17 +129,6 @@ def set_db_path(path: str) -> None:
     """Set the SQLite DB path. Called by builder at startup."""
     global _default_store
     _default_store = MemoryStore(path)
-
-
-def set_checkpointer(checkpointer: Any) -> None:
-    """No-op shim kept for call-site compatibility."""
-    pass
-
-
-def _get_default() -> MemoryStore:
-    if _default_store is None:
-        raise RuntimeError("Memory store not initialized — call set_db_path() first")
-    return _default_store
 
 
 def read_trajectory(thread_id: str) -> str:

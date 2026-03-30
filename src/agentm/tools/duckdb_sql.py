@@ -87,11 +87,12 @@ def _open_conn() -> tuple[duckdb.DuckDBPyConnection, dict[str, str | list[dict]]
     tables = _tables_var.get()
     conn = duckdb.connect(":memory:")
     for name, src in tables.items():
+        safe_name = name.replace('"', '""')
         if isinstance(src, str):
             # Parquet file — create a view
             safe_path = src.replace("'", "''")
             conn.execute(
-                f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{safe_path}')"
+                f'CREATE VIEW "{safe_name}" AS SELECT * FROM read_parquet(\'{safe_path}\')'
             )
         else:
             # In-memory list[dict] — write to a temp JSON file, import, then delete
@@ -102,7 +103,7 @@ def _open_conn() -> tuple[duckdb.DuckDBPyConnection, dict[str, str | list[dict]]
                         json.dump(src, f)
                     safe_tmp = tmp_path.replace("'", "''")
                     conn.execute(
-                        f"CREATE TABLE {name} AS SELECT * FROM read_json_auto('{safe_tmp}')"
+                        f'CREATE TABLE "{safe_name}" AS SELECT * FROM read_json_auto(\'{safe_tmp}\')'
                     )
                 finally:
                     # Remove temp file immediately; DuckDB already loaded the data
@@ -158,7 +159,8 @@ async def describe_tables(request: str) -> str:
     try:
         schema: dict[str, Any] = {}
         for name in tables:
-            result = conn.execute(f"SELECT * FROM {name} LIMIT 0")
+            safe_name = name.replace('"', '""')
+            result = conn.execute(f'SELECT * FROM "{safe_name}" LIMIT 0')
             columns = [
                 {
                     "name": desc[0],
@@ -168,7 +170,7 @@ async def describe_tables(request: str) -> str:
                 }
                 for desc in result.description
             ]
-            row_count_row = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()
+            row_count_row = conn.execute(f'SELECT COUNT(*) FROM "{safe_name}"').fetchone()
             row_count = row_count_row[0] if row_count_row else 0
             schema[name] = {"row_count": row_count, "columns": columns}
         return json.dumps(schema, ensure_ascii=False, indent=2)

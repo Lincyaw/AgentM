@@ -39,7 +39,7 @@ from agentm.harness.middleware import (
 from agentm.harness.runtime import AgentRuntime
 from agentm.harness.scenario import ScenarioWiring, SetupContext, get_scenario
 from agentm.harness.tool import Tool, tool_from_function
-from agentm.harness.types import AgentResult, RunConfig, ToolCallable
+from agentm.harness.types import AgentInput, AgentOutput, AgentResult, RunConfig, ToolCallable
 from agentm.harness.worker_factory import WorkerLoopFactory
 from agentm.models.data import OrchestratorHooks
 from agentm.tools.orchestrator import create_orchestrator_tools
@@ -79,13 +79,16 @@ def _default_hooks() -> OrchestratorHooks:
 # ---------------------------------------------------------------------------
 
 
-def _extract_task(input_data: dict[str, Any]) -> str:
+def _extract_task(input_data: AgentInput | dict[str, Any]) -> str:
     """Extract the task string from agent input data.
 
     Looks for ``task_description`` first, then falls back to the content
     of the first message.  Handles LangChain message objects (lists).
     """
-    task = input_data.get("task_description") or input_data.get("messages", [{}])[0].get("content", "")
+    task = input_data.get("task_description", "")
+    if not task:
+        messages = input_data.get("messages") or []
+        task = messages[0].get("content", "") if messages else ""
     if isinstance(task, list):
         task = str(task[0]) if task else ""
     return str(task)
@@ -121,7 +124,7 @@ class AgentSystem:
         if self.trajectory is not None:
             await self.trajectory.close()
 
-    async def execute(self, input_data: dict[str, Any]) -> dict[str, Any]:
+    async def execute(self, input_data: AgentInput) -> AgentOutput:
         """Execute the agent system with the given input. Returns final result."""
         task = _extract_task(input_data)
         result: AgentResult = await self.loop.run(
@@ -132,7 +135,7 @@ class AgentSystem:
 
     async def stream(
         self,
-        input_data: dict[str, Any],
+        input_data: AgentInput,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream events from the agent system execution.
 

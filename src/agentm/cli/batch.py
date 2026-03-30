@@ -26,6 +26,7 @@ from rich.console import Console
 from rich.table import Table
 
 from agentm.cli.run import run_trajectory_analysis
+from agentm.exceptions import AgentMError
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -150,6 +151,12 @@ def collect_from_directory(
     if not base.is_dir():
         raise NotADirectoryError(f"Not a directory: {directory}")
 
+    meta_filter = _EvalMetaFilter(
+        filter_correctness=filter_correctness,
+        exp_id=exp_id,
+        agent_type=agent_type,
+    )
+
     cases: list[CaseInfo] = []
     for path in sorted(base.glob("*.json")):
         if path.name.endswith(".export.json"):
@@ -166,23 +173,12 @@ def collect_from_directory(
             continue
 
         correct = meta.get("correct")
-        if filter_correctness == "incorrect" and correct is not False:
-            continue
-        if filter_correctness == "correct" and correct is not True:
-            continue
-
-        if exp_id and meta.get("exp_id") != exp_id:
-            continue
-        if agent_type and meta.get("agent_type") != agent_type:
+        if not meta_filter.matches(correct, meta.get("exp_id", ""), meta.get("agent_type", "") or ""):
             continue
 
         # Resolve data directory from source field + data_base_dir
         source = meta.get("source", "") or ""
-        resolved_data_dir = ""
-        if data_base_dir and source:
-            candidate = Path(data_base_dir) / source / "converted"
-            if candidate.is_dir():
-                resolved_data_dir = str(candidate)
+        resolved_data_dir = _resolve_data_dir(source, data_base_dir, suffix="converted")
 
         cases.append(
             CaseInfo(
@@ -353,7 +349,7 @@ class _EvalMetaFilter:
         return True
 
 
-def _parse_ground_truth(correct_answer: str) -> list[str]:
+def parse_ground_truth(correct_answer: str) -> list[str]:
     """Parse comma-separated ground truth services into a list."""
     return [s.strip() for s in correct_answer.split(",") if s.strip()]
 
@@ -625,7 +621,7 @@ async def run_batch_analysis(cfg: BatchConfig, cases: list[CaseInfo]) -> None:
                     case_data_mapping=case_data_mapping or None,
                 )
                 completed += 1
-            except Exception as e:
+            except (AgentMError, asyncio.TimeoutError) as e:
                 failed_batches.append((batch_idx + 1, str(e)))
                 console.print(f"[red]Batch #{batch_idx + 1} failed: {e}[/]")
 

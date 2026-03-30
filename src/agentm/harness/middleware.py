@@ -13,10 +13,10 @@ from typing import Any
 
 import tiktoken
 
-from agentm.config.schema import CompressionConfig, ModelConfig
+from agentm.config.schema import CompressionConfig, LoopDetectionConfig, ModelConfig
 from agentm.core.trajectory import TrajectoryCollector
 from agentm.harness.types import LoopContext, Message
-from agentm.tools.vault.store import MarkdownVault
+from agentm.harness.protocols import NoteReader
 
 logger = logging.getLogger(__name__)
 
@@ -294,6 +294,13 @@ class CompressionMiddleware(MiddlewareBase):
         self._threshold_tokens = int(window * config.compression_threshold)
         self._preserve_n = config.preserve_latest_n
 
+    @classmethod
+    def from_config(
+        cls, config: CompressionConfig, model_config: ModelConfig | None = None
+    ) -> CompressionMiddleware:
+        """Create from a CompressionConfig instance."""
+        return cls(config, model_config=model_config)
+
     async def on_llm_start(
         self, messages: list[Message], ctx: LoopContext
     ) -> list[Message]:
@@ -358,6 +365,15 @@ class LoopDetectionMiddleware(MiddlewareBase):
         self._window_size = window_size
         self._think_stall_limit = think_stall_limit
         self._think_tool_name = think_tool_name
+
+    @classmethod
+    def from_config(cls, config: LoopDetectionConfig) -> LoopDetectionMiddleware:
+        """Create from a LoopDetectionConfig instance."""
+        return cls(
+            threshold=config.threshold,
+            window_size=config.window_size,
+            think_stall_limit=config.think_stall_limit,
+        )
 
     async def on_llm_start(
         self, messages: list[Message], ctx: LoopContext
@@ -590,9 +606,9 @@ class DedupMiddleware(MiddlewareBase):
 
 
 class SkillMiddleware(MiddlewareBase):
-    """Injects skill context from a MarkdownVault into the system prompt."""
+    """Injects skill context from a note store into the system prompt."""
 
-    def __init__(self, vault: MarkdownVault, skill_paths: list[str]) -> None:
+    def __init__(self, vault: NoteReader, skill_paths: list[str]) -> None:
         self._skill_descriptions: list[dict[str, str]] = []
         for path in skill_paths:
             note = vault.read(path)

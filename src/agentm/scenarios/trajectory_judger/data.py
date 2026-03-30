@@ -1,7 +1,6 @@
 """Data models for trajectory judger scenario.
 
-Defines Pydantic models for trajectory classification including the main
-TrajectoryLabel output, AnalyzeTask input, and BatchReport for batch analysis.
+Defines the TrajectoryLabel structured output for trajectory classification.
 """
 from __future__ import annotations
 
@@ -9,6 +8,23 @@ from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+
+class EvidenceItem(BaseModel):
+    """A single piece of evidence supporting the classification."""
+
+    step: int = Field(description="Step number in the trajectory where this evidence was observed")
+    description: str = Field(description="What happened at this step")
+    relevance: str = Field(default="", description="Why this evidence matters for classification")
+
+
+class TrajectoryStats(BaseModel):
+    """Query statistics extracted from the trajectory."""
+
+    total_steps: int = Field(default=0, description="Total number of agent steps")
+    total_tool_calls: int = Field(default=0, description="Total tool invocations")
+    unique_services_queried: int = Field(default=0, description="Distinct services investigated")
+    root_cause_first_mentioned_step: int = Field(default=-1, description="Step when actual root cause first appeared (-1 if never)")
 
 
 class TrajectoryLabel(BaseModel):
@@ -69,20 +85,20 @@ class TrajectoryLabel(BaseModel):
         description="Detailed justification of the classification (200+ characters)",
         min_length=10,
     )
-    evidence: list[dict] = Field(
+    evidence: list[EvidenceItem] = Field(
         default_factory=list,
         description="Evidence supporting the label (step numbers, queries, statements)",
     )
 
     # Key step locations
-    key_steps: dict = Field(
+    key_steps: dict[str, int] = Field(
         default_factory=dict,
-        description="Step numbers for key events",
+        description="Step numbers for key events (e.g., first_query, pivot_point)",
     )
 
     # Statistics
-    stats: dict = Field(
-        default_factory=dict,
+    stats: TrajectoryStats = Field(
+        default_factory=TrajectoryStats,
         description="Query statistics from the trajectory",
     )
 
@@ -94,59 +110,4 @@ class TrajectoryLabel(BaseModel):
     analyzer_version: str = Field(
         default="1.0.0",
         description="Version of the analyzer that produced this label",
-    )
-
-
-class AnalyzeTask(BaseModel):
-    """Input task for single trajectory analysis.
-
-    Contains all data needed for the trajectory judger to classify
-    a single agent execution.
-    """
-
-    trajectory_id: str = Field(
-        ...,
-        description="Unique identifier for the trajectory to analyze",
-    )
-    trajectory_data: dict = Field(
-        ...,
-        description="The trajectory JSON data containing agent execution steps",
-    )
-    case_id: str = Field(
-        ...,
-        description="Case identifier for grouping related trajectories",
-    )
-    ground_truth: list[str] = Field(
-        ...,
-        description="List of actual root-cause service names",
-    )
-
-
-class BatchReport(BaseModel):
-    """Output for batch analysis results.
-
-    Aggregated statistics across multiple trajectory analyses including
-    distribution by category and sub-type.
-    """
-
-    total: int = Field(
-        ...,
-        description="Total number of trajectories analyzed",
-        ge=0,
-    )
-    by_category: dict[str, int] = Field(
-        default_factory=dict,
-        description="Count of trajectories per category",
-    )
-    by_sub_type: dict[str, int] = Field(
-        default_factory=dict,
-        description="Count of trajectories per sub-type",
-    )
-    confidence_distribution: dict[str, list[float]] = Field(
-        default_factory=dict,
-        description="Confidence scores distribution by category",
-    )
-    detailed_results: list[TrajectoryLabel] = Field(
-        default_factory=list,
-        description="Individual labels for all analyzed trajectories",
     )
