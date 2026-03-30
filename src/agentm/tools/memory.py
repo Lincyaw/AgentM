@@ -7,6 +7,7 @@ Builder calls memory_module.set_db_path(path) at startup.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 from typing import Any
@@ -119,16 +120,17 @@ class MemoryStore:
 
 
 # ---------------------------------------------------------------------------
-# Module-level backward-compatible API
+# Module-level API — async-safe via ContextVar
 # ---------------------------------------------------------------------------
 
-_default_store: MemoryStore | None = None
+_store_var: contextvars.ContextVar[MemoryStore | None] = contextvars.ContextVar(
+    "memory_store", default=None
+)
 
 
 def set_db_path(path: str) -> None:
     """Set the SQLite DB path. Called by builder at startup."""
-    global _default_store
-    _default_store = MemoryStore(path)
+    _store_var.set(MemoryStore(path))
 
 
 def read_trajectory(thread_id: str) -> str:
@@ -137,9 +139,10 @@ def read_trajectory(thread_id: str) -> str:
     Args:
         thread_id: The thread ID of the trajectory to read.
     """
-    if _default_store is None:
+    store = _store_var.get()
+    if store is None:
         return "Memory DB path not set — call set_db_path() first."
-    return _default_store.read_trajectory(thread_id)
+    return store.read_trajectory(thread_id)
 
 
 def get_checkpoint_history(thread_id: str, limit: int = 50) -> str:
@@ -152,6 +155,7 @@ def get_checkpoint_history(thread_id: str, limit: int = 50) -> str:
         thread_id: The thread ID to inspect.
         limit: Maximum number of checkpoints to return (default 50).
     """
-    if _default_store is None:
+    store = _store_var.get()
+    if store is None:
         return "Memory DB path not set — call set_db_path() first."
-    return _default_store.get_checkpoint_history(thread_id, limit)
+    return store.get_checkpoint_history(thread_id, limit)

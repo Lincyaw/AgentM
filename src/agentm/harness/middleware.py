@@ -105,15 +105,28 @@ def _get_encoding(model: str) -> tiktoken.Encoding:
         return tiktoken.get_encoding("cl100k_base")
 
 
-def _count_tokens(messages: list[Message], model: str) -> int:
+def _count_tokens(
+    messages: list[Message], model: str, encoding: tiktoken.Encoding | None = None
+) -> int:
     """Count tokens across all messages using the model's tokenizer."""
-    encoding = _get_encoding(model)
+    enc = encoding or _get_encoding(model)
     total = 0
     for msg in messages:
         content = msg_content(msg)
         if isinstance(content, str):
-            total += len(encoding.encode(content))
+            total += len(enc.encode(content))
     return total
+
+
+# ---------------------------------------------------------------------------
+# Shared key-making helper for loop detection and dedup
+# ---------------------------------------------------------------------------
+
+
+def _make_tool_call_key(name: str, args: dict[str, Any]) -> str:
+    """Create a canonical key for a tool call (name + sorted-JSON args)."""
+    args_str = json.dumps(args, sort_keys=True, default=str)
+    return f"{name}:{args_str}"
 
 
 def _format_messages_for_summary(messages: list[Message]) -> list[str]:
@@ -294,6 +307,7 @@ class CompressionMiddleware(MiddlewareBase):
         window = context_window or config.context_window
         self._threshold_tokens = int(window * config.compression_threshold)
         self._preserve_n = config.preserve_latest_n
+        self._encoding = _get_encoding(config.compression_model)
 
     @classmethod
     def from_config(
@@ -305,7 +319,9 @@ class CompressionMiddleware(MiddlewareBase):
     async def on_llm_start(
         self, messages: list[Message], ctx: LoopContext
     ) -> list[Message]:
-        token_count = _count_tokens(messages, model=self._config.compression_model)
+        token_count = _count_tokens(
+            messages, model=self._config.compression_model, encoding=self._encoding
+        )
 
         if token_count < self._threshold_tokens:
             return messages
@@ -366,6 +382,10 @@ class LoopDetectionMiddleware(MiddlewareBase):
         self._window_size = window_size
         self._think_stall_limit = think_stall_limit
         self._think_tool_name = think_tool_name
+        # Incremental tool-call counter updated via on_tool_call
+        self._tool_call_counter: Counter[str] = Counter()
+        # Track all keys in insertion order for windowed counting
+        self._tool_call_keys: list[str] = []
 
     @classmethod
     def from_config(cls, config: LoopDetectionConfig) -> LoopDetectionMiddleware:
@@ -391,17 +411,10 @@ class LoopDetectionMiddleware(MiddlewareBase):
             )
             return [*messages, {"role": "human", "content": warning_text}]
 
-        # Exact-match loop detection
-        ai_messages = [m for m in messages if msg_role(m) == "ai"]
-        recent_ai = ai_messages[-self._window_size :] if self._window_size else ai_messages
-
-        call_counter: Counter[str] = Counter()
-        for msg in recent_ai:
-            for tc in msg_tool_calls(msg):
-                tc_name = tc.get("name", "")
-                tc_args = tc.get("args", {})
-                args_key = json.dumps(tc_args, sort_keys=True, default=str)
-                call_counter[f"{tc_name}:{args_key}"] += 1
+        # Exact-match loop detection using incremental counter
+        # Use only the last `window_size` keys for windowed counting
+        window_keys = self._tool_call_keys[-self._window_size :] if self._window_size else self._tool_call_keys
+        call_counter: Counter[str] = Counter(window_keys)
 
         repeated = [key for key, count in call_counter.items() if count >= self._threshold]
 
@@ -416,6 +429,17 @@ class LoopDetectionMiddleware(MiddlewareBase):
             return [*messages, {"role": "human", "content": warning_text}]
 
         return messages
+
+    async def on_tool_call(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        call_next: Callable[[str, dict[str, Any]], Awaitable[str]],
+        ctx: LoopContext,
+    ) -> str:
+        key = _make_tool_call_key(tool_name, tool_args)
+        self._tool_call_keys.append(key)
+        return await call_next(tool_name, tool_args)
 
 
 # ---------------------------------------------------------------------------
@@ -513,8 +537,7 @@ class DedupTracker:
         self._max_size = max_cache_size
 
     def make_key(self, tool_name: str, args: dict[str, Any]) -> str:
-        args_str = json.dumps(args, sort_keys=True, default=str)
-        return f"{tool_name}:{args_str}"
+        return _make_tool_call_key(tool_name, args)
 
     def has(self, key: str) -> bool:
         return key in self._cache
@@ -563,9 +586,10 @@ class DedupMiddleware(MiddlewareBase):
                     if tc_name in self._excluded:
                         continue
                     tc_args = tc.get("args", {})
-                    key = self._tracker.make_key(tc_name, tc_args)
+                    key = _make_tool_call_key(tc_name, tc_args)
                     if self._tracker.has(key):
-                        args_str = json.dumps(tc_args, sort_keys=True, default=str)
+                        # key is "name:args_json", extract args portion
+                        args_str = key.partition(":")[2]
                         reminders.append(
                             f"- `{tc_name}({args_str})` -- you already have this result"
                         )
@@ -627,6 +651,8 @@ class SkillMiddleware(MiddlewareBase):
             len(self._skill_descriptions),
             len(skill_paths),
         )
+        # Cache the skills section string — skill_descriptions is immutable after init
+        self._skills_section = self._build_skills_section()
 
     @property
     def skill_count(self) -> int:
@@ -667,10 +693,10 @@ class SkillMiddleware(MiddlewareBase):
     async def on_llm_start(
         self, messages: list[Message], ctx: LoopContext
     ) -> list[Message]:
-        if not self._skill_descriptions:
+        if not self._skills_section:
             return messages
 
-        skills_section = self._build_skills_section()
+        skills_section = self._skills_section
 
         new_messages: list[Message] = []
         injected = False
@@ -734,10 +760,13 @@ class DynamicContextMiddleware(MiddlewareBase):
                 "Consider finalizing if evidence is sufficient."
             )
 
-        new_messages: list[Any] = [{"role": "system", "content": self._base_prompt}]
-        for m in messages:
-            if not msg_is_system(m):
-                new_messages.append(m)
+        # The system message is always at index 0 (set by SimpleAgentLoop).
+        # Replace it directly instead of filtering all messages.
+        non_system_start = 1 if messages and msg_is_system(messages[0]) else 0
+        new_messages: list[Any] = [
+            {"role": "system", "content": self._base_prompt},
+            *messages[non_system_start:],
+        ]
 
         if context_text:
             prefill = (

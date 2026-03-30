@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from collections import Counter
 from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
+
+from agentm.core.trajectory import read_trajectory
+from agentm.utils.json_utils import truncate
 
 
 console = Console()
@@ -27,7 +29,7 @@ def analyze_trajectory(
         console.print(f"[red]File not found: {path}[/]")
         return
 
-    events = _load_events(path)
+    _meta, events = read_trajectory(path)
     console.print(f"Loaded [cyan]{len(events)}[/] events from [dim]{path.name}[/]")
 
     if filter_agent:
@@ -60,27 +62,6 @@ def analyze_trajectory(
     if show_timeline:
         _print_timeline(events)
 
-
-def _load_events(path: Path) -> list[dict]:
-    """Load events from a JSONL file, skipping the metadata header line."""
-    events: list[dict] = []
-    with open(path, encoding="utf-8") as f:
-        for line_num, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                console.print(
-                    f"[yellow]Warning: invalid JSON at line {line_num}, skipping[/]"
-                )
-                continue
-            # Skip metadata header line (identified by _meta key)
-            if "_meta" in data:
-                continue
-            events.append(data)
-    return events
 
 
 def _print_summary(events: list[dict]) -> None:
@@ -186,9 +167,11 @@ def _event_detail(event: dict) -> str:
     data = event.get("data", {})
 
     if et == "tool_call":
-        return f"{data.get('tool_name', '')}({str(data.get('args', ''))[:40]})"
+        args = truncate(str(data.get("args", "")), 40)
+        return f"{data.get('tool_name', '')}({args})"
     if et == "tool_result":
-        return f"{data.get('tool_name', '')}: {(data.get('result') or data.get('result_preview', ''))[:40]}"
+        result = truncate(data.get("result") or data.get("result_preview", ""), 40)
+        return f"{data.get('tool_name', '')}: {result}"
     if et == "hypothesis_update":
         return f"{data.get('hypothesis_id', '')} -> {data.get('status', '')}"
     if et in ("task_dispatch", "task_complete", "task_fail"):
@@ -196,10 +179,10 @@ def _event_detail(event: dict) -> str:
         if et == "task_complete" and data.get("duration_seconds"):
             parts.append(f"{data['duration_seconds']:.1f}s")
         if et == "task_fail":
-            parts.append(data.get("error_summary", "")[:30])
+            parts.append(truncate(data.get("error_summary", ""), 30))
         return " | ".join(parts)
     if et == "llm_end":
-        return (data.get("content") or data.get("content_preview", ""))[:60]
+        return truncate(data.get("content") or data.get("content_preview", ""), 60)
     if et == "error":
-        return data.get("message", "")[:60]
-    return str(data)[:60]
+        return truncate(data.get("message", ""), 60)
+    return truncate(str(data), 60)

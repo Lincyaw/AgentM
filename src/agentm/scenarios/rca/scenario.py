@@ -140,8 +140,6 @@ def _build_rca_orchestrator_tools(
     profile_store: "ServiceProfileStore",
 ) -> list[Tool]:
     """Build orchestrator-side RCA tools as SDK Tool instances."""
-    from agentm.harness.tool import Tool
-
     tools: list[Tool] = []
 
     # -- Hypothesis tools --

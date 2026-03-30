@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import contextvars
 import json
 import subprocess
 from dataclasses import dataclass
@@ -94,17 +95,21 @@ class TrajectoryReader:
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton
+# Module-level API — async-safe via ContextVar
 # ---------------------------------------------------------------------------
 
-_default_reader: TrajectoryReader | None = None
+_reader_var: contextvars.ContextVar[TrajectoryReader | None] = contextvars.ContextVar(
+    "trajectory_reader", default=None
+)
 
 
 def get_reader() -> TrajectoryReader:
-    global _default_reader
-    if _default_reader is None:
-        _default_reader = TrajectoryReader()
-    return _default_reader
+    """Return the current context's TrajectoryReader, creating one if needed."""
+    reader = _reader_var.get()
+    if reader is None:
+        reader = TrajectoryReader()
+        _reader_var.set(reader)
+    return reader
 
 
 def jq_query(thread_id: str, expression: str, raw: bool = False) -> str:

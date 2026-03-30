@@ -157,6 +157,33 @@ _DEFAULT_TOOLS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / 
 
 
 # ---------------------------------------------------------------------------
+# AgentSystemContext — immutable, reusable resources shared across runs
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AgentSystemContext:
+    """Immutable, reusable resources shared across multiple agent runs.
+
+    Created once by ``build_system_context()`` and passed to
+    ``create_agent_run()`` for each case.  Everything stored here is
+    safe to share between concurrent runs — no mutable per-run state.
+    """
+
+    scenario_name: str
+    scenario_config: ScenarioConfig
+    system_config: SystemConfig | None
+    tool_registry: ToolRegistry
+    vault: MarkdownVault | None
+    memory_tools: dict[str, ToolCallable]
+    orch_model_config: ModelConfig | None
+    worker_model_config: ModelConfig | None
+    wiring: ScenarioWiring
+    # Resolved directory paths (avoid re-resolving each run)
+    _checkpoint_db_path: str = ""
+
+
+# ---------------------------------------------------------------------------
 # PlatformResources — intermediate container for phase 1 outputs
 # ---------------------------------------------------------------------------
 
@@ -172,6 +199,7 @@ class _PlatformResources:
     orch_model_config: ModelConfig | None
     worker_model_config: ModelConfig | None
     thread_id: str
+    checkpoint_db_path: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -218,16 +246,16 @@ def _create_platform_resources(
     if worker_config is not None and system_config is not None:
         worker_model_config = system_config.models.get(worker_config.model)
 
+    # Checkpoint DB path (computed once, reused for trajectory creation)
+    checkpoint_db_path = ""
+    if system_config is not None and system_config.storage.checkpointer.backend == "sqlite":
+        db_url = system_config.storage.checkpointer.url or "./checkpoints.db"
+        checkpoint_db_path = str(Path(db_url).resolve())
+
     # Trajectory
     trajectory: TrajectoryCollector | None = None
     if system_config is not None and system_config.debug.trajectory.enabled:
         run_id = f"{scenario_name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-        checkpoint_db_path = ""
-        if system_config.storage.checkpointer.backend == "sqlite":
-            db_url = (
-                system_config.storage.checkpointer.url or "./checkpoints.db"
-            )
-            checkpoint_db_path = str(Path(db_url).resolve())
         trajectory = TrajectoryCollector(
             run_id=run_id,
             output_dir=system_config.debug.trajectory.output_dir,
@@ -270,6 +298,7 @@ def _create_platform_resources(
         orch_model_config=orch_model_config,
         worker_model_config=worker_model_config,
         thread_id=resolved_thread_id,
+        checkpoint_db_path=checkpoint_db_path,
     )
 
 
@@ -462,7 +491,141 @@ def _build_orchestrator_loop(
 
 
 # ---------------------------------------------------------------------------
-# build_agent_system() — the single canonical builder
+# build_system_context() — create reusable context (call once)
+# ---------------------------------------------------------------------------
+
+
+def build_system_context(
+    scenario_name: str,
+    scenario_config: ScenarioConfig,
+    system_config: SystemConfig | None = None,
+    *,
+    tools_dir: Path | str | None = None,
+    knowledge_base_dir: str | None = None,
+) -> AgentSystemContext:
+    """Create reusable, immutable context -- call once, use for many runs.
+
+    Performs the expensive work: scenario discovery, tool registry loading,
+    vault initialisation, config validation, and scenario wiring.  The
+    returned ``AgentSystemContext`` can be passed to ``create_agent_run()``
+    repeatedly without redoing any of this work.
+
+    Args:
+        scenario_name: Registered scenario name (e.g. "hypothesis_driven").
+        scenario_config: Full scenario configuration.
+        system_config: Optional system-level config (models, storage, debug).
+        tools_dir: Directory containing tool YAML definitions.
+        knowledge_base_dir: Path to the knowledge base (vault root).
+    """
+    from agentm.scenarios import discover as _discover_scenarios
+
+    _discover_scenarios()
+
+    scenario = get_scenario(scenario_name)
+
+    # Build platform resources (trajectory=None since context is immutable)
+    resources = _create_platform_resources(
+        scenario_name,
+        scenario_config,
+        system_config,
+        thread_id=None,
+        tools_dir=tools_dir,
+        knowledge_base_dir=knowledge_base_dir,
+    )
+
+    # Validate cross-references once
+    if system_config is not None:
+        from agentm.config.validator import validate_references
+
+        errors = validate_references(system_config, scenario_config, resources.tool_registry)
+        if errors:
+            raise ConfigError(
+                "Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+            )
+
+    # Scenario wiring (immutable for a given config)
+    setup_ctx = SetupContext(
+        vault=resources.vault,
+        trajectory=None,  # No per-run trajectory in the shared context
+        tool_registry=resources.tool_registry,
+    )
+    wiring = scenario.setup(setup_ctx)
+
+    return AgentSystemContext(
+        scenario_name=scenario_name,
+        scenario_config=scenario_config,
+        system_config=system_config,
+        tool_registry=resources.tool_registry,
+        vault=resources.vault,
+        memory_tools=resources.memory_tools,
+        orch_model_config=resources.orch_model_config,
+        worker_model_config=resources.worker_model_config,
+        wiring=wiring,
+        _checkpoint_db_path=resources.checkpoint_db_path,
+    )
+
+
+# ---------------------------------------------------------------------------
+# create_agent_run() — cheap, per-run agent system from a context
+# ---------------------------------------------------------------------------
+
+
+def create_agent_run(ctx: AgentSystemContext) -> AgentSystem:
+    """Create a fresh agent system from an existing context -- cheap, per-run.
+
+    Only creates the mutable, per-run resources: ``TrajectoryCollector``,
+    ``AgentRuntime``, ``WorkerLoopFactory``, and ``SimpleAgentLoop``.
+    """
+    thread_id = str(uuid.uuid4())
+
+    # Per-run trajectory
+    trajectory: TrajectoryCollector | None = None
+    if ctx.system_config is not None and ctx.system_config.debug.trajectory.enabled:
+        run_id = (
+            f"{ctx.scenario_name}-"
+            f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-"
+            f"{uuid.uuid4().hex[:8]}"
+        )
+        trajectory = TrajectoryCollector(
+            run_id=run_id,
+            output_dir=ctx.system_config.debug.trajectory.output_dir,
+            thread_id=thread_id,
+            checkpoint_db=ctx._checkpoint_db_path,
+        )
+
+    # Build a _PlatformResources adapter for the existing phase helpers
+    resources = _PlatformResources(
+        tool_registry=ctx.tool_registry,
+        vault=ctx.vault,
+        trajectory=trajectory,
+        memory_tools=ctx.memory_tools,
+        orch_model_config=ctx.orch_model_config,
+        worker_model_config=ctx.worker_model_config,
+        thread_id=thread_id,
+        checkpoint_db_path=ctx._checkpoint_db_path,
+    )
+
+    runtime, worker_factory = _create_worker_infrastructure(
+        ctx.scenario_config, resources, ctx.wiring,
+    )
+    tools = _assemble_orchestrator_tools(
+        ctx.scenario_config, resources, ctx.wiring, runtime, worker_factory,
+    )
+    orch_loop = _build_orchestrator_loop(
+        ctx.scenario_config, resources, ctx.wiring, tools,
+    )
+
+    return AgentSystem(
+        orch_loop,
+        scenario_config=ctx.scenario_config,
+        runtime=runtime,
+        trajectory=trajectory,
+        thread_id=thread_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# build_agent_system() — convenience wrapper (backward compatible)
 # ---------------------------------------------------------------------------
 
 
@@ -477,15 +640,15 @@ def build_agent_system(
 ) -> AgentSystem:
     """Build an AgentSystem from a scenario name and config.
 
-    This is the single canonical entry point for constructing any agent
-    system.  It uses the Scenario protocol to wire domain-specific behavior.
+    Convenience wrapper: builds context + creates a run in one call.
+    All existing callers continue to work unchanged.
 
     The build is decomposed into four phases:
 
-    1. ``_create_platform_resources`` — vault, trajectory, tool registry
-    2. ``_create_worker_infrastructure`` — runtime, worker factory
-    3. ``_assemble_orchestrator_tools`` — SDK + scenario + registry tools
-    4. ``_build_orchestrator_loop`` — middleware stack + LLM + loop
+    1. ``_create_platform_resources`` -- vault, trajectory, tool registry
+    2. ``_create_worker_infrastructure`` -- runtime, worker factory
+    3. ``_assemble_orchestrator_tools`` -- SDK + scenario + registry tools
+    4. ``_build_orchestrator_loop`` -- middleware stack + LLM + loop
 
     Args:
         scenario_name: Registered scenario name (e.g. "hypothesis_driven").
@@ -523,12 +686,12 @@ def build_agent_system(
             )
 
     # 3. Call scenario.setup()
-    ctx = SetupContext(
+    setup_ctx = SetupContext(
         vault=resources.vault,
         trajectory=resources.trajectory,
         tool_registry=resources.tool_registry,
     )
-    wiring = scenario.setup(ctx)
+    wiring = scenario.setup(setup_ctx)
 
     # 4. Create worker infrastructure
     runtime, worker_factory = _create_worker_infrastructure(

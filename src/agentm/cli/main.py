@@ -1,4 +1,4 @@
-"""AgentM CLI — typer application with run, debug, resume, and extract commands."""
+"""AgentM CLI — typer application with run, debug, and extract commands."""
 
 from __future__ import annotations
 
@@ -11,18 +11,11 @@ from dotenv import load_dotenv
 
 from agentm.exceptions import AgentMError
 
-from agentm.cli.batch import (
-    collect_cases,
-    load_batch_config,
-    run_batch_analysis,
-)
 from agentm.cli.debug import analyze_trajectory
 from agentm.cli.export_eval import export_eval_batch, export_eval_result
-from agentm.cli.judge_runner import run_judging
-from agentm.cli.run import (
-    resume_investigation,
-    run_trajectory_analysis,
-)
+from agentm.cli.judge_runner import collect_cases, load_judge_config, run_judging
+from agentm.cli.run import run_trajectory_analysis
+from agentm.server.app import DashboardOpts
 
 app = typer.Typer(
     name="agentm",
@@ -98,10 +91,7 @@ def analyze(
         "--task",
         help=(
             "Analysis task with evaluation feedback. Describe what to analyze "
-            "and whether the trajectory succeeded or failed. "
-            "e.g. 'success: correctly identified mysql as root cause, "
-            "extract the reasoning patterns that led to this' or "
-            "'failure: missed ts-order-service, anchored on ts-preserve-service'"
+            "and whether the trajectory succeeded or failed."
         ),
     ),
     scenario: str = typer.Option(
@@ -135,17 +125,11 @@ def analyze(
 
     Examples:
 
-      # Analyze an event-format trajectory (JSONL)
       agentm analyze trajectories/rca-20260311-162834.jsonl \\
           --task "failure: missed ts-order-service"
 
-      # Analyze an exported eval case (JSON)
       agentm analyze eval-trajectories/agentm-v11_7901_incorrect.json \\
           --task "failure: ground truth is ts-basic-service,ts-price-service"
-
-      # Multiple files
-      agentm analyze trajectories/rca-*.jsonl \\
-          --task "2/3 succeeded, 1 failed on cascade identification"
     """
     if not trajectories:
         typer.echo(
@@ -162,143 +146,10 @@ def analyze(
             config_path=config,
             debug_mode=debug,
             verbose=verbose,
-            dashboard=dashboard,
-            dashboard_port=port,
-            dashboard_host=dashboard_host,
+            dashboard_opts=DashboardOpts(
+                enabled=dashboard, port=port, host=dashboard_host,
+            ),
             max_steps=max_steps,
-        )
-    )
-
-
-@app.command("analyze-batch")
-def analyze_batch(
-    config_file: str = typer.Argument(
-        ...,
-        help="Path to batch config YAML (e.g. config/batch/default.yaml)",
-    ),
-    limit: int | None = typer.Option(
-        None, "--limit", help="Override source.limit in config"
-    ),
-    batch_size: int | None = typer.Option(
-        None, "--batch-size", help="Override batch.size in config"
-    ),
-    concurrency: int | None = typer.Option(
-        None, "--concurrency", help="Override batch.concurrency in config"
-    ),
-    exp_id: str | None = typer.Option(
-        None, "--exp-id", help="Override source.exp_id in config"
-    ),
-    filter_correctness: str | None = typer.Option(
-        None,
-        "--filter",
-        help="Override source.filter (incorrect|correct|all)",
-    ),
-    verbose: bool = typer.Option(False, "--verbose", help="Extra detail in output"),
-    dashboard: bool = typer.Option(False, "--dashboard", help="Start web dashboard"),
-    port: int = typer.Option(8765, "--port", help="Dashboard server port"),
-    data_base_dir: str | None = typer.Option(
-        None, "--data-base-dir", help="Override source.data_base_dir in config",
-    ),
-    source_path_pattern: str | None = typer.Option(
-        None, "--source-path-pattern",
-        help="Override source.source_path_pattern in config",
-    ),
-) -> None:
-    """Batch analyze evaluation trajectories from config file.
-
-    Load a batch config YAML that specifies data source (directory or DB),
-    batch grouping strategy, and analysis goals. Each batch groups N
-    trajectories into a single analysis run for cross-case pattern detection.
-
-    Examples:
-
-      # Error analysis on failed cases
-      agentm analyze-batch config/batch/default.yaml
-
-      # Include correct cases too
-      agentm analyze-batch config/batch/default.yaml --filter all
-
-      # Override experiment and limit
-      agentm analyze-batch config/batch/default.yaml --exp-id agentm-v12 --limit 30
-
-      # Quick ad-hoc override
-      agentm analyze-batch config/batch/default.yaml --batch-size 5 --verbose
-    """
-    cfg = load_batch_config(config_file)
-
-    # Apply CLI overrides
-    if limit is not None:
-        cfg.source.limit = limit
-    if batch_size is not None:
-        cfg.batch.size = batch_size
-    if concurrency is not None:
-        cfg.batch.concurrency = concurrency
-    if exp_id is not None:
-        cfg.source.exp_id = exp_id
-    if filter_correctness is not None:
-        cfg.source.filter = filter_correctness  # type: ignore[assignment]
-    if verbose:
-        cfg.output.verbose = True
-    if dashboard:
-        cfg.output.dashboard = True
-        cfg.output.dashboard_port = port
-    if data_base_dir is not None:
-        cfg.source.data_base_dir = data_base_dir
-    if source_path_pattern is not None:
-        cfg.source.source_path_pattern = source_path_pattern
-
-    cases = collect_cases(cfg)
-    if not cases:
-        typer.echo("No cases matched the filter criteria.", err=True)
-        raise typer.Exit(code=1)
-
-    asyncio.run(run_batch_analysis(cfg, cases))
-
-
-@app.command()
-def resume(  # noqa: ARG001  — CLI params reserved for future checkpoint resume
-    trajectory_file: str = typer.Argument(help="Path to trajectory .jsonl file"),
-    data_dir: str = typer.Option("", "--data-dir", help="Observability data directory"),
-    scenario: str = typer.Option(
-        "config/scenarios/rca_hypothesis",
-        "--scenario",
-        help="Scenario directory",
-    ),
-    config: str = typer.Option(
-        "config/system.yaml", "--config", help="System config YAML"
-    ),
-    checkpoint: str | None = typer.Option(  # noqa: ARG001
-        None,
-        "--checkpoint",
-        help="Checkpoint ID to restore (skips interactive selection)",
-    ),
-    list_checkpoints: bool = typer.Option(  # noqa: ARG001
-        False, "--list", help="List available checkpoints without executing"
-    ),
-    dashboard: bool = typer.Option(  # noqa: ARG001
-        False, "--dashboard", help="Start web dashboard after resuming"
-    ),
-    port: int = typer.Option(  # noqa: ARG001
-        8765, "--port", help="Dashboard server port (requires --dashboard)"
-    ),
-    dashboard_host: str = typer.Option(  # noqa: ARG001
-        "0.0.0.0", "--dashboard-host", help="Dashboard server bind address"
-    ),
-    verbose: bool = typer.Option(False, "--verbose", help="Extra detail in output"),
-) -> None:
-    """Resume an interrupted investigation from a trajectory file.
-
-    Without --checkpoint: shows an interactive list to pick a restore point.
-    With --list: only lists available checkpoints, does not execute.
-    With --checkpoint <id>: resumes directly from the given checkpoint ID.
-    """
-    asyncio.run(
-        resume_investigation(
-            trajectory_file=trajectory_file,
-            data_dir=data_dir,
-            scenario_dir=scenario,
-            config_path=config,
-            verbose=verbose,
         )
     )
 
@@ -402,44 +253,35 @@ def judge(
     source_path_pattern: str | None = typer.Option(
         None, "--source-path-pattern", help="Override source.source_path_pattern",
     ),
+    concurrency: int = typer.Option(
+        1, "--concurrency", help="Number of cases to judge in parallel (default: 1)",
+    ),
 ) -> None:
     """Judge trajectories using decision-tree classification.
 
-    Reads source settings (data_base_dir, source_path_pattern, filter, etc.)
-    from a batch config YAML. CLI options override config file values.
+    Reads source settings from a batch config YAML. CLI options override
+    config file values.
 
     Examples:
 
-      # Judge cases using config
       agentm judge config/batch/default.yaml
-
-      # Override limit and filter
       agentm judge config/batch/default.yaml --limit 5 --filter incorrect
-
-      # Override experiment
-      agentm judge config/batch/default.yaml --exp-id agentm-v12
-
-      # Save results to JSON
       agentm judge config/batch/default.yaml -o judgment_results.json
+      agentm judge config/batch/default.yaml --concurrency 4
     """
-    from agentm.cli.batch import collect_cases, load_batch_config
-    from agentm.cli.run import _load_and_override
+    from agentm.cli.run import load_and_override
 
-    cfg = load_batch_config(config_file)
+    cfg = load_judge_config(config_file)
 
-    # Apply CLI overrides
-    if exp_id is not None:
-        cfg.source.exp_id = exp_id
-    if limit is not None:
-        cfg.source.limit = limit
-    if filter_correctness is not None:
-        cfg.source.filter = filter_correctness  # type: ignore[assignment]
-    if agent_type is not None:
-        cfg.source.agent_type = agent_type
-    if data_base_dir is not None:
-        cfg.source.data_base_dir = data_base_dir
-    if source_path_pattern is not None:
-        cfg.source.source_path_pattern = source_path_pattern
+    # Apply CLI overrides to source config
+    overrides = {
+        "exp_id": exp_id, "limit": limit, "agent_type": agent_type,
+        "filter": filter_correctness, "data_base_dir": data_base_dir,
+        "source_path_pattern": source_path_pattern,
+    }
+    for key, val in overrides.items():
+        if val is not None:
+            setattr(cfg.source, key, val)
 
     try:
         case_infos = collect_cases(cfg)
@@ -451,8 +293,7 @@ def judge(
         typer.echo("No cases matched the filter criteria.", err=True)
         raise typer.Exit(code=1)
 
-    # Load configs via the shared loader (same pattern as analyze/run)
-    system_config, scenario_config, _ = _load_and_override(
+    system_config, scenario_config, _ = load_and_override(
         scenario, config, debug_mode=False, verbose=verbose,
     )
 
@@ -461,7 +302,8 @@ def judge(
         system_config=system_config,
         scenario_config=scenario_config,
         output_path=output,
-        dashboard=dashboard,
-        dashboard_port=port,
-        dashboard_host=dashboard_host,
+        dashboard_opts=DashboardOpts(
+            enabled=dashboard, port=port, host=dashboard_host,
+        ),
+        concurrency=concurrency,
     ))

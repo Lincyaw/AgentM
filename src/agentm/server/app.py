@@ -8,17 +8,28 @@ Serves the single-file HTML dashboard and provides:
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from rcabench_platform.v3.sdk.llm_eval.eval import dashboard as _sdk_dashboard
 
+if TYPE_CHECKING:
+    from agentm.config.schema import ScenarioConfig
+    from agentm.core.trajectory import TrajectoryCollector
+    from agentm.harness.runtime import AgentRuntime
+    from rcabench_platform.v3.sdk.llm_eval.eval.tracker import EvalTracker
+
 load_ground_truth = _sdk_dashboard.load_ground_truth
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Static HTML path
@@ -28,6 +39,21 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # SDK shared static (eval.js, constants, hooks, components, styles)
 SDK_STATIC_DIR = Path(_sdk_dashboard.__file__).resolve().parent / "static"
+
+
+# ---------------------------------------------------------------------------
+# DashboardOpts
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DashboardOpts:
+    """Bundled dashboard configuration parameters."""
+
+    enabled: bool = False
+    port: int = 8765
+    host: str = "0.0.0.0"
+
 
 # ---------------------------------------------------------------------------
 # WebSocket client management
@@ -126,17 +152,106 @@ def _serialize_message(msg: Any) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Shared dashboard infrastructure
+# ---------------------------------------------------------------------------
+
+
+def wire_trajectory_to_ws(
+    trajectory: TrajectoryCollector,
+    broadcaster: Broadcaster,
+    sample_id: str,
+) -> None:
+    """Wire trajectory events to WebSocket broadcast as eval sample events.
+
+    This is the shared implementation used by both ``run.py`` and
+    ``judge_runner.py`` to bridge trajectory events into the dashboard.
+    """
+
+    async def _traj_to_ws(event: dict[str, Any]) -> None:
+        traj_event = {
+            "event_type": event.get("event_type", ""),
+            "agent_path": event.get("agent_path", []),
+            "data": event.get("data", {}),
+            "timestamp": event.get("timestamp", ""),
+        }
+        await broadcaster.broadcast(
+            {
+                "channel": "eval",
+                "event_type": "sample_trajectory_event",
+                "sample_id": sample_id,
+                "data": traj_event,
+            }
+        )
+
+    trajectory.add_listener(_traj_to_ws)
+
+
+async def start_dashboard_server(
+    scenario_config: ScenarioConfig | None,
+    host: str,
+    port: int,
+    *,
+    runtime: AgentRuntime | None = None,
+    trajectory: TrajectoryCollector | None = None,
+    thread_id: str = "",
+) -> tuple[EvalTracker, Broadcaster, asyncio.Task[None]]:
+    """Create tracker + broadcaster, wire tracker to WS, start uvicorn.
+
+    Returns ``(eval_tracker, broadcaster, server_task)``.
+    """
+    import uvicorn
+
+    from rcabench_platform.v3.sdk.llm_eval.eval.tracker import EvalTracker as _EvalTracker
+
+    tracker = _EvalTracker()
+    broadcaster = Broadcaster()
+
+    loop = asyncio.get_running_loop()
+
+    def _tracker_to_ws(event: dict[str, Any]) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(broadcaster.broadcast(event), loop)
+        except RuntimeError:
+            logger.debug("Dropping dashboard event: event loop closed")
+
+    tracker.add_listener(_tracker_to_ws)
+
+    app = create_dashboard_app(
+        scenario_config=scenario_config,
+        runtime=runtime,
+        trajectory=trajectory,
+        thread_id=thread_id,
+        broadcaster=broadcaster,
+        eval_tracker=tracker,
+    )
+
+    uvi_config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    server = uvicorn.Server(uvi_config)
+    task: asyncio.Task[None] = asyncio.create_task(server.serve())
+    await asyncio.sleep(0.3)
+
+    from rich.console import Console as _Console
+
+    _Console().print(
+        f"Dashboard: [link=http://localhost:{port}]"
+        f"http://localhost:{port}[/link]"
+    )
+
+    return tracker, broadcaster, task
+
+
+# ---------------------------------------------------------------------------
 # Application factory
 # ---------------------------------------------------------------------------
 
 
 def create_dashboard_app(
-    scenario_config: Any | None = None,
-    runtime: Any | None = None,
-    trajectory: Any | None = None,
+    scenario_config: ScenarioConfig | None = None,
+    runtime: AgentRuntime | None = None,
+    trajectory: TrajectoryCollector | None = None,
     thread_id: str | None = None,
     broadcaster: Broadcaster | None = None,
-    eval_tracker: Any | None = None,
+    eval_tracker: EvalTracker | None = None,
 ) -> FastAPI:
     """Create the FastAPI dashboard application.
 
@@ -146,7 +261,7 @@ def create_dashboard_app(
         trajectory: TrajectoryCollector instance (for replaying history on connect).
         thread_id: Thread identifier for the current run.
         broadcaster: Broadcaster instance for WebSocket client management.
-            If ``None``, uses the module-level default broadcaster.
+            If ``None``, uses a fresh default broadcaster.
         eval_tracker: EvalTracker instance for batch evaluation monitoring.
             If ``None``, eval endpoints return inactive status.
     """
@@ -183,10 +298,21 @@ def create_dashboard_app(
         await websocket.accept()
         bc = app.state.broadcaster
         bc.add(websocket)
-        # Replay trajectory history so refreshed clients get full state
+        # Replay trajectory history so refreshed clients get full state.
+        # Prefer reading from the persisted JSONL file (complete history
+        # even when in-memory events have been evicted).
         traj = app.state.trajectory
         if traj is not None:
-            for evt in traj.events:
+            from agentm.core.trajectory import TrajectoryCollector as _TC
+
+            traj_file = traj.file_path
+            if traj_file.exists():
+                replay_events: list[dict[str, Any]] = _TC.read_all_events(
+                    traj_file
+                )
+            else:
+                replay_events = list(traj.events)
+            for evt in replay_events:
                 try:
                     payload = json.dumps(
                         {
