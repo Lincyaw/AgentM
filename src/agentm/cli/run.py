@@ -252,7 +252,7 @@ async def run_trajectory_analysis(
     verbose: bool = False,
     dashboard: bool = False,
     dashboard_port: int = 8765,
-    dashboard_host: str = "127.0.0.1",
+    dashboard_host: str = "0.0.0.0",
     max_steps: int = 60,
     case_data_mapping: dict[str, str] | None = None,
 ) -> None:
@@ -371,7 +371,7 @@ async def resume_investigation(
     list_only: bool = False,
     dashboard: bool = False,
     dashboard_port: int = 8765,
-    dashboard_host: str = "127.0.0.1",
+    dashboard_host: str = "0.0.0.0",
     verbose: bool = False,
     project_root: str | Path | None = None,
 ) -> None:
