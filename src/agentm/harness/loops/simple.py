@@ -226,7 +226,7 @@ class SimpleAgentLoop(AgentLoop):
         return chain
 
     async def run(
-        self, input: str, *, config: RunConfig | None = None
+        self, input: str | list[Message], *, config: RunConfig | None = None
     ) -> AgentResult:
         """Convenience: iterate stream(), return final result."""
         result = None
@@ -238,7 +238,7 @@ class SimpleAgentLoop(AgentLoop):
         return result
 
     async def stream(
-        self, input: str, *, config: RunConfig | None = None
+        self, input: str | list[Message], *, config: RunConfig | None = None
     ) -> AsyncIterator[AgentEvent]:
         """Run the agent loop, yielding events as they occur.
 
@@ -248,9 +248,19 @@ class SimpleAgentLoop(AgentLoop):
         agent_id = config.metadata.get("agent_id", "")
 
         # Build initial message list: system prompt + user input
+        # The loop always owns the system prompt; strip any system messages
+        # from caller-provided lists to avoid duplicates (DynamicContextMiddleware
+        # handles this for orchestrators, but workers may not have it).
+        if isinstance(input, str):
+            user_messages: list[Message] = [{"role": "human", "content": input}]
+        else:
+            user_messages = [
+                m for m in input
+                if not (isinstance(m, dict) and m.get("role") == "system")
+            ]
         messages: list[Message] = [
             {"role": "system", "content": self._system_prompt},
-            {"role": "human", "content": input},
+            *user_messages,
         ]
         step = 0
         tool_call_count = 0

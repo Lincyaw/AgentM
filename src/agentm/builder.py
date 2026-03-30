@@ -39,7 +39,7 @@ from agentm.harness.middleware import (
 from agentm.harness.runtime import AgentRuntime
 from agentm.harness.scenario import ScenarioWiring, SetupContext, get_scenario
 from agentm.harness.tool import Tool, tool_from_function
-from agentm.harness.types import AgentInput, AgentOutput, AgentResult, RunConfig, ToolCallable
+from agentm.harness.types import AgentInput, AgentOutput, AgentResult, Message, RunConfig, ToolCallable
 from agentm.harness.worker_factory import WorkerLoopFactory
 from agentm.models.data import OrchestratorHooks
 from agentm.tools.orchestrator import create_orchestrator_tools
@@ -79,19 +79,22 @@ def _default_hooks() -> OrchestratorHooks:
 # ---------------------------------------------------------------------------
 
 
-def _extract_task(input_data: AgentInput | dict[str, Any]) -> str:
-    """Extract the task string from agent input data.
+def _to_messages(input_data: AgentInput | dict[str, Any]) -> list[Message]:
+    """Convert agent input to a message list.
 
-    Looks for ``task_description`` first, then falls back to the content
-    of the first message.  Handles LangChain message objects (lists).
+    Priority:
+      1. ``messages`` -- used directly if present and non-empty.
+      2. ``task_description`` -- wrapped as a single human message.
     """
+    messages = input_data.get("messages")
+    if messages:
+        return list(messages)
     task = input_data.get("task_description", "")
-    if not task:
-        messages = input_data.get("messages") or []
-        task = messages[0].get("content", "") if messages else ""
-    if isinstance(task, list):
-        task = str(task[0]) if task else ""
-    return str(task)
+    if task:
+        if isinstance(task, list):
+            task = str(task[0]) if task else ""
+        return [{"role": "human", "content": str(task)}]
+    return []
 
 
 class AgentSystem:
@@ -126,9 +129,9 @@ class AgentSystem:
 
     async def execute(self, input_data: AgentInput) -> AgentOutput:
         """Execute the agent system with the given input. Returns final result."""
-        task = _extract_task(input_data)
+        messages = _to_messages(input_data)
         result: AgentResult = await self.loop.run(
-            task,
+            messages,
             config=RunConfig(metadata={"agent_id": "orchestrator"}),
         )
         return {"output": result.output, "status": result.status.value, "steps": result.steps}
@@ -141,10 +144,10 @@ class AgentSystem:
 
         Yields AgentEvent-like dicts from the SimpleAgentLoop's stream().
         """
-        task = _extract_task(input_data)
+        messages = _to_messages(input_data)
 
         async for event in self.loop.stream(
-            task,
+            messages,
             config=RunConfig(metadata={"agent_id": "orchestrator"}),
         ):
             yield {"event": event}

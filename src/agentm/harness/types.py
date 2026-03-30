@@ -140,7 +140,7 @@ class AgentInput(TypedDict, total=False):
     """Typed input for AgentSystem.execute() / stream()."""
 
     task_description: str
-    messages: list[dict[str, str]]
+    messages: list[Message]
 
 
 class AgentOutput(TypedDict):
