@@ -193,6 +193,18 @@ def collect_from_directory(
         source = meta.get("source", "") or ""
         resolved_data_dir = _resolve_data_dir(source, resolve_fn)
 
+        # Enrich reasoning with fault context from difficulty if present
+        base_reasoning = meta.get("reasoning", "") or ""
+        difficulty = meta.get("difficulty")
+        if isinstance(difficulty, dict):
+            fault_ctx = _extract_fault_context_from_meta({"difficulty": difficulty})
+            if fault_ctx and "Fault type:" not in base_reasoning:
+                reasoning = f"{base_reasoning} | {fault_ctx}" if base_reasoning else fault_ctx
+            else:
+                reasoning = base_reasoning
+        else:
+            reasoning = base_reasoning
+
         cases.append(
             CaseInfo(
                 file_path=path,
@@ -201,7 +213,7 @@ def collect_from_directory(
                 correct=correct,
                 correct_answer=meta.get("correct_answer", "") or "",
                 extracted_final_answer=meta.get("extracted_final_answer", "") or "",
-                reasoning=meta.get("reasoning", "") or "",
+                reasoning=reasoning,
                 agent_type=meta.get("agent_type", "") or "",
                 model_name=meta.get("model_name", "") or "",
                 dataset_index=meta.get("dataset_index"),
