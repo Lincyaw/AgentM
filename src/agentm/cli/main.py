@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from pathlib import Path
+from typing import Any
 
 import typer
 from dotenv import load_dotenv
@@ -12,13 +14,13 @@ from dotenv import load_dotenv
 from agentm.exceptions import AgentMError
 
 from agentm.cli.batch import (
-    BatchConfig,
     collect_cases,
     load_batch_config,
     run_batch_analysis,
 )
 from agentm.cli.debug import analyze_trajectory
 from agentm.cli.export_eval import export_eval_batch, export_eval_result
+from agentm.cli.judge_runner import run_judging
 from agentm.cli.run import (
     resume_investigation,
     run_trajectory_analysis,
@@ -359,3 +361,111 @@ def export_batch(
         console.print(f"Failed: [red]{len(failed)}[/] files")
         for traj, err in failed[:10]:
             console.print(f"  - [red]{traj}[/]: {err}")
+
+
+@app.command()
+def judge(
+    exp_id: str | None = typer.Option(None, "--exp-id", help="Experiment ID filter"),
+    limit: int | None = typer.Option(None, "--limit", help="Max cases to process"),
+    filter_correctness: str = typer.Option("all", "--filter", help="Filter: incorrect/correct/all"),
+    agent_type: str | None = typer.Option(None, "--agent-type", help="Agent type filter"),
+    source: str = typer.Option("database", "--source", help="Source: database or directory"),
+    directory: str | None = typer.Option(None, "--dir", help="Directory path (if source=directory)"),
+    output: str | None = typer.Option(None, "-o", "--output", help="Output JSON file for results"),
+    verbose: bool = typer.Option(False, "--verbose", help="Extra detail"),
+    dashboard: bool = typer.Option(False, "--dashboard", help="Start web dashboard for real-time monitoring"),
+    port: int = typer.Option(8765, "--port", help="Dashboard server port (requires --dashboard)"),
+    dashboard_host: str = typer.Option("127.0.0.1", "--dashboard-host", help="Dashboard server bind address"),
+) -> None:
+    """Judge trajectories using decision-tree classification.
+
+    Classifies each trajectory as: success, lucky_hit, exploration_fail,
+    confirmation_fail, or judgment_fail with detailed reasoning.
+
+    Examples:
+
+      # Judge one case from database
+      agentm judge --limit 1
+
+      # Judge all incorrect cases from an experiment
+      agentm judge --exp-id agentm-v12 --filter incorrect
+
+      # Judge cases from a directory
+      agentm judge --source directory --dir ./eval-trajectories --limit 10
+
+      # Save results to JSON
+      agentm judge --limit 50 -o judgment_results.json
+    """
+    # Validate filter_correctness
+    if filter_correctness not in ("incorrect", "correct", "all"):
+        typer.echo("ERROR: --filter must be one of: incorrect, correct, all", err=True)
+        raise typer.Exit(code=1)
+
+    # Validate source
+    if source not in ("database", "directory"):
+        typer.echo("ERROR: --source must be one of: database, directory", err=True)
+        raise typer.Exit(code=1)
+
+    # Validate directory is provided when source=directory
+    if source == "directory" and not directory:
+        typer.echo("ERROR: --dir is required when --source=directory", err=True)
+        raise typer.Exit(code=1)
+
+    # Unified flow: export to files first, then collect from directory
+    from agentm.cli.batch import collect_from_directory, collect_from_db
+
+    export_dir = Path("/home/nn/workspace/AgentM/eval-trajectories")
+
+    try:
+        if source == "database":
+            # Export from DB to files (same as batch.py pattern)
+            typer.echo(f"Exporting from database to {export_dir}...")
+            collect_from_db(
+                exp_id=exp_id,
+                filter_correctness=filter_correctness,
+                agent_type=agent_type,
+                limit=limit,
+                output_dir=str(export_dir),
+            )
+            # Now collect from the exported files
+            case_infos = collect_from_directory(
+                directory=str(export_dir),
+                filter_correctness=filter_correctness,
+                exp_id=exp_id,
+                agent_type=agent_type,
+                limit=limit,
+            )
+        else:
+            # Source is directory - use directly
+            if not directory:
+                raise ValueError("directory is required when source=directory")
+            case_infos = collect_from_directory(
+                directory=directory,
+                filter_correctness=filter_correctness,
+                exp_id=exp_id,
+                agent_type=agent_type,
+                limit=limit,
+            )
+
+        # Build (case_info, ground_truth) tuples
+        cases: list[tuple[Any, list[str]]] = []
+        for case_info in case_infos:
+            ground_truth = [s.strip() for s in case_info.correct_answer.split(",") if s.strip()]
+            cases.append((case_info, ground_truth))
+
+    except Exception as e:
+        typer.echo(f"ERROR: Failed to collect cases: {e}", err=True)
+        raise typer.Exit(code=1)
+
+    if not cases:
+        typer.echo("No cases matched the filter criteria.", err=True)
+        raise typer.Exit(code=1)
+
+    asyncio.run(run_judging(
+        cases,
+        output_path=output,
+        verbose=verbose,
+        dashboard=dashboard,
+        dashboard_port=port,
+        dashboard_host=dashboard_host,
+    ))

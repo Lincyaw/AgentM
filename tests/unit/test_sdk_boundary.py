@@ -26,6 +26,8 @@ _LAZY_LOADERS: set[str] = {
     "builder.py",
     # WorkerLoopFactory calls scenarios.discover() inside function
     "harness/worker_factory.py",
+    # CLI judge_runner imports trajectory_judger data models
+    "cli/judge_runner.py",
 }
 
 # SDK modules to scan (everything except scenarios/ and __pycache__)
