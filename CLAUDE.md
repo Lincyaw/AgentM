@@ -21,7 +21,20 @@ uv run agentm        # Run the CLI entry point
 uv add <package>     # Add a dependency
 uv run pytest        # Run tests
 uv run pytest tests/path/to/test_file.py::test_name  # Run a single test
+uv run ruff check src/   # Lint check
+uv run mypy src/         # Type check
 ```
+
+## Code Quality Checks
+
+After making code changes, **always** run lint and type checks on the modified files:
+
+```bash
+uv run ruff check <changed-files>
+uv run mypy <changed-files>
+```
+
+Fix all errors before considering the task complete. For `mypy` issues on dynamic/duck-typed parameters (e.g., `broadcaster: object`), use targeted `# type: ignore[attr-defined]` annotations rather than suppressing broadly.
 
 ## Architecture
 
