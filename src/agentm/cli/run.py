@@ -10,11 +10,10 @@ import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-import uvicorn
 from rich.console import Console
 
 import agentm.tools.observability as obs_tools
-from agentm.exceptions import CheckpointError, DataInitError
+from agentm.exceptions import DataInitError
 from agentm.tools.duckdb_sql import register_tables as duckdb_register_tables
 from agentm.builder import AgentSystem, build_agent_system
 from agentm.config.loader import load_scenario_config, load_system_config
@@ -22,7 +21,11 @@ from agentm.config.schema import SystemConfig, ScenarioConfig
 from agentm.core.debug_console import DebugConsole
 from agentm.core.trajectory import TrajectoryCollector
 from agentm.harness.types import JsonDict
-from agentm.server.app import Broadcaster, create_dashboard_app
+from agentm.server.app import (
+    DashboardOpts,
+    start_dashboard_server,
+    wire_trajectory_to_ws,
+)
 
 if TYPE_CHECKING:
     from rcabench_platform.v3.sdk.llm_eval.eval.tracker import EvalTracker
@@ -54,7 +57,7 @@ def _init_observability_data(data_dir: str) -> dict:
     return init_info
 
 
-def _load_and_override(
+def load_and_override(
     scenario_dir: str,
     config_path: str,
     debug_mode: bool,
@@ -90,93 +93,48 @@ async def _setup_debug_and_dashboard(
     system: AgentSystem,
     system_config: SystemConfig,
     verbose: bool,
-    dashboard: bool,
-    dashboard_host: str,
-    dashboard_port: int,
+    dashboard_opts: DashboardOpts,
     *,
     data_dir: str = "",
-) -> tuple[DebugConsole | None, asyncio.Task | None, EvalTracker | None, str | None]:
+) -> tuple[DebugConsole | None, asyncio.Task[None] | None, EvalTracker | None, str | None]:
     """Wire up DebugConsole and optional dashboard with EvalTracker.
 
     Returns (debug_console, dashboard_server_task, eval_tracker, sample_id).
     """
-    from rcabench_platform.v3.sdk.llm_eval.eval.tracker import EvalTracker
-
     debug_console = None
     if system_config.debug.console_live:
         debug_console = DebugConsole(verbose=verbose)
         debug_console.start()
 
-    dashboard_server_task = None
-    eval_tracker = None
-    sample_id = None
-    bc: Broadcaster | None = None
-    if dashboard:
-        bc = Broadcaster()
-        tracker = EvalTracker()
-        sample_id = system.thread_id
+    dashboard_server_task: asyncio.Task[None] | None = None
+    eval_tracker: EvalTracker | None = None
+    sample_id: str | None = None
 
+    if dashboard_opts.enabled:
+        tracker, broadcaster, dashboard_server_task = await start_dashboard_server(
+            scenario_config=system.scenario_config,
+            host=dashboard_opts.host,
+            port=dashboard_opts.port,
+            runtime=system.runtime,
+            trajectory=system.trajectory,
+            thread_id=system.thread_id,
+        )
+
+        sample_id = system.thread_id
         tracker.register_sample(sample_id, dataset_index=0, data_dir=data_dir)
         tracker.mark_running(sample_id, run_id=sample_id)
         if system.trajectory is not None:
             tracker.update_trajectory_path(sample_id, str(system.trajectory.file_path))
 
-        # Wire tracker → WebSocket
-        _loop = asyncio.get_running_loop()
-
-        def _tracker_to_ws(event: dict) -> None:
-            try:
-                asyncio.run_coroutine_threadsafe(bc.broadcast(event), _loop)
-            except RuntimeError:
-                logger.debug("Dropping dashboard event: event loop closed")
-
-        tracker.add_listener(_tracker_to_ws)
         eval_tracker = tracker
 
-        app = create_dashboard_app(
-            scenario_config=system.scenario_config,
-            runtime=system.runtime,
-            trajectory=system.trajectory,
-            thread_id=system.thread_id,
-            broadcaster=bc,
-            eval_tracker=tracker,
-        )
+        # Wire trajectory events to WebSocket
+        if system.trajectory is not None:
+            wire_trajectory_to_ws(system.trajectory, broadcaster, sample_id)
 
-        uvi_config = uvicorn.Config(
-            app, host=dashboard_host, port=dashboard_port, log_level="warning"
-        )
-        server = uvicorn.Server(uvi_config)
-        dashboard_server_task = asyncio.create_task(server.serve())
-        await asyncio.sleep(0.3)
-        console.print(
-            f"Dashboard: [link=http://localhost:{dashboard_port}]"
-            f"http://localhost:{dashboard_port}[/link]"
-        )
-
-    # Register trajectory listeners
-    if system.trajectory is not None:
-        if debug_console is not None:
-            system.trajectory.add_listener(debug_console.on_trajectory_event)
-        if dashboard and bc is not None:
-            _sid = sample_id
-
-            async def _traj_to_ws(event: dict) -> None:
-                traj_event = {
-                    "event_type": event.get("event_type", ""),
-                    "agent_path": event.get("agent_path", []),
-                    "data": event.get("data", {}),
-                    "timestamp": event.get("timestamp", ""),
-                }
-                await bc.broadcast(
-                    {
-                        "channel": "eval",
-                        "event_type": "sample_trajectory_event",
-                        "sample_id": _sid,
-                        "data": traj_event,
-                    }
-                )
-
-            system.trajectory.add_listener(_traj_to_ws)
+    # Register trajectory listeners for debug console
+    if system.trajectory is not None and debug_console is not None:
+        system.trajectory.add_listener(debug_console.on_trajectory_event)
 
     return debug_console, dashboard_server_task, eval_tracker, sample_id
 
@@ -186,8 +144,8 @@ async def _stream_and_finalize(
     initial_state: JsonDict,
     system_config: SystemConfig,
     debug_console: DebugConsole | None,
-    dashboard_server_task: asyncio.Task | None,
-    dashboard_port: int,
+    dashboard_server_task: asyncio.Task[None] | None,
+    dashboard_opts: DashboardOpts,
     verbose: bool,
     max_steps: int,
     label: str,
@@ -235,8 +193,8 @@ async def _stream_and_finalize(
 
     if dashboard_server_task is not None:
         console.print(
-            f"\nDashboard running at [link=http://localhost:{dashboard_port}]"
-            f"http://localhost:{dashboard_port}[/link] — press Ctrl+C to stop."
+            f"\nDashboard running at [link=http://localhost:{dashboard_opts.port}]"
+            f"http://localhost:{dashboard_opts.port}[/link] — press Ctrl+C to stop."
         )
         try:
             await dashboard_server_task
@@ -256,14 +214,15 @@ async def run_trajectory_analysis(
     config_path: str,
     debug_mode: bool = False,
     verbose: bool = False,
-    dashboard: bool = False,
-    dashboard_port: int = 8765,
-    dashboard_host: str = "0.0.0.0",
+    dashboard_opts: DashboardOpts | None = None,
     max_steps: int = 60,
     case_data_mapping: dict[str, str] | None = None,
 ) -> None:
     """Run a trajectory analysis pass over one or more completed RCA trajectories."""
-    system_config, scenario_config, _ = _load_and_override(
+    if dashboard_opts is None:
+        dashboard_opts = DashboardOpts()
+
+    system_config, scenario_config, _ = load_and_override(
         scenario_dir, config_path, debug_mode, verbose
     )
 
@@ -294,6 +253,8 @@ async def run_trajectory_analysis(
             meta = TrajectoryCollector.read_metadata(p)
             tid = meta.get("thread_id", "")
             if not tid:
+                from agentm.exceptions import CheckpointError
+
                 raise CheckpointError(f"{entry} has no thread_id metadata.")
             traj_reader.register(p)
             thread_ids.append(tid)
@@ -329,9 +290,7 @@ async def run_trajectory_analysis(
         system,
         system_config,
         verbose,
-        dashboard,
-        dashboard_host,
-        dashboard_port,
+        dashboard_opts,
     )
 
     initial_state = {
@@ -354,72 +313,12 @@ async def run_trajectory_analysis(
         system_config,
         debug_console,
         dashboard_task,
-        dashboard_port,
+        dashboard_opts,
         verbose,
         max_steps,
         "trajectory_analysis",
         eval_tracker=eval_tracker,
         sample_id=sample_id,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Resume investigation
-# ---------------------------------------------------------------------------
-
-
-async def resume_investigation(
-    trajectory_file: str,
-    data_dir: str,
-    scenario_dir: str,
-    config_path: str,
-    _checkpoint_id: str | None = None,
-    _list_only: bool = False,
-    _dashboard: bool = False,
-    _dashboard_port: int = 8765,
-    _dashboard_host: str = "0.0.0.0",
-    verbose: bool = False,
-    _project_root: str | Path | None = None,
-) -> None:
-    """Resume an interrupted investigation from a trajectory file."""
-    traj_path = Path(trajectory_file)
-    if not traj_path.exists():
-        raise CheckpointError(f"Trajectory file not found: {trajectory_file}")
-
-    meta = TrajectoryCollector.read_metadata(traj_path)
-    thread_id = meta.get("thread_id", "")
-    checkpoint_db = meta.get("checkpoint_db", "")
-
-    if not thread_id:
-        raise CheckpointError(
-            "Trajectory file has no thread_id metadata. "
-            "This trajectory was created before resume support was added."
-        )
-
-    console.rule("AgentM — Resume Investigation")
-    console.print(f"Trajectory: [cyan]{trajectory_file}[/]")
-    console.print(f"Thread ID:  [cyan]{thread_id}[/]")
-    console.print(f"Checkpoint DB: [cyan]{checkpoint_db or '(none)'}[/]")
-
-    system_config, scenario_config, _ = _load_and_override(
-        scenario_dir, config_path, False, verbose
-    )
-
-    if checkpoint_db:
-        system_config.storage.checkpointer.backend = "sqlite"
-        system_config.storage.checkpointer.url = checkpoint_db
-
-    # Initialize data
-    if data_dir:
-        init_info = _init_observability_data(data_dir)
-        console.print(f"Data initialized: {len(init_info['files'])} parquet files")
-
-    # Checkpoint-based resume requires CheckpointStore integration with
-    # SimpleAgentLoop, which is not yet implemented in the harness SDK.
-    raise NotImplementedError(
-        "Checkpoint resume is not yet supported in the Agent Harness architecture. "
-        "The SimpleAgentLoop does not support LangGraph-style checkpoint recovery. "
-        "This will be re-implemented using the CheckpointStore protocol."
     )
 
 
@@ -600,7 +499,7 @@ async def run_investigation_headless(
     """
     import uuid
 
-    system_config, scenario_config, _ = _load_and_override(
+    system_config, scenario_config, _ = load_and_override(
         scenario_dir, config_path, debug_mode=False, verbose=False
     )
     # Disable console live so no Rich output is produced
@@ -698,11 +597,19 @@ async def run_investigation_headless(
             await system.trajectory.close()
 
     trajectory_json: str | None = None
-    if system.trajectory is not None and system.trajectory.events:
+    if system.trajectory is not None:
         from agentm.core.trajectory_converter import build_trajectory_from_events
 
-        trajectory_json = build_trajectory_from_events(run_id, system.trajectory.events)
-    elif collected_messages:
+        # Prefer reading from the persisted JSONL file (complete history even
+        # when in-memory events have been evicted by max_memory_events).
+        traj_file = system.trajectory.file_path
+        if traj_file.exists():
+            all_events = TrajectoryCollector.read_all_events(traj_file)
+        else:
+            all_events = list(system.trajectory.events)
+        if all_events:
+            trajectory_json = build_trajectory_from_events(run_id, all_events)
+    if trajectory_json is None and collected_messages:
         trajectory_json = _build_trajectory_json(run_id, collected_messages)
 
     return structured_response_json, trajectory_json, run_id, trajectory_file_path

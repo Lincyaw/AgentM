@@ -22,6 +22,11 @@ _data_dir_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "obs_data_dir", default=None
 )
 
+# Cached DuckDB connection for observability queries (one per ContextVar scope)
+_obs_conn_var: contextvars.ContextVar[duckdb.DuckDBPyConnection | None] = (
+    contextvars.ContextVar("obs_duckdb_conn", default=None)
+)
+
 # File mapping: (category, period) -> relative path under data_dir
 _FILE_MAP: dict[tuple[str, str], str] = {
     ("metrics", "abnormal"): "abnormal_metrics.parquet",
@@ -53,8 +58,37 @@ class QueryError(Exception):
     """Raised when a DuckDB query fails. Contains a user-friendly error message."""
 
 
-def _query(sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
+def _get_obs_conn() -> duckdb.DuckDBPyConnection:
+    """Return the cached in-memory DuckDB connection, creating one if needed.
+
+    Observability queries embed parquet paths directly in SQL (via
+    ``read_parquet(...)``), so no table registration is required — a plain
+    in-memory connection is sufficient.
+    """
+    conn = _obs_conn_var.get()
+    if conn is not None:
+        return conn
     conn = duckdb.connect(":memory:")
+    _obs_conn_var.set(conn)
+    return conn
+
+
+def close_obs_connection() -> None:
+    """Close and discard the cached observability DuckDB connection.
+
+    Call this when the tool session is finished to release resources.
+    """
+    conn = _obs_conn_var.get()
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _obs_conn_var.set(None)
+
+
+def _query(sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
+    conn = _get_obs_conn()
     try:
         result = conn.execute(sql, params or []).fetchall()
         columns = [desc[0] for desc in conn.description]
@@ -63,8 +97,6 @@ def _query(sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
     except duckdb.Error as e:
         error_msg = str(e)
         raise QueryError(error_msg) from e
-    finally:
-        conn.close()
 
 
 def _safe_tool(func):  # noqa: ANN001, ANN201

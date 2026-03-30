@@ -2,13 +2,60 @@
 
 from __future__ import annotations
 
+import functools
 import json
+import logging
 import math
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Any
+from typing import Any, ParamSpec, TypeVar, overload
+
+logger = logging.getLogger(__name__)
 
 # Common token budget for all tool result payloads.
 TOKEN_LIMIT = 5000
+
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+# ---------------------------------------------------------------------------
+# Tool response helpers
+# ---------------------------------------------------------------------------
+
+
+def tool_ok(**data: Any) -> str:
+    """Return a JSON success response for a tool."""
+    return json.dumps(data, ensure_ascii=False)
+
+
+def tool_error(msg: str, **extra: Any) -> str:
+    """Return a JSON error response for a tool."""
+    return json.dumps({"error": msg, **extra}, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# safe_tool decorator
+# ---------------------------------------------------------------------------
+
+
+def safe_tool(func: Callable[P, Awaitable[str]]) -> Callable[P, Awaitable[str]]:
+    """Decorator that catches exceptions in async tool functions and returns JSON errors."""
+
+    @functools.wraps(func)
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> str:
+        try:
+            return await func(*args, **kwargs)
+        except Exception as exc:
+            logger.warning("Tool %s failed: %s", func.__name__, exc)
+            return tool_error(str(exc))
+
+    return wrapper
+
+
+# ---------------------------------------------------------------------------
+# Serialization helpers
+# ---------------------------------------------------------------------------
 
 
 def estimate_tokens(text: str) -> int:
@@ -35,30 +82,53 @@ def serialize_for_json(obj: Any) -> Any:
     return obj
 
 
-def enforce_token_budget(payload: str, context: str) -> str:
+# ---------------------------------------------------------------------------
+# Token budget enforcement
+# ---------------------------------------------------------------------------
+
+
+@overload
+def enforce_token_budget(payload: str, context: str) -> str: ...
+
+
+@overload
+def enforce_token_budget(
+    payload: str, context: str, *, parsed: list[Any] | dict[str, Any]
+) -> str: ...
+
+
+def enforce_token_budget(
+    payload: str,
+    context: str,
+    *,
+    parsed: list[Any] | dict[str, Any] | None = None,
+) -> str:
     """Enforce token budget on a JSON tool-result string.
 
     When *payload* fits within ``TOKEN_LIMIT``, returns it unchanged.
     When it exceeds the limit, truncates the data and appends metadata
     so the agent can refine its query.
 
+    Pass *parsed* to avoid a redundant ``json.loads`` when the caller
+    already has the deserialized object.
+
     Handles three shapes:
-    - **list** — keeps a prefix of rows and reports total vs returned counts.
-    - **dict** — truncates each list-valued key independently.
-    - **scalar / unknown** — returns a budget-exceeded error object.
+    - **list** -- keeps a prefix of rows and reports total vs returned counts.
+    - **dict** -- truncates each list-valued key independently.
+    - **scalar / unknown** -- returns a budget-exceeded error object.
     """
     if estimate_tokens(payload) <= TOKEN_LIMIT:
         return payload
 
     estimated_tokens = estimate_tokens(payload)
     ratio = TOKEN_LIMIT / estimated_tokens
-    parsed = json.loads(payload)
+    data = parsed if parsed is not None else json.loads(payload)
 
-    if isinstance(parsed, list):
-        original_count = len(parsed)
+    if isinstance(data, list):
+        original_count = len(data)
         keep = max(1, int(original_count * ratio * 0.8))
-        truncated = parsed[:keep]
-        result = {
+        truncated = data[:keep]
+        result: dict[str, Any] = {
             "_truncated": True,
             "_total_rows": original_count,
             "_rows_returned": keep,
@@ -71,11 +141,11 @@ def enforce_token_budget(payload: str, context: str) -> str:
         }
         return json.dumps(result, ensure_ascii=False, indent=2)
 
-    if isinstance(parsed, dict):
+    if isinstance(data, dict):
         # For dict payloads (e.g. call graphs with {nodes, edges}), truncate each list
         truncated_dict: dict[str, Any] = {}
         meta: dict[str, Any] = {"_truncated": True, "_context": context}
-        for k, v in parsed.items():
+        for k, v in data.items():
             if isinstance(v, list):
                 keep = max(1, int(len(v) * ratio * 0.8))
                 truncated_dict[k] = v[:keep]
@@ -87,7 +157,7 @@ def enforce_token_budget(payload: str, context: str) -> str:
         truncated_dict.update(meta)
         return json.dumps(truncated_dict, ensure_ascii=False, indent=2)
 
-    # Scalar or unknown — return warning only
+    # Scalar or unknown -- return warning only
     warning = {
         "error": "Result exceeds token budget",
         "context": context,

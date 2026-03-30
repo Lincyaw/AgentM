@@ -8,7 +8,9 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from agentm.core.trajectory import read_trajectory
 from agentm.utils.db import sqlite_cursor
+from agentm.utils.json_utils import safe_load_json
 from agentm.utils.serde import deserialize_typed
 
 
@@ -27,7 +29,7 @@ def export_eval_result(trajectory_file: str, output_file: str | None = None) -> 
     if not traj_path.exists():
         raise FileNotFoundError(f"Trajectory file not found: {trajectory_file}")
 
-    meta, events = _load_trajectory(traj_path)
+    meta, events = read_trajectory(traj_path)
     case_dir = _extract_case_dir(events)
     ground_truth = _load_ground_truth(case_dir)
     final_orchestrator_output = _extract_last_llm_end(events, agent="orchestrator")
@@ -98,27 +100,6 @@ def export_eval_batch(
     return success, failed
 
 
-def _load_trajectory(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    lines = path.read_text(encoding="utf-8").splitlines()
-    if not lines:
-        return {}, []
-
-    first = json.loads(lines[0])
-    meta = first.get("_meta", {}) if isinstance(first, dict) else {}
-
-    events: list[dict[str, Any]] = []
-    for raw in lines[1:]:
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            item = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(item, dict):
-            events.append(item)
-    return meta, events
-
 
 def _extract_case_dir(events: list[dict[str, Any]]) -> Path | None:
     pattern = re.compile(
@@ -151,11 +132,8 @@ def _load_ground_truth(case_dir: Path | None) -> dict[str, Any] | None:
     if case_dir is None:
         return None
     injection = case_dir / "injection.json"
-    if not injection.exists():
-        return None
-    try:
-        data = json.loads(injection.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    data = safe_load_json(injection)
+    if data is None:
         return None
     gt = data.get("ground_truth")
     return gt if isinstance(gt, dict) else None

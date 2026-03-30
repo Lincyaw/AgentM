@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from agentm.tools._shared import tool_error
 from agentm.tools.duckdb_sql import register_tables
 
 # ContextVar: case_id -> data directory path.
@@ -78,29 +79,23 @@ async def load_case_data(case_id: str) -> str:
     mapping = _case_data_var.get()
 
     if not mapping:
-        return json.dumps(
-            {
-                "error": "No case data mapping configured.",
-                "hint": "Observability data access is not available for this run. "
-                "The batch config needs a data_base_dir setting.",
-            }
+        return tool_error(
+            "No case data mapping configured.",
+            hint="Observability data access is not available for this run. "
+            "The batch config needs a data_base_dir setting.",
         )
 
     data_dir = mapping.get(case_id)
     if data_dir is None:
         available = list(mapping.keys())[:10]
-        return json.dumps(
-            {
-                "error": f"No data directory mapped for case_id={case_id!r}.",
-                "available_case_ids": available,
-            }
+        return tool_error(
+            f"No data directory mapped for case_id={case_id!r}.",
+            available_case_ids=available,
         )
 
     data_path = Path(data_dir)
     if not data_path.is_dir():
-        return json.dumps(
-            {"error": f"Data directory does not exist: {data_dir}"}
-        )
+        return tool_error(f"Data directory does not exist: {data_dir}")
 
     # Discover parquet files
     tables: dict[str, Any] = {}
@@ -110,11 +105,9 @@ async def load_case_data(case_id: str) -> str:
             tables[table_name] = str(f)
 
     if not tables:
-        return json.dumps(
-            {
-                "error": f"No parquet files found in {data_dir}",
-                "hint": "Expected files like abnormal_traces.parquet, abnormal_logs.parquet, etc.",
-            }
+        return tool_error(
+            f"No parquet files found in {data_dir}",
+            hint="Expected files like abnormal_traces.parquet, abnormal_logs.parquet, etc.",
         )
 
     # Register tables in the current async context (ContextVar isolation)

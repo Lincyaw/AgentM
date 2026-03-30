@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, cast
 
@@ -76,7 +77,7 @@ class SimpleAgentLoop(AgentLoop):
             lambda resp: not getattr(resp, "tool_calls", None)
         )
         self._checkpoint_store = checkpoint_store
-        self._inbox: list[str] = []
+        self._inbox: deque[str] = deque()
         self._retry_max_attempts = retry_max_attempts
         self._retry_initial_interval = retry_initial_interval
         self._retry_backoff_factor = retry_backoff_factor
@@ -274,7 +275,7 @@ class SimpleAgentLoop(AgentLoop):
         while config.max_steps is None or step < config.max_steps:
             # 1. Drain inbox
             while self._inbox:
-                injected = self._inbox.pop(0)
+                injected = self._inbox.popleft()
                 messages.append(
                     {"role": "human", "content": f"[Injected message]\n{injected}"}
                 )

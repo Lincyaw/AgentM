@@ -8,11 +8,11 @@ from pathlib import Path
 import pytest
 
 from agentm.cli.debug import (
-    _load_events,
     _print_summary,
     _print_timeline,
     _event_detail,
 )
+from agentm.core.trajectory import read_trajectory
 
 
 @pytest.fixture
@@ -116,8 +116,8 @@ def sample_trajectory(tmp_path: Path) -> Path:
 
 
 def test_load_events(sample_trajectory: Path) -> None:
-    """_load_events must parse all valid lines."""
-    events = _load_events(sample_trajectory)
+    """read_trajectory must parse all valid lines."""
+    _meta, events = read_trajectory(sample_trajectory)
     assert len(events) == 6
 
 
@@ -125,13 +125,13 @@ def test_load_events_skips_invalid_json(tmp_path: Path) -> None:
     """Invalid JSON lines must be skipped, not crash the loader."""
     path = tmp_path / "bad.jsonl"
     path.write_text('{"valid": true}\nnot json\n{"also": "valid"}\n')
-    events = _load_events(path)
+    _meta, events = read_trajectory(path)
     assert len(events) == 2
 
 
 def test_filter_by_agent_path(sample_trajectory: Path) -> None:
     """agent path filter must match prefix."""
-    events = _load_events(sample_trajectory)
+    _meta, events = read_trajectory(sample_trajectory)
     filtered = [
         e for e in events if "worker-scout" in "/".join(e.get("agent_path", []))
     ]
@@ -141,7 +141,7 @@ def test_filter_by_agent_path(sample_trajectory: Path) -> None:
 
 def test_filter_by_event_type(sample_trajectory: Path) -> None:
     """event_type filter must match exactly."""
-    events = _load_events(sample_trajectory)
+    _meta, events = read_trajectory(sample_trajectory)
     filtered = [e for e in events if e.get("event_type") == "hypothesis_update"]
     assert len(filtered) == 2
 
@@ -180,11 +180,11 @@ def test_event_detail_task_complete() -> None:
 
 def test_print_summary_does_not_crash(sample_trajectory: Path, capsys) -> None:
     """_print_summary must run without exceptions on valid events."""
-    events = _load_events(sample_trajectory)
+    _meta, events = read_trajectory(sample_trajectory)
     _print_summary(events)  # Should not raise
 
 
 def test_print_timeline_does_not_crash(sample_trajectory: Path, capsys) -> None:
     """_print_timeline must run without exceptions on valid events."""
-    events = _load_events(sample_trajectory)
+    _meta, events = read_trajectory(sample_trajectory)
     _print_timeline(events)  # Should not raise
