@@ -17,7 +17,7 @@ class TrajectoryAnalysisScenario:
     def name(self) -> str:
         return "trajectory_analysis"
 
-    def setup(self, ctx: SetupContext) -> ScenarioWiring:
+    def setup(self, _ctx: SetupContext) -> ScenarioWiring:
         """Wire up trajectory analysis scenario: schemas and output."""
         from agentm.harness.scenario import ScenarioWiring
         from agentm.scenarios.trajectory_analysis.answer_schemas import (

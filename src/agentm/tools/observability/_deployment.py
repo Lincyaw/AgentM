@@ -11,7 +11,7 @@ from agentm.tools.observability._core import _query, _safe_tool
 
 @_safe_tool
 async def get_deployment_graph(
-    request: str,
+    request: str,  # noqa: ARG001  (LLM prompt parameter)
     service_name: str | None = None,
 ) -> str:
     """Infrastructure deployment topology: which services run on which pods and nodes.

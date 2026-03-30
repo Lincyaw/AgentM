@@ -226,7 +226,7 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
     # 10. vault_lint
     # ------------------------------------------------------------------
 
-    def vault_lint(request: str) -> str:
+    def vault_lint(request: str) -> str:  # noqa: ARG001  (LLM prompt parameter)
         """Check vault health: find dead links and orphan notes.
 
         Pass any value for request (e.g. "check").
