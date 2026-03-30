@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 # Event types relevant to conversation reconstruction
 # ---------------------------------------------------------------------------
 _CONVERSATION_EVENTS = {"llm_start", "tool_call", "tool_result", "llm_end"}
-_LIFECYCLE_EVENTS = {"task_dispatch", "task_complete", "task_timeout", "task_fail"}
 
 # Role mapping: LangChain type -> OpenAI role
 _ROLE_MAP = {

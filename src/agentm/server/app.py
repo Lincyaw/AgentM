@@ -78,15 +78,6 @@ class Broadcaster:
             self._clients.discard(ws)
 
 
-# Default broadcaster instance for backward compatibility
-_default_broadcaster = Broadcaster()
-
-
-async def broadcast_event(event: dict[str, Any]) -> None:
-    """Broadcast using the default broadcaster. Backward-compatible API."""
-    await _default_broadcaster.broadcast(event)
-
-
 # ---------------------------------------------------------------------------
 # Serialization helpers
 # ---------------------------------------------------------------------------
@@ -140,7 +131,7 @@ def create_dashboard_app(
             If ``None``, eval endpoints return inactive status.
     """
     if broadcaster is None:
-        broadcaster = _default_broadcaster
+        broadcaster = Broadcaster()
 
     app = FastAPI(title="AgentM Dashboard")
 

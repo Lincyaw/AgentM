@@ -9,6 +9,10 @@ from typing import Any, Callable
 
 import yaml
 
+# TODO: move Tool and tool_from_function to core/ or a shared models/
+# module to fix core→harness layer violation.  Both are used at runtime
+# in ToolDefinition.create_tool(), so they cannot be hidden behind
+# TYPE_CHECKING without a deeper refactor.
 from agentm.harness.tool import Tool, tool_from_function
 
 

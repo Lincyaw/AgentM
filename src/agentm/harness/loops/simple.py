@@ -233,7 +233,9 @@ class SimpleAgentLoop(AgentLoop):
         async for event in self.stream(input, config=config):
             if event.type == "complete":
                 result = event.data.get("result")
-        return result  # type: ignore[return-value]
+        if result is None:
+            raise RuntimeError("Agent loop finished without producing a result")
+        return result
 
     async def stream(
         self, input: str, *, config: RunConfig | None = None

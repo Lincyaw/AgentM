@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypedDict
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -100,7 +100,7 @@ class AgentEvent:
     inject, complete, error.
     """
 
-    type: str
+    type: Literal["llm_start", "llm_end", "tool_start", "tool_end", "inject", "complete", "error"]
     agent_id: str
     data: JsonDict = field(default_factory=dict)
     step: int = 0
@@ -129,3 +129,23 @@ class LoopContext:
     max_steps: int | None
     tool_call_count: int
     metadata: JsonDict
+
+
+# ---------------------------------------------------------------------------
+# TypedDicts for AgentSystem input / output
+# ---------------------------------------------------------------------------
+
+
+class AgentInput(TypedDict, total=False):
+    """Typed input for AgentSystem.execute() / stream()."""
+
+    task_description: str
+    messages: list[dict[str, str]]
+
+
+class AgentOutput(TypedDict):
+    """Typed output returned by AgentSystem.execute()."""
+
+    output: object
+    status: str
+    steps: int

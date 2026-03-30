@@ -37,8 +37,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-from agentm.harness.types import JsonDict
-from agentm.config.schema import SystemConfig, ScenarioConfig
+def _init_observability_data(data_dir: str) -> dict:
+    """Initialize observability data directory and register DuckDB tables."""
+    result = obs_tools.set_data_directory(data_dir)
+    init_info = json.loads(result)
+    if "error" in init_info:
+        raise DataInitError(init_info["error"])
+    duckdb_register_tables(
+        {
+            Path(f).stem: str(Path(data_dir) / f)
+            for f in init_info["files"]
+            if Path(f).parent == Path(".")
+            and Path(f).name in obs_tools.ALLOWED_TABLE_FILES
+        }
+    )
+    return init_info
 
 
 def _load_and_override(
@@ -115,7 +128,7 @@ async def _setup_debug_and_dashboard(
             try:
                 asyncio.run_coroutine_threadsafe(bc.broadcast(event), _loop)
             except RuntimeError:
-                pass
+                logger.debug("Dropping dashboard event: event loop closed")
 
         tracker.add_listener(_tracker_to_ws)
         eval_tracker = tracker
@@ -392,19 +405,8 @@ async def resume_investigation(
 
     # Initialize data
     if data_dir:
-        result = obs_tools.set_data_directory(data_dir)
-        init_info = json.loads(result)
-        if "error" in init_info:
-            raise DataInitError(init_info["error"])
+        init_info = _init_observability_data(data_dir)
         console.print(f"Data initialized: {len(init_info['files'])} parquet files")
-        duckdb_register_tables(
-            {
-                Path(f).stem: str(Path(data_dir) / f)
-                for f in init_info["files"]
-                if Path(f).parent == Path(".")
-                and Path(f).name in obs_tools.ALLOWED_TABLE_FILES
-            }
-        )
 
     # Checkpoint-based resume requires CheckpointStore integration with
     # SimpleAgentLoop, which is not yet implemented in the harness SDK.
@@ -578,8 +580,8 @@ async def run_investigation_headless(
 
     Returns ``(structured_response_json, trajectory_json, run_id,
     trajectory_file_path)`` where any value may be ``None`` if not produced.
-    Raises on configuration errors; runtime errors during streaming are caught
-    and result in ``(None, None, run_id, trajectory_file_path)``.
+    Raises on all errors except ``asyncio.TimeoutError`` (which results in
+    partial output).  Callers must handle exceptions.
 
     Args:
         on_start: Optional callback ``(run_id, trajectory_file_path)`` invoked
@@ -591,10 +593,6 @@ async def run_investigation_headless(
     opens a fresh in-memory connection.
     """
     import uuid
-
-    from dotenv import load_dotenv
-
-    load_dotenv()
 
     system_config, scenario_config, _ = _load_and_override(
         scenario_dir, config_path, debug_mode=False, verbose=False
@@ -609,21 +607,7 @@ async def run_investigation_headless(
         base_dir = system_config.debug.trajectory.output_dir
         system_config.debug.trajectory.output_dir = str(Path(base_dir) / exp_id)
 
-    result = obs_tools.set_data_directory(data_dir)
-    init_info = json.loads(result)
-    if "error" in init_info:
-        from agentm.exceptions import DataInitError
-
-        raise DataInitError(init_info["error"])
-
-    duckdb_register_tables(
-        {
-            Path(f).stem: str(Path(data_dir) / f)
-            for f in init_info["files"]
-            if Path(f).parent == Path(".")
-            and Path(f).name in obs_tools.ALLOWED_TABLE_FILES
-        }
-    )
+    _init_observability_data(data_dir)
 
     system = build_agent_system(
         "hypothesis_driven",
@@ -703,8 +687,6 @@ async def run_investigation_headless(
 
     except asyncio.TimeoutError:
         logger.warning("headless stream timed out after %.0fs", timeout)
-    except Exception:
-        logger.error("headless stream failed", exc_info=True)
     finally:
         if system.trajectory is not None:
             await system.trajectory.close()
