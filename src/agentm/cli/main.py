@@ -389,6 +389,10 @@ def judge(
         None, "--data-base-dir",
         help="Root directory of dataset (contains injection.json per case)",
     ),
+    source_path_pattern: str | None = typer.Option(
+        None, "--source-path-pattern",
+        help="Pattern for resolving source → data dir, e.g. '{data_base_dir}/{source}/converted'",
+    ),
 ) -> None:
     """Judge trajectories using decision-tree classification.
 
@@ -434,6 +438,7 @@ def judge(
                 limit=limit,
                 output_dir=export_dir,
                 data_base_dir=data_base_dir,
+                source_path_pattern=source_path_pattern,
             )
         else:
             case_infos = collect_from_directory(
@@ -443,6 +448,7 @@ def judge(
                 agent_type=agent_type,
                 limit=limit,
                 data_base_dir=data_base_dir,
+                source_path_pattern=source_path_pattern,
             )
     except Exception as e:
         typer.echo(f"ERROR: Failed to collect cases: {e}", err=True)

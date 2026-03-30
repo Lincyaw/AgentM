@@ -187,6 +187,9 @@ def extract_skeleton(
 def _load_injection_context(data_dir: str) -> str:
     """Load injection.json from data_dir and format key fault details.
 
+    Searches data_dir itself and its parent (handles both
+    ``{base}/{source}/`` and ``{base}/{source}/converted/`` layouts).
+
     Returns a compact summary string, or empty string if unavailable.
     """
     if not data_dir:
