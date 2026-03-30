@@ -123,7 +123,7 @@ def analyze(
         8765, "--port", help="Dashboard server port (requires --dashboard)"
     ),
     dashboard_host: str = typer.Option(
-        "127.0.0.1", "--dashboard-host", help="Dashboard server bind address"
+        "0.0.0.0", "--dashboard-host", help="Dashboard server bind address"
     ),
     max_steps: int = typer.Option(
         60, "--max-steps", help="Maximum orchestrator steps (default: 60)"
@@ -273,7 +273,7 @@ def resume(
         8765, "--port", help="Dashboard server port (requires --dashboard)"
     ),
     dashboard_host: str = typer.Option(
-        "127.0.0.1", "--dashboard-host", help="Dashboard server bind address"
+        "0.0.0.0", "--dashboard-host", help="Dashboard server bind address"
     ),
     verbose: bool = typer.Option(False, "--verbose", help="Extra detail in output"),
 ) -> None:
@@ -390,7 +390,7 @@ def judge(
     ),
     port: int = typer.Option(8765, "--port", help="Dashboard server port"),
     dashboard_host: str = typer.Option(
-        "127.0.0.1", "--dashboard-host", help="Dashboard server bind address",
+        "0.0.0.0", "--dashboard-host", help="Dashboard server bind address",
     ),
 ) -> None:
     """Judge trajectories using decision-tree classification.

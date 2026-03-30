@@ -162,7 +162,7 @@ async def run_judging(
     verbose: bool = False,
     dashboard: bool = False,
     dashboard_port: int = 8765,
-    dashboard_host: str = "127.0.0.1",
+    dashboard_host: str = "0.0.0.0",
 ) -> list[TrajectoryLabel]:
     """Run trajectory_judger scenario on each case.
 
