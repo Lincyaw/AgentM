@@ -22,8 +22,7 @@ from __future__ import annotations
 
 import contextvars
 import json
-import os
-import tempfile
+import re
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +37,16 @@ from agentm.tools._shared import enforce_token_budget, serialize_for_json
 _tables_var: contextvars.ContextVar[dict[str, str | list[dict]]] = (
     contextvars.ContextVar("duckdb_sql_tables", default={})
 )
+
+# ---------------------------------------------------------------------------
+# ContextVar: cached DuckDB connection + the table-map id it was built from
+# ---------------------------------------------------------------------------
+_conn_var: contextvars.ContextVar[
+    tuple[duckdb.DuckDBPyConnection, int] | None
+] = contextvars.ContextVar("duckdb_sql_conn", default=None)
+
+# Module-level compiled regex for _needs_quoting
+_NEEDS_QUOTING_RE: re.Pattern[str] = re.compile(r"[^a-zA-Z0-9_]")
 
 
 # ---------------------------------------------------------------------------
@@ -79,12 +88,28 @@ def register_tables(tables: dict[str, TableSource]) -> None:
 
 
 def _open_conn() -> tuple[duckdb.DuckDBPyConnection, dict[str, str | list[dict]]]:
-    """Open a fresh in-memory DuckDB connection and register all tables.
+    """Return a cached DuckDB connection, creating one if needed.
 
-    Returns the connection and the current table mapping so callers can
-    include ``available_tables`` in error messages.
+    The connection is cached in a ContextVar and reused as long as the
+    registered table map hasn't changed (detected via ``id()`` of the dict).
+    Returns the connection and the current table mapping.
     """
     tables = _tables_var.get()
+    tables_id = id(tables)
+
+    cached = _conn_var.get()
+    if cached is not None:
+        conn, cached_id = cached
+        if cached_id == tables_id:
+            return conn, tables
+
+        # Table map changed — close the stale connection
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Create a fresh connection and register all tables
     conn = duckdb.connect(":memory:")
     for name, src in tables.items():
         safe_name = name.replace('"', '""')
@@ -95,24 +120,31 @@ def _open_conn() -> tuple[duckdb.DuckDBPyConnection, dict[str, str | list[dict]]
                 f'CREATE VIEW "{safe_name}" AS SELECT * FROM read_parquet(\'{safe_path}\')'
             )
         else:
-            # In-memory list[dict] — write to a temp JSON file, import, then delete
+            # In-memory list[dict] — register directly as a Python object
             if src:
-                fd, tmp_path = tempfile.mkstemp(suffix=".json")
-                try:
-                    with os.fdopen(fd, "w") as f:
-                        json.dump(src, f)
-                    safe_tmp = tmp_path.replace("'", "''")
-                    conn.execute(
-                        f'CREATE TABLE "{safe_name}" AS SELECT * FROM read_json_auto(\'{safe_tmp}\')'
-                    )
-                finally:
-                    # Remove temp file immediately; DuckDB already loaded the data
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
+                import pyarrow as pa  # type: ignore[import-untyped]  # noqa: PLC0415
 
+                table = pa.Table.from_pylist(src)
+                conn.register(safe_name, table)
+
+    _conn_var.set((conn, tables_id))
     return conn, tables
+
+
+def close_cached_connection() -> None:
+    """Close and discard the cached DuckDB connection for the current context.
+
+    Call this when the tool session is finished (e.g., after an eval run)
+    to release resources.
+    """
+    cached = _conn_var.get()
+    if cached is not None:
+        conn, _ = cached
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _conn_var.set(None)
 
 
 # ---------------------------------------------------------------------------
@@ -178,16 +210,12 @@ async def describe_tables(request: str) -> str:
         return json.dumps(
             {"error": f"Schema extraction failed: {e}"}, ensure_ascii=False
         )
-    finally:
-        conn.close()
 
 
 def _needs_quoting(col: str) -> bool:
     """Return True if a column name requires double-quoting in DuckDB SQL."""
-    import re
-
     # Needs quoting if it contains non-alphanumeric/underscore chars or starts with a digit
-    return bool(re.search(r"[^a-zA-Z0-9_]", col)) or (len(col) > 0 and col[0].isdigit())
+    return bool(_NEEDS_QUOTING_RE.search(col)) or (len(col) > 0 and col[0].isdigit())
 
 
 async def query_sql(sql: str) -> str:
@@ -296,5 +324,3 @@ async def query_sql(sql: str) -> str:
             ensure_ascii=False,
             indent=2,
         )
-    finally:
-        conn.close()

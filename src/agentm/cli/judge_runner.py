@@ -1,7 +1,7 @@
 """Trajectory judging runner — single-pass classification.
 
 Orchestrates batch execution of the trajectory_judger scenario.
-Reuses AgentSystem.execute() and shared infrastructure from batch.py / run.py.
+Includes case collection, config loading, and skeleton extraction.
 """
 
 from __future__ import annotations
@@ -9,21 +9,384 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Literal
 
 import pydantic
+import yaml
+from pydantic import BaseModel, ConfigDict
 from rich.console import Console
 from rich.table import Table
 
-from agentm.builder import build_agent_system
-from agentm.cli.batch import CaseInfo, parse_ground_truth
+from agentm.builder import AgentSystemContext, build_system_context, create_agent_run
 from agentm.config.schema import ScenarioConfig, SkeletonConfig, SystemConfig
 from agentm.exceptions import AgentMError
 from agentm.scenarios.trajectory_judger.data import TrajectoryLabel
+from agentm.server.app import (
+    DashboardOpts,
+    start_dashboard_server,
+    wire_trajectory_to_ws,
+)
 from agentm.tools.trajectory_reader import get_reader
 
 logger = logging.getLogger(__name__)
 console = Console()
+
+
+# ---------------------------------------------------------------------------
+# Case metadata
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CaseInfo:
+    """Metadata for one evaluation case."""
+
+    file_path: Path
+    case_id: str
+    exp_id: str = ""
+    correct: bool | None = None
+    correct_answer: str = ""
+    extracted_final_answer: str = ""
+    reasoning: str = ""
+    agent_type: str = ""
+    model_name: str = ""
+    dataset_index: int | None = None
+    source: str = ""
+    data_dir: str = ""
+
+
+def parse_ground_truth(correct_answer: str) -> list[str]:
+    """Parse comma-separated ground truth services into a list."""
+    return [s.strip() for s in correct_answer.split(",") if s.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+
+class SourceConfig(BaseModel):
+    """Where to get trajectories from."""
+
+    type: Literal["directory", "database"] = "directory"
+    directory: str = "./eval-trajectories"
+    filter: Literal["incorrect", "correct", "all"] = "incorrect"
+    exp_id: str | None = None
+    agent_type: str | None = None
+    limit: int | None = None
+    data_base_dir: str | None = None
+    source_path_pattern: str | None = None
+
+
+class JudgeConfig(BaseModel):
+    """Config for the judge command (loaded from batch YAML).
+
+    Extra fields (batch, task, output) from batch-analysis configs are
+    silently ignored so the same YAML files remain compatible.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    source: SourceConfig = SourceConfig()
+    scenario: str = "config/scenarios/trajectory_analysis"
+    system_config: str = "config/system.yaml"
+
+
+def load_judge_config(path: str | Path) -> JudgeConfig:
+    """Load a judge/batch config YAML file with env var substitution."""
+    from agentm.config.loader import substitute_env_vars
+
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    resolved = substitute_env_vars(raw)
+    return JudgeConfig(**resolved)
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers for case collection
+# ---------------------------------------------------------------------------
+
+SourcePathFn = Callable[[str], str]
+
+
+def _build_source_path_fn(src: SourceConfig) -> SourcePathFn | None:
+    """Build a source path resolver from config."""
+    if not src.data_base_dir:
+        return None
+    root = src.data_base_dir
+    pat = src.source_path_pattern or "{data_base_dir}/{source}"
+
+    def _resolve(source: str) -> str:
+        return pat.format(data_base_dir=root, source=source)
+
+    return _resolve
+
+
+def _resolve_data_dir(source: str, fn: SourcePathFn | None) -> str:
+    if not fn or not source:
+        return ""
+    candidate = Path(fn(source))
+    return str(candidate) if candidate.is_dir() else ""
+
+
+def _matches_filter(
+    correct: bool | None,
+    row_exp_id: str,
+    row_agent_type: str,
+    src: SourceConfig,
+) -> bool:
+    """Check if a record matches source filter criteria."""
+    if src.filter == "incorrect" and correct is not False:
+        return False
+    if src.filter == "correct" and correct is not True:
+        return False
+    if src.exp_id is not None and row_exp_id != src.exp_id:
+        return False
+    if src.agent_type is not None and row_agent_type != src.agent_type:
+        return False
+    return True
+
+
+def _extract_fault_context(meta: dict[str, Any] | None) -> str:
+    """Extract fault injection context from evaluation metadata."""
+    if not meta:
+        return ""
+    parts: list[str] = []
+    difficulty = meta.get("difficulty")
+    if isinstance(difficulty, dict):
+        if ft := difficulty.get("fault_type"):
+            parts.append(f"Fault type: {ft}")
+        if fc := difficulty.get("fault_category"):
+            parts.append(f"Fault category: {fc}")
+    if datapack := meta.get("datapack_name"):
+        parts.append(f"Datapack: {datapack}")
+    return "; ".join(parts)
+
+
+def _enrich_reasoning(base_reasoning: str, fault_ctx: str) -> str:
+    """Append fault context to reasoning if not already present."""
+    if fault_ctx and "Fault type:" not in base_reasoning:
+        return f"{base_reasoning} | {fault_ctx}" if base_reasoning else fault_ctx
+    return base_reasoning
+
+
+# ---------------------------------------------------------------------------
+# Collect from directory
+# ---------------------------------------------------------------------------
+
+
+def _collect_from_directory(src: SourceConfig) -> list[CaseInfo]:
+    """Scan a directory for exported eval JSON files and load metadata."""
+    base = Path(src.directory)
+    if not base.is_dir():
+        raise NotADirectoryError(f"Not a directory: {src.directory}")
+
+    resolve_fn = _build_source_path_fn(src)
+    cases: list[CaseInfo] = []
+
+    for path in sorted(base.glob("*.json")):
+        if path.name.endswith(".export.json"):
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Skipping unreadable file: %s", path)
+            continue
+
+        meta = data.get("_eval_meta")
+        if not isinstance(meta, dict):
+            continue
+
+        correct = meta.get("correct")
+        if not _matches_filter(correct, meta.get("exp_id", ""), meta.get("agent_type", "") or "", src):
+            continue
+
+        source = meta.get("source", "") or ""
+        fault_ctx = _extract_fault_context({"difficulty": meta.get("difficulty")} if meta.get("difficulty") else None)
+        reasoning = _enrich_reasoning(meta.get("reasoning", "") or "", fault_ctx)
+
+        cases.append(
+            CaseInfo(
+                file_path=path,
+                case_id=str(meta.get("id", path.stem)),
+                exp_id=meta.get("exp_id", ""),
+                correct=correct,
+                correct_answer=meta.get("correct_answer", "") or "",
+                extracted_final_answer=meta.get("extracted_final_answer", "") or "",
+                reasoning=reasoning,
+                agent_type=meta.get("agent_type", "") or "",
+                model_name=meta.get("model_name", "") or "",
+                dataset_index=meta.get("dataset_index"),
+                source=source,
+                data_dir=_resolve_data_dir(source, resolve_fn),
+            )
+        )
+
+    if src.limit:
+        cases = cases[:src.limit]
+    return cases
+
+
+# ---------------------------------------------------------------------------
+# Collect from database
+# ---------------------------------------------------------------------------
+
+
+def _parse_trajectory_data(raw_trajectories: str | dict | None) -> list[dict]:
+    """Parse trajectory data from DB into a list of trajectory dicts."""
+    if raw_trajectories is None:
+        return []
+    data = json.loads(raw_trajectories) if isinstance(raw_trajectories, str) else raw_trajectories
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        if "trajectories" in data and isinstance(data["trajectories"], list):
+            return data["trajectories"]
+        return [data]
+    return []
+
+
+def _build_db_query(src: SourceConfig) -> tuple[str, list[Any]]:
+    conditions = ["stage = 'judged'", "trajectories IS NOT NULL"]
+    params: list[Any] = []
+
+    if src.exp_id:
+        conditions.append("exp_id = %s")
+        params.append(src.exp_id)
+    if src.filter == "incorrect":
+        conditions.append("correct = %s")
+        params.append(False)
+    elif src.filter == "correct":
+        conditions.append("correct = %s")
+        params.append(True)
+    if src.agent_type:
+        conditions.append("agent_type = %s")
+        params.append(src.agent_type)
+
+    query = (
+        "SELECT id, exp_id, dataset_index, correct, correct_answer,"
+        "       extracted_final_answer, agent_type, model_name, reasoning,"
+        "       source, trajectories, meta "
+        "FROM evaluation_data "
+        f"WHERE {' AND '.join(conditions)} "
+        "ORDER BY id"
+    )
+    if src.limit:
+        query += " LIMIT %s"
+        params.append(src.limit)
+    return query, params
+
+
+def _collect_from_db(src: SourceConfig, output_dir: str | None = None) -> list[CaseInfo]:
+    """Query the eval DB and export cases to JSON files."""
+    try:
+        import psycopg2
+        import psycopg2.extras
+    except ImportError:
+        raise ImportError(
+            "psycopg2 is required for database source. "
+            "Install with: uv add psycopg2-binary"
+        ) from None
+
+    db_url = os.environ.get("LLM_EVAL_DB_URL")
+    if not db_url:
+        raise ValueError("LLM_EVAL_DB_URL environment variable is required for database source")
+
+    query, params = _build_db_query(src)
+
+    console.print("Connecting to eval database...")
+    conn = psycopg2.connect(db_url)
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        console.print("[yellow]No matching rows found in database.[/]")
+        return []
+
+    out_dir = Path(output_dir) if output_dir else Path("eval-trajectories")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    resolve_fn = _build_source_path_fn(src)
+
+    cases: list[CaseInfo] = []
+    for row in rows:
+        row = dict(row)
+        row_id = row["id"]
+        row_exp_id = row["exp_id"] or "unknown"
+        label = "correct" if row["correct"] else "incorrect"
+
+        source = row.get("source", "") or ""
+
+        row_meta = row.get("meta")
+        if isinstance(row_meta, str):
+            try:
+                row_meta = json.loads(row_meta)
+            except json.JSONDecodeError:
+                row_meta = None
+
+        base_reasoning = row["reasoning"] or ""
+        fault_ctx = _extract_fault_context(row_meta)
+        reasoning = _enrich_reasoning(base_reasoning, fault_ctx)
+
+        eval_meta: dict[str, Any] = {
+            "id": row_id,
+            "exp_id": row_exp_id,
+            "dataset_index": row["dataset_index"],
+            "correct": row["correct"],
+            "correct_answer": row["correct_answer"],
+            "extracted_final_answer": row["extracted_final_answer"],
+            "agent_type": row["agent_type"],
+            "model_name": row["model_name"],
+            "reasoning": reasoning,
+            "source": source,
+        }
+        if isinstance(row_meta, dict) and row_meta.get("difficulty"):
+            eval_meta["difficulty"] = row_meta["difficulty"]
+
+        trajectories = _parse_trajectory_data(row["trajectories"])
+        output: dict[str, Any] = {
+            "_eval_meta": eval_meta,
+            "trajectories": trajectories,
+        }
+
+        filepath = out_dir / f"{row_exp_id}_{row_id}_{label}.json"
+        filepath.write_text(
+            json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        cases.append(
+            CaseInfo(
+                file_path=filepath,
+                case_id=str(row_id),
+                exp_id=row_exp_id,
+                correct=row["correct"],
+                correct_answer=row["correct_answer"] or "",
+                extracted_final_answer=row["extracted_final_answer"] or "",
+                reasoning=reasoning,
+                agent_type=row["agent_type"] or "",
+                model_name=row["model_name"] or "",
+                dataset_index=row["dataset_index"],
+                source=source,
+                data_dir=_resolve_data_dir(source, resolve_fn),
+            )
+        )
+
+    console.print(f"Exported [green]{len(cases)}[/] cases to [cyan]{out_dir}[/]")
+    return cases
+
+
+def collect_cases(cfg: JudgeConfig) -> list[CaseInfo]:
+    """Collect cases according to the source config."""
+    if cfg.source.type == "database":
+        return _collect_from_db(cfg.source)
+    return _collect_from_directory(cfg.source)
 
 
 # ---------------------------------------------------------------------------
@@ -50,14 +413,7 @@ def _should_include_tool(tool_name: str, config: SkeletonConfig) -> bool:
 def _extract_skeleton_from_json(
     data: dict, config: SkeletonConfig,
 ) -> list[dict]:
-    """Extract skeleton from DB-exported JSON (OpenAI message format).
-
-    Walks through trajectories[*].messages looking for assistant tool_calls
-    and their paired tool responses.
-    """
-    # Support both formats:
-    # - Multi-agent wrapper: {"trajectories": [{"messages": [...]}, ...]}
-    # - Single trajectory:  {"messages": [...]}
+    """Extract skeleton from DB-exported JSON (OpenAI message format)."""
     trajectories = data.get("trajectories")
     if isinstance(trajectories, list):
         all_messages = [msg for traj in trajectories for msg in traj.get("messages", [])]
@@ -66,7 +422,6 @@ def _extract_skeleton_from_json(
     else:
         return []
 
-    # Build tool_call_id → response content map
     response_map: dict[str, str] = {}
     for msg in all_messages:
         if isinstance(msg, dict) and msg.get("role") == "tool":
@@ -112,12 +467,9 @@ def _extract_skeleton_from_json(
 def _extract_skeleton_from_jsonl(
     path: Path, config: SkeletonConfig,
 ) -> list[dict]:
-    """Extract skeleton from JSONL trajectory (TrajectoryCollector events).
-
-    Pairs tool_call events with subsequent tool_result events by sequence.
-    """
+    """Extract skeleton from JSONL trajectory (TrajectoryCollector events)."""
     tool_calls: list[dict] = []
-    tool_results: dict[int, dict] = {}  # seq → result event data
+    tool_results: dict[int, dict] = {}
 
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -135,7 +487,6 @@ def _extract_skeleton_from_jsonl(
                 tool_results[event.get("seq", -1)] = event.get("data", {})
 
     steps: list[dict] = []
-    # tool_result seq is typically tool_call seq + 1
     for i, tc_event in enumerate(tool_calls):
         data = tc_event.get("data", {})
         tool_name = data.get("tool_name", "")
@@ -145,7 +496,6 @@ def _extract_skeleton_from_jsonl(
         args = data.get("args", {})
         args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
 
-        # Find matching tool_result (seq = tc_seq + 1)
         tc_seq = tc_event.get("seq", -1)
         result_data = tool_results.get(tc_seq + 1, {})
         response_content = str(result_data.get("content", ""))
@@ -160,38 +510,21 @@ def _extract_skeleton_from_jsonl(
     return steps
 
 
-def extract_skeleton(
-    file_path: Path, config: SkeletonConfig,
-) -> list[dict]:
-    """Extract tool-call skeleton from a trajectory file.
-
-    Supports JSON (DB export with _eval_meta/trajectories) and JSONL
-    (TrajectoryCollector event stream) formats.
-
-    Returns a list of step dicts:
-        {"step": 1, "tool": "duckdb_sql", "args": "...", "response_preview": "...", "response_chars": 2847}
-    """
+def extract_skeleton(file_path: Path, config: SkeletonConfig) -> list[dict]:
+    """Extract tool-call skeleton from a trajectory file."""
     if not file_path.exists():
         return []
-
     if file_path.suffix == ".json":
         try:
             data = json.loads(file_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return []
         return _extract_skeleton_from_json(data, config)
-
     return _extract_skeleton_from_jsonl(file_path, config)
 
 
 def _load_injection_context(data_dir: str) -> str:
-    """Load injection.json from data_dir and format key fault details.
-
-    Searches data_dir itself and its parent (handles both
-    ``{base}/{source}/`` and ``{base}/{source}/converted/`` layouts).
-
-    Returns a compact summary string, or empty string if unavailable.
-    """
+    """Load injection.json from data_dir and format key fault details."""
     if not data_dir:
         return ""
     injection_path = Path(data_dir) / "injection.json"
@@ -204,11 +537,6 @@ def _load_injection_context(data_dir: str) -> str:
 
     parts: list[str] = []
 
-    # NOTE: fault_type is a numeric code (e.g. 28) — not human-readable.
-    # The readable fault name comes from meta.difficulty.fault_type in reasoning.
-    # We only extract injection target details from display_config here.
-
-    # Parse display_config for injection point details
     display_config_raw = injection.get("display_config")
     if display_config_raw:
         try:
@@ -224,8 +552,7 @@ def _load_injection_context(data_dir: str) -> str:
                     target_parts.append(ip["method_name"])
                 if target_parts:
                     parts.append(f"- **Injection Target**: {' / '.join(target_parts)}")
-            duration = dc.get("duration")
-            if duration:
+            if duration := dc.get("duration"):
                 parts.append(f"- **Duration**: {duration} min")
             mem_type = dc.get("mem_type")
             if mem_type is not None:
@@ -262,7 +589,11 @@ def format_skeleton(steps: list[dict]) -> str:
         lines.append(f"Step {s['step']}: {s['tool']}({s['args']}){preview}{chars}")
     return "\n".join(lines)
 
-# Category → Rich color for consistent display
+
+# ---------------------------------------------------------------------------
+# Single-case judging
+# ---------------------------------------------------------------------------
+
 _CATEGORY_COLORS: dict[str, str] = {
     "success": "green",
     "lucky_hit": "yellow",
@@ -270,52 +601,17 @@ _CATEGORY_COLORS: dict[str, str] = {
     "confirmation_fail": "red",
     "judgment_fail": "red",
 }
-
-# Ordered list for summary table
 _CATEGORIES = ["success", "lucky_hit", "exploration_fail", "confirmation_fail", "judgment_fail"]
 
 
-def _wire_trajectory_to_broadcaster(
-    trajectory: object, broadcaster: object, case_id: str,
-) -> None:
-    """Add an async listener that forwards trajectory events to the WebSocket broadcaster."""
-
-    async def _traj_to_ws(event: dict) -> None:
-        traj_event = {
-            "event_type": event.get("event_type", ""),
-            "agent_path": event.get("agent_path", []),
-            "data": event.get("data", {}),
-            "timestamp": event.get("timestamp", ""),
-        }
-        # Push through the unified eval channel so the frontend receives
-        # trajectory events via the same WebSocket path as status events.
-        await broadcaster.broadcast(  # type: ignore[attr-defined]
-            {
-                "channel": "eval",
-                "event_type": "sample_trajectory_event",
-                "sample_id": case_id,
-                "data": traj_event,
-            }
-        )
-
-    trajectory.add_listener(_traj_to_ws)  # type: ignore[attr-defined]
-
-
 def _parse_label(output: object, case_id: str, ground_truth: list[str]) -> TrajectoryLabel | None:
-    """Coerce AgentSystem output into a TrajectoryLabel.
-
-    The harness returns a dict (from Pydantic model_dump) when output_schema
-    is set. Handles the raw_text fallback gracefully.
-    """
     if output is None:
         return None
 
     if isinstance(output, dict):
-        # raw_text fallback means structured output failed entirely
         if "raw_text" in output and len(output) == 1:
             logger.warning("Case %s: structured output failed, got raw_text fallback", case_id)
             return None
-        # Fill identity fields that the LLM may have omitted
         output.setdefault("trajectory_id", case_id)
         output.setdefault("case_id", case_id)
         output.setdefault("ground_truth", ground_truth)
@@ -334,37 +630,29 @@ def _parse_label(output: object, case_id: str, ground_truth: list[str]) -> Traje
 
 async def _judge_single_case(
     case: CaseInfo,
-    system_config: SystemConfig,
-    scenario_config: ScenarioConfig,
+    ctx: AgentSystemContext,
     broadcaster: object | None = None,
     eval_tracker: object | None = None,
 ) -> TrajectoryLabel | None:
     """Run trajectory_judger on a single case via AgentSystem.execute()."""
+    from agentm.server.app import Broadcaster as _Broadcaster
+
     case_id = case.case_id
     file_path = case.file_path
     ground_truth = parse_ground_truth(case.correct_answer)
 
-    # Register trajectory file for jq_query access
     if file_path.exists():
         get_reader().register(str(file_path))
 
-    system = build_agent_system(
-        "trajectory_judger",
-        scenario_config,
-        system_config,
-    )
+    system = create_agent_run(ctx)
 
-    # Update tracker with the real trajectory file path so the REST events
-    # endpoint (/api/eval/samples/{id}/events) can read from the correct file.
     if eval_tracker is not None and system.trajectory is not None:
         eval_tracker.update_trajectory_path(case_id, str(system.trajectory.file_path))  # type: ignore[attr-defined]
 
-    # Wire trajectory events → dashboard WebSocket
-    if broadcaster is not None and system.trajectory is not None:
-        _wire_trajectory_to_broadcaster(system.trajectory, broadcaster, case_id)
+    if broadcaster is not None and system.trajectory is not None and isinstance(broadcaster, _Broadcaster):
+        wire_trajectory_to_ws(system.trajectory, broadcaster, case_id)
 
-    # Build trajectory skeleton for context injection
-    skeleton_config = scenario_config.orchestrator.skeleton or SkeletonConfig()
+    skeleton_config = ctx.scenario_config.orchestrator.skeleton or SkeletonConfig()
     skeleton_steps = extract_skeleton(file_path, skeleton_config)
     skeleton_text = format_skeleton(skeleton_steps)
 
@@ -377,7 +665,6 @@ async def _judge_single_case(
         f"- **jq_query thread_id**: `{case_id}`",
     ]
 
-    # Fault context: injection details from data_dir + eval reasoning
     logger.info(
         "Case %s: data_dir=%r, reasoning=%r",
         case_id, case.data_dir or "(empty)", (case.reasoning or "")[:80],
@@ -415,8 +702,12 @@ async def _judge_single_case(
         return None
 
 
+# ---------------------------------------------------------------------------
+# Summary and output
+# ---------------------------------------------------------------------------
+
+
 def _print_summary(results: list[TrajectoryLabel], total: int, failed_count: int) -> None:
-    """Print classification summary table."""
     console.print()
     console.rule("Judgment Complete")
     console.print(f"Total cases: [cyan]{total}[/]")
@@ -447,7 +738,6 @@ def _print_summary(results: list[TrajectoryLabel], total: int, failed_count: int
 
 
 def _save_results(results: list[TrajectoryLabel], total: int, failed_count: int, output_path: str) -> None:
-    """Write results to a JSON file."""
     output_data = {
         "total": total,
         "successful": len(results),
@@ -461,90 +751,138 @@ def _save_results(results: list[TrajectoryLabel], total: int, failed_count: int,
     console.print(f"\nResults saved to: [green]{output_path}[/]")
 
 
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+
 async def run_judging(
     cases: list[CaseInfo],
     system_config: SystemConfig,
     scenario_config: ScenarioConfig,
     output_path: str | None = None,
-    dashboard: bool = False,
-    dashboard_port: int = 8765,
-    dashboard_host: str = "0.0.0.0",
+    dashboard_opts: DashboardOpts | None = None,
+    concurrency: int = 1,
 ) -> list[TrajectoryLabel]:
     """Run trajectory_judger scenario on each case.
 
     Args:
-        cases: List of CaseInfo objects.
-        system_config: Loaded system configuration.
-        scenario_config: Loaded scenario configuration.
-        output_path: Optional JSON file to write results.
-        dashboard: Start web dashboard for real-time monitoring.
-        dashboard_port: Dashboard server port.
-        dashboard_host: Dashboard server bind address.
-
-    Returns:
-        List of TrajectoryLabel results.
+        concurrency: Maximum number of cases to judge in parallel.
+            Defaults to 1 (sequential).
     """
+    if dashboard_opts is None:
+        dashboard_opts = DashboardOpts()
+
     if not cases:
         console.print("[yellow]No cases to judge.[/]")
         return []
 
-    # Disable trajectory collection for judging unless dashboard needs events
-    if not dashboard:
+    if not dashboard_opts.enabled:
         system_config.debug.trajectory.enabled = False
 
     console.print(f"Judging {len(cases)} cases with model: {scenario_config.orchestrator.model}")
+    if concurrency > 1:
+        console.print(f"Concurrency: [cyan]{concurrency}[/]")
     console.print()
 
-    # Optional dashboard setup
+    # Build immutable context once for all cases
+    ctx = build_system_context(
+        "trajectory_judger",
+        scenario_config,
+        system_config,
+    )
+
     tracker, broadcaster, dashboard_task = None, None, None
-    if dashboard:
-        dashboard_tuples = [
-            (c.case_id, c.file_path, parse_ground_truth(c.correct_answer))
-            for c in cases
-        ]
-        tracker, broadcaster, dashboard_task = await _start_dashboard(
-            dashboard_tuples, scenario_config, dashboard_host, dashboard_port,
+    if dashboard_opts.enabled:
+        tracker, broadcaster, dashboard_task = await start_dashboard_server(
+            scenario_config=scenario_config,
+            host=dashboard_opts.host,
+            port=dashboard_opts.port,
+            thread_id=f"judge-{cases[0].case_id if cases else 'batch'}",
         )
+        for i, case in enumerate(cases):
+            tracker.register_sample(
+                case.case_id,
+                dataset_index=i,
+                data_dir=str(case.file_path.parent),
+            )
 
     results: list[TrajectoryLabel] = []
     failed_cases: list[str] = []
 
-    for i, case in enumerate(cases, 1):
-        console.print(f"[{i}/{len(cases)}] Judging case {case.case_id}...")
+    if concurrency <= 1:
+        # Sequential execution
+        for i, case in enumerate(cases, 1):
+            console.print(f"[{i}/{len(cases)}] Judging case {case.case_id}...")
 
-        if tracker is not None:
-            tracker.mark_running(case.case_id, run_id=case.case_id)
-
-        label = await _judge_single_case(
-            case=case,
-            system_config=system_config,
-            scenario_config=scenario_config,
-            broadcaster=broadcaster,
-            eval_tracker=tracker,
-        )
-
-        if label is not None:
-            results.append(label)
-            color = _CATEGORY_COLORS.get(label.category, "white")
-            console.print(f"    [{color}]{label.category}[/] — {label.reasoning[:80]}...")
             if tracker is not None:
-                tracker.mark_completed(case.case_id)
-        else:
-            failed_cases.append(case.case_id)
-            console.print("    [red]FAILED[/]")
-            if tracker is not None:
-                tracker.mark_failed(case.case_id, "classification failed")
+                tracker.mark_running(case.case_id, run_id=case.case_id)
+
+            label = await _judge_single_case(
+                case=case,
+                ctx=ctx,
+                broadcaster=broadcaster,
+                eval_tracker=tracker,
+            )
+
+            if label is not None:
+                results.append(label)
+                color = _CATEGORY_COLORS.get(label.category, "white")
+                console.print(f"    [{color}]{label.category}[/] — {label.reasoning[:80]}...")
+                if tracker is not None:
+                    tracker.mark_completed(case.case_id)
+            else:
+                failed_cases.append(case.case_id)
+                console.print("    [red]FAILED[/]")
+                if tracker is not None:
+                    tracker.mark_failed(case.case_id, "classification failed")
+    else:
+        # Concurrent execution with semaphore
+        sem = asyncio.Semaphore(concurrency)
+        lock = asyncio.Lock()
+
+        async def _run_case(idx: int, case: CaseInfo) -> None:
+            async with sem:
+                console.print(f"[{idx}/{len(cases)}] Judging case {case.case_id}...")
+
+                if tracker is not None:
+                    tracker.mark_running(case.case_id, run_id=case.case_id)
+
+                label = await _judge_single_case(
+                    case=case,
+                    ctx=ctx,
+                    broadcaster=broadcaster,
+                    eval_tracker=tracker,
+                )
+
+                async with lock:
+                    if label is not None:
+                        results.append(label)
+                        color = _CATEGORY_COLORS.get(label.category, "white")
+                        console.print(
+                            f"    [{case.case_id}] [{color}]{label.category}[/]"
+                            f" — {label.reasoning[:80]}..."
+                        )
+                        if tracker is not None:
+                            tracker.mark_completed(case.case_id)
+                    else:
+                        failed_cases.append(case.case_id)
+                        console.print(f"    [{case.case_id}] [red]FAILED[/]")
+                        if tracker is not None:
+                            tracker.mark_failed(case.case_id, "classification failed")
+
+        tasks = [_run_case(i, case) for i, case in enumerate(cases, 1)]
+        await asyncio.gather(*tasks)
 
     _print_summary(results, total=len(cases), failed_count=len(failed_cases))
 
     if output_path and results:
         _save_results(results, total=len(cases), failed_count=len(failed_cases), output_path=output_path)
 
-    # Keep dashboard alive after judging
     if dashboard_task is not None:
         console.print(
-            f"\nDashboard running at [link=http://localhost:{dashboard_port}]"
-            f"http://localhost:{dashboard_port}[/link] — press Ctrl+C to stop."
+            f"\nDashboard running at [link=http://localhost:{dashboard_opts.port}]"
+            f"http://localhost:{dashboard_opts.port}[/link] — press Ctrl+C to stop."
         )
         try:
             await dashboard_task
@@ -552,57 +890,3 @@ async def run_judging(
             pass
 
     return results
-
-
-async def _start_dashboard(
-    cases: list[tuple[str, Path, list[str]]],
-    scenario_config: ScenarioConfig,
-    host: str,
-    port: int,
-) -> tuple:
-    """Start the dashboard server and register all cases with the tracker.
-
-    Returns (tracker, broadcaster, server_task).
-    """
-    import uvicorn
-
-    from rcabench_platform.v3.sdk.llm_eval.eval.tracker import EvalTracker
-
-    from agentm.server.app import Broadcaster, create_dashboard_app
-
-    tracker = EvalTracker()
-    broadcaster = Broadcaster()
-
-    # Register all cases as pending
-    for i, (case_id, file_path, _gt) in enumerate(cases):
-        tracker.register_sample(case_id, dataset_index=i, data_dir=str(file_path.parent))
-
-    # Wire tracker events → WebSocket
-    loop = asyncio.get_running_loop()
-
-    def _tracker_to_ws(event: dict) -> None:
-        try:
-            asyncio.run_coroutine_threadsafe(broadcaster.broadcast(event), loop)
-        except RuntimeError:
-            logger.debug("Dropping dashboard event: event loop closed")
-
-    tracker.add_listener(_tracker_to_ws)
-
-    app = create_dashboard_app(
-        scenario_config=scenario_config,
-        runtime=None,
-        trajectory=None,
-        thread_id=f"judge-{cases[0][0] if cases else 'batch'}",
-        broadcaster=broadcaster,
-        eval_tracker=tracker,
-    )
-
-    uvi_config = uvicorn.Config(app, host=host, port=port, log_level="warning")
-    server = uvicorn.Server(uvi_config)
-    task = asyncio.create_task(server.serve())
-    await asyncio.sleep(0.3)
-    console.print(
-        f"Dashboard: [link=http://localhost:{port}]http://localhost:{port}[/link]"
-    )
-
-    return tracker, broadcaster, task

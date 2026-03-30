@@ -64,6 +64,15 @@ class MarkdownVault:
             self._conn.execute("PRAGMA journal_mode=WAL")
         return self._conn
 
+    def get_connection(self) -> sqlite3.Connection:
+        """Return the SQLite connection for the vault index (public API)."""
+        return self._get_conn()
+
+    @property
+    def embedding_model(self) -> str | None:
+        """Return the configured embedding model name, or None."""
+        return self._embedding_model
+
     @staticmethod
     def _compute_body_hash(body: str) -> str:
         return hashlib.sha256(body.encode("utf-8")).hexdigest()

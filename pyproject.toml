@@ -25,6 +25,7 @@ dependencies = [
     "rcabench-platform[llm-eval]>=0.4.13",
     "sqlite-vec>=0.1.6",
     "mcp[cli]>=1.0",
+    "pyarrow>=23.0.1",
 ]
 
 #[tool.uv.sources]

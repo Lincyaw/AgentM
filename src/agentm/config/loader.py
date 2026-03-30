@@ -5,14 +5,17 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import yaml
+from pydantic import BaseModel
 
 from agentm.config.schema import ScenarioConfig, SystemConfig
 from agentm.exceptions import ConfigError
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+T = TypeVar("T", bound=BaseModel)
 
 
 def _resolve_env_ref(ref: str) -> str:
@@ -48,34 +51,30 @@ def _substitute(value: Any) -> Any:
     return value
 
 
-def load_system_config(path: Path | str) -> SystemConfig:
-    """Load and validate system.yaml into a SystemConfig."""
+def _load_validated_yaml(path: str | Path, model_cls: type[T]) -> T:
+    """Load YAML, substitute env vars, and validate against a Pydantic model."""
+    p = Path(path)
+    if not p.exists():
+        raise ConfigError(f"Config file not found: {path}")
     try:
-        raw = yaml.safe_load(Path(path).read_text())
-    except FileNotFoundError:
-        raise ConfigError(f"System config not found: {path}") from None
+        raw = yaml.safe_load(p.read_text(encoding="utf-8"))
     except yaml.YAMLError as e:
         raise ConfigError(f"Invalid YAML in {path}: {e}") from e
     resolved = substitute_env_vars(raw)
     try:
-        return SystemConfig(**resolved)
+        return model_cls(**resolved)
     except Exception as e:
-        raise ConfigError(f"Invalid system config {path}: {e}") from e
+        raise ConfigError(f"Invalid config in {path}: {e}") from e
+
+
+def load_system_config(path: Path | str) -> SystemConfig:
+    """Load and validate system.yaml into a SystemConfig."""
+    return _load_validated_yaml(path, SystemConfig)
 
 
 def load_scenario_config(path: Path | str) -> ScenarioConfig:
     """Load and validate scenario.yaml into a ScenarioConfig."""
-    try:
-        raw = yaml.safe_load(Path(path).read_text())
-    except FileNotFoundError:
-        raise ConfigError(f"Scenario config not found: {path}") from None
-    except yaml.YAMLError as e:
-        raise ConfigError(f"Invalid YAML in {path}: {e}") from e
-    resolved = substitute_env_vars(raw)
-    try:
-        return ScenarioConfig(**resolved)
-    except Exception as e:
-        raise ConfigError(f"Invalid scenario config {path}: {e}") from e
+    return _load_validated_yaml(path, ScenarioConfig)
 
 
 def load_tool_definitions(tools_dir: Path | str) -> dict[str, Any]:
@@ -88,7 +87,7 @@ def load_tool_definitions(tools_dir: Path | str) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for yaml_file in sorted(tools_dir.glob("*.yaml")):
         try:
-            data = yaml.safe_load(yaml_file.read_text())
+            data = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
         except yaml.YAMLError as e:
             raise ConfigError(f"Invalid YAML in tool file {yaml_file}: {e}") from e
         if data and "tools" in data:
