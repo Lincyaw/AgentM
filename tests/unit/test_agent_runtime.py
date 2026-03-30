@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -14,6 +13,7 @@ from agentm.harness.types import (
     AgentEvent,
     AgentResult,
     AgentStatus,
+    Message,
     RunConfig,
 )
 from agentm.harness.runtime import AgentRuntime
@@ -47,7 +47,7 @@ class FakeAgentLoop:
         self._inbox.append(message)
 
     async def run(
-        self, input: str, *, config: RunConfig | None = None
+        self, input: str | list[Message], *, config: RunConfig | None = None
     ) -> AgentResult:
         async for event in self.stream(input, config=config):
             if event.type == "complete":
@@ -55,7 +55,7 @@ class FakeAgentLoop:
         raise RuntimeError("stream ended without complete event")
 
     async def stream(
-        self, input: str, *, config: RunConfig | None = None
+        self, input: str | list[Message], *, config: RunConfig | None = None
     ) -> Any:
         config = config or RunConfig()
         agent_id = config.metadata.get("agent_id", "")
@@ -84,7 +84,7 @@ class NeverEndingLoop:
         self._inbox.append(message)
 
     async def run(
-        self, input: str, *, config: RunConfig | None = None
+        self, input: str | list[Message], *, config: RunConfig | None = None
     ) -> AgentResult:
         async for event in self.stream(input, config=config):
             if event.type == "complete":
@@ -92,7 +92,7 @@ class NeverEndingLoop:
         raise RuntimeError("stream ended without complete event")
 
     async def stream(
-        self, input: str, *, config: RunConfig | None = None
+        self, input: str | list[Message], *, config: RunConfig | None = None
     ) -> Any:
         config = config or RunConfig()
         agent_id = config.metadata.get("agent_id", "")
@@ -174,7 +174,7 @@ class TestAgentRuntimeAbort:
         runtime = AgentRuntime()
         loop = NeverEndingLoop()
 
-        handle = await runtime.spawn("slow-agent", loop=loop, input="work")
+        await runtime.spawn("slow-agent", loop=loop, input="work")
         # Give the task a moment to start
         await asyncio.sleep(0.05)
 

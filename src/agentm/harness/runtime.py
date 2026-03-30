@@ -19,8 +19,21 @@ from agentm.harness.types import (
     AgentInfo,
     AgentResult,
     AgentStatus,
+    Message,
     RunConfig,
 )
+
+
+def _extract_instruction(input: str | list[Message]) -> str:
+    """Extract a human-readable instruction string for trajectory logging."""
+    if isinstance(input, str):
+        return input
+    for msg in input:
+        role = msg.get("role", "") if isinstance(msg, dict) else getattr(msg, "type", "")
+        if role == "human":
+            content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
+            return str(content)
+    return ""
 
 
 @dataclass
@@ -64,7 +77,7 @@ class AgentRuntime:
         agent_id: str,
         *,
         loop: AgentLoop,
-        input: str,
+        input: str | list[Message],
         parent_id: str | None = None,
         config: RunConfig | None = None,
         metadata: dict[str, Any] | None = None,
@@ -96,7 +109,7 @@ class AgentRuntime:
                     "task_id": agent_id,
                     "agent_id": original_agent_id,
                     "task_type": (metadata or {}).get("task_type", "unknown"),
-                    "instruction": input,
+                    "instruction": _extract_instruction(input),
                     "metadata": metadata or {},
                 },
                 task_id=agent_id,
@@ -110,7 +123,7 @@ class AgentRuntime:
         return AgentHandle(self, agent_id)
 
     async def _run_agent(
-        self, entry: _AgentEntry, input: str, config: RunConfig
+        self, entry: _AgentEntry, input: str | list[Message], config: RunConfig
     ) -> None:
         """Run an agent's stream, forwarding events and handling completion."""
         start_time = time.monotonic()
