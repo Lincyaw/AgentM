@@ -1,0 +1,25 @@
+system:
+  type: "trajectory_judger"
+
+orchestrator:
+  model: "gpt-5.1-mini"
+  temperature: 0.3
+  orchestrator_mode: "node"
+  max_rounds: 10
+
+  prompts:
+    system: "prompts/orchestrator_system.j2"
+
+  tools:
+    - jq_query
+
+agents:
+  worker:
+    model: "gpt-5.1-mini"
+    temperature: 0.3
+    prompt: "prompts/worker.md"
+    tools:
+      - jq_query
+    execution:
+      max_steps: 30
+      timeout: 120

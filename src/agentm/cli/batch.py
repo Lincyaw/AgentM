@@ -241,34 +241,7 @@ def collect_from_db(
             "LLM_EVAL_DB_URL environment variable is required for database source"
         )
 
-    # Build query
-    conditions = ["stage = 'judged'", "trajectories IS NOT NULL"]
-    params: list[Any] = []
-
-    if exp_id:
-        conditions.append("exp_id = %s")
-        params.append(exp_id)
-    if filter_correctness == "incorrect":
-        conditions.append("correct = %s")
-        params.append(False)
-    elif filter_correctness == "correct":
-        conditions.append("correct = %s")
-        params.append(True)
-    if agent_type:
-        conditions.append("agent_type = %s")
-        params.append(agent_type)
-
-    query = (
-        "SELECT id, exp_id, dataset_index, correct, correct_answer,"
-        "       extracted_final_answer, agent_type, model_name, reasoning,"
-        "       source, trajectories "
-        "FROM evaluation_data "
-        f"WHERE {' AND '.join(conditions)} "
-        "ORDER BY id"
-    )
-    if limit:
-        query += " LIMIT %s"
-        params.append(limit)
+    query, params = _build_db_query(exp_id, filter_correctness, agent_type, limit)
 
     console.print("Connecting to eval database...")
     conn = psycopg2.connect(db_url)
@@ -308,11 +281,7 @@ def collect_from_db(
             "source": row.get("source", ""),
         }
 
-        raw_trajectories = row["trajectories"]
-        if isinstance(raw_trajectories, str):
-            trajectory_data = json.loads(raw_trajectories)
-        else:
-            trajectory_data = raw_trajectories
+        trajectory_data = _parse_trajectory_data(row["trajectories"])
 
         output = {"_eval_meta": eval_meta}
         if isinstance(trajectory_data, dict):
@@ -326,11 +295,7 @@ def collect_from_db(
         )
 
         source = row.get("source", "") or ""
-        resolved_data_dir = ""
-        if data_base_dir and source:
-            candidate = Path(data_base_dir) / source
-            if candidate.is_dir():
-                resolved_data_dir = str(candidate)
+        resolved_data_dir = _resolve_data_dir(source, data_base_dir)
 
         cases.append(
             CaseInfo(
@@ -351,6 +316,124 @@ def collect_from_db(
 
     console.print(f"Exported [green]{len(cases)}[/] cases to [cyan]{out_dir}[/]")
     return cases
+
+
+# ---------------------------------------------------------------------------
+# Collect for judging — returns trajectory data and ground truth
+# ---------------------------------------------------------------------------
+
+
+class _EvalMetaFilter:
+    """Encapsulates filtering logic for eval metadata.
+
+    Reusable across directory and database sources to ensure consistent
+    filtering behavior.
+    """
+
+    def __init__(
+        self,
+        filter_correctness: str = "all",
+        exp_id: str | None = None,
+        agent_type: str | None = None,
+    ):
+        self.filter_correctness = filter_correctness
+        self.exp_id = exp_id
+        self.agent_type = agent_type
+
+    def matches(self, correct: bool | None, row_exp_id: str, row_agent_type: str) -> bool:
+        """Check if a record matches all filter criteria."""
+        if self.filter_correctness == "incorrect" and correct is not False:
+            return False
+        if self.filter_correctness == "correct" and correct is not True:
+            return False
+        if self.exp_id is not None and row_exp_id != self.exp_id:
+            return False
+        if self.agent_type is not None and row_agent_type != self.agent_type:
+            return False
+        return True
+
+
+def _parse_ground_truth(correct_answer: str) -> list[str]:
+    """Parse comma-separated ground truth services into a list."""
+    return [s.strip() for s in correct_answer.split(",") if s.strip()]
+
+
+def _resolve_data_dir(source: str, data_base_dir: str | None, suffix: str = "") -> str:
+    """Resolve data directory from source and base dir."""
+    if not data_base_dir or not source:
+        return ""
+    candidate = Path(data_base_dir) / source / suffix if suffix else Path(data_base_dir) / source
+    return str(candidate) if candidate.is_dir() else ""
+
+
+def _parse_trajectory_data(raw_trajectories: str | dict | None) -> dict:
+    """Parse trajectory data from various formats.
+
+    Handles nested formats like {"trajectories": [...]} by extracting
+    the inner trajectory array, as well as direct formats.
+    """
+    if raw_trajectories is None:
+        return {}
+
+    # Parse string JSON
+    if isinstance(raw_trajectories, str):
+        data = json.loads(raw_trajectories)
+    else:
+        data = raw_trajectories
+
+    # Handle nested format: {"trajectories": [...]}
+    if isinstance(data, dict) and "trajectories" in data:
+        trajectories = data["trajectories"]
+        if isinstance(trajectories, list) and len(trajectories) > 0:
+            # Return the first trajectory (or wrap the list appropriately)
+            first_traj = trajectories[0]
+            if isinstance(first_traj, dict):
+                return first_traj
+            return {"trajectories": trajectories}
+        return data
+
+    return data
+
+
+def _build_db_query(
+    exp_id: str | None,
+    filter_correctness: str,
+    agent_type: str | None,
+    limit: int | None,
+) -> tuple[str, list[Any]]:
+    """Build the database query and parameters.
+
+    Returns (query_string, params_list) tuple.
+    """
+    conditions = ["stage = 'judged'", "trajectories IS NOT NULL"]
+    params: list[Any] = []
+
+    if exp_id:
+        conditions.append("exp_id = %s")
+        params.append(exp_id)
+    if filter_correctness == "incorrect":
+        conditions.append("correct = %s")
+        params.append(False)
+    elif filter_correctness == "correct":
+        conditions.append("correct = %s")
+        params.append(True)
+    if agent_type:
+        conditions.append("agent_type = %s")
+        params.append(agent_type)
+
+    query = (
+        "SELECT id, exp_id, dataset_index, correct, correct_answer,"
+        "       extracted_final_answer, agent_type, model_name, reasoning,"
+        "       source, trajectories "
+        "FROM evaluation_data "
+        f"WHERE {' AND '.join(conditions)} "
+        "ORDER BY id"
+    )
+    if limit:
+        query += " LIMIT %s"
+        params.append(limit)
+
+    return query, params
 
 
 # ---------------------------------------------------------------------------
