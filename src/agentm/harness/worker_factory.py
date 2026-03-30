@@ -194,17 +194,14 @@ class WorkerLoopFactory:
         middleware.append(budget_mw)
 
         # Loop detection
-        ld = config.execution.loop_detection
-        middleware.append(LoopDetectionMiddleware(
-            threshold=ld.threshold,
-            window_size=ld.window_size,
-            think_stall_limit=ld.think_stall_limit,
-        ))
+        middleware.append(
+            LoopDetectionMiddleware.from_config(config.execution.loop_detection)
+        )
 
         # Compression
         if config.compression is not None:
             middleware.append(
-                CompressionMiddleware(
+                CompressionMiddleware.from_config(
                     config.compression, model_config=self._model_config
                 )
             )

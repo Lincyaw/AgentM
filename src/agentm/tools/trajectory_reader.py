@@ -49,17 +49,6 @@ class TrajectoryReader:
         self._files[case_id] = _RegisteredFile(path=path, fmt=fmt)
         return case_id
 
-    def register_with_id(self, file_path: str | Path, case_id: str) -> str:
-        """Register a file with an explicit ID (e.g. a DB id for batch imports).
-
-        Format detection still occurs so that ``jq_query`` uses the correct
-        invocation mode.
-        """
-        path = Path(file_path).resolve()
-        fmt, _ = _detect_format_and_id(path)
-        self._files[case_id] = _RegisteredFile(path=path, fmt=fmt)
-        return case_id
-
     def jq_query(self, thread_id: str, expression: str, raw: bool = False) -> str:
         """Run a jq expression against a registered trajectory file.
 

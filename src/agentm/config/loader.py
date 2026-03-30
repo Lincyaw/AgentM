@@ -10,6 +10,7 @@ from typing import Any
 import yaml
 
 from agentm.config.schema import ScenarioConfig, SystemConfig
+from agentm.exceptions import ConfigError
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
@@ -20,7 +21,7 @@ def _resolve_env_ref(ref: str) -> str:
         var_name, default = ref.split(":", 1)
         return os.environ.get(var_name, default)
     if ref not in os.environ:
-        raise KeyError(f"Environment variable '{ref}' is not set")
+        raise ConfigError(f"Environment variable '{ref}' is not set")
     return os.environ[ref]
 
 
@@ -49,27 +50,32 @@ def _substitute(value: Any) -> Any:
 
 def load_system_config(path: Path | str) -> SystemConfig:
     """Load and validate system.yaml into a SystemConfig."""
-    raw = yaml.safe_load(Path(path).read_text())
+    try:
+        raw = yaml.safe_load(Path(path).read_text())
+    except FileNotFoundError:
+        raise ConfigError(f"System config not found: {path}") from None
+    except yaml.YAMLError as e:
+        raise ConfigError(f"Invalid YAML in {path}: {e}") from e
     resolved = substitute_env_vars(raw)
-    return SystemConfig(**resolved)
-
-
-def load_config(
-    system_path: Path | str,
-    scenario_path: Path | str,
-) -> tuple[SystemConfig, ScenarioConfig]:
-    """Convenience wrapper — load both system and scenario configs.
-
-    Returns (system_config, scenario_config).
-    """
-    return load_system_config(system_path), load_scenario_config(scenario_path)
+    try:
+        return SystemConfig(**resolved)
+    except Exception as e:
+        raise ConfigError(f"Invalid system config {path}: {e}") from e
 
 
 def load_scenario_config(path: Path | str) -> ScenarioConfig:
     """Load and validate scenario.yaml into a ScenarioConfig."""
-    raw = yaml.safe_load(Path(path).read_text())
+    try:
+        raw = yaml.safe_load(Path(path).read_text())
+    except FileNotFoundError:
+        raise ConfigError(f"Scenario config not found: {path}") from None
+    except yaml.YAMLError as e:
+        raise ConfigError(f"Invalid YAML in {path}: {e}") from e
     resolved = substitute_env_vars(raw)
-    return ScenarioConfig(**resolved)
+    try:
+        return ScenarioConfig(**resolved)
+    except Exception as e:
+        raise ConfigError(f"Invalid scenario config {path}: {e}") from e
 
 
 def load_tool_definitions(tools_dir: Path | str) -> dict[str, Any]:
@@ -81,7 +87,10 @@ def load_tool_definitions(tools_dir: Path | str) -> dict[str, Any]:
     tools_dir = Path(tools_dir)
     result: dict[str, Any] = {}
     for yaml_file in sorted(tools_dir.glob("*.yaml")):
-        data = yaml.safe_load(yaml_file.read_text())
+        try:
+            data = yaml.safe_load(yaml_file.read_text())
+        except yaml.YAMLError as e:
+            raise ConfigError(f"Invalid YAML in tool file {yaml_file}: {e}") from e
         if data and "tools" in data:
             tools = data["tools"]
             if isinstance(tools, list):
