@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, TypedDict
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -102,7 +102,7 @@ class AgentEvent:
 
     type: Literal["llm_start", "llm_end", "tool_start", "tool_end", "inject", "complete", "error"]
     agent_id: str
-    data: JsonDict = field(default_factory=dict)
+    data: dict[str, Any] = field(default_factory=dict)
     step: int = 0
     timestamp: str = ""
 
