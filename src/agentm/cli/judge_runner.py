@@ -54,52 +54,57 @@ def _extract_skeleton_from_json(
     Walks through trajectories[*].messages looking for assistant tool_calls
     and their paired tool responses.
     """
-    trajectories = data.get("trajectories", [])
-    if not isinstance(trajectories, list):
+    # Support both formats:
+    # - Multi-agent wrapper: {"trajectories": [{"messages": [...]}, ...]}
+    # - Single trajectory:  {"messages": [...]}
+    trajectories = data.get("trajectories")
+    if isinstance(trajectories, list):
+        all_messages = [msg for traj in trajectories for msg in traj.get("messages", [])]
+    elif isinstance(data.get("messages"), list):
+        all_messages = data["messages"]
+    else:
         return []
 
-    # Build tool_call_id → response content map across all agents
+    # Build tool_call_id → response content map
     response_map: dict[str, str] = {}
-    for traj in trajectories:
-        for msg in traj.get("messages", []):
-            if msg.get("role") == "tool":
-                tc_id = msg.get("tool_call_id", "")
-                if tc_id:
-                    response_map[tc_id] = str(msg.get("content", ""))
+    for msg in all_messages:
+        if isinstance(msg, dict) and msg.get("role") == "tool":
+            tc_id = msg.get("tool_call_id", "")
+            if tc_id:
+                response_map[tc_id] = str(msg.get("content", ""))
 
     steps: list[dict] = []
     step_num = 0
-    for traj in trajectories:
-        for msg in traj.get("messages", []):
-            if msg.get("role") != "assistant":
+    for msg in all_messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls", []):
+            func = tc.get("function", {})
+            tool_name = func.get("name", "")
+            if not _should_include_tool(tool_name, config):
                 continue
-            for tc in msg.get("tool_calls", []):
-                func = tc.get("function", {})
-                tool_name = func.get("name", "")
-                if not _should_include_tool(tool_name, config):
-                    continue
 
-                step_num += 1
-                raw_args = func.get("arguments", "")
-                if isinstance(raw_args, str):
-                    try:
-                        args_obj = json.loads(raw_args)
-                        args_str = json.dumps(args_obj, ensure_ascii=False)
-                    except json.JSONDecodeError:
-                        args_str = raw_args
-                else:
-                    args_str = json.dumps(raw_args, ensure_ascii=False)
+            step_num += 1
+            raw_args = func.get("arguments", "")
+            if isinstance(raw_args, str):
+                try:
+                    args_obj = json.loads(raw_args)
+                    args_str = json.dumps(args_obj, ensure_ascii=False)
+                except json.JSONDecodeError:
+                    args_str = raw_args
+            else:
+                args_str = json.dumps(raw_args, ensure_ascii=False)
 
-                tc_id = tc.get("id", "")
-                response_content = response_map.get(tc_id, "")
+            tc_id = tc.get("id", "")
+            response_content = response_map.get(tc_id, "")
 
-                steps.append({
-                    "step": step_num,
-                    "tool": tool_name,
-                    "args": _truncate(args_str, config.max_args_length),
-                    "response_preview": _truncate(response_content, config.response_preview_length, oneline=True),
-                    "response_chars": len(response_content),
-                })
+            steps.append({
+                "step": step_num,
+                "tool": tool_name,
+                "args": _truncate(args_str, config.max_args_length),
+                "response_preview": _truncate(response_content, config.response_preview_length, oneline=True),
+                "response_chars": len(response_content),
+            })
     return steps
 
 
