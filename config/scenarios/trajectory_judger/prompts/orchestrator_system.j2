@@ -32,16 +32,34 @@ The skeleton format is:
 Step N: tool_name(args) → response_preview (response_chars chars)
 ```
 
+## Trajectory Data Structure
+
+The trajectory is stored in OpenAI message format:
+```json
+{
+  "trajectory_id": "...",
+  "agent_name": "...",
+  "messages": [
+    {"role": "system", "content": "..."},
+    {"role": "user", "content": "..."},
+    {"role": "assistant", "content": "...", "tool_calls": [{"id": "...", "function": {"name": "...", "arguments": "{...}"}}]},
+    {"role": "tool", "content": "...", "tool_call_id": "..."},
+    ...
+  ],
+  "_eval_meta": {...}
+}
+```
+
 ## Analysis Workflow
 1. **Read the skeleton** to understand the agent's overall strategy: what it queried, in what order, and whether it covered the right services
 2. **Identify key steps** where the agent may have found (or missed) the root cause
 3. **Use jq_query** to fetch full tool responses for specific steps you need to examine in detail — you do NOT need to read every response, only the ones relevant to your classification
 4. Compare the agent's conclusion against the ground truth
-5. Determine the category and sub-type according to the decision tree
-6. Explain the analysis process in detail in the reasoning field (200+ characters)
+5. Classify according to the decision tree
+6. Write detailed reasoning (200+ characters)
 
 ## Available Tools
-- jq_query: query the full trajectory data for detailed tool responses
+- jq_query: query the trajectory JSON with jq expressions. Use `thread_id` parameter to specify which trajectory to query.
 
 ## Output Format
 You must output structured data conforming to the TrajectoryLabel schema, including the complete analysis process.
