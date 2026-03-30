@@ -100,7 +100,7 @@ class AgentEvent:
     inject, complete, error.
     """
 
-    type: Literal["llm_start", "llm_end", "tool_start", "tool_end", "inject", "complete", "error"]
+    type: Literal["loop_start", "llm_start", "llm_end", "tool_start", "tool_end", "inject", "complete", "error"]
     agent_id: str
     data: dict[str, Any] = field(default_factory=dict)
     step: int = 0
