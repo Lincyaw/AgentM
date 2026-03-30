@@ -43,14 +43,20 @@ def _wire_trajectory_to_broadcaster(
     """Add an async listener that forwards trajectory events to the WebSocket broadcaster."""
 
     async def _traj_to_ws(event: dict) -> None:
+        traj_event = {
+            "event_type": event.get("event_type", ""),
+            "agent_path": event.get("agent_path", []),
+            "data": event.get("data", {}),
+            "timestamp": event.get("timestamp", ""),
+        }
+        # Push through the unified eval channel so the frontend receives
+        # trajectory events via the same WebSocket path as status events.
         await broadcaster.broadcast(  # type: ignore[union-attr]
             {
-                "event_type": event.get("event_type", ""),
-                "agent_path": event.get("agent_path", []),
-                "data": event.get("data", {}),
-                "timestamp": event.get("timestamp", ""),
-                "case_id": case_id,
-                "mode": "trajectory",
+                "channel": "eval",
+                "event_type": "sample_trajectory_event",
+                "sample_id": case_id,
+                "data": traj_event,
             }
         )
 
