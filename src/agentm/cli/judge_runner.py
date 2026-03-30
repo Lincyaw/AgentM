@@ -16,8 +16,8 @@ from rich.console import Console
 from rich.table import Table
 
 from agentm.builder import build_agent_system
-from agentm.exceptions import AgentMError
 from agentm.config.schema import ScenarioConfig, SystemConfig
+from agentm.exceptions import AgentMError
 from agentm.scenarios.trajectory_judger.data import TrajectoryLabel
 from agentm.tools.trajectory_reader import get_reader
 
@@ -160,6 +160,9 @@ async def run_judging(
     scenario_config: ScenarioConfig,
     output_path: str | None = None,
     verbose: bool = False,
+    dashboard: bool = False,
+    dashboard_port: int = 8765,
+    dashboard_host: str = "127.0.0.1",
 ) -> list[TrajectoryLabel]:
     """Run trajectory_judger scenario on each case.
 
@@ -169,6 +172,9 @@ async def run_judging(
         scenario_config: Loaded scenario configuration.
         output_path: Optional JSON file to write results.
         verbose: Print detailed progress.
+        dashboard: Start web dashboard for real-time monitoring.
+        dashboard_port: Dashboard server port.
+        dashboard_host: Dashboard server bind address.
 
     Returns:
         List of TrajectoryLabel results.
@@ -183,11 +189,21 @@ async def run_judging(
     console.print(f"Judging {len(cases)} cases with model: {scenario_config.orchestrator.model}")
     console.print()
 
+    # Optional dashboard setup
+    tracker, broadcaster, dashboard_task = None, None, None
+    if dashboard:
+        tracker, broadcaster, dashboard_task = await _start_dashboard(
+            cases, scenario_config, dashboard_host, dashboard_port,
+        )
+
     results: list[TrajectoryLabel] = []
     failed_cases: list[str] = []
 
     for i, (case_id, file_path, ground_truth) in enumerate(cases, 1):
         console.print(f"[{i}/{len(cases)}] Judging case {case_id}...")
+
+        if tracker is not None:
+            tracker.mark_running(case_id, run_id=case_id)
 
         label = await _judge_single_case(
             case_id=case_id,
@@ -201,13 +217,82 @@ async def run_judging(
             results.append(label)
             color = _CATEGORY_COLORS.get(label.category, "white")
             console.print(f"    [{color}]{label.category}[/] — {label.reasoning[:80]}...")
+            if tracker is not None:
+                tracker.mark_completed(case_id)
         else:
             failed_cases.append(case_id)
             console.print("    [red]FAILED[/]")
+            if tracker is not None:
+                tracker.mark_failed(case_id, "classification failed")
 
     _print_summary(results, total=len(cases), failed_count=len(failed_cases))
 
     if output_path and results:
         _save_results(results, total=len(cases), failed_count=len(failed_cases), output_path=output_path)
 
+    # Keep dashboard alive after judging
+    if dashboard_task is not None:
+        console.print(
+            f"\nDashboard running at [link=http://localhost:{dashboard_port}]"
+            f"http://localhost:{dashboard_port}[/link] — press Ctrl+C to stop."
+        )
+        try:
+            await dashboard_task
+        except asyncio.CancelledError:
+            pass
+
     return results
+
+
+async def _start_dashboard(
+    cases: list[tuple[str, Path, list[str]]],
+    scenario_config: ScenarioConfig,
+    host: str,
+    port: int,
+) -> tuple:
+    """Start the dashboard server and register all cases with the tracker.
+
+    Returns (tracker, broadcaster, server_task).
+    """
+    import uvicorn
+
+    from rcabench_platform.v3.sdk.llm_eval.eval.tracker import EvalTracker
+
+    from agentm.server.app import Broadcaster, create_dashboard_app
+
+    tracker = EvalTracker()
+    broadcaster = Broadcaster()
+
+    # Register all cases as pending
+    for i, (case_id, file_path, _gt) in enumerate(cases):
+        tracker.register_sample(case_id, dataset_index=i, data_dir=str(file_path.parent))
+
+    # Wire tracker events → WebSocket
+    loop = asyncio.get_running_loop()
+
+    def _tracker_to_ws(event: dict) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(broadcaster.broadcast(event), loop)
+        except RuntimeError:
+            logger.debug("Dropping dashboard event: event loop closed")
+
+    tracker.add_listener(_tracker_to_ws)
+
+    app = create_dashboard_app(
+        scenario_config=scenario_config,
+        runtime=None,
+        trajectory=None,
+        thread_id=f"judge-{cases[0][0] if cases else 'batch'}",
+        broadcaster=broadcaster,
+        eval_tracker=tracker,
+    )
+
+    uvi_config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    server = uvicorn.Server(uvi_config)
+    task = asyncio.create_task(server.serve())
+    await asyncio.sleep(0.3)
+    console.print(
+        f"Dashboard: [link=http://localhost:{port}]http://localhost:{port}[/link]"
+    )
+
+    return tracker, broadcaster, task

@@ -385,6 +385,13 @@ def judge(
     config: str = typer.Option(
         "config/system.yaml", "--config", help="System config YAML",
     ),
+    dashboard: bool = typer.Option(
+        False, "--dashboard", help="Start web dashboard for real-time monitoring",
+    ),
+    port: int = typer.Option(8765, "--port", help="Dashboard server port"),
+    dashboard_host: str = typer.Option(
+        "127.0.0.1", "--dashboard-host", help="Dashboard server bind address",
+    ),
 ) -> None:
     """Judge trajectories using decision-tree classification.
 
@@ -463,4 +470,7 @@ def judge(
         scenario_config=scenario_config,
         output_path=output,
         verbose=verbose,
+        dashboard=dashboard,
+        dashboard_port=port,
+        dashboard_host=dashboard_host,
     ))
