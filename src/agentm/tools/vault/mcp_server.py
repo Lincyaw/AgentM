@@ -26,7 +26,7 @@ class VaultContext:
 
 
 @asynccontextmanager
-async def lifespan(server: FastMCP) -> AsyncIterator[VaultContext]:
+async def lifespan(server: FastMCP) -> AsyncIterator[VaultContext]:  # noqa: ARG001  (framework callback)
     """Initialize vault on startup, close on shutdown."""
     vault_dir = os.environ.get("VAULT_DIR", "./vault")
     embedding_model = os.environ.get("VAULT_EMBEDDING_MODEL") or None

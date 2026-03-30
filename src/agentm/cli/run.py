@@ -367,13 +367,13 @@ async def resume_investigation(
     data_dir: str,
     scenario_dir: str,
     config_path: str,
-    checkpoint_id: str | None = None,
-    list_only: bool = False,
-    dashboard: bool = False,
-    dashboard_port: int = 8765,
-    dashboard_host: str = "0.0.0.0",
+    _checkpoint_id: str | None = None,
+    _list_only: bool = False,
+    _dashboard: bool = False,
+    _dashboard_port: int = 8765,
+    _dashboard_host: str = "0.0.0.0",
     verbose: bool = False,
-    project_root: str | Path | None = None,
+    _project_root: str | Path | None = None,
 ) -> None:
     """Resume an interrupted investigation from a trajectory file."""
     traj_path = Path(trajectory_file)
