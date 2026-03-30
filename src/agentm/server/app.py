@@ -39,6 +39,8 @@ class Broadcaster:
 
     def __init__(self) -> None:
         self._clients: set[WebSocket] = set()
+        # Per-sample trajectory event buffer for WebSocket replay on reconnect
+        self._sample_events: dict[str, list[dict[str, Any]]] = {}
 
     def add(self, ws: WebSocket) -> None:
         self._clients.add(ws)
@@ -46,12 +48,30 @@ class Broadcaster:
     def remove(self, ws: WebSocket) -> None:
         self._clients.discard(ws)
 
+    def buffer_sample_event(self, sample_id: str, event: dict[str, Any]) -> None:
+        """Store a trajectory event for later replay when clients reconnect."""
+        self._sample_events.setdefault(sample_id, []).append(event)
+
+    def get_sample_events(self, sample_id: str, after: int = 0) -> list[dict[str, Any]]:
+        """Return buffered trajectory events for a sample."""
+        events = self._sample_events.get(sample_id, [])
+        return events[after:]
+
+    def get_sample_event_count(self, sample_id: str) -> int:
+        """Return total number of buffered events for a sample."""
+        return len(self._sample_events.get(sample_id, []))
+
     async def broadcast(self, event: dict[str, Any]) -> None:
         """Broadcast a WebSocket event envelope to all connected clients."""
         if "timestamp" not in event:
             event["timestamp"] = datetime.now().isoformat()
         if "mode" not in event:
             event["mode"] = "updates"
+
+        # Buffer trajectory events per sample for reconnect replay
+        sample_id = event.get("sample_id") or event.get("case_id")
+        if sample_id and event.get("channel") == "eval" and event.get("event_type") == "sample_trajectory_event":
+            self.buffer_sample_event(sample_id, event.get("data", {}))
 
         data = event.get("data")
         if isinstance(data, dict):
@@ -279,7 +299,11 @@ def create_dashboard_app(
 
     @app.get("/api/eval/samples/{sample_id}/events")
     async def eval_sample_events(sample_id: str, after: int = 0) -> dict[str, Any]:
-        """Read trajectory events from JSONL file for a specific sample.
+        """Return trajectory events for a sample.
+
+        Primary source: in-memory buffer in the Broadcaster (populated by
+        real-time WebSocket events).  Fallback: JSONL file on disk (for
+        completed runs or when the buffer has been cleared).
 
         Args:
             after: Skip the first ``after`` events (0-based). When the client
@@ -291,6 +315,19 @@ def create_dashboard_app(
         info = et.get_sample(sample_id)
         if info is None:
             return {"error": "Sample not found", "events": [], "total": 0}
+
+        bc = app.state.broadcaster
+        total = bc.get_sample_event_count(sample_id)
+
+        # Prefer in-memory buffer (always up-to-date)
+        if total > 0:
+            return {
+                "events": bc.get_sample_events(sample_id, after=after),
+                "total": total,
+                "status": info.get("status", "unknown"),
+            }
+
+        # Fallback: read from JSONL file on disk
         traj_path = info.get("trajectory_path")
         if not traj_path:
             return {
@@ -317,7 +354,6 @@ def create_dashboard_app(
                         parsed = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    # Skip metadata lines
                     if "_meta" in parsed:
                         continue
                     if event_index >= after:
