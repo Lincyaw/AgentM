@@ -378,7 +378,15 @@ async def _judge_single_case(
     ]
 
     # Fault context: injection details from data_dir + eval reasoning
+    logger.info(
+        "Case %s: data_dir=%r, reasoning=%r",
+        case_id, case.data_dir or "(empty)", (case.reasoning or "")[:80],
+    )
     injection_ctx = _load_injection_context(case.data_dir)
+    if injection_ctx:
+        logger.info("Case %s: loaded injection context from %s", case_id, case.data_dir)
+    elif case.data_dir:
+        logger.warning("Case %s: no injection.json found at %s", case_id, case.data_dir)
     if injection_ctx or case.reasoning:
         parts.extend(["", "## Fault Context", ""])
         if injection_ctx:
