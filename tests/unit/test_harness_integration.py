@@ -20,6 +20,7 @@ from agentm.harness.types import (
     AgentEvent,
     AgentResult,
     AgentStatus,
+    Message,
     RunConfig,
 )
 
@@ -89,7 +90,7 @@ class FakeAgentLoop:
         self._inbox.append(message)
 
     async def run(
-        self, input: str, *, config: RunConfig | None = None
+        self, input: str | list[Message], *, config: RunConfig | None = None
     ) -> AgentResult:
         async for event in self.stream(input, config=config):
             if event.type == "complete":
@@ -97,7 +98,7 @@ class FakeAgentLoop:
         raise RuntimeError("no complete event")
 
     async def stream(
-        self, input: str, *, config: RunConfig | None = None
+        self, input: str | list[Message], *, config: RunConfig | None = None
     ) -> Any:
         config = config or RunConfig()
         agent_id = config.metadata.get("agent_id", "")
@@ -386,13 +387,13 @@ class TestAbortTaskUsesRuntimeAbort:
             def inject(self, message: str) -> None:
                 self._inbox.append(message)
 
-            async def run(self, input: str, *, config: RunConfig | None = None) -> AgentResult:
+            async def run(self, input: str | list[Message], *, config: RunConfig | None = None) -> AgentResult:
                 async for event in self.stream(input, config=config):
                     if event.type == "complete":
                         return event.data["result"]
                 raise RuntimeError("no complete")
 
-            async def stream(self, input: str, *, config: RunConfig | None = None) -> Any:
+            async def stream(self, input: str | list[Message], *, config: RunConfig | None = None) -> Any:
                 config = config or RunConfig()
                 agent_id = config.metadata.get("agent_id", "")
                 yield AgentEvent(type="llm_start", agent_id=agent_id, step=0)

@@ -22,7 +22,7 @@ class AgentLoop(Protocol):
     """
 
     async def run(
-        self, input: str, *, config: RunConfig | None = None
+        self, input: str | list[Message], *, config: RunConfig | None = None
     ) -> AgentResult:
         """Run the agent loop to completion.
 
@@ -33,7 +33,7 @@ class AgentLoop(Protocol):
         ...
 
     def stream(
-        self, input: str, *, config: RunConfig | None = None
+        self, input: str | list[Message], *, config: RunConfig | None = None
     ) -> AsyncIterator[AgentEvent]:
         """Run the agent loop, yielding events as they occur.
 

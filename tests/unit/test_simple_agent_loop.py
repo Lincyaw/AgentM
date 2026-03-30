@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from agentm.harness.types import AgentEvent, AgentResult, AgentStatus, RunConfig
+from agentm.harness.types import AgentEvent, AgentResult, AgentStatus, Message, RunConfig
 
 
 # ---------------------------------------------------------------------------
@@ -195,10 +195,14 @@ def _make_loop(
     )
 
 
-async def _collect_events(loop: Any, input_text: str, config: RunConfig | None = None) -> list[AgentEvent]:
+async def _collect_events(
+    loop: Any,
+    input_val: str | list[Message],
+    config: RunConfig | None = None,
+) -> list[AgentEvent]:
     """Collect all events from stream()."""
     events = []
-    async for event in loop.stream(input_text, config=config):
+    async for event in loop.stream(input_val, config=config):
         events.append(event)
     return events
 
@@ -686,3 +690,136 @@ class TestOutputSchemaRetryFallback:
         assert result.output["raw_text"] == "fallback plain text"
         # Structured model: 1 initial + 2 retries = 3 calls
         assert len(structured_model.invocations) == 3
+
+
+# ---------------------------------------------------------------------------
+# Tests for list[Message] input path in SimpleAgentLoop
+# ---------------------------------------------------------------------------
+
+
+class TestSimpleAgentLoopListInput:
+    """Test that stream()/run() accept list[Message] in addition to str.
+
+    Bug prevented: Callers passing pre-built message lists (e.g. from
+    AgentSystem._to_messages) would crash or lose messages if the loop
+    only handled str input.
+    """
+
+    @pytest.mark.asyncio
+    async def test_should_produce_same_result_for_str_and_single_message_list(self) -> None:
+        """Passing [{"role": "human", "content": "hello"}] behaves
+        identically to passing the string "hello"."""
+        model_str = MockModel([MockAIResponse(content="answer-str")])
+        loop_str = _make_loop(model=model_str, system_prompt="sys")
+
+        model_list = MockModel([MockAIResponse(content="answer-list")])
+        loop_list = _make_loop(model=model_list, system_prompt="sys")
+
+        result_str = await loop_str.run("hello")
+        result_list = await loop_list.run([{"role": "human", "content": "hello"}])
+
+        # Both should complete successfully
+        assert result_str.status == AgentStatus.COMPLETED
+        assert result_list.status == AgentStatus.COMPLETED
+
+        # Both should produce the same message structure sent to the LLM:
+        # [system_prompt, human_message]
+        msgs_str = model_str.invocations[0]
+        msgs_list = model_list.invocations[0]
+        assert len(msgs_str) == len(msgs_list)
+        # First message is the system prompt in both cases
+        assert msgs_str[0] == {"role": "system", "content": "sys"}
+        assert msgs_list[0] == {"role": "system", "content": "sys"}
+        # Second message is the human message
+        assert msgs_str[1] == {"role": "human", "content": "hello"}
+        assert msgs_list[1] == {"role": "human", "content": "hello"}
+
+    @pytest.mark.asyncio
+    async def test_should_preserve_all_messages_in_list_input(self) -> None:
+        """Passing multiple messages preserves them all after the system prompt.
+
+        Bug prevented: Only the first message is kept, or messages are
+        flattened into a single string.
+        """
+        model = MockModel([MockAIResponse(content="done")])
+        loop = _make_loop(model=model, system_prompt="You are helpful.")
+
+        messages: list[Message] = [
+            {"role": "human", "content": "Context: previous conversation"},
+            {"role": "assistant", "content": "I understand"},
+            {"role": "human", "content": "Now do the task"},
+        ]
+        result = await loop.run(messages)
+
+        assert result.status == AgentStatus.COMPLETED
+        # The first 4 messages sent to the LLM: system + all 3 user messages
+        # (MockModel stores a reference, so the list grows after the call;
+        #  we check the initial positions.)
+        sent = model.invocations[0]
+        assert sent[0] == {"role": "system", "content": "You are helpful."}
+        assert sent[1] == {"role": "human", "content": "Context: previous conversation"}
+        assert sent[2] == {"role": "assistant", "content": "I understand"}
+        assert sent[3] == {"role": "human", "content": "Now do the task"}
+
+    @pytest.mark.asyncio
+    async def test_should_prepend_system_prompt_regardless_of_input_type(self) -> None:
+        """System prompt is always the first message, whether input is
+        str or list[Message].
+
+        Bug prevented: System prompt omitted or duplicated when input
+        is already a list containing a system message from the caller.
+        """
+        model = MockModel([MockAIResponse(content="ok")])
+        loop = _make_loop(model=model, system_prompt="SYSTEM PROMPT")
+
+        await loop.run([{"role": "human", "content": "task"}])
+
+        sent = model.invocations[0]
+        assert sent[0] == {"role": "system", "content": "SYSTEM PROMPT"}
+
+    @pytest.mark.asyncio
+    async def test_should_stream_events_correctly_with_list_input(self) -> None:
+        """stream() with list input yields the same event sequence as str input.
+
+        Bug prevented: Event generation breaks or changes when the input
+        type changes from str to list.
+        """
+        tool = MockTool("mytool", result="result")
+        model = MockModel([
+            MockAIResponse(
+                content="",
+                tool_calls=[{"name": "mytool", "args": {"x": 1}, "id": "tc-1"}],
+            ),
+            MockAIResponse(content="final"),
+        ])
+        loop = _make_loop(model=model, tools=[tool])
+
+        events = await _collect_events(
+            loop, [{"role": "human", "content": "Do work"}]
+        )
+        event_types = [e.type for e in events]
+
+        assert event_types == [
+            "llm_start", "llm_end",
+            "tool_start", "tool_end",
+            "llm_start", "llm_end",
+            "complete",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_should_handle_empty_list_input(self) -> None:
+        """An empty message list still works -- system prompt is the only
+        initial message sent to the LLM.
+
+        Bug prevented: IndexError or empty-messages crash when caller
+        passes [] (e.g. from _to_messages with no task).
+        """
+        model = MockModel([MockAIResponse(content="no input")])
+        loop = _make_loop(model=model, system_prompt="sys")
+
+        result = await loop.run([])
+
+        assert result.status == AgentStatus.COMPLETED
+        # The system prompt should be the first (and initially only) message
+        sent = model.invocations[0]
+        assert sent[0] == {"role": "system", "content": "sys"}
