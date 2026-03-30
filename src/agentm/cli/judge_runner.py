@@ -16,13 +16,178 @@ from rich.console import Console
 from rich.table import Table
 
 from agentm.builder import build_agent_system
-from agentm.config.schema import ScenarioConfig, SystemConfig
+from agentm.config.schema import ScenarioConfig, SkeletonConfig, SystemConfig
 from agentm.exceptions import AgentMError
 from agentm.scenarios.trajectory_judger.data import TrajectoryLabel
 from agentm.tools.trajectory_reader import get_reader
 
 logger = logging.getLogger(__name__)
 console = Console()
+
+
+# ---------------------------------------------------------------------------
+# Skeleton extraction
+# ---------------------------------------------------------------------------
+
+
+def _truncate(text: str, max_len: int, *, oneline: bool = False) -> str:
+    if oneline:
+        text = text.replace("\n", " ").replace("\r", "")
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "..."
+
+
+def _should_include_tool(tool_name: str, config: SkeletonConfig) -> bool:
+    if config.include_tools:
+        return tool_name in config.include_tools
+    if config.exclude_tools:
+        return tool_name not in config.exclude_tools
+    return True
+
+
+def _extract_skeleton_from_json(
+    data: dict, config: SkeletonConfig,
+) -> list[dict]:
+    """Extract skeleton from DB-exported JSON (OpenAI message format).
+
+    Walks through trajectories[*].messages looking for assistant tool_calls
+    and their paired tool responses.
+    """
+    trajectories = data.get("trajectories", [])
+    if not isinstance(trajectories, list):
+        return []
+
+    # Build tool_call_id → response content map across all agents
+    response_map: dict[str, str] = {}
+    for traj in trajectories:
+        for msg in traj.get("messages", []):
+            if msg.get("role") == "tool":
+                tc_id = msg.get("tool_call_id", "")
+                if tc_id:
+                    response_map[tc_id] = str(msg.get("content", ""))
+
+    steps: list[dict] = []
+    step_num = 0
+    for traj in trajectories:
+        for msg in traj.get("messages", []):
+            if msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls", []):
+                func = tc.get("function", {})
+                tool_name = func.get("name", "")
+                if not _should_include_tool(tool_name, config):
+                    continue
+
+                step_num += 1
+                raw_args = func.get("arguments", "")
+                if isinstance(raw_args, str):
+                    try:
+                        args_obj = json.loads(raw_args)
+                        args_str = json.dumps(args_obj, ensure_ascii=False)
+                    except json.JSONDecodeError:
+                        args_str = raw_args
+                else:
+                    args_str = json.dumps(raw_args, ensure_ascii=False)
+
+                tc_id = tc.get("id", "")
+                response_content = response_map.get(tc_id, "")
+
+                steps.append({
+                    "step": step_num,
+                    "tool": tool_name,
+                    "args": _truncate(args_str, config.max_args_length),
+                    "response_preview": _truncate(response_content, config.response_preview_length, oneline=True),
+                    "response_chars": len(response_content),
+                })
+    return steps
+
+
+def _extract_skeleton_from_jsonl(
+    path: Path, config: SkeletonConfig,
+) -> list[dict]:
+    """Extract skeleton from JSONL trajectory (TrajectoryCollector events).
+
+    Pairs tool_call events with subsequent tool_result events by sequence.
+    """
+    tool_calls: list[dict] = []
+    tool_results: dict[int, dict] = {}  # seq → result event data
+
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            et = event.get("event_type", "")
+            if et == "tool_call":
+                tool_calls.append(event)
+            elif et == "tool_result":
+                tool_results[event.get("seq", -1)] = event.get("data", {})
+
+    steps: list[dict] = []
+    # tool_result seq is typically tool_call seq + 1
+    for i, tc_event in enumerate(tool_calls):
+        data = tc_event.get("data", {})
+        tool_name = data.get("tool_name", "")
+        if not _should_include_tool(tool_name, config):
+            continue
+
+        args = data.get("args", {})
+        args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
+
+        # Find matching tool_result (seq = tc_seq + 1)
+        tc_seq = tc_event.get("seq", -1)
+        result_data = tool_results.get(tc_seq + 1, {})
+        response_content = str(result_data.get("content", ""))
+
+        steps.append({
+            "step": i + 1,
+            "tool": tool_name,
+            "args": _truncate(args_str, config.max_args_length),
+            "response_preview": _truncate(response_content, config.response_preview_length, oneline=True),
+            "response_chars": len(response_content),
+        })
+    return steps
+
+
+def extract_skeleton(
+    file_path: Path, config: SkeletonConfig,
+) -> list[dict]:
+    """Extract tool-call skeleton from a trajectory file.
+
+    Supports JSON (DB export with _eval_meta/trajectories) and JSONL
+    (TrajectoryCollector event stream) formats.
+
+    Returns a list of step dicts:
+        {"step": 1, "tool": "duckdb_sql", "args": "...", "response_preview": "...", "response_chars": 2847}
+    """
+    if not file_path.exists():
+        return []
+
+    if file_path.suffix == ".json":
+        try:
+            data = json.loads(file_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+        return _extract_skeleton_from_json(data, config)
+
+    return _extract_skeleton_from_jsonl(file_path, config)
+
+
+def format_skeleton(steps: list[dict]) -> str:
+    """Format skeleton steps as compact text for LLM consumption."""
+    if not steps:
+        return "(no tool calls found)"
+    lines = []
+    for s in steps:
+        preview = f" → {s['response_preview']}" if s["response_preview"] else ""
+        chars = f" ({s['response_chars']} chars)" if s["response_chars"] else ""
+        lines.append(f"Step {s['step']}: {s['tool']}({s['args']}){preview}{chars}")
+    return "\n".join(lines)
 
 # Category → Rich color for consistent display
 _CATEGORY_COLORS: dict[str, str] = {
@@ -51,7 +216,7 @@ def _wire_trajectory_to_broadcaster(
         }
         # Push through the unified eval channel so the frontend receives
         # trajectory events via the same WebSocket path as status events.
-        await broadcaster.broadcast(  # type: ignore[union-attr]
+        await broadcaster.broadcast(  # type: ignore[attr-defined]
             {
                 "channel": "eval",
                 "event_type": "sample_trajectory_event",
@@ -60,7 +225,7 @@ def _wire_trajectory_to_broadcaster(
             }
         )
 
-    trajectory.add_listener(_traj_to_ws)  # type: ignore[union-attr]
+    trajectory.add_listener(_traj_to_ws)  # type: ignore[attr-defined]
 
 
 def _parse_label(output: object, case_id: str, ground_truth: list[str]) -> TrajectoryLabel | None:
@@ -117,22 +282,35 @@ async def _judge_single_case(
     # Update tracker with the real trajectory file path so the REST events
     # endpoint (/api/eval/samples/{id}/events) can read from the correct file.
     if eval_tracker is not None and system.trajectory is not None:
-        eval_tracker.update_trajectory_path(case_id, str(system.trajectory.file_path))
+        eval_tracker.update_trajectory_path(case_id, str(system.trajectory.file_path))  # type: ignore[attr-defined]
 
     # Wire trajectory events → dashboard WebSocket
     if broadcaster is not None and system.trajectory is not None:
         _wire_trajectory_to_broadcaster(system.trajectory, broadcaster, case_id)
 
-    task_content = json.dumps(
-        {
-            "trajectory_id": case_id,
-            "case_id": case_id,
-            "ground_truth": ground_truth,
-            "note": f"Use jq_query tool with thread_id='{case_id}' to query trajectory data",
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
+    # Build trajectory skeleton for context injection
+    skeleton_config = scenario_config.orchestrator.skeleton or SkeletonConfig()
+    skeleton_steps = extract_skeleton(file_path, skeleton_config)
+    skeleton_text = format_skeleton(skeleton_steps)
+
+    task_payload: dict = {
+        "trajectory_id": case_id,
+        "case_id": case_id,
+        "ground_truth": ground_truth,
+    }
+
+    if skeleton_steps:
+        task_payload["trajectory_skeleton"] = skeleton_text
+        task_payload["note"] = (
+            f"The skeleton above shows all tool calls with args and response previews. "
+            f"Use jq_query with thread_id='{case_id}' to fetch full tool responses for specific steps."
+        )
+    else:
+        task_payload["note"] = (
+            f"Use jq_query tool with thread_id='{case_id}' to query trajectory data"
+        )
+
+    task_content = json.dumps(task_payload, ensure_ascii=False, indent=2)
 
     try:
         async with system:

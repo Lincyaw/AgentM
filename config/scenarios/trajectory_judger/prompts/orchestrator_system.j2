@@ -20,15 +20,28 @@ Is the conclusion correct?
 - confirmation_fail = "Queried but didn't confirm" (action omission)
 - judgment_fail = "Confirmed but misread" (cognitive error)
 
-## Analysis Requirements
-1. Read the entire trajectory to understand the agent's reasoning process
-2. Compare the agent's conclusion against the ground truth
-3. Determine the category and sub-type according to the decision tree
-4. Explain the analysis process in detail in the reasoning field (200+ characters)
-5. List concrete evidence in the evidence field (step number, query content, agent statement)
+## Input Format
+
+You will receive a JSON message containing:
+- `case_id` / `trajectory_id`: identifier for this trajectory
+- `ground_truth`: the actual root-cause services
+- `trajectory_skeleton`: a pre-extracted summary of ALL tool calls the agent made, showing tool name, arguments, and a short preview of each response. This gives you an at-a-glance view of the agent's full action sequence.
+
+The skeleton format is:
+```
+Step N: tool_name(args) → response_preview (response_chars chars)
+```
+
+## Analysis Workflow
+1. **Read the skeleton** to understand the agent's overall strategy: what it queried, in what order, and whether it covered the right services
+2. **Identify key steps** where the agent may have found (or missed) the root cause
+3. **Use jq_query** to fetch full tool responses for specific steps you need to examine in detail — you do NOT need to read every response, only the ones relevant to your classification
+4. Compare the agent's conclusion against the ground truth
+5. Determine the category and sub-type according to the decision tree
+6. Explain the analysis process in detail in the reasoning field (200+ characters)
 
 ## Available Tools
-- jq_query: for complex JSON queries (optional; you may also read directly)
+- jq_query: query the full trajectory data for detailed tool responses
 
 ## Output Format
 You must output structured data conforming to the TrajectoryLabel schema, including the complete analysis process.
