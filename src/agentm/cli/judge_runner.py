@@ -37,6 +37,26 @@ _CATEGORY_COLORS: dict[str, str] = {
 _CATEGORIES = ["success", "lucky_hit", "exploration_fail", "confirmation_fail", "judgment_fail"]
 
 
+def _wire_trajectory_to_broadcaster(
+    trajectory: object, broadcaster: object, case_id: str,
+) -> None:
+    """Add an async listener that forwards trajectory events to the WebSocket broadcaster."""
+
+    async def _traj_to_ws(event: dict) -> None:
+        await broadcaster.broadcast(  # type: ignore[union-attr]
+            {
+                "event_type": event.get("event_type", ""),
+                "agent_path": event.get("agent_path", []),
+                "data": event.get("data", {}),
+                "timestamp": event.get("timestamp", ""),
+                "case_id": case_id,
+                "mode": "trajectory",
+            }
+        )
+
+    trajectory.add_listener(_traj_to_ws)  # type: ignore[union-attr]
+
+
 def _parse_label(output: object, case_id: str, ground_truth: list[str]) -> TrajectoryLabel | None:
     """Coerce AgentSystem output into a TrajectoryLabel.
 
@@ -74,6 +94,7 @@ async def _judge_single_case(
     ground_truth: list[str],
     system_config: SystemConfig,
     scenario_config: ScenarioConfig,
+    broadcaster: object | None = None,
 ) -> TrajectoryLabel | None:
     """Run trajectory_judger on a single case via AgentSystem.execute()."""
     # Register trajectory file for jq_query access
@@ -85,6 +106,10 @@ async def _judge_single_case(
         scenario_config,
         system_config,
     )
+
+    # Wire trajectory events → dashboard WebSocket
+    if broadcaster is not None and system.trajectory is not None:
+        _wire_trajectory_to_broadcaster(system.trajectory, broadcaster, case_id)
 
     task_content = json.dumps(
         {
@@ -181,8 +206,9 @@ async def run_judging(
         console.print("[yellow]No cases to judge.[/]")
         return []
 
-    # Disable trajectory collection for judging (we're analyzing, not producing)
-    system_config.debug.trajectory.enabled = False
+    # Disable trajectory collection for judging unless dashboard needs events
+    if not dashboard:
+        system_config.debug.trajectory.enabled = False
 
     console.print(f"Judging {len(cases)} cases with model: {scenario_config.orchestrator.model}")
     console.print()
@@ -209,6 +235,7 @@ async def run_judging(
             ground_truth=ground_truth,
             system_config=system_config,
             scenario_config=scenario_config,
+            broadcaster=broadcaster,
         )
 
         if label is not None:
