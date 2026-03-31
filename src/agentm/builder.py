@@ -54,6 +54,14 @@ from agentm.tools.vault.store import MarkdownVault
 
 _DECISION_RE = re.compile(r"<decision>(.*?)</decision>", re.DOTALL | re.IGNORECASE)
 
+# TODO: move to agentm.defaults once orchestrator prompt is added there
+_DEFAULT_ORCHESTRATOR_PROMPT = "You are an agent orchestrator."
+
+
+def _generate_run_id(scenario_name: str) -> str:
+    """Generate a unique run ID with timestamp and short UUID suffix."""
+    return f"{scenario_name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+
 
 def _orchestrator_should_terminate(response: object) -> bool:
     """Return True when the LLM signals finalize via <decision> tag.
@@ -153,7 +161,9 @@ class AgentSystem:
             yield {"event": event}
 
 
-_DEFAULT_TOOLS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "tools"
+# TODO: move to agentm.defaults once tools_dir default is added there
+_CANDIDATE_TOOLS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "tools"
+_DEFAULT_TOOLS_DIR: Path | None = _CANDIDATE_TOOLS_DIR if _CANDIDATE_TOOLS_DIR.is_dir() else None
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +230,7 @@ def _create_platform_resources(
 
     Pure setup — no scenario-specific logic.
     """
-    resolved_tools_dir = (
+    resolved_tools_dir: Path | None = (
         Path(tools_dir) if tools_dir is not None else _DEFAULT_TOOLS_DIR
     )
     resolved_kb_dir = (
@@ -230,8 +240,9 @@ def _create_platform_resources(
 
     # Tool registry
     tool_registry = ToolRegistry()
-    for yaml_file in sorted(resolved_tools_dir.glob("*.yaml")):
-        tool_registry.load_from_yaml(yaml_file)
+    if resolved_tools_dir is not None:
+        for yaml_file in sorted(resolved_tools_dir.glob("*.yaml")):
+            tool_registry.load_from_yaml(yaml_file)
 
     # Model configs
     orch_model_name = scenario_config.orchestrator.model
@@ -255,7 +266,7 @@ def _create_platform_resources(
     # Trajectory
     trajectory: TrajectoryCollector | None = None
     if system_config is not None and system_config.debug.trajectory.enabled:
-        run_id = f"{scenario_name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        run_id = _generate_run_id(scenario_name)
         trajectory = TrajectoryCollector(
             run_id=run_id,
             output_dir=system_config.debug.trajectory.output_dir,
@@ -406,7 +417,7 @@ def _build_orchestrator_loop(
             context="",
         )
     else:
-        static_system_prompt = "You are an agent orchestrator."
+        static_system_prompt = _DEFAULT_ORCHESTRATOR_PROMPT
 
     max_rounds: int = config.max_rounds
     format_context = wiring.format_context
@@ -435,8 +446,20 @@ def _build_orchestrator_loop(
 
     compression_cfg = config.compression
     if compression_cfg is not None and compression_cfg.enabled:
+        window = compression_cfg.context_window
+        threshold_tokens = int(window * compression_cfg.compression_threshold)
+        compression_llm = create_chat_model(
+            model=compression_cfg.compression_model,
+            temperature=0,
+            model_config=resources.orch_model_config,
+        )
         orch_middleware.append(
-            CompressionMiddleware(compression_cfg, model_config=resources.orch_model_config)
+            CompressionMiddleware(
+                compression_model=compression_cfg.compression_model,
+                llm=compression_llm,
+                threshold_tokens=threshold_tokens,
+                preserve_latest_n=compression_cfg.preserve_latest_n,
+            )
         )
 
     if config.skills and resources.vault is not None:
@@ -581,11 +604,7 @@ def create_agent_run(ctx: AgentSystemContext) -> AgentSystem:
     # Per-run trajectory
     trajectory: TrajectoryCollector | None = None
     if ctx.system_config is not None and ctx.system_config.debug.trajectory.enabled:
-        run_id = (
-            f"{ctx.scenario_name}-"
-            f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-"
-            f"{uuid.uuid4().hex[:8]}"
-        )
+        run_id = _generate_run_id(ctx.scenario_name)
         trajectory = TrajectoryCollector(
             run_id=run_id,
             output_dir=ctx.system_config.debug.trajectory.output_dir,
@@ -634,7 +653,7 @@ def build_agent_system(
     scenario_config: ScenarioConfig,
     system_config: SystemConfig | None = None,
     *,
-    thread_id: str | None = None,
+    thread_id: str | None = None,  # noqa: ARG001 — kept for backward compatibility
     tools_dir: Path | str | None = None,
     knowledge_base_dir: str | None = None,
 ) -> AgentSystem:
@@ -643,75 +662,23 @@ def build_agent_system(
     Convenience wrapper: builds context + creates a run in one call.
     All existing callers continue to work unchanged.
 
-    The build is decomposed into four phases:
-
-    1. ``_create_platform_resources`` -- vault, trajectory, tool registry
-    2. ``_create_worker_infrastructure`` -- runtime, worker factory
-    3. ``_assemble_orchestrator_tools`` -- SDK + scenario + registry tools
-    4. ``_build_orchestrator_loop`` -- middleware stack + LLM + loop
+    Delegates to ``build_system_context()`` for the expensive, reusable
+    setup and ``create_agent_run()`` for the cheap, per-run resources.
 
     Args:
         scenario_name: Registered scenario name (e.g. "hypothesis_driven").
         scenario_config: Full scenario configuration.
         system_config: Optional system-level config (models, storage, debug).
-        thread_id: Optional thread ID for checkpoint continuity.
+        thread_id: Deprecated — each run now generates its own thread ID.
+            Kept for backward compatibility; ignored.
         tools_dir: Directory containing tool YAML definitions.
         knowledge_base_dir: Path to the knowledge base (vault root).
     """
-    from agentm.scenarios import discover as _discover_scenarios
-
-    _discover_scenarios()
-
-    # 1. Look up the Scenario
-    scenario = get_scenario(scenario_name)
-
-    # 2. Create platform resources
-    resources = _create_platform_resources(
+    ctx = build_system_context(
         scenario_name,
         scenario_config,
         system_config,
-        thread_id=thread_id,
         tools_dir=tools_dir,
         knowledge_base_dir=knowledge_base_dir,
     )
-
-    # 2b. Validate cross-references
-    if system_config is not None:
-        from agentm.config.validator import validate_references
-
-        errors = validate_references(system_config, scenario_config, resources.tool_registry)
-        if errors:
-            raise ConfigError(
-                "Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
-            )
-
-    # 3. Call scenario.setup()
-    setup_ctx = SetupContext(
-        vault=resources.vault,
-        trajectory=resources.trajectory,
-        tool_registry=resources.tool_registry,
-    )
-    wiring = scenario.setup(setup_ctx)
-
-    # 4. Create worker infrastructure
-    runtime, worker_factory = _create_worker_infrastructure(
-        scenario_config, resources, wiring,
-    )
-
-    # 5. Assemble orchestrator tools
-    tools = _assemble_orchestrator_tools(
-        scenario_config, resources, wiring, runtime, worker_factory,
-    )
-
-    # 6. Build orchestrator loop
-    orch_loop = _build_orchestrator_loop(
-        scenario_config, resources, wiring, tools,
-    )
-
-    return AgentSystem(
-        orch_loop,
-        scenario_config=scenario_config,
-        runtime=runtime,
-        trajectory=resources.trajectory,
-        thread_id=resources.thread_id,
-    )
+    return create_agent_run(ctx)

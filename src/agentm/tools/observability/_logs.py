@@ -11,7 +11,7 @@ from agentm.tools.observability._builders import (
     _resolve_file,
     _result,
 )
-from agentm.tools.observability._core import _query, _safe_tool
+from agentm.tools.observability._core import _query, obs_safe_tool
 
 
 # Docstrings for factory-generated functions
@@ -45,7 +45,7 @@ Args:
 def _make_search_logs(period: str, doc: str):
     """Factory for creating period-specific log search tools."""
 
-    @_safe_tool
+    @obs_safe_tool
     async def search_logs(
         keyword: str,
         match_mode: str = "contains",

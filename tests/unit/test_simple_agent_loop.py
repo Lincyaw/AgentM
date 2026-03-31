@@ -6,76 +6,13 @@ does not exist yet.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
 
 from agentm.harness.types import AgentEvent, AgentResult, AgentStatus, Message, RunConfig
 
-
-# ---------------------------------------------------------------------------
-# Mock helpers — lightweight fakes for LLM, tools, middleware
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class MockToolCall:
-    """Represents a single tool call in an AI response."""
-
-    name: str
-    args: dict[str, Any]
-    id: str = "tc-1"
-
-
-@dataclass
-class MockAIResponse:
-    """Minimal mock of an LLM response (AI message)."""
-
-    content: str = "done"
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    type: str = "ai"
-
-
-class MockModel:
-    """Mock ChatModel that returns pre-configured responses in order."""
-
-    def __init__(self, responses: list[MockAIResponse]) -> None:
-        self._responses = iter(responses)
-        self.invocations: list[list[Any]] = []
-        self._structured_calls: list[list[Any]] = []
-
-    async def ainvoke(self, messages: list[Any]) -> MockAIResponse:
-        self.invocations.append(messages)
-        return next(self._responses)
-
-    def with_structured_output(self, schema: type, **kwargs: Any) -> MockStructuredModel:
-        return MockStructuredModel(schema)
-
-
-class MockStructuredModel:
-    """Mock for model.with_structured_output(schema)."""
-
-    def __init__(self, schema: type) -> None:
-        self.schema = schema
-        self.invocations: list[list[Any]] = []
-
-    async def ainvoke(self, messages: list[Any]) -> dict[str, Any]:
-        self.invocations.append(messages)
-        return {"structured": True, "schema": self.schema.__name__}
-
-
-class MockTool:
-    """Mock tool with a fixed result."""
-
-    def __init__(self, name: str, result: str = "tool result") -> None:
-        self.name = name
-        self._result = result
-        self.invocations: list[dict[str, Any]] = []
-
-    async def ainvoke(self, args: dict[str, Any]) -> str:
-        self.invocations.append(args)
-        return self._result
+from tests.helpers import MockAIResponse, MockModel, MockTool
 
 
 class PassthroughMiddleware:

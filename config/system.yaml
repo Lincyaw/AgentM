@@ -23,7 +23,7 @@ models:
     rate_limit:
       requests_per_second: 20
       max_bucket_size: 50
-  ep-20250919144417-j2j4b:
+  "${AGENTM_CUSTOM_ENDPOINT_MODEL:ep-custom}":
     api_key: "${AGENTM_API_KEY}"
     base_url: "${AGENTM_API_BASE_URL:}"
     rate_limit:
@@ -33,12 +33,6 @@ models:
     api_key: "${AGENTM_API_KEY}"
     base_url: "${AGENTM_API_BASE_URL:}"
     provider: "anthropic"
-    rate_limit:
-      requests_per_second: 20
-      max_bucket_size: 50
-  glm-5:
-    api_key: "${AGENTM_API_KEY}"
-    base_url: "${AGENTM_API_BASE_URL:}"
     rate_limit:
       requests_per_second: 20
       max_bucket_size: 50

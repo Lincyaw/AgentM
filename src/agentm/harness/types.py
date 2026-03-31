@@ -72,7 +72,7 @@ class AgentStatus(Enum):
     ABORTED = "aborted"
 
 
-@dataclass
+@dataclass(frozen=True)
 class RunConfig:
     """Per-run execution configuration."""
 
@@ -82,7 +82,7 @@ class RunConfig:
     metadata: JsonDict = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(frozen=True)
 class AgentResult:
     """Outcome of an agent loop execution."""
 

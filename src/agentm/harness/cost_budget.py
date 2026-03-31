@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from agentm.exceptions import AgentMError
 from agentm.harness.middleware import MiddlewareBase
 from agentm.harness.types import LoopContext
 
@@ -16,7 +17,7 @@ from agentm.harness.types import LoopContext
 # ---------------------------------------------------------------------------
 
 
-class BudgetExceeded(Exception):
+class BudgetExceeded(AgentMError):
     """Base exception for budget limit violations."""
 
 

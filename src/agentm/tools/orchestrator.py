@@ -13,7 +13,7 @@ from typing import Any, Callable, Protocol, runtime_checkable
 
 from agentm.harness.protocols import AgentLoop
 from agentm.harness.runtime import AgentRuntime
-from agentm.harness.types import AgentStatus, RunConfig
+from agentm.harness.types import AgentStatus, JsonValue, RunConfig
 from agentm.models.types import TaskType
 
 
@@ -76,7 +76,7 @@ def create_orchestrator_tools(
         unique_id = f"{agent_id}-{uuid.uuid4().hex[:8]}"
         loop = worker_factory.create_worker(agent_id, task_type)
 
-        run_metadata = {"task_type": task_type, "original_agent_id": agent_id}
+        run_metadata: dict[str, JsonValue] = {"task_type": task_type, "original_agent_id": agent_id}
         if metadata:
             run_metadata.update(metadata)
 

@@ -5,7 +5,7 @@ Fully implemented — these are value objects validated at startup.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from langchain_core.rate_limiters import InMemoryRateLimiter
 from pydantic import BaseModel
@@ -33,8 +33,8 @@ class ModelConfig(BaseModel):
     """Configuration for a single LLM model."""
 
     api_key: str
-    base_url: Optional[str] = None
-    rate_limit: Optional[RateLimitConfig] = None
+    base_url: str | None = None
+    rate_limit: RateLimitConfig | None = None
     max_retries: int = 20
     provider: Literal["openai", "anthropic"] = "openai"
 
@@ -91,7 +91,7 @@ class StorageBackendConfig(BaseModel):
 
     backend: str
     url: str
-    index: Optional[dict[str, Any]] = None
+    index: dict[str, Any] | None = None
 
 
 class StorageConfig(BaseModel):
@@ -163,11 +163,11 @@ class ExecutionConfig(BaseModel):
 
     max_steps: int = 20
     timeout: int = 120
-    tool_call_budget: Optional[int] = None
-    dedup: Optional[DedupConfig] = None
+    tool_call_budget: int | None = None
+    dedup: DedupConfig | None = None
     retry: RetryConfig = RetryConfig()
     loop_detection: LoopDetectionConfig = LoopDetectionConfig()
-    max_concurrent_workers: Optional[int] = None
+    max_concurrent_workers: int | None = None
 
 
 class CompressionConfig(BaseModel):
@@ -178,8 +178,8 @@ class CompressionConfig(BaseModel):
     compression_model: str = "gpt-4o-mini"
     context_window: int = 128_000
     preserve_latest_n: int = 2
-    prompt: Optional[str] = None
-    recall: Optional[dict[str, Any]] = None
+    prompt: str | None = None
+    recall: dict[str, Any] | None = None
 
 
 class LLMConfig(BaseModel):
@@ -191,7 +191,7 @@ class LLMConfig(BaseModel):
 
     model: str
     temperature: float
-    compression: Optional[CompressionConfig] = None
+    compression: CompressionConfig | None = None
     skills: list[str] = []
     include_think_tool: bool = True
 
@@ -199,10 +199,10 @@ class LLMConfig(BaseModel):
 class AgentConfig(LLMConfig):
     """Configuration for a single Sub-Agent."""
 
-    prompt: Optional[str] = None
+    prompt: str | None = None
     tools: list[str]
     tool_settings: dict[str, dict[str, Any]] = {}
-    task_type_prompts: Optional[dict[str, str]] = None
+    task_type_prompts: dict[str, str] | None = None
     execution: ExecutionConfig = ExecutionConfig()
 
 
@@ -226,7 +226,7 @@ class OutputConfig(BaseModel):
     """
 
     prompt: str
-    schema_name: str = "CausalGraph"
+    schema_name: str = ""
 
 
 class SkeletonConfig(BaseModel):
@@ -251,15 +251,15 @@ class OrchestratorConfig(LLMConfig):
     prompts: dict[str, str] = {}
     tools: list[str] = []
     feature_gates: FeatureGatesConfig = FeatureGatesConfig()
-    monitoring: Optional[dict[str, Any]] = None
-    output: Optional[OutputConfig] = None
+    monitoring: dict[str, Any] | None = None
+    output: OutputConfig | None = None
     max_rounds: int = 20  # node mode only: max LLM rounds before forced synthesize
     disable_tool_binding: bool = (
         False  # set True for models that don't support bind_tools (e.g. MiniMax)
     )
     retry: RetryConfig = RetryConfig()
     loop_detection: LoopDetectionConfig = LoopDetectionConfig()
-    skeleton: Optional[SkeletonConfig] = None
+    skeleton: SkeletonConfig | None = None
 
 
 class SystemTypeConfig(BaseModel):

@@ -202,7 +202,7 @@ class MarkdownVault:
     # ------------------------------------------------------------------
 
     def _validate_note(
-        self, _path: str, frontmatter: dict, body: str
+        self, frontmatter: dict, body: str
     ) -> list[str]:
         """Check a note for structural issues. Returns a list of warnings."""
         warnings: list[str] = []
@@ -293,7 +293,7 @@ class MarkdownVault:
             conn = self._get_conn()
             self._index_note(conn, path, frontmatter, body)
             conn.commit()
-            return self._validate_note(path, frontmatter, body)
+            return self._validate_note(frontmatter, body)
 
     def write_batch(self, entries: list[dict]) -> list[str]:
         """Write multiple notes in a single atomic transaction. Returns warnings."""
@@ -312,7 +312,7 @@ class MarkdownVault:
             conn.commit()
             # Validate after all are indexed (so cross-references can resolve)
             for entry in entries:
-                ws = self._validate_note(entry["path"], entry["frontmatter"], entry["body"])
+                ws = self._validate_note(entry["frontmatter"], entry["body"])
                 for w in ws:
                     all_warnings.append(f"{entry['path']}: {w}")
         return all_warnings
@@ -354,7 +354,7 @@ class MarkdownVault:
             conn = self._get_conn()
             self._index_note(conn, path, frontmatter, body)
             conn.commit()
-            return self._validate_note(path, frontmatter, body)
+            return self._validate_note(frontmatter, body)
 
     def delete(self, path: str) -> None:
         """Delete a note file and all its index entries."""

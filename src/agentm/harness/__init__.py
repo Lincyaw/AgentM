@@ -7,13 +7,13 @@ from agentm.harness.protocols import (
     AgentLoop,
     CheckpointStore,
     EventHandler,
-    Middleware,
 )
 from agentm.harness.runtime import AgentRuntime
 from agentm.harness.scenario import (
     Scenario,
     ScenarioWiring,
     SetupContext,
+    clear_scenarios,
     get_scenario,
     list_scenarios,
     register_scenario,
@@ -48,9 +48,9 @@ __all__ = [
     "register_scenario",
     "get_scenario",
     "list_scenarios",
+    "clear_scenarios",
     # Protocols
     "AgentLoop",
-    "Middleware",
     "CheckpointStore",
     "EventHandler",
     # Classes

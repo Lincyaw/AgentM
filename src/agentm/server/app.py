@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from rcabench_platform.v3.sdk.llm_eval.eval import dashboard as _sdk_dashboard
@@ -409,10 +409,10 @@ def create_dashboard_app(
     async def eval_sample_detail(sample_id: str) -> dict[str, Any]:
         et = app.state.eval_tracker
         if et is None:
-            return {"error": "Eval not active"}
+            raise HTTPException(status_code=503, detail="Eval not active")
         info = et.get_sample(sample_id)
         if info is None:
-            return {"error": "Sample not found"}
+            raise HTTPException(status_code=404, detail="Sample not found")
         ground_truth = load_ground_truth(info.get("data_dir", ""))
         if ground_truth is not None:
             info = {**info, "ground_truth": ground_truth}
@@ -437,10 +437,10 @@ def create_dashboard_app(
         """
         et = app.state.eval_tracker
         if et is None:
-            return {"error": "Eval not active", "events": [], "total": 0}
+            raise HTTPException(status_code=503, detail="Eval not active")
         info = et.get_sample(sample_id)
         if info is None:
-            return {"error": "Sample not found", "events": [], "total": 0}
+            raise HTTPException(status_code=404, detail="Sample not found")
 
         bc = app.state.broadcaster
         total = bc.get_sample_event_count(sample_id)

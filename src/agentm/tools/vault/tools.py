@@ -4,20 +4,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
 
+from agentm.tools._shared import tool_error, tool_ok
 from agentm.tools.vault.graph import get_backlinks, lint, traverse
 from agentm.tools.vault.search import hybrid_search, keyword_search, semantic_search
 from agentm.tools.vault.store import MarkdownVault
-
-
-def _ok(**kwargs: Any) -> str:
-    return json.dumps({"status": "ok", **kwargs}, ensure_ascii=False)
-
-
-def _err(msg: str) -> str:
-    return json.dumps({"error": msg}, ensure_ascii=False)
 
 
 def _suggest_nearby(vault: MarkdownVault, path: str) -> str:
@@ -61,11 +55,11 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
             if len(entries) == 1:
                 e = entries[0]
                 warnings = vault.write(e["path"], e.get("frontmatter", {}), e.get("body", ""))
-                return _ok(path=e["path"], warnings=warnings)
+                return tool_ok(status="ok",path=e["path"], warnings=warnings)
             warnings = vault.write_batch(entries)
-            return _ok(count=len(entries), warnings=warnings)
+            return tool_ok(status="ok",count=len(entries), warnings=warnings)
         except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
-            return _err(str(exc))
+            return tool_error(str(exc))
 
     # ------------------------------------------------------------------
     # 2. vault_read
@@ -83,10 +77,10 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
                     msg += f". {hint}"
                 else:
                     msg += ". Use vault_list() to discover available entries."
-                return _err(msg)
+                return tool_error(msg)
             return json.dumps(result, ensure_ascii=False)
         except (OSError, ValueError, sqlite3.Error) as exc:
-            return _err(str(exc))
+            return tool_error(str(exc))
 
     # ------------------------------------------------------------------
     # 3. vault_edit
@@ -100,9 +94,9 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
         """
         try:
             warnings = vault.edit(path, operation, params)
-            return _ok(path=path, operation=operation, warnings=warnings)
+            return tool_ok(status="ok",path=path, operation=operation, warnings=warnings)
         except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
-            return _err(str(exc))
+            return tool_error(str(exc))
 
     # ------------------------------------------------------------------
     # 4. vault_delete
@@ -112,9 +106,9 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
         """Delete a note and remove it from the index."""
         try:
             vault.delete(path)
-            return _ok(path=path)
+            return tool_ok(status="ok",path=path)
         except (OSError, ValueError, sqlite3.Error) as exc:
-            return _err(str(exc))
+            return tool_error(str(exc))
 
     # ------------------------------------------------------------------
     # 5. vault_rename
@@ -124,9 +118,9 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
         """Rename or move a note. Backlinks in other notes are rewritten automatically."""
         try:
             vault.rename(old_path, new_path)
-            return _ok(old_path=old_path, new_path=new_path)
+            return tool_ok(status="ok",old_path=old_path, new_path=new_path)
         except (OSError, ValueError, sqlite3.Error) as exc:
-            return _err(str(exc))
+            return tool_error(str(exc))
 
     # ------------------------------------------------------------------
     # 6. vault_list
@@ -142,7 +136,7 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
             notes = vault.list_notes(path, depth=depth, type_filter=type_filter or None)
             return json.dumps({"notes": notes}, ensure_ascii=False)
         except (OSError, ValueError, sqlite3.Error) as exc:
-            return _err(str(exc))
+            return tool_error(str(exc))
 
     # ------------------------------------------------------------------
     # 7. vault_search
@@ -166,7 +160,7 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
                 hits = keyword_search(conn, query, filters, limit)
             elif mode == "semantic":
                 if vault.embedding_model is None:
-                    return _err("No embedding model configured; use mode='keyword'")
+                    return tool_error("No embedding model configured; use mode='keyword'")
                 # Build embedding function from model name
                 hits = semantic_search(conn, query, _get_embed_fn(vault), filters, limit)
             elif mode == "hybrid":
@@ -176,12 +170,12 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
                 else:
                     hits = hybrid_search(conn, query, _get_embed_fn(vault), filters, limit)
             else:
-                return _err(f"Unknown search mode: {mode}")
+                return tool_error(f"Unknown search mode: {mode}")
 
             results = [asdict(h) for h in hits]
             return json.dumps({"results": results}, ensure_ascii=False)
         except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
-            return _err(str(exc))
+            return tool_error(str(exc))
 
     # ------------------------------------------------------------------
     # 8. vault_backlinks
@@ -194,7 +188,7 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
             links = get_backlinks(conn, path)
             return json.dumps({"backlinks": links}, ensure_ascii=False)
         except (OSError, sqlite3.Error) as exc:
-            return _err(str(exc))
+            return tool_error(str(exc))
 
     # ------------------------------------------------------------------
     # 9. vault_traverse
@@ -221,7 +215,7 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
                 ensure_ascii=False,
             )
         except (OSError, ValueError, sqlite3.Error) as exc:
-            return _err(str(exc))
+            return tool_error(str(exc))
 
     # ------------------------------------------------------------------
     # 10. vault_lint
@@ -243,7 +237,7 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
                 ensure_ascii=False,
             )
         except (OSError, sqlite3.Error) as exc:
-            return _err(str(exc))
+            return tool_error(str(exc))
 
     return {
         "vault_write": vault_write,
@@ -259,9 +253,19 @@ def create_vault_tools(vault: MarkdownVault) -> dict[str, Any]:
     }
 
 
-def _get_embed_fn(vault: MarkdownVault):  # noqa: ANN201
-    """Lazily build an embedding function from the vault's model name."""
-    from sentence_transformers import SentenceTransformer
+_embed_model_cache: dict[str, Any] = {}
 
-    model = SentenceTransformer(vault.embedding_model)
-    return lambda text: model.encode(text).tolist()
+
+def _get_embed_fn(vault: MarkdownVault) -> Callable[[str], list[float]]:
+    """Lazily build an embedding function from the vault's model name, caching the model."""
+    model_name = vault.embedding_model or "all-MiniLM-L6-v2"
+    if model_name not in _embed_model_cache:
+        from sentence_transformers import SentenceTransformer
+
+        _embed_model_cache[model_name] = SentenceTransformer(model_name)
+    model = _embed_model_cache[model_name]
+
+    def embed(text: str) -> list[float]:
+        return model.encode(text).tolist()  # type: ignore[return-value]
+
+    return embed

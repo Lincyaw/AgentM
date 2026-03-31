@@ -167,10 +167,12 @@ def discover() -> None:
     from agentm.scenarios.rca import register as register_rca
     from agentm.scenarios.trajectory_analysis import register as register_ta
     from agentm.scenarios.general_purpose import register as register_gp
+    from agentm.scenarios.trajectory_judger import register as register_tj
 
     register_rca()
     register_ta()
     register_gp()
+    register_tj()
 ```
 
 `discover()` is called once by `build_agent_system()` before looking up the scenario. New scenarios only need to add their `register()` call here.
