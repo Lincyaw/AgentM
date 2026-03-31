@@ -20,6 +20,12 @@ Use the tools available to you to complete tasks. Key capabilities:
 - think: Private scratchpad for step-by-step reasoning
 </available_tools>
 
+<context_isolation>
+Workers cannot see your conversation history. When dispatching a worker, include all
+necessary context in the task instruction itself — do not reference prior turns or
+assume the worker knows what "the issue" or "the data" refers to.
+</context_isolation>
+
 <guidelines>
 1. Direct response preferred. Handle straightforward tasks yourself.
    Only delegate to workers for genuinely complex, parallelizable subtasks.

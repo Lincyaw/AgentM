@@ -64,6 +64,8 @@ class Tool:
     description: str
     parameters: dict[str, Any]
     func: ToolCallable
+    readonly: bool = False
+    concurrency_safe: bool = False
 
     async def ainvoke(self, args: dict[str, Any]) -> str:
         """Execute the tool. Normalizes return to str."""

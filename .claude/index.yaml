@@ -12,7 +12,7 @@ concepts:
   agent_harness:
     description: "Core SDK: AgentLoop Protocol, AgentRuntime (lifecycle management), SimpleAgentLoop (ReAct cycle), Middleware protocol (3 hooks: on_llm_start, on_llm_end, on_tool_call), bidirectional agent communication via inbox queues, CheckpointStore protocol. Pure Python, no LangGraph."
     design: "designs/agent-harness.md"
-    related_concepts: [sdk_consistency, system_architecture, orchestrator, sub_agent, execution_runner, middleware_system, scenario_protocol]
+    related_concepts: [sdk_consistency, system_architecture, orchestrator, sub_agent, execution_runner, middleware_system, scenario_protocol, loop_resilience]
     plans: []
     tasks: []
 
@@ -169,8 +169,8 @@ concepts:
     tasks: []
 
   middleware_system:
-    description: "Middleware protocol with 3 hooks: on_llm_start, on_llm_end, on_tool_call. Chain pattern for composing multiple middlewares. Concrete implementations: DynamicContextMiddleware, LoopDetectionMiddleware, CompressionMiddleware, BudgetMiddleware, DedupMiddleware, SkillMiddleware, TrajectoryMiddleware. All middleware code is in harness/middleware.py."
-    related_concepts: [agent_harness, builder, sub_agent, tool_dedup]
+    description: "Middleware protocol with 3 hooks: on_llm_start, on_llm_end, on_tool_call. Chain pattern for composing multiple middlewares. Concrete implementations: DynamicContextMiddleware, LoopDetectionMiddleware, CompressionMiddleware, BudgetMiddleware, DedupMiddleware, SkillMiddleware, TrajectoryMiddleware, PermissionMiddleware, MemoryMiddleware, plus loop-resilience additions (ToolResultBudgetMiddleware, SystemReminderMiddleware, MicroCompactMiddleware, CostBudgetMiddleware). All middleware code is in harness/middleware.py."
+    related_concepts: [agent_harness, builder, sub_agent, tool_dedup, loop_resilience]
     plans: []
     tasks: []
     tests:
@@ -262,6 +262,13 @@ concepts:
   prompt_patterns:
     description: "Catalog of 12 prompt design patterns for AgentM templates: role anchor, critical boundary markers, numbered sections, decision tables, good/bad contrast, anti-rationalization checklists, deterrence statements, purpose statements, forced output format, context isolation, three-layer permissions, per-turn reminders."
     design: "designs/prompt-patterns.md"
-    related_concepts: [orchestrator, sub_agent, configuration_system, middleware_system, scenario_protocol]
+    related_concepts: [orchestrator, sub_agent, configuration_system, middleware_system, scenario_protocol, loop_resilience]
+    plans: []
+    tasks: []
+
+  loop_resilience:
+    description: "Five mechanisms for robust agent loops: tool result budget (truncation of oversized results), tool concurrency partitioning (safe parallel vs serial execution), critical system reminder (periodic constraint re-injection), micro-compact (lightweight rule-based context cleanup), cost budget (USD/token hard stop). All implemented as middleware or minimal loop changes."
+    design: "designs/loop-resilience.md"
+    related_concepts: [agent_harness, middleware_system, sub_agent, permission_mode, prompt_patterns, configuration_system, recovery_system]
     plans: []
     tasks: []
