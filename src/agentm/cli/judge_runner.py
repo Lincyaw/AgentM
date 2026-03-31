@@ -778,6 +778,54 @@ def _save_results(results: list[TrajectoryLabel], total: int, failed_count: int,
 
 
 # ---------------------------------------------------------------------------
+# JSONL cache for incremental resume
+# ---------------------------------------------------------------------------
+
+
+def _cache_path_for(output_path: str) -> Path:
+    """Derive the JSONL cache path from the output path."""
+    p = Path(output_path)
+    return p.parent / (p.stem + ".cache.jsonl")
+
+
+def _load_cached_results(cache_file: Path) -> dict[str, TrajectoryLabel]:
+    """Load previously successful results from the JSONL cache.
+
+    Returns a dict mapping case_id -> TrajectoryLabel.
+    Malformed lines are skipped with a warning.
+    """
+    cached: dict[str, TrajectoryLabel] = {}
+    if not cache_file.exists():
+        return cached
+    skipped = 0
+    with open(cache_file, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                label = TrajectoryLabel.model_validate(data)
+                cached[label.case_id] = label
+            except (json.JSONDecodeError, pydantic.ValidationError):
+                skipped += 1
+                continue
+    if skipped:
+        logger.warning("Skipped %d malformed lines in cache %s", skipped, cache_file)
+    return cached
+
+
+def _append_to_cache(cache_file: Path, label: TrajectoryLabel) -> None:
+    """Append a single result to the JSONL cache file.
+
+    Uses synchronous I/O — acceptable because each write is tiny
+    relative to the LLM API latency that dominates per-case cost.
+    """
+    with open(cache_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(label.model_dump(mode="json"), ensure_ascii=False) + "\n")
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -802,6 +850,26 @@ async def run_judging(
     if not cases:
         console.print("[yellow]No cases to judge.[/]")
         return []
+
+    # --- Cache: load previous results and filter cases ---
+    cache_file: Path | None = None
+    cached_results: dict[str, TrajectoryLabel] = {}
+    if output_path:
+        cache_file = _cache_path_for(output_path)
+        cached_results = _load_cached_results(cache_file)
+        if cached_results:
+            original_count = len(cases)
+            cases = [c for c in cases if c.case_id not in cached_results]
+            skipped = original_count - len(cases)
+            console.print(
+                f"Loaded [green]{len(cached_results)}[/] cached results from {cache_file.name}, "
+                f"skipping [cyan]{skipped}[/] already-judged cases"
+            )
+            if not cases:
+                console.print("[green]All cases already judged. Nothing to do.[/]")
+                all_results = list(cached_results.values())
+                _print_summary(all_results, total=original_count, failed_count=0)
+                return all_results
 
     if not dashboard_opts.enabled:
         system_config.debug.trajectory.enabled = False
@@ -836,6 +904,28 @@ async def run_judging(
     results: list[TrajectoryLabel] = []
     failed_cases: list[str] = []
 
+    def _record_result(
+        label: TrajectoryLabel | None,
+        case: CaseInfo,
+        *,
+        prefix: str = "",
+    ) -> None:
+        """Record a judgment result — append to results/cache, print, update tracker."""
+        tag = f"[{case.case_id}] " if prefix else ""
+        if label is not None:
+            results.append(label)
+            if cache_file is not None:
+                _append_to_cache(cache_file, label)
+            color = _CATEGORY_COLORS.get(label.category, "white")
+            console.print(f"    {tag}[{color}]{label.category}[/] — {label.reasoning[:80]}...")
+            if tracker is not None:
+                tracker.mark_completed(case.case_id)
+        else:
+            failed_cases.append(case.case_id)
+            console.print(f"    {tag}[red]FAILED[/]")
+            if tracker is not None:
+                tracker.mark_failed(case.case_id, "classification failed")
+
     if concurrency <= 1:
         # Sequential execution
         for i, case in enumerate(cases, 1):
@@ -850,18 +940,7 @@ async def run_judging(
                 broadcaster=broadcaster,
                 eval_tracker=tracker,
             )
-
-            if label is not None:
-                results.append(label)
-                color = _CATEGORY_COLORS.get(label.category, "white")
-                console.print(f"    [{color}]{label.category}[/] — {label.reasoning[:80]}...")
-                if tracker is not None:
-                    tracker.mark_completed(case.case_id)
-            else:
-                failed_cases.append(case.case_id)
-                console.print("    [red]FAILED[/]")
-                if tracker is not None:
-                    tracker.mark_failed(case.case_id, "classification failed")
+            _record_result(label, case)
     else:
         # Concurrent execution with semaphore
         sem = asyncio.Semaphore(concurrency)
@@ -882,28 +961,22 @@ async def run_judging(
                 )
 
                 async with lock:
-                    if label is not None:
-                        results.append(label)
-                        color = _CATEGORY_COLORS.get(label.category, "white")
-                        console.print(
-                            f"    [{case.case_id}] [{color}]{label.category}[/]"
-                            f" — {label.reasoning[:80]}..."
-                        )
-                        if tracker is not None:
-                            tracker.mark_completed(case.case_id)
-                    else:
-                        failed_cases.append(case.case_id)
-                        console.print(f"    [{case.case_id}] [red]FAILED[/]")
-                        if tracker is not None:
-                            tracker.mark_failed(case.case_id, "classification failed")
+                    _record_result(label, case, prefix=case.case_id)
 
         tasks = [_run_case(i, case) for i, case in enumerate(cases, 1)]
         await asyncio.gather(*tasks)
 
-    _print_summary(results, total=len(cases), failed_count=len(failed_cases))
+    # Merge cached + new results for summary and output
+    all_results = list(cached_results.values()) + results
+    total_cases = len(all_results) + len(failed_cases)
 
-    if output_path and results:
-        _save_results(results, total=len(cases), failed_count=len(failed_cases), output_path=output_path)
+    _print_summary(all_results, total=total_cases, failed_count=len(failed_cases))
+
+    if output_path and all_results:
+        _save_results(all_results, total=total_cases, failed_count=len(failed_cases), output_path=output_path)
+        if cache_file is not None and not failed_cases:
+            cache_file.unlink(missing_ok=True)
+            logger.info("Cleaned up cache file %s (all cases completed)", cache_file)
 
     if dashboard_task is not None:
         console.print(
@@ -915,4 +988,4 @@ async def run_judging(
         except asyncio.CancelledError:
             pass
 
-    return results
+    return all_results
