@@ -7,15 +7,16 @@
 
 # Data source — "directory" reads local JSON files, "database" queries eval DB
 source:
-  type: "directory"                    # "directory" or "database"
+  type: "database"                    # "directory" or "database"
   directory: "./eval-trajectories"     # used when type=directory
-  filter: "incorrect"                  # incorrect | correct | all
+  filter: "all"                  # incorrect | correct | all
   # exp_id: "agentm-v11"              # filter by experiment ID
   # agent_type: "agentm"              # filter by agent type
   # limit: 50                         # max total cases
   data_base_dir: "/mnt/jfs/rcabench_dataset/"   # base dir for observability data (resolved via _eval_meta.source)
+  source_path_pattern: "{data_base_dir}/{source}/converted"  # pattern for resolving source → data dir
 
-concurrency: 1                         # parallel judge workers
+concurrency: 10                         # parallel judge workers
 
 scenario: "config/scenarios/trajectory_analysis"
 system_config: "config/system.yaml"
