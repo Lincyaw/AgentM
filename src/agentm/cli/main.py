@@ -253,8 +253,8 @@ def judge(
     source_path_pattern: str | None = typer.Option(
         None, "--source-path-pattern", help="Override source.source_path_pattern",
     ),
-    concurrency: int = typer.Option(
-        1, "--concurrency", help="Number of cases to judge in parallel (default: 1)",
+    concurrency: int | None = typer.Option(
+        None, "--concurrency", help="Number of cases to judge in parallel (overrides config file)",
     ),
 ) -> None:
     """Judge trajectories using decision-tree classification.
@@ -310,5 +310,5 @@ def judge(
         dashboard_opts=DashboardOpts(
             enabled=dashboard, port=port, host=dashboard_host,
         ),
-        concurrency=concurrency,
+        concurrency=concurrency if concurrency is not None else cfg.concurrency,
     ))

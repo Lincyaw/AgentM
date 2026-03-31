@@ -88,8 +88,8 @@ class SourceConfig(BaseModel):
 class JudgeConfig(BaseModel):
     """Config for the judge command (loaded from batch YAML).
 
-    Extra fields (batch, task, output) from batch-analysis configs are
-    silently ignored so the same YAML files remain compatible.
+    Extra fields from legacy configs are silently ignored so the same
+    YAML files remain compatible.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -97,6 +97,7 @@ class JudgeConfig(BaseModel):
     source: SourceConfig = SourceConfig()
     scenario: str = "config/scenarios/trajectory_analysis"
     system_config: str = "config/system.yaml"
+    concurrency: int = 1
 
 
 def load_judge_config(path: str | Path) -> JudgeConfig:

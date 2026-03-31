@@ -1,9 +1,9 @@
-# Batch trajectory analysis configuration
+# Judge batch configuration
 #
 # Usage:
-#   agentm analyze-batch config/batch/default.yaml
-#   agentm analyze-batch config/batch/default.yaml --filter all --limit 30
-#   agentm analyze-batch config/batch/default.yaml --exp-id agentm-v12
+#   agentm judge config/batch/default.yaml
+#   agentm judge config/batch/default.yaml --filter all --limit 30
+#   agentm judge config/batch/default.yaml --exp-id agentm-v12
 
 # Data source — "directory" reads local JSON files, "database" queries eval DB
 source:
@@ -14,25 +14,8 @@ source:
   # agent_type: "agentm"              # filter by agent type
   # limit: 50                         # max total cases
   data_base_dir: "/mnt/jfs/rcabench_dataset/"   # base dir for observability data (resolved via _eval_meta.source)
-  # source_path_pattern: "{data_base_dir}/{source}/converted"  # pattern for resolving source → data dir
 
-# Batch execution
-batch:
-  size: 10                             # trajectories per analysis run
-  concurrency: 1                       # parallel batch runs
-  max_steps: 60                        # max orchestrator steps per batch
-
-# Analysis goals — uncomment to override defaults
-# task:
-#   goals:
-#     - "Classify each case using Outcome Classification taxonomy"
-#     - "Cross-case error patterns and failure modes"
-#     - "Agent behavioral features: tool usage, hypothesis management"
+concurrency: 1                         # parallel judge workers
 
 scenario: "config/scenarios/trajectory_analysis"
 system_config: "config/system.yaml"
-
-output:
-  export_dir: "./eval-trajectories"    # where DB exports land
-  verbose: false
-  dashboard: false
