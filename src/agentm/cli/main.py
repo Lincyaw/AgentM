@@ -283,6 +283,11 @@ def judge(
         if val is not None:
             setattr(cfg.source, key, val)
 
+    # Auto-generate output path for caching when not specified
+    effective_output = output
+    if effective_output is None and cfg.source.exp_id:
+        effective_output = f"judge_results_{cfg.source.exp_id}.json"
+
     try:
         case_infos = collect_cases(cfg)
     except Exception as e:
@@ -301,7 +306,7 @@ def judge(
         case_infos,
         system_config=system_config,
         scenario_config=scenario_config,
-        output_path=output,
+        output_path=effective_output,
         dashboard_opts=DashboardOpts(
             enabled=dashboard, port=port, host=dashboard_host,
         ),
