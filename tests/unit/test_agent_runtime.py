@@ -5,113 +5,13 @@ RED phase: all tests should FAIL until AgentRuntime is implemented.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 import pytest
 
-from agentm.harness.types import (
-    AgentEvent,
-    AgentResult,
-    AgentStatus,
-    Message,
-    RunConfig,
-)
+from agentm.harness.types import AgentStatus
 from agentm.harness.runtime import AgentRuntime
 
-
-# ---------------------------------------------------------------------------
-# FakeAgentLoop — controllable AgentLoop for testing
-# ---------------------------------------------------------------------------
-
-
-class FakeAgentLoop:
-    """Controllable AgentLoop implementation for testing.
-
-    Emits a configurable number of llm_end events, then a complete event
-    carrying an AgentResult with the given output.
-    """
-
-    def __init__(
-        self,
-        steps: int = 1,
-        result_output: str = "done",
-        delay: float = 0,
-    ) -> None:
-        self._steps = steps
-        self._result_output = result_output
-        self._delay = delay
-        self._inbox: list[str] = []
-        self._cancelled = False
-
-    def inject(self, message: str) -> None:
-        self._inbox.append(message)
-
-    async def run(
-        self, input: str | list[Message], *, config: RunConfig | None = None
-    ) -> AgentResult:
-        async for event in self.stream(input, config=config):
-            if event.type == "complete":
-                return event.data.get("result")  # type: ignore[return-value]
-        raise RuntimeError("stream ended without complete event")
-
-    async def stream(
-        self, input: str | list[Message], *, config: RunConfig | None = None
-    ) -> Any:
-        config = config or RunConfig()
-        agent_id = config.metadata.get("agent_id", "")
-        for step in range(self._steps):
-            if self._delay:
-                await asyncio.sleep(self._delay)
-            yield AgentEvent(type="llm_end", agent_id=agent_id, step=step)
-        result = AgentResult(
-            agent_id=agent_id,
-            status=AgentStatus.COMPLETED,
-            output=self._result_output,
-            steps=self._steps,
-        )
-        yield AgentEvent(
-            type="complete", agent_id=agent_id, data={"result": result}
-        )
-
-
-class NeverEndingLoop:
-    """A loop that never completes — hangs until cancelled."""
-
-    def __init__(self) -> None:
-        self._inbox: list[str] = []
-
-    def inject(self, message: str) -> None:
-        self._inbox.append(message)
-
-    async def run(
-        self, input: str | list[Message], *, config: RunConfig | None = None
-    ) -> AgentResult:
-        async for event in self.stream(input, config=config):
-            if event.type == "complete":
-                return event.data.get("result")  # type: ignore[return-value]
-        raise RuntimeError("stream ended without complete event")
-
-    async def stream(
-        self, input: str | list[Message], *, config: RunConfig | None = None
-    ) -> Any:
-        config = config or RunConfig()
-        agent_id = config.metadata.get("agent_id", "")
-        # Emit one event then hang forever
-        yield AgentEvent(type="llm_start", agent_id=agent_id, step=0)
-        try:
-            await asyncio.sleep(3600)  # effectively forever
-        except asyncio.CancelledError:
-            return
-
-
-class MockEventHandler:
-    """Collects all events for assertion."""
-
-    def __init__(self) -> None:
-        self.events: list[AgentEvent] = []
-
-    async def on_event(self, event: AgentEvent) -> None:
-        self.events.append(event)
+from tests.helpers import FakeAgentLoop, MockEventHandler, NeverEndingLoop
 
 
 # ---------------------------------------------------------------------------

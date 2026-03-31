@@ -74,7 +74,7 @@ class ScenarioWiring:
         if self.hooks is None:
             from agentm.models.data import OrchestratorHooks as _Hooks
 
-            object.__setattr__(self, "hooks", _Hooks())
+            self.hooks = _Hooks()
 
 
 # ---------------------------------------------------------------------------
@@ -119,3 +119,8 @@ def get_scenario(name: str) -> Scenario:
 def list_scenarios() -> list[str]:
     """Return all registered scenario names."""
     return list(_SCENARIOS)
+
+
+def clear_scenarios() -> None:
+    """Reset scenario registry. For testing only."""
+    _SCENARIOS.clear()

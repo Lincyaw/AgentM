@@ -2,7 +2,7 @@ system:
   type: "general_purpose"
 
 orchestrator:
-  model: "gpt-4o"
+  model: "gpt-5.1"
   temperature: 0.7
   orchestrator_mode: "node"
   max_rounds: 30
@@ -30,7 +30,7 @@ orchestrator:
 
 agents:
   worker:
-    model: "gpt-4o-mini"
+    model: "gpt-5.1-mini"
     temperature: 0.3
     task_type_prompts:
       execute: "prompts/task_types/execute.j2"

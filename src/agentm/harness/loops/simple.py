@@ -15,6 +15,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, cast
 
+from agentm.harness.cost_budget import BudgetExceeded
 from agentm.harness.middleware import MiddlewareBase
 from agentm.harness.protocols import AgentLoop, CheckpointStore
 from agentm.harness.tool import Tool
@@ -276,6 +277,8 @@ class SimpleAgentLoop(AgentLoop):
         ]
         step = 0
         tool_call_count = 0
+        total_input_tokens = 0
+        total_output_tokens = 0
 
         semaphore = asyncio.Semaphore(get_max_tool_concurrency())
         timeout_cm = (
@@ -304,6 +307,8 @@ class SimpleAgentLoop(AgentLoop):
                 max_steps=config.max_steps,
                 tool_call_count=tool_call_count,
                 metadata=config.metadata,
+                total_input_tokens=total_input_tokens,
+                total_output_tokens=total_output_tokens,
             )
             prepared = messages
             for mw in self._middleware:
@@ -313,6 +318,12 @@ class SimpleAgentLoop(AgentLoop):
 
             # 3. Call LLM (with retry on transient errors)
             response = await self._invoke_with_retry(prepared)
+
+            # 3b. Accumulate token usage
+            usage = getattr(response, "usage_metadata", None)
+            if usage:
+                total_input_tokens += getattr(usage, "input_tokens", 0) or 0
+                total_output_tokens += getattr(usage, "output_tokens", 0) or 0
 
             # 4. Middleware: on_llm_end
             for mw in self._middleware:
@@ -449,6 +460,32 @@ class SimpleAgentLoop(AgentLoop):
                 agent_id=agent_id,
                 status=AgentStatus.FAILED,
                 error=f"Timeout after {config.timeout}s",
+                steps=step,
+                tool_calls=tool_call_count,
+            )
+            yield AgentEvent(
+                type="complete",
+                agent_id=agent_id,
+                step=step,
+                data={"result": result},
+            )
+        except BudgetExceeded as exc:
+            yield AgentEvent(
+                type="error",
+                agent_id=agent_id,
+                step=step,
+                data={"error": str(exc)},
+            )
+            # Attempt output synthesis from conversation so far
+            try:
+                output = await self._synthesize_output(messages)
+            except Exception:
+                output = None
+            result = AgentResult(
+                agent_id=agent_id,
+                status=AgentStatus.FAILED,
+                output=output,
+                error=str(exc),
                 steps=step,
                 tool_calls=tool_call_count,
             )

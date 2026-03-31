@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -24,105 +23,12 @@ from agentm.harness.types import (
     RunConfig,
 )
 
-
-# ---------------------------------------------------------------------------
-# Shared test helpers
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class MockAIResponse:
-    """Minimal mock of an LLM AI response."""
-
-    content: str = "done"
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    type: str = "ai"
-
-
-class MockModel:
-    """Mock ChatModel that returns pre-configured responses in sequence."""
-
-    def __init__(self, responses: list[MockAIResponse] | None = None) -> None:
-        self._responses = iter(responses or [MockAIResponse()])
-        self.invocations: list[list[Any]] = []
-
-    async def ainvoke(self, messages: list[Any]) -> MockAIResponse:
-        self.invocations.append(messages)
-        return next(self._responses)
-
-    def bind_tools(self, tools: list[Any]) -> MockModel:
-        return self
-
-    def with_structured_output(self, schema: type) -> MockModel:
-        return self
-
-
-class MockTool:
-    """Mock tool with a fixed result."""
-
-    def __init__(self, name: str, result: str = "tool result") -> None:
-        self.name = name
-        self.description = f"Mock {name} tool"
-        self._result = result
-
-    async def ainvoke(self, args: dict[str, Any]) -> str:
-        return self._result
-
-    def to_openai_schema(self) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
-        }
-
-
-class FakeAgentLoop:
-    """Controllable AgentLoop for testing orchestrator tool wiring."""
-
-    def __init__(self, result_output: Any = "worker-result") -> None:
-        self._result_output = result_output
-        self._inbox: list[str] = []
-
-    def inject(self, message: str) -> None:
-        self._inbox.append(message)
-
-    async def run(
-        self, input: str | list[Message], *, config: RunConfig | None = None
-    ) -> AgentResult:
-        async for event in self.stream(input, config=config):
-            if event.type == "complete":
-                return event.data["result"]
-        raise RuntimeError("no complete event")
-
-    async def stream(
-        self, input: str | list[Message], *, config: RunConfig | None = None
-    ) -> Any:
-        config = config or RunConfig()
-        agent_id = config.metadata.get("agent_id", "")
-        result = AgentResult(
-            agent_id=agent_id,
-            status=AgentStatus.COMPLETED,
-            output=self._result_output,
-            steps=1,
-        )
-        yield AgentEvent(
-            type="complete", agent_id=agent_id, data={"result": result}
-        )
-
-
-class FakeWorkerFactory:
-    """Mock WorkerFactory for orchestrator tool tests."""
-
-    def __init__(self, loop: FakeAgentLoop | None = None) -> None:
-        self._loop = loop or FakeAgentLoop()
-        self.create_calls: list[tuple[str, str]] = []
-
-    def create_worker(self, agent_id: str, task_type: str) -> AgentLoop:
-        self.create_calls.append((agent_id, task_type))
-        return self._loop
+from tests.helpers import (
+    FakeAgentLoop,
+    FakeWorkerFactory,
+    MockModel,
+    MockTool,
+)
 
 
 # =========================================================================

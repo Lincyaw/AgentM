@@ -27,6 +27,7 @@ from agentm.harness.middleware import (
 )
 from agentm.harness.micro_compact import MicroCompactMiddleware
 from agentm.harness.tool import Tool
+from agentm.harness.tool_filter import WORKER_DISALLOWED_TOOLS, resolve_tools
 from agentm.harness.tool_result_budget import ToolResultBudgetConfig, ToolResultBudgetMiddleware
 
 logger = logging.getLogger(__name__)
@@ -142,6 +143,12 @@ class WorkerLoopFactory:
         if self._worker_config.include_think_tool:
             from agentm.tools.think import think
             tools.append(think)
+        # Apply safety filter — strip orchestrator-only tools from workers
+        tools = resolve_tools(
+            tools,
+            whitelist=["*"],
+            global_disallowed=WORKER_DISALLOWED_TOOLS,
+        )
         return tools
 
     def _build_system_prompt(
@@ -196,15 +203,31 @@ class WorkerLoopFactory:
         middleware.append(budget_mw)
 
         # Loop detection
+        ld = config.execution.loop_detection
         middleware.append(
-            LoopDetectionMiddleware.from_config(config.execution.loop_detection)
+            LoopDetectionMiddleware(
+                threshold=ld.threshold,
+                window_size=ld.window_size,
+                think_stall_limit=ld.think_stall_limit,
+            )
         )
 
         # Compression
         if config.compression is not None:
+            comp = config.compression
+            window = comp.context_window
+            threshold_tokens = int(window * comp.compression_threshold)
+            compression_llm = create_chat_model(
+                model=comp.compression_model,
+                temperature=0,
+                model_config=self._model_config,
+            )
             middleware.append(
-                CompressionMiddleware.from_config(
-                    config.compression, model_config=self._model_config
+                CompressionMiddleware(
+                    compression_model=comp.compression_model,
+                    llm=compression_llm,
+                    threshold_tokens=threshold_tokens,
+                    preserve_latest_n=comp.preserve_latest_n,
                 )
             )
 
