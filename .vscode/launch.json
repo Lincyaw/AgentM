@@ -1,0 +1,60 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "AgentM: Judge (custom, dashboard)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/.venv/bin/agentm",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "judge",
+                "${input:judgeConfigFile}",
+                "--exp-id",
+                "${input:judgeExpId}",
+                "--limit",
+                "${input:judgeLimit}",
+                "--dashboard"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "AgentM: Judge (custom, no dashboard)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/.venv/bin/agentm",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "judge",
+                "${input:judgeConfigFile}",
+                "--exp-id",
+                "${input:judgeExpId}",
+                "--limit",
+                "${input:judgeLimit}"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ],
+    "inputs": [
+        {
+            "id": "judgeConfigFile",
+            "type": "promptString",
+            "description": "Path to batch config file",
+            "default": "config/batch/default.yaml"
+        },
+        {
+            "id": "judgeExpId",
+            "type": "promptString",
+            "description": "Experiment ID",
+            "default": "thinkdepthai_openrca2_lite"
+        },
+        {
+            "id": "judgeLimit",
+            "type": "promptString",
+            "description": "Case limit",
+            "default": "2"
+        }
+    ]
+}
