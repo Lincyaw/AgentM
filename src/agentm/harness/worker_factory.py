@@ -25,7 +25,9 @@ from agentm.harness.middleware import (
     LoopDetectionMiddleware,
     TrajectoryMiddleware,
 )
+from agentm.harness.micro_compact import MicroCompactMiddleware
 from agentm.harness.tool import Tool
+from agentm.harness.tool_result_budget import ToolResultBudgetConfig, ToolResultBudgetMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -222,5 +224,11 @@ class WorkerLoopFactory:
                     max_cache_size=config.execution.dedup.max_cache_size
                 )
             )
+
+        # Tool result budget — truncate oversized tool results
+        middleware.append(ToolResultBudgetMiddleware(ToolResultBudgetConfig()))
+
+        # Micro-compact — clear stale tool results before LLM compression
+        middleware.append(MicroCompactMiddleware())
 
         return middleware

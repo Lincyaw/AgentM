@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, deque
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, cast
 
 import tiktoken
 
@@ -30,21 +30,22 @@ logger = logging.getLogger(__name__)
 def msg_role(msg: Message) -> str:
     """Extract the role/type string from a message (dict or LC object)."""
     if isinstance(msg, dict):
-        return msg.get("role", "")
+        return str(msg.get("role", ""))
     return getattr(msg, "type", "")
 
 
 def msg_content(msg: Message) -> str:
     """Extract text content from a message."""
     if isinstance(msg, dict):
-        return msg.get("content", "")
+        return str(msg.get("content", ""))
     return getattr(msg, "content", "")
 
 
 def msg_tool_calls(msg: Message) -> list[dict[str, Any]]:
     """Extract tool_calls list from a message."""
     if isinstance(msg, dict):
-        return msg.get("tool_calls", [])
+        raw = msg.get("tool_calls")
+        return cast(list[dict[str, Any]], raw) if isinstance(raw, list) else []
     return getattr(msg, "tool_calls", None) or []
 
 
@@ -53,6 +54,33 @@ def msg_is_system(msg: Message) -> bool:
     if isinstance(msg, dict):
         return msg.get("role") == "system"
     return getattr(msg, "type", None) == "system"
+
+
+def inject_into_system_message(
+    messages: list[Message], fragment: str
+) -> list[Message]:
+    """Append *fragment* to the first system message, or prepend a new one.
+
+    Returns a shallow-copied message list with the system message replaced.
+    """
+    new_messages: list[Message] = []
+    injected = False
+
+    for msg in messages:
+        if not injected and msg_is_system(msg):
+            content = msg_content(msg)
+            new_messages.append({
+                "role": "system",
+                "content": f"{content}\n\n{fragment}",
+            })
+            injected = True
+        else:
+            new_messages.append(msg)
+
+    if not injected:
+        new_messages.insert(0, {"role": "system", "content": fragment})
+
+    return new_messages
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +203,7 @@ def _summarize_messages(
 
     def _invoke(prompt: str) -> str:
         result = llm.invoke([{"role": "human", "content": prompt}])
-        content = result.content
+        content = getattr(result, "content", "")
         if isinstance(content, list):
             return " ".join(str(part) for part in content)
         return str(content)
@@ -337,7 +365,7 @@ class CompressionMiddleware(MiddlewareBase):
             model=self._config.compression_model,
             model_config=self._model_config,
         )
-        summary_msg = {
+        summary_msg: Message = {
             "role": "system",
             "content": f"[Compressed History Summary]\n{summary_text}",
         }
@@ -356,15 +384,26 @@ class CompressionMiddleware(MiddlewareBase):
 
 
 def _count_trailing_think_only(messages: list[Message], think_tool: str) -> int:
-    """Count consecutive AI messages from the tail where the only tool is think."""
+    """Count consecutive AI messages from the tail where the only tool is think.
+
+    Stops at the first non-AI message encountered after the streak begins,
+    or at the first AI message that calls a non-think tool.
+    """
     streak = 0
     for msg in reversed(messages):
-        if msg_role(msg) != "ai":
+        role = msg_role(msg)
+        if role in ("ai", "assistant"):
+            tool_names = {tc.get("name", "") for tc in msg_tool_calls(msg)}
+            if tool_names and tool_names != {think_tool}:
+                break
+            streak += 1
+        elif role == "tool":
+            # Tool results sit between AI messages — skip them
             continue
-        tool_names = {tc.get("name", "") for tc in msg_tool_calls(msg)}
-        if tool_names and tool_names != {think_tool}:
-            break
-        streak += 1
+        else:
+            # Human/system message breaks the trailing streak
+            if streak > 0:
+                break
     return streak
 
 
@@ -382,10 +421,8 @@ class LoopDetectionMiddleware(MiddlewareBase):
         self._window_size = window_size
         self._think_stall_limit = think_stall_limit
         self._think_tool_name = think_tool_name
-        # Incremental tool-call counter updated via on_tool_call
-        self._tool_call_counter: Counter[str] = Counter()
-        # Track all keys in insertion order for windowed counting
-        self._tool_call_keys: list[str] = []
+        # Bounded deque for windowed loop detection — old entries auto-evict
+        self._tool_call_keys: deque[str] = deque(maxlen=window_size or None)
 
     @classmethod
     def from_config(cls, config: LoopDetectionConfig) -> LoopDetectionMiddleware:
@@ -411,10 +448,8 @@ class LoopDetectionMiddleware(MiddlewareBase):
             )
             return [*messages, {"role": "human", "content": warning_text}]
 
-        # Exact-match loop detection using incremental counter
-        # Use only the last `window_size` keys for windowed counting
-        window_keys = self._tool_call_keys[-self._window_size :] if self._window_size else self._tool_call_keys
-        call_counter: Counter[str] = Counter(window_keys)
+        # Exact-match loop detection (deque is already bounded to window_size)
+        call_counter: Counter[str] = Counter(self._tool_call_keys)
 
         repeated = [key for key, count in call_counter.items() if count >= self._threshold]
 
@@ -695,27 +730,7 @@ class SkillMiddleware(MiddlewareBase):
     ) -> list[Message]:
         if not self._skills_section:
             return messages
-
-        skills_section = self._skills_section
-
-        new_messages: list[Message] = []
-        injected = False
-
-        for msg in messages:
-            if not injected and msg_is_system(msg):
-                content = msg_content(msg)
-                new_messages.append({
-                    "role": "system",
-                    "content": f"{content}\n\n{skills_section}",
-                })
-                injected = True
-            else:
-                new_messages.append(msg)
-
-        if not injected:
-            new_messages.insert(0, {"role": "system", "content": skills_section})
-
-        return new_messages
+        return inject_into_system_message(messages, self._skills_section)
 
 
 # ---------------------------------------------------------------------------

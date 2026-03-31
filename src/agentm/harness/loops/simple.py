@@ -9,6 +9,7 @@ stream() is the primary method. run() delegates to it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -17,6 +18,10 @@ from typing import Any, cast
 from agentm.harness.middleware import MiddlewareBase
 from agentm.harness.protocols import AgentLoop, CheckpointStore
 from agentm.harness.tool import Tool
+from agentm.harness.tool_concurrency import (
+    get_max_tool_concurrency,
+    partition_tool_calls,
+)
 from agentm.harness.types import (
     AgentEvent,
     AgentResult,
@@ -272,7 +277,13 @@ class SimpleAgentLoop(AgentLoop):
         step = 0
         tool_call_count = 0
 
-        while config.max_steps is None or step < config.max_steps:
+        semaphore = asyncio.Semaphore(get_max_tool_concurrency())
+        timeout_cm = (
+            asyncio.timeout(config.timeout) if config.timeout else contextlib.nullcontext()
+        )
+        try:
+         async with timeout_cm:
+          while config.max_steps is None or step < config.max_steps:
             # 1. Drain inbox
             while self._inbox:
                 injected = self._inbox.popleft()
@@ -343,28 +354,17 @@ class SimpleAgentLoop(AgentLoop):
                 step += 1
                 continue
 
-            # 6. Execute tools — parallel when multiple, sequential when single
+            # 6. Execute tools — partition into concurrent/serial batches
             chain = self._build_tool_chain(ctx)
 
-            if len(tool_calls) == 1:
-                # Single tool call — execute directly (avoid gather overhead)
-                tc = tool_calls[0]
-                name = tc.get("name", "")
-                args = tc.get("args", {})
-                yield AgentEvent(
-                    type="tool_start",
-                    agent_id=agent_id,
-                    step=step,
-                    data={"tool": name, "args": args},
-                )
-                result_str = await chain(name, args)
-                tool_call_count += 1
-                yield AgentEvent(
-                    type="tool_end",
-                    agent_id=agent_id,
-                    step=step,
-                    data={"tool": name, "result": result_str},
-                )
+            async def _run_one(tc: dict[str, Any]) -> tuple[dict[str, Any], str]:
+                async with semaphore:
+                    n = tc.get("name", "")
+                    a = tc.get("args", {})
+                    r = await chain(n, a)
+                    return tc, r
+
+            def _append_result(tc: dict[str, Any], result_str: str) -> None:
                 messages.append(
                     {
                         "role": "tool",
@@ -372,9 +372,12 @@ class SimpleAgentLoop(AgentLoop):
                         "tool_call_id": tc.get("id", ""),
                     }
                 )
-            else:
-                # Multiple tool calls — execute in parallel
-                for tc in tool_calls:
+
+            for is_concurrent, batch in partition_tool_calls(
+                tool_calls, self._tools
+            ):
+                # Emit tool_start events for the batch
+                for tc in batch:
                     yield AgentEvent(
                         type="tool_start",
                         agent_id=agent_id,
@@ -382,23 +385,20 @@ class SimpleAgentLoop(AgentLoop):
                         data={"tool": tc.get("name", ""), "args": tc.get("args", {})},
                     )
 
-                async def _run_one(tc: dict[str, Any]) -> tuple[dict[str, Any], str]:
-                    n = tc.get("name", "")
-                    a = tc.get("args", {})
-                    r = await chain(n, a)
-                    return tc, r
-
-                results = await asyncio.gather(
-                    *[_run_one(tc) for tc in tool_calls],
-                    return_exceptions=True,
-                )
-
-                for item in results:
-                    if isinstance(item, BaseException):
-                        # Tool raised — record error as result
-                        tc_fallback = tool_calls[results.index(item)]
-                        name = tc_fallback.get("name", "?")
-                        result_str = f"Error: tool '{name}' raised {item}"
+                if is_concurrent and len(batch) > 1:
+                    # Concurrent batch — gather with semaphore
+                    gather_results = await asyncio.gather(
+                        *[_run_one(tc) for tc in batch],
+                        return_exceptions=True,
+                    )
+                    for idx, item in enumerate(gather_results):
+                        if isinstance(item, BaseException):
+                            tc_fallback = batch[idx]
+                            name = tc_fallback.get("name", "?")
+                            result_str = f"Error: tool '{name}' raised {item}"
+                        else:
+                            tc_fallback, result_str = item
+                            name = tc_fallback.get("name", "")
                         tool_call_count += 1
                         yield AgentEvent(
                             type="tool_end",
@@ -406,16 +406,13 @@ class SimpleAgentLoop(AgentLoop):
                             step=step,
                             data={"tool": name, "result": result_str},
                         )
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "content": result_str,
-                                "tool_call_id": tc_fallback.get("id", ""),
-                            }
-                        )
-                    else:
-                        tc, result_str = item
-                        name = tc.get("name", "")
+                        _append_result(tc_fallback, result_str)
+                else:
+                    # Serial batch — execute one by one
+                    for tc in batch:
+                        name = str(tc.get("name", ""))
+                        args = cast(dict[str, Any], tc.get("args", {}))
+                        result_str = await chain(name, args)
                         tool_call_count += 1
                         yield AgentEvent(
                             type="tool_end",
@@ -423,13 +420,7 @@ class SimpleAgentLoop(AgentLoop):
                             step=step,
                             data={"tool": name, "result": result_str},
                         )
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "content": result_str,
-                                "tool_call_id": tc.get("id", ""),
-                            }
-                        )
+                        _append_result(tc, result_str)
 
             step += 1
 
@@ -439,17 +430,31 @@ class SimpleAgentLoop(AgentLoop):
                     agent_id, {"messages": messages, "step": step}
                 )
 
-        # Max steps exhausted
-        result = AgentResult(
-            agent_id=agent_id,
-            status=AgentStatus.FAILED,
-            error=f"Max steps ({config.max_steps}) reached",
-            steps=step,
-            tool_calls=tool_call_count,
-        )
-        yield AgentEvent(
-            type="complete",
-            agent_id=agent_id,
-            step=step,
-            data={"result": result},
-        )
+          # Max steps exhausted
+          result = AgentResult(
+              agent_id=agent_id,
+              status=AgentStatus.FAILED,
+              error=f"Max steps ({config.max_steps}) reached",
+              steps=step,
+              tool_calls=tool_call_count,
+          )
+          yield AgentEvent(
+              type="complete",
+              agent_id=agent_id,
+              step=step,
+              data={"result": result},
+          )
+        except TimeoutError:
+            result = AgentResult(
+                agent_id=agent_id,
+                status=AgentStatus.FAILED,
+                error=f"Timeout after {config.timeout}s",
+                steps=step,
+                tool_calls=tool_call_count,
+            )
+            yield AgentEvent(
+                type="complete",
+                agent_id=agent_id,
+                step=step,
+                data={"result": result},
+            )

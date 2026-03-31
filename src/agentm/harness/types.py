@@ -21,8 +21,12 @@ class ModelProtocol(Protocol):
     Supports both plain models and models with bound tools.
     """
 
+    def invoke(self, messages: list[Message]) -> object:
+        """Invoke the model synchronously. Returns a response object."""
+        ...
+
     async def ainvoke(self, messages: list[Message]) -> object:
-        """Invoke the model with messages. Returns a response object."""
+        """Invoke the model asynchronously. Returns a response object."""
         ...
 
     def with_structured_output(self, schema: type, *, method: str = "function_calling") -> "ModelProtocol":
@@ -129,6 +133,8 @@ class LoopContext:
     max_steps: int | None
     tool_call_count: int
     metadata: JsonDict
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
 
 
 # ---------------------------------------------------------------------------
