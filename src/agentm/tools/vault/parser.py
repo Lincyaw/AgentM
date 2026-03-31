@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-import yaml
+from agentm.utils.frontmatter import parse_frontmatter, serialize_frontmatter
 
 
 def parse_note(content: str) -> tuple[dict, str]:
@@ -13,29 +13,12 @@ def parse_note(content: str) -> tuple[dict, str]:
     Returns (frontmatter_dict, body_string).
     Missing frontmatter yields an empty dict.
     """
-    if not content.startswith("---\n"):
-        return {}, content
-
-    end_idx = content.find("\n---\n", 4)
-    if end_idx == -1:
-        return {}, content
-
-    raw_yaml = content[4:end_idx]
-    fm = yaml.safe_load(raw_yaml)
-    if not isinstance(fm, dict):
-        return {}, content
-
-    body = content[end_idx + 5:]  # skip "\n---\n"
-    return fm, body
+    return parse_frontmatter(content)
 
 
 def serialize_note(frontmatter: dict, body: str) -> str:
     """Render frontmatter dict + body into a Markdown string with YAML fences."""
-    if not frontmatter:
-        return body
-
-    raw = yaml.safe_dump(frontmatter, default_flow_style=False, allow_unicode=True)
-    return f"---\n{raw}---\n{body}"
+    return serialize_frontmatter(frontmatter, body)
 
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
