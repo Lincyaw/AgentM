@@ -10,7 +10,7 @@ from agentm.tools.observability._builders import (
     _resolve_file,
     _result,
 )
-from agentm.tools.observability._core import INTERVAL_MAP, _query, _safe_tool
+from agentm.tools.observability._core import INTERVAL_MAP, _query, obs_safe_tool
 
 
 # Docstrings for factory-generated functions
@@ -48,7 +48,7 @@ Args:
 def _make_query_metrics_ohlc(period: str, doc: str):
     """Factory for creating period-specific metrics OHLC query tools."""
 
-    @_safe_tool
+    @obs_safe_tool
     async def query_metrics_ohlc(
         metric_name: str,
         interval: str = "5m",
@@ -72,7 +72,7 @@ def _make_query_metrics_ohlc(period: str, doc: str):
             GROUP BY time_bucket ORDER BY time_bucket
             LIMIT 200
         """
-        params = [metric_name] + fc_params + tc_params + [200]
+        params = [metric_name] + fc_params + tc_params
         rows = _query(sql, params)
         if not rows:
             return _empty_hint(

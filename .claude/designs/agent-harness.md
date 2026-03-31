@@ -531,7 +531,25 @@ def _compose_tool_middleware(middlewares, actual_call):
     return chain
 ```
 
-### 4.5 Verified Not Needed
+### 4.5 Middleware Catalog
+
+| Middleware | Hook(s) | Purpose |
+|-----------|---------|---------|
+| **BudgetMiddleware** | `on_llm_start` | Enforces per-turn message budget by truncating conversation history |
+| **CompressionMiddleware** | `on_llm_start` | LLM-based summarization of old messages when token count exceeds threshold |
+| **LoopDetectionMiddleware** | `on_llm_start` | Detects repeated tool call patterns and injects guidance to break loops |
+| **DedupMiddleware** | `on_llm_start`, `on_tool_call` | Two-layer dedup: soft reminder + hard cache short-circuit for identical tool calls |
+| **TrajectoryMiddleware** | `on_llm_start`, `on_llm_end`, `on_tool_call` | Records all LLM and tool events to TrajectoryCollector for analysis |
+| **SkillMiddleware** | `on_llm_start` | Injects skill/instruction context into messages |
+| **DynamicContextMiddleware** | `on_llm_start` | Injects scenario-specific dynamic context (e.g., hypothesis board) |
+| **ToolResultBudgetMiddleware** | `on_tool_call` | Truncates oversized tool results to stay within token budget |
+| **SystemReminderMiddleware** | `on_llm_start` | Periodically re-injects critical system constraints |
+| **MicroCompactMiddleware** | `on_llm_start` | Lightweight rule-based cleanup of stale context |
+| **CostBudgetMiddleware** | `on_llm_end` | Tracks cumulative cost/tokens and raises BudgetExceeded when limits hit |
+| **PermissionMiddleware** | `on_tool_call` | Enforces permission policies (DEFAULT/READONLY/SUPERVISED/UNRESTRICTED) |
+| **MemoryMiddleware** | `on_llm_start` | Injects per-agent persistent memory from vault into conversation |
+
+### 4.6 Verified Not Needed
 
 These capabilities were evaluated and determined to NOT require interface changes:
 

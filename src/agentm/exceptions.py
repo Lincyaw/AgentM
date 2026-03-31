@@ -17,5 +17,17 @@ class DataInitError(AgentMError):
     """Data directory initialization failed."""
 
 
+class ToolError(AgentMError):
+    """Tool execution or registration error."""
+
+
+class AgentError(AgentMError):
+    """Agent runtime error."""
+
+
 class CheckpointError(AgentMError):
     """Checkpoint read/write error."""
+
+
+class StoreNotInitializedError(AgentMError):
+    """Attempted to use a store before initialization."""

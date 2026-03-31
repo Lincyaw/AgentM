@@ -4,8 +4,9 @@ Thin MCP wrappers that delegate to the shared tool implementations
 in ``tools.py`` via ``create_vault_tools()``.
 """
 
+import contextlib
+import io
 import os
-import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -36,16 +37,13 @@ async def lifespan(server: FastMCP) -> AsyncIterator[VaultContext]:  # noqa: ARG
         try:
             # Suppress stderr during model loading to avoid interfering
             # with MCP stdio transport (progress bars, warnings, etc.)
-            _stderr = sys.stderr
-            sys.stderr = open(os.devnull, "w")  # noqa: SIM115, PTH123
-            try:
+            with contextlib.redirect_stderr(io.StringIO()):
                 from sentence_transformers import SentenceTransformer
 
                 model = SentenceTransformer(embedding_model)
-                embed_fn = lambda text: model.encode(text).tolist()  # noqa: E731
-            finally:
-                sys.stderr.close()
-                sys.stderr = _stderr
+
+                def embed_fn(text: str) -> list[float]:
+                    return model.encode(text).tolist()  # type: ignore[return-value]
         except Exception:
             pass
 

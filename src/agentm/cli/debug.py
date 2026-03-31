@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
+import typer
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -27,7 +28,7 @@ def analyze_trajectory(
     path = Path(trajectory_file)
     if not path.exists():
         console.print(f"[red]File not found: {path}[/]")
-        return
+        raise typer.Exit(code=1)
 
     _meta, events = read_trajectory(path)
     console.print(f"Loaded [cyan]{len(events)}[/] events from [dim]{path.name}[/]")

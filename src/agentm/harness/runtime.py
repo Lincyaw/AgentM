@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -88,7 +88,8 @@ class AgentRuntime:
 
         config = config or RunConfig()
         # Ensure agent_id is in config metadata so the loop can access it
-        config.metadata.setdefault("agent_id", agent_id)
+        if "agent_id" not in config.metadata:
+            config = replace(config, metadata={**config.metadata, "agent_id": agent_id})
 
         entry = _AgentEntry(
             agent_id=agent_id,
@@ -148,7 +149,7 @@ class AgentRuntime:
             # Record task_complete
             duration = time.monotonic() - start_time
             if entry.result is not None:
-                entry.result.duration_seconds = duration
+                entry.result = replace(entry.result, duration_seconds=duration)
             if self._trajectory is not None:
                 self._trajectory.record_sync(
                     event_type="task_complete",
@@ -335,6 +336,8 @@ class AgentRuntime:
         entry = self._agents.get(to)
         if entry is None:
             raise ValueError(f"Agent '{to}' not found")
+        if entry.status != AgentStatus.RUNNING:
+            raise ValueError(f"Cannot send message to agent '{to}' in status {entry.status.value}")
         entry.loop.inject(message)
 
     # --- Status ---

@@ -6,7 +6,7 @@ concepts:
     description: "SDK semantic consistency refactoring: unified Tool type (@tool decorator, no StructuredTool), Scenario protocol (setup() -> ScenarioWiring), single ScenarioRegistry (replaces 4 global registries), dead code removal, langchain boundary convergence (HumanMessage/StructuredTool removed from SDK internals)."
     design: "designs/sdk-consistency.md"
     related_concepts: [agent_harness, system_architecture, scenario_protocol, middleware_system]
-    plans: []
+    plans: ["plans/2026-03-15-library-antipattern-fixes.md"]
     tasks: []
 
   agent_harness:
@@ -40,8 +40,17 @@ concepts:
     description: "Pure Python multi-agent orchestration system. SimpleAgentLoop-based ReAct cycle, AgentRuntime for worker management, WorkerLoopFactory for config-driven worker creation, build_agent_system() single canonical builder, Scenario protocol for domain logic, Middleware protocol (3 hooks) for cross-cutting concerns. Config-driven design, trajectory recording, monitoring, and failure recovery."
     design: "designs/system-design-overview.md"
     related_concepts: [agent_harness, orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner, scenario_protocol, middleware_system, storage_backend, trajectory_analysis]
-    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
-    tasks: []
+    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-08-stub-implementation.md"]
+    tasks:
+      - "tasks/2026-03-08-design-audit-findings.md"
+      - "tasks/2026-03-08-impl-builder.md"
+      - "tasks/2026-03-08-impl-config-loader.md"
+      - "tasks/2026-03-08-impl-config-validator-phase-manager.md"
+      - "tasks/2026-03-08-impl-orchestrator-agent.md"
+      - "tasks/2026-03-08-impl-orchestrator-tools.md"
+      - "tasks/2026-03-08-impl-prompt-tool-registry.md"
+      - "tasks/2026-03-08-impl-task-manager.md"
+      - "tasks/2026-03-08-snapshot-tests.md"
 
   orchestrator:
     description: "SimpleAgentLoop-based orchestrator with DynamicContextMiddleware for state injection. Dispatches workers via AgentRuntime. Monitors/injects/aborts via dispatch_agent/check_tasks/inject_instruction/abort_task tools. RCA scenario uses HypothesisStore for hypothesis reasoning."
@@ -55,7 +64,8 @@ concepts:
     design: "designs/sub-agent.md"
     related_concepts: [system_architecture, orchestrator, configuration_system, execution_runner, service_profile]
     plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
-    tasks: []
+    tasks:
+      - "tasks/2026-03-08-impl-hooks-sub-agent.md"
 
   generic_state_wrapper:
     description: "Scenario Protocol architecture: Scenario protocol (setup() -> ScenarioWiring), SetupContext (platform resources), ScenarioRegistry (register/discover), build_agent_system() 4-phase pipeline integration. 3 built-in scenarios: RCA (hypothesis_driven), trajectory_analysis, general_purpose."
@@ -172,7 +182,9 @@ concepts:
     description: "Middleware protocol with 3 hooks: on_llm_start, on_llm_end, on_tool_call. Chain pattern for composing multiple middlewares. Concrete implementations: DynamicContextMiddleware, LoopDetectionMiddleware, CompressionMiddleware, BudgetMiddleware, DedupMiddleware, SkillMiddleware, TrajectoryMiddleware, PermissionMiddleware, MemoryMiddleware, plus loop-resilience additions (ToolResultBudgetMiddleware, SystemReminderMiddleware, MicroCompactMiddleware, CostBudgetMiddleware). All middleware code is in harness/middleware.py."
     related_concepts: [agent_harness, builder, sub_agent, tool_dedup, loop_resilience]
     plans: []
-    tasks: []
+    tasks:
+      - "tasks/2026-03-08-impl-compression.md"
+      - "tasks/2026-03-08-impl-notebook.md"
     tests:
       - file: "tests/unit/test_generic_sdk.py"
         covers:
@@ -270,5 +282,12 @@ concepts:
     description: "Five mechanisms for robust agent loops: tool result budget (truncation of oversized results), tool concurrency partitioning (safe parallel vs serial execution), critical system reminder (periodic constraint re-injection), micro-compact (lightweight rule-based context cleanup), cost budget (USD/token hard stop). All implemented as middleware or minimal loop changes."
     design: "designs/loop-resilience.md"
     related_concepts: [agent_harness, middleware_system, sub_agent, permission_mode, prompt_patterns, configuration_system, recovery_system]
+    plans: []
+    tasks: []
+
+  trajectory_judger:
+    description: "Judge trajectory quality by classifying agent behavior patterns. Single-pass scenario with structured output schema for classification results."
+    design: "designs/trajectory-judger.md"
+    related_concepts: [trajectory, trajectory_analysis, scenario_protocol]
     plans: []
     tasks: []

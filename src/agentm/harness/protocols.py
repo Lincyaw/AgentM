@@ -1,10 +1,10 @@
 """Protocol definitions for the Agent Harness SDK."""
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from typing import Any, Protocol, runtime_checkable
 
-from agentm.harness.types import AgentEvent, AgentResult, LoopContext, Message, RunConfig
+from agentm.harness.types import AgentEvent, AgentResult, Message, RunConfig
 
 
 @runtime_checkable
@@ -53,58 +53,6 @@ class AgentLoop(Protocol):
         The message will be consumed before the next LLM call.
         Can be called concurrently while the agent loop is running
         (safe under asyncio single-thread model).
-        """
-        ...
-
-
-@runtime_checkable
-class Middleware(Protocol):
-    """Hook into the agent loop at defined points.
-
-    All methods have default pass-through behavior. Implementations
-    override only the hooks they need.
-
-    Design: 3 hooks total.
-    - on_llm_start / on_llm_end: chain in order (output of one -> input of next)
-    - on_tool_call: wrapping pattern (call call_next to proceed, or return
-      directly to short-circuit with a cached/intercepted result)
-    """
-
-    async def on_llm_start(
-        self, messages: list[Message], ctx: LoopContext
-    ) -> list[Message]:
-        """Called before each LLM invocation.
-
-        May modify, filter, or append to the message list.
-        Return the (possibly modified) messages.
-        """
-        ...
-
-    async def on_llm_end(self, response: object, ctx: LoopContext) -> object:
-        """Called after each LLM invocation.
-
-        May inspect or modify the response.
-        """
-        ...
-
-    async def on_tool_call(
-        self,
-        tool_name: str,
-        tool_args: dict[str, Any],
-        call_next: Callable[[str, dict[str, Any]], Awaitable[str]],
-        ctx: LoopContext,
-    ) -> str:
-        """Wrap a single tool execution.
-
-        Call ``await call_next(tool_name, tool_args)`` to proceed to the
-        next middleware (or the actual tool). Return the result string.
-
-        Capabilities:
-        - Pass through:     ``return await call_next(name, args)``
-        - Short-circuit:    ``return cached_result`` (skip execution)
-        - Modify args:      ``return await call_next(name, new_args)``
-        - Transform output: ``r = await call_next(name, args); return r[:1000]``
-        - Record before/after: wrap the call_next with logging
         """
         ...
 

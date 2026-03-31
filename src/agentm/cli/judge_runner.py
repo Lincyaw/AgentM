@@ -25,6 +25,7 @@ from agentm.builder import AgentSystemContext, build_system_context, create_agen
 from agentm.config.schema import ScenarioConfig, SkeletonConfig, SystemConfig
 from agentm.exceptions import AgentMError
 from agentm.scenarios.trajectory_judger.data import TrajectoryLabel
+from agentm.utils.json_utils import truncate as _truncate
 from agentm.server.app import (
     DashboardOpts,
     start_dashboard_server,
@@ -303,8 +304,8 @@ def _build_db_query(src: SourceConfig) -> tuple[str, list[Any]]:
 def _collect_from_db(src: SourceConfig, output_dir: str | None = None) -> list[CaseInfo]:
     """Query the eval DB and export cases to JSON files."""
     try:
-        import psycopg2
-        import psycopg2.extras
+        import psycopg2  # type: ignore[import-untyped]
+        import psycopg2.extras  # type: ignore[import-untyped]
     except ImportError:
         raise ImportError(
             "psycopg2 is required for database source. "
@@ -419,14 +420,6 @@ def collect_cases(cfg: JudgeConfig) -> list[CaseInfo]:
 # ---------------------------------------------------------------------------
 # Skeleton extraction
 # ---------------------------------------------------------------------------
-
-
-def _truncate(text: str, max_len: int, *, oneline: bool = False) -> str:
-    if oneline:
-        text = text.replace("\n", " ").replace("\r", "")
-    if len(text) <= max_len:
-        return text
-    return text[:max_len] + "..."
 
 
 def _should_include_tool(tool_name: str, config: SkeletonConfig) -> bool:

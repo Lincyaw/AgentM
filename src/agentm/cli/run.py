@@ -20,7 +20,7 @@ from agentm.config.loader import load_scenario_config, load_system_config
 from agentm.config.schema import SystemConfig, ScenarioConfig
 from agentm.core.debug_console import DebugConsole
 from agentm.core.trajectory import TrajectoryCollector
-from agentm.harness.types import JsonDict
+from agentm.harness.types import AgentInput, JsonDict
 from agentm.server.app import (
     DashboardOpts,
     start_dashboard_server,
@@ -141,7 +141,7 @@ async def _setup_debug_and_dashboard(
 
 async def _stream_and_finalize(
     system: AgentSystem,
-    initial_state: JsonDict,
+    initial_state: AgentInput,
     system_config: SystemConfig,
     debug_console: DebugConsole | None,
     dashboard_server_task: asyncio.Task[None] | None,
@@ -293,16 +293,10 @@ async def run_trajectory_analysis(
         dashboard_opts,
     )
 
-    initial_state = {
-        "messages": [{"role": "human", "content": task}],
-        "task_id": system.thread_id,
-        "task_description": task,
-        "current_phase": "analyze",
-        "source_trajectories": thread_ids,
-        "analysis_results": [],
-        "skill_name": "",
-        "structured_output": None,
-    }
+    initial_state = AgentInput(
+        messages=[{"role": "human", "content": task}],
+        task_description=task,
+    )
 
     console.print(f"Task: {task[:200]}{'...' if len(task) > 200 else ''}")
     console.print()
@@ -421,7 +415,7 @@ def _build_trajectory_json(run_id: str, messages: list[JsonDict]) -> str:
     return json.dumps(span, ensure_ascii=False)
 
 
-def _normalize_structured_response(data: JsonDict) -> JsonDict:
+def _normalize_structured_response(data: dict[str, Any]) -> dict[str, Any]:
     """Convert agent-internal schema to eval-compatible format.
 
     Handles two transformations:
@@ -521,7 +515,7 @@ async def run_investigation_headless(
     )
 
     run_id = f"headless-{uuid.uuid4().hex[:12]}"
-    initial_state: dict[str, Any] = {"messages": [{"role": "human", "content": incident}]}
+    initial_state = AgentInput(messages=[{"role": "human", "content": incident}])
 
     # Resolve the real trajectory file path (set by builder)
     trajectory_file_path: str | None = None

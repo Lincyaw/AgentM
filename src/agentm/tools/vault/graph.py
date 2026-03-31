@@ -84,23 +84,17 @@ GROUP BY g.path
 def _collect_edges(
     conn: sqlite3.Connection,
     node_paths: set[str],
-    direction: str,
 ) -> list[TraverseEdge]:
     """Return directed edges between discovered nodes."""
     if not node_paths:
         return []
     placeholders = ",".join("?" for _ in node_paths)
     paths = list(node_paths)
-    if direction == "forward":
-        sql = f"SELECT source, target FROM links WHERE source IN ({placeholders}) AND target IN ({placeholders})"  # noqa: S608
-    elif direction == "backward":
-        sql = f"SELECT source, target FROM links WHERE target IN ({placeholders}) AND source IN ({placeholders})"  # noqa: S608
-    else:  # both
-        sql = (
-            f"SELECT source, target FROM links "  # noqa: S608
-            f"WHERE source IN ({placeholders}) AND target IN ({placeholders})"
-        )
-    params = paths + paths if direction != "both" else paths + paths
+    # All directions use the same query: return edges where both endpoints
+    # are within the discovered node set.  The forward/backward distinction
+    # is handled during BFS traversal, not edge collection.
+    sql = f"SELECT source, target FROM links WHERE source IN ({placeholders}) AND target IN ({placeholders})"  # noqa: S608
+    params = paths + paths
     rows = conn.execute(sql, params).fetchall()
     return [TraverseEdge(source=r[0], target=r[1]) for r in rows]
 
@@ -131,7 +125,7 @@ def traverse(
 
     nodes = sorted(node_map.values(), key=lambda n: (n.depth, n.path))
     node_paths = {n.path for n in nodes}
-    edges = _collect_edges(conn, node_paths, direction)
+    edges = _collect_edges(conn, node_paths)
 
     return TraverseResult(start=start, nodes=nodes, edges=edges)
 

@@ -14,9 +14,8 @@ from typing import Any, cast
 
 import tiktoken
 
-from agentm.config.schema import CompressionConfig, LoopDetectionConfig, ModelConfig
 from agentm.core.trajectory import TrajectoryCollector
-from agentm.harness.types import LoopContext, Message
+from agentm.harness.types import LoopContext, Message, ModelProtocol
 from agentm.harness.protocols import NoteReader
 
 logger = logging.getLogger(__name__)
@@ -172,14 +171,12 @@ def _format_messages_for_summary(messages: list[Message]) -> list[str]:
     return formatted
 
 
-def _summarize_messages(
+async def _summarize_messages(
     messages: list[Message],
     model: str,
-    model_config: ModelConfig | None = None,
+    llm: ModelProtocol,
 ) -> str:
     """Summarize a list of messages using an LLM, chunking if needed."""
-    from agentm.config.schema import create_chat_model
-
     formatted_lines = _format_messages_for_summary(messages)
     encoding = _get_encoding(model)
 
@@ -199,31 +196,29 @@ def _summarize_messages(
     if current_chunk:
         chunks.append("\n".join(current_chunk))
 
-    llm = create_chat_model(model=model, temperature=0, model_config=model_config)
-
-    def _invoke(prompt: str) -> str:
-        result = llm.invoke([{"role": "human", "content": prompt}])
+    async def _invoke(prompt: str) -> str:
+        result = await llm.ainvoke([{"role": "human", "content": prompt}])
         content = getattr(result, "content", "")
         if isinstance(content, list):
             return " ".join(str(part) for part in content)
         return str(content)
 
     if len(chunks) == 1:
-        return _invoke(f"{_SUMMARIZE_PROMPT}\n\nMessages:\n{chunks[0]}")
+        return await _invoke(f"{_SUMMARIZE_PROMPT}\n\nMessages:\n{chunks[0]}")
 
-    chunk_summaries = [
-        _invoke(
+    chunk_summaries: list[str] = []
+    for i, chunk in enumerate(chunks):
+        summary = await _invoke(
             f"{_SUMMARIZE_PROMPT}\n\n"
             f"This is part {i + 1} of {len(chunks)} of the execution history.\n\n"
             f"Messages:\n{chunk}"
         )
-        for i, chunk in enumerate(chunks)
-    ]
+        chunk_summaries.append(summary)
 
     combined = "\n\n---\n\n".join(
         f"[Part {i + 1}]\n{s}" for i, s in enumerate(chunk_summaries)
     )
-    return _invoke(
+    return await _invoke(
         "Combine the following partial summaries into one coherent, structured summary. "
         "Remove redundancy but preserve all key data points.\n\n"
         f"{combined}"
@@ -326,29 +321,22 @@ class CompressionMiddleware(MiddlewareBase):
 
     def __init__(
         self,
-        config: CompressionConfig,
-        model_config: ModelConfig | None = None,
-        context_window: int | None = None,
+        compression_model: str,
+        llm: ModelProtocol,
+        threshold_tokens: int,
+        preserve_latest_n: int = 2,
     ) -> None:
-        self._config = config
-        self._model_config = model_config
-        window = context_window or config.context_window
-        self._threshold_tokens = int(window * config.compression_threshold)
-        self._preserve_n = config.preserve_latest_n
-        self._encoding = _get_encoding(config.compression_model)
-
-    @classmethod
-    def from_config(
-        cls, config: CompressionConfig, model_config: ModelConfig | None = None
-    ) -> CompressionMiddleware:
-        """Create from a CompressionConfig instance."""
-        return cls(config, model_config=model_config)
+        self._compression_model = compression_model
+        self._llm = llm
+        self._threshold_tokens = threshold_tokens
+        self._preserve_n = preserve_latest_n
+        self._encoding = _get_encoding(compression_model)
 
     async def on_llm_start(
         self, messages: list[Message], ctx: LoopContext
     ) -> list[Message]:
         token_count = _count_tokens(
-            messages, model=self._config.compression_model, encoding=self._encoding
+            messages, model=self._compression_model, encoding=self._encoding
         )
 
         if token_count < self._threshold_tokens:
@@ -360,10 +348,10 @@ class CompressionMiddleware(MiddlewareBase):
         older = messages[: -self._preserve_n]
         recent = messages[-self._preserve_n :]
 
-        summary_text = _summarize_messages(
+        summary_text = await _summarize_messages(
             older,
-            model=self._config.compression_model,
-            model_config=self._model_config,
+            model=self._compression_model,
+            llm=self._llm,
         )
         summary_msg: Message = {
             "role": "system",
@@ -423,15 +411,6 @@ class LoopDetectionMiddleware(MiddlewareBase):
         self._think_tool_name = think_tool_name
         # Bounded deque for windowed loop detection — old entries auto-evict
         self._tool_call_keys: deque[str] = deque(maxlen=window_size or None)
-
-    @classmethod
-    def from_config(cls, config: LoopDetectionConfig) -> LoopDetectionMiddleware:
-        """Create from a LoopDetectionConfig instance."""
-        return cls(
-            threshold=config.threshold,
-            window_size=config.window_size,
-            think_stall_limit=config.think_stall_limit,
-        )
 
     async def on_llm_start(
         self, messages: list[Message], ctx: LoopContext
@@ -614,6 +593,7 @@ class DedupMiddleware(MiddlewareBase):
             return messages
 
         reminders: list[str] = []
+        ai_checked = 0
         for msg in reversed(messages):
             if msg_role(msg) == "ai":
                 for tc in msg_tool_calls(msg):
@@ -628,7 +608,9 @@ class DedupMiddleware(MiddlewareBase):
                         reminders.append(
                             f"- `{tc_name}({args_str})` -- you already have this result"
                         )
-                break  # Only check the last AI message
+                ai_checked += 1
+                if ai_checked >= 3:
+                    break
 
         if reminders:
             reminder_text = (

@@ -17,7 +17,7 @@ from agentm.tools._shared import enforce_token_budget
 from agentm.tools.observability._core import (
     INTERVAL_MAP,
     _query,
-    _safe_tool,
+    obs_safe_tool,
 )
 
 _VALID_GROUP_BY: frozenset[str] = frozenset({"service_name", "span_name"})
@@ -57,7 +57,7 @@ Args:
 def _make_query_trace_stats(period: str, doc: str):
     """Factory for creating period-specific trace stats query tools."""
 
-    @_safe_tool
+    @obs_safe_tool
     async def query_trace_stats(
         _request: str,
         group_by: str = "service_name",
@@ -89,7 +89,7 @@ def _make_query_trace_stats(period: str, doc: str):
             ORDER BY time_bucket, "{group_by}"
             LIMIT 200
         """
-        params = fc_params + tc_params + [200]
+        params = fc_params + tc_params
         rows = _query(sql, params)
         if not rows:
             return _empty_hint(
@@ -144,7 +144,7 @@ Returns:
 def _make_get_service_call_graph(period: str, doc: str):
     """Factory for creating period-specific service call graph tools."""
 
-    @_safe_tool
+    @obs_safe_tool
     async def get_service_call_graph(
         _request: str,
         start_time: str | None = None,
@@ -220,7 +220,7 @@ Returns:
 def _make_get_span_call_graph(period: str, doc: str):
     """Factory for creating period-specific span call graph tools."""
 
-    @_safe_tool
+    @obs_safe_tool
     async def get_span_call_graph(trace_id: str) -> str:
         file = _resolve_file("traces", period)
         sql = f"""

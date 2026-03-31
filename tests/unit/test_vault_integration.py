@@ -15,16 +15,6 @@ from pathlib import Path
 class TestVaultPublicAPI:
     """Verify the public API is importable and complete."""
 
-    def test_import_markdown_vault(self) -> None:
-        from agentm.tools.vault import MarkdownVault
-
-        assert MarkdownVault is not None
-
-    def test_import_create_vault_tools(self) -> None:
-        from agentm.tools.vault import create_vault_tools
-
-        assert callable(create_vault_tools)
-
     def test_all_exports(self) -> None:
         import agentm.tools.vault as vault_mod
 

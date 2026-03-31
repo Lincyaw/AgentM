@@ -6,10 +6,10 @@ import json
 
 from agentm.tools._shared import enforce_token_budget
 from agentm.tools.observability._builders import _resolve_file
-from agentm.tools.observability._core import _query, _safe_tool
+from agentm.tools.observability._core import _query, obs_safe_tool
 
 
-@_safe_tool
+@obs_safe_tool
 async def get_deployment_graph(
     request: str,  # noqa: ARG001  (LLM prompt parameter)
     service_name: str | None = None,

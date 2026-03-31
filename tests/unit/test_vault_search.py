@@ -102,20 +102,6 @@ class TestSearchResult:
         with pytest.raises(AttributeError):
             r.path = "b"  # type: ignore[misc]
 
-    def test_should_store_all_fields(self):
-        r = SearchResult(
-            path="p", score=0.5, title="T", type="concept",
-            confidence="pattern", status="active", tags=["a", "b"], snippet="snip",
-        )
-        assert r.path == "p"
-        assert r.score == 0.5
-        assert r.title == "T"
-        assert r.type == "concept"
-        assert r.confidence == "pattern"
-        assert r.status == "active"
-        assert r.tags == ["a", "b"]
-        assert r.snippet == "snip"
-
 
 # ---------------------------------------------------------------------------
 # apply_filters

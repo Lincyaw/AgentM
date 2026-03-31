@@ -12,10 +12,19 @@ import duckdb
 
 from agentm.tools._shared import (
     TOKEN_LIMIT,  # noqa: F401  (re-exported via observability/__init__)
+    safe_tool,
     serialize_for_json,
 )
 
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+def _ensure_tokenizers_parallel_disabled() -> None:
+    """Set TOKENIZERS_PARALLELISM=false if not already set.
+
+    Called lazily when creating a DuckDB connection, not at import time.
+    """
+    if "TOKENIZERS_PARALLELISM" not in os.environ:
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 
 # Thread-safe state via ContextVar, set by builder at startup
 _data_dir_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -62,12 +71,13 @@ def _get_obs_conn() -> duckdb.DuckDBPyConnection:
     """Return the cached in-memory DuckDB connection, creating one if needed.
 
     Observability queries embed parquet paths directly in SQL (via
-    ``read_parquet(...)``), so no table registration is required — a plain
+    ``read_parquet(...)``), so no table registration is required -- a plain
     in-memory connection is sufficient.
     """
     conn = _obs_conn_var.get()
     if conn is not None:
         return conn
+    _ensure_tokenizers_parallel_disabled()
     conn = duckdb.connect(":memory:")
     _obs_conn_var.set(conn)
     return conn
@@ -99,11 +109,15 @@ def _query(sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
         raise QueryError(error_msg) from e
 
 
-def _safe_tool(func):  # noqa: ANN001, ANN201
-    """Decorator that catches tool errors and returns JSON error instead of crashing."""
+def obs_safe_tool(func):  # noqa: ANN001, ANN201
+    """Decorator for observability tools.
+
+    Intercepts ``QueryError`` with observability-specific guidance, then
+    delegates all other exceptions to the shared ``safe_tool`` from ``_shared.py``.
+    """
 
     @functools.wraps(func)
-    async def wrapper(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+    async def _inner(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         try:
             return await func(*args, **kwargs)
         except QueryError as e:
@@ -117,16 +131,9 @@ def _safe_tool(func):  # noqa: ANN001, ANN201
                 ensure_ascii=False,
                 indent=2,
             )
-        except (RuntimeError, FileNotFoundError, ValueError) as e:
-            return json.dumps(
-                {
-                    "error": str(e),
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
 
-    return wrapper
+    # Wrap with shared safe_tool to catch any remaining exceptions
+    return safe_tool(_inner)
 
 
 def set_data_directory(directory: str) -> str:
