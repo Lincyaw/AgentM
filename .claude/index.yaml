@@ -230,3 +230,38 @@ concepts:
           - "Query filters: anomalous_only, related_to"
           - "LLM formatting: anomalous/healthy grouping"
           - "Immutability: frozen dataclasses"
+
+  tool_filter:
+    description: "Three-layer tool filtering: global disallowed (SDK safety, prevents worker recursion), agent-level disallowed_tools, whitelist. resolve_tools() pure function in harness/tool_filter.py. Wildcard ['*'] semantics. Fail-fast on unknown whitelist names."
+    design: "designs/tool-filter.md"
+    related_concepts: [sub_agent, agent_harness, sdk_consistency, tool_dedup, agent_definition]
+    plans: []
+    tasks: []
+
+  permission_mode:
+    description: "Four-mode permission system (DEFAULT, READONLY, SUPERVISED, UNRESTRICTED) enforced via PermissionMiddleware on_tool_call hook. Three-layer defense: prompt reinforcement + tool filtering + middleware interception. Tool.readonly annotation, PermissionPolicy with per-tool overrides, audit trail for SUPERVISED mode."
+    design: "designs/permission-mode.md"
+    related_concepts: [agent_harness, middleware_system, scenario_protocol, sub_agent, sdk_consistency, tool_filter]
+    plans: []
+    tasks: []
+
+  agent_memory:
+    description: "Per-agent persistent memory with three scopes (AGENT, SCENARIO, PROJECT). MemoryMiddleware injects memory prompt via on_llm_start. Dedicated tools (memory_read/write/edit/delete) with auto-maintained MEMORY.md index. Reuses vault parser module. Flat markdown storage, no SQLite."
+    design: "designs/agent-memory.md"
+    related_concepts: [memory_vault, agent_harness, middleware_system, sub_agent, configuration_system]
+    plans: []
+    tasks: []
+
+  agent_definition:
+    description: "Declarative AgentDefinition frozen dataclass replacing AgentConfig. Loaded from Markdown frontmatter (.md) or YAML. One file = one agent. Supports tools/disallowed_tools, task_type dispatch routing, Jinja2 system prompt. Source layering with full-replacement semantics."
+    design: "designs/agent-definition.md"
+    related_concepts: [sub_agent, configuration_system, builder, tool_filter, permission_mode, agent_memory]
+    plans: []
+    tasks: []
+
+  prompt_patterns:
+    description: "Catalog of 12 prompt design patterns for AgentM templates: role anchor, critical boundary markers, numbered sections, decision tables, good/bad contrast, anti-rationalization checklists, deterrence statements, purpose statements, forced output format, context isolation, three-layer permissions, per-turn reminders."
+    design: "designs/prompt-patterns.md"
+    related_concepts: [orchestrator, sub_agent, configuration_system, middleware_system, scenario_protocol]
+    plans: []
+    tasks: []
