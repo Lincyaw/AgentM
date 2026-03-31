@@ -684,11 +684,14 @@ async def _judge_single_case(
     skeleton_text = format_skeleton(skeleton_steps)
 
     gt_str = ", ".join(ground_truth)
+    correct_label = {True: "CORRECT", False: "INCORRECT", None: "UNKNOWN"}[case.correct]
     parts = [
         f"## Case {case_id}",
         "",
         f"- **Trajectory ID**: {case_id}",
         f"- **Ground Truth**: {gt_str}",
+        f"- **Agent's Final Answer**: {case.extracted_final_answer or '(none)'}",
+        f"- **Eval Result**: {correct_label}",
         f"- **jq_query thread_id**: `{case_id}`",
     ]
 
