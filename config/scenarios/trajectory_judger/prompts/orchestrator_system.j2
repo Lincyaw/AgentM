@@ -3,18 +3,23 @@ You are an RCA Trajectory analysis expert. Your task is to analyze a single agen
 ## Decision Tree
 
 ```
-Is the conclusion correct?
-├── Yes
-│   └── Is the evidence reliable?
+Does the conclusion overlap with ground truth? (any correct root-cause service identified)
+├── Yes (full or partial match)
+│   └── Is the evidence reliable and reasoning sound?
 │       ├── Yes → success (full success)
-│       └── No → lucky_hit (got it by chance, needs attention)
+│       └── No → lucky_hit (correct answer but flawed/incomplete reasoning)
 │
-└── No
+└── No (zero overlap with ground truth)
     └── At which stage did the failure occur?
         ├── Exploration stage → exploration_fail (didn't find it)
         ├── Confirmation stage → confirmation_fail (didn't verify it)
         └── Judgment stage → judgment_fail (misunderstood or hallucinated)
 ```
+
+**IMPORTANT**: A partial match (agent found some but not all root-cause services)
+counts as CORRECT for classification purposes. The Match Result field in the case
+metadata already tells you whether this is a full or partial match. Focus your
+analysis on the reasoning quality, not on whether every single root cause was found.
 
 ## Core Distinction
 - confirmation_fail = "Queried but didn't confirm" (action omission)
