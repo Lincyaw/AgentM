@@ -24,6 +24,7 @@ dependencies = [
     "sqlite-vec>=0.1.6",
     "mcp[cli]>=1.0",
     "pyarrow>=23.0.1",
+    "tqdm>=4.66.0",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +38,7 @@ dev = [
     "mypy>=1.0",
     "ruff>=0.4",
     "types-pyyaml>=6.0.12.20250915",
+    "types-tqdm>=4.66.0.20240417",
 ]
 
 [project.scripts]

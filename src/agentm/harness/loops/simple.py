@@ -6,6 +6,7 @@ No LangGraph dependency. Implements the cycle:
 Middleware hooks fire at each stage. Inbox is drained before each LLM call.
 stream() is the primary method. run() delegates to it.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -38,7 +39,17 @@ logger = logging.getLogger(__name__)
 
 # Exceptions considered transient and safe to retry.
 # Covers: rate limits (429), server errors (5xx), network issues.
-_RETRYABLE_SUBSTRINGS = ("rate limit", "429", "500", "502", "503", "504", "timed out", "timeout", "connection")
+_RETRYABLE_SUBSTRINGS = (
+    "rate limit",
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "timed out",
+    "timeout",
+    "connection",
+)
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -140,7 +151,9 @@ class SimpleAgentLoop(AgentLoop):
 
         # Build synthesis messages: output_prompt + conversation history + instruction
         non_system = [
-            m for m in messages if not (isinstance(m, dict) and m.get("role") == "system")
+            m
+            for m in messages
+            if not (isinstance(m, dict) and m.get("role") == "system")
         ]
         synth_messages: list[Message] = []
         if self._output_prompt:
@@ -156,11 +169,6 @@ class SimpleAgentLoop(AgentLoop):
                 output: JsonValue = cast(
                     JsonValue,
                     result.model_dump() if hasattr(result, "model_dump") else result,
-                )
-                logger.info(
-                    "synthesize attempt %d/%d succeeded",
-                    attempt + 1,
-                    1 + self._synthesize_retries,
                 )
                 return output
             except Exception as exc:
@@ -200,7 +208,11 @@ class SimpleAgentLoop(AgentLoop):
     @staticmethod
     def _extract_raw_from_error(exc: Exception) -> str:
         """Extract the raw LLM text from a structured-output failure."""
-        for e in (exc, getattr(exc, "__cause__", None), getattr(exc, "__context__", None)):
+        for e in (
+            exc,
+            getattr(exc, "__cause__", None),
+            getattr(exc, "__context__", None),
+        ):
             if e is not None and hasattr(e, "llm_output") and e.llm_output:
                 return str(e.llm_output)
         return str(exc)
@@ -214,10 +226,7 @@ class SimpleAgentLoop(AgentLoop):
             tool = self._tools.get(n)
             if tool is None:
                 available = ", ".join(sorted(self._tools))
-                return (
-                    f"Error: tool '{n}' does not exist. "
-                    f"Available tools: {available}"
-                )
+                return f"Error: tool '{n}' does not exist. Available tools: {available}"
             return await tool.ainvoke(a)
 
         chain: Callable[[str, dict[str, Any]], Awaitable[str]] = _actual_call
@@ -268,7 +277,8 @@ class SimpleAgentLoop(AgentLoop):
             user_messages: list[Message] = [{"role": "human", "content": input}]
         else:
             user_messages = [
-                m for m in input
+                m
+                for m in input
                 if not (isinstance(m, dict) and m.get("role") == "system")
             ]
         messages: list[Message] = [
@@ -282,74 +292,181 @@ class SimpleAgentLoop(AgentLoop):
 
         semaphore = asyncio.Semaphore(get_max_tool_concurrency())
         timeout_cm = (
-            asyncio.timeout(config.timeout) if config.timeout else contextlib.nullcontext()
+            asyncio.timeout(config.timeout)
+            if config.timeout
+            else contextlib.nullcontext()
         )
         try:
-         async with timeout_cm:
-          while config.max_steps is None or step < config.max_steps:
-            # 1. Drain inbox
-            while self._inbox:
-                injected = self._inbox.popleft()
-                messages.append(
-                    {"role": "human", "content": f"[Injected message]\n{injected}"}
-                )
-                yield AgentEvent(
-                    type="inject",
-                    agent_id=agent_id,
-                    step=step,
-                    data={"message": injected},
-                )
+            async with timeout_cm:
+                while config.max_steps is None or step < config.max_steps:
+                    # 1. Drain inbox
+                    while self._inbox:
+                        injected = self._inbox.popleft()
+                        messages.append(
+                            {
+                                "role": "human",
+                                "content": f"[Injected message]\n{injected}",
+                            }
+                        )
+                        yield AgentEvent(
+                            type="inject",
+                            agent_id=agent_id,
+                            step=step,
+                            data={"message": injected},
+                        )
 
-            # 2. Middleware: on_llm_start
-            ctx = LoopContext(
-                agent_id=agent_id,
-                step=step,
-                max_steps=config.max_steps,
-                tool_call_count=tool_call_count,
-                metadata=config.metadata,
-                total_input_tokens=total_input_tokens,
-                total_output_tokens=total_output_tokens,
-            )
-            prepared = messages
-            for mw in self._middleware:
-                prepared = await mw.on_llm_start(prepared, ctx)
+                    # 2. Middleware: on_llm_start
+                    ctx = LoopContext(
+                        agent_id=agent_id,
+                        step=step,
+                        max_steps=config.max_steps,
+                        tool_call_count=tool_call_count,
+                        metadata=config.metadata,
+                        total_input_tokens=total_input_tokens,
+                        total_output_tokens=total_output_tokens,
+                    )
+                    prepared = messages
+                    for mw in self._middleware:
+                        prepared = await mw.on_llm_start(prepared, ctx)
 
-            yield AgentEvent(type="llm_start", agent_id=agent_id, step=step)
+                    yield AgentEvent(type="llm_start", agent_id=agent_id, step=step)
 
-            # 3. Call LLM (with retry on transient errors)
-            response = await self._invoke_with_retry(prepared)
+                    # 3. Call LLM (with retry on transient errors)
+                    response = await self._invoke_with_retry(prepared)
 
-            # 3b. Accumulate token usage
-            usage = getattr(response, "usage_metadata", None)
-            if usage:
-                total_input_tokens += getattr(usage, "input_tokens", 0) or 0
-                total_output_tokens += getattr(usage, "output_tokens", 0) or 0
+                    # 3b. Accumulate token usage
+                    usage = getattr(response, "usage_metadata", None)
+                    if usage:
+                        total_input_tokens += getattr(usage, "input_tokens", 0) or 0
+                        total_output_tokens += getattr(usage, "output_tokens", 0) or 0
 
-            # 4. Middleware: on_llm_end
-            for mw in self._middleware:
-                response = await mw.on_llm_end(response, ctx)
+                    # 4. Middleware: on_llm_end
+                    for mw in self._middleware:
+                        response = await mw.on_llm_end(response, ctx)
 
-            messages.append(response)  # type: ignore[arg-type]
-            yield AgentEvent(
-                type="llm_end",
-                agent_id=agent_id,
-                step=step,
-                data={"content": getattr(response, "content", "")},
-            )
+                    messages.append(response)  # type: ignore[arg-type]
+                    yield AgentEvent(
+                        type="llm_end",
+                        agent_id=agent_id,
+                        step=step,
+                        data={"content": getattr(response, "content", "")},
+                    )
 
-            # 5. Check termination via should_terminate callback
-            tool_calls = getattr(response, "tool_calls", None) or []
-            terminate = self._should_terminate(response)
+                    # 5. Check termination via should_terminate callback
+                    tool_calls = getattr(response, "tool_calls", None) or []
+                    terminate = self._should_terminate(response)
 
-            if terminate:
-                # Terminate: skip tool execution even if tool_calls present
-                output = await self._synthesize_output(messages)
+                    if terminate:
+                        # Terminate: skip tool execution even if tool_calls present
+                        output = await self._synthesize_output(messages)
 
+                        result = AgentResult(
+                            agent_id=agent_id,
+                            status=AgentStatus.COMPLETED,
+                            output=output,
+                            steps=step + 1,
+                            tool_calls=tool_call_count,
+                        )
+                        yield AgentEvent(
+                            type="complete",
+                            agent_id=agent_id,
+                            step=step,
+                            data={"result": result},
+                        )
+                        return
+
+                    if not tool_calls:
+                        # should_terminate=False but no tool_calls: continue loop
+                        step += 1
+                        continue
+
+                    # 6. Execute tools — partition into concurrent/serial batches
+                    chain = self._build_tool_chain(ctx)
+
+                    async def _run_one(
+                        tc: dict[str, Any],
+                    ) -> tuple[dict[str, Any], str]:
+                        async with semaphore:
+                            n = tc.get("name", "")
+                            a = tc.get("args", {})
+                            r = await chain(n, a)
+                            return tc, r
+
+                    def _append_result(tc: dict[str, Any], result_str: str) -> None:
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "content": result_str,
+                                "tool_call_id": tc.get("id", ""),
+                            }
+                        )
+
+                    for is_concurrent, batch in partition_tool_calls(
+                        tool_calls, self._tools
+                    ):
+                        # Emit tool_start events for the batch
+                        for tc in batch:
+                            yield AgentEvent(
+                                type="tool_start",
+                                agent_id=agent_id,
+                                step=step,
+                                data={
+                                    "tool": tc.get("name", ""),
+                                    "args": tc.get("args", {}),
+                                },
+                            )
+
+                        if is_concurrent and len(batch) > 1:
+                            # Concurrent batch — gather with semaphore
+                            gather_results = await asyncio.gather(
+                                *[_run_one(tc) for tc in batch],
+                                return_exceptions=True,
+                            )
+                            for idx, item in enumerate(gather_results):
+                                if isinstance(item, BaseException):
+                                    tc_fallback = batch[idx]
+                                    name = tc_fallback.get("name", "?")
+                                    result_str = f"Error: tool '{name}' raised {item}"
+                                else:
+                                    tc_fallback, result_str = item
+                                    name = tc_fallback.get("name", "")
+                                tool_call_count += 1
+                                yield AgentEvent(
+                                    type="tool_end",
+                                    agent_id=agent_id,
+                                    step=step,
+                                    data={"tool": name, "result": result_str},
+                                )
+                                _append_result(tc_fallback, result_str)
+                        else:
+                            # Serial batch — execute one by one
+                            for tc in batch:
+                                name = str(tc.get("name", ""))
+                                args = cast(dict[str, Any], tc.get("args", {}))
+                                result_str = await chain(name, args)
+                                tool_call_count += 1
+                                yield AgentEvent(
+                                    type="tool_end",
+                                    agent_id=agent_id,
+                                    step=step,
+                                    data={"tool": name, "result": result_str},
+                                )
+                                _append_result(tc, result_str)
+
+                    step += 1
+
+                    # 7. Checkpoint (optional)
+                    if self._checkpoint_store:
+                        await self._checkpoint_store.save(
+                            agent_id, {"messages": messages, "step": step}
+                        )
+
+                # Max steps exhausted
                 result = AgentResult(
                     agent_id=agent_id,
-                    status=AgentStatus.COMPLETED,
-                    output=output,
-                    steps=step + 1,
+                    status=AgentStatus.FAILED,
+                    error=f"Max steps ({config.max_steps}) reached",
+                    steps=step,
                     tool_calls=tool_call_count,
                 )
                 yield AgentEvent(
@@ -358,103 +475,6 @@ class SimpleAgentLoop(AgentLoop):
                     step=step,
                     data={"result": result},
                 )
-                return
-
-            if not tool_calls:
-                # should_terminate=False but no tool_calls: continue loop
-                step += 1
-                continue
-
-            # 6. Execute tools — partition into concurrent/serial batches
-            chain = self._build_tool_chain(ctx)
-
-            async def _run_one(tc: dict[str, Any]) -> tuple[dict[str, Any], str]:
-                async with semaphore:
-                    n = tc.get("name", "")
-                    a = tc.get("args", {})
-                    r = await chain(n, a)
-                    return tc, r
-
-            def _append_result(tc: dict[str, Any], result_str: str) -> None:
-                messages.append(
-                    {
-                        "role": "tool",
-                        "content": result_str,
-                        "tool_call_id": tc.get("id", ""),
-                    }
-                )
-
-            for is_concurrent, batch in partition_tool_calls(
-                tool_calls, self._tools
-            ):
-                # Emit tool_start events for the batch
-                for tc in batch:
-                    yield AgentEvent(
-                        type="tool_start",
-                        agent_id=agent_id,
-                        step=step,
-                        data={"tool": tc.get("name", ""), "args": tc.get("args", {})},
-                    )
-
-                if is_concurrent and len(batch) > 1:
-                    # Concurrent batch — gather with semaphore
-                    gather_results = await asyncio.gather(
-                        *[_run_one(tc) for tc in batch],
-                        return_exceptions=True,
-                    )
-                    for idx, item in enumerate(gather_results):
-                        if isinstance(item, BaseException):
-                            tc_fallback = batch[idx]
-                            name = tc_fallback.get("name", "?")
-                            result_str = f"Error: tool '{name}' raised {item}"
-                        else:
-                            tc_fallback, result_str = item
-                            name = tc_fallback.get("name", "")
-                        tool_call_count += 1
-                        yield AgentEvent(
-                            type="tool_end",
-                            agent_id=agent_id,
-                            step=step,
-                            data={"tool": name, "result": result_str},
-                        )
-                        _append_result(tc_fallback, result_str)
-                else:
-                    # Serial batch — execute one by one
-                    for tc in batch:
-                        name = str(tc.get("name", ""))
-                        args = cast(dict[str, Any], tc.get("args", {}))
-                        result_str = await chain(name, args)
-                        tool_call_count += 1
-                        yield AgentEvent(
-                            type="tool_end",
-                            agent_id=agent_id,
-                            step=step,
-                            data={"tool": name, "result": result_str},
-                        )
-                        _append_result(tc, result_str)
-
-            step += 1
-
-            # 7. Checkpoint (optional)
-            if self._checkpoint_store:
-                await self._checkpoint_store.save(
-                    agent_id, {"messages": messages, "step": step}
-                )
-
-          # Max steps exhausted
-          result = AgentResult(
-              agent_id=agent_id,
-              status=AgentStatus.FAILED,
-              error=f"Max steps ({config.max_steps}) reached",
-              steps=step,
-              tool_calls=tool_call_count,
-          )
-          yield AgentEvent(
-              type="complete",
-              agent_id=agent_id,
-              step=step,
-              data={"result": result},
-          )
         except TimeoutError:
             result = AgentResult(
                 agent_id=agent_id,
