@@ -678,6 +678,19 @@ _CATEGORIES = [
 ]
 
 
+def _override_correctness(label: TrajectoryLabel) -> TrajectoryLabel:
+    """Override is_correct/is_partial with deterministic set-overlap logic.
+
+    Partial match (any overlap with ground truth) counts as correct.
+    """
+    agent_set = set(label.agent_conclusion)
+    gt_set = set(label.ground_truth)
+    overlap = agent_set & gt_set
+    label.is_correct = bool(overlap)
+    label.is_partial = bool(overlap) and overlap != gt_set
+    return label
+
+
 def _parse_label(
     output: object, case_id: str, ground_truth: list[str]
 ) -> TrajectoryLabel | None:
@@ -694,7 +707,7 @@ def _parse_label(
         output.setdefault("case_id", case_id)
         output.setdefault("ground_truth", ground_truth)
         try:
-            return TrajectoryLabel(**output)
+            return _override_correctness(TrajectoryLabel(**output))
         except pydantic.ValidationError as exc:
             logger.warning(
                 "Case %s: TrajectoryLabel validation failed: %s", case_id, exc
@@ -702,7 +715,7 @@ def _parse_label(
             return None
 
     if isinstance(output, TrajectoryLabel):
-        return output
+        return _override_correctness(output)
 
     logger.warning("Case %s: unexpected output type %s", case_id, type(output).__name__)
     return None
@@ -741,14 +754,25 @@ async def _judge_single_case(
     skeleton_text = format_skeleton(skeleton_steps)
 
     gt_str = ", ".join(ground_truth)
-    correct_label = {True: "CORRECT", False: "INCORRECT", None: "UNKNOWN"}[case.correct]
+    agent_services = parse_ground_truth(case.extracted_final_answer)
+    agent_set = set(agent_services)
+    gt_set = set(ground_truth)
+    overlap = agent_set & gt_set
+    if overlap == gt_set:
+        match_label = "CORRECT (full match)"
+    elif overlap:
+        match_label = (
+            f"CORRECT (partial: found {len(overlap)} of {len(gt_set)} root causes)"
+        )
+    else:
+        match_label = "INCORRECT (no overlap with ground truth)"
     parts = [
         f"## Case {case_id}",
         "",
         f"- **Trajectory ID**: {case_id}",
         f"- **Ground Truth**: {gt_str}",
         f"- **Agent's Final Answer**: {case.extracted_final_answer or '(none)'}",
-        f"- **Eval Result**: {correct_label}",
+        f"- **Match Result**: {match_label}",
         f"- **jq_query thread_id**: `{case_id}`",
     ]
 
