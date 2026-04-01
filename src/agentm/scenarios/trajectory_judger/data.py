@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 class EvidenceItem(BaseModel):
     """A single piece of evidence supporting the classification."""
 
-    step: int = Field(description="Step number in the trajectory where this evidence was observed")
+    step: int = Field(description="Step number in the trajectory where this evidence was observed. Use -1 for evidence about the overall trajectory or final output.")
     description: str = Field(description="What happened at this step")
     relevance: str = Field(default="", description="Why this evidence matters for classification")
 

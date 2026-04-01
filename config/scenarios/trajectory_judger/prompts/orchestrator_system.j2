@@ -66,3 +66,8 @@ Step N: tool_name(args) → response_preview (response_chars chars)
 
 ## Output Format
 You must output structured data conforming to the TrajectoryLabel schema, including the complete analysis process.
+
+**IMPORTANT — `evidence[].step` must be an integer.**
+- Use the actual step number (e.g., 3, 7, 15) when the evidence comes from a specific agent step.
+- Use `-1` when the evidence refers to the overall trajectory, the final output, or a pattern across multiple steps.
+- NEVER use strings like "all", "full_trajectory", "final_output", or "final_answer" — these will cause a validation error.
