@@ -20,6 +20,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict
 from rich.console import Console
 from rich.table import Table
+from tqdm import tqdm
 
 from agentm.builder import AgentSystemContext, build_system_context, create_agent_run
 from agentm.config.schema import ScenarioConfig, SkeletonConfig, SystemConfig
@@ -217,11 +218,15 @@ def _collect_from_directory(src: SourceConfig) -> list[CaseInfo]:
             continue
 
         correct = meta.get("correct")
-        if not _matches_filter(correct, meta.get("exp_id", ""), meta.get("agent_type", "") or "", src):
+        if not _matches_filter(
+            correct, meta.get("exp_id", ""), meta.get("agent_type", "") or "", src
+        ):
             continue
 
         source = meta.get("source", "") or ""
-        fault_ctx = _extract_fault_context({"difficulty": meta.get("difficulty")} if meta.get("difficulty") else None)
+        fault_ctx = _extract_fault_context(
+            {"difficulty": meta.get("difficulty")} if meta.get("difficulty") else None
+        )
         reasoning = _enrich_reasoning(meta.get("reasoning", "") or "", fault_ctx)
 
         cases.append(
@@ -239,13 +244,17 @@ def _collect_from_directory(src: SourceConfig) -> list[CaseInfo]:
                 source=source,
                 data_dir=_resolve_data_dir(source, resolve_fn),
                 fault_type=_get_difficulty_field(meta.get("difficulty"), "fault_type"),
-                fault_category=_get_difficulty_field(meta.get("difficulty"), "fault_category"),
-                difficulty=meta.get("difficulty") if isinstance(meta.get("difficulty"), dict) else None,
+                fault_category=_get_difficulty_field(
+                    meta.get("difficulty"), "fault_category"
+                ),
+                difficulty=meta.get("difficulty")
+                if isinstance(meta.get("difficulty"), dict)
+                else None,
             )
         )
 
     if src.limit:
-        cases = cases[:src.limit]
+        cases = cases[: src.limit]
     return cases
 
 
@@ -258,7 +267,11 @@ def _parse_trajectory_data(raw_trajectories: str | dict | None) -> list[dict]:
     """Parse trajectory data from DB into a list of trajectory dicts."""
     if raw_trajectories is None:
         return []
-    data = json.loads(raw_trajectories) if isinstance(raw_trajectories, str) else raw_trajectories
+    data = (
+        json.loads(raw_trajectories)
+        if isinstance(raw_trajectories, str)
+        else raw_trajectories
+    )
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
@@ -301,7 +314,9 @@ def _build_db_query(src: SourceConfig) -> tuple[str, list[Any]]:
     return query, params
 
 
-def _collect_from_db(src: SourceConfig, output_dir: str | None = None) -> list[CaseInfo]:
+def _collect_from_db(
+    src: SourceConfig, output_dir: str | None = None
+) -> list[CaseInfo]:
     """Query the eval DB and export cases to JSON files."""
     try:
         import psycopg2  # type: ignore[import-untyped]
@@ -314,7 +329,9 @@ def _collect_from_db(src: SourceConfig, output_dir: str | None = None) -> list[C
 
     db_url = os.environ.get("LLM_EVAL_DB_URL")
     if not db_url:
-        raise ValueError("LLM_EVAL_DB_URL environment variable is required for database source")
+        raise ValueError(
+            "LLM_EVAL_DB_URL environment variable is required for database source"
+        )
 
     query, params = _build_db_query(src)
 
@@ -431,12 +448,15 @@ def _should_include_tool(tool_name: str, config: SkeletonConfig) -> bool:
 
 
 def _extract_skeleton_from_json(
-    data: dict, config: SkeletonConfig,
+    data: dict,
+    config: SkeletonConfig,
 ) -> list[dict]:
     """Extract skeleton from DB-exported JSON (OpenAI message format)."""
     trajectories = data.get("trajectories")
     if isinstance(trajectories, list):
-        all_messages = [msg for traj in trajectories for msg in traj.get("messages", [])]
+        all_messages = [
+            msg for traj in trajectories for msg in traj.get("messages", [])
+        ]
     elif isinstance(data.get("messages"), list):
         all_messages = data["messages"]
     else:
@@ -474,18 +494,23 @@ def _extract_skeleton_from_json(
             tc_id = tc.get("id", "")
             response_content = response_map.get(tc_id, "")
 
-            steps.append({
-                "step": step_num,
-                "tool": tool_name,
-                "args": _truncate(args_str, config.max_args_length),
-                "response_preview": _truncate(response_content, config.response_preview_length, oneline=True),
-                "response_chars": len(response_content),
-            })
+            steps.append(
+                {
+                    "step": step_num,
+                    "tool": tool_name,
+                    "args": _truncate(args_str, config.max_args_length),
+                    "response_preview": _truncate(
+                        response_content, config.response_preview_length, oneline=True
+                    ),
+                    "response_chars": len(response_content),
+                }
+            )
     return steps
 
 
 def _extract_skeleton_from_jsonl(
-    path: Path, config: SkeletonConfig,
+    path: Path,
+    config: SkeletonConfig,
 ) -> list[dict]:
     """Extract skeleton from JSONL trajectory (TrajectoryCollector events)."""
     tool_calls: list[dict] = []
@@ -514,19 +539,27 @@ def _extract_skeleton_from_jsonl(
             continue
 
         args = data.get("args", {})
-        args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
+        args_str = (
+            json.dumps(args, ensure_ascii=False)
+            if isinstance(args, dict)
+            else str(args)
+        )
 
         tc_seq = tc_event.get("seq", -1)
         result_data = tool_results.get(tc_seq + 1, {})
         response_content = str(result_data.get("content", ""))
 
-        steps.append({
-            "step": i + 1,
-            "tool": tool_name,
-            "args": _truncate(args_str, config.max_args_length),
-            "response_preview": _truncate(response_content, config.response_preview_length, oneline=True),
-            "response_chars": len(response_content),
-        })
+        steps.append(
+            {
+                "step": i + 1,
+                "tool": tool_name,
+                "args": _truncate(args_str, config.max_args_length),
+                "response_preview": _truncate(
+                    response_content, config.response_preview_length, oneline=True
+                ),
+                "response_chars": len(response_content),
+            }
+        )
     return steps
 
 
@@ -560,7 +593,11 @@ def _load_injection_context(data_dir: str) -> str:
     display_config_raw = injection.get("display_config")
     if display_config_raw:
         try:
-            dc = json.loads(display_config_raw) if isinstance(display_config_raw, str) else display_config_raw
+            dc = (
+                json.loads(display_config_raw)
+                if isinstance(display_config_raw, str)
+                else display_config_raw
+            )
             ip = dc.get("injection_point", {})
             if ip:
                 target_parts = []
@@ -576,7 +613,13 @@ def _load_injection_context(data_dir: str) -> str:
                 parts.append(f"- **Duration**: {duration} min")
             mem_type = dc.get("mem_type")
             if mem_type is not None:
-                label = "Heap" if mem_type == 1 else "Stack" if mem_type == 2 else str(mem_type)
+                label = (
+                    "Heap"
+                    if mem_type == 1
+                    else "Stack"
+                    if mem_type == 2
+                    else str(mem_type)
+                )
                 parts.append(f"- **Memory Type**: {label}")
         except (json.JSONDecodeError, TypeError):
             pass
@@ -621,16 +664,26 @@ _CATEGORY_COLORS: dict[str, str] = {
     "confirmation_fail": "red",
     "judgment_fail": "red",
 }
-_CATEGORIES = ["success", "lucky_hit", "exploration_fail", "confirmation_fail", "judgment_fail"]
+_CATEGORIES = [
+    "success",
+    "lucky_hit",
+    "exploration_fail",
+    "confirmation_fail",
+    "judgment_fail",
+]
 
 
-def _parse_label(output: object, case_id: str, ground_truth: list[str]) -> TrajectoryLabel | None:
+def _parse_label(
+    output: object, case_id: str, ground_truth: list[str]
+) -> TrajectoryLabel | None:
     if output is None:
         return None
 
     if isinstance(output, dict):
         if "raw_text" in output and len(output) == 1:
-            logger.warning("Case %s: structured output failed, got raw_text fallback", case_id)
+            logger.warning(
+                "Case %s: structured output failed, got raw_text fallback", case_id
+            )
             return None
         output.setdefault("trajectory_id", case_id)
         output.setdefault("case_id", case_id)
@@ -638,7 +691,9 @@ def _parse_label(output: object, case_id: str, ground_truth: list[str]) -> Traje
         try:
             return TrajectoryLabel(**output)
         except pydantic.ValidationError as exc:
-            logger.warning("Case %s: TrajectoryLabel validation failed: %s", case_id, exc)
+            logger.warning(
+                "Case %s: TrajectoryLabel validation failed: %s", case_id, exc
+            )
             return None
 
     if isinstance(output, TrajectoryLabel):
@@ -669,7 +724,11 @@ async def _judge_single_case(
     if eval_tracker is not None and system.trajectory is not None:
         eval_tracker.update_trajectory_path(case_id, str(system.trajectory.file_path))  # type: ignore[attr-defined]
 
-    if broadcaster is not None and system.trajectory is not None and isinstance(broadcaster, _Broadcaster):
+    if (
+        broadcaster is not None
+        and system.trajectory is not None
+        and isinstance(broadcaster, _Broadcaster)
+    ):
         wire_trajectory_to_ws(system.trajectory, broadcaster, case_id)
 
     skeleton_config = ctx.scenario_config.orchestrator.skeleton or SkeletonConfig()
@@ -688,15 +747,7 @@ async def _judge_single_case(
         f"- **jq_query thread_id**: `{case_id}`",
     ]
 
-    logger.info(
-        "Case %s: data_dir=%r, reasoning=%r",
-        case_id, case.data_dir or "(empty)", (case.reasoning or "")[:80],
-    )
     injection_ctx = _load_injection_context(case.data_dir)
-    if injection_ctx:
-        logger.info("Case %s: loaded injection context from %s", case_id, case.data_dir)
-    elif case.data_dir:
-        logger.warning("Case %s: no injection.json found at %s", case_id, case.data_dir)
     if injection_ctx or case.reasoning:
         parts.extend(["", "## Fault Context", ""])
         if injection_ctx:
@@ -707,12 +758,14 @@ async def _judge_single_case(
             parts.append(f"**Eval Reasoning**: {case.reasoning}")
 
     if skeleton_steps:
-        parts.extend([
-            "",
-            "## Trajectory Skeleton",
-            "",
-            skeleton_text,
-        ])
+        parts.extend(
+            [
+                "",
+                "## Trajectory Skeleton",
+                "",
+                skeleton_text,
+            ]
+        )
 
     task_content = "\n".join(parts)
 
@@ -730,7 +783,9 @@ async def _judge_single_case(
 # ---------------------------------------------------------------------------
 
 
-def _print_summary(results: list[TrajectoryLabel], total: int, failed_count: int) -> None:
+def _print_summary(
+    results: list[TrajectoryLabel], total: int, failed_count: int
+) -> None:
     console.print()
     console.rule("Judgment Complete")
     console.print(f"Total cases: [cyan]{total}[/]")
@@ -760,7 +815,9 @@ def _print_summary(results: list[TrajectoryLabel], total: int, failed_count: int
     console.print(table)
 
 
-def _save_results(results: list[TrajectoryLabel], total: int, failed_count: int, output_path: str) -> None:
+def _save_results(
+    results: list[TrajectoryLabel], total: int, failed_count: int, output_path: str
+) -> None:
     output_data = {
         "total": total,
         "successful": len(results),
@@ -871,7 +928,9 @@ async def run_judging(
     if not dashboard_opts.enabled:
         system_config.debug.trajectory.enabled = False
 
-    console.print(f"Judging {len(cases)} cases with model: {scenario_config.orchestrator.model}")
+    console.print(
+        f"Judging {len(cases)} cases with model: {scenario_config.orchestrator.model}"
+    )
     if concurrency > 1:
         console.print(f"Concurrency: [cyan]{concurrency}[/]")
     console.print()
@@ -900,6 +959,7 @@ async def run_judging(
 
     results: list[TrajectoryLabel] = []
     failed_cases: list[str] = []
+    progress = tqdm(total=len(cases), desc="Judging", unit="case")
 
     def _record_result(
         label: TrajectoryLabel | None,
@@ -914,7 +974,9 @@ async def run_judging(
             if cache_file is not None:
                 _append_to_cache(cache_file, label)
             color = _CATEGORY_COLORS.get(label.category, "white")
-            console.print(f"    {tag}[{color}]{label.category}[/] — {label.reasoning[:80]}...")
+            console.print(
+                f"    {tag}[{color}]{label.category}[/] — {label.reasoning[:80]}..."
+            )
             if tracker is not None:
                 tracker.mark_completed(case.case_id)
         else:
@@ -926,7 +988,7 @@ async def run_judging(
     if concurrency <= 1:
         # Sequential execution
         for i, case in enumerate(cases, 1):
-            console.print(f"[{i}/{len(cases)}] Judging case {case.case_id}...")
+            progress.set_description(f"Judging case {case.case_id}")
 
             if tracker is not None:
                 tracker.mark_running(case.case_id, run_id=case.case_id)
@@ -938,6 +1000,7 @@ async def run_judging(
                 eval_tracker=tracker,
             )
             _record_result(label, case)
+            progress.update(1)
     else:
         # Concurrent execution with semaphore
         sem = asyncio.Semaphore(concurrency)
@@ -945,7 +1008,7 @@ async def run_judging(
 
         async def _run_case(idx: int, case: CaseInfo) -> None:
             async with sem:
-                console.print(f"[{idx}/{len(cases)}] Judging case {case.case_id}...")
+                progress.set_description(f"Judging case {case.case_id}")
 
                 if tracker is not None:
                     tracker.mark_running(case.case_id, run_id=case.case_id)
@@ -959,9 +1022,12 @@ async def run_judging(
 
                 async with lock:
                     _record_result(label, case, prefix=case.case_id)
+                    progress.update(1)
 
         tasks = [_run_case(i, case) for i, case in enumerate(cases, 1)]
         await asyncio.gather(*tasks)
+
+    progress.close()
 
     # Merge cached + new results for summary and output
     all_results = list(cached_results.values()) + results
@@ -970,7 +1036,12 @@ async def run_judging(
     _print_summary(all_results, total=total_cases, failed_count=len(failed_cases))
 
     if output_path and all_results:
-        _save_results(all_results, total=total_cases, failed_count=len(failed_cases), output_path=output_path)
+        _save_results(
+            all_results,
+            total=total_cases,
+            failed_count=len(failed_cases),
+            output_path=output_path,
+        )
         if cache_file is not None and not failed_cases:
             cache_file.unlink(missing_ok=True)
             logger.info("Cleaned up cache file %s (all cases completed)", cache_file)
