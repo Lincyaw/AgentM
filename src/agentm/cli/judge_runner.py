@@ -978,10 +978,6 @@ async def run_judging(
             results.append(label)
             if cache_file is not None:
                 _append_to_cache(cache_file, label)
-            color = _CATEGORY_COLORS.get(label.category, "white")
-            console.print(
-                f"    {tag}[{color}]{label.category}[/] — {label.reasoning[:80]}..."
-            )
             if tracker is not None:
                 tracker.mark_completed(case.case_id)
         else:
