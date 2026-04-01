@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import logging.handlers
 import os
+from pathlib import Path
 
 import typer
 from dotenv import load_dotenv
@@ -47,24 +49,48 @@ def debug(
     )
 
 
+def _setup_logging() -> None:
+    """Configure logging: file gets full detail, console shows only warnings.
+
+    Environment variables:
+        AGENTM_LOG_LEVEL  — file log level (default: INFO)
+        AGENTM_LOG_DIR    — log directory (default: logs/)
+    """
+    log_level = os.environ.get("AGENTM_LOG_LEVEL", "INFO").upper()
+    log_dir = Path(os.environ.get("AGENTM_LOG_DIR", "logs"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    fmt = "%(asctime)s %(levelname)s [%(name)s:%(lineno)d] %(message)s"
+    datefmt = "%H:%M:%S"
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+
+    # --- File handler: detailed logs, daily rotation, keep 14 days ---
+    file_handler = logging.handlers.TimedRotatingFileHandler(
+        log_dir / "agentm.log",
+        when="midnight",
+        backupCount=14,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(getattr(logging, log_level, logging.INFO))
+    file_handler.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+    root.addHandler(file_handler)
+
+    # --- Console handler: warnings and errors only (keep terminal clean) ---
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)
+    console_handler.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+    root.addHandler(console_handler)
+
+    # Suppress noisy third-party loggers
+    for name in ("httpx", "httpcore", "openai", "langchain", "langsmith", "aiosqlite"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def main() -> None:
     load_dotenv()
-    log_level = os.environ.get("AGENTM_LOG_LEVEL", "INFO").upper()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s [%(name)s:%(lineno)d] %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    # Apply custom log level only to agentm loggers
-    if log_level != "INFO":
-        logging.getLogger("agentm").setLevel(getattr(logging, log_level, logging.INFO))
-    # Suppress noisy third-party loggers
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
-    logging.getLogger("langchain").setLevel(logging.WARNING)
-    logging.getLogger("langsmith").setLevel(logging.WARNING)
-    logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+    _setup_logging()
     try:
         app()
     except AgentMError as e:
