@@ -338,11 +338,16 @@ def _collect_from_db(
     console.print("Connecting to eval database...")
     conn = psycopg2.connect(db_url)
     try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        console.print("Executing query...")
+        with conn.cursor(
+            name="judge_fetch", cursor_factory=psycopg2.extras.RealDictCursor
+        ) as cur:
+            cur.itersize = 200
             cur.execute(query, params)
             rows = cur.fetchall()
     finally:
         conn.close()
+    console.print(f"Fetched [cyan]{len(rows)}[/] rows from database.")
 
     if not rows:
         console.print("[yellow]No matching rows found in database.[/]")
