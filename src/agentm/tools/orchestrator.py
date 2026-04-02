@@ -14,14 +14,13 @@ from typing import Any, Callable, Protocol, runtime_checkable
 from agentm.harness.protocols import AgentLoop
 from agentm.harness.runtime import AgentRuntime
 from agentm.harness.types import AgentStatus, JsonValue, RunConfig
-from agentm.models.types import TaskType
 
 
 @runtime_checkable
 class WorkerFactory(Protocol):
     """Creates worker AgentLoop instances for a given task type."""
 
-    def create_worker(self, agent_id: str, task_type: TaskType) -> AgentLoop: ...
+    def create_worker(self, agent_id: str, task_type: str) -> AgentLoop: ...
 
 
 def create_orchestrator_tools(
@@ -50,7 +49,7 @@ def create_orchestrator_tools(
     async def dispatch_agent(
         agent_id: str,
         task: str,
-        task_type: TaskType,
+        task_type: str,
         metadata: dict[str, str] | None = None,
     ) -> str:
         """Launch a Sub-Agent. Auto-blocks when this is the only running task.
@@ -140,7 +139,7 @@ def create_orchestrator_tools(
         _ = request
 
         running_ids = runtime.get_running_ids()
-        wait_seconds = _calculate_wait(running_ids, check_tasks_wait_seconds)
+        wait_seconds = check_tasks_wait_seconds if running_ids else 0.0
 
         # Wait for any agent to complete (or timeout)
         if running_ids and wait_seconds > 0:
@@ -220,8 +219,3 @@ def create_orchestrator_tools(
         "abort_task": abort_task,
     }
     return tools
-
-
-def _calculate_wait(running_ids: list[str], default_wait: float = 600.0) -> float:
-    """Return *default_wait* when agents are running, else 0."""
-    return default_wait if running_ids else 0.0

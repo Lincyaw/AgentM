@@ -18,7 +18,7 @@ from agentm.harness.scenario import (
     list_scenarios,
     register_scenario,
 )
-from agentm.harness.tool import Tool, tool, tool_from_function
+from agentm.core.tool import Tool, tool, tool_from_function
 from agentm.harness.types import (
     AgentEvent,
     AgentInfo,

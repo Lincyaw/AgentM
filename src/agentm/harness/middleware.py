@@ -540,56 +540,25 @@ class TrajectoryMiddleware(MiddlewareBase):
 # ---------------------------------------------------------------------------
 
 
-class DedupTracker:
-    """Per-task cache for tool call deduplication.
-
-    Uses OrderedDict with FIFO eviction to bound memory.
-    """
-
-    def __init__(self, max_cache_size: int = 50) -> None:
-        self._cache: OrderedDict[str, str] = OrderedDict()
-        self._max_size = max_cache_size
-
-    def make_key(self, tool_name: str, args: dict[str, Any]) -> str:
-        return _make_tool_call_key(tool_name, args)
-
-    def has(self, key: str) -> bool:
-        return key in self._cache
-
-    def lookup(self, key: str) -> str | None:
-        return self._cache.get(key)
-
-    def store(self, key: str, result: str) -> None:
-        if key in self._cache:
-            self._cache.move_to_end(key)
-        self._cache[key] = result
-        while len(self._cache) > self._max_size:
-            self._cache.popitem(last=False)
-
-    @property
-    def size(self) -> int:
-        return len(self._cache)
-
-
 class DedupMiddleware(MiddlewareBase):
-    """Deduplicates tool calls via caching."""
+    """Deduplicates tool calls via caching.
+
+    Uses an internal OrderedDict with FIFO eviction to bound memory.
+    """
 
     def __init__(
         self,
         max_cache_size: int = 50,
         excluded_tools: frozenset[str] = frozenset({"think"}),
     ) -> None:
-        self._tracker = DedupTracker(max_cache_size=max_cache_size)
+        self._cache: OrderedDict[str, str] = OrderedDict()
+        self._max_cache_size = max_cache_size
         self._excluded = excluded_tools
-
-    @property
-    def tracker(self) -> DedupTracker:
-        return self._tracker
 
     async def on_llm_start(
         self, messages: list[Message], ctx: LoopContext
     ) -> list[Message]:
-        if self._tracker.size == 0:
+        if len(self._cache) == 0:
             return messages
 
         reminders: list[str] = []
@@ -602,7 +571,7 @@ class DedupMiddleware(MiddlewareBase):
                         continue
                     tc_args = tc.get("args", {})
                     key = _make_tool_call_key(tc_name, tc_args)
-                    if self._tracker.has(key):
+                    if key in self._cache:
                         # key is "name:args_json", extract args portion
                         args_str = key.partition(":")[2]
                         reminders.append(
@@ -632,13 +601,18 @@ class DedupMiddleware(MiddlewareBase):
         if tool_name in self._excluded:
             return await call_next(tool_name, tool_args)
 
-        key = self._tracker.make_key(tool_name, tool_args)
-        cached = self._tracker.lookup(key)
+        key = _make_tool_call_key(tool_name, tool_args)
+        cached = self._cache.get(key)
         if cached is not None:
             return cached
 
         result = await call_next(tool_name, tool_args)
-        self._tracker.store(key, result)
+        # Store with FIFO eviction
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        self._cache[key] = result
+        while len(self._cache) > self._max_cache_size:
+            self._cache.popitem(last=False)
         return result
 
 
@@ -713,6 +687,44 @@ class SkillMiddleware(MiddlewareBase):
         if not self._skills_section:
             return messages
         return inject_into_system_message(messages, self._skills_section)
+
+
+# ---------------------------------------------------------------------------
+# 7. DynamicContextMiddleware
+# ---------------------------------------------------------------------------
+
+
+def create_compression_middleware(
+    config: object,
+    model_config: object | None = None,
+) -> CompressionMiddleware:
+    """Create a CompressionMiddleware from a CompressionConfig.
+
+    Centralises the boilerplate of computing threshold tokens and creating
+    the compression LLM so that both ``builder.py`` and
+    ``WorkerLoopFactory`` can share the same logic.
+    """
+    from agentm.config.schema import CompressionConfig, ModelConfig, create_chat_model
+
+    # Runtime type narrowing — callers pass the concrete types but the
+    # signature uses ``object`` to avoid a circular import at module level.
+    assert isinstance(config, CompressionConfig)
+    if model_config is not None:
+        assert isinstance(model_config, ModelConfig)
+
+    window = config.context_window
+    threshold_tokens = int(window * config.compression_threshold)
+    compression_llm = create_chat_model(
+        model=config.compression_model,
+        temperature=0,
+        model_config=model_config,  # type: ignore[arg-type]
+    )
+    return CompressionMiddleware(
+        compression_model=config.compression_model,
+        llm=compression_llm,
+        threshold_tokens=threshold_tokens,
+        preserve_latest_n=config.preserve_latest_n,
+    )
 
 
 # ---------------------------------------------------------------------------
