@@ -755,17 +755,25 @@ async def _judge_single_case(
 
     gt_str = ", ".join(ground_truth)
     agent_services = parse_ground_truth(case.extracted_final_answer)
-    agent_set = set(agent_services)
-    gt_set = set(ground_truth)
-    overlap = agent_set & gt_set
-    if overlap == gt_set:
-        match_label = "CORRECT (full match)"
-    elif overlap:
-        match_label = (
-            f"CORRECT (partial: found {len(overlap)} of {len(gt_set)} root causes)"
-        )
+    if agent_services:
+        agent_set = set(agent_services)
+        gt_set = set(ground_truth)
+        overlap = agent_set & gt_set
+        if overlap == gt_set:
+            match_label = "CORRECT (full match)"
+        elif overlap:
+            match_label = (
+                f"CORRECT (partial: found {len(overlap)} of"
+                f" {len(gt_set)} root causes)"
+            )
+        else:
+            match_label = "INCORRECT (no overlap with ground truth)"
     else:
-        match_label = "INCORRECT (no overlap with ground truth)"
+        match_label = {
+            True: "CORRECT (per upstream evaluation)",
+            False: "INCORRECT (per upstream evaluation)",
+            None: "UNKNOWN",
+        }[case.correct]
     parts = [
         f"## Case {case_id}",
         "",
