@@ -82,6 +82,7 @@ class SimpleAgentLoop(AgentLoop):
         retry_max_attempts: int = 3,
         retry_initial_interval: float = 1.0,
         retry_backoff_factor: float = 2.0,
+        budget_excluded_tools: frozenset[str] | None = None,
     ) -> None:
         self._model = model
         self._tools = {t.name: t for t in tools}
@@ -98,6 +99,7 @@ class SimpleAgentLoop(AgentLoop):
         self._retry_max_attempts = retry_max_attempts
         self._retry_initial_interval = retry_initial_interval
         self._retry_backoff_factor = retry_backoff_factor
+        self._budget_excluded_tools = budget_excluded_tools or frozenset()
 
     def inject(self, message: str) -> None:
         """Inject a message into the agent's inbox.
@@ -430,7 +432,8 @@ class SimpleAgentLoop(AgentLoop):
                                 else:
                                     tc_fallback, result_str = item
                                     name = tc_fallback.get("name", "")
-                                tool_call_count += 1
+                                if name not in self._budget_excluded_tools:
+                                    tool_call_count += 1
                                 yield AgentEvent(
                                     type="tool_end",
                                     agent_id=agent_id,
@@ -444,7 +447,8 @@ class SimpleAgentLoop(AgentLoop):
                                 name = str(tc.get("name", ""))
                                 args = cast(dict[str, Any], tc.get("args", {}))
                                 result_str = await chain(name, args)
-                                tool_call_count += 1
+                                if name not in self._budget_excluded_tools:
+                                    tool_call_count += 1
                                 yield AgentEvent(
                                     type="tool_end",
                                     agent_id=agent_id,

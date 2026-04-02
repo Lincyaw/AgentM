@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agentm.harness.scenario import TrajectorySlot
 from agentm.harness.types import LoopContext
 from agentm.scenarios.rca.hypothesis_store import HypothesisStore
 from agentm.scenarios.rca.sanitizer.code_sanitizer import CodeSanitizer
@@ -89,13 +90,17 @@ def make_middleware(
         tool_call_budget: int | None = None,
         trajectory=None,
     ) -> SanitizerMiddleware:
+        traj_slot: TrajectorySlot | None = None
+        if trajectory is not None:
+            traj_slot = TrajectorySlot()
+            traj_slot.value = trajectory
         return SanitizerMiddleware(
             code_sanitizer=code_sanitizer,
             critic_sanitizer=critic,
             tracker=tracker,
             hypothesis_store=hypothesis_store,
             profile_store=profile_store,
-            trajectory=trajectory,
+            traj_slot=traj_slot,
             periodic_interval=periodic_interval,
             max_block_retries=max_block_retries,
             tool_call_budget=tool_call_budget,

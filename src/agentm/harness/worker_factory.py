@@ -110,6 +110,8 @@ class WorkerLoopFactory:
             len(middleware),
         )
 
+        budget_excluded = frozenset(config.execution.budget_excluded_tools)
+
         return SimpleAgentLoop(
             model=model_with_tools,
             tools=tools,
@@ -119,6 +121,7 @@ class WorkerLoopFactory:
             retry_max_attempts=retry_cfg.max_attempts,
             retry_initial_interval=retry_cfg.initial_interval,
             retry_backoff_factor=retry_cfg.backoff_factor,
+            budget_excluded_tools=budget_excluded or None,
         )
 
     # ------------------------------------------------------------------
@@ -194,25 +197,27 @@ class WorkerLoopFactory:
         if self._extra_middleware:
             middleware.extend(self._extra_middleware)
 
-        # Budget
-        budget_mw = BudgetMiddleware(
-            config.execution.max_steps,
-            tool_call_budget=config.execution.tool_call_budget,
-        )
-        middleware.append(budget_mw)
+        # Budget warnings
+        if config.execution.budget_warnings:
+            budget_mw = BudgetMiddleware(
+                config.execution.max_steps,
+                tool_call_budget=config.execution.tool_call_budget,
+            )
+            middleware.append(budget_mw)
 
         # Loop detection
         ld = config.execution.loop_detection
-        middleware.append(
-            LoopDetectionMiddleware(
-                threshold=ld.threshold,
-                window_size=ld.window_size,
-                think_stall_limit=ld.think_stall_limit,
+        if ld.enabled:
+            middleware.append(
+                LoopDetectionMiddleware(
+                    threshold=ld.threshold,
+                    window_size=ld.window_size,
+                    think_stall_limit=ld.think_stall_limit,
+                )
             )
-        )
 
         # Compression
-        if config.compression is not None:
+        if config.compression is not None and config.compression.enabled:
             from agentm.harness.middleware import create_compression_middleware
 
             middleware.append(
@@ -237,9 +242,11 @@ class WorkerLoopFactory:
             )
 
         # Tool result budget — truncate oversized tool results
-        middleware.append(ToolResultBudgetMiddleware(ToolResultBudgetConfig()))
+        if config.execution.tool_result_budget:
+            middleware.append(ToolResultBudgetMiddleware(ToolResultBudgetConfig()))
 
         # Micro-compact — clear stale tool results before LLM compression
-        middleware.append(MicroCompactMiddleware())
+        if config.execution.micro_compact:
+            middleware.append(MicroCompactMiddleware())
 
         return middleware
