@@ -185,20 +185,22 @@ sequenceDiagram
 
 ```
 on_llm_start (before LLM call):
-  ┌─ DynamicContextMW ─── replace system msg + inject state + assistant prefill
-  ├─ SkillMW ──────────── inject skill catalog into system msg
-  ├─ LoopDetectionMW ──── detect think-stall / repeated tool calls
-  ├─ TrajectoryMW ─────── record llm_start event
-  ├─ CompressionMW ────── summarize old messages if token > threshold
-  └─ SanitizerMW ──────── inject pending findings / finalize_blocked
+  1. DynamicContextMW ─── replace system msg with base prompt
+  2. LoopDetectionMW ──── detect think-stall / repeated tool calls (may inject human msg)
+  3. CompressionMW ────── summarize old messages if token > threshold (preserves system msgs)
+  4. SkillMW ──────────── inject skill catalog into system msg
+  5. SanitizerMW ──────── inject pending findings / finalize_blocked (may inject human msg)
+  6. TrajectoryMW ─────── record llm_start event
+  7. PrefillMW ─────────── append assistant prefill with state + round context (ALWAYS LAST)
 
 on_llm_end (after LLM response):
-  ┌─ DynamicContextMW ─── (pass-through)
-  ├─ SkillMW ──────────── (pass-through)
-  ├─ LoopDetectionMW ──── (pass-through)
-  ├─ TrajectoryMW ─────── record tool_call / llm_end event
-  ├─ CompressionMW ────── (pass-through)
-  └─ SanitizerMW ──────── pre_finalize / every_round / hypothesis_change / periodic checks
+  1. DynamicContextMW ─── (pass-through)
+  2. LoopDetectionMW ──── (pass-through)
+  3. CompressionMW ────── (pass-through)
+  4. SkillMW ──────────── (pass-through)
+  5. SanitizerMW ──────── pre_finalize / every_round / hypothesis_change / periodic checks
+  6. TrajectoryMW ─────── record tool_call / llm_end event
+  7. PrefillMW ─────────── (pass-through)
 
 on_tool_call (wraps tool execution):
   SanitizerMW → TrajectoryMW → LoopDetectionMW → actual tool
@@ -219,7 +221,34 @@ on_llm_start:
 on_tool_call:
   MicroCompactMW → ToolResultBudgetMW → DedupMW → TrajectoryMW → LoopDetectionMW → BudgetMW → actual tool
   (DedupMW returns cached result on hit, ToolResultBudgetMW truncates oversized results)
+  Note: vault_read/vault_search/vault_list excluded from tool_call_count by budget_excluded_tools
 ```
+
+## Ablation Switches
+
+All middleware can be toggled via `scenario.yaml` for ablation experiments:
+
+### Orchestrator (`orchestrator:`)
+
+| Feature | Config Key | Default | Notes |
+|---------|-----------|---------|-------|
+| Compression | `compression.enabled` | `true` | |
+| Loop detection | `loop_detection.enabled` | `true` | |
+| Sanitizer | `sanitizer.enabled` | `true` | |
+| Prefill | `prefill` | `true` | Assistant prefill with state context |
+| Skills | `skills: []` | (list) | Empty list disables |
+
+### Worker (`agents.worker.execution:`)
+
+| Feature | Config Key | Default | Notes |
+|---------|-----------|---------|-------|
+| Budget warnings | `budget_warnings` | `true` | Urgency messages when budget low |
+| Loop detection | `loop_detection.enabled` | `true` | |
+| Compression | `compression.enabled` | `true` | (if compression block present) |
+| Dedup | `dedup.enabled` | `true` | |
+| Tool result budget | `tool_result_budget` | `true` | Truncate oversized results |
+| Micro-compact | `micro_compact` | `true` | Clear stale tool results |
+| Budget-excluded tools | `budget_excluded_tools` | `[vault_read, ...]` | Tools not counted toward budget |
 
 ## Sanitizer Check Triggers
 

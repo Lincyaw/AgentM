@@ -32,6 +32,7 @@ from agentm.harness.middleware import (
     DynamicContextMiddleware,
     LoopDetectionMiddleware,
     MiddlewareBase,
+    PrefillMiddleware,
     SkillMiddleware,
     TrajectoryMiddleware,
 )
@@ -421,14 +422,14 @@ def _build_orchestrator_loop(
     # Hooks should never be None after __post_init__, but mypy doesn't know that
     hooks_safe = hooks or OrchestratorHooks()
 
+    # 1. Replace system message with base prompt (runs first)
     orch_middleware.append(DynamicContextMiddleware(
-        format_context_fn=format_context if callable(format_context) else lambda: "",
         base_system_prompt=static_system_prompt,
-        max_rounds=max_rounds,
     ))
 
-    if hooks_safe.think_stall_enabled:
-        ld = config.loop_detection
+    # 2. Loop detection (may inject human warning messages)
+    ld = config.loop_detection
+    if ld.enabled and hooks_safe.think_stall_enabled:
         orch_middleware.append(
             LoopDetectionMiddleware(
                 threshold=ld.threshold,
@@ -437,6 +438,7 @@ def _build_orchestrator_loop(
             )
         )
 
+    # 3. Compression (preserves system messages, compresses conversation)
     compression_cfg = config.compression
     if compression_cfg is not None and compression_cfg.enabled:
         from agentm.harness.middleware import create_compression_middleware
@@ -445,16 +447,26 @@ def _build_orchestrator_loop(
             create_compression_middleware(compression_cfg, resources.orch_model_config)
         )
 
+    # 4. Skill injection into system message
     if config.skills and resources.vault is not None:
         orch_middleware.append(SkillMiddleware(resources.vault, config.skills))
 
+    # 5. Scenario middleware (e.g. SanitizerMW — may inject human messages)
     if wiring.orchestrator_middleware:
         orch_middleware.extend(wiring.orchestrator_middleware)
 
+    # 6. Trajectory recording
     if resources.trajectory is not None:
         orch_middleware.append(
             TrajectoryMiddleware(resources.trajectory, agent_path=["orchestrator"])
         )
+
+    # 7. Prefill — MUST be last so it's never displaced by injected messages
+    if config.prefill:
+        orch_middleware.append(PrefillMiddleware(
+            format_context_fn=format_context if callable(format_context) else lambda: "",
+            max_rounds=max_rounds,
+        ))
 
     # Model
     model_plain = create_chat_model(
@@ -607,6 +619,9 @@ def create_agent_run(ctx: AgentSystemContext) -> AgentSystem:
         thread_id=thread_id,
         checkpoint_db_path=ctx._checkpoint_db_path,
     )
+
+    # Inject per-run trajectory into scenario wiring so closures see it
+    ctx.wiring.bind_trajectory(trajectory)
 
     runtime, worker_factory = _create_worker_infrastructure(
         ctx.scenario_config, resources, ctx.wiring,

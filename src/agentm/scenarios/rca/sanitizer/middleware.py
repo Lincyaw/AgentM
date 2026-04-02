@@ -11,8 +11,8 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from agentm.core.trajectory import TrajectoryCollector
 from agentm.harness.middleware import MiddlewareBase
+from agentm.harness.scenario import TrajectorySlot
 from agentm.harness.types import LoopContext, Message
 from agentm.scenarios.rca.hypothesis_store import HypothesisStore
 from agentm.scenarios.rca.sanitizer.code_sanitizer import CodeSanitizer
@@ -38,7 +38,7 @@ class SanitizerMiddleware(MiddlewareBase):
         tracker: InvestigationTracker,
         hypothesis_store: HypothesisStore,
         profile_store: ServiceProfileStore,
-        trajectory: TrajectoryCollector | None = None,
+        traj_slot: TrajectorySlot | None = None,
         periodic_interval: int = 5,
         max_block_retries: int = 3,
         tool_call_budget: int | None = None,
@@ -48,7 +48,7 @@ class SanitizerMiddleware(MiddlewareBase):
         self._tracker = tracker
         self._hypothesis_store = hypothesis_store
         self._profile_store = profile_store
-        self._trajectory = trajectory
+        self._traj_slot = traj_slot
         self._periodic_interval = periodic_interval
         self._max_block_retries = max_block_retries
         self._tool_call_budget = tool_call_budget
@@ -396,9 +396,10 @@ class SanitizerMiddleware(MiddlewareBase):
         findings: list[SanitizerFinding],
     ) -> None:
         """Record sanitizer findings to trajectory if available."""
-        if self._trajectory is None or not findings:
+        trajectory = self._traj_slot.value if self._traj_slot is not None else None
+        if trajectory is None or not findings:
             return
-        self._trajectory.record_sync(
+        trajectory.record_sync(
             event_type="sanitizer",
             agent_path=["orchestrator"],
             data={

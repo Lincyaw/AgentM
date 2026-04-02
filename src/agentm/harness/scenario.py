@@ -13,10 +13,11 @@ if TYPE_CHECKING:
 
     from agentm.config.schema import ScenarioConfig
     from agentm.core.tool_registry import ToolRegistry
-    from agentm.core.trajectory import TrajectoryCollector
     from agentm.harness.middleware import MiddlewareBase
     from agentm.core.tool import Tool
     from agentm.tools.vault.store import MarkdownVault
+
+from agentm.core.trajectory import TrajectoryCollector
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +48,25 @@ class OrchestratorHooks:
 def _empty_context() -> str:
     """Return an empty string. Used as default for ScenarioWiring.format_context."""
     return ""
+
+
+# ---------------------------------------------------------------------------
+# TrajectorySlot — mutable holder for late-bound trajectory
+# ---------------------------------------------------------------------------
+
+
+class TrajectorySlot:
+    """Mutable holder so closures created at setup time see the per-run trajectory.
+
+    Scenario tools and middleware capture this slot during ``setup()``.
+    The harness calls ``ScenarioWiring.bind_trajectory()`` in
+    ``create_agent_run()`` to fill it with the actual per-run collector.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self) -> None:
+        self.value: TrajectoryCollector | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -92,9 +112,16 @@ class ScenarioWiring:
     orchestrator_middleware: list[MiddlewareBase] = field(default_factory=list)
     worker_middleware: list[MiddlewareBase] = field(default_factory=list)
 
+    # Late-bound trajectory — filled by create_agent_run()
+    _trajectory_slot: TrajectorySlot = field(default_factory=TrajectorySlot)
+
     def __post_init__(self) -> None:
         if self.hooks is None:
             self.hooks = OrchestratorHooks()
+
+    def bind_trajectory(self, trajectory: TrajectoryCollector | None) -> None:
+        """Inject the per-run trajectory so closures created at setup time can use it."""
+        self._trajectory_slot.value = trajectory
 
 
 # ---------------------------------------------------------------------------

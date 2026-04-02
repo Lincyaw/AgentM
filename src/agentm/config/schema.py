@@ -153,6 +153,7 @@ class DedupConfig(BaseModel):
 class LoopDetectionConfig(BaseModel):
     """Loop detection configuration for an agent or orchestrator."""
 
+    enabled: bool = True
     threshold: int = 5
     window_size: int = 15
     think_stall_limit: int = 3
@@ -164,6 +165,10 @@ class ExecutionConfig(BaseModel):
     max_steps: int = 20
     timeout: int = 120
     tool_call_budget: int | None = None
+    budget_excluded_tools: list[str] = []
+    budget_warnings: bool = True
+    tool_result_budget: bool = True
+    micro_compact: bool = True
     dedup: DedupConfig | None = None
     retry: RetryConfig = RetryConfig()
     loop_detection: LoopDetectionConfig = LoopDetectionConfig()
@@ -271,6 +276,7 @@ class OrchestratorConfig(LLMConfig):
     disable_tool_binding: bool = (
         False  # set True for models that don't support bind_tools (e.g. MiniMax)
     )
+    prefill: bool = True
     retry: RetryConfig = RetryConfig()
     loop_detection: LoopDetectionConfig = LoopDetectionConfig()
     skeleton: SkeletonConfig | None = None

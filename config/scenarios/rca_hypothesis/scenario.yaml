@@ -76,6 +76,10 @@ agents:
       max_steps: 40
       timeout: 900
       tool_call_budget: 20
+      budget_excluded_tools:
+        - vault_read
+        - vault_search
+        - vault_list
       dedup:
         enabled: true
         max_cache_size: 50
