@@ -143,7 +143,7 @@ class TestTrajectoryAnalysisScenario:
 
     def test_hooks_are_default(self):
         from agentm.harness.scenario import SetupContext
-        from agentm.models.data import OrchestratorHooks
+        from agentm.harness.scenario import OrchestratorHooks
         from agentm.scenarios.trajectory_analysis.scenario import TrajectoryAnalysisScenario
 
         wiring = TrajectoryAnalysisScenario().setup(SetupContext(vault=None, trajectory=None, tool_registry=None))

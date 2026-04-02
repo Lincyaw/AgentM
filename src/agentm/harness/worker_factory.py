@@ -20,13 +20,12 @@ from agentm.core.trajectory import TrajectoryCollector
 from agentm.harness.loops.simple import SimpleAgentLoop
 from agentm.harness.middleware import (
     BudgetMiddleware,
-    CompressionMiddleware,
     DedupMiddleware,
     LoopDetectionMiddleware,
     TrajectoryMiddleware,
 )
 from agentm.harness.micro_compact import MicroCompactMiddleware
-from agentm.harness.tool import Tool
+from agentm.core.tool import Tool
 from agentm.harness.tool_filter import WORKER_DISALLOWED_TOOLS, resolve_tools
 from agentm.harness.tool_result_budget import ToolResultBudgetConfig, ToolResultBudgetMiddleware
 
@@ -214,21 +213,10 @@ class WorkerLoopFactory:
 
         # Compression
         if config.compression is not None:
-            comp = config.compression
-            window = comp.context_window
-            threshold_tokens = int(window * comp.compression_threshold)
-            compression_llm = create_chat_model(
-                model=comp.compression_model,
-                temperature=0,
-                model_config=self._model_config,
-            )
+            from agentm.harness.middleware import create_compression_middleware
+
             middleware.append(
-                CompressionMiddleware(
-                    compression_model=comp.compression_model,
-                    llm=compression_llm,
-                    threshold_tokens=threshold_tokens,
-                    preserve_latest_n=comp.preserve_latest_n,
-                )
+                create_compression_middleware(config.compression, self._model_config)
             )
 
         # Trajectory

@@ -9,7 +9,7 @@ tool-use contexts.
 """
 from __future__ import annotations
 
-from agentm.harness.tool import tool
+from agentm.core.tool import tool
 
 
 @tool

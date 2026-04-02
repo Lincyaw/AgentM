@@ -19,7 +19,7 @@ from typing import Any, cast
 from agentm.harness.cost_budget import BudgetExceeded
 from agentm.harness.middleware import MiddlewareBase
 from agentm.harness.protocols import AgentLoop, CheckpointStore
-from agentm.harness.tool import Tool
+from agentm.core.tool import Tool
 from agentm.harness.tool_concurrency import (
     get_max_tool_concurrency,
     partition_tool_calls,

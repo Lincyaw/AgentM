@@ -8,7 +8,7 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING, Literal, Optional
 
-from agentm.harness.tool import Tool, tool_from_function
+from agentm.core.tool import Tool, tool_from_function
 from agentm.scenarios.rca.hypothesis_store import HypothesisStore
 from agentm.scenarios.rca.service_profile import ServiceProfileStore
 
@@ -235,7 +235,7 @@ class RCAScenario:
     def setup(self, ctx: SetupContext) -> ScenarioWiring:
         """Wire up the RCA scenario: stores, tools, context, schemas, hooks."""
         from agentm.harness.scenario import ScenarioWiring
-        from agentm.models.data import OrchestratorHooks
+        from agentm.harness.scenario import OrchestratorHooks
         from agentm.scenarios.rca.answer_schemas import (
             DeepAnalyzeAnswer,
             ScoutAnswer,

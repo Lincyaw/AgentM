@@ -29,7 +29,6 @@ from agentm.core.trajectory import TrajectoryCollector
 from agentm.exceptions import ConfigError
 from agentm.harness.loops.simple import SimpleAgentLoop
 from agentm.harness.middleware import (
-    CompressionMiddleware,
     DynamicContextMiddleware,
     LoopDetectionMiddleware,
     MiddlewareBase,
@@ -37,11 +36,10 @@ from agentm.harness.middleware import (
     TrajectoryMiddleware,
 )
 from agentm.harness.runtime import AgentRuntime
-from agentm.harness.scenario import ScenarioWiring, SetupContext, get_scenario
-from agentm.harness.tool import Tool, tool_from_function
-from agentm.harness.types import AgentInput, AgentOutput, AgentResult, Message, RunConfig, ToolCallable
+from agentm.harness.scenario import OrchestratorHooks, ScenarioWiring, SetupContext, get_scenario
+from agentm.core.tool import Tool, ToolCallable, tool_from_function
+from agentm.harness.types import AgentInput, AgentOutput, AgentResult, Message, RunConfig
 from agentm.harness.worker_factory import WorkerLoopFactory
-from agentm.models.data import OrchestratorHooks
 from agentm.tools.orchestrator import create_orchestrator_tools
 from agentm.tools.vault.store import MarkdownVault
 
@@ -75,11 +73,6 @@ def _orchestrator_should_terminate(response: object) -> bool:
         return match.group(1).strip().lower() == "finalize"
     # No decision tag: fall back to no-tool-calls = terminate
     return not getattr(response, "tool_calls", None)
-
-
-def _default_hooks() -> OrchestratorHooks:
-    """Return default orchestrator hooks."""
-    return OrchestratorHooks()
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +419,7 @@ def _build_orchestrator_loop(
     orch_middleware: list[MiddlewareBase] = []
 
     # Hooks should never be None after __post_init__, but mypy doesn't know that
-    hooks_safe = hooks or _default_hooks()
+    hooks_safe = hooks or OrchestratorHooks()
 
     orch_middleware.append(DynamicContextMiddleware(
         format_context_fn=format_context if callable(format_context) else lambda: "",
@@ -446,20 +439,10 @@ def _build_orchestrator_loop(
 
     compression_cfg = config.compression
     if compression_cfg is not None and compression_cfg.enabled:
-        window = compression_cfg.context_window
-        threshold_tokens = int(window * compression_cfg.compression_threshold)
-        compression_llm = create_chat_model(
-            model=compression_cfg.compression_model,
-            temperature=0,
-            model_config=resources.orch_model_config,
-        )
+        from agentm.harness.middleware import create_compression_middleware
+
         orch_middleware.append(
-            CompressionMiddleware(
-                compression_model=compression_cfg.compression_model,
-                llm=compression_llm,
-                threshold_tokens=threshold_tokens,
-                preserve_latest_n=compression_cfg.preserve_latest_n,
-            )
+            create_compression_middleware(compression_cfg, resources.orch_model_config)
         )
 
     if config.skills and resources.vault is not None:
