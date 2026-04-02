@@ -48,6 +48,13 @@ orchestrator:
     prompt: "prompts/output/causal_graph.j2"
     schema_name: "CausalGraph"
 
+  sanitizer:
+    enabled: true
+    periodic_interval: 5
+    drift_window: 3
+    block_on: [C1, C2, J3]
+    warn_on: [E1, E2, E3, E4, C4, J2, P1]
+
   monitoring:
     summary_model: "gpt-5.1-mini"
     stream_mode: ["updates", "custom"]

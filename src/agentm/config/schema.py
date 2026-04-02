@@ -243,6 +243,20 @@ class SkeletonConfig(BaseModel):
     response_preview_length: int = 100
 
 
+class SanitizerConfig(BaseModel):
+    """Investigation sanitizer configuration."""
+
+    enabled: bool = False
+    critic_model: str = ""  # empty = use compression_model
+    periodic_interval: int = 5
+    drift_window: int = 3
+    drift_threshold: int = 3
+    max_block_retries: int = 3
+    block_on: list[str] = ["C1", "C2", "J3"]
+    warn_on: list[str] = ["E1", "E2", "E3", "E4", "C4", "J2", "P1"]
+    disable: list[str] = []
+
+
 class OrchestratorConfig(LLMConfig):
     """Orchestrator configuration within a scenario."""
 
@@ -260,6 +274,7 @@ class OrchestratorConfig(LLMConfig):
     retry: RetryConfig = RetryConfig()
     loop_detection: LoopDetectionConfig = LoopDetectionConfig()
     skeleton: SkeletonConfig | None = None
+    sanitizer: SanitizerConfig | None = None
 
 
 class SystemTypeConfig(BaseModel):

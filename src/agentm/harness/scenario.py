@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from pydantic import BaseModel
 
+    from agentm.config.schema import ScenarioConfig
     from agentm.core.tool_registry import ToolRegistry
     from agentm.core.trajectory import TrajectoryCollector
     from agentm.harness.middleware import MiddlewareBase
@@ -59,6 +60,7 @@ class SetupContext:
     vault: MarkdownVault | None
     trajectory: TrajectoryCollector | None
     tool_registry: ToolRegistry
+    config: ScenarioConfig | None = None
 
 
 # ---------------------------------------------------------------------------
