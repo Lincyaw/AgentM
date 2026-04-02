@@ -13,7 +13,9 @@ from agentm.scenarios.rca.hypothesis_store import HypothesisStore
 from agentm.scenarios.rca.service_profile import ServiceProfileStore
 
 if TYPE_CHECKING:
+    from agentm.config.schema import SanitizerConfig
     from agentm.core.trajectory import TrajectoryCollector
+    from agentm.harness.middleware import MiddlewareBase
     from agentm.harness.scenario import ScenarioWiring, SetupContext
 
 
@@ -222,6 +224,63 @@ def _build_rca_worker_tools(profile_store: "ServiceProfileStore") -> list[Tool]:
 
 
 # ---------------------------------------------------------------------------
+# Sanitizer wiring helper
+# ---------------------------------------------------------------------------
+
+def _build_sanitizer_middleware(
+    san_cfg: SanitizerConfig,
+    hypothesis_store: HypothesisStore,
+    profile_store: "ServiceProfileStore",
+    trajectory: TrajectoryCollector | None,
+) -> list[MiddlewareBase]:
+    """Build sanitizer middleware from config. Returns empty list if disabled."""
+    from agentm.scenarios.rca.sanitizer.code_sanitizer import CodeSanitizer
+    from agentm.scenarios.rca.sanitizer.critic_sanitizer import CriticSanitizer
+    from agentm.scenarios.rca.sanitizer.middleware import SanitizerMiddleware
+    from agentm.scenarios.rca.sanitizer.models import Severity
+    from agentm.scenarios.rca.sanitizer.tracker import InvestigationTracker
+
+    tracker = InvestigationTracker()
+
+    # Build severity map from config lists
+    severity_map: dict[str, Severity] = {}
+    for code in san_cfg.block_on:
+        severity_map[code] = Severity.BLOCK
+    for code in san_cfg.warn_on:
+        severity_map[code] = Severity.WARN
+    disabled = set(san_cfg.disable)
+
+    code_sanitizer = CodeSanitizer(
+        severity_map=severity_map,
+        disabled=disabled,
+        drift_window=san_cfg.drift_window,
+    )
+
+    critic_sanitizer: CriticSanitizer | None = None
+    if san_cfg.critic_model:
+        from agentm.config.schema import create_chat_model
+
+        critic_model = create_chat_model(model=san_cfg.critic_model, temperature=0)
+        critic_sanitizer = CriticSanitizer(
+            model=critic_model,
+            severity_map=severity_map,
+            disabled=disabled,
+        )
+
+    sanitizer_mw = SanitizerMiddleware(
+        code_sanitizer=code_sanitizer,
+        critic_sanitizer=critic_sanitizer,
+        tracker=tracker,
+        hypothesis_store=hypothesis_store,
+        profile_store=profile_store,
+        trajectory=trajectory,
+        periodic_interval=san_cfg.periodic_interval,
+        max_block_retries=san_cfg.max_block_retries,
+    )
+    return [sanitizer_mw]
+
+
+# ---------------------------------------------------------------------------
 # Scenario class
 # ---------------------------------------------------------------------------
 
@@ -264,6 +323,18 @@ class RCAScenario:
             think_stall_enabled=True,
         )
 
+        # Wire sanitizer middleware when config is available and enabled
+        sanitizer_middleware: list[MiddlewareBase] = []
+        san_cfg = (
+            ctx.config.orchestrator.sanitizer
+            if ctx.config is not None
+            else None
+        )
+        if san_cfg is not None and san_cfg.enabled:
+            sanitizer_middleware = _build_sanitizer_middleware(
+                san_cfg, hypothesis_store, profile_store, ctx.trajectory,
+            )
+
         return ScenarioWiring(
             orchestrator_tools=orch_tools,
             worker_tools=worker_tools,
@@ -275,4 +346,5 @@ class RCAScenario:
             },
             output_schema=CausalGraph,
             hooks=hooks,
+            orchestrator_middleware=sanitizer_middleware,
         )

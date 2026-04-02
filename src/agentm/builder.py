@@ -554,6 +554,7 @@ def build_system_context(
         vault=resources.vault,
         trajectory=None,  # No per-run trajectory in the shared context
         tool_registry=resources.tool_registry,
+        config=scenario_config,
     )
     wiring = scenario.setup(setup_ctx)
 
