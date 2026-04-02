@@ -14,9 +14,8 @@ from agentm.scenarios.rca.service_profile import ServiceProfileStore
 
 if TYPE_CHECKING:
     from agentm.config.schema import SanitizerConfig
-    from agentm.core.trajectory import TrajectoryCollector
     from agentm.harness.middleware import MiddlewareBase
-    from agentm.harness.scenario import ScenarioWiring, SetupContext
+    from agentm.harness.scenario import ScenarioWiring, SetupContext, TrajectorySlot
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +136,7 @@ def _build_profile_tools(profile_store: "ServiceProfileStore | None") -> list[To
 
 
 def _build_rca_orchestrator_tools(
-    trajectory: "TrajectoryCollector | None",
+    traj_slot: "TrajectorySlot",
     hypothesis_store: "HypothesisStore",
     profile_store: "ServiceProfileStore",
 ) -> list[Tool]:
@@ -172,8 +171,9 @@ def _build_rca_orchestrator_tools(
 
         content = f"Hypothesis {id} updated: {status} — {description}"
 
-        if trajectory is not None:
-            await trajectory.record(
+        traj = traj_slot.value
+        if traj is not None:
+            await traj.record(
                 event_type="hypothesis_update",
                 agent_path=["orchestrator"],
                 data={
@@ -195,8 +195,9 @@ def _build_rca_orchestrator_tools(
         if hypothesis_store is not None:
             hypothesis_store.remove(id)
 
-        if trajectory is not None:
-            await trajectory.record(
+        traj = traj_slot.value
+        if traj is not None:
+            await traj.record(
                 event_type="hypothesis_update",
                 agent_path=["orchestrator"],
                 data={
@@ -231,7 +232,7 @@ def _build_sanitizer_middleware(
     san_cfg: SanitizerConfig,
     hypothesis_store: HypothesisStore,
     profile_store: "ServiceProfileStore",
-    trajectory: TrajectoryCollector | None,
+    traj_slot: TrajectorySlot,
 ) -> list[MiddlewareBase]:
     """Build sanitizer middleware from config. Returns empty list if disabled."""
     from agentm.scenarios.rca.sanitizer.code_sanitizer import CodeSanitizer
@@ -273,7 +274,7 @@ def _build_sanitizer_middleware(
         tracker=tracker,
         hypothesis_store=hypothesis_store,
         profile_store=profile_store,
-        trajectory=trajectory,
+        traj_slot=traj_slot,
         periodic_interval=san_cfg.periodic_interval,
         max_block_retries=san_cfg.max_block_retries,
     )
@@ -293,7 +294,7 @@ class RCAScenario:
 
     def setup(self, ctx: SetupContext) -> ScenarioWiring:
         """Wire up the RCA scenario: stores, tools, context, schemas, hooks."""
-        from agentm.harness.scenario import ScenarioWiring
+        from agentm.harness.scenario import ScenarioWiring, TrajectorySlot
         from agentm.harness.scenario import OrchestratorHooks
         from agentm.scenarios.rca.answer_schemas import (
             DeepAnalyzeAnswer,
@@ -308,8 +309,11 @@ class RCAScenario:
         hypothesis_store = HypothesisStore()
         profile_store = ServiceProfileStore()
 
+        # Trajectory slot — filled later by create_agent_run via bind_trajectory
+        traj_slot = TrajectorySlot()
+
         orch_tools = _build_rca_orchestrator_tools(
-            ctx.trajectory, hypothesis_store, profile_store,
+            traj_slot, hypothesis_store, profile_store,
         )
         worker_tools = _build_rca_worker_tools(profile_store)
 
@@ -332,7 +336,7 @@ class RCAScenario:
         )
         if san_cfg is not None and san_cfg.enabled:
             sanitizer_middleware = _build_sanitizer_middleware(
-                san_cfg, hypothesis_store, profile_store, ctx.trajectory,
+                san_cfg, hypothesis_store, profile_store, traj_slot,
             )
 
         return ScenarioWiring(
@@ -347,4 +351,5 @@ class RCAScenario:
             output_schema=CausalGraph,
             hooks=hooks,
             orchestrator_middleware=sanitizer_middleware,
+            _trajectory_slot=traj_slot,
         )

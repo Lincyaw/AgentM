@@ -335,18 +335,24 @@ class CompressionMiddleware(MiddlewareBase):
     async def on_llm_start(
         self, messages: list[Message], ctx: LoopContext
     ) -> list[Message]:
+        # Separate system messages (prompts) from conversation history.
+        # System messages are never compressed — they contain instructions
+        # that must survive verbatim across all rounds.
+        system_msgs = [m for m in messages if msg_is_system(m)]
+        non_system = [m for m in messages if not msg_is_system(m)]
+
         token_count = _count_tokens(
-            messages, model=self._compression_model, encoding=self._encoding
+            non_system, model=self._compression_model, encoding=self._encoding
         )
 
         if token_count < self._threshold_tokens:
             return messages
 
-        if len(messages) <= self._preserve_n:
+        if len(non_system) <= self._preserve_n:
             return messages
 
-        older = messages[: -self._preserve_n]
-        recent = messages[-self._preserve_n :]
+        older = non_system[: -self._preserve_n]
+        recent = non_system[-self._preserve_n :]
 
         summary_text = await _summarize_messages(
             older,
@@ -363,7 +369,7 @@ class CompressionMiddleware(MiddlewareBase):
             len(older),
             token_count,
         )
-        return [summary_msg, *recent]
+        return [*system_msgs, summary_msg, *recent]
 
 
 # ---------------------------------------------------------------------------
@@ -733,26 +739,57 @@ def create_compression_middleware(
 
 
 class DynamicContextMiddleware(MiddlewareBase):
-    """Injects dynamic state context into the system prompt before each LLM call.
+    """Replaces the system message with the base prompt each round.
 
-    ``format_context_fn`` is always zero-arg. Scenarios bind their own state
-    via closures in ``Scenario.setup()``.
+    Does NOT add the assistant prefill — that is handled by
+    ``PrefillMiddleware`` which must run last in the stack.
+    """
+
+    def __init__(
+        self,
+        base_system_prompt: str,
+    ) -> None:
+        self._base_prompt = base_system_prompt
+
+    async def on_llm_start(
+        self, messages: list[Message], ctx: LoopContext
+    ) -> list[Message]:
+        # The system message is always at index 0 (set by SimpleAgentLoop).
+        # Replace it directly instead of filtering all messages.
+        non_system_start = 1 if messages and msg_is_system(messages[0]) else 0
+        return [
+            {"role": "system", "content": self._base_prompt},
+            *messages[non_system_start:],
+        ]
+
+
+# ---------------------------------------------------------------------------
+# 8. PrefillMiddleware
+# ---------------------------------------------------------------------------
+
+
+class PrefillMiddleware(MiddlewareBase):
+    """Appends assistant prefill with dynamic state as the LAST message.
+
+    MUST be the last middleware in the ``on_llm_start`` chain so that
+    the prefill is never displaced by human-message injections from
+    LoopDetectionMiddleware, SanitizerMiddleware, etc.
     """
 
     def __init__(
         self,
         format_context_fn: Callable[[], str],
-        base_system_prompt: str,
         max_rounds: int = 30,
     ) -> None:
         self._format_fn = format_context_fn
-        self._base_prompt = base_system_prompt
         self._max_rounds = max_rounds
 
     async def on_llm_start(
         self, messages: list[Message], ctx: LoopContext
     ) -> list[Message]:
         context_text = self._format_fn()
+        if not context_text:
+            return messages
 
         round_num = ctx.step + 1
 
@@ -769,20 +806,9 @@ class DynamicContextMiddleware(MiddlewareBase):
                 "Consider finalizing if evidence is sufficient."
             )
 
-        # The system message is always at index 0 (set by SimpleAgentLoop).
-        # Replace it directly instead of filtering all messages.
-        non_system_start = 1 if messages and msg_is_system(messages[0]) else 0
-        new_messages: list[Any] = [
-            {"role": "system", "content": self._base_prompt},
-            *messages[non_system_start:],
-        ]
-
-        if context_text:
-            prefill = (
-                f"<current_state>\n{context_text}\n</current_state>"
-                f"\n\n<round_context>\n{round_block}\n</round_context>"
-                "\n\nBased on the current state, my next action:"
-            )
-            new_messages.append({"role": "assistant", "content": prefill})
-
-        return new_messages
+        prefill = (
+            f"<current_state>\n{context_text}\n</current_state>"
+            f"\n\n<round_context>\n{round_block}\n</round_context>"
+            "\n\nBased on the current state, my next action:"
+        )
+        return [*messages, {"role": "assistant", "content": prefill}]
