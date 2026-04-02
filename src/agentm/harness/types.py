@@ -6,8 +6,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, TypedDict
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from langchain_core.messages import BaseMessage
 
 
@@ -48,14 +46,8 @@ JsonValue: TypeAlias = "str | int | float | bool | None | list[JsonValue] | dict
 # Message type - supports dict and LangChain BaseMessage
 Message: TypeAlias = "dict[str, JsonValue] | BaseMessage"
 
-# Tool result type - all tools return strings (JSON-encoded)
-ToolResult: TypeAlias = str
-
 # JSON-compatible dict
 JsonDict: TypeAlias = "dict[str, JsonValue]"
-
-# Tool callable type - async or sync function returning ToolResult
-ToolCallable: TypeAlias = "Callable[..., ToolResult | Awaitable[ToolResult]]"
 
 
 # ---------------------------------------------------------------------------

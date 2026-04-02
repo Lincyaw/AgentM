@@ -14,9 +14,29 @@ if TYPE_CHECKING:
     from agentm.core.tool_registry import ToolRegistry
     from agentm.core.trajectory import TrajectoryCollector
     from agentm.harness.middleware import MiddlewareBase
-    from agentm.harness.tool import Tool
-    from agentm.models.data import OrchestratorHooks
+    from agentm.core.tool import Tool
     from agentm.tools.vault.store import MarkdownVault
+
+
+# ---------------------------------------------------------------------------
+# OrchestratorHooks — behavior customization returned by scenarios
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OrchestratorHooks:
+    """Orchestrator behavior customization points returned by strategy.
+
+    Strategies return an instance of this dataclass from ``orchestrator_hooks()``
+    to control think-stall detection and synthesize retry behavior.
+    Default values provide sensible generic behavior.
+    """
+
+    # Think-stall detection
+    think_stall_enabled: bool = True
+
+    # Synthesize retries
+    synthesize_max_retries: int = 2
 
 
 # ---------------------------------------------------------------------------
@@ -72,9 +92,7 @@ class ScenarioWiring:
 
     def __post_init__(self) -> None:
         if self.hooks is None:
-            from agentm.models.data import OrchestratorHooks as _Hooks
-
-            self.hooks = _Hooks()
+            self.hooks = OrchestratorHooks()
 
 
 # ---------------------------------------------------------------------------
