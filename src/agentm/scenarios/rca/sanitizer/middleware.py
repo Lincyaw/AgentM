@@ -56,8 +56,14 @@ class SanitizerMiddleware(MiddlewareBase):
         # Internal state
         self._pending_findings: list[SanitizerFinding] = []
         self._pending_block_message: str | None = None
-        self._block_attempts: dict[tuple[str, str], int] = {}
+        # P0 fix: track finalize attempts globally (not per-hypothesis)
+        self._finalize_block_counts: dict[str, int] = {}
         self._hypothesis_changed: bool = False
+        # P0 fix: track whether pre_finalize ran this round to skip
+        # redundant every_round/periodic/hypothesis_change checks
+        self._finalize_checked_this_round: bool = False
+        # P1 fix: de-duplicate findings within a single injection cycle
+        self._seen_finding_keys: set[tuple[str, str]] = set()
 
     # ------------------------------------------------------------------
     # on_tool_call — observe and record events
@@ -74,7 +80,6 @@ class SanitizerMiddleware(MiddlewareBase):
 
         if tool_name == "dispatch_agent":
             task_type = tool_args.get("task_type", "")
-            # Extract hypothesis_id from task text (best effort: look for H-prefixed IDs)
             hypothesis_id = _extract_hypothesis_id(tool_args.get("task", ""))
             self._tracker.record(
                 round=current_round,
@@ -163,8 +168,13 @@ class SanitizerMiddleware(MiddlewareBase):
         content = getattr(response, "content", "") or ""
         content_modified = False
 
+        # Reset per-round flags
+        self._finalize_checked_this_round = False
+
         # Check for finalize decision
         if _FINALIZE_RE.search(content):
+            self._finalize_checked_this_round = True
+
             # Run pre_finalize checks
             code_findings = self._code_sanitizer.check(
                 "pre_finalize",
@@ -187,7 +197,7 @@ class SanitizerMiddleware(MiddlewareBase):
             # Apply budget-aware degradation
             code_findings = self._apply_budget_degradation(code_findings, ctx)
 
-            # Apply retry degradation
+            # Apply retry degradation (P0 fix: global per-code counter)
             code_findings = self._apply_retry_degradation(code_findings)
 
             # Record to trajectory
@@ -203,57 +213,74 @@ class SanitizerMiddleware(MiddlewareBase):
                 self._pending_block_message = self._format_finalize_blocked(
                     block_findings
                 )
-                # Add non-block findings as regular findings
-                self._pending_findings.extend(
-                    f for f in code_findings if f.severity != Severity.BLOCK
-                )
+                # Add non-block findings as regular findings (deduplicated)
+                for f in code_findings:
+                    if f.severity != Severity.BLOCK:
+                        self._add_finding(f)
             else:
-                # Finalize allowed — reset block attempts for previously tracked codes
-                self._block_attempts.clear()
+                # Finalize allowed — reset block attempt counters
+                self._finalize_block_counts.clear()
                 # Still report non-block findings
-                self._pending_findings.extend(code_findings)
+                for f in code_findings:
+                    self._add_finding(f)
 
-        # Every round checks
-        every_round_findings = self._code_sanitizer.check(
-            "every_round",
-            self._hypothesis_store,
-            self._profile_store,
-            self._tracker,
-            ctx,
-        )
-        if every_round_findings:
-            self._pending_findings.extend(every_round_findings)
-            self._record_findings("every_round", every_round_findings)
-
-        # Hypothesis change checks
-        if self._hypothesis_changed:
-            hyp_findings = self._code_sanitizer.check(
-                "hypothesis_change",
+        # P0 fix: skip every_round/periodic/hypothesis_change when
+        # pre_finalize already ran all checks this round
+        if not self._finalize_checked_this_round:
+            # Every round checks
+            every_round_findings = self._code_sanitizer.check(
+                "every_round",
                 self._hypothesis_store,
                 self._profile_store,
                 self._tracker,
                 ctx,
             )
-            if hyp_findings:
-                self._pending_findings.extend(hyp_findings)
-                self._record_findings("hypothesis_change", hyp_findings)
+            if every_round_findings:
+                for f in every_round_findings:
+                    self._add_finding(f)
+                self._record_findings("every_round", every_round_findings)
+
+            # Hypothesis change checks — P1 fix: skip C1 here, it only
+            # matters at pre_finalize time (avoids premature BLOCK when
+            # a hypothesis is confirmed before verify can possibly complete)
+            if self._hypothesis_changed:
+                hyp_findings = self._code_sanitizer.check(
+                    "hypothesis_change",
+                    self._hypothesis_store,
+                    self._profile_store,
+                    self._tracker,
+                    ctx,
+                )
+                if hyp_findings:
+                    # Filter out C1 from hypothesis_change — it's only
+                    # meaningful at pre_finalize when verify has had time
+                    hyp_findings = [
+                        f for f in hyp_findings if f.code != "C1"
+                    ]
+                    for f in hyp_findings:
+                        self._add_finding(f)
+                    self._record_findings("hypothesis_change", hyp_findings)
+                self._hypothesis_changed = False
+
+            # Periodic checks
+            if (
+                self._periodic_interval > 0
+                and current_round % self._periodic_interval == 0
+            ):
+                periodic_findings = self._code_sanitizer.check(
+                    "periodic",
+                    self._hypothesis_store,
+                    self._profile_store,
+                    self._tracker,
+                    ctx,
+                )
+                if periodic_findings:
+                    for f in periodic_findings:
+                        self._add_finding(f)
+                    self._record_findings("periodic", periodic_findings)
+        else:
+            # Still consume the hypothesis_changed flag to avoid stale state
             self._hypothesis_changed = False
-
-        # Periodic checks
-        if (
-            self._periodic_interval > 0
-            and current_round % self._periodic_interval == 0
-        ):
-            periodic_findings = self._code_sanitizer.check(
-                "periodic",
-                self._hypothesis_store,
-                self._profile_store,
-                self._tracker,
-                ctx,
-            )
-            if periodic_findings:
-                self._pending_findings.extend(periodic_findings)
-                self._record_findings("periodic", periodic_findings)
 
         # Apply content modification if needed
         if content_modified:
@@ -272,7 +299,8 @@ class SanitizerMiddleware(MiddlewareBase):
         if self._critic_sanitizer is not None:
             async_findings = self._critic_sanitizer.collect_async_results()
             if async_findings:
-                self._pending_findings.extend(async_findings)
+                for f in async_findings:
+                    self._add_finding(f)
                 self._record_findings("async_critic", async_findings)
 
         # Build injection message from block message + regular findings
@@ -284,10 +312,24 @@ class SanitizerMiddleware(MiddlewareBase):
             parts.append(self._format_findings(self._pending_findings))
             self._pending_findings = []
 
+        # Reset dedup set for next injection cycle
+        self._seen_finding_keys.clear()
+
         if parts:
             return [*messages, {"role": "human", "content": "\n".join(parts)}]
 
         return messages
+
+    # ------------------------------------------------------------------
+    # Finding deduplication (P1 fix)
+    # ------------------------------------------------------------------
+
+    def _add_finding(self, finding: SanitizerFinding) -> None:
+        """Add a finding to pending list, deduplicating by (code, target_key)."""
+        key = (finding.code, _extract_target_key(finding))
+        if key not in self._seen_finding_keys:
+            self._seen_finding_keys.add(key)
+            self._pending_findings.append(finding)
 
     # ------------------------------------------------------------------
     # Finding formatting
@@ -357,16 +399,19 @@ class SanitizerMiddleware(MiddlewareBase):
         self,
         findings: list[SanitizerFinding],
     ) -> list[SanitizerFinding]:
-        """Degrade BLOCK findings after max_block_retries consecutive blocks."""
+        """Degrade BLOCK findings after max_block_retries consecutive blocks.
+
+        P0 fix: uses code-only key instead of (code, target_key) so that
+        creating new hypotheses does not reset the counter.
+        """
         result: list[SanitizerFinding] = []
         for f in findings:
             if f.severity != Severity.BLOCK:
                 result.append(f)
                 continue
 
-            target_key = _extract_target_key(f)
-            key = (f.code, target_key)
-            count = self._block_attempts.get(key, 0)
+            code = f.code
+            count = self._finalize_block_counts.get(code, 0)
 
             if count >= self._max_block_retries:
                 result.append(
@@ -381,7 +426,7 @@ class SanitizerMiddleware(MiddlewareBase):
                     )
                 )
             else:
-                self._block_attempts[key] = count + 1
+                self._finalize_block_counts[code] = count + 1
                 result.append(f)
 
         return result
@@ -457,9 +502,12 @@ def _try_record_completion(
     *task_type* and *hypothesis_id* come from the original dispatch_agent
     tool_args so that downstream checks (C1, C2, P1) can match completions
     to specific hypotheses and task types.
+
+    P1 fix: uses word-boundary regex instead of bare ``in`` to avoid
+    false matches like "NOT SUPPORTED" matching "SUPPORTED".
     """
     for verdict in ("SUPPORTED", "CONTRADICTED", "INCONCLUSIVE"):
-        if verdict in result:
+        if re.search(r"\b" + verdict + r"\b", result):
             tracker.record(
                 round=current_round,
                 event_type="task_complete",

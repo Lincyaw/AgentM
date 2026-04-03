@@ -385,8 +385,14 @@ def check_incomplete_chain(
     findings: list[SanitizerFinding] = []
     for profile in anomalous:
         svc = profile.service_name.lower()
-        # Use word-boundary match to avoid "a" matching inside "database"
-        if not re.search(r"\b" + re.escape(svc) + r"\b", search_text):
+        # Normalize separators (-, _, .) to spaces for fuzzy matching so
+        # "payment-service" matches "payment_service" or "payment service"
+        svc_normalized = re.sub(r"[-_.]", " ", svc)
+        search_normalized = re.sub(r"[-_.]", " ", search_text)
+        if (
+            svc not in search_text
+            and svc_normalized not in search_normalized
+        ):
             findings.append(
                 _make_finding(
                     "J3",
@@ -494,7 +500,7 @@ def check_profile_write_without_read(
 _TRIGGER_MAP: dict[str, list[str]] = {
     "every_round": ["J2", "P3"],
     "periodic": ["E1", "E2", "E3"],
-    "hypothesis_change": ["C1", "C2", "C4", "P1"],
+    "hypothesis_change": ["C1", "C2", "P1"],
     "pre_finalize": [
         "E1", "E2", "E3", "E4", "C1", "C2", "C4", "J2", "J3", "P1", "P3",
     ],

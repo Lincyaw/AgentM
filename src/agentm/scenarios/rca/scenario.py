@@ -277,6 +277,7 @@ def _build_sanitizer_middleware(
         traj_slot=traj_slot,
         periodic_interval=san_cfg.periodic_interval,
         max_block_retries=san_cfg.max_block_retries,
+        tool_call_budget=san_cfg.tool_call_budget,
     )
     return [sanitizer_mw]
 
