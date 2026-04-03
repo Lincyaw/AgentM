@@ -91,10 +91,15 @@ class Tool:
             }
             args = {k: v for k, v in args.items() if k in allowed}
 
-        if asyncio.iscoroutinefunction(self.func):
-            result = await self.func(**args)
-        else:
-            result = self.func(**args)
+        try:
+            if asyncio.iscoroutinefunction(self.func):
+                result = await self.func(**args)
+            else:
+                result = self.func(**args)
+        except TypeError as exc:
+            # Return argument errors (missing/wrong params) as a tool
+            # result so the LLM can self-correct instead of crashing.
+            return f"Error calling {self.name}: {exc}"
         return result if isinstance(result, str) else str(result)
 
     def to_openai_schema(self) -> dict[str, Any]:
