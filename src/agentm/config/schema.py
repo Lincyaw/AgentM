@@ -257,6 +257,7 @@ class SanitizerConfig(BaseModel):
     drift_window: int = 3
     drift_threshold: int = 3
     max_block_retries: int = 3
+    tool_call_budget: int | None = None
     block_on: list[str] = ["C1", "C2", "J3"]
     warn_on: list[str] = ["E1", "E2", "E3", "E4", "C4", "J2", "P1"]
     disable: list[str] = []

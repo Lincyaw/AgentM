@@ -68,7 +68,29 @@ class Tool:
     concurrency_safe: bool = False
 
     async def ainvoke(self, args: dict[str, Any]) -> str:
-        """Execute the tool. Normalizes return to str."""
+        """Execute the tool. Normalizes return to str.
+
+        Filters out any extra keyword arguments not present in the
+        function signature so that LLM-hallucinated parameters don't
+        cause a TypeError.
+        """
+        sig = inspect.signature(self.func)
+        params = sig.parameters
+        # Allow all args through if the function accepts **kwargs
+        if not any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        ):
+            allowed = {
+                name
+                for name, p in params.items()
+                if p.kind
+                in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                )
+            }
+            args = {k: v for k, v in args.items() if k in allowed}
+
         if asyncio.iscoroutinefunction(self.func):
             result = await self.func(**args)
         else:
