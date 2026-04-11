@@ -519,7 +519,8 @@ def _extract_skeleton_from_jsonl(
 ) -> list[dict]:
     """Extract skeleton from JSONL trajectory (TrajectoryCollector events)."""
     tool_calls: list[dict] = []
-    tool_results: dict[int, dict] = {}
+    tool_results_by_call_id: dict[str, dict] = {}
+    tool_results_unmatched: list[dict] = []
 
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -534,7 +535,12 @@ def _extract_skeleton_from_jsonl(
             if et == "tool_call":
                 tool_calls.append(event)
             elif et == "tool_result":
-                tool_results[event.get("seq", -1)] = event.get("data", {})
+                result_data = event.get("data", {})
+                tcid = str(result_data.get("tool_call_id", "") or "")
+                if tcid:
+                    tool_results_by_call_id[tcid] = result_data
+                else:
+                    tool_results_unmatched.append(result_data)
 
     steps: list[dict] = []
     for i, tc_event in enumerate(tool_calls):
@@ -550,9 +556,15 @@ def _extract_skeleton_from_jsonl(
             else str(args)
         )
 
-        tc_seq = tc_event.get("seq", -1)
-        result_data = tool_results.get(tc_seq + 1, {})
-        response_content = str(result_data.get("content", ""))
+        tcid = str(data.get("tool_call_id", "") or "")
+        result_data: dict = {}
+        if tcid:
+            result_data = tool_results_by_call_id.get(tcid, {})
+        elif tool_results_unmatched:
+            result_data = tool_results_unmatched.pop(0)
+        response_content = str(
+            result_data.get("result", result_data.get("content", ""))
+        )
 
         steps.append(
             {

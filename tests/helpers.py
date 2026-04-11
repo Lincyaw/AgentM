@@ -36,6 +36,11 @@ class MockAIResponse:
     content: str = "done"
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     type: str = "ai"
+    additional_kwargs: dict[str, Any] = field(default_factory=dict)
+    response_metadata: dict[str, Any] = field(default_factory=dict)
+    usage_metadata: dict[str, Any] = field(default_factory=dict)
+    content_blocks: list[Any] = field(default_factory=list)
+    text: str = ""
 
 
 class MockModel:
@@ -223,10 +228,16 @@ class FakeWorkerFactory:
     ) -> None:
         self._loop = loop
         self._result_output = result_output
-        self.create_calls: list[tuple[str, str]] = []
+        self.create_calls: list[tuple[str, str, str | None]] = []
 
-    def create_worker(self, agent_id: str, task_type: str) -> FakeAgentLoop:
-        self.create_calls.append((agent_id, task_type))
+    def create_worker(
+        self,
+        agent_id: str,
+        task_type: str,
+        *,
+        task_id: str | None = None,
+    ) -> FakeAgentLoop:
+        self.create_calls.append((agent_id, task_type, task_id))
         if self._loop is not None:
             return self._loop
         if self._result_output is not self._UNSET:

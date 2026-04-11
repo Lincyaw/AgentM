@@ -1,5 +1,12 @@
 {
   "mcpServers": {
+    "debugmcp": {
+      "type": "streamableHttp",
+      "url": "http://localhost:3001/mcp",
+      "timeout": 180,
+      "disabled": false,
+      "autoApprove": []
+    },
     "vault": {
       "type": "stdio",
       "command": "uv",

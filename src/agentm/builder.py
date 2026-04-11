@@ -495,6 +495,7 @@ def _build_orchestrator_loop(
 
     return SimpleAgentLoop(
         model=model_with_tools,
+        synthesis_model=model_plain,
         tools=tools,
         system_prompt="",  # Managed by DynamicContextMiddleware
         middleware=orch_middleware,

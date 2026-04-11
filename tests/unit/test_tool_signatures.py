@@ -23,7 +23,13 @@ def _extract_literal_values(annotation) -> set[str] | None:
 
 
 class _MockWorkerFactory:
-    def create_worker(self, agent_id: str, task_type: str):
+    def create_worker(
+        self,
+        agent_id: str,
+        task_type: str,
+        *,
+        task_id: str | None = None,
+    ):
         return None
 
 
@@ -72,6 +78,7 @@ def test_worker_factory_create_worker_requires_agent_id_and_task_type() -> None:
     sig = inspect.signature(WorkerLoopFactory.create_worker)
     assert "agent_id" in sig.parameters
     assert "task_type" in sig.parameters
+    assert "task_id" in sig.parameters
 
 
 def test_inject_and_abort_tool_contracts_are_async_and_have_required_ids(orch_tools) -> None:
