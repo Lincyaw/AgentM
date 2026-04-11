@@ -20,7 +20,13 @@ from agentm.harness.types import AgentStatus, JsonValue, RunConfig
 class WorkerFactory(Protocol):
     """Creates worker AgentLoop instances for a given task type."""
 
-    def create_worker(self, agent_id: str, task_type: str) -> AgentLoop: ...
+    def create_worker(
+        self,
+        agent_id: str,
+        task_type: str,
+        *,
+        task_id: str | None = None,
+    ) -> AgentLoop: ...
 
 
 def create_orchestrator_tools(
@@ -73,11 +79,14 @@ def create_orchestrator_tools(
             await _worker_semaphore.acquire()
 
         unique_id = f"{agent_id}-{uuid.uuid4().hex[:8]}"
-        loop = worker_factory.create_worker(agent_id, task_type)
-
         run_metadata: dict[str, JsonValue] = {"task_type": task_type, "original_agent_id": agent_id}
         if metadata:
             run_metadata.update(metadata)
+        loop = worker_factory.create_worker(
+            agent_id,
+            task_type,
+            task_id=unique_id,
+        )
 
         handle = await runtime.spawn(
             unique_id,

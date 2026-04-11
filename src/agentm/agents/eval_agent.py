@@ -23,7 +23,6 @@ Registration::
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -37,16 +36,23 @@ from rcabench_platform.v3.sdk.llm_eval.trajectory.schema import Trajectory
 
 logger = logging.getLogger(__name__)
 
-_EMPTY_CAUSAL_GRAPH_RESPONSE = json.dumps(
-    {
-        "nodes": [],
-        "edges": [],
-        "root_causes": [],
-        "component_to_service": {},
-    },
-    ensure_ascii=False,
-)
 
+def _bridge_agentm_logging_to_llm_eval() -> None:
+    """Mirror AgentM logs into llm_eval's handlers during eval runs."""
+    llm_eval_logger = logging.getLogger("llm_eval")
+    if not llm_eval_logger.handlers:
+        return
+
+    agentm_logger = logging.getLogger("agentm")
+    if getattr(agentm_logger, "_llm_eval_bridge_installed", False):
+        return
+
+    agentm_logger.setLevel(logging.DEBUG)
+    for handler in llm_eval_logger.handlers:
+        agentm_logger.addHandler(handler)
+    # Avoid duplicate emission if some callers also configure root handlers.
+    agentm_logger.propagate = False
+    setattr(agentm_logger, "_llm_eval_bridge_installed", True)
 
 class AgentMAgent(BaseAgent):
     """Hypothesis-driven multi-agent RCA agent (AgentM).
@@ -70,6 +76,8 @@ class AgentMAgent(BaseAgent):
         exp_id: str | None = None,
         **_kwargs: Any,
     ) -> None:
+        _bridge_agentm_logging_to_llm_eval()
+
         self._scenario_dir = scenario_dir
         self._config_path = config_path
         self._max_steps = max_steps
@@ -143,7 +151,7 @@ class AgentMAgent(BaseAgent):
             )
         except Exception as exc:
             logger.exception(
-                "headless run failed; fallback to empty CausalGraph "
+                "headless run failed "
                 "(data_dir=%s, scenario_dir=%s, config_path=%s, max_steps=%s, timeout=%s, exp_id=%s)",
                 data_dir,
                 self._scenario_dir,
@@ -152,18 +160,7 @@ class AgentMAgent(BaseAgent):
                 timeout,
                 self._exp_id,
             )
-            return AgentResult(
-                response=_EMPTY_CAUSAL_GRAPH_RESPONSE,
-                trajectory=None,
-                metadata={
-                    "run_id": None,
-                    "exp_id": self._exp_id,
-                    "trajectory_file": None,
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                    "fallback_reason": "exception",
-                },
-            )
+            raise
 
         metadata: dict[str, Any] = {
             "run_id": run_id,
@@ -173,14 +170,14 @@ class AgentMAgent(BaseAgent):
 
         response = response_json
         if not response:
-            logger.warning(
-                "headless returned empty structured response; fallback to empty CausalGraph "
+            error_msg = (
+                "headless returned empty structured response "
                 "(run_id=%s, data_dir=%s)",
-                run_id,
-                data_dir,
             )
-            response = _EMPTY_CAUSAL_GRAPH_RESPONSE
-            metadata["fallback_reason"] = "empty_response"
+            logger.error(error_msg, run_id, data_dir)
+            raise RuntimeError(
+                f"headless returned empty structured response (run_id={run_id}, data_dir={data_dir})"
+            )
 
         trajectory = None
         if trajectory_json:

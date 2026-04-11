@@ -54,6 +54,35 @@ class CachingToolMiddleware:
         return self._cached
 
 
+class CaptureToolContextMiddleware:
+    """Records tool-call metadata seen by middleware."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def on_llm_start(self, messages: list[Any], ctx: Any) -> list[Any]:
+        return messages
+
+    async def on_llm_end(self, response: Any, ctx: Any) -> Any:
+        return response
+
+    async def on_tool_call(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        call_next: Any,
+        ctx: Any,
+    ) -> str:
+        self.calls.append(
+            {
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "tool_call_id": ctx.metadata.get("tool_call_id"),
+            }
+        )
+        return await call_next(tool_name, tool_args)
+
+
 class MockFailThenSucceedStructuredModel:
     """Structured model that fails N times before succeeding."""
 
@@ -253,6 +282,132 @@ async def test_stream_emits_expected_event_sequence_for_single_tool_turn() -> No
 
 
 @pytest.mark.asyncio
+async def test_tool_call_id_is_available_in_tool_middleware_context() -> None:
+    tool = MockTool("mytool", result="result")
+    capture = CaptureToolContextMiddleware()
+    model = MockModel([
+        MockAIResponse(
+            content="",
+            tool_calls=[{"name": "mytool", "args": {"x": 1}, "id": "tc-1"}],
+        ),
+        MockAIResponse(content="final"),
+    ])
+    loop = _make_loop(model=model, tools=[tool], middleware=[capture])
+
+    result = await loop.run("Do work")
+
+    assert result.status == AgentStatus.COMPLETED
+    assert capture.calls == [
+        {
+            "tool_name": "mytool",
+            "tool_args": {"x": 1},
+            "tool_call_id": "tc-1",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_empty_final_response_logs_diagnostic_and_returns_failed_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    model = MockModel([
+        MockAIResponse(
+            content="",
+            response_metadata={
+                "finish_reason": "stop",
+                "model_name": "debug-model",
+                "id": "resp-empty-1",
+            },
+        )
+    ])
+    loop = _make_loop(model=model)
+
+    with caplog.at_level("ERROR"):
+        result = await loop.run("Do work")
+
+    assert result.status == AgentStatus.FAILED
+    assert result.error == "Synthesis produced empty non-schema output"
+    assert "empty llm response before termination" in caplog.text
+    assert "debug-model" in caplog.text
+    assert "resp-empty-1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_trajectory_middleware_records_empty_llm_response(tmp_path) -> None:
+    from agentm.core.trajectory import TrajectoryCollector
+    from agentm.harness.middleware import TrajectoryMiddleware
+
+    trajectory = TrajectoryCollector(run_id="run-empty", output_dir=str(tmp_path))
+    model = MockModel([
+        MockAIResponse(
+            content="",
+            response_metadata={
+                "finish_reason": "stop",
+                "model_name": "debug-model",
+                "id": "resp-empty-2",
+            },
+        )
+    ])
+    loop = _make_loop(
+        model=model,
+        middleware=[TrajectoryMiddleware(trajectory, agent_path=["orchestrator"])],
+    )
+
+    result = await loop.run("Do work")
+
+    assert result.status == AgentStatus.FAILED
+    empty_event = next(
+        event for event in trajectory.events if event.get("event_type") == "llm_end_empty"
+    )
+    assert empty_event["agent_path"] == ["orchestrator"]
+    assert empty_event["data"]["finish_reason"] == "stop"
+    assert empty_event["data"]["model_name"] == "debug-model"
+    assert empty_event["data"]["response_id"] == "resp-empty-2"
+
+
+@pytest.mark.asyncio
+async def test_output_schema_failures_produce_failed_result_instead_of_plain_fallback() -> None:
+    from pydantic import BaseModel
+
+    class Report(BaseModel):
+        answer: str = ""
+
+    model = MockModelWithStructuredControl(
+        responses=[MockAIResponse(content="initial response")],
+        structured_model=MockAlwaysFailStructuredModel(),
+    )
+    loop = _make_loop(model=model, output_schema=Report, synthesize_retries=2)
+
+    result = await loop.run("Produce report")
+
+    assert result.status == AgentStatus.FAILED
+    assert result.output is None
+    assert "Synthesis failed after 3 attempts" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_output_schema_uses_last_raw_output_in_failure_message() -> None:
+    from pydantic import BaseModel
+
+    class Report(BaseModel):
+        answer: str = ""
+
+    raw_graph = '{"nodes":[],"edges":[],"root_causes":[],"component_to_service":{}}'
+    model = MockModelWithStructuredControl(
+        responses=[MockAIResponse(content="initial response")],
+        structured_model=MockAlwaysFailStructuredModelWithRaw(llm_output=raw_graph),
+    )
+    loop = _make_loop(model=model, output_schema=Report, synthesize_retries=2)
+
+    result = await loop.run("Produce report")
+
+    assert result.status == AgentStatus.FAILED
+    assert result.output is None
+    assert "payload_preview" not in (result.error or "")
+    assert "Synthesis failed after 3 attempts" in (result.error or "")
+
+
+@pytest.mark.asyncio
 async def test_max_steps_exhaustion_returns_failed_result() -> None:
     tool = MockTool("loop_tool", result="again")
     model = MockModel([
@@ -333,45 +488,6 @@ async def test_output_schema_retries_before_returning_structured_result() -> Non
     assert result.status == AgentStatus.COMPLETED
     assert result.output == {"answer": "the answer"}
     assert len(structured_model.invocations) == 2
-
-
-@pytest.mark.asyncio
-async def test_output_schema_falls_back_to_plain_text_after_all_retries_fail() -> None:
-    from pydantic import BaseModel
-
-    class Report(BaseModel):
-        answer: str = ""
-
-    model = MockModelWithStructuredControl(
-        responses=[MockAIResponse(content="initial response"), MockAIResponse(content="fallback plain text")],
-        structured_model=MockAlwaysFailStructuredModel(),
-    )
-    loop = _make_loop(model=model, output_schema=Report, synthesize_retries=2)
-
-    result = await loop.run("Produce report")
-
-    assert result.status == AgentStatus.COMPLETED
-    assert result.output == {"raw_text": "fallback plain text"}
-
-
-@pytest.mark.asyncio
-async def test_output_schema_uses_last_raw_output_when_plain_fallback_is_empty() -> None:
-    from pydantic import BaseModel
-
-    class Report(BaseModel):
-        answer: str = ""
-
-    raw_graph = '{"nodes":[],"edges":[],"root_causes":[],"component_to_service":{}}'
-    model = MockModelWithStructuredControl(
-        responses=[MockAIResponse(content="initial response"), MockAIResponse(content="")],
-        structured_model=MockAlwaysFailStructuredModelWithRaw(llm_output=raw_graph),
-    )
-    loop = _make_loop(model=model, output_schema=Report, synthesize_retries=2)
-
-    result = await loop.run("Produce report")
-
-    assert result.status == AgentStatus.COMPLETED
-    assert result.output == {"raw_text": raw_graph}
 
 
 @pytest.mark.asyncio

@@ -40,6 +40,42 @@ def msg_content(msg: Message) -> str:
     return getattr(msg, "content", "")
 
 
+def _response_text(response: object) -> str:
+    """Best-effort extraction of visible text from an LLM response object."""
+    content = getattr(response, "content", "")
+    if isinstance(content, str):
+        if content.strip():
+            return content
+    elif isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        joined = "\n".join(part for part in parts if part)
+        if joined.strip():
+            return joined
+    text_attr = getattr(response, "text", "")
+    return text_attr if isinstance(text_attr, str) else ""
+
+
+def _content_block_types(response: object) -> list[str]:
+    """Return content block type names for trajectory diagnostics."""
+    content_blocks = getattr(response, "content_blocks", None)
+    if not isinstance(content_blocks, list):
+        return []
+    block_types: list[str] = []
+    for block in content_blocks:
+        if isinstance(block, dict):
+            block_types.append(str(block.get("type", "<missing>")))
+        else:
+            block_types.append(type(block).__name__)
+    return block_types
+
+
 def msg_tool_calls(msg: Message) -> list[dict[str, Any]]:
     """Extract tool_calls list from a message."""
     if isinstance(msg, dict):
@@ -503,6 +539,8 @@ class TrajectoryMiddleware(MiddlewareBase):
     async def on_llm_end(self, response: object, ctx: LoopContext) -> object:
         tool_calls = getattr(response, "tool_calls", None) or []
         content = getattr(response, "content", "")
+        visible_text = _response_text(response)
+        response_metadata = getattr(response, "response_metadata", {})
 
         if tool_calls:
             for tc in tool_calls:
@@ -512,14 +550,40 @@ class TrajectoryMiddleware(MiddlewareBase):
                     data={
                         "tool_name": tc.get("name", ""),
                         "args": tc.get("args", {}),
+                        "tool_call_id": tc.get("id", ""),
                     },
                     task_id=self._task_id,
                 )
-        elif content:
+        elif visible_text:
             self._trajectory.record_sync(
                 event_type="llm_end",
                 agent_path=self._agent_path,
-                data={"content": str(content)},
+                data={"content": visible_text},
+                task_id=self._task_id,
+            )
+        else:
+            self._trajectory.record_sync(
+                event_type="llm_end_empty",
+                agent_path=self._agent_path,
+                data={
+                    "content_preview": str(content)[:200],
+                    "finish_reason": (
+                        response_metadata.get("finish_reason")
+                        if isinstance(response_metadata, dict)
+                        else None
+                    ),
+                    "model_name": (
+                        response_metadata.get("model_name")
+                        if isinstance(response_metadata, dict)
+                        else None
+                    ),
+                    "response_id": (
+                        response_metadata.get("id")
+                        if isinstance(response_metadata, dict)
+                        else None
+                    ),
+                    "content_block_types": _content_block_types(response),
+                },
                 task_id=self._task_id,
             )
         return response
@@ -532,10 +596,15 @@ class TrajectoryMiddleware(MiddlewareBase):
         ctx: LoopContext,
     ) -> str:
         result = await call_next(tool_name, tool_args)
+        tool_call_id = str(ctx.metadata.get("tool_call_id", "") or "")
         self._trajectory.record_sync(
             event_type="tool_result",
             agent_path=self._agent_path,
-            data={"tool_name": tool_name, "result": result},
+            data={
+                "tool_name": tool_name,
+                "result": result,
+                "tool_call_id": tool_call_id,
+            },
             task_id=self._task_id,
         )
         return result

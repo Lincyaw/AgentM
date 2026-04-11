@@ -5,6 +5,7 @@ import asyncio
 
 import pytest
 
+from agentm.core.trajectory import TrajectoryCollector
 from agentm.harness.runtime import AgentRuntime
 from agentm.harness.types import AgentStatus
 
@@ -88,3 +89,29 @@ async def test_runtime_forwards_events_to_handler() -> None:
     assert "llm_end" in event_types
     assert "complete" in event_types
     assert all(e.agent_id == "observed" for e in handler.events)
+
+
+@pytest.mark.asyncio
+async def test_runtime_records_worker_task_events_under_orchestrator_path(
+    tmp_path,
+) -> None:
+    trajectory = TrajectoryCollector(run_id="run-1", output_dir=str(tmp_path))
+    runtime = AgentRuntime(trajectory=trajectory)
+
+    await runtime.spawn(
+        "scout-abc123",
+        loop=FakeAgentLoop(result_output="done"),
+        input="investigate",
+        parent_id="orchestrator",
+        metadata={"original_agent_id": "scout", "task_type": "scout"},
+    )
+    await runtime.wait("scout-abc123", timeout=5.0)
+
+    events = list(trajectory.events)
+    dispatch = next(e for e in events if e.get("event_type") == "task_dispatch")
+    complete = next(e for e in events if e.get("event_type") == "task_complete")
+
+    assert dispatch["agent_path"] == ["orchestrator", "scout"]
+    assert complete["agent_path"] == ["orchestrator", "scout"]
+    assert dispatch["task_id"] == "scout-abc123"
+    assert complete["task_id"] == "scout-abc123"

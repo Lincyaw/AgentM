@@ -571,6 +571,10 @@ async def run_investigation_headless(
                 if etype == "complete":
                     result = data.get("result")
                     if result is not None:
+                        status = getattr(result, "status", None)
+                        if getattr(status, "value", status) == "failed":
+                            error = getattr(result, "error", None) or "agent run failed during synthesis"
+                            raise RuntimeError(str(error))
                         output = getattr(result, "output", None)
                         if output is not None:
                             if isinstance(output, dict):
@@ -638,9 +642,13 @@ async def run_investigation_headless(
         fallback_content = ""
         if collected_messages:
             fallback_content = str(collected_messages[-1].get("content", "")).strip()
-        normalized = _normalize_structured_response(
-            {"raw_text": fallback_content or "{}"}
+        preview = fallback_content[:400] if fallback_content else "<empty>"
+        logger.error(
+            "headless investigation completed without structured response; last_llm_preview=%s",
+            preview,
         )
-        structured_response_json = json.dumps(normalized, ensure_ascii=False)
+        raise RuntimeError(
+            "Headless investigation produced no structured response"
+        )
 
     return structured_response_json, trajectory_json, run_id, trajectory_file_path

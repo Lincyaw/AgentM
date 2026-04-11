@@ -67,7 +67,13 @@ class WorkerLoopFactory:
     def worker_timeout(self) -> int:
         return self._worker_config.execution.timeout
 
-    def create_worker(self, agent_id: str, task_type: str) -> SimpleAgentLoop:
+    def create_worker(
+        self,
+        agent_id: str,
+        task_type: str,
+        *,
+        task_id: str | None = None,
+    ) -> SimpleAgentLoop:
         """Build a fully configured SimpleAgentLoop for a worker dispatch."""
         config = self._worker_config
 
@@ -81,15 +87,14 @@ class WorkerLoopFactory:
         )
 
         # -- Middleware --
-        middleware = self._build_middleware(config, agent_id)
+        middleware = self._build_middleware(config, agent_id, task_id=task_id)
 
-        # -- Output schema --
-        # answer_schemas injected from ScenarioWiring via builder
-        output_schema = (
-            self._answer_schemas.get(task_type)
-            if self._answer_schemas is not None
-            else None
-        )
+        # Workers return their final assistant message directly.
+        # We intentionally skip the extra structured synthesis pass here:
+        # sub-agents are already invoked as tools by the orchestrator, so
+        # re-running a final model call adds cost/latency without helping
+        # the parent loop's tool-call semantics.
+        output_schema = None
 
         # -- Model --
         model = create_chat_model(
@@ -114,6 +119,7 @@ class WorkerLoopFactory:
 
         return SimpleAgentLoop(
             model=model_with_tools,
+            synthesis_model=model,
             tools=tools,
             system_prompt=system_prompt,
             middleware=middleware,
@@ -188,7 +194,11 @@ class WorkerLoopFactory:
         return system_prompt
 
     def _build_middleware(
-        self, config: AgentConfig, agent_id: str
+        self,
+        config: AgentConfig,
+        agent_id: str,
+        *,
+        task_id: str | None = None,
     ) -> list[Any]:
         """Assemble the middleware stack in execution order."""
         middleware: list[Any] = []
@@ -230,6 +240,7 @@ class WorkerLoopFactory:
                 TrajectoryMiddleware(
                     self._trajectory,
                     agent_path=["orchestrator", agent_id],
+                    task_id=task_id,
                 )
             )
 
