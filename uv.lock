@@ -58,7 +58,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "rcabench-platform", extras = ["llm-eval"], specifier = ">=0.4.18" },
+    { name = "rcabench-platform", extras = ["llm-eval"], specifier = ">=0.4.20" },
     { name = "rich", specifier = ">=13.0" },
     { name = "sentence-transformers", specifier = ">=3.0" },
     { name = "sqlite-vec", specifier = ">=0.1.6" },
@@ -1933,7 +1933,7 @@ wheels = [
 
 [[package]]
 name = "rcabench-platform"
-version = "0.4.18"
+version = "0.4.20"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "loguru" },
@@ -1942,9 +1942,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7b/9b/bf0a28a25bacbe1f88f1237d25178200f14e5821bd045774af7a66de3699/rcabench_platform-0.4.18.tar.gz", hash = "sha256:176a192f01e82d84996e6ec3db69f1d97906da5b41ba77f9775cb2eb264a2545", size = 437912, upload-time = "2026-03-30T09:50:07.437Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ad/c3/5ea7d903931cfb8e1df38f075b256e31c6515a324d5ca86e36c945bbe216/rcabench_platform-0.4.20.tar.gz", hash = "sha256:90fa07417f9fa1189a6da52da38f731db7f9e59e3e2dfa6ee58e447367a608d7", size = 439706, upload-time = "2026-04-03T03:12:38.929Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5b/4b/925de48d196235103b60b55b15b67945c4e605dbe3504433d41f6d02137b/rcabench_platform-0.4.18-py3-none-any.whl", hash = "sha256:2c2c0e9fd9753ba6d9b47f0d0e95a80c7535460911ec70ffd3e49b5e8e870ccd", size = 557372, upload-time = "2026-03-30T09:50:05.944Z" },
+    { url = "https://files.pythonhosted.org/packages/44/08/b77bc44b8eb6e77a00d28d309cad7af006ac21da51619b2ea056e58035e8/rcabench_platform-0.4.20-py3-none-any.whl", hash = "sha256:1b32b3d5ec2908922943a87ac57c0b1cc2be99265442fed436f080d12e629cf8", size = 559250, upload-time = "2026-04-03T03:12:40.539Z" },
 ]
 
 [package.optional-dependencies]

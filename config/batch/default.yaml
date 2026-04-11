@@ -16,7 +16,7 @@ source:
   data_base_dir: "${RCABENCH_DATA_DIR}"   # base dir for observability data (resolved via _eval_meta.source)
   source_path_pattern: "{data_base_dir}/{source}/converted"  # pattern for resolving source → data dir
 
-concurrency: 10                         # parallel judge workers
+concurrency: 8                         # parallel judge workers
 
 scenario: "config/scenarios/trajectory_analysis"
 system_config: "config/system.yaml"
