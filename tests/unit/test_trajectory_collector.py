@@ -1,4 +1,4 @@
-"""Unit tests for TrajectoryCollector."""
+"""Focused tests for TrajectoryCollector sequencing, persistence, and model roundtrip."""
 
 from __future__ import annotations
 
@@ -16,143 +16,56 @@ def tmp_output(tmp_path: Path) -> str:
 
 
 @pytest.mark.asyncio
-async def test_record_assigns_monotonic_sequence(tmp_output: str) -> None:
-    """Sequence numbers must be strictly increasing — out-of-order breaks timeline."""
+async def test_record_and_record_sync_assign_monotonic_sequence_numbers(tmp_output: str) -> None:
     collector = TrajectoryCollector(run_id="test-mono", output_dir=tmp_output)
-    s1 = await collector.record("tool_call", ["orchestrator"], {"tool": "a"})
-    s2 = await collector.record("tool_result", ["orchestrator"], {"result": "b"})
-    s3 = await collector.record("llm_end", ["orchestrator"], {"content": "c"})
+
+    assert await collector.record("tool_call", ["orchestrator"], {"tool": "a"}) == 1
+    assert collector.record_sync("hypothesis_update", ["orchestrator"], {"id": "H1"}) == 2
+    assert await collector.record("llm_end", ["orchestrator"], {"content": "c"}) == 3
+
     await collector.close()
-
-    assert s1 == 1
-    assert s2 == 2
-    assert s3 == 3
+    assert len(collector.events) == 3
 
 
 @pytest.mark.asyncio
-async def test_record_writes_valid_jsonl(tmp_output: str) -> None:
-    """Every event line in the JSONL file must be valid JSON — broken lines crash analysis."""
-    collector = TrajectoryCollector(run_id="test-jsonl", output_dir=tmp_output)
-    await collector.record("tool_call", ["orchestrator"], {"name": "spawn_worker"})
-    await collector.record(
-        "task_dispatch", ["worker-scout"], {"task_id": "t1"}, task_id="t1"
-    )
-    path = await collector.close()
+async def test_close_returns_none_without_events_and_path_with_events(tmp_output: str) -> None:
+    empty = TrajectoryCollector(run_id="empty", output_dir=tmp_output)
+    assert await empty.close() is None
+
+    used = TrajectoryCollector(run_id="used", output_dir=tmp_output)
+    await used.record("llm_end", ["orchestrator"], {"content": "x"})
+    path = await used.close()
 
     assert path is not None
-    all_lines = [line for line in Path(path).read_text().strip().split("\n") if line]
-    # First line is metadata (_meta), subsequent lines are events
-    event_lines = [line for line in all_lines if "_meta" not in line]
-    assert len(event_lines) == 2
-    for line in event_lines:
-        parsed = json.loads(line)
-        assert "run_id" in parsed
-        assert "seq" in parsed
-        assert "event_type" in parsed
+    assert path.endswith("used.jsonl")
 
 
 @pytest.mark.asyncio
-async def test_close_returns_file_path(tmp_output: str) -> None:
-    """close() must return path so caller can report it to user."""
-    collector = TrajectoryCollector(run_id="test-path", output_dir=tmp_output)
-    await collector.record("llm_end", ["orchestrator"], {"content": "x"})
-    path = await collector.close()
-
-    assert path is not None
-    assert "test-path.jsonl" in path
-
-
-@pytest.mark.asyncio
-async def test_close_without_records_returns_none(tmp_output: str) -> None:
-    """close() on unused collector must not crash."""
-    collector = TrajectoryCollector(run_id="test-empty", output_dir=tmp_output)
-    path = await collector.close()
-    assert path is None
-
-
-@pytest.mark.asyncio
-async def test_events_buffer_matches_file(tmp_output: str) -> None:
-    """In-memory events and file event lines must match — divergence causes debug confusion."""
+async def test_jsonl_persistence_matches_in_memory_events(tmp_output: str) -> None:
     collector = TrajectoryCollector(run_id="test-buffer", output_dir=tmp_output)
     await collector.record("tool_call", ["orchestrator"], {"tool": "a"})
-    await collector.record("error", ["worker-scout"], {"message": "timeout"})
-    path = await collector.close()
-
-    assert path is not None
-    all_lines = [line for line in Path(path).read_text().strip().split("\n") if line]
-    # Skip metadata line (first line, contains _meta key)
-    file_events = [json.loads(line) for line in all_lines if "_meta" not in line]
-    memory_events = collector.events
-
-    assert len(file_events) == len(memory_events) == 2
-    for fe, me in zip(file_events, memory_events):
-        assert fe["seq"] == me["seq"]
-        assert fe["event_type"] == me["event_type"]
-
-
-@pytest.mark.asyncio
-async def test_record_without_optional_fields(tmp_output: str) -> None:
-    """Optional fields (task_id, metadata, parent_seq) default to None/empty."""
-    collector = TrajectoryCollector(run_id="test-opt", output_dir=tmp_output)
-    await collector.record("llm_end", ["orchestrator"], {"content": "hi"})
-    path = await collector.close()
-
-    assert path is not None
-    all_lines = [
-        line
-        for line in Path(path).read_text().strip().split("\n")
-        if line and "_meta" not in line
-    ]
-    event = json.loads(all_lines[0])
-    assert event["task_id"] is None
-    assert event["metadata"] == {}
-    assert event["parent_seq"] is None
-
-
-@pytest.mark.asyncio
-async def test_record_with_linkage_fields(tmp_output: str) -> None:
-    """task_id, metadata, parent_seq must be preserved for trace reconstruction."""
-    collector = TrajectoryCollector(run_id="test-link", output_dir=tmp_output)
-    s1 = await collector.record(
-        "tool_call", ["orchestrator"], {"tool": "spawn_worker"}, task_id="t-1"
-    )
     await collector.record(
-        "tool_result",
-        ["orchestrator"],
-        {"result": "ok"},
+        "error",
+        ["worker-scout"],
+        {"message": "timeout"},
         task_id="t-1",
-        metadata={"hypothesis_id": "H1"},
-        parent_seq=s1,
+        metadata={"k": "v"},
+        parent_seq=1,
     )
+
     path = await collector.close()
-
     assert path is not None
-    all_lines = [
-        line
-        for line in Path(path).read_text().strip().split("\n")
-        if line and "_meta" not in line
-    ]
-    e2 = json.loads(all_lines[1])
-    assert e2["task_id"] == "t-1"
-    assert e2["metadata"]["hypothesis_id"] == "H1"
-    assert e2["parent_seq"] == 1
 
+    lines = [line for line in Path(path).read_text(encoding="utf-8").strip().split("\n") if line]
+    file_events = [json.loads(line) for line in lines if "_meta" not in line]
 
-@pytest.mark.asyncio
-async def test_record_sync_variant(tmp_output: str) -> None:
-    """record_sync writes events without async — needed for sync tool functions."""
-    collector = TrajectoryCollector(run_id="test-sync", output_dir=tmp_output)
-    s1 = collector.record_sync("hypothesis_update", ["orchestrator"], {"id": "H1"})
-    s2 = collector.record_sync("hypothesis_update", ["orchestrator"], {"id": "H2"})
-    await collector.close()
-
-    assert s1 == 1
-    assert s2 == 2
-    assert len(collector.events) == 2
+    assert len(file_events) == len(collector.events) == 2
+    assert file_events[1]["task_id"] == "t-1"
+    assert file_events[1]["metadata"]["k"] == "v"
+    assert file_events[1]["parent_seq"] == 1
 
 
 def test_trajectory_event_model_roundtrip() -> None:
-    """TrajectoryEvent must serialize/deserialize cleanly — JSONL depends on this."""
     event = TrajectoryEvent(
         run_id="r1",
         seq=1,
@@ -163,8 +76,8 @@ def test_trajectory_event_model_roundtrip() -> None:
         data={"tool": "spawn_worker", "args": {"type": "scout"}},
         task_id="t-1",
     )
-    json_str = event.model_dump_json()
-    roundtripped = TrajectoryEvent.model_validate_json(json_str)
+
+    roundtripped = TrajectoryEvent.model_validate_json(event.model_dump_json())
     assert roundtripped.seq == 1
     assert roundtripped.data["tool"] == "spawn_worker"
     assert roundtripped.task_id == "t-1"

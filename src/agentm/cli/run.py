@@ -96,7 +96,9 @@ async def _setup_debug_and_dashboard(
     dashboard_opts: DashboardOpts,
     *,
     data_dir: str = "",
-) -> tuple[DebugConsole | None, asyncio.Task[None] | None, EvalTracker | None, str | None]:
+) -> tuple[
+    DebugConsole | None, asyncio.Task[None] | None, EvalTracker | None, str | None
+]:
     """Wire up DebugConsole and optional dashboard with EvalTracker.
 
     Returns (debug_console, dashboard_server_task, eval_tracker, sample_id).
@@ -265,9 +267,7 @@ async def run_trajectory_analysis(
             # Message-format JSON (e.g. exported from eval DB)
             case_id = traj_reader.register(p)
             thread_ids.append(case_id)
-            console.print(
-                f"  Registered [dim]{p.name}[/] → case_id [cyan]{case_id}[/]"
-            )
+            console.print(f"  Registered [dim]{p.name}[/] → case_id [cyan]{case_id}[/]")
         else:
             thread_ids.append(entry)
 
@@ -428,6 +428,9 @@ def _normalize_structured_response(data: dict[str, Any]) -> dict[str, Any]:
        ``list[{component_name, service_name}]`` (required by Pydantic /
        ``with_structured_output``), but the eval judge expects
        ``dict[str, str]``.  Convert before serialization.
+
+     3. **schema coercion**: Always coerce to a CausalGraph-compatible
+         shape so eval never receives an empty response payload.
     """
     # 1. Unwrap raw_text fallback if inner content is a valid graph JSON
     if "raw_text" in data and len(data) == 1:
@@ -447,7 +450,7 @@ def _normalize_structured_response(data: dict[str, Any]) -> dict[str, Any]:
                 pass
 
     # 2. Convert component_to_service list -> dict
-    c2s = data.get("component_to_service")
+    c2s: Any = data.get("component_to_service")
     if isinstance(c2s, list):
         mapping: dict[str, str] = {}
         for item in c2s:
@@ -461,8 +464,31 @@ def _normalize_structured_response(data: dict[str, Any]) -> dict[str, Any]:
             len(c2s),
             len(mapping),
         )
-        return {**data, "component_to_service": mapping}
-    return data
+        c2s = mapping
+
+    # 3. Coerce to CausalGraph-compatible shape
+    nodes = data.get("nodes")
+    edges = data.get("edges")
+    root_causes = data.get("root_causes")
+
+    if not isinstance(nodes, list):
+        nodes = []
+    if not isinstance(edges, list):
+        edges = []
+    if not isinstance(root_causes, list):
+        root_causes = []
+    if not isinstance(c2s, dict):
+        c2s = {}
+
+    if "raw_text" in data and not (nodes or edges or root_causes):
+        logger.warning("raw_text fallback could not be parsed into graph JSON")
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "root_causes": root_causes,
+        "component_to_service": c2s,
+    }
 
 
 async def run_investigation_headless(
@@ -558,7 +584,9 @@ async def run_investigation_headless(
                                 structured_response_json = json.dumps(
                                     output, ensure_ascii=False, default=str
                                 )
-                            is_fallback = isinstance(output, dict) and "raw_text" in output
+                            is_fallback = (
+                                isinstance(output, dict) and "raw_text" in output
+                            )
                             logger.info(
                                 "headless captured structured_response "
                                 "(is_fallback=%s, len=%d)",
@@ -605,5 +633,14 @@ async def run_investigation_headless(
             trajectory_json = build_trajectory_from_events(run_id, all_events)
     if trajectory_json is None and collected_messages:
         trajectory_json = _build_trajectory_json(run_id, collected_messages)
+
+    if not structured_response_json:
+        fallback_content = ""
+        if collected_messages:
+            fallback_content = str(collected_messages[-1].get("content", "")).strip()
+        normalized = _normalize_structured_response(
+            {"raw_text": fallback_content or "{}"}
+        )
+        structured_response_json = json.dumps(normalized, ensure_ascii=False)
 
     return structured_response_json, trajectory_json, run_id, trajectory_file_path

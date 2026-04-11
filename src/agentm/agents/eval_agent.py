@@ -23,10 +23,29 @@ Registration::
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 
-from rcabench_platform.v3.sdk.llm_eval.agents.base_agent import AgentResult, BaseAgent, RunContext
+from rcabench_platform.v3.sdk.llm_eval.agents.base_agent import (
+    AgentResult,
+    BaseAgent,
+    RunContext,
+)
 from rcabench_platform.v3.sdk.llm_eval.trajectory.schema import Trajectory
+
+
+logger = logging.getLogger(__name__)
+
+_EMPTY_CAUSAL_GRAPH_RESPONSE = json.dumps(
+    {
+        "nodes": [],
+        "edges": [],
+        "root_causes": [],
+        "component_to_service": {},
+    },
+    ensure_ascii=False,
+)
 
 
 class AgentMAgent(BaseAgent):
@@ -106,30 +125,77 @@ class AgentMAgent(BaseAgent):
                 if traj_path:
                     ctx.emit({"type": "trajectory_update", "path": traj_path})
 
-        response_json, trajectory_json, run_id, traj_file_path = await run_investigation_headless(
-            data_dir=data_dir,
-            incident=incident,
-            scenario_dir=self._scenario_dir,
-            config_path=self._config_path,
-            max_steps=max_steps,
-            timeout=timeout,
-            on_start=_on_headless_start,
-            exp_id=self._exp_id,
-        )
+        try:
+            (
+                response_json,
+                trajectory_json,
+                run_id,
+                traj_file_path,
+            ) = await run_investigation_headless(
+                data_dir=data_dir,
+                incident=incident,
+                scenario_dir=self._scenario_dir,
+                config_path=self._config_path,
+                max_steps=max_steps,
+                timeout=timeout,
+                on_start=_on_headless_start,
+                exp_id=self._exp_id,
+            )
+        except Exception as exc:
+            logger.exception(
+                "headless run failed; fallback to empty CausalGraph "
+                "(data_dir=%s, scenario_dir=%s, config_path=%s, max_steps=%s, timeout=%s, exp_id=%s)",
+                data_dir,
+                self._scenario_dir,
+                self._config_path,
+                max_steps,
+                timeout,
+                self._exp_id,
+            )
+            return AgentResult(
+                response=_EMPTY_CAUSAL_GRAPH_RESPONSE,
+                trajectory=None,
+                metadata={
+                    "run_id": None,
+                    "exp_id": self._exp_id,
+                    "trajectory_file": None,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "fallback_reason": "exception",
+                },
+            )
+
+        metadata: dict[str, Any] = {
+            "run_id": run_id,
+            "exp_id": self._exp_id,
+            "trajectory_file": traj_file_path,
+        }
+
+        response = response_json
+        if not response:
+            logger.warning(
+                "headless returned empty structured response; fallback to empty CausalGraph "
+                "(run_id=%s, data_dir=%s)",
+                run_id,
+                data_dir,
+            )
+            response = _EMPTY_CAUSAL_GRAPH_RESPONSE
+            metadata["fallback_reason"] = "empty_response"
 
         trajectory = None
         if trajectory_json:
             try:
                 trajectory = Trajectory.from_json(trajectory_json)
             except Exception:
-                pass
+                logger.warning(
+                    "failed to parse trajectory json (run_id=%s, trajectory_file=%s)",
+                    run_id,
+                    traj_file_path,
+                    exc_info=True,
+                )
 
         return AgentResult(
-            response=response_json or "",
+            response=response,
             trajectory=trajectory,
-            metadata={
-                "run_id": run_id,
-                "exp_id": self._exp_id,
-                "trajectory_file": traj_file_path,
-            },
+            metadata=metadata,
         )
