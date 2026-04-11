@@ -3,7 +3,7 @@
 
 # Experiment identifier — used to group results in the DB.
 # Change this for each new experiment to avoid mixing results.
-exp_id: "agentm-3.29"
+exp_id: "agentm-pure-4.11"
 
 # Agent / model labels written to every result row for filtering in stat.
 # model_name is optional — auto-read from scenario orchestrator.model if omitted.
@@ -12,7 +12,7 @@ agent_type: "agentm"
 
 # Database that stores rollout results, judgements, and stats.
 # Defaults to env var LLM_EVAL_DB_URL if not set here.
-db_url: "${EVAL_DB_URL}"
+db_url: ""
 
 # Dataset to evaluate against.
 data:
@@ -24,7 +24,7 @@ data:
     - "openrca2-lite"
 
 # Rollout parallelism.
-concurrency: 2
+concurrency: 10
 
 # Root path for dataset sources.
 # Resolved as: {source_path}/{source}/converted
