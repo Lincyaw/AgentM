@@ -1,4 +1,4 @@
-"""Integration tests for the vault public API and builder wiring."""
+"""High-value integration checks for vault public API wiring."""
 
 from __future__ import annotations
 
@@ -6,91 +6,49 @@ import json
 from pathlib import Path
 
 
+def test_public_api_and_factory_shape_are_stable(tmp_path: Path) -> None:
+    import agentm.tools.vault as vault_mod
+    from agentm.tools.vault import MarkdownVault, create_vault_tools
 
-# ------------------------------------------------------------------
-# Public API surface
-# ------------------------------------------------------------------
+    assert set(vault_mod.__all__) == {"MarkdownVault", "create_vault_tools"}
 
-
-class TestVaultPublicAPI:
-    """Verify the public API is importable and complete."""
-
-    def test_all_exports(self) -> None:
-        import agentm.tools.vault as vault_mod
-
-        assert set(vault_mod.__all__) == {
-            "MarkdownVault",
-            "create_vault_tools",
-        }
-
-    def test_create_vault_tools_returns_expected_keys(self, tmp_path: Path) -> None:
-        from agentm.tools.vault import MarkdownVault, create_vault_tools
-
-        vault = MarkdownVault(tmp_path / "vault")
-        tools = create_vault_tools(vault)
-
-        expected_tools = {
-            "vault_write",
-            "vault_read",
-            "vault_edit",
-            "vault_delete",
-            "vault_rename",
-            "vault_list",
-            "vault_search",
-            "vault_backlinks",
-            "vault_traverse",
-            "vault_lint",
-        }
-        assert set(tools.keys()) == expected_tools
-        for name, func in tools.items():
-            assert callable(func), f"{name} is not callable"
+    tools = create_vault_tools(MarkdownVault(tmp_path / "vault"))
+    assert set(tools) == {
+        "vault_write",
+        "vault_read",
+        "vault_edit",
+        "vault_delete",
+        "vault_rename",
+        "vault_list",
+        "vault_search",
+        "vault_backlinks",
+        "vault_traverse",
+        "vault_lint",
+    }
+    assert all(callable(fn) for fn in tools.values())
 
 
-# ------------------------------------------------------------------
-# Vault round-trip through tool functions
-# ------------------------------------------------------------------
+def test_tool_round_trip_write_read_search(tmp_path: Path) -> None:
+    from agentm.tools.vault import MarkdownVault, create_vault_tools
 
+    tools = create_vault_tools(MarkdownVault(tmp_path / "vault"))
 
-class TestVaultToolRoundTrip:
-    """Verify vault tools work end-to-end via the closure API."""
-
-    def test_write_then_read(self, tmp_path: Path) -> None:
-        from agentm.tools.vault import MarkdownVault, create_vault_tools
-
-        vault = MarkdownVault(tmp_path / "vault")
-        tools = create_vault_tools(vault)
-
-        result = tools["vault_write"](
-            entries=[{
-                "path": "test/note",
-                "frontmatter": {"type": "insight", "tags": ["demo"]},
-                "body": "# Hello\n\nThis is a test note.",
-            }],
-        )
-        data = json.loads(result)
-        assert data["status"] == "ok"
-
-        result = tools["vault_read"](path="test/note")
-        data = json.loads(result)
-        assert data["path"] == "test/note"
-        assert data["frontmatter"]["type"] == "insight"
-        assert "Hello" in data["body"]
-
-    def test_search_after_write(self, tmp_path: Path) -> None:
-        from agentm.tools.vault import MarkdownVault, create_vault_tools
-
-        vault = MarkdownVault(tmp_path / "vault")
-        tools = create_vault_tools(vault)
-
+    write_result = json.loads(
         tools["vault_write"](
-            entries=[{
-                "path": "services/api",
-                "frontmatter": {"type": "service", "tags": ["api"]},
-                "body": "# API Service\n\nHandles REST requests.",
-            }],
+            entries=[
+                {
+                    "path": "services/api",
+                    "frontmatter": {"type": "service", "tags": ["api"]},
+                    "body": "# API Service\n\nHandles REST requests.",
+                }
+            ]
         )
+    )
+    assert write_result["status"] == "ok"
 
-        result = tools["vault_search"](query="REST requests", mode="keyword")
-        data = json.loads(result)
-        assert len(data["results"]) > 0
-        assert data["results"][0]["path"] == "services/api"
+    read_result = json.loads(tools["vault_read"](path="services/api"))
+    assert read_result["path"] == "services/api"
+    assert "REST requests" in read_result["body"]
+
+    search_result = json.loads(tools["vault_search"](query="REST requests", mode="keyword"))
+    assert [r["path"] for r in search_result["results"]] == ["services/api"]

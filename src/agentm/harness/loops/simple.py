@@ -164,6 +164,7 @@ class SimpleAgentLoop(AgentLoop):
         synth_messages.append(
             {"role": "human", "content": "Produce your final structured report now."}
         )
+        last_raw_text = ""
 
         for attempt in range(1 + self._synthesize_retries):
             try:
@@ -175,6 +176,8 @@ class SimpleAgentLoop(AgentLoop):
                 return output
             except Exception as exc:
                 raw_text = self._extract_raw_from_error(exc)
+                if raw_text.strip():
+                    last_raw_text = raw_text
                 if attempt < self._synthesize_retries:
                     logger.warning(
                         "synthesize attempt %d/%d failed (%s), retrying",
@@ -200,12 +203,19 @@ class SimpleAgentLoop(AgentLoop):
                     )
                     try:
                         raw = await self._model.ainvoke(synth_messages)
-                        return {"raw_text": str(getattr(raw, "content", raw))}
+                        fallback_text = str(getattr(raw, "content", raw))
+                        if fallback_text.strip():
+                            return {"raw_text": fallback_text}
+                        if last_raw_text:
+                            return {"raw_text": last_raw_text}
+                        return {"raw_text": "{}"}
                     except Exception as exc2:
                         logger.error("synthesize fallback also FAILED: %s", exc2)
-                        return {"raw_text": ""}
+                        if last_raw_text:
+                            return {"raw_text": last_raw_text}
+                        return {"raw_text": "{}"}
 
-        return {"raw_text": ""}  # unreachable, but satisfies type checker
+        return {"raw_text": "{}"}  # unreachable, but satisfies type checker
 
     @staticmethod
     def _extract_raw_from_error(exc: Exception) -> str:

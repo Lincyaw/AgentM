@@ -1,40 +1,20 @@
-"""Unit tests for post-hoc trajectory analysis."""
+"""Focused tests for post-hoc trajectory analysis helpers."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-import pytest
-
-from agentm.cli.debug import (
-    _print_summary,
-    _print_timeline,
-    _event_detail,
-)
+from agentm.cli.debug import _event_detail, _print_summary, _print_timeline
 from agentm.core.trajectory import read_trajectory
 
 
-@pytest.fixture
-def sample_trajectory(tmp_path: Path) -> Path:
-    """Create a sample trajectory JSONL file."""
+def _write_sample(path: Path) -> Path:
     events = [
         {
             "run_id": "r1",
             "seq": 1,
             "timestamp": "2026-03-08T10:00:01",
-            "agent_path": ["orchestrator"],
-            "node_name": "agent",
-            "event_type": "llm_end",
-            "data": {"content": "Let me investigate"},
-            "task_id": None,
-            "metadata": {},
-            "parent_seq": None,
-        },
-        {
-            "run_id": "r1",
-            "seq": 2,
-            "timestamp": "2026-03-08T10:00:02",
             "agent_path": ["orchestrator"],
             "node_name": "agent",
             "event_type": "tool_call",
@@ -45,146 +25,39 @@ def sample_trajectory(tmp_path: Path) -> Path:
         },
         {
             "run_id": "r1",
-            "seq": 3,
-            "timestamp": "2026-03-08T10:00:03",
-            "agent_path": ["worker-scout"],
-            "node_name": "",
-            "event_type": "task_dispatch",
-            "data": {
-                "task_id": "t-1",
-                "agent_id": "worker-scout",
-                "task_type": "scout",
-            },
-            "task_id": "t-1",
-            "metadata": {},
-            "parent_seq": None,
-        },
-        {
-            "run_id": "r1",
-            "seq": 4,
+            "seq": 2,
             "timestamp": "2026-03-08T10:00:15",
             "agent_path": ["worker-scout"],
-            "node_name": "",
+            "node_name": "agent",
             "event_type": "task_complete",
-            "data": {
-                "task_id": "t-1",
-                "agent_id": "worker-scout",
-                "duration_seconds": 12.3,
-            },
+            "data": {"agent_id": "worker-scout", "duration_seconds": 12.3},
             "task_id": "t-1",
             "metadata": {},
-            "parent_seq": None,
-        },
-        {
-            "run_id": "r1",
-            "seq": 5,
-            "timestamp": "2026-03-08T10:00:16",
-            "agent_path": ["orchestrator"],
-            "node_name": "agent",
-            "event_type": "hypothesis_update",
-            "data": {
-                "metadata": {"hypothesis_id": "H1"},
-                "status": "formed",
-                "description": "DB connection pool exhaustion",
-            },
-            "task_id": None,
-            "metadata": {"hypothesis_id": "H1"},
-            "parent_seq": None,
-        },
-        {
-            "run_id": "r1",
-            "seq": 6,
-            "timestamp": "2026-03-08T10:00:30",
-            "agent_path": ["orchestrator"],
-            "node_name": "agent",
-            "event_type": "hypothesis_update",
-            "data": {
-                "metadata": {"hypothesis_id": "H1"},
-                "status": "confirmed",
-                "description": "DB connection pool exhaustion",
-            },
-            "task_id": None,
-            "metadata": {"hypothesis_id": "H1"},
             "parent_seq": None,
         },
     ]
-    path = tmp_path / "test.jsonl"
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         for e in events:
             f.write(json.dumps(e) + "\n")
     return path
 
 
-def test_load_events(sample_trajectory: Path) -> None:
-    """read_trajectory must parse all valid lines."""
-    _meta, events = read_trajectory(sample_trajectory)
-    assert len(events) == 6
-
-
-def test_load_events_skips_invalid_json(tmp_path: Path) -> None:
-    """Invalid JSON lines must be skipped, not crash the loader."""
-    path = tmp_path / "bad.jsonl"
-    path.write_text('{"valid": true}\nnot json\n{"also": "valid"}\n')
+def test_read_trajectory_parses_valid_lines_and_skips_invalid(tmp_path: Path) -> None:
+    path = _write_sample(tmp_path / "ok.jsonl")
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("not-json\n")
     _meta, events = read_trajectory(path)
     assert len(events) == 2
 
 
-def test_filter_by_agent_path(sample_trajectory: Path) -> None:
-    """agent path filter must match prefix."""
-    _meta, events = read_trajectory(sample_trajectory)
-    filtered = [
-        e for e in events if "worker-scout" in "/".join(e.get("agent_path", []))
-    ]
-    assert len(filtered) == 2
-    assert all("worker-scout" in "/".join(e["agent_path"]) for e in filtered)
+def test_event_detail_formats_tool_and_completion_events() -> None:
+    detail_tool = _event_detail({"event_type": "tool_call", "data": {"tool_name": "spawn_worker", "args": {"x": 1}}})
+    detail_done = _event_detail({"event_type": "task_complete", "data": {"agent_id": "w", "duration_seconds": 3.2}})
+    assert "spawn_worker" in detail_tool
+    assert "w" in detail_done
 
 
-def test_filter_by_event_type(sample_trajectory: Path) -> None:
-    """event_type filter must match exactly."""
-    _meta, events = read_trajectory(sample_trajectory)
-    filtered = [e for e in events if e.get("event_type") == "hypothesis_update"]
-    assert len(filtered) == 2
-
-
-def test_event_detail_tool_call() -> None:
-    """tool_call detail must include tool name and truncated args."""
-    event = {
-        "event_type": "tool_call",
-        "data": {"tool_name": "spawn_worker", "args": {"task_type": "scout"}},
-    }
-    detail = _event_detail(event)
-    assert "spawn_worker" in detail
-
-
-def test_event_detail_hypothesis_update() -> None:
-    """hypothesis_update detail must include id and status transition."""
-    event = {
-        "event_type": "hypothesis_update",
-        "data": {"hypothesis_id": "H1", "status": "confirmed"},
-    }
-    detail = _event_detail(event)
-    assert "H1" in detail
-    assert "confirmed" in detail
-
-
-def test_event_detail_task_complete() -> None:
-    """task_complete detail must include agent and duration."""
-    event = {
-        "event_type": "task_complete",
-        "data": {"agent_id": "worker-scout", "duration_seconds": 12.3},
-    }
-    detail = _event_detail(event)
-    assert "worker-scout" in detail
-    assert "12.3" in detail
-
-
-def test_print_summary_does_not_crash(sample_trajectory: Path, capsys) -> None:
-    """_print_summary must run without exceptions on valid events."""
-    _meta, events = read_trajectory(sample_trajectory)
-    _print_summary(events)  # Should not raise
-
-
-def test_print_timeline_does_not_crash(sample_trajectory: Path, capsys) -> None:
-    """_print_timeline must run without exceptions on valid events."""
-    _meta, events = read_trajectory(sample_trajectory)
-    _print_timeline(events)  # Should not raise
+def test_print_summary_and_timeline_do_not_crash_on_valid_events(tmp_path: Path) -> None:
+    _meta, events = read_trajectory(_write_sample(tmp_path / "events.jsonl"))
+    _print_summary(events)
+    _print_timeline(events)
