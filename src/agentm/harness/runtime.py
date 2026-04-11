@@ -70,6 +70,21 @@ class AgentRuntime:
         self._trajectory = trajectory
         self._agents: dict[str, _AgentEntry] = {}
 
+    @staticmethod
+    def _trajectory_agent_path(
+        agent_id: str,
+        *,
+        parent_id: str | None,
+        metadata: dict[str, Any] | None,
+    ) -> list[str]:
+        """Return the logical agent path used for trajectory events."""
+        logical_agent_id = (metadata or {}).get("original_agent_id", agent_id)
+        if agent_id == "orchestrator" or logical_agent_id == "orchestrator":
+            return ["orchestrator"]
+        if parent_id == "orchestrator":
+            return ["orchestrator", str(logical_agent_id)]
+        return [str(logical_agent_id)]
+
     # --- Lifecycle ---
 
     async def spawn(
@@ -103,9 +118,14 @@ class AgentRuntime:
         # Record task_dispatch trajectory event
         if self._trajectory is not None:
             original_agent_id = (metadata or {}).get("original_agent_id", agent_id)
+            agent_path = self._trajectory_agent_path(
+                agent_id,
+                parent_id=parent_id,
+                metadata=metadata,
+            )
             self._trajectory.record_sync(
                 event_type="task_dispatch",
-                agent_path=[original_agent_id],
+                agent_path=agent_path,
                 data={
                     "task_id": agent_id,
                     "agent_id": original_agent_id,
@@ -129,6 +149,11 @@ class AgentRuntime:
         """Run an agent's stream, forwarding events and handling completion."""
         start_time = time.monotonic()
         original_agent_id = entry.metadata.get("original_agent_id", entry.agent_id)
+        agent_path = self._trajectory_agent_path(
+            entry.agent_id,
+            parent_id=entry.parent_id,
+            metadata=entry.metadata,
+        )
         try:
             async for event in entry.loop.stream(input, config=config):  # type: ignore[attr-defined]
                 entry.current_step = event.step
@@ -153,7 +178,7 @@ class AgentRuntime:
             if self._trajectory is not None:
                 self._trajectory.record_sync(
                     event_type="task_complete",
-                    agent_path=[original_agent_id],
+                    agent_path=agent_path,
                     data={
                         "task_id": entry.agent_id,
                         "agent_id": original_agent_id,
@@ -175,7 +200,7 @@ class AgentRuntime:
                 if self._trajectory is not None:
                     self._trajectory.record_sync(
                         event_type="task_abort",
-                        agent_path=[original_agent_id],
+                        agent_path=agent_path,
                         data={
                             "task_id": entry.agent_id,
                             "agent_id": original_agent_id,
@@ -195,7 +220,7 @@ class AgentRuntime:
             if self._trajectory is not None:
                 self._trajectory.record_sync(
                     event_type="task_fail",
-                    agent_path=[original_agent_id],
+                    agent_path=agent_path,
                     data={
                         "task_id": entry.agent_id,
                         "agent_id": original_agent_id,

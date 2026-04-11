@@ -2,6 +2,57 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "AgentM: RCA Eval (single task, dashboard)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/.venv/bin/rca",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "llm-eval",
+                "run",
+                "${input:evalConfigFile}",
+                "-a",
+                "agentm",
+                "--source-path",
+                "${input:evalSourcePath}",
+                "--exp-id",
+                "${input:evalExpId}",
+                "--concurrency",
+                "1",
+                "--max-samples",
+                "1",
+                "--dashboard"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "AgentM: RCA Eval (single task, no dashboard)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/.venv/bin/rca",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "llm-eval",
+                "run",
+                "${input:evalConfigFile}",
+                "-a",
+                "agentm",
+                "--source-path",
+                "${input:evalSourcePath}",
+                "--exp-id",
+                "${input:evalExpId}",
+                "--concurrency",
+                "1",
+                "--max-samples",
+                "1"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
             "name": "AgentM: Judge (custom, dashboard)",
             "type": "debugpy",
             "request": "launch",
@@ -38,6 +89,24 @@
         }
     ],
     "inputs": [
+        {
+            "id": "evalConfigFile",
+            "type": "promptString",
+            "description": "Path to eval config file",
+            "default": "config/eval/test.yaml"
+        },
+        {
+            "id": "evalSourcePath",
+            "type": "promptString",
+            "description": "Dataset source root",
+            "default": "/mnt/jfs/rcabench_dataset"
+        },
+        {
+            "id": "evalExpId",
+            "type": "promptString",
+            "description": "Experiment ID for debug run",
+            "default": "agentm-debug-single"
+        },
         {
             "id": "judgeConfigFile",
             "type": "promptString",

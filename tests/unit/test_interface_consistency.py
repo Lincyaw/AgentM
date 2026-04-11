@@ -11,7 +11,13 @@ from agentm.tools.orchestrator import create_orchestrator_tools
 
 
 class _MockWorkerFactory:
-    def create_worker(self, agent_id: str, task_type: str):
+    def create_worker(
+        self,
+        agent_id: str,
+        task_type: str,
+        *,
+        task_id: str | None = None,
+    ):
         return None
 
 

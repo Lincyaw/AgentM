@@ -37,6 +37,7 @@ def test_worker_factory_creates_valid_loop_with_core_middleware(mock_create_mode
     mw_types = {type(m) for m in loop._middleware}
     assert BudgetMiddleware in mw_types
     assert LoopDetectionMiddleware in mw_types
+    assert loop._output_schema is None
 
 
 @pytest.mark.asyncio
@@ -44,10 +45,12 @@ async def test_dispatch_agent_calls_runtime_spawn_and_returns_completed_payload(
     from agentm.tools.orchestrator import create_orchestrator_tools
 
     runtime = AgentRuntime()
-    tools = create_orchestrator_tools(runtime, FakeWorkerFactory(FakeAgentLoop(result_output="ok")))
+    worker_factory = FakeWorkerFactory(FakeAgentLoop(result_output="ok"))
+    tools = create_orchestrator_tools(runtime, worker_factory)
     result = await tools["dispatch_agent"](agent_id="w1", task="Investigate", task_type="scout")
     parsed = json.loads(result)
     assert parsed["status"] == "completed"
+    assert worker_factory.create_calls == [("w1", "scout", parsed["task_id"])]
     assert runtime.get_status()
 
 
