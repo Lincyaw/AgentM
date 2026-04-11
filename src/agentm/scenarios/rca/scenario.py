@@ -3,24 +3,24 @@
 Encapsulates all RCA-specific wiring: hypothesis/profile stores, tools,
 context formatting, answer schemas, output schema, and hooks.
 """
+
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import Literal, Optional
 
 from agentm.core.tool import Tool, tool_from_function
 from agentm.scenarios.rca.hypothesis_store import HypothesisStore
 from agentm.scenarios.rca.service_profile import ServiceProfileStore
-
-if TYPE_CHECKING:
-    from agentm.config.schema import SanitizerConfig
-    from agentm.harness.middleware import MiddlewareBase
-    from agentm.harness.scenario import ScenarioWiring, SetupContext, TrajectorySlot
+from agentm.config.schema import SanitizerConfig
+from agentm.harness.middleware import MiddlewareBase
+from agentm.harness.scenario import ScenarioWiring, SetupContext, TrajectorySlot
 
 
 # ---------------------------------------------------------------------------
 # Shared profile tool logic — single implementation, two call modes
 # ---------------------------------------------------------------------------
+
 
 def _do_query(
     store: "ServiceProfileStore",
@@ -113,6 +113,7 @@ def _query_service_profile(
 # ---------------------------------------------------------------------------
 # Tool builders
 # ---------------------------------------------------------------------------
+
 
 def _build_profile_tools(profile_store: "ServiceProfileStore | None") -> list[Tool]:
     """Build service profile tools (shared by orchestrator and worker)."""
@@ -228,6 +229,7 @@ def _build_rca_worker_tools(profile_store: "ServiceProfileStore") -> list[Tool]:
 # Sanitizer wiring helper
 # ---------------------------------------------------------------------------
 
+
 def _build_sanitizer_middleware(
     san_cfg: SanitizerConfig,
     hypothesis_store: HypothesisStore,
@@ -286,6 +288,7 @@ def _build_sanitizer_middleware(
 # Scenario class
 # ---------------------------------------------------------------------------
 
+
 class RCAScenario:
     """Scenario implementation for hypothesis-driven Root Cause Analysis."""
 
@@ -314,7 +317,9 @@ class RCAScenario:
         traj_slot = TrajectorySlot()
 
         orch_tools = _build_rca_orchestrator_tools(
-            traj_slot, hypothesis_store, profile_store,
+            traj_slot,
+            hypothesis_store,
+            profile_store,
         )
         worker_tools = _build_rca_worker_tools(profile_store)
 
@@ -330,14 +335,13 @@ class RCAScenario:
 
         # Wire sanitizer middleware when config is available and enabled
         sanitizer_middleware: list[MiddlewareBase] = []
-        san_cfg = (
-            ctx.config.orchestrator.sanitizer
-            if ctx.config is not None
-            else None
-        )
+        san_cfg = ctx.config.orchestrator.sanitizer if ctx.config is not None else None
         if san_cfg is not None and san_cfg.enabled:
             sanitizer_middleware = _build_sanitizer_middleware(
-                san_cfg, hypothesis_store, profile_store, traj_slot,
+                san_cfg,
+                hypothesis_store,
+                profile_store,
+                traj_slot,
             )
 
         return ScenarioWiring(

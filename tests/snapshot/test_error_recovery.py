@@ -30,8 +30,8 @@ class TestAbortTask:
         self.abort_task = tools["abort_task"]
 
     @pytest.mark.asyncio
-    async def test_abort_sets_aborted_status(self) -> None:
-        """abort_task should set agent status to ABORTED."""
+    async def test_abort_sets_aborted_status_and_reason(self) -> None:
+        """abort_task should terminate a running task with an explicit reason."""
         loop = NeverEndingLoop()
         await self.runtime.spawn("task-running-001", loop=loop, input="scan metrics")
         await asyncio.sleep(0.05)
@@ -41,33 +41,7 @@ class TestAbortTask:
         result = self.runtime.get_result("task-running-001")
         assert result is not None
         assert result.status == AgentStatus.ABORTED
-
-    @pytest.mark.asyncio
-    async def test_abort_records_reason(self) -> None:
-        """abort_task should record the reason in error."""
-        loop = NeverEndingLoop()
-        await self.runtime.spawn("task-running-001", loop=loop, input="scan metrics")
-        await asyncio.sleep(0.05)
-
-        await self.abort_task("task-running-001", "timeout")
-
-        result = self.runtime.get_result("task-running-001")
-        assert result is not None
         assert "timeout" in result.error
-
-    @pytest.mark.asyncio
-    async def test_abort_cancels_asyncio_task(self) -> None:
-        """abort_task should cancel the underlying asyncio.Task."""
-        loop = NeverEndingLoop()
-        await self.runtime.spawn("task-running-001", loop=loop, input="scan metrics")
-        await asyncio.sleep(0.05)
-
-        await self.abort_task("task-running-001", "timeout")
-
-        # The agent should be in a terminal state
-        result = self.runtime.get_result("task-running-001")
-        assert result is not None
-        assert result.status == AgentStatus.ABORTED
 
     @pytest.mark.asyncio
     async def test_abort_on_nonexistent_task_returns_not_found(self) -> None:

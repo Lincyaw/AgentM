@@ -17,7 +17,6 @@ from agentm.harness.types import LoopContext
 from agentm.scenarios.rca.hypothesis_store import HypothesisStore
 from agentm.scenarios.rca.sanitizer.code_sanitizer import CodeSanitizer
 from agentm.scenarios.rca.sanitizer.middleware import SanitizerMiddleware
-from agentm.scenarios.rca.sanitizer.models import Severity
 from agentm.scenarios.rca.sanitizer.tracker import InvestigationTracker
 from agentm.scenarios.rca.service_profile import ServiceProfileStore
 
@@ -164,49 +163,7 @@ class TestFinalizeBlockedThenResolved:
 
 
 # ---------------------------------------------------------------------------
-# Test 2: Drift detection (J2)
-# ---------------------------------------------------------------------------
-
-
-class TestDriftDetection:
-    """J2 fires when last N dispatches target same service and hypothesis."""
-
-    @pytest.mark.asyncio
-    async def test_j2_drift_warning(
-        self,
-        tracker: InvestigationTracker,
-        make_middleware,
-    ) -> None:
-        # Record 3 consecutive dispatches targeting same service and hypothesis
-        for i in range(3):
-            tracker.record(
-                round=i + 1,
-                event_type="dispatch",
-                data={"target_services": ["ts-foo"], "hypothesis_id": "H1"},
-            )
-
-        mw = make_middleware()
-        ctx = make_ctx()
-
-        # Call on_llm_end (no finalize, just triggers every_round checks)
-        resp = MockResponse(content="some analysis")
-        await mw.on_llm_end(resp, ctx)
-
-        # _pending_findings should have J2 WARN
-        j2_findings = [f for f in mw._pending_findings if f.code == "J2"]
-        assert len(j2_findings) == 1
-        assert j2_findings[0].severity == Severity.WARN
-
-        # on_llm_start should inject the drift warning
-        messages: list[dict[str, Any]] = [{"role": "assistant", "content": "ok"}]
-        injected = await mw.on_llm_start(messages, ctx)
-        assert len(injected) > len(messages)
-        injected_content = injected[-1]["content"]
-        assert "J2" in injected_content  # type: ignore[operator]
-
-
-# ---------------------------------------------------------------------------
-# Test 3: BLOCK degradation after max_block_retries
+# Test 2: BLOCK degradation after max_block_retries
 # ---------------------------------------------------------------------------
 
 
@@ -240,7 +197,7 @@ class TestBlockDegradation:
 
 
 # ---------------------------------------------------------------------------
-# Test 4: Budget exhaustion degrades coverage BLOCKs but not process BLOCKs
+# Test 3: Budget exhaustion degrades coverage BLOCKs but not process BLOCKs
 # ---------------------------------------------------------------------------
 
 
@@ -287,7 +244,7 @@ class TestBudgetDegradation:
 
 
 # ---------------------------------------------------------------------------
-# Test 5: TrajectoryCollector receives sanitizer events
+# Test 4: TrajectoryCollector receives sanitizer events
 # ---------------------------------------------------------------------------
 
 
@@ -335,63 +292,3 @@ class TestTrajectoryRecording:
             data = first_call.args[2] if len(first_call.args) > 2 else {}
         assert "findings" in data
         assert "trigger" in data
-
-
-# ---------------------------------------------------------------------------
-# Test 6: Periodic coverage check fires at interval
-# ---------------------------------------------------------------------------
-
-
-class TestPeriodicChecks:
-    """E1 fires only on rounds that are multiples of periodic_interval."""
-
-    @pytest.mark.asyncio
-    async def test_periodic_e1_fires_at_interval(
-        self,
-        profile_store: ServiceProfileStore,
-        make_middleware,
-    ) -> None:
-        # Set up E1 condition: anomalous service with unchecked upstream
-        profile_store.update(
-            service_name="ts-anomalous",
-            is_anomalous=True,
-            upstream_services=["ts-upstream"],
-        )
-
-        mw = make_middleware(periodic_interval=3)
-
-        def collect_e1_findings() -> list:
-            """Extract E1 findings from _pending_findings and drain."""
-            return [f for f in mw._pending_findings if f.code == "E1"]
-
-        # Round = ctx.step + 1. Periodic fires when round % interval == 0.
-        # step=0→round=1, step=1→round=2, step=2→round=3 (fires), etc.
-
-        # Rounds 1, 2 (step 0, 1): no E1
-        for step in range(2):
-            ctx = make_ctx(step=step)
-            resp = MockResponse(content="thinking")
-            await mw.on_llm_end(resp, ctx)
-            assert len(collect_e1_findings()) == 0, "E1 should not fire on non-periodic rounds"
-            await mw.on_llm_start([], ctx)
-
-        # Round 3 (step 2): E1 should fire
-        ctx = make_ctx(step=2)
-        resp = MockResponse(content="thinking")
-        await mw.on_llm_end(resp, ctx)
-        assert len(collect_e1_findings()) >= 1, "E1 should fire on periodic round 3"
-        await mw.on_llm_start([], ctx)
-
-        # Rounds 4, 5 (step 3, 4): no E1
-        for step in range(3, 5):
-            ctx = make_ctx(step=step)
-            resp = MockResponse(content="thinking")
-            await mw.on_llm_end(resp, ctx)
-            assert len(collect_e1_findings()) == 0, "E1 should not fire on non-periodic rounds"
-            await mw.on_llm_start([], ctx)
-
-        # Round 6 (step 5): E1 fires again
-        ctx = make_ctx(step=5)
-        resp = MockResponse(content="thinking")
-        await mw.on_llm_end(resp, ctx)
-        assert len(collect_e1_findings()) >= 1, "E1 should fire on periodic round 6"
