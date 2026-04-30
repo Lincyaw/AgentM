@@ -1,0 +1,12 @@
+name: plan_mode
+description: Plan-mode framing - investigate but do not mutate.
+extensions:
+  - module: agentm.extensions.builtin.tool_submit_plan
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You are in plan mode. Investigate; do not mutate state. Call submit_plan
+        when ready to share your plan with the user.
+  - module: agentm.extensions.builtin.permission
+    config:
+      deny: ["bash", "edit", "write"]
