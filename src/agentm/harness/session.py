@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from agentm.core.kernel import (
+    AgentEndEvent,
     AgentLoop,
     AgentMessage,
     EventBus,
@@ -429,7 +430,10 @@ class AgentSession:
         if self._budget_exceeded:
             await self._bus.emit(
                 "agent_end",
-                {"stop_reason": "budget"},
+                AgentEndEvent(
+                    messages=self._session_manager.get_messages(),
+                    stop_reason="budget",
+                ),
             )
             return self._session_manager.get_messages()
 
@@ -456,6 +460,7 @@ class AgentSession:
             system_prompt = replacement_system
 
         pre_run_count = len(messages)
+        budget_before_run = self._budget_exceeded
 
         # 5. Run the loop.
         final_messages = await self._loop.run(
@@ -472,6 +477,15 @@ class AgentSession:
             child = message_entry(msg, parent_id=cursor)
             self._session_manager.append(child)
             cursor = child.id
+
+        if self._budget_exceeded and not budget_before_run:
+            await self._bus.emit(
+                "agent_end",
+                AgentEndEvent(
+                    messages=final_messages,
+                    stop_reason="budget",
+                ),
+            )
 
         return final_messages
 
