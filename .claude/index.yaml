@@ -2,15 +2,55 @@
 # Maintenance rules: see CLAUDE.md "Design Documentation System"
 
 concepts:
+  extension_as_scenario:
+    description: "Pluggability model: a scenario is a *composition* of atomic extensions, expressed as data (YAML), not code. Atoms (one Python module, one responsibility) live in extensions/builtin/; scenario recipes live in extensions/scenarios/*.yaml. load_scenario(name) flattens a YAML to list[(module, config)] for AgentSession.create. Same mechanism for built-in and third-party scenarios — no privileged path. Legacy harness/scenarios/tools tree is deleted in Phase 2.5 single sweep."
+    design: "designs/extension-as-scenario.md"
+    related_concepts: [pluggable_architecture, operations_ports, single_file_extension_contract]
+    plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
+    tasks:
+      - "tasks/2026-04-30-phase2-group-0b.md"
+      - "tasks/2026-04-30-phase2-group-0c.md"
+      - "tasks/2026-04-30-phase2-group-A0.md"
+      - "tasks/2026-04-30-phase2-group-A.md"
+      - "tasks/2026-04-30-phase2-group-B.md"
+      - "tasks/2026-04-30-phase2-group-C.md"
+      - "tasks/2026-04-30-phase2-group-D1.md"
+      - "tasks/2026-04-30-phase2-group-D2.md"
+      - "tasks/2026-04-30-legacy-cleanup.md"
+
+  single_file_extension_contract:
+    description: "§11 hard rule: one new built-in extension = one new .py file under extensions/builtin/<name>.py with module-level MANIFEST: ExtensionManifest plus install(api, config). Auto-discovery (extensions.discover) and a mechanical validator (extensions.validate, 8 checks keyed to design §11.4) gate the catalog. Designed so future agent self-edits have a tiny, verifiable surface — atom-to-atom imports forbidden, harness.session import forbidden, allow-listed imports only. Phase 2.0c scaffolding landed; A/B/C/D1 atoms must conform."
+    design: "designs/extension-as-scenario.md#11-single-file-self-contained-extension-contract"
+    related_concepts: [extension_as_scenario, pluggable_architecture]
+    plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
+    tasks: ["tasks/2026-04-30-phase2-group-0c.md"]
+
+  operations_ports:
+    description: "FileOperations / BashOperations Protocols + LocalFileOperations / LocalBashOperations defaults in src/agentm/core/operations.py. The environment boundary that lets tool atoms (tool_read, tool_bash, tool_edit, tool_write) run unchanged whether targeting local FS or remote (SSH, sandbox). Acceptance scenario 2 of pluggable-architecture.md depends on this port."
+    design: "designs/extension-as-scenario.md#10b6"
+    related_concepts: [pluggable_architecture, extension_as_scenario]
+    plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
+    tasks:
+      - "tasks/2026-04-30-phase2-group-A0.md"
+
+  pluggable_architecture:
+    description: "First-principles pluggable architecture inspired by pi-mono (badlogic/pi-mono). Three-layer package boundary (agentm-llm / agentm-core / agentm-harness / agentm-modes). Five pluggability axes as Protocol ports: StreamFn (LLM), Tool+Operations (env), SessionManager (state), ResourceLoader (project context), EventBus+ExtensionAPI (policy). Built-in features become default extensions. Reference index to pi-mono source paths."
+    design: "designs/pluggable-architecture.md"
+    related_concepts: [extension_as_scenario, operations_ports]
+    plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
+    tasks: []
+
   sdk_consistency:
-    description: "SDK semantic consistency refactoring: unified Tool type (@tool decorator, no StructuredTool), Scenario protocol (setup() -> ScenarioWiring), single ScenarioRegistry (replaces 4 global registries), dead code removal, langchain boundary convergence (HumanMessage/StructuredTool removed from SDK internals)."
+    status: historical
+    description: "[HISTORICAL — superseded by extension_as_scenario; code deleted in Phase 2.5] SDK semantic consistency refactoring: unified Tool type (@tool decorator, no StructuredTool), Scenario protocol (setup() -> ScenarioWiring), single ScenarioRegistry (replaces 4 global registries), dead code removal, langchain boundary convergence (HumanMessage/StructuredTool removed from SDK internals)."
     design: "designs/sdk-consistency.md"
     related_concepts: [agent_harness, system_architecture, scenario_protocol, middleware_system]
     plans: ["plans/2026-03-15-library-antipattern-fixes.md"]
     tasks: []
 
   agent_harness:
-    description: "Core SDK: AgentLoop Protocol, AgentRuntime (lifecycle management), SimpleAgentLoop (ReAct cycle), Middleware protocol (3 hooks: on_llm_start, on_llm_end, on_tool_call), bidirectional agent communication via inbox queues, CheckpointStore protocol. Pure Python, no LangGraph."
+    status: historical
+    description: "[HISTORICAL — superseded by pluggable_architecture + extension_as_scenario; code deleted in Phase 2.5] Core SDK: AgentLoop Protocol, AgentRuntime (lifecycle management), SimpleAgentLoop (ReAct cycle), Middleware protocol (3 hooks: on_llm_start, on_llm_end, on_tool_call), bidirectional agent communication via inbox queues, CheckpointStore protocol. Pure Python, no LangGraph."
     design: "designs/agent-harness.md"
     related_concepts: [sdk_consistency, system_architecture, orchestrator, sub_agent, execution_runner, middleware_system, scenario_protocol, loop_resilience]
     plans: []
@@ -68,7 +108,8 @@ concepts:
       - "tasks/2026-03-08-impl-hooks-sub-agent.md"
 
   generic_state_wrapper:
-    description: "Scenario Protocol architecture: Scenario protocol (setup() -> ScenarioWiring), SetupContext (platform resources), ScenarioRegistry (register/discover), build_agent_system() 4-phase pipeline integration. 3 built-in scenarios: RCA (hypothesis_driven), trajectory_analysis, general_purpose."
+    status: historical
+    description: "[HISTORICAL — superseded by extension_as_scenario (scenario = YAML composition of atoms); code deleted in Phase 2.5] Scenario Protocol architecture: Scenario protocol (setup() -> ScenarioWiring), SetupContext (platform resources), ScenarioRegistry (register/discover), build_agent_system() 4-phase pipeline integration. 3 built-in scenarios: RCA (hypothesis_driven), trajectory_analysis, general_purpose."
     design: "designs/generic-state-wrapper.md"
     related_concepts: [agent_harness, orchestrator, configuration_system, memory_system, scenario_protocol, middleware_system, builder]
     plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-09-compression-recall-memory.md"]
@@ -172,14 +213,16 @@ concepts:
     tasks: []
 
   scenario_protocol:
-    description: "Scenario Protocol: pluggable domain logic. setup(ctx) -> ScenarioWiring (orchestrator_tools, worker_tools, format_context, answer_schemas, output_schema, hooks, should_terminate, middleware). ScenarioRegistry maps names to instances. Concrete: RCAScenario (hypothesis_driven), TrajectoryAnalysisScenario, GeneralPurposeScenario."
+    status: historical
+    description: "[HISTORICAL — replaced by scenario YAML recipes in extensions/scenarios/; code deleted in Phase 2.5] Scenario Protocol: pluggable domain logic. setup(ctx) -> ScenarioWiring (orchestrator_tools, worker_tools, format_context, answer_schemas, output_schema, hooks, should_terminate, middleware). ScenarioRegistry maps names to instances. Concrete: RCAScenario (hypothesis_driven), TrajectoryAnalysisScenario, GeneralPurposeScenario."
     design: "designs/sdk-consistency.md"
     related_concepts: [agent_harness, builder, orchestrator]
     plans: []
     tasks: []
 
   middleware_system:
-    description: "Middleware protocol with 3 hooks: on_llm_start, on_llm_end, on_tool_call. Chain pattern for composing multiple middlewares. Concrete implementations: DynamicContextMiddleware, LoopDetectionMiddleware, CompressionMiddleware, BudgetMiddleware, DedupMiddleware, SkillMiddleware, TrajectoryMiddleware, PermissionMiddleware, MemoryMiddleware, plus loop-resilience additions (ToolResultBudgetMiddleware, SystemReminderMiddleware, MicroCompactMiddleware, CostBudgetMiddleware). All middleware code is in harness/middleware.py."
+    status: historical
+    description: "[HISTORICAL — replaced by EventBus + atomic extensions; code deleted in Phase 2.5] Middleware protocol with 3 hooks: on_llm_start, on_llm_end, on_tool_call. Chain pattern for composing multiple middlewares. Concrete implementations: DynamicContextMiddleware, LoopDetectionMiddleware, CompressionMiddleware, BudgetMiddleware, DedupMiddleware, SkillMiddleware, TrajectoryMiddleware, PermissionMiddleware, MemoryMiddleware, plus loop-resilience additions (ToolResultBudgetMiddleware, SystemReminderMiddleware, MicroCompactMiddleware, CostBudgetMiddleware). All middleware code is in harness/middleware.py."
     related_concepts: [agent_harness, builder, sub_agent, tool_dedup, loop_resilience]
     plans: []
     tasks:
@@ -258,7 +301,8 @@ concepts:
     tasks: []
 
   agent_memory:
-    description: "Per-agent persistent memory with three scopes (AGENT, SCENARIO, PROJECT). MemoryMiddleware injects memory prompt via on_llm_start. Dedicated tools (memory_read/write/edit/delete) with auto-maintained MEMORY.md index. Reuses vault parser module. Flat markdown storage, no SQLite."
+    status: historical
+    description: "[HISTORICAL — dropped from Phase 2 catalog; covered by RCA's tool_hypothesis_store + SessionManager.payload; code deleted in Phase 2.5] Per-agent persistent memory with three scopes (AGENT, SCENARIO, PROJECT). MemoryMiddleware injects memory prompt via on_llm_start. Dedicated tools (memory_read/write/edit/delete) with auto-maintained MEMORY.md index. Reuses vault parser module. Flat markdown storage, no SQLite."
     design: "designs/agent-memory.md"
     related_concepts: [memory_vault, agent_harness, middleware_system, sub_agent, configuration_system]
     plans: []
