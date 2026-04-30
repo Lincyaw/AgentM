@@ -1,0 +1,12 @@
+name: general_purpose
+description: General-purpose coding agent with read/bash/edit/write tools.
+extensions:
+  - module: agentm.extensions.builtin.tool_read
+  - module: agentm.extensions.builtin.tool_bash
+  - module: agentm.extensions.builtin.tool_edit
+  - module: agentm.extensions.builtin.tool_write
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You are a helpful coding assistant. Use the available tools to read,
+        modify, and execute code. Be careful with destructive operations.

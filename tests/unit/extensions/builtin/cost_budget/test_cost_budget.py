@@ -45,6 +45,7 @@ async def test_handler_emits_cost_budget_exceeded_payload() -> None:
         renderers=renderers,
         pending_user_messages=pending,
         model_getter=lambda: model,
+        provider_getter=lambda: None,
     )
 
     seen: list[CostBudgetExceededEvent] = []
