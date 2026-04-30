@@ -7,16 +7,16 @@ from typing import Any
 import pytest
 
 from agentm.core.kernel import FunctionTool, TextContent, ToolResultMessage
-from agentm.harness.events import SessionReadyEvent
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
 
 from agentm.extensions.builtin import tool_filter
+
+
 @pytest.mark.asyncio
-async def test_handler_filters_registered_tools_on_session_ready() -> None:
+async def test_install_filters_registered_tools_immediately() -> None:
     class API:
         def __init__(self) -> None:
-            self.handlers: dict[str, Any] = {}
             self._tools = [
                 FunctionTool(
                     name="echo",
@@ -32,10 +32,6 @@ async def test_handler_filters_registered_tools_on_session_ready() -> None:
                 ),
             ]
 
-        def on(self, channel: str, handler: Any) -> Any:
-            self.handlers[channel] = handler
-            return lambda: None
-
     async def _tool_result(text: str):
         from agentm.core.kernel import ToolResult
 
@@ -43,16 +39,6 @@ async def test_handler_filters_registered_tools_on_session_ready() -> None:
 
     api = API()
     tool_filter.install(api, {"deny": ["echo"]})
-
-    api.handlers["session_ready"](
-        SessionReadyEvent(
-            cwd=".",
-            session_id="s1",
-            tool_names=("echo", "other"),
-            command_names=(),
-            model=None,
-        )
-    )
 
     assert [tool.name for tool in api._tools] == ["other"]
 

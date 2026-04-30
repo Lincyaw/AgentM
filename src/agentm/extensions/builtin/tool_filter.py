@@ -1,6 +1,7 @@
 """Policy-gate atom for the §7 ``extensions.builtin.tool_filter`` row.
 
-Filters the registered tool catalog once the final session tool list is known.
+Filters the already-registered tool catalog in ``install()`` by mutating the
+shared tool list in place.
 """
 
 from __future__ import annotations
@@ -8,14 +9,13 @@ from __future__ import annotations
 from typing import Any
 
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import SessionReadyEvent
 from agentm.harness.extension import ExtensionAPI
 
 
 MANIFEST = ExtensionManifest(
     name="tool_filter",
     description="Remove tools from the registered catalog by allow/deny rules.",
-    registers=("event:session_ready",),
+    registers=(),
     config_schema={
         "type": "object",
         "properties": {
@@ -33,18 +33,16 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     if not allow and not deny:
         return
 
-    def _apply_filter(_: SessionReadyEvent) -> None:
-        tools = getattr(api, "_tools", None)
-        if not isinstance(tools, list):
-            return
-        kept = []
-        for tool in tools:
-            name = getattr(tool, "name", "")
-            if name in deny:
-                continue
-            if allow and name not in allow:
-                continue
-            kept.append(tool)
-        tools[:] = kept
+    tools = getattr(api, "_tools", None)
+    if not isinstance(tools, list):
+        return
 
-    api.on("session_ready", _apply_filter)
+    kept = []
+    for tool in tools:
+        name = getattr(tool, "name", "")
+        if name in deny:
+            continue
+        if allow and name not in allow:
+            continue
+        kept.append(tool)
+    tools[:] = kept
