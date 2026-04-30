@@ -248,6 +248,9 @@ class AgentSession:
             cur = active_provider_box["value"]
             return cur.model if cur is not None else None
 
+        def _provider_getter() -> ProviderConfig | None:
+            return active_provider_box["value"]
+
         session_view: ReadonlySession = _SessionView(session_manager)
 
         api = _ExtensionAPIImpl(
@@ -260,6 +263,7 @@ class AgentSession:
             renderers=renderers,
             pending_user_messages=pending_user_messages,
             model_getter=_model_getter,
+            provider_getter=_provider_getter,
         )
 
         # Load auxiliary extensions first.
