@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
-import types
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -129,21 +127,6 @@ def _get_active_provider(api: ExtensionAPI) -> ProviderConfig:
     return provider
 
 
-def _create_provider_bridge_module(
-    *, task_id: str, provider: ProviderConfig
-) -> str:
-    module_name = f"agentm.extensions.builtin._sub_agent_provider_bridge_{task_id}"
-    module = types.ModuleType(module_name)
-
-    def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-        _ = config
-        api.register_provider(provider.name, provider)
-
-    module.install = install  # type: ignore[attr-defined]
-    sys.modules[module_name] = module
-    return module_name
-
-
 def _load_session_types() -> tuple[Any, Any]:
     session_mod = import_module("agentm.harness.session")
     return session_mod.AgentSession, session_mod.AgentSessionConfig
@@ -170,6 +153,11 @@ async def _shutdown_child_with_error(
 
 
 async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+    bridge_provider = config.get("_bridge_provider")
+    if isinstance(bridge_provider, ProviderConfig):
+        api.register_provider(bridge_provider.name, bridge_provider)
+        return
+
     inherit_extensions = list(
         config.get("inherit_extensions", _DEFAULT_INHERIT_EXTENSIONS)
     )
@@ -277,15 +265,11 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
         provider = _get_active_provider(api)
         task_id = uuid.uuid4().hex
-        provider_module = _create_provider_bridge_module(
-            task_id=task_id,
-            provider=provider,
-        )
         session_cls, session_config_cls = _load_session_types()
         child_config = session_config_cls(
             cwd=api.cwd,
             extensions=child_extensions,
-            provider=(provider_module, {}),
+            provider=(__name__, {"_bridge_provider": provider}),
             parent_bus=api.events,
             parent_session_id=parent_session_id,
             purpose=purpose,

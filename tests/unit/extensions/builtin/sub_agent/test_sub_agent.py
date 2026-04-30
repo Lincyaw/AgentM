@@ -5,7 +5,7 @@ import sys
 import types
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -77,7 +77,13 @@ class SharedProvider:
             yield event
 
 
-def _text_message_end(text: str, *, stop_reason: str = "end_turn") -> MessageEnd:
+def _text_message_end(
+    text: str,
+    *,
+    stop_reason: Literal[
+        "end_turn", "tool_use", "max_tokens", "error", "aborted"
+    ] = "end_turn",
+) -> MessageEnd:
     return MessageEnd(
         message=AssistantMessage(
             role="assistant",
