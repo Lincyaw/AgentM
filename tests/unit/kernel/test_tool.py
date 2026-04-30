@@ -45,6 +45,19 @@ async def test_function_tool_execute_returns_wrapped_result() -> None:
     assert result is sentinel
 
 
+def test_tool_result_accepts_extras_and_exposes_details_alias() -> None:
+    """The D1 submit-plan contract uses ``extras``; older callers use
+    ``details``. Both names must resolve to the same payload."""
+
+    result = ToolResult(
+        content=[TextContent(type="text", text="payload")],
+        extras={"plan_submitted": True},
+    )
+
+    assert result.extras == {"plan_submitted": True}
+    assert result.details == {"plan_submitted": True}
+
+
 @pytest.mark.asyncio
 async def test_function_tool_does_not_swallow_exceptions() -> None:
     """The kernel deliberately leaves exception→error-result conversion to

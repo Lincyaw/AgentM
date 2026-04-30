@@ -17,19 +17,41 @@ from typing import Any, Protocol, runtime_checkable
 from .messages import ImageContent, TextContent
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, init=False)
 class ToolResult:
     """The result of one tool execution.
 
     ``content`` is the user-visible payload (text and/or images) that becomes
-    a ``ToolResultBlock``. ``details`` is opaque structured data the harness
+    a ``ToolResultBlock``. ``extras`` is opaque structured data the harness
     or extensions may use (e.g. for richer rendering); the kernel never reads
-    it.
+    it. ``details`` remains as a backwards-compatible alias because earlier
+    extensions and tests already used that name.
     """
 
     content: list[TextContent | ImageContent]
     is_error: bool = False
-    details: Any = None
+    extras: Any = None
+
+    def __init__(
+        self,
+        content: list[TextContent | ImageContent],
+        is_error: bool = False,
+        details: Any = None,
+        extras: Any = None,
+    ) -> None:
+        self.content = content
+        self.is_error = is_error
+        if extras is not None and details is not None and extras != details:
+            raise ValueError("ToolResult received conflicting details and extras")
+        self.extras = extras if extras is not None else details
+
+    @property
+    def details(self) -> Any:
+        return self.extras
+
+    @details.setter
+    def details(self, value: Any) -> None:
+        self.extras = value
 
 
 @runtime_checkable
