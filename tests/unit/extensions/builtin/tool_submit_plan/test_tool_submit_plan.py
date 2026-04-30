@@ -40,7 +40,8 @@ async def test_tool_submit_plan_appends_entry_and_emits_event(tmp_path: Path) ->
     result = await session.tools[0].execute({"plan": "1. observe\n2. act"})
 
     assert not result.is_error
-    assert result.details == {"plan_submitted": True, "plan_id": events[0].plan_id}
+    assert result.extras == {"plan_submitted": True, "plan_id": events[0].plan_id}
+    assert result.details == result.extras
     branch = session.session_manager.get_active_branch()
     assert branch[-1].type == "plan"
     assert branch[-1].payload == {"text": "1. observe\n2. act"}

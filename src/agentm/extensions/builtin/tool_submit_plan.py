@@ -40,7 +40,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             )
             return ToolResult(
                 content=[TextContent(type="text", text="plan submitted")],
-                details={"plan_submitted": True, "plan_id": plan_id},
+                extras={"plan_submitted": True, "plan_id": plan_id},
             )
         except Exception as exc:
             return ToolResult(
