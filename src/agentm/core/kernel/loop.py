@@ -138,6 +138,16 @@ def _collect_context_messages(
     return chosen
 
 
+def _collect_error(returns: list[Any]) -> BaseException | None:
+    """Return the last explicit exception object from handler returns."""
+
+    chosen: BaseException | None = None
+    for value in returns:
+        if isinstance(value, BaseException):
+            chosen = value
+    return chosen
+
+
 def _assemble_assistant_message(
     events: list[AssistantStreamEvent], *, fallback_timestamp: float
 ) -> AssistantMessage:
@@ -218,7 +228,12 @@ class AgentLoop:
             )
 
         messages = list(messages)  # local copy; we won't mutate caller's list
-        await self._bus.emit("agent_start", AgentStartEvent(messages=messages))
+        start_returns = await self._bus.emit(
+            "agent_start", AgentStartEvent(messages=messages)
+        )
+        start_error = _collect_error(start_returns)
+        if start_error is not None:
+            raise start_error
 
         tool_index = {t.name: t for t in tools}
         max_turns = self._config.max_turns

@@ -467,7 +467,8 @@ class AgentSession:
         )
 
         # 6. Append every new assistant / tool_result message.
-        cursor: str | None = entry.id
+        active_branch = self._session_manager.get_active_branch()
+        cursor: str | None = active_branch[-1].id if active_branch else entry.id
         for msg in final_messages[pre_run_count:]:
             child = message_entry(msg, parent_id=cursor)
             self._session_manager.append(child)

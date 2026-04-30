@@ -158,6 +158,8 @@ class ExtensionAPI(Protocol):
     @property
     def cwd(self) -> str: ...
     @property
+    def tools(self) -> list[Tool]: ...
+    @property
     def session(self) -> ReadonlySession: ...
     @property
     def model(self) -> Model | None: ...
@@ -240,6 +242,10 @@ class _ExtensionAPIImpl:
     @property
     def cwd(self) -> str:
         return self._cwd
+
+    @property
+    def tools(self) -> list[Tool]:
+        return self._tools
 
     @property
     def session(self) -> ReadonlySession:
