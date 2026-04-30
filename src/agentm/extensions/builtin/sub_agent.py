@@ -117,13 +117,9 @@ def _resolve_inherited_extensions(
 
 
 def _get_active_provider(api: ExtensionAPI) -> ProviderConfig:
-    providers = getattr(api, "_providers", None)
-    if not isinstance(providers, dict) or not providers:
+    provider = api.provider
+    if provider is None:
         raise RuntimeError("sub_agent requires an active provider")
-    active_name = next(reversed(providers))
-    provider = providers[active_name]
-    if not isinstance(provider, ProviderConfig):
-        raise RuntimeError("sub_agent could not resolve the active provider")
     return provider
 
 
@@ -166,6 +162,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     registry: dict[str, _ChildTask] = {}
     registry_lock = asyncio.Lock()
     parent_session_id = "unknown"
+    reserved_slots = 0
 
     async def _drain_instructions(state: _ChildTask) -> str | None:
         async with registry_lock:
@@ -238,14 +235,23 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return state.final_messages
 
     async def _dispatch_agent(args: dict[str, Any]) -> ToolResult:
+        nonlocal reserved_slots
         purpose = str(args.get("purpose", "subagent"))
         prompt = str(args.get("prompt", ""))
+        child_extensions = _coerce_extension_specs(args.get("extensions"))
+        inherited_extensions = _resolve_inherited_extensions(
+            inherit_extensions,
+            available_inherited,
+        )
+        provider = _get_active_provider(api)
+        task_id = uuid.uuid4().hex
+        session_cls, session_config_cls = _load_session_types()
 
         async with registry_lock:
             running_children = sum(
                 1 for child in registry.values() if child.status == _RUNNING
             )
-            if running_children >= max_workers:
+            if running_children + reserved_slots >= max_workers:
                 return _tool_result(
                     {
                         "error": (
@@ -255,26 +261,30 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     },
                     is_error=True,
                 )
+            reserved_slots += 1
 
-        caller_extensions = _coerce_extension_specs(args.get("extensions"))
-        inherited_extensions = _resolve_inherited_extensions(
-            inherit_extensions,
-            available_inherited,
-        )
-        child_extensions = caller_extensions + inherited_extensions
-
-        provider = _get_active_provider(api)
-        task_id = uuid.uuid4().hex
-        session_cls, session_config_cls = _load_session_types()
         child_config = session_config_cls(
             cwd=api.cwd,
-            extensions=child_extensions,
+            extensions=child_extensions + inherited_extensions,
             provider=(__name__, {"_bridge_provider": provider}),
             parent_bus=api.events,
             parent_session_id=parent_session_id,
             purpose=purpose,
         )
-        child = await session_cls.create(child_config)
+        try:
+            child = await session_cls.create(child_config)
+        except Exception as exc:  # noqa: BLE001
+            async with registry_lock:
+                reserved_slots -= 1
+            return _tool_result(
+                {
+                    "error": (
+                        f"failed to create child session for purpose {purpose!r}: {exc}"
+                    )
+                },
+                is_error=True,
+            )
+
         abort_signal = asyncio.Event()
         state = _ChildTask(
             task_id=task_id,
@@ -283,10 +293,9 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             task=asyncio.create_task(asyncio.sleep(0)),
             abort_signal=abort_signal,
         )
-        state.task = asyncio.create_task(
-            _run_child(state=state, initial_prompt=prompt)
-        )
+        state.task = asyncio.create_task(_run_child(state=state, initial_prompt=prompt))
         async with registry_lock:
+            reserved_slots -= 1
             registry[task_id] = state
         return _tool_result(
             {"task_id": task_id, "status": _RUNNING, "purpose": purpose}

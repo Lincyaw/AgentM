@@ -389,6 +389,71 @@ async def test_dispatch_agent_enforces_max_workers_cap(
 
 
 @pytest.mark.asyncio
+async def test_dispatch_agent_reserves_worker_slots_during_child_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentm.extensions.builtin import sub_agent
+
+    started_create = asyncio.Event()
+    release_create = asyncio.Event()
+
+    class DelayedAgentSession:
+        @classmethod
+        async def create(cls, config: AgentSessionConfig) -> AgentSession:
+            started_create.set()
+            await release_create.wait()
+            return await AgentSession.create(config)
+
+    monkeypatch.setattr(
+        sub_agent,
+        "_load_session_types",
+        lambda: (DelayedAgentSession, AgentSessionConfig),
+    )
+
+    async def handler(
+        *, messages: list[Any], model: Model, tools: list[Any], signal: Any
+    ) -> list[AssistantStreamEvent]:
+        _ = messages, model, tools, signal
+        return [TextDelta(text="done"), _text_message_end("done")]
+
+    provider = SharedProvider(handler)
+    provider_module = _make_provider_module(
+        "tests.unit.extensions.builtin.sub_agent._provider_reserved_slot",
+        provider,
+    )
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                (
+                    "agentm.extensions.builtin.sub_agent",
+                    {"inherit_extensions": [], "max_workers": 1},
+                )
+            ],
+            provider=(provider_module, {}),
+            resource_loader=InMemoryResourceLoader(),
+        )
+    )
+    dispatch = _tool(session, "dispatch_agent")
+
+    first_dispatch = asyncio.create_task(
+        dispatch.execute({"purpose": "first", "prompt": "alpha"})
+    )
+    await started_create.wait()
+
+    overflow = await dispatch.execute({"purpose": "second", "prompt": "beta"})
+    assert overflow.is_error is True
+    assert "max_workers" in overflow.details["error"]
+
+    release_create.set()
+    first_result = await first_dispatch
+    assert first_result.is_error is False
+
+    await session.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_parent_shutdown_aborts_children_within_grace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

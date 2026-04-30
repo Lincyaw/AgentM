@@ -162,6 +162,8 @@ class ExtensionAPI(Protocol):
     @property
     def model(self) -> Model | None: ...
     @property
+    def provider(self) -> ProviderConfig | None: ...
+    @property
     def events(self) -> EventBus: ...
 
 
@@ -191,6 +193,7 @@ class _ExtensionAPIImpl:
         renderers: dict[str, Renderer],
         pending_user_messages: list[str | list[Any]],
         model_getter: Callable[[], Model | None],
+        provider_getter: Callable[[], ProviderConfig | None],
     ) -> None:
         self._bus = bus
         self._cwd = cwd
@@ -201,6 +204,7 @@ class _ExtensionAPIImpl:
         self._renderers = renderers
         self._pending_user_messages = pending_user_messages
         self._model_getter = model_getter
+        self._provider_getter = provider_getter
 
     # --- Event subscription ------------------------------------------------
 
@@ -248,6 +252,10 @@ class _ExtensionAPIImpl:
     @property
     def model(self) -> Model | None:
         return self._model_getter()
+
+    @property
+    def provider(self) -> ProviderConfig | None:
+        return self._provider_getter()
 
     @property
     def events(self) -> EventBus:
