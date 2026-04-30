@@ -1,0 +1,13 @@
+name: rca
+description: Root cause analysis - data-only, hypothesis-driven.
+extensions:
+  - module: agentm.extensions.builtin.tool_read
+  - module: agentm.extensions.builtin.tool_hypothesis_store
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You are an RCA analyst. Collect evidence; never draw conclusions
+        without supporting data. Use the hypothesis store to track theories.
+  - module: agentm.extensions.builtin.permission
+    config:
+      deny: ["bash", "edit", "write"]
