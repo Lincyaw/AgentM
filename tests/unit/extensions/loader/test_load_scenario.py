@@ -27,6 +27,7 @@ def test_load_scenario_resolves_builtin_name() -> None:
         ("agentm.extensions.builtin.tool_grep", {}),
         ("agentm.extensions.builtin.tool_find", {}),
         ("agentm.extensions.builtin.tool_ls", {}),
+        ("agentm.extensions.builtin.tool_catalog", {}),
         (
             "agentm.extensions.builtin.micro_compact",
             {"threshold_pct": 0.85, "keep_last": 8},
