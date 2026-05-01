@@ -1,6 +1,6 @@
 **Status**: HISTORICAL — describes the pre-v2 architecture removed in Phase 2.5 (2026-04-30).
-The current architecture lives in [pluggable-architecture.md](pluggable-architecture.md) and
-[extension-as-scenario.md](extension-as-scenario.md).
+The current architecture lives in [pluggable-architecture.md](../pluggable-architecture.md) and
+[extension-as-scenario.md](../extension-as-scenario.md).
 
 ---
 
@@ -19,7 +19,7 @@ A catalog of production-proven prompt design patterns that all AgentM prompt tem
 
 ## Motivation
 
-AgentM's current prompt templates have evolved organically. They lack a unified structural standard. Analysis of Claude Code's prompt architecture ([reference](../../docs/references/claude-code-sdk-reform-analysis.md)) reveals 12 patterns that systematically improve LLM compliance, reduce hallucination, and enforce behavioral boundaries.
+AgentM's current prompt templates have evolved organically. They lack a unified structural standard. Analysis of Claude Code's prompt architecture ([reference](../../../docs/references/claude-code-sdk-reform-analysis.md)) reveals 12 patterns that systematically improve LLM compliance, reduce hallucination, and enforce behavioral boundaries.
 
 Current templates already use some implicitly (role opening, structured output) but miss several high-impact ones (anti-rationalization checklists, deterrence statements, context isolation declarations, permission boundary markers).
 
