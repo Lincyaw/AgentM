@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agentm.core.skills import SkillRecord, format_skills_for_prompt, load_skills
+from agentm.core.abi.skill import SkillRecord
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import (
     BeforeAgentStartEvent,
@@ -69,7 +69,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 for entry in extra_skills:
                     if isinstance(entry, SkillRecord):
                         contributed_skills.append(entry)
-        skills, _diagnostics = load_skills(
+        skills, _diagnostics = api.skills.load_skills(
             cwd=api.cwd,
             agent_dir=str(Path.home() / ".agentm"),
             skill_paths=tuple(discovered_paths),
@@ -83,7 +83,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 continue
             seen_names.add(record.name)
             skills.append(record)
-        cached_prompt_block = format_skills_for_prompt(skills)
+        cached_prompt_block = api.skills.format_skills_for_prompt(skills)
 
     def _inject(event: BeforeAgentStartEvent) -> dict[str, str] | None:
         if not cached_prompt_block:

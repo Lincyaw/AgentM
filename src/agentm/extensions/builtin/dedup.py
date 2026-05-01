@@ -9,7 +9,7 @@ import json
 from collections import deque
 from typing import Any
 
-from agentm.core.kernel import AgentStartEvent, ToolCallEvent
+from agentm.core.abi import AgentStartEvent, ToolCallEvent
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 

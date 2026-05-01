@@ -32,7 +32,8 @@ requires = ["uv_build>=0.10.9,<0.11.0"]
 build-backend = "uv_build"
 
 [tool.setuptools.package-data]
-agentm = ["py.typed", "extensions/scenarios/*.yaml"]
+agentm = ["py.typed"]
 
 [tool.uv.workspace]
 members = ["scenarios/*"]
+exclude = ["scenarios/plan_mode", "scenarios/trajectory_analysis"]

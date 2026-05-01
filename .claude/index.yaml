@@ -13,7 +13,7 @@ concepts:
     tasks: []
 
   self_modifiable_architecture:
-    description: "Boundary refinement of pluggable_architecture: core/extensions split is drawn by 'what an agent can safely self-modify' rather than mechanism vs policy. Three layers — Constitution (kernel + validator + reload primitive + catalog write-protect, listed in core-manifest.yaml), Autonomy (atoms + scenarios + skills + prompts, with tier-1 freely editable / tier-2 reviewable), Discovery (filesystem scan + reload + assert_active). Adds versioned ExtensionAPI (api_version with grace window), transactional reload (validator → snapshot → install → rollback on failure), assert_active() stale-ctx invalidation ported from pi-mono runtime, and a new ExtensionAPI surface (reload_atom, freeze_current, list_atoms, is_constitution_path). Tier-2 atoms (permission, cost_budget, tool_filter, llm_compaction, claude_agents) require propose_change approval to reload. Establishes that change is safe and atomic; evolution-substrate.md establishes that change is evidence-driven."
+    description: "Boundary refinement of pluggable_architecture: core/extensions split is drawn by 'what an agent can safely self-modify' rather than mechanism vs policy. Constitution layer is uniform on the modifiability axis (none of core/ is agent-modifiable) but split on the visibility axis into core/abi/ (types & Protocols, atom + llm import), core/lib/ (pure-function utilities, atom imports as stdlib), and core/_internal/ (stateful subsystems & default impls — operations_impl, skills, prompt_templates, catalog/, compaction engine — atoms reach exclusively via ExtensionAPI services: api.get_operations / api.skills / api.prompt_templates / api.catalog / api.compaction; direct import forbidden by validator). Autonomy layer holds atoms + scenarios + skills + prompts (tier-1 free / tier-2 reviewable). Discovery layer = fs scan + reload + assert_active. Adds versioned ExtensionAPI (api_version with grace window), transactional reload (validator → snapshot → install → rollback on failure), and a new ExtensionAPI surface (reload_atom, freeze_current, list_atoms, is_constitution_path). Tier-2 atoms (permission, cost_budget, tool_filter, llm_compaction, cc_agents) require propose_change approval to reload. Compaction prompts are the canonical mechanism→policy split: prompt strings moved out of core into the llm_compaction atom, engine in core/_internal/compaction/ takes prompt as a required parameter. Establishes that change is safe and atomic; evolution-substrate.md establishes that change is evidence-driven."
     design: "designs/self-modifiable-architecture.md"
     related_concepts: [pluggable_architecture, extension_as_scenario, single_file_extension_contract, observability, evolution_substrate]
     plans: []
@@ -57,7 +57,7 @@ concepts:
     tasks: ["tasks/2026-04-30-phase2-group-0c.md"]
 
   operations_ports:
-    description: "FileOperations / BashOperations Protocols + LocalFileOperations / LocalBashOperations defaults in src/agentm/core/operations.py. The environment boundary that lets tool atoms (tool_read, tool_bash, tool_edit, tool_write) run unchanged whether targeting local FS or remote (SSH, sandbox). Acceptance scenario 2 of pluggable-architecture.md depends on this port."
+    description: "FileOperations / BashOperations Protocols in src/agentm/core/abi/operations.py + LocalFileOperations / LocalBashOperations defaults in src/agentm/core/_internal/operations_impl.py. The environment boundary that lets tool atoms (tool_read, tool_bash, tool_edit, tool_write) run unchanged whether targeting local FS or remote (SSH, sandbox). Acceptance scenario 2 of pluggable-architecture.md depends on this port."
     design: "designs/extension-as-scenario.md#10b6"
     related_concepts: [pluggable_architecture, extension_as_scenario]
     plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
@@ -65,28 +65,28 @@ concepts:
       - "tasks/2026-04-30-phase2-group-A0.md"
 
   skills:
-    description: "Filesystem-discovered SKILL.md files (YAML frontmatter + body) advertised in the system prompt as a compact <available_skills> XML index; LLM loads any specific skill on demand via the `read` tool. Implements progressive disclosure. Pi-mono port of core/skills.ts. Includes core/skills.py (loader + validator + diagnostics), core/frontmatter.py (in-house parser, promoted from resource_loader._split_frontmatter), and extensions/builtin/skill_loader.py atom that injects the index via before_agent_start."
+    description: "Filesystem-discovered SKILL.md files (YAML frontmatter + body) advertised in the system prompt as a compact <available_skills> XML index; LLM loads any specific skill on demand via the `read` tool. Implements progressive disclosure. Pi-mono port of core/skills.ts. Includes core/_internal/skills.py (loader + validator + diagnostics), core/lib/frontmatter.py (in-house parser, promoted from resource_loader._split_frontmatter), and extensions/builtin/skill_loader.py atom that injects the index via before_agent_start."
     design: "designs/skills.md"
     related_concepts: [prompt_templates, pluggable_architecture, extension_as_scenario, search_tools]
     plans: ["plans/2026-05-01-pi-mono-migration.md"]
     tasks: []
 
   prompt_templates:
-    description: "Filesystem-discovered markdown templates with YAML frontmatter. /<name> args expansion with bash-style placeholders ($1, $@, $ARGUMENTS, ${@:N:L}). Pi-mono port of core/prompt-templates.ts. Includes core/prompt_templates.py (parser + substituter + loader) and extensions/builtin/prompt_templates.py atom (input-event handler that expands before agent loop runs). Code-registered slash commands win over templates on name collision; non-matching /-prefixed text falls through verbatim."
+    description: "Filesystem-discovered markdown templates with YAML frontmatter. /<name> args expansion with bash-style placeholders ($1, $@, $ARGUMENTS, ${@:N:L}). Pi-mono port of core/prompt-templates.ts. Includes core/_internal/prompt_templates.py (parser + substituter + loader) and extensions/builtin/prompt_templates.py atom (input-event handler that expands before agent loop runs). Code-registered slash commands win over templates on name collision; non-matching /-prefixed text falls through verbatim."
     design: "designs/prompt-templates.md"
     related_concepts: [skills, extension_as_scenario, pluggable_architecture]
     plans: ["plans/2026-05-01-pi-mono-migration.md"]
     tasks: []
 
   search_tools:
-    description: "Three new tool atoms — tool_grep, tool_find, tool_ls — backed by ripgrep/fd with stdlib+pathspec fallback, .gitignore-aware, deterministic byte/line truncation. Each tool exposes its own Operations Protocol (GrepOperations/FindOperations/LsOperations) for SSH/sandbox swap, mirroring core/operations.py. Adds shared core/text_truncate.py and core/path_utils.py modules. Pi-mono port of tools/{grep,find,ls,truncate,path-utils}.ts."
+    description: "Three new tool atoms — tool_grep, tool_find, tool_ls — backed by ripgrep/fd with stdlib+pathspec fallback, .gitignore-aware, deterministic byte/line truncation. Each tool exposes its own Operations Protocol (GrepOperations/FindOperations/LsOperations) for SSH/sandbox swap, mirroring core/abi/operations.py. Adds shared core/lib/text_truncate.py and core/lib/path_utils.py modules. Pi-mono port of tools/{grep,find,ls,truncate,path-utils}.ts."
     design: "designs/search-tools.md"
     related_concepts: [edit_diff, tool_event_narrowing, extension_as_scenario, operations_ports, pluggable_architecture]
     plans: ["plans/2026-05-01-pi-mono-migration.md"]
     tasks: []
 
   edit_diff:
-    description: "Pure-function module core/edit_diff.py owning the edit-application algorithm: line-ending detection/restoration, UTF-8 BOM handling, NFKC + smart-quote/dash/space fuzzy normalization, and multi-edit application pipeline (Edit{old,new} sequences). Pi-mono port of tools/edit-diff.ts. Consumed by the upgraded tool_edit atom in Tier 2."
+    description: "Pure-function module core/lib/edit_diff.py owning the edit-application algorithm: line-ending detection/restoration, UTF-8 BOM handling, NFKC + smart-quote/dash/space fuzzy normalization, and multi-edit application pipeline (Edit{old,new} sequences). Pi-mono port of tools/edit-diff.ts. Consumed by the upgraded tool_edit atom in Tier 2."
     design: "designs/edit-diff.md"
     related_concepts: [search_tools, tool_event_narrowing, extension_as_scenario, operations_ports]
     plans: ["plans/2026-05-01-pi-mono-migration.md"]

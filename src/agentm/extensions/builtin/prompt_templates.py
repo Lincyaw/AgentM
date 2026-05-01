@@ -5,11 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agentm.core.prompt_templates import (
-    PromptTemplateRecord,
-    expand_prompt_template,
-    load_prompt_templates,
-)
+from agentm.core.abi.prompt_template import PromptTemplateRecord
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import ResourcesDiscoverEvent, SessionReadyEvent
 from agentm.harness.extension import ExtensionAPI
@@ -48,7 +44,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             if not isinstance(extra_paths, list):
                 continue
             prompt_paths.extend(str(path) for path in extra_paths)
-        cache[:] = load_prompt_templates(
+        cache[:] = api.prompt_templates.load_prompt_templates(
             cwd=api.cwd,
             agent_dir=str(Path.home() / ".agentm"),
             prompt_paths=tuple(prompt_paths),
@@ -59,7 +55,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         text = event.get("text")
         if not isinstance(text, str) or not text.startswith("/"):
             return
-        expanded = expand_prompt_template(text, cache)
+        expanded = api.prompt_templates.expand_prompt_template(text, cache)
         if expanded is not None:
             event["text"] = expanded
 

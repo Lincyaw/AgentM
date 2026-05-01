@@ -14,8 +14,8 @@ import importlib
 
 import pytest
 
-from agentm.core.catalog import manifest as core_manifest_mod
-from agentm.core.catalog.manifest import CoreManifest
+from agentm.core._internal.catalog import manifest as core_manifest_mod
+from agentm.core._internal.catalog.manifest import CoreManifest
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import BuiltinEntry, discover_builtin, reset_cache
 from agentm.extensions.validate import (

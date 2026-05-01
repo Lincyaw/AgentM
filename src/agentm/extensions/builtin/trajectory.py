@@ -8,7 +8,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from agentm.core.kernel import AgentEndEvent
+from agentm.core.abi import AgentEndEvent
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 

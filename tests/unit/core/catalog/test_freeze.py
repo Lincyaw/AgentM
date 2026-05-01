@@ -6,14 +6,14 @@ from pathlib import Path
 
 import yaml
 
-from agentm.core.catalog import freeze_current, list_atoms
-from agentm.core.catalog._layout import (
+from agentm.core._internal.catalog import freeze_current, list_atoms
+from agentm.core._internal.catalog._layout import (
     atom_current_symlink,
     atom_manifest_path,
     atom_runs_dir,
     atom_source_path,
 )
-from agentm.core.catalog.hashing import compute_atom_hash
+from agentm.core._internal.catalog.hashing import compute_atom_hash
 from agentm.extensions import ExtensionManifest
 
 

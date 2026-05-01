@@ -11,9 +11,9 @@ from typing import Any, Protocol
 
 import pathspec
 
-from agentm.core.kernel import TextContent, Tool, ToolResult
-from agentm.core.path_utils import load_gitignore_patterns, resolve_to_cwd
-from agentm.core.text_truncate import DEFAULT_MAX_BYTES, format_size, truncate_head
+from agentm.core.abi import TextContent, Tool, ToolResult
+from agentm.core.lib.path_utils import load_gitignore_patterns, resolve_to_cwd
+from agentm.core.lib.text_truncate import DEFAULT_MAX_BYTES, format_size, truncate_head
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 

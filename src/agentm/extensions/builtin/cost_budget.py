@@ -12,7 +12,7 @@ import json
 from dataclasses import fields, is_dataclass
 from typing import Any
 
-from agentm.core.kernel import BeforeSendToLlmEvent, TurnEndEvent
+from agentm.core.abi import BeforeSendToLlmEvent, TurnEndEvent
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import CostBudgetExceededEvent
 from agentm.harness.extension import ExtensionAPI
@@ -61,7 +61,11 @@ def _estimate_input_tokens(messages: list[Any]) -> int:
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    limit = float(config.get("limit", 0.0))
+    # ``limit`` is in ``MANIFEST.config_schema.required``, so the discovery
+    # filter (session.py:_atom_requires_unsupplied_config) skips this atom
+    # when no explicit config was supplied. ``install`` therefore assumes
+    # the key is present.
+    limit = float(config["limit"])
     currency = str(config.get("currency", "usd"))
     state = {
         "used": 0.0,

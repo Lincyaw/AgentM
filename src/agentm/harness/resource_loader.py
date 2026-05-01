@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from agentm.core.frontmatter import parse_frontmatter
+from agentm.core.lib.frontmatter import parse_frontmatter
 
 
 # --- Records ----------------------------------------------------------------
@@ -100,11 +100,20 @@ class DefaultResourceLoader:
           ``cwd`` (ancestor-most first; ``cwd`` last).
     """
 
-    def __init__(self, cwd: Path, agent_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        cwd: Path,
+        agent_dir: Path | None = None,
+        *,
+        no_skills: bool = False,
+        no_prompt_templates: bool = False,
+    ) -> None:
         self._cwd = Path(cwd)
         self._agent_dir = (
             Path(agent_dir) if agent_dir is not None else Path.home() / ".agentm"
         )
+        self._no_skills = no_skills
+        self._no_prompt_templates = no_prompt_templates
         self._skills: list[Skill] | None = None
         self._prompts: list[PromptTemplate] | None = None
         self._context: list[ContextFile] | None = None
@@ -112,11 +121,15 @@ class DefaultResourceLoader:
     # --- Public API -------------------------------------------------------
 
     def get_skills(self) -> list[Skill]:
+        if self._no_skills:
+            return []
         if self._skills is None:
             self._skills = self._discover_skills()
         return list(self._skills)
 
     def get_prompt_templates(self) -> list[PromptTemplate]:
+        if self._no_prompt_templates:
+            return []
         if self._prompts is None:
             self._prompts = self._discover_prompts()
         return list(self._prompts)

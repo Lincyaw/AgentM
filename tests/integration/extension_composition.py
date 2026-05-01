@@ -30,7 +30,7 @@ from typing import Any
 
 import pytest
 
-from agentm.core.kernel import (
+from agentm.core.abi import (
     AssistantMessage,
     AssistantStreamEvent,
     MessageEnd,
@@ -52,6 +52,25 @@ from agentm.harness.session_services import (
     create_agent_session_from_services,
     create_agent_session_services,
 )
+
+
+def _register_rca_hypothesis_store() -> str:
+    """Register the rca scenario's tool_hypothesis_store as a synthetic
+    module and return its dotted path. Idempotent."""
+
+    import importlib.util
+
+    synthetic = "agentm._scenarios.rca.tool_hypothesis_store"
+    if synthetic in sys.modules:
+        return synthetic
+    repo_root = Path(__file__).resolve().parents[2]
+    file_path = repo_root / "scenarios" / "rca" / "tool_hypothesis_store.py"
+    spec = importlib.util.spec_from_file_location(synthetic, file_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[synthetic] = module
+    spec.loader.exec_module(module)
+    return synthetic
 
 
 # --- Fake provider ---------------------------------------------------------
@@ -199,7 +218,7 @@ def _composition_extensions(
     ]
     rca_tooling: list[tuple[str, dict[str, Any]]] = [
         ("agentm.extensions.builtin.tool_read", {}),
-        ("agentm.extensions.builtin.tool_hypothesis_store", {}),
+        (_register_rca_hypothesis_store(), {}),
         (
             "agentm.extensions.builtin.system_prompt",
             {
@@ -505,13 +524,14 @@ async def test_sub_agent_child_inherits_only_configured_extension_set(
 
 @pytest.mark.parametrize(
     "scenario_name",
-    ["general_purpose", "trajectory_analysis", "plan_mode"],
+    ["trajectory_analysis", "plan_mode", "rca"],
 )
 def test_scenario_yaml_loads_and_resolves_to_known_atoms(
     scenario_name: str,
 ) -> None:
     """Every shipped scenario yaml composes from atoms in the discovered
-    builtin catalog — no module-path drift, no missing atoms.
+    builtin catalog or scenario-local files — no module-path drift, no
+    missing atoms.
 
     Bug this prevents: a scenario yaml referencing an atom that was
     renamed/deleted, which would only blow up at session-create time deep
@@ -524,6 +544,10 @@ def test_scenario_yaml_loads_and_resolves_to_known_atoms(
 
     assert extensions, f"scenario {scenario_name} must declare at least one atom"
     for module_path, _config in extensions:
+        if module_path.startswith("agentm._scenarios."):
+            # Scenario-local atom — already validated by the loader at
+            # parse time (file existence, MANIFEST, install symbol).
+            continue
         assert module_path in catalog_paths, (
             f"{scenario_name}: {module_path} is not a discovered builtin atom"
         )
@@ -548,11 +572,13 @@ def test_pluggable_architecture_section6_capabilities_have_landing_atoms() -> No
     assert "sub_agent" in catalog         # case 7: sub-agent system
     plan_mode = load_scenario("plan_mode")
     plan_modules = {module for module, _ in plan_mode}
-    assert "agentm.extensions.builtin.tool_submit_plan" in plan_modules  # case 8
+    # The submit_plan atom now lives as a scenario-local file under
+    # ``scenarios/plan_mode/`` and is registered under a synthetic name.
+    assert "agentm._scenarios.plan_mode.tool_submit_plan" in plan_modules  # case 8
 
     # Cases 1-4: ports exist as Protocols / config fields on the public surface.
-    from agentm.core.kernel import StreamFn  # case 1
-    from agentm.core.operations import BashOperations, FileOperations  # cases 2
+    from agentm.core.abi import StreamFn  # case 1
+    from agentm.core.abi.operations import BashOperations, FileOperations  # cases 2
     from agentm.harness.session_manager import SessionManager  # case 3
     from agentm.harness.resource_loader import ResourceLoader  # case 4
 
@@ -599,7 +625,7 @@ async def test_micro_compact_emits_before_compact_under_pressure(
                 "agentm.extensions.builtin.micro_compact",
                 {"threshold_pct": 0.0001, "keep_last": 1},
             ),
-            ("agentm.extensions.builtin.tool_hypothesis_store", {}),
+            (_register_rca_hypothesis_store(), {}),
             ("agentm.extensions.builtin.trajectory", {"path": "trajectory.jsonl"}),
         ],
         provider=(provider_module, {}),

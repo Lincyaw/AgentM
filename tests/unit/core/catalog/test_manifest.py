@@ -1,6 +1,6 @@
 """Tests for the constitution boundary manifest parser and predicate.
 
-Drives the public surface of `agentm.core.catalog.manifest`:
+Drives the public surface of `agentm.core._internal.catalog.manifest`:
 
     - load_core_manifest() -> CoreManifest
     - reload_manifest()    -> CoreManifest   (clears cache; for tests)
@@ -24,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from agentm.core.catalog import manifest as manifest_mod
-from agentm.core.catalog.manifest import (
+from agentm.core._internal.catalog import manifest as manifest_mod
+from agentm.core._internal.catalog.manifest import (
     CoreManifest,
     is_constitution_path,
     load_core_manifest,
@@ -37,7 +37,7 @@ from agentm.core.catalog.manifest import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-KERNEL_PATH = "src/agentm/core/kernel/loop.py"
+KERNEL_PATH = "src/agentm/core/abi/loop.py"
 EXTENSION_ATOM_PATH = "src/agentm/extensions/builtin/tool_read.py"
 CATALOG_METRICS_PATH = ".agentm/catalog/atoms/x/y/metrics.jsonl"
 MANIFEST_FILENAME = "core-manifest.yaml"
@@ -75,8 +75,9 @@ def test_loads_constitution_paths() -> None:
     # verbatim. If the YAML format ever changes, the design must change
     # in lockstep — this test pins the contract.
     expected_subset = {
-        "src/agentm/core/kernel/**",
-        "src/agentm/core/operations.py",
+        "src/agentm/core/abi/**",
+        "src/agentm/core/lib/**",
+        "src/agentm/core/_internal/**",
         "src/agentm/llm/**",
         "src/agentm/harness/session.py",
         "src/agentm/extensions/loader.py",
@@ -144,7 +145,7 @@ def test_S10_manifest_change_moves_constitution_boundary(
         "version: 1\n"
         "constitution:\n"
         "  paths:\n"
-        "    - src/agentm/core/operations.py\n"
+        "    - src/agentm/core/lib/**\n"
         "    - core-manifest.yaml\n"
         "extension_api:\n"
         "  current: 1\n"
@@ -160,12 +161,12 @@ def test_S10_manifest_change_moves_constitution_boundary(
     cm = reload_manifest()
 
     # Sanity: the new manifest is what the loader sees.
-    assert "src/agentm/core/operations.py" in cm.constitution_paths
+    assert "src/agentm/core/lib/**" in cm.constitution_paths
     assert "core-manifest.yaml" in cm.constitution_paths
-    assert "src/agentm/core/kernel/**" not in cm.constitution_paths
+    assert "src/agentm/core/abi/**" not in cm.constitution_paths
 
-    # The boundary moved: the kernel file is now autonomy-layer.
+    # The boundary moved: the kernel (abi) file is now autonomy-layer.
     assert is_constitution_path(KERNEL_PATH) is False
-    # ...but operations.py and the manifest itself are still protected.
-    assert is_constitution_path("src/agentm/core/operations.py") is True
+    # ...but lib/ paths and the manifest itself are still protected.
+    assert is_constitution_path("src/agentm/core/lib/path_utils.py") is True
     assert is_constitution_path(MANIFEST_FILENAME) is True

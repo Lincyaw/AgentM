@@ -16,7 +16,7 @@ AgentM's `general_purpose` scenario currently has `read`, `bash`, `edit`, `write
 
 ### Shared utilities (Tier 1, consumed by all three atoms)
 
-#### `core/text_truncate.py`
+#### `core/lib/text_truncate.py`
 
 Port of `truncate.ts`. Pure functions, no I/O.
 
@@ -47,7 +47,7 @@ def truncate_line(line: str, max_chars: int = GREP_MAX_LINE_LENGTH) -> tuple[str
 
 Byte counting uses `len(s.encode("utf-8"))`. Multi-byte tail truncation walks UTF-8 continuation bytes (`b & 0xC0 == 0x80`) — same algorithm as `truncate.ts:236-251`.
 
-#### `core/path_utils.py`
+#### `core/lib/path_utils.py`
 
 Port of `path-utils.ts`.
 
@@ -176,7 +176,7 @@ class LsOperations(Protocol):
 ### Cross-cutting rules
 
 - `from __future__ import annotations` mandatory.
-- Imports limited to: stdlib, `agentm.core.kernel.*`, `agentm.core.text_truncate`, `agentm.core.path_utils`, `agentm.core.operations` (for `FileOperations` reuse), `agentm.harness.extension`, `agentm.harness.events`, `agentm.extensions` (for `ExtensionManifest`). Atom-to-atom imports forbidden ([extension-as-scenario.md §11.1](extension-as-scenario.md#111-hard-rules)).
+- Imports limited to: stdlib, `agentm.core.abi.*`, `agentm.core.lib.text_truncate`, `agentm.core.lib.path_utils`, `agentm.core.abi.operations` (for `FileOperations` reuse), `agentm.harness.extension`, `agentm.harness.events`, `agentm.extensions` (for `ExtensionManifest`). Atom-to-atom imports forbidden ([extension-as-scenario.md §11.1](extension-as-scenario.md#111-hard-rules)).
 - Each atom's `MANIFEST.registers` includes exactly one `tool:<name>` tag.
 - Cancellation: every `execute` accepts `signal: asyncio.Event`. The subprocess implementations call `proc.terminate()` when set.
 - Errors: raised as `Exception` with a single sentence. The kernel wraps them into a tool-error result.
@@ -208,14 +208,14 @@ The `rca.yaml` and `trajectory_analysis.yaml` scenarios opt in by adding the lin
 See per-atom blocks above. Public Python surface:
 
 ```python
-# core/text_truncate.py
+# core/lib/text_truncate.py
 class TruncationResult: ...
 def truncate_head(...) -> TruncationResult: ...
 def truncate_tail(...) -> TruncationResult: ...
 def truncate_line(...) -> tuple[str, bool]: ...
 def format_size(...) -> str: ...
 
-# core/path_utils.py
+# core/lib/path_utils.py
 def expand_path(p: str) -> str: ...
 def resolve_to_cwd(p: str, cwd: str) -> str: ...
 def resolve_read_path(p: str, cwd: str) -> str: ...

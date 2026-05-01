@@ -19,8 +19,7 @@ from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import IO, Any
 
-from agentm.core.catalog import compute_active_set_fingerprint, compute_atom_hash
-from agentm.core.kernel import (
+from agentm.core.abi import (
     EventBusObserver,
     LlmRequestEndEvent,
     LlmRequestStartEvent,
@@ -29,6 +28,7 @@ from agentm.core.kernel import (
     TurnEndEvent,
     TurnStartEvent,
 )
+from agentm.core.abi.messages import ToolCallBlock
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
 from agentm.harness.events import (
@@ -412,27 +412,53 @@ def _wrap_handler_for_diff(
 
 
 class _TurnAggregator:
+    """Writes ``turn.summary`` spans on ``turn_end``.
+
+    Tool-call counts and names come from the assistant message's content
+    blocks (the source of truth) rather than from ``on_tool_call``
+    subscriptions: ``AgentLoop`` emits ``turn_end`` BEFORE the per-call
+    ``tool_call`` events for the same turn, so any subscription-based
+    accumulator would always see an empty list at write time.
+
+    ``tool_error_count`` still has to come from ``on_tool_result``
+    observed during the *previous* turn's tool-execution phase, since
+    error status isn't on the assistant message. We snapshot and reset
+    that counter at each ``turn_start``.
+    """
+
     def __init__(self, sink: _Sink, trace_id: str) -> None:
         self._sink = sink
         self._trace_id = trace_id
         self._turn_start_ns: int = 0
-        self._tool_calls: list[str] = []
-        self._tool_errors: int = 0
+        self._previous_tool_errors: int = 0
+        self._current_tool_errors: int = 0
 
     def on_turn_start(self, event: TurnStartEvent) -> None:
         self._turn_start_ns = _now_ns()
-        self._tool_calls = []
-        self._tool_errors = 0
+        # Tool errors observed between the previous turn's turn_end and
+        # this turn_start belong to the previous turn but couldn't be
+        # written into its summary (already flushed). We attribute them
+        # to whichever turn opens next via ``_previous_tool_errors``.
+        self._previous_tool_errors = self._current_tool_errors
+        self._current_tool_errors = 0
 
     def on_tool_call(self, event: ToolCallEvent) -> None:
-        self._tool_calls.append(event.tool_name)
+        # No-op: tool calls are now read from ``event.message.content``
+        # in ``on_turn_end``. Kept subscribed so observability still
+        # records the dispatch span via the generic event.dispatch path.
+        del event
 
     def on_tool_result(self, event: ToolResultEvent) -> None:
         if getattr(event.result, "is_error", False):
-            self._tool_errors += 1
+            self._current_tool_errors += 1
 
     def on_turn_end(self, event: TurnEndEvent) -> None:
         end_ns = _now_ns()
+        tool_calls = [
+            block.name
+            for block in event.message.content
+            if isinstance(block, ToolCallBlock)
+        ]
         self._sink.write(
             {
                 "schema": "otel/span/v0",
@@ -445,9 +471,11 @@ class _TurnAggregator:
                 "attributes": {
                     "turn_index": event.turn_index,
                     "duration_ns": end_ns - self._turn_start_ns,
-                    "tool_calls": list(self._tool_calls),
-                    "tool_call_count": len(self._tool_calls),
-                    "tool_error_count": self._tool_errors,
+                    "tool_calls": tool_calls,
+                    "tool_call_count": len(tool_calls),
+                    # Errors from the prior turn's tool-execution phase,
+                    # which run between turn_end[N-1] and turn_start[N].
+                    "tool_error_count": self._previous_tool_errors,
                     "stop_reason": event.message.stop_reason,
                     "content_block_types": [
                         getattr(c, "type", type(c).__name__)
@@ -457,6 +485,8 @@ class _TurnAggregator:
                 "status": {"code": "OK"},
             }
         )
+        # Once written, the prior-turn carry no longer applies.
+        self._previous_tool_errors = 0
 
 
 def _make_simple_writer(sink: _Sink, trace_id: str, kind: str, name: str = ""):  # type: ignore[no-untyped-def]
@@ -477,24 +507,6 @@ def _make_simple_writer(sink: _Sink, trace_id: str, kind: str, name: str = ""): 
         )
 
     return _write
-
-
-def _builtin_hashes_for_modules(module_paths: tuple[str, ...]) -> dict[str, str]:
-    discovered = discover_builtin()
-    hashes: dict[str, str] = {}
-    for module_path in module_paths:
-        entry = next(
-            (candidate for candidate in discovered.values() if candidate.module_path == module_path),
-            None,
-        )
-        if entry is None:
-            continue
-        source_path = inspect.getsourcefile(entry.module)
-        if source_path is None:
-            continue
-        source = Path(source_path).read_text(encoding="utf-8")
-        hashes[entry.name] = compute_atom_hash(source)
-    return hashes
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
@@ -581,8 +593,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             if entry is None:
                 continue
             source = inspect.getsource(entry.module)
-            active_atom_hashes[entry.name] = compute_atom_hash(source)
-        return compute_active_set_fingerprint(
+            active_atom_hashes[entry.name] = api.catalog.compute_atom_hash(source)
+        return api.catalog.compute_active_set_fingerprint(
             loaded=active_atom_hashes,
             scenario=scenario,
             core_hash=None,
@@ -732,7 +744,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         nonlocal current_fingerprint
         if event.name in active_atom_hashes or event.old_hash is None:
             active_atom_hashes[event.name] = event.new_hash
-        fingerprint_after = compute_active_set_fingerprint(
+        fingerprint_after = api.catalog.compute_active_set_fingerprint(
             loaded=active_atom_hashes,
             scenario=(
                 None if current_fingerprint is None else current_fingerprint.get("scenario")

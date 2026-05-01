@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from agentm.core.kernel import FunctionTool, TextContent, ToolResult
-from agentm.core.operations import BashOperations, LocalBashOperations
+from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.abi.operations import BashOperations
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
@@ -36,7 +36,7 @@ _PARAMETERS = {
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    bash_ops = _coerce_bash_ops(config.get("bash_ops"))
+    bash_ops = _coerce_bash_ops(api, config.get("bash_ops"))
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
         cmd = str(args["cmd"])
@@ -69,8 +69,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     )
 
 
-def _coerce_bash_ops(candidate: Any) -> BashOperations:
-    return candidate if candidate is not None else LocalBashOperations()
+def _coerce_bash_ops(api: ExtensionAPI, candidate: Any) -> BashOperations:
+    return candidate if candidate is not None else api.get_operations().bash
 
 
 def _error(text: str) -> ToolResult:

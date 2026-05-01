@@ -25,6 +25,8 @@ MANIFEST = ExtensionManifest(
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+    # ``prompt`` is required by MANIFEST.config_schema; the discovery
+    # filter skips this atom when configured with ``{}``.
     prompt = str(config["prompt"])
 
     def before_agent_start(event: BeforeAgentStartEvent) -> dict[str, str]:

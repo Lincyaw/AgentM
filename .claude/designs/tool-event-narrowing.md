@@ -29,7 +29,7 @@ Three problems compound:
 
 ### New event hierarchy
 
-In `core/kernel/events.py` (add alongside the existing `ToolCallEvent` / `ToolResultEvent`):
+In `core/abi/events.py` (add alongside the existing `ToolCallEvent` / `ToolResultEvent`):
 
 ```python
 # Base classes — keep the existing ToolCallEvent and ToolResultEvent as
@@ -94,7 +94,7 @@ This is the cleaner pattern and **the recommended style going forward**. The `is
 
 ### Construction site (kernel loop)
 
-In `core/kernel/loop.py` where `ToolCallEvent` is instantiated today, swap to a small dispatch:
+In `core/abi/loop.py` where `ToolCallEvent` is instantiated today, swap to a small dispatch:
 
 ```python
 _TOOL_EVENT_TYPES: dict[str, type[ToolCallEvent]] = {
@@ -163,7 +163,7 @@ Option B wins on simplicity, isinstance friendliness, and zero new deps.
 ## Interface Definition
 
 ```python
-# core/kernel/events.py — additions
+# core/abi/events.py — additions
 
 class BashInput(TypedDict, total=False): ...
 class ReadInput(TypedDict, total=False): ...
@@ -190,7 +190,7 @@ def is_bash_tool_result(e: ToolResultEvent) -> TypeGuard[BashToolResultEvent]: .
 # ... one per tool
 ```
 
-`*ToolDetails` types live next to their tool atoms (where the structured data is produced) and are imported into `kernel/events.py`. **Exception to the layer-purity rule**: `kernel/events.py` is allowed to import the details dataclasses because they are pure data. The implementer phase locks the exact module name (probably `core/kernel/tool_details.py` to keep imports flat).
+`*ToolDetails` types live next to their tool atoms (where the structured data is produced) and are imported into `abi/events.py`. **Exception to the layer-purity rule**: `abi/events.py` is allowed to import the details dataclasses because they are pure data. The implementer phase locks the exact module name (probably `core/abi/tool_details.py` to keep imports flat).
 
 ## Acceptance Scenarios
 
@@ -228,4 +228,4 @@ def is_bash_tool_result(e: ToolResultEvent) -> TypeGuard[BashToolResultEvent]: .
 
 - [ ] Should custom-tool authors be able to register their own typed event subclass via `api.register_tool_event_type(name, cls)`? Defer — no real consumer yet. The base `ToolCallEvent` covers them.
 - [ ] Do we want `ToolCallEventResult`-style typed *return* values from handlers? Currently handlers return `dict | None`. Recommendation: defer; the dict shape is small and stable.
-- [ ] Where does `*ToolDetails` live to avoid layer-purity churn? Recommendation: `core/kernel/tool_details.py` so atoms can import it and the kernel can too.
+- [ ] Where does `*ToolDetails` live to avoid layer-purity churn? Recommendation: `core/abi/tool_details.py` so atoms can import it and the kernel can too.
