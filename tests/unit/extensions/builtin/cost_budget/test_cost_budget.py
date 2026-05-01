@@ -38,6 +38,7 @@ async def test_handler_emits_cost_budget_exceeded_payload() -> None:
     api = _ExtensionAPIImpl(
         bus=bus,
         cwd=".",
+        session_id="test-session",
         session=_Session(),
         tools=tools,
         commands=commands,

@@ -257,6 +257,8 @@ class ExtensionAPI(Protocol):
     @property
     def cwd(self) -> str: ...
     @property
+    def session_id(self) -> str: ...
+    @property
     def tools(self) -> list[Tool]: ...
     @property
     def session(self) -> ReadonlySession: ...
@@ -287,6 +289,7 @@ class _ExtensionAPIImpl:
         *,
         bus: EventBus,
         cwd: str,
+        session_id: str,
         session: ReadonlySession,
         tools: list[Tool],
         commands: dict[str, CommandSpec],
@@ -300,6 +303,7 @@ class _ExtensionAPIImpl:
     ) -> None:
         self._bus = bus
         self._cwd = cwd
+        self._session_id = session_id
         self._session = session
         self._tools = tools
         self._commands = commands
@@ -427,6 +431,10 @@ class _ExtensionAPIImpl:
     def cwd(self) -> str:
         self._assert_active()
         return self._cwd
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
 
     @property
     def tools(self) -> list[Tool]:

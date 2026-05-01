@@ -57,3 +57,37 @@ def atom_current_symlink(name: str, *, root: Path | None = None) -> Path:
 
 def core_dir(content_hash: str, *, root: Path | None = None) -> Path:
     return catalog_root(root=root) / "core" / content_hash
+
+
+# --- Indexer helpers (PR #44) -------------------------------------------------
+#
+# The indexer treats its ``root`` argument as the catalog root itself
+# (``<cwd>/.agentm/catalog``) rather than the cwd. The helpers below provide
+# that view onto the same on-disk tree so freeze.py / indexer.py can share the
+# same ``_layout`` module while keeping their respective conventions.
+
+METRICS_FILENAME = "metrics.jsonl"
+RUNS_DIRNAME = "runs"
+
+
+def resolve_root(root: Path) -> Path:
+    """Return the catalog root as an absolute Path, creating it if needed."""
+
+    resolved = Path(root).expanduser().resolve()
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+def atoms_root(root: Path) -> Path:
+    """Return the atoms directory under a catalog root (not a cwd)."""
+
+    return Path(root) / "atoms"
+
+
+def _from_catalog_root(catalog_root_path: Path) -> Path:
+    """Translate a catalog-root path back into the cwd-style ``root`` accepted
+    by the freeze.py-flavoured helpers (``catalog_root(root=cwd)``)."""
+
+    catalog_root_path = Path(catalog_root_path)
+    # CATALOG_ROOT is ``.agentm/catalog`` (2 components); strip them off.
+    return catalog_root_path.parent.parent
