@@ -9,7 +9,11 @@ from importlib import import_module
 from typing import Any, Literal, cast
 
 from agentm.core.kernel import FunctionTool, TextContent, ToolResult
-from agentm.harness.events import ChildSessionEndEvent, SessionReadyEvent
+from agentm.harness.events import (
+    ChildSessionEndEvent,
+    SessionReadyEvent,
+    SessionShutdownEvent,
+)
 from agentm.harness.extension import ExtensionAPI, ProviderConfig
 from agentm.extensions import ExtensionManifest
 
@@ -135,7 +139,7 @@ async def _shutdown_child_with_error(
     parent_session_id: str,
     error: str | None,
 ) -> None:
-    await child.bus.emit("session_shutdown", {"cwd": child.cwd})
+    await child.bus.emit("session_shutdown", SessionShutdownEvent(cwd=child.cwd))
     await parent_bus.emit(
         "child_session_end",
         ChildSessionEndEvent(
@@ -369,7 +373,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         nonlocal parent_session_id
         parent_session_id = event.session_id
 
-    async def _on_session_shutdown(_event: Any) -> None:
+    async def _on_session_shutdown(_event: SessionShutdownEvent) -> None:
         async with registry_lock:
             children = list(registry.values())
         pending = [child for child in children if child.status == _RUNNING]

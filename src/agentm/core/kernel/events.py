@@ -24,7 +24,7 @@ import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, overload
 
 from .messages import AgentMessage, AssistantMessage
 from .stream import Model
@@ -156,6 +156,71 @@ class EventBus:
 
     _handlers: dict[str, list[Handler]] = field(default_factory=dict)
 
+    # Typed overloads for kernel-owned channels. Harness-level channels
+    # (``before_agent_start``, ``session_shutdown``, ``before_compact``,
+    # ``after_compact``, ``child_session_*``, ``cost_budget_exceeded``,
+    # ``plan_submitted``, ``session_ready``) fall through to the ``str``
+    # fallback to preserve the layer rule (kernel does not import harness).
+    # Extensions may also invent their own channels — the ``str`` fallback
+    # also preserves that escape hatch.
+    @overload
+    def on(
+        self,
+        channel: Literal["agent_start"],
+        handler: Callable[[AgentStartEvent], Any]
+        | Callable[[AgentStartEvent], Awaitable[Any]],
+    ) -> Callable[[], None]: ...
+    @overload
+    def on(
+        self,
+        channel: Literal["agent_end"],
+        handler: Callable[[AgentEndEvent], Any]
+        | Callable[[AgentEndEvent], Awaitable[Any]],
+    ) -> Callable[[], None]: ...
+    @overload
+    def on(
+        self,
+        channel: Literal["turn_start"],
+        handler: Callable[[TurnStartEvent], Any]
+        | Callable[[TurnStartEvent], Awaitable[Any]],
+    ) -> Callable[[], None]: ...
+    @overload
+    def on(
+        self,
+        channel: Literal["turn_end"],
+        handler: Callable[[TurnEndEvent], Any]
+        | Callable[[TurnEndEvent], Awaitable[Any]],
+    ) -> Callable[[], None]: ...
+    @overload
+    def on(
+        self,
+        channel: Literal["tool_call"],
+        handler: Callable[[ToolCallEvent], Any]
+        | Callable[[ToolCallEvent], Awaitable[Any]],
+    ) -> Callable[[], None]: ...
+    @overload
+    def on(
+        self,
+        channel: Literal["tool_result"],
+        handler: Callable[[ToolResultEvent], Any]
+        | Callable[[ToolResultEvent], Awaitable[Any]],
+    ) -> Callable[[], None]: ...
+    @overload
+    def on(
+        self,
+        channel: Literal["before_send_to_llm"],
+        handler: Callable[[BeforeSendToLlmEvent], Any]
+        | Callable[[BeforeSendToLlmEvent], Awaitable[Any]],
+    ) -> Callable[[], None]: ...
+    @overload
+    def on(
+        self,
+        channel: Literal["context"],
+        handler: Callable[[ContextEvent], Any]
+        | Callable[[ContextEvent], Awaitable[Any]],
+    ) -> Callable[[], None]: ...
+    @overload
+    def on(self, channel: str, handler: Handler) -> Callable[[], None]: ...
     def on(self, channel: str, handler: Handler) -> Callable[[], None]:
         """Subscribe ``handler`` to ``channel``; return an unsubscribe fn.
 
@@ -176,6 +241,40 @@ class EventBus:
 
         return unsubscribe
 
+    @overload
+    async def emit(
+        self, channel: Literal["agent_start"], event: AgentStartEvent
+    ) -> list[Any]: ...
+    @overload
+    async def emit(
+        self, channel: Literal["agent_end"], event: AgentEndEvent
+    ) -> list[Any]: ...
+    @overload
+    async def emit(
+        self, channel: Literal["turn_start"], event: TurnStartEvent
+    ) -> list[Any]: ...
+    @overload
+    async def emit(
+        self, channel: Literal["turn_end"], event: TurnEndEvent
+    ) -> list[Any]: ...
+    @overload
+    async def emit(
+        self, channel: Literal["tool_call"], event: ToolCallEvent
+    ) -> list[Any]: ...
+    @overload
+    async def emit(
+        self, channel: Literal["tool_result"], event: ToolResultEvent
+    ) -> list[Any]: ...
+    @overload
+    async def emit(
+        self, channel: Literal["before_send_to_llm"], event: BeforeSendToLlmEvent
+    ) -> list[Any]: ...
+    @overload
+    async def emit(
+        self, channel: Literal["context"], event: ContextEvent
+    ) -> list[Any]: ...
+    @overload
+    async def emit(self, channel: str, event: Any) -> list[Any]: ...
     async def emit(self, channel: str, event: Any) -> list[Any]:
         """Dispatch ``event`` to all handlers on ``channel`` in order.
 

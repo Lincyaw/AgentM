@@ -54,9 +54,11 @@ from agentm.core.kernel import (
 )
 
 from agentm.harness.events import (
+    BeforeAgentStartEvent,
     ChildSessionEndEvent,
     ChildSessionStartEvent,
     SessionReadyEvent,
+    SessionShutdownEvent,
 )
 from agentm.harness.extension import (
     CommandSpec,
@@ -457,13 +459,20 @@ class AgentSession:
         system_prompt = self._build_system_prompt()
         before_returns = await self._bus.emit(
             "before_agent_start",
-            {"messages": messages, "system": system_prompt},
+            BeforeAgentStartEvent(messages=messages, system=system_prompt),
         )
         replacement_system = _collect_system_replacement(before_returns)
         if replacement_system is not None:
             system_prompt = replacement_system
 
-        pre_run_count = len(messages)
+        # Snapshot object identities of pre-run messages. We can't slice by
+        # index because per-turn extensions (e.g. micro_compact) may mutate
+        # the list in place via ``messages[:] = compacted`` from a
+        # ``before_send_to_llm`` handler — design ``extension-as-scenario``
+        # §10b.2: SessionManager owns durable history; context is per-turn
+        # ephemeral. Identity-based diff stays correct under any such
+        # rewrite.
+        pre_run_ids: set[int] = {id(m) for m in messages}
         budget_before_run = self._budget_exceeded
 
         # 5. Run the loop.
@@ -475,10 +484,14 @@ class AgentSession:
             signal=signal,
         )
 
-        # 6. Append every new assistant / tool_result message.
+        # 6. Append every new assistant / tool_result message — those whose
+        # identities did not exist in the pre-run snapshot, in the order
+        # they appear in the returned list.
         active_branch = self._session_manager.get_active_branch()
         cursor: str | None = active_branch[-1].id if active_branch else entry.id
-        for msg in final_messages[pre_run_count:]:
+        for msg in final_messages:
+            if id(msg) in pre_run_ids:
+                continue
             child = message_entry(msg, parent_id=cursor)
             self._session_manager.append(child)
             cursor = child.id
@@ -565,7 +578,7 @@ class AgentSession:
         subscription. Extensions that need cleanup hook ``on('session_shutdown')``.
         """
 
-        await self._bus.emit("session_shutdown", {"cwd": self._cwd})
+        await self._bus.emit("session_shutdown", SessionShutdownEvent(cwd=self._cwd))
 
         # Notify the parent (if any) BEFORE clearing handlers so that an
         # extension subscribed on the parent bus can still observe the end

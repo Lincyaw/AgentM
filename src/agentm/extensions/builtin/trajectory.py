@@ -8,6 +8,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from agentm.core.kernel import AgentEndEvent
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
@@ -78,6 +79,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     records: list[dict[str, Any]] = []
 
     def _record(channel: str, event: Any) -> None:
+        # ``event`` is intentionally ``Any``: the trajectory atom records every
+        # channel polymorphically — kernel events, harness events, and
+        # extension-defined events all flow through ``_serialize``.
         records.append(
             {
                 "timestamp": time.time(),
@@ -89,7 +93,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     for channel in channels:
         if channel == "agent_end":
 
-            def on_agent_end(event: Any, *, _channel: str = channel) -> None:
+            def on_agent_end(
+                event: AgentEndEvent, *, _channel: str = channel
+            ) -> None:
                 _record(_channel, event)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 with output_path.open("w", encoding="utf-8") as handle:
