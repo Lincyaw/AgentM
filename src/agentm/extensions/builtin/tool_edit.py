@@ -47,6 +47,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
         if not old_string:
             return _error("old_string must not be empty")
+        if api.is_constitution_path(path):
+            return _error(f"Refusing to edit constitution path {path!r}")
 
         try:
             original = (await file_ops.read_file(path)).decode(

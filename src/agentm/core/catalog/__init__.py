@@ -15,7 +15,7 @@ from agentm.core.catalog.browse import (
     list_versions,
     runs_for,
 )
-from agentm.core.catalog.freeze import freeze_current
+from agentm.core.catalog.freeze import freeze_current, source_path_for_hash
 from agentm.core.catalog.hashing import (
     compute_active_set_fingerprint,
     compute_atom_hash,
@@ -80,4 +80,5 @@ __all__ = [
     "list_atoms",
     "list_versions",
     "runs_for",
+    "source_path_for_hash",
 ]
