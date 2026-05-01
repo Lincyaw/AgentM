@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
 import pytest
 
+from agentm.core.catalog import compute_atom_hash
+import agentm.extensions.builtin.observability as observability_ext
+from agentm.harness.events import ExtensionReloadEvent
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
 
@@ -194,3 +198,130 @@ def test_event_bus_strict_sync_raises_on_async_handler() -> None:
     bus.on("api_register", handler)
     with pytest.raises(RuntimeError, match="sync-only channel"):
         bus.emit_sync("api_register", object())
+
+
+@pytest.mark.asyncio
+async def test_M2_fingerprint_record_includes_all_loaded_atoms(tmp_path: Path) -> None:
+    output = tmp_path / "obs.jsonl"
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                ("agentm.extensions.builtin.observability", {"path": str(output)}),
+                (
+                    "agentm.extensions.builtin.trajectory",
+                    {"path": str(tmp_path / "traj.jsonl"), "channels": ["agent_end"]},
+                ),
+            ],
+            provider=("tests.unit.extensions.builtin._helpers", {}),
+            resource_loader=InMemoryResourceLoader(),
+        )
+    )
+    await session.shutdown()
+
+    records = _read_records(output)
+    fingerprint = next(r for r in records if r["kind"] == "session.fingerprint")
+    atoms = fingerprint["attributes"]["atoms"]
+
+    assert set(atoms) == {"observability", "trajectory"}
+    assert fingerprint["attributes"]["scenario"] is None
+    assert fingerprint["attributes"]["task_meta"] == {
+        "type": None,
+        "difficulty": None,
+        "external_id": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_record_atom_format(tmp_path: Path) -> None:
+    output = tmp_path / "obs.jsonl"
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                ("agentm.extensions.builtin.observability", {"path": str(output)}),
+            ],
+            provider=("tests.unit.extensions.builtin._helpers", {}),
+            resource_loader=InMemoryResourceLoader(),
+        )
+    )
+    await session.shutdown()
+
+    records = _read_records(output)
+    fingerprint = next(r for r in records if r["kind"] == "session.fingerprint")
+    atom_value = fingerprint["attributes"]["atoms"]["observability"]
+
+    assert atom_value.startswith("observability@")
+    assert len(atom_value.split("@", 1)[1]) == 12
+
+
+@pytest.mark.asyncio
+async def test_atom_reload_record_emitted_on_extension_reload(tmp_path: Path) -> None:
+    output = tmp_path / "obs.jsonl"
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                ("agentm.extensions.builtin.observability", {"path": str(output)}),
+            ],
+            provider=("tests.unit.extensions.builtin._helpers", {}),
+            resource_loader=InMemoryResourceLoader(),
+        )
+    )
+
+    old_hash = compute_atom_hash(inspect.getsource(observability_ext))
+
+    await session.bus.emit(
+        "extension_reload",
+        ExtensionReloadEvent(
+            name="observability",
+            old_hash=old_hash,
+            new_hash="abcdef123456",
+            trigger="human",
+            tier=1,
+        ),
+    )
+    await session.shutdown()
+
+    records = _read_records(output)
+    reload_record = next(r for r in records if r["kind"] == "atom.reload")
+
+    assert reload_record["attributes"]["name"] == "observability"
+    assert reload_record["attributes"]["old_hash"] == old_hash
+    assert reload_record["attributes"]["new_hash"] == "abcdef123456"
+    assert reload_record["attributes"]["trigger"] == "human"
+
+
+@pytest.mark.asyncio
+async def test_atom_reload_record_carries_new_fingerprint(tmp_path: Path) -> None:
+    output = tmp_path / "obs.jsonl"
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                ("agentm.extensions.builtin.observability", {"path": str(output)}),
+            ],
+            provider=("tests.unit.extensions.builtin._helpers", {}),
+            resource_loader=InMemoryResourceLoader(),
+        )
+    )
+
+    await session.bus.emit(
+        "extension_reload",
+        ExtensionReloadEvent(
+            name="observability",
+            old_hash=None,
+            new_hash="abcdef123456",
+            trigger="agent",
+            tier=1,
+        ),
+    )
+    await session.shutdown()
+
+    records = _read_records(output)
+    reload_record = next(r for r in records if r["kind"] == "atom.reload")
+
+    assert (
+        reload_record["attributes"]["fingerprint_after"]["atoms"]["observability"]
+        == "observability@abcdef123456"
+    )
