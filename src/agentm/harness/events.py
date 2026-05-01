@@ -165,6 +165,18 @@ class ExtensionInstallEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ExtensionReloadEvent:
+    """Fires when a live session reloads an already-loaded extension."""
+
+    name: str
+    old_hash: str | None
+    new_hash: str
+    trigger: Literal["agent", "human", "propose_change_approved"]
+    tier: int
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ApiRegisterEvent:
     """Fires synchronously from ``ExtensionAPI`` register methods.
 
@@ -204,6 +216,7 @@ __all__ = [
     "ChildSessionStartEvent",
     "CostBudgetExceededEvent",
     "ExtensionInstallEvent",
+    "ExtensionReloadEvent",
     "PlanSubmittedEvent",
     "ResourcesDiscoverEvent",
     "SessionReadyEvent",
