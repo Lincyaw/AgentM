@@ -1,5 +1,8 @@
 name: rca
 description: Root cause analysis - data-only, hypothesis-driven.
+provider:
+  id: anthropic
+  model: claude-sonnet-4-6
 extensions:
   - module: agentm.extensions.builtin.tool_read
   - module: agentm.extensions.builtin.tool_hypothesis_store

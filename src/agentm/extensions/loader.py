@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dataclasses import dataclass
 
 from agentm.harness.extension import ExtensionLoadError
 
@@ -16,7 +17,21 @@ class ScenarioLoadError(ExtensionLoadError):
 _PACKAGE = "agentm.extensions"
 
 
+@dataclass(frozen=True, slots=True)
+class ScenarioDefinition:
+    name: str
+    description: str
+    extensions: list[tuple[str, dict[str, Any]]]
+    provider: str
+    model: str
+    provider_config: dict[str, Any]
+
+
 def load_scenario(name_or_path: str) -> list[tuple[str, dict[str, Any]]]:
+    return load_scenario_definition(name_or_path).extensions
+
+
+def load_scenario_definition(name_or_path: str) -> ScenarioDefinition:
     candidate = Path(name_or_path)
     if candidate.is_absolute():
         return _load_from_path(candidate)
@@ -26,21 +41,51 @@ def load_scenario(name_or_path: str) -> list[tuple[str, dict[str, Any]]]:
         return _load_from_path(resolved)
 
 
-def _load_from_path(path: Path) -> list[tuple[str, dict[str, Any]]]:
+def _load_from_path(path: Path) -> ScenarioDefinition:
     try:
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
         raise ScenarioLoadError(str(path), exc) from exc
-    return _parse_extensions(payload, source=str(path))
+    return _parse_definition(payload, source=str(path))
 
 
-def _parse_extensions(
+def _parse_definition(
     payload: Any,
     *,
     source: str,
-) -> list[tuple[str, dict[str, Any]]]:
+) -> ScenarioDefinition:
     if not isinstance(payload, dict):
         raise ScenarioLoadError(source, ValueError("scenario must be a mapping"))
+
+    raw_name = payload.get("name")
+    raw_description = payload.get("description")
+    if raw_name is not None and (not isinstance(raw_name, str) or not raw_name):
+        raise ScenarioLoadError(source, ValueError("'name' must be a string"))
+    if raw_description is not None and not isinstance(raw_description, str):
+        raise ScenarioLoadError(
+            source, ValueError("'description' must be a string when present")
+        )
+    name = raw_name or Path(source).stem
+    description = raw_description or ""
+
+    raw_provider = payload.get("provider", {})
+    if not isinstance(raw_provider, dict):
+        raise ScenarioLoadError(
+            source, ValueError("'provider' must be a mapping when present")
+        )
+    provider = raw_provider.get("id", "anthropic")
+    model = raw_provider.get("model", "claude-sonnet-4-6")
+    provider_config = raw_provider.get("config", {})
+    if not isinstance(provider, str) or not provider:
+        raise ScenarioLoadError(source, ValueError("'provider.id' must be a string"))
+    if not isinstance(model, str) or not model:
+        raise ScenarioLoadError(
+            source, ValueError("'provider.model' must be a string")
+        )
+    if not isinstance(provider_config, dict):
+        raise ScenarioLoadError(
+            source, ValueError("'provider.config' must be a mapping")
+        )
 
     raw_extensions = payload.get("extensions")
     if not isinstance(raw_extensions, list):
@@ -68,11 +113,18 @@ def _parse_extensions(
             )
         extensions.append((module, dict(config)))
 
-    return extensions
+    return ScenarioDefinition(
+        name=name,
+        description=description,
+        extensions=extensions,
+        provider=provider,
+        model=model,
+        provider_config=dict(provider_config),
+    )
 
 
 def _entry_error(index: int, detail: str) -> str:
     return f"extensions[{index}] {detail}"
 
 
-__all__ = ["ScenarioLoadError", "load_scenario"]
+__all__ = ["ScenarioDefinition", "ScenarioLoadError", "load_scenario", "load_scenario_definition"]

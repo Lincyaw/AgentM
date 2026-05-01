@@ -1,5 +1,8 @@
 name: plan_mode
 description: Plan-mode framing - investigate but do not mutate.
+provider:
+  id: anthropic
+  model: claude-sonnet-4-6
 extensions:
   - module: agentm.extensions.builtin.tool_submit_plan
   - module: agentm.extensions.builtin.system_prompt

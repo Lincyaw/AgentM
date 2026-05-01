@@ -74,6 +74,7 @@ from agentm.harness.resource_loader import (
     DefaultResourceLoader,
     ResourceLoader,
 )
+from agentm.harness.model_resolver import ModelResolver
 from agentm.harness.session_manager import (
     InMemorySessionManager,
     SessionEntry,
@@ -92,7 +93,9 @@ class AgentSessionConfig:
 
     cwd: str
     extensions: list[tuple[str, dict[str, Any]]]
-    provider: tuple[str, dict[str, Any]]
+    provider: str | tuple[str, dict[str, Any]]
+    model: str | None = None
+    provider_config: dict[str, Any] = field(default_factory=dict)
     initial_messages: list[AgentMessage] = field(default_factory=list)
     session_manager: SessionManager | None = None
     resource_loader: ResourceLoader | None = None
@@ -274,26 +277,33 @@ class AgentSession:
             if inspect.isawaitable(result):
                 await result
 
-        # Load the provider extension. After it returns, we expect it to have
-        # registered a ProviderConfig.
-        provider_path, provider_cfg = config.provider
-        result = load_extension(provider_path, api, provider_cfg)
-        if inspect.isawaitable(result):
-            await result
+        if isinstance(config.provider, tuple):
+            # Legacy test path: keep dynamic provider modules working while
+            # production call sites move to the provider registry.
+            provider_path, provider_cfg = config.provider
+            result = load_extension(provider_path, api, provider_cfg)
+            if inspect.isawaitable(result):
+                await result
 
-        if not providers:
-            raise ExtensionLoadError(
-                provider_path,
-                RuntimeError(
-                    "provider extension did not call api.register_provider"
-                ),
+            if not providers:
+                raise ExtensionLoadError(
+                    provider_path,
+                    RuntimeError(
+                        "provider extension did not call api.register_provider"
+                    ),
+                )
+
+            active_name = next(reversed(providers))
+            active_provider = providers[active_name]
+        else:
+            resolved = await ModelResolver().resolve(
+                config.provider,
+                model_id=config.model,
+                provider_config=config.provider_config,
             )
+            providers[resolved.provider.id] = resolved.config
+            active_provider = resolved.config
 
-        # Pick the most recently registered provider as active. dict insertion
-        # order is preserved on Python 3.7+; the last-inserted entry is the
-        # authoritative one.
-        active_name = next(reversed(providers))
-        active_provider = providers[active_name]
         active_provider_box["value"] = active_provider
 
         # Build the kernel loop now that we have a stream_fn.

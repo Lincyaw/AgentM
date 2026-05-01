@@ -14,9 +14,11 @@ testing the **contract** documented in §10b.1:
 from __future__ import annotations
 
 import dataclasses
+from typing import cast
 
 import pytest
 
+from agentm.core.kernel import AgentMessage
 from agentm.core.kernel import text_message
 from agentm.harness.events import (
     AfterCompactEvent,
@@ -30,7 +32,10 @@ def test_before_compact_messages_is_mutable() -> None:
     """Handlers must be able to swap entries in the messages buffer in place
     before compaction runs. Same contract as ``ContextEvent``."""
 
-    msgs = [text_message("a", timestamp=0.0), text_message("b", timestamp=1.0)]
+    msgs = cast(
+        list[AgentMessage],
+        [text_message("a", timestamp=0.0), text_message("b", timestamp=1.0)],
+    )
     event = BeforeCompactEvent(messages=msgs, reason="auto_overflow")
 
     # Mutation must succeed (event is not frozen).

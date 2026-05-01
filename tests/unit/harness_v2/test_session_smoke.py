@@ -13,6 +13,7 @@ event bus saw the expected events.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 from typing import Any
 
 import pytest
@@ -25,6 +26,7 @@ from agentm.core.kernel import (
     ToolResultMessage,
     UserMessage,
 )
+from tests.unit.harness_v2._fixtures.fake_provider import FakeStream
 
 from agentm.harness.events import (
     ChildSessionEndEvent,
@@ -238,7 +240,7 @@ async def test_prompt_dispatches_slash_command_without_calling_stream(
 
     # Find the active provider's stream object via the registry to check
     # call counts. The fake provider stores calls on the FakeStream instance.
-    fake_stream = session._loop._stream_fn  # type: ignore[attr-defined]
+    fake_stream = cast(FakeStream, session._loop._stream_fn)  # type: ignore[attr-defined]
     pre_calls = fake_stream.calls
 
     result = await session.prompt("/ping arg1 arg2")
@@ -288,7 +290,7 @@ async def test_double_slash_escapes_to_literal_user_message(tmp_path: Path) -> N
     )
     session = await AgentSession.create(config)
 
-    fake_stream = session._loop._stream_fn  # type: ignore[attr-defined]
+    fake_stream = cast(FakeStream, session._loop._stream_fn)  # type: ignore[attr-defined]
     pre_calls = fake_stream.calls
 
     final = await session.prompt("//ping")

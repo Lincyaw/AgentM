@@ -1,5 +1,8 @@
 name: trajectory_analysis
 description: Analyze recorded agent trajectories.
+provider:
+  id: anthropic
+  model: claude-sonnet-4-6
 extensions:
   - module: agentm.extensions.builtin.tool_read
   - module: agentm.extensions.builtin.tool_trajectory_loader
