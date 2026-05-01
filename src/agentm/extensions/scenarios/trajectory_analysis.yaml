@@ -2,6 +2,9 @@ name: trajectory_analysis
 description: Analyze recorded agent trajectories.
 extensions:
   - module: agentm.extensions.builtin.tool_read
+  - module: agentm.extensions.builtin.tool_grep
+  - module: agentm.extensions.builtin.tool_find
+  - module: agentm.extensions.builtin.tool_ls
   - module: agentm.extensions.builtin.tool_trajectory_loader
   - module: agentm.extensions.builtin.system_prompt
     config:
