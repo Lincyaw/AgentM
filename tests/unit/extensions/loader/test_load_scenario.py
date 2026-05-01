@@ -26,6 +26,18 @@ def test_load_scenario_resolves_builtin_name() -> None:
         ("agentm.extensions.builtin.tool_grep", {}),
         ("agentm.extensions.builtin.tool_find", {}),
         ("agentm.extensions.builtin.tool_ls", {}),
+        (
+            "agentm.extensions.builtin.micro_compact",
+            {"threshold_pct": 0.85, "keep_last": 8},
+        ),
+        (
+            "agentm.extensions.builtin.llm_compaction",
+            {
+                "enabled": True,
+                "reserve_tokens": 16384,
+                "keep_recent_tokens": 20000,
+            },
+        ),
         ("agentm.extensions.builtin.prompt_templates", {}),
         (
             "agentm.extensions.builtin.system_prompt",

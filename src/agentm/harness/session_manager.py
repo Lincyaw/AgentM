@@ -63,6 +63,7 @@ class SessionContext:
 class SessionTreeNode:
     entry: SessionEntry
     children: list[SessionTreeNode]
+    has_compacted_ancestor: bool = False
 
 
 def _new_id() -> str:
@@ -649,6 +650,10 @@ class SessionManager:
         while stack:
             current = stack.pop()
             current.children.sort(key=lambda child: child.entry.timestamp)
+            for child in current.children:
+                child.has_compacted_ancestor = (
+                    current.has_compacted_ancestor or current.entry.type == "compaction"
+                )
             stack.extend(current.children)
         roots.sort(key=lambda node: node.entry.timestamp)
         return roots
@@ -686,16 +691,18 @@ class SessionManager:
 
         first_kept_id = details.get("first_kept_entry_id") or details.get("firstKeptEntryId")
         compaction_index = path.index(latest_compaction)
+        first_kept_index: int | None = None
         if isinstance(first_kept_id, str):
-            found_first_kept = False
-            for entry in path[:compaction_index]:
-                if entry.id == first_kept_id:
-                    found_first_kept = True
-                if found_first_kept:
-                    append_materialized(entry)
-        else:
-            for entry in path[:compaction_index]:
-                append_materialized(entry)
+            first_kept_index = next(
+                (index for index, entry in enumerate(path[:compaction_index]) if entry.id == first_kept_id),
+                None,
+            )
+
+        if first_kept_index is None:
+            first_kept_index = compaction_index
+
+        for entry in path[first_kept_index:compaction_index]:
+            append_materialized(entry)
 
         for entry in path[compaction_index + 1 :]:
             append_materialized(entry)

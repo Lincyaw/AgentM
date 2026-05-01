@@ -489,9 +489,12 @@ class AgentSession:
         # 6. Append every new assistant / tool_result message — those whose
         # identities did not exist in the pre-run snapshot, in the order
         # they appear in the returned list.
+        persisted_context = self._session_manager.build_session_context().messages
         cursor: str | None = self._session_manager.get_leaf_id() or entry.id
         for msg in final_messages:
             if id(msg) in pre_run_ids:
+                continue
+            if msg in persisted_context:
                 continue
             if cursor is None:
                 self._session_manager.reset_leaf()
