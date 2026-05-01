@@ -111,6 +111,26 @@ When any design concept changes, execute the following workflow:
 
 Every test must be deliberate. Adding, modifying, or removing a test requires careful justification.
 
+### First-principles rule (load-bearing)
+
+**Quality over quantity. Only test positions where AgentM's value proposition fails if broken.** Before adding a test, ask: "if this assertion never existed, what realistic disaster could ship?" If you can't name one tied to AgentM's identity (self-modifiability, evidence-driven evolution, pluggable SDK boundary), don't write it. Single-tool happy paths, vendor wiring, utility helpers, and framework guarantees are NOT core — even if a bug exists there, it isn't an AgentM-defining failure.
+
+This rule supersedes any urge to broaden coverage. A test suite of 7 well-chosen files that map 1:1 to fail-stop positions beats 60 files that pad metrics.
+
+### Core test positions (the only places that warrant tests by default)
+
+| Position | Why it's load-bearing |
+|---|---|
+| Constitution boundary (`is_constitution_path`, manifest reload) | Wrong → agent self-modifies kernel → bricks itself |
+| Atom hash determinism (`compute_atom_hash`) | Wrong → evidence attribution corrupt |
+| Active-set fingerprint pairing | Wrong → observation can't be linked to atom version |
+| Catalog freeze idempotence | Wrong → catalog state untrustworthy |
+| Indexer rebuild idempotence | Wrong → evolution evidence drifts |
+| Transactional reload atomicity | Wrong → live agent in inconsistent state |
+| §11 extension contract validator | Wrong → bad atoms slip into catalog |
+
+New tests outside this list require an explicit justification of which fail-stop they protect. If none, the test is decoration — delete instead of merge.
+
 ### Principles
 
 1. **Test behavior, not structure** — Ask "what does this code do" not "what fields does it have". Never test language guarantees (enum values exist, dataclass defaults work, imports succeed).
