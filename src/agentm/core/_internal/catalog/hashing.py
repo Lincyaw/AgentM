@@ -7,6 +7,7 @@ from typing import Any
 
 
 def compute_atom_hash(source: str) -> str:
+    # legacy: pre-migration trace parsing only
     digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
     return digest[:12]
 

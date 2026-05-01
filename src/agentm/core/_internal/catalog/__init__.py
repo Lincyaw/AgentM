@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 from agentm.core._internal.catalog import _layout
 from agentm.core._internal.catalog.browse import (
@@ -21,7 +18,7 @@ from agentm.core._internal.catalog.hashing import (
     compute_atom_hash,
 )
 from agentm.core._internal.catalog.manifest import is_constitution_path
-
+from agentm.extensions.discover import discover_builtin
 
 
 def list_atoms(*, root: Path | None = None) -> list[dict[str, Any]]:
@@ -29,45 +26,28 @@ def list_atoms(*, root: Path | None = None) -> list[dict[str, Any]]:
     if not atoms_root.exists():
         return []
 
+    builtin = discover_builtin()
     atoms: list[dict[str, Any]] = []
     for atom_dir in sorted(path for path in atoms_root.iterdir() if path.is_dir()):
-        current_hash = _read_current_hash(atom_dir.name, root=root)
-        if current_hash is None:
+        versions = [
+            child.name
+            for child in atom_dir.iterdir()
+            if child.is_dir() and not child.name.startswith(_layout.LEGACY_PREFIX)
+        ]
+        if not versions:
             continue
-
-        manifest_path = _layout.atom_manifest_path(
-            atom_dir.name, current_hash, root=root
-        )
-        manifest = _load_manifest(manifest_path)
+        manifest = builtin.get(atom_dir.name)
         atoms.append(
             {
                 "name": atom_dir.name,
-                "current_hash": current_hash,
-                "tier": manifest.get("tier"),
-                "api_version": manifest.get("api_version"),
+                "current_hash": sorted(versions)[-1],
+                "tier": None if manifest is None else manifest.manifest.tier,
+                "api_version": (
+                    None if manifest is None else manifest.manifest.api_version
+                ),
             }
         )
     return atoms
-
-
-
-def _read_current_hash(name: str, *, root: Path | None = None) -> str | None:
-    current_path = _layout.atom_current_symlink(name, root=root)
-    if current_path.is_symlink():
-        return Path(os.readlink(current_path)).name
-    if current_path.exists():
-        content_hash = current_path.read_text(encoding="utf-8").strip()
-        return content_hash or None
-    return None
-
-
-
-def _load_manifest(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
-    if not isinstance(data, dict):
-        raise RuntimeError(f"catalog manifest at {path} must deserialize to a dict")
-    return data
 
 
 __all__ = [
