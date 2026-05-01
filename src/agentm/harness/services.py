@@ -132,6 +132,14 @@ class CatalogService(Protocol):
         self, name: str, root: Path | None = None
     ) -> list[str]: ...
 
+    def current_version(
+        self, path: str, root: Path | None = None
+    ) -> str: ...
+
+    def get_source_at(
+        self, path: str, version: str, root: Path | None = None
+    ) -> bytes: ...
+
     def get_manifest_at(
         self, name: str, version: str, root: Path | None = None
     ) -> dict[str, Any]: ...
@@ -151,6 +159,21 @@ class CatalogService(Protocol):
         core_hash: str | None,
     ) -> dict[str, Any]: ...
 
+    def read_atom_decisions(
+        self,
+        name: str,
+        version_key: str,
+        root: Path | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def append_atom_decision(
+        self,
+        name: str,
+        version_key: str,
+        record: dict[str, Any],
+        root: Path | None = None,
+    ) -> None: ...
+
 
 class _DefaultCatalogService:
     def list_versions(
@@ -159,6 +182,20 @@ class _DefaultCatalogService:
         from agentm.core._internal.catalog import list_versions as _impl
 
         return _impl(name, root)
+
+    def current_version(
+        self, path: str, root: Path | None = None
+    ) -> str:
+        from agentm.core._internal.catalog import current_version as _impl
+
+        return _impl(path, root)
+
+    def get_source_at(
+        self, path: str, version: str, root: Path | None = None
+    ) -> bytes:
+        from agentm.core._internal.catalog import get_source_at as _impl
+
+        return _impl(path, version, root)
 
     def get_manifest_at(
         self, name: str, version: str, root: Path | None = None
@@ -192,6 +229,43 @@ class _DefaultCatalogService:
         )
 
         return _impl(loaded, scenario, core_hash)
+
+    def read_atom_decisions(
+        self,
+        name: str,
+        version_key: str,
+        root: Path | None = None,
+    ) -> list[dict[str, Any]]:
+        import json
+
+        from agentm.core._internal.catalog import _layout
+
+        path = _layout.atom_decisions_path(name, version_key, root=root)
+        if not path.exists():
+            return []
+        out: list[dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            out.append(json.loads(line))
+        return out
+
+    def append_atom_decision(
+        self,
+        name: str,
+        version_key: str,
+        record: dict[str, Any],
+        root: Path | None = None,
+    ) -> None:
+        import json
+
+        from agentm.core._internal.catalog import _layout
+
+        path = _layout.atom_decisions_path(name, version_key, root=root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True))
+            handle.write("\n")
 
 
 # --- Compaction service ----------------------------------------------------
