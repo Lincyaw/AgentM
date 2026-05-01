@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Generator
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -16,7 +17,7 @@ def _write_table(path: Path, rows: list[dict[str, object]]) -> None:
 
 
 @pytest.fixture
-def observability_data_dir(tmp_path: Path) -> Path:
+def observability_data_dir(tmp_path: Path) -> Generator[Path, None, None]:
     ts0 = datetime(2025, 8, 28, 20, 45)
     ts1 = datetime(2025, 8, 28, 20, 47)
 

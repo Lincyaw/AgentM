@@ -55,6 +55,7 @@ dependencies = [
     { name = "agentm" },
     { name = "duckdb" },
     { name = "pyarrow" },
+    { name = "pydantic" },
     { name = "tiktoken" },
 ]
 
@@ -63,6 +64,7 @@ requires-dist = [
     { name = "agentm", editable = "." },
     { name = "duckdb", specifier = ">=1.4.4" },
     { name = "pyarrow", specifier = ">=23.0.1" },
+    { name = "pydantic", specifier = ">=2.11.0" },
     { name = "tiktoken", specifier = ">=0.12.0" },
 ]
 
