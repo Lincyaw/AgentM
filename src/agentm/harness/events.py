@@ -27,7 +27,7 @@ Layer purity: imports only stdlib + ``agentm.core.kernel``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from agentm.core.kernel import AgentMessage, Model
 
@@ -150,6 +150,14 @@ class SessionReadyEvent:
     model: Model | None
 
 
+@dataclass(frozen=True, slots=True)
+class ResourcesDiscoverEvent:
+    """Fires when an extension wants peers to contribute resource paths."""
+
+    cwd: str
+    reason: Literal["startup", "reload"]
+
+
 __all__ = [
     "AfterCompactEvent",
     "BeforeAgentStartEvent",
@@ -158,6 +166,7 @@ __all__ = [
     "ChildSessionStartEvent",
     "CostBudgetExceededEvent",
     "PlanSubmittedEvent",
+    "ResourcesDiscoverEvent",
     "SessionReadyEvent",
     "SessionShutdownEvent",
 ]

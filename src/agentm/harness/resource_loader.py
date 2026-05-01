@@ -14,7 +14,7 @@ The default loader walks ``cwd``, its ancestors, and ``~/.agentm/`` to find:
 
 Embedded SDK callers who lack a filesystem can use ``InMemoryResourceLoader``.
 
-Hard rule: this module imports only stdlib + ``pyyaml``. No legacy harness.
+Hard rule: this module imports only stdlib + shared frontmatter parsing.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-import yaml
+from agentm.core.frontmatter import parse_frontmatter
 
 
 # --- Records ----------------------------------------------------------------
@@ -74,37 +74,10 @@ class ResourceLoader(Protocol):
 
 
 def _split_frontmatter(text: str) -> tuple[dict[str, object], str]:
-    """Split a markdown file into (frontmatter dict, body).
+    """Split a markdown file into ``(frontmatter, body)`` via shared parsing."""
 
-    Recognizes the classic ``---\\n...\\n---\\n`` block at the very top. If
-    no frontmatter is present, returns ``({}, text)``. Frontmatter parsing
-    uses ``yaml.safe_load``; on parse failure, returns the file unchanged
-    (the caller decides what to do with a missing ``name``).
-    """
-
-    if not text.startswith("---"):
-        return {}, text
-    # Allow first line to be exactly "---"
-    lines = text.splitlines(keepends=True)
-    if not lines or lines[0].strip() != "---":
-        return {}, text
-    # Find the closing fence.
-    closing_idx: int | None = None
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            closing_idx = i
-            break
-    if closing_idx is None:
-        return {}, text
-    fm_text = "".join(lines[1:closing_idx])
-    body = "".join(lines[closing_idx + 1 :])
-    try:
-        loaded = yaml.safe_load(fm_text) or {}
-    except yaml.YAMLError:
-        return {}, text
-    if not isinstance(loaded, dict):
-        return {}, text
-    return loaded, body
+    metadata, body = parse_frontmatter(text)
+    return dict(metadata), body
 
 
 # --- Default impl ----------------------------------------------------------
