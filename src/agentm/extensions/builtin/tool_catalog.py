@@ -76,9 +76,16 @@ _RUNS_FOR_PARAMS = {
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    root = Path(str(config.get("root", ".agentm/catalog")))
-    if not root.is_absolute():
-        root = Path(api.cwd) / root
+    # ``root`` is the *project* root that contains ``.agentm/catalog/``.
+    # ``agentm.core.catalog._layout.catalog_root`` prepends that segment, so
+    # callers must not include it here. Defaults to the session cwd.
+    raw_root = config.get("root")
+    if raw_root is None:
+        root = Path(api.cwd)
+    else:
+        root = Path(str(raw_root))
+        if not root.is_absolute():
+            root = Path(api.cwd) / root
 
     async def _list_versions_tool(args: dict[str, Any]) -> ToolResult:
         versions = list_versions(str(args["atom"]), root)
