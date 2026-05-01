@@ -16,12 +16,6 @@ from agentm.harness.session import AgentSession, AgentSessionConfig
     ("scenario_name", "tool_name", "arguments", "expected_entry_types"),
     [
         ("general_purpose", "read", None, {"message"}),
-        (
-            "rca",
-            "add_hypothesis",
-            {"id": "H1", "description": "Disk is full"},
-            {"message", "hypothesis"},
-        ),
         ("trajectory_analysis", "load_trajectory", None, {"message"}),
         (
             "plan_mode",

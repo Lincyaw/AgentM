@@ -1,0 +1,20 @@
+[project]
+name = "agentm-rca"
+version = "0.1.0"
+description = "RCA scenario package that consumes the AgentM SDK"
+readme = "README.md"
+authors = [{ name = "Aoyang Fang", email = "aoyangfang@gmail.com" }]
+requires-python = ">=3.12"
+dependencies = [
+    "agentm",
+    "duckdb>=1.4.4",
+    "pyarrow>=23.0.1",
+    "tiktoken>=0.12.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+agentm = { workspace = true }

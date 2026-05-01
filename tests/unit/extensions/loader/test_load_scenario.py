@@ -10,30 +10,27 @@ from agentm.extensions.loader import ScenarioLoadError, load_scenario
 
 _BUILTIN_SCENARIOS = [
     "general_purpose",
-    "rca",
     "trajectory_analysis",
     "plan_mode",
 ]
 
 
 def test_load_scenario_resolves_builtin_name() -> None:
-    loaded = load_scenario("rca")
+    loaded = load_scenario("general_purpose")
 
     assert loaded == [
         ("agentm.extensions.builtin.tool_read", {}),
-        ("agentm.extensions.builtin.tool_hypothesis_store", {}),
+        ("agentm.extensions.builtin.tool_bash", {}),
+        ("agentm.extensions.builtin.tool_edit", {}),
+        ("agentm.extensions.builtin.tool_write", {}),
         (
             "agentm.extensions.builtin.system_prompt",
             {
                 "prompt": (
-                    "You are an RCA analyst. Collect evidence; never draw conclusions\n"
-                    "without supporting data. Use the hypothesis store to track theories.\n"
+                    "You are a helpful coding assistant. Use the available tools to read,\n"
+                    "modify, and execute code. Be careful with destructive operations.\n"
                 )
             },
-        ),
-        (
-            "agentm.extensions.builtin.permission",
-            {"deny": ["bash", "edit", "write"]},
         ),
     ]
     assert loaded[0][0] == "agentm.extensions.builtin.tool_read"
@@ -46,10 +43,10 @@ def test_load_scenario_accepts_absolute_path() -> None:
         / "agentm"
         / "extensions"
         / "scenarios"
-        / "rca.yaml"
+        / "general_purpose.yaml"
     )
 
-    assert load_scenario(str(scenario_path)) == load_scenario("rca")
+    assert load_scenario(str(scenario_path)) == load_scenario("general_purpose")
 
 
 def test_load_scenario_rejects_non_list_extensions(tmp_path: Path) -> None:
