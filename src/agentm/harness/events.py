@@ -82,7 +82,7 @@ class AfterCompactEvent:
     summary: str
     kept_message_count: int
     discarded_message_count: int
-    details: Any = None  # extension-specific (e.g. RCA artifact index)
+    details: Any = None  # extension-specific (e.g. artifact index)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +91,7 @@ class ChildSessionStartEvent:
 
     child_session_id: str
     parent_session_id: str
-    purpose: str  # e.g. "subagent:rca_worker", caller-defined
+    purpose: str  # e.g. "subagent:worker", caller-defined
 
 
 @dataclass(frozen=True, slots=True)

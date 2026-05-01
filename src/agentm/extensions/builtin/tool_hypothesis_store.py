@@ -27,7 +27,7 @@ class Hypothesis:
 
 MANIFEST = ExtensionManifest(
     name="tool_hypothesis_store",
-    description="Register in-memory RCA hypothesis store tools.",
+    description="Register in-memory hypothesis store tools.",
     registers=(
         "tool:add_hypothesis",
         "tool:update_hypothesis",
@@ -102,7 +102,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     api.register_tool(
         FunctionTool(
             name="add_hypothesis",
-            description="Create a tracked RCA hypothesis.",
+            description="Create a tracked hypothesis.",
             parameters=_ADD_PARAMETERS,
             fn=_add,
         )
@@ -110,7 +110,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     api.register_tool(
         FunctionTool(
             name="update_hypothesis",
-            description="Update a tracked RCA hypothesis.",
+            description="Update a tracked hypothesis.",
             parameters=_UPDATE_PARAMETERS,
             fn=_update,
         )
@@ -118,7 +118,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     api.register_tool(
         FunctionTool(
             name="list_hypotheses",
-            description="List all tracked RCA hypotheses.",
+            description="List all tracked hypotheses.",
             parameters=_LIST_PARAMETERS,
             fn=_list,
         )

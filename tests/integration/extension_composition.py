@@ -4,7 +4,7 @@ Spec: ``.claude/plans/2026-04-30-phase2-parallel-extensions.md`` lines 67-77.
 
 Exercises the full builtin set
 ``{permission, dedup, cost_budget, tool_result_budget, micro_compact,
-trajectory, sub_agent}`` + the ``rca`` scenario recipe in one
+trajectory, sub_agent}`` plus the RCA-oriented tool atoms in one
 ``AgentSession.create``. A scripted fake provider drives turns that hit each
 extension's value path so the test prevents:
 
@@ -149,7 +149,7 @@ def _composition_extensions(
     tool_result_max_chars: int,
     inherit_extensions: list[str],
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Atom set called out by the plan (lines 70-72) plus the ``rca`` recipe.
+    """Atom set called out by the plan (lines 70-72) plus RCA-oriented tools.
 
     The order matters: per design §10b.4 extensions process in declaration
     order. The atoms come first so the recipe can layer on its own
@@ -190,7 +190,21 @@ def _composition_extensions(
             },
         ),
     ]
-    return atoms + load_scenario("rca") + [
+    rca_tooling: list[tuple[str, dict[str, Any]]] = [
+        ("agentm.extensions.builtin.tool_read", {}),
+        ("agentm.extensions.builtin.tool_hypothesis_store", {}),
+        (
+            "agentm.extensions.builtin.system_prompt",
+            {
+                "prompt": (
+                    "You are an RCA analyst. Collect evidence; never draw conclusions\n"
+                    "without supporting data. Use the hypothesis store to track theories.\n"
+                )
+            },
+        ),
+        ("agentm.extensions.builtin.permission", {"deny": ["bash", "edit", "write"]}),
+    ]
+    return atoms + rca_tooling + [
         ("agentm.extensions.builtin.trajectory", {"path": "trajectory.jsonl"}),
     ]
 
@@ -295,7 +309,7 @@ async def test_full_stack_composition_routes_each_extensions_value_path(
         f"trajectory missed channels: {expected_channels - seen_channels}"
     )
 
-    # 2) Permission denied the rca-scenario denylist tool ('bash') was never
+    # 2) Permission denied the RCA denylist tool ('bash') was never
     #    called; the provider only invoked 'forbidden_tool' once and got a
     #    single block with the permission reason. No double-blocking.
     is_err, text = blocked_by_id["c1"]
@@ -317,7 +331,7 @@ async def test_full_stack_composition_routes_each_extensions_value_path(
     assert read_err is False
     assert "tool_result_budget truncated" in read_text
 
-    # 5) The rca recipe's permission denylist + tool_hypothesis_store wiring
+    # 5) The RCA-specific permission denylist + tool_hypothesis_store wiring
     #    landed: bash/edit/write are absent, hypothesis tools are present.
     tool_names = {t.name for t in session.tools}
     assert {"add_hypothesis", "list_hypotheses", "read"} <= tool_names
@@ -484,7 +498,7 @@ async def test_sub_agent_child_inherits_only_configured_extension_set(
 
 @pytest.mark.parametrize(
     "scenario_name",
-    ["general_purpose", "rca", "trajectory_analysis", "plan_mode"],
+    ["general_purpose", "trajectory_analysis", "plan_mode"],
 )
 def test_scenario_yaml_loads_and_resolves_to_known_atoms(
     scenario_name: str,

@@ -31,3 +31,6 @@ build-backend = "uv_build"
 
 [tool.setuptools.package-data]
 agentm = ["py.typed", "extensions/scenarios/*.yaml"]
+
+[tool.uv.workspace]
+members = ["scenarios/*"]
