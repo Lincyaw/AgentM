@@ -1,3 +1,9 @@
+**Status**: HISTORICAL — describes the pre-v2 architecture removed in Phase 2.5 (2026-04-30).
+The current architecture lives in [pluggable-architecture.md](pluggable-architecture.md) and
+[extension-as-scenario.md](extension-as-scenario.md).
+
+---
+
 # Design: Agent Memory Scope
 
 **Status**: DRAFT

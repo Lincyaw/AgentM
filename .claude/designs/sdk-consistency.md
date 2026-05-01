@@ -1,3 +1,9 @@
+**Status**: HISTORICAL — describes the pre-v2 architecture removed in Phase 2.5 (2026-04-30).
+The current architecture lives in [pluggable-architecture.md](pluggable-architecture.md) and
+[extension-as-scenario.md](extension-as-scenario.md).
+
+---
+
 # Design: SDK Semantic Consistency Refactoring
 
 **Status: COMPLETED** (2026-03-28). All phases implemented.

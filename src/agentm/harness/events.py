@@ -33,6 +33,33 @@ from agentm.core.kernel import AgentMessage, Model
 
 
 @dataclass(slots=True)
+class BeforeAgentStartEvent:
+    """Fires at the top of ``AgentSession.prompt`` before the kernel loop runs.
+
+    Mutability: this event is intentionally **not frozen**. Handlers may mutate
+    ``system`` in place; alternatively they may return a ``dict[str, str]`` of
+    shape ``{"system": "..."}`` and the harness will use the last non-None
+    replacement to overwrite the system prompt. ``messages`` is the live list
+    that will be passed to the loop — handlers should generally not rewrite it
+    here (use ``context`` / ``before_send_to_llm`` for that).
+    """
+
+    messages: list[AgentMessage]
+    system: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionShutdownEvent:
+    """Fires when ``AgentSession.shutdown`` is called.
+
+    Carries the session's cwd so cleanup handlers can locate session-scoped
+    resources without holding a reference to the session itself.
+    """
+
+    cwd: str
+
+
+@dataclass(slots=True)
 class BeforeCompactEvent:
     """Fires before an extension performs context compaction.
 
@@ -125,10 +152,12 @@ class SessionReadyEvent:
 
 __all__ = [
     "AfterCompactEvent",
+    "BeforeAgentStartEvent",
     "BeforeCompactEvent",
     "ChildSessionEndEvent",
     "ChildSessionStartEvent",
     "CostBudgetExceededEvent",
     "PlanSubmittedEvent",
     "SessionReadyEvent",
+    "SessionShutdownEvent",
 ]
