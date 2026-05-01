@@ -14,7 +14,7 @@ from agentm.harness.events import (
     SessionReadyEvent,
     SessionShutdownEvent,
 )
-from agentm.harness.extension import ExtensionAPI, ProviderConfig
+from agentm.harness.extension import ExtensionAPI, ExtensionLoadError, ProviderConfig
 from agentm.extensions import ExtensionManifest
 
 _RUNNING: Literal["running"] = "running"
@@ -43,10 +43,25 @@ MANIFEST = ExtensionManifest(
                 "type": "array",
                 "items": {"type": "string"},
                 "default": _DEFAULT_INHERIT_EXTENSIONS,
+                "description": (
+                    "Names of parent-side extensions the child session may "
+                    "inherit. Each name listed here MUST appear as a key in "
+                    "``available_inherited_extensions`` or installation fails "
+                    "fast with ExtensionLoadError."
+                ),
             },
             "available_inherited_extensions": {
                 "type": "object",
                 "additionalProperties": True,
+                "description": (
+                    "Resolution map the parent supplies to translate inherited "
+                    "names into concrete extension specs. Each value is either "
+                    "a ``[module_path, config_dict]`` pair or "
+                    "``{'module': str, 'config': dict}``. Parents must populate "
+                    "this for every name in ``inherit_extensions``; otherwise "
+                    "inheritance silently fails — which is why this atom now "
+                    "fast-fails on missing keys."
+                ),
             },
             "max_workers": {"type": "integer", "minimum": 1, "default": 4},
         },
@@ -162,6 +177,20 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         config.get("inherit_extensions", _DEFAULT_INHERIT_EXTENSIONS)
     )
     available_inherited = dict(config.get("available_inherited_extensions", {}))
+    missing = [name for name in inherit_extensions if name not in available_inherited]
+    if missing:
+        # Fast-fail: silently dropping inherited extensions hides subtle child
+        # misbehaviour (e.g. permission policy not applied). Match design
+        # §10b.4 ordering errors and surface this at install time.
+        raise ExtensionLoadError(
+            __name__,
+            ValueError(
+                "sub_agent.inherit_extensions references "
+                f"{missing!r} but available_inherited_extensions does not "
+                "supply them; parent must populate the resolution map for "
+                "every inherited name."
+            ),
+        )
     max_workers = int(config.get("max_workers", 4))
     registry: dict[str, _ChildTask] = {}
     registry_lock = asyncio.Lock()
