@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from agentm.extensions import ExtensionManifest
+from agentm.harness.events import BeforeAgentStartEvent
 from agentm.harness.extension import ExtensionAPI
 
 
@@ -26,10 +27,10 @@ MANIFEST = ExtensionManifest(
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     prompt = str(config["prompt"])
 
-    def before_agent_start(event: dict[str, Any]) -> dict[str, str]:
-        current = str(event.get("system") or "")
+    def before_agent_start(event: BeforeAgentStartEvent) -> dict[str, str]:
+        current = str(event.system or "")
         updated = f"{prompt}\n\n{current}" if current else prompt
-        event["system"] = updated
+        event.system = updated
         return {"system": updated}
 
     api.on("before_agent_start", before_agent_start)

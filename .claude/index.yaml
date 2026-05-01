@@ -57,6 +57,7 @@ concepts:
     tasks: []
 
   testing_strategy:
+    status: historical
     description: "Four-layer testing architecture: deterministic invariants, snapshot-based pipeline integration (Mock LLM), LLM-as-Judge decision eval, and E2E scenario eval. Checkpoint-driven snapshot injection for mid-flow behavioral testing."
     design: "designs/testing-strategy.md"
     related_concepts: [orchestrator, sub_agent, configuration_system, recovery_system, memory_system, execution_runner]
@@ -77,6 +78,7 @@ concepts:
         layer: "L1 — Deterministic Invariants"
 
   system_architecture:
+    status: historical
     description: "Pure Python multi-agent orchestration system. SimpleAgentLoop-based ReAct cycle, AgentRuntime for worker management, WorkerLoopFactory for config-driven worker creation, build_agent_system() single canonical builder, Scenario protocol for domain logic, Middleware protocol (3 hooks) for cross-cutting concerns. Config-driven design, trajectory recording, monitoring, and failure recovery."
     design: "designs/system-design-overview.md"
     related_concepts: [agent_harness, orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner, scenario_protocol, middleware_system, storage_backend, trajectory_analysis]
@@ -93,6 +95,7 @@ concepts:
       - "tasks/2026-03-08-snapshot-tests.md"
 
   orchestrator:
+    status: historical
     description: "SimpleAgentLoop-based orchestrator with DynamicContextMiddleware for state injection. Dispatches workers via AgentRuntime. Monitors/injects/aborts via dispatch_agent/check_tasks/inject_instruction/abort_task tools. RCA scenario uses HypothesisStore for hypothesis reasoning."
     design: "designs/orchestrator.md"
     related_concepts: [system_architecture, sub_agent, trajectory_system, memory_system, execution_runner]
@@ -100,6 +103,7 @@ concepts:
     tasks: []
 
   sub_agent:
+    status: historical
     description: "Worker agents built by WorkerLoopFactory as SimpleAgentLoop instances. Config-driven tools/prompts, middleware stack (budget, compression, dedup, trajectory). Data-only constraint in RCA mode. Launched as asyncio.Tasks by AgentRuntime."
     design: "designs/sub-agent.md"
     related_concepts: [system_architecture, orchestrator, configuration_system, execution_runner, service_profile]
@@ -119,6 +123,7 @@ concepts:
         layer: "L1 — Deterministic Invariants"
 
   memory_system:
+    status: historical
     description: "Two-layer memory: intra-task (context compression via CompressionMiddleware, see orchestrator.md) and cross-task (trajectory_analysis scenario with trajectory-analysis skills writing to vault, see trajectory-analysis.md)"
     design: "designs/orchestrator.md"
     related_concepts: [orchestrator, trajectory_system, memory_vault, trajectory_analysis]
@@ -127,6 +132,7 @@ concepts:
     tasks: []
 
   trajectory_analysis:
+    status: historical
     description: "Skill-driven trajectory analysis scenario. Agent Skills spec (SKILL.md + references/ + examples/) in vault under skill/trajectory-analysis/. Three-tier progressive disclosure: catalog → SKILL.md → references/. Model-driven or config-driven skill activation. Uses generic state via Scenario protocol, two phases (analyze → synthesize)."
     design: "designs/trajectory-analysis.md"
     related_concepts: [system_architecture, memory_system, memory_vault, scenario_protocol, configuration_system]
@@ -140,6 +146,7 @@ concepts:
       - "tasks/2026-03-24-ta-tests.md"
 
   configuration_system:
+    status: historical
     description: "Config system: system.yaml (global), tools/*.yaml (reusable tool defs), scenarios/<name>/ (scenario.yaml + prompts/*.j2). Pydantic schema validation + cross-reference validation at startup. Environment variable substitution"
     design: "designs/system-design-overview.md"
     related_concepts: [system_architecture, sub_agent, orchestrator]
@@ -152,6 +159,7 @@ concepts:
           - "ScenarioConfig composition — accepts complete valid scenario (§ Configuration — scenario.yaml)"
 
   trajectory_system:
+    status: historical
     description: "Hierarchical trace capture via TrajectoryCollector (JSONL event recording). Independent checkpoint chains per agent, linked by task_id. Export to RL training format. LLM input recording via TrajectoryMiddleware (on_llm_start, on_tool_call, on_llm_end hooks)."
     design: "designs/orchestrator.md"
     related_concepts: [system_architecture, orchestrator, recovery_system, memory_system, execution_runner, trajectory, debug_console, middleware_system]
@@ -159,6 +167,7 @@ concepts:
     tasks: []
 
   recovery_system:
+    status: historical
     description: "Four-layer error handling: Worker self-heal, API retry (ChatOpenAI max_retries + SimpleAgentLoop._invoke_with_retry() logic), Orchestrator decision (with error summary + last steps), manual system recovery via checkpoint resume. Debug replay via checkpoint fork."
     design: "designs/system-design-overview.md"
     related_concepts: [system_architecture, trajectory_system, orchestrator, sub_agent, execution_runner]
@@ -170,6 +179,7 @@ concepts:
           - "Inject/abort workflows (§ Recovery Layer 3)"
 
   execution_runner:
+    status: historical
     description: "AgentRuntime: manages async worker execution. Provides dispatch_agent/check_tasks/inject_instruction/abort_task tools. Spawns workers as AgentHandle instances, bidirectional communication via inbox queues. Streams events to frontend WebSocket."
     design: "designs/orchestrator.md"
     related_concepts: [orchestrator, sub_agent, frontend_architecture, trajectory_system, trajectory, debug_console]
@@ -186,6 +196,7 @@ concepts:
           - "abort_task cancels running worker (§ AgentRuntime)"
 
   frontend_architecture:
+    status: historical
     description: "Read-only observation dashboard: Agent Topology (d3.js), Execution Monitor (timeline+detail), Conversation View (scenario plugin), Debug Panel (checkpoint browser). Single HTML file, React + WebSocket + d3.js. Scenario plugin architecture for extensibility. Backend streams events via AgentRuntime."
     design: "designs/frontend-architecture.md"
     related_concepts: [system_architecture, trajectory_system, orchestrator, execution_runner, configuration_system, debug_console]
@@ -193,6 +204,7 @@ concepts:
     tasks: []
 
   trajectory:
+    status: historical
     description: "TrajectoryCollector: structured event capture to JSONL with async/sync recording, fan-out listeners, thread safety, and context manager lifecycle"
     design: "designs/trajectory.md"
     related_concepts: [system_architecture, orchestrator, execution_runner, debug_console]
@@ -200,6 +212,7 @@ concepts:
     tasks: []
 
   debug_console:
+    status: historical
     description: "Rich-based real-time terminal UI with three panels (Agent Status, Tool Timeline, Hypothesis Board). Consumes events via TrajectoryCollector listener"
     design: "designs/debug-console.md"
     related_concepts: [trajectory, frontend_architecture, execution_runner]
@@ -207,6 +220,7 @@ concepts:
     tasks: []
 
   builder:
+    status: historical
     description: "build_agent_system() — single canonical 4-phase builder (platform resources -> worker infra -> orch tools -> orch loop). Scenario-driven, no legacy wrappers. Factory closure DI for tools, trajectory wiring."
     related_concepts: [system_architecture, orchestrator, sub_agent, trajectory, configuration_system, scenario_protocol, middleware_system, storage_backend]
     plans: ["plans/2026-03-09-compression-recall-memory.md"]
@@ -236,6 +250,7 @@ concepts:
           - "Class hierarchy verification"
 
   storage_backend:
+    status: historical
     description: "DELETED: StorageBackend Protocol, FilesystemBackend, and CompositeBackend were removed. The framework now uses direct filesystem operations and vault-based storage."
     related_concepts: [memory_vault]
     plans: []
@@ -243,6 +258,7 @@ concepts:
     tests: []
 
   memory_vault:
+    status: historical
     description: "Markdown + YAML frontmatter persistent knowledge vault with SQLite-backed three-layer index (structural, link graph, FTS5 + sqlite-vec). Replaces JSON-based KnowledgeStore. [[wikilink]] bidirectional linking, atomic write flow, vault_edit with 4 incremental edit primitives (replace_string, set_frontmatter, replace_section, append_section), rebuildable index."
     design: "designs/memory-vault.md"
     related_concepts: [memory_system, agent_harness, storage_backend, configuration_system]
@@ -258,6 +274,7 @@ concepts:
       - "tasks/2026-03-16-vault-integration.md"
 
   tool_dedup:
+    status: historical
     description: "Two-layer tool call deduplication: on_llm_start hook (soft limit, reminder injection) + tool wrapper (hard limit, short rejection). DedupTracker with OrderedDict FIFO eviction. Excludes think tool. Per-agent-invocation cache. All code in middleware/dedup.py"
     design: "designs/tool-dedup.md"
     related_concepts: [sub_agent, configuration_system, middleware_system]
@@ -270,6 +287,7 @@ concepts:
         layer: "L1 — Deterministic Invariants"
 
   service_profile:
+    status: historical
     description: "Thread-safe, run-scoped shared service knowledge store (ServiceProfileStore). Orchestrator and workers both read/write via update_service_profile/query_service_profile tools. Merge semantics: topology union, observations append, anomaly upgrade only. Injected into workers via extra_tools, into orchestrator via format_context partial binding."
     design: "designs/sub-agent.md"
     related_concepts: [orchestrator, sub_agent, execution_runner]
@@ -287,6 +305,7 @@ concepts:
           - "Immutability: frozen dataclasses"
 
   tool_filter:
+    status: historical
     description: "Three-layer tool filtering: global disallowed (SDK safety, prevents worker recursion), agent-level disallowed_tools, whitelist. resolve_tools() pure function in harness/tool_filter.py. Wildcard ['*'] semantics. Fail-fast on unknown whitelist names."
     design: "designs/tool-filter.md"
     related_concepts: [sub_agent, agent_harness, sdk_consistency, tool_dedup, agent_definition]
@@ -294,6 +313,7 @@ concepts:
     tasks: []
 
   permission_mode:
+    status: historical
     description: "Four-mode permission system (DEFAULT, READONLY, SUPERVISED, UNRESTRICTED) enforced via PermissionMiddleware on_tool_call hook. Three-layer defense: prompt reinforcement + tool filtering + middleware interception. Tool.readonly annotation, PermissionPolicy with per-tool overrides, audit trail for SUPERVISED mode."
     design: "designs/permission-mode.md"
     related_concepts: [agent_harness, middleware_system, scenario_protocol, sub_agent, sdk_consistency, tool_filter]
@@ -309,6 +329,7 @@ concepts:
     tasks: []
 
   agent_definition:
+    status: historical
     description: "Declarative AgentDefinition frozen dataclass replacing AgentConfig. Loaded from Markdown frontmatter (.md) or YAML. One file = one agent. Supports tools/disallowed_tools, task_type dispatch routing, Jinja2 system prompt. Source layering with full-replacement semantics."
     design: "designs/agent-definition.md"
     related_concepts: [sub_agent, configuration_system, builder, tool_filter, permission_mode, agent_memory]
@@ -316,6 +337,7 @@ concepts:
     tasks: []
 
   prompt_patterns:
+    status: historical
     description: "Catalog of 12 prompt design patterns for AgentM templates: role anchor, critical boundary markers, numbered sections, decision tables, good/bad contrast, anti-rationalization checklists, deterrence statements, purpose statements, forced output format, context isolation, three-layer permissions, per-turn reminders."
     design: "designs/prompt-patterns.md"
     related_concepts: [orchestrator, sub_agent, configuration_system, middleware_system, scenario_protocol, loop_resilience]
@@ -323,6 +345,7 @@ concepts:
     tasks: []
 
   loop_resilience:
+    status: historical
     description: "Five mechanisms for robust agent loops: tool result budget (truncation of oversized results), tool concurrency partitioning (safe parallel vs serial execution), critical system reminder (periodic constraint re-injection), micro-compact (lightweight rule-based context cleanup), cost budget (USD/token hard stop). All implemented as middleware or minimal loop changes."
     design: "designs/loop-resilience.md"
     related_concepts: [agent_harness, middleware_system, sub_agent, permission_mode, prompt_patterns, configuration_system, recovery_system]
@@ -330,6 +353,7 @@ concepts:
     tasks: []
 
   trajectory_judger:
+    status: historical
     description: "Judge trajectory quality by classifying agent behavior patterns. Single-pass scenario with structured output schema for classification results."
     design: "designs/trajectory-judger.md"
     related_concepts: [trajectory, trajectory_analysis, scenario_protocol]
@@ -337,6 +361,7 @@ concepts:
     tasks: []
 
   investigation_sanitizer:
+    status: historical
     description: "Automated investigation quality checks (linter/sanitizer) for the RCA orchestrator. Two-layer design: CodeSanitizer (deterministic store/sequence checks) + CriticSanitizer (LLM-based semantic judgment). Detects exploration gaps (E1-E4), confirmation failures (C1-C4), judgment errors (J1-J4), process violations (P1-P3). Injects findings into orchestrator message stream. Hard-gates finalize on critical violations."
     design: "designs/investigation-sanitizer.md"
     related_concepts: [orchestrator, middleware_system, scenario_protocol, loop_resilience, trajectory_judger, service_profile]

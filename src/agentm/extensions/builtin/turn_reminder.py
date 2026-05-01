@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from agentm.extensions import ExtensionManifest
+from agentm.harness.events import BeforeAgentStartEvent
 from agentm.harness.extension import ExtensionAPI
 
 
@@ -28,13 +29,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     reminder = str(config["reminder"])
     every_n_turns = int(config["every_n_turns"])
 
-    def before_agent_start(event: dict[str, Any]) -> dict[str, str] | None:
+    def before_agent_start(event: BeforeAgentStartEvent) -> dict[str, str] | None:
         turn_count = len(api.session.get_messages())
         if turn_count % every_n_turns != 0:
             return None
-        current = str(event.get("system") or "")
+        current = str(event.system or "")
         updated = f"{current}\n\n{reminder}" if current else reminder
-        event["system"] = updated
+        event.system = updated
         return {"system": updated}
 
     api.on("before_agent_start", before_agent_start)

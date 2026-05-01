@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
-from agentm.core.kernel import AgentMessage, AssistantMessage, TextContent
+from agentm.core.kernel import (
+    AgentMessage,
+    AssistantMessage,
+    BeforeSendToLlmEvent,
+    TextContent,
+)
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import AfterCompactEvent, BeforeCompactEvent
 from agentm.harness.extension import ExtensionAPI
@@ -31,7 +36,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     keep_last = int(config.get("keep_last", 8))
     last_compaction_id: str | None = None
 
-    async def before_send_to_llm(event: Any) -> None:
+    async def before_send_to_llm(event: BeforeSendToLlmEvent) -> None:
         nonlocal last_compaction_id
 
         model = api.model
