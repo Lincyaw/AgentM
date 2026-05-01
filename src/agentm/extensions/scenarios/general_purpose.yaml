@@ -9,6 +9,7 @@ extensions:
   - module: agentm.extensions.builtin.tool_grep
   - module: agentm.extensions.builtin.tool_find
   - module: agentm.extensions.builtin.tool_ls
+  - module: agentm.extensions.builtin.tool_catalog
   - module: agentm.extensions.builtin.micro_compact
     config:
       threshold_pct: 0.85

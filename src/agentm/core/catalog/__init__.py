@@ -9,6 +9,12 @@ from typing import Any
 import yaml
 
 from agentm.core.catalog import _layout
+from agentm.core.catalog.browse import (
+    CatalogAtom,
+    get_manifest_at,
+    list_versions,
+    runs_for,
+)
 from agentm.core.catalog.freeze import freeze_current
 from agentm.core.catalog.hashing import (
     compute_active_set_fingerprint,
@@ -65,9 +71,13 @@ def _load_manifest(path: Path) -> dict[str, Any]:
 
 
 __all__ = [
-    "compute_atom_hash",
+    "CatalogAtom",
     "compute_active_set_fingerprint",
+    "compute_atom_hash",
     "freeze_current",
+    "get_manifest_at",
     "is_constitution_path",
     "list_atoms",
+    "list_versions",
+    "runs_for",
 ]
