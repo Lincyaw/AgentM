@@ -479,14 +479,32 @@ def _make_simple_writer(sink: _Sink, trace_id: str, kind: str, name: str = ""): 
     return _write
 
 
+def _builtin_hashes_for_modules(module_paths: tuple[str, ...]) -> dict[str, str]:
+    discovered = discover_builtin()
+    hashes: dict[str, str] = {}
+    for module_path in module_paths:
+        entry = next(
+            (candidate for candidate in discovered.values() if candidate.module_path == module_path),
+            None,
+        )
+        if entry is None:
+            continue
+        source_path = inspect.getsourcefile(entry.module)
+        if source_path is None:
+            continue
+        source = Path(source_path).read_text(encoding="utf-8")
+        hashes[entry.name] = compute_atom_hash(source)
+    return hashes
+
+
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     bus = api.events
     if getattr(bus, "_observer", None) is not None:
         return
 
-    trace_id = uuid.uuid4().hex
+    trace_id = api.session_id
     raw_path = config.get("path", ".agentm/observability/{session_id}.jsonl")
-    materialized = str(raw_path).replace("{session_id}", trace_id)
+    materialized = str(raw_path).replace("{session_id}", api.session_id)
     file_path = Path(materialized)
     if not file_path.is_absolute():
         file_path = Path(api.cwd) / file_path
@@ -569,7 +587,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             scenario=scenario,
             core_hash=None,
         )
-
 
     def _on_extension_install(event: ExtensionInstallEvent) -> None:
         if event.phase == "end" and event.module_path in builtin_by_module_path:
@@ -684,6 +701,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "cwd": event.cwd,
                     "tool_names": list(event.tool_names),
                     "command_names": list(event.command_names),
+                    "extension_module_paths": list(event.extension_module_paths),
                     "model": _serialize(event.model),
                 },
                 "status": {"code": "OK"},

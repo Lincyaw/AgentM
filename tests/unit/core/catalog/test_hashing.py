@@ -101,6 +101,11 @@ def test_catalog_modules_keep_layer_purity_contract() -> None:
         "dataclasses",
         "datetime",
         "typing",
+        # PR #44 indexer additions: stdlib only.
+        "argparse",
+        "inspect",
+        "json",
+        "logging",
         "agentm.core.catalog",
         "agentm.extensions",
         "__future__",
