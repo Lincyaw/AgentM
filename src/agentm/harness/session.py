@@ -40,6 +40,7 @@ import logging
 import os
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -51,6 +52,7 @@ from agentm.core.catalog import (
     compute_atom_hash,
     freeze_current as freeze_atom_snapshot,
     is_constitution_path,
+    source_path_for_hash,
 )
 from agentm.core.kernel import (
     AgentEndEvent,
@@ -416,9 +418,6 @@ class AgentSession:
             with tempfile.TemporaryDirectory(prefix=f"agentm-reload-{name}-") as tmpdir:
                 src_path = Path(tmpdir) / f"{name}.py"
                 src_path.write_text(new_source, encoding="utf-8")
-                issues = validate_mod._check_imports(module_path, src_path)
-                if issues:
-                    raise RuntimeError(issues[0].message)
                 spec = importlib.util.spec_from_file_location(
                     f"_agentm_reload_validate_{name}_{uuid.uuid4().hex}",
                     src_path,
@@ -427,47 +426,68 @@ class AgentSession:
                     raise RuntimeError(f"could not build spec for {name!r}")
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
+                install = getattr(module, "install", None)
+                if install is None or not callable(install):
+                    raise RuntimeError("missing callable 'install(api, config)'")
+                sig = inspect.signature(install)
+                positional = [
+                    p
+                    for p in sig.parameters.values()
+                    if p.kind
+                    in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    )
+                ]
+                if len(positional) < 2:
+                    raise RuntimeError(f"'install' must accept (api, config); got {sig}")
 
-            install = getattr(module, "install", None)
-            if install is None or not callable(install):
-                raise RuntimeError("missing callable 'install(api, config)'")
-            sig = inspect.signature(install)
-            positional = [
-                p
-                for p in sig.parameters.values()
-                if p.kind
-                in (
-                    inspect.Parameter.POSITIONAL_ONLY,
-                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                manifest = _module_manifest(module)
+                if manifest is None:
+                    return None
+                if manifest.name != name:
+                    raise RuntimeError(
+                        f"MANIFEST.name {manifest.name!r} does not match atom name {name!r}"
+                    )
+                issues = validate_mod.validate_extension_contract(
+                    module_path=module_path,
+                    module=module,
+                    src_file=src_path,
+                    known_extension_names=set(loaded_atoms_by_name),
                 )
-            ]
-            if len(positional) < 2:
-                raise RuntimeError(f"'install' must accept (api, config); got {sig}")
+                blocking = [issue for issue in issues if issue.severity == "error"]
+                if blocking:
+                    raise RuntimeError(blocking[0].message)
+                return manifest
 
-            manifest = _module_manifest(module)
-            if manifest is None:
-                return None
-            if manifest.name != name:
-                raise RuntimeError(
-                    f"MANIFEST.name {manifest.name!r} does not match atom name {name!r}"
-                )
+        def _finish_install_sync(
+            module_path: str,
+            api: _ExtensionAPIImpl,
+            ext_cfg: dict[str, Any],
+        ) -> None:
+            result = load_extension(module_path, api, ext_cfg)
+            if not inspect.isawaitable(result):
+                return
 
-            core_manifest = validate_mod.core_manifest_mod.load_core_manifest()
-            if manifest.api_version > core_manifest.extension_api_current:
-                raise RuntimeError(
-                    f"atom requires api_version {manifest.api_version}, "
-                    f"current is {core_manifest.extension_api_current}"
-                )
-            if (
-                manifest.api_version
-                < core_manifest.extension_api_current
-                - core_manifest.extension_api_grace
-            ):
-                raise RuntimeError(
-                    f"atom api_version {manifest.api_version} is older than "
-                    "the grace window"
-                )
-            return manifest
+            error: list[BaseException] = []
+
+            def _runner() -> None:
+                async def _await_result() -> None:
+                    await result
+
+                try:
+                    asyncio.run(_await_result())
+                except BaseException as exc:  # pragma: no cover - exercised in caller
+                    error.append(exc)
+
+            thread = threading.Thread(
+                target=_runner,
+                name=f"agentm-reload-{module_path.rsplit('.', 1)[-1]}",
+            )
+            thread.start()
+            thread.join()
+            if error:
+                raise error[0]
 
         class _Gateway:
             def reload_atom(
@@ -529,6 +549,8 @@ class AgentSession:
                     atom.manifest or _default_manifest(name),
                     root=Path(config.cwd),
                 )
+                snapshot_path = source_path_for_hash(name, old_hash, root=Path(config.cwd))
+                snapshot_source = snapshot_path.read_text(encoding="utf-8")
                 new_hash = compute_atom_hash(new_source)
 
                 fd, tmp_name = tempfile.mkstemp(
@@ -550,15 +572,11 @@ class AgentSession:
                     os.replace(tmp_name, atom.file_path)
                     _clear_module_bytecode(atom.file_path)
                     importlib.invalidate_caches()
-                    install_result = load_extension(
+                    _finish_install_sync(
                         atom.module_path,
                         _make_api(atom.module_path),
                         dict(atom.config),
                     )
-                    if inspect.isawaitable(install_result):
-                        raise RuntimeError(
-                            "reload_atom is sync-only; async install is not supported"
-                        )
                     _record_loaded_atom(
                         atom.module_path,
                         atom.config,
@@ -584,19 +602,24 @@ class AgentSession:
                     )
                 except Exception as exc:  # noqa: BLE001
                     try:
-                        atom.file_path.write_text(current_source, encoding="utf-8")
+                        rollback_fd, rollback_tmp_name = tempfile.mkstemp(
+                            prefix=f".rollback-{name}-",
+                            suffix=atom.file_path.suffix,
+                            dir=str(atom.file_path.parent),
+                        )
+                        with os.fdopen(
+                            rollback_fd, "w", encoding="utf-8"
+                        ) as rollback_handle:
+                            rollback_handle.write(snapshot_source)
+                        os.replace(rollback_tmp_name, atom.file_path)
                         sys.modules.pop(atom.module_path, None)
                         _clear_module_bytecode(atom.file_path)
                         importlib.invalidate_caches()
-                        rollback_result = load_extension(
+                        _finish_install_sync(
                             atom.module_path,
                             _make_api(atom.module_path),
                             dict(atom.config),
                         )
-                        if inspect.isawaitable(rollback_result):
-                            raise RuntimeError(
-                                "reload rollback is sync-only; async install is not supported"
-                            )
                         _record_loaded_atom(
                             atom.module_path,
                             atom.config,

@@ -49,7 +49,14 @@ def install(api, config):
 '''
 
 
-def _tool_source(name: str, text: str, *, marker_label: str | None = None) -> str:
+def _tool_source(
+    name: str,
+    text: str,
+    *,
+    marker_label: str | None = None,
+    install_kind: str = "sync",
+    registers: tuple[str, ...] = ("tool:demo",),
+) -> str:
     state_import = ""
     handler = ""
     if marker_label is not None:
@@ -60,6 +67,7 @@ def _tool_source(name: str, text: str, *, marker_label: str | None = None) -> st
 
     api.on("marker", _on_marker)
 '''
+    install_prefix = "async " if install_kind == "async" else ""
     return f'''
 from __future__ import annotations
 
@@ -71,12 +79,12 @@ from agentm.harness.extension import ExtensionAPI
 MANIFEST = ExtensionManifest(
     name={name!r},
     description="reload test atom",
-    registers=("tool:demo",),
+    registers={registers!r},
 )
 CAPTURED_API = None
 
 
-def install(api: ExtensionAPI, config: dict[str, object]) -> None:
+{install_prefix}def install(api: ExtensionAPI, config: dict[str, object]) -> None:
     global CAPTURED_API
     CAPTURED_API = api
 {handler}
@@ -196,6 +204,29 @@ async def test_S4_syntax_error_rejected_no_write(tmp_path: Path, monkeypatch: py
 
 
 @pytest.mark.asyncio
+async def test_reload_rejects_invalid_register_tag_no_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = await _build_session(
+        tmp_path,
+        monkeypatch,
+        atom_source=_tool_source("tool_demo", "v1"),
+    )
+    tool_path = tmp_path / session._test_pkg / "tool_demo.py"  # type: ignore[attr-defined]
+    original = tool_path.read_text(encoding="utf-8")
+    try:
+        result = session._apis[f"{session._test_pkg}.tool_demo"].reload_atom(  # type: ignore[attr-defined]
+            "tool_demo",
+            _tool_source("tool_demo", "v2", registers=("badtag",)),
+        )
+        assert result.ok is False
+        assert "register" in (result.error or "")
+        assert tool_path.read_text(encoding="utf-8") == original
+    finally:
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_S5_install_failure_rolls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     session = await _build_session(
         tmp_path,
@@ -214,6 +245,31 @@ async def test_S5_install_failure_rolls_back(tmp_path: Path, monkeypatch: pytest
 
         follow_up = await session.prompt("still works")
         assert follow_up[-2].content[0].content[0].text == "stable"
+    finally:
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_reload_supports_async_install_atoms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = await _build_session(
+        tmp_path,
+        monkeypatch,
+        atom_source=_tool_source("tool_demo", "v1", install_kind="async"),
+    )
+    try:
+        first = await session.prompt("hi")
+        assert first[2].content[0].content[0].text == "v1"
+
+        result = session._apis[f"{session._test_pkg}.tool_demo"].reload_atom(  # type: ignore[attr-defined]
+            "tool_demo",
+            _tool_source("tool_demo", "v2", install_kind="async"),
+        )
+        assert result.ok is True
+
+        second = await session.prompt("hi again")
+        assert second[-2].content[0].content[0].text == "v2"
     finally:
         await session.shutdown()
 
