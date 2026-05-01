@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from agentm.core.catalog import compute_atom_hash
 import agentm.extensions.builtin.observability as observability_ext
+from agentm.core.catalog import compute_atom_hash
+from agentm.extensions.discover import discover_builtin
 from agentm.harness.events import ExtensionReloadEvent
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
@@ -15,6 +16,14 @@ from agentm.harness.session import AgentSession, AgentSessionConfig
 
 def _read_records(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text("utf-8").splitlines() if line]
+
+
+def _builtin_hash(name: str) -> str:
+    entry = discover_builtin()[name]
+    source_path = inspect.getsourcefile(entry.module)
+    assert source_path is not None
+    source = Path(source_path).read_text(encoding="utf-8")
+    return compute_atom_hash(source)
 
 
 @pytest.mark.asyncio
@@ -184,6 +193,73 @@ async def test_observability_diffs_only_mutable_channels(tmp_path: Path) -> None
             "tool_result",
             "before_compact",
         }
+
+
+@pytest.mark.asyncio
+async def test_observability_default_path_uses_session_id_and_emits_fingerprint(
+    tmp_path: Path,
+) -> None:
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                ("agentm.extensions.builtin.observability", {}),
+                ("agentm.extensions.builtin.tool_ls", {}),
+            ],
+            provider=("tests.unit.extensions.builtin._helpers", {}),
+            resource_loader=InMemoryResourceLoader(),
+        )
+    )
+    await session.prompt("hi")
+    await session.shutdown()
+
+    output = tmp_path / ".agentm" / "observability" / f"{session.session_id}.jsonl"
+    records = _read_records(output)
+
+    assert output.is_file()
+    fingerprint = next(r for r in records if r["kind"] == "session.fingerprint")
+    assert fingerprint["attributes"]["atoms"]["observability"] == (
+        f"observability@{_builtin_hash('observability')}"
+    )
+    assert fingerprint["attributes"]["atoms"]["tool_ls"] == (
+        f"tool_ls@{_builtin_hash('tool_ls')}"
+    )
+    assert {record["trace_id"] for record in records} == {session.session_id}
+
+
+@pytest.mark.asyncio
+async def test_observability_writes_atom_reload_record_from_extension_reload_event(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / ".agentm" / "observability" / "reload.jsonl"
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                ("agentm.extensions.builtin.observability", {"path": str(output)}),
+            ],
+            provider=("tests.unit.extensions.builtin._helpers", {}),
+            resource_loader=InMemoryResourceLoader(),
+        )
+    )
+    await session.bus.emit(
+        "extension_reload",
+        ExtensionReloadEvent(
+            name="observability",
+            old_hash=_builtin_hash("observability"),
+            new_hash="cafef00d1234",
+            trigger="human",
+            tier=1,
+        ),
+    )
+    await session.shutdown()
+
+    records = _read_records(output)
+    reload_record = next(r for r in records if r["kind"] == "atom.reload")
+    assert reload_record["attributes"]["new_hash"] == "cafef00d1234"
+    assert reload_record["attributes"]["fingerprint_after"]["atoms"]["observability"] == (
+        "observability@cafef00d1234"
+    )
 
 
 def test_event_bus_strict_sync_raises_on_async_handler() -> None:

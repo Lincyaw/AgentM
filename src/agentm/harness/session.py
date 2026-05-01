@@ -101,7 +101,6 @@ from agentm.harness.session_manager import (
     SessionManager,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -307,6 +306,7 @@ class AgentSession:
         def _provider_getter() -> ProviderConfig | None:
             return active_provider_box["value"]
 
+        session_id = uuid.uuid4().hex
         session_view: ReadonlySession = _SessionView(session_manager)
 
         def _refresh_active_provider() -> None:
@@ -695,6 +695,7 @@ class AgentSession:
             api = _ExtensionAPIImpl(
                 bus=bus,
                 cwd=config.cwd,
+                session_id=session_id,
                 session=session_view,
                 tools=tools,
                 commands=commands,
@@ -786,7 +787,6 @@ class AgentSession:
         for msg in config.initial_messages:
             session_manager.append_message(msg)
 
-        session_id = uuid.uuid4().hex
         instance = cls(
             cwd=config.cwd,
             bus=bus,
@@ -828,6 +828,9 @@ class AgentSession:
                 session_id=session_id,
                 tool_names=tuple(t.name for t in tools),
                 command_names=tuple(commands.keys()),
+                extension_module_paths=tuple(
+                    module_path for module_path, _ext_cfg in config.extensions
+                ),
                 model=active_provider.model,
             ),
         )
@@ -1084,6 +1087,20 @@ class AgentSession:
             )
 
         self._bus.clear()
+
+        try:
+            from agentm.core.catalog.indexer import index_trace
+
+            trace_path = (
+                Path(self._cwd)
+                / ".agentm"
+                / "observability"
+                / f"{self._session_id}.jsonl"
+            )
+            if trace_path.is_file():
+                index_trace(trace_path)
+        except Exception as exc:
+            logger.warning("agentm catalog indexer post-shutdown failed: %r", exc)
 
     # --- Helpers ----------------------------------------------------------
 
