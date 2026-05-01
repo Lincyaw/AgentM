@@ -1,55 +1,52 @@
-"""Minimal AgentM CLI.
+"""AgentM CLI (typer-based).
 
-After Phase 2.5 the legacy multi-command typer app was removed. This module
-provides a small ``agentm`` entry point that boots an :class:`AgentSession`
-from a named scenario recipe and runs a single ``prompt(...)`` call against
-the Anthropic provider.
-
-The CLI deliberately stays thin: the real value lives in the kernel +
-extensions + scenario recipes. Anything richer (dashboards, eval harnesses,
-etc.) is now an out-of-tree concern.
+Loads a scenario recipe, sends one prompt, and prints the assistant's final
+text output. Any richer surface (dashboards, eval harnesses, batch runs)
+remains an out-of-tree concern — this CLI is intentionally thin.
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import os
-import sys
+from typing import Annotated
 
+import typer
+
+from agentm.core.kernel.messages import (
+    AssistantMessage,
+    TextContent,
+    ToolCallBlock,
+)
 from agentm.extensions.loader import ScenarioLoadError, load_scenario
 from agentm.harness import AgentSession, AgentSessionConfig
 
+def _print_final(final_messages: list) -> None:
+    text_blocks: list[str] = []
+    tool_calls = 0
+    for msg in final_messages:
+        if isinstance(msg, AssistantMessage):
+            for block in msg.content:
+                if isinstance(block, TextContent):
+                    text_blocks.append(block.text)
+                elif isinstance(block, ToolCallBlock):
+                    tool_calls += 1
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="agentm",
-        description=(
-            "AgentM v2 thin CLI: load a scenario recipe, send one prompt, "
-            "stream the result."
-        ),
-    )
-    parser.add_argument("prompt", help="User prompt to send to the agent.")
-    parser.add_argument(
-        "--scenario",
-        default="general_purpose",
-        help="Scenario recipe name under agentm.extensions.scenarios "
-        "(default: general_purpose).",
-    )
-    parser.add_argument(
-        "--model",
-        default=os.environ.get("AGENTM_MODEL", "claude-sonnet-4-5"),
-        help="Anthropic model id.",
-    )
-    parser.add_argument(
-        "--cwd",
-        default=os.getcwd(),
-        help="Working directory exposed to extensions (default: cwd).",
-    )
-    return parser
+    typer.echo("\n" + "=" * 60)
+    typer.echo("AGENT FINAL OUTPUT")
+    typer.echo("=" * 60)
+    typer.echo("\n\n".join(text_blocks) if text_blocks else "<no text output>")
+    typer.echo("=" * 60)
+    typer.echo(f"messages={len(final_messages)} tool_calls={tool_calls}")
 
 
-async def _run(prompt: str, scenario_name: str, model: str, cwd: str) -> int:
+async def _run(
+    prompt: str,
+    scenario_name: str,
+    model: str,
+    cwd: str,
+    quiet: bool,
+) -> int:
     extensions = load_scenario(scenario_name)
     config = AgentSessionConfig(
         cwd=cwd,
@@ -58,19 +55,51 @@ async def _run(prompt: str, scenario_name: str, model: str, cwd: str) -> int:
     )
     session = await AgentSession.create(config)
     try:
-        await session.prompt(prompt)
+        final = await session.prompt(prompt)
     finally:
         await session.shutdown()
+
+    if not quiet:
+        _print_final(final)
     return 0
+
+
+def run_cmd(
+    prompt: Annotated[str, typer.Argument(help="User prompt to send to the agent.")],
+    scenario: Annotated[
+        str,
+        typer.Option(
+            "--scenario",
+            help="Scenario recipe name under agentm.extensions.scenarios.",
+        ),
+    ] = "general_purpose",
+    model: Annotated[
+        str,
+        typer.Option(
+            "--model",
+            help="Model id passed to the Anthropic-compatible provider.",
+        ),
+    ] = os.environ.get("AGENTM_MODEL", "claude-sonnet-4-6"),
+    cwd: Annotated[
+        str,
+        typer.Option("--cwd", help="Working directory exposed to extensions."),
+    ] = os.getcwd(),
+    quiet: Annotated[
+        bool,
+        typer.Option("--quiet", help="Suppress final-output printout."),
+    ] = False,
+) -> None:
+    """Send a single prompt and print the agent's final text."""
+
+    try:
+        rc = asyncio.run(_run(prompt, scenario, model, cwd, quiet))
+    except ScenarioLoadError as exc:
+        typer.echo(f"agentm: scenario load failed: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    raise typer.Exit(code=rc)
 
 
 def main() -> None:
     """Entry point referenced by the ``agentm`` console script."""
 
-    args = _build_parser().parse_args()
-    try:
-        rc = asyncio.run(_run(args.prompt, args.scenario, args.model, args.cwd))
-    except ScenarioLoadError as exc:
-        print(f"agentm: scenario load failed: {exc}", file=sys.stderr)
-        sys.exit(2)
-    sys.exit(rc)
+    typer.run(run_cmd)

@@ -151,6 +151,42 @@ class SessionReadyEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ExtensionInstallEvent:
+    """Fires twice per ``load_extension`` call: ``"start"`` precedes
+    ``install(api, config)``; ``"end"`` follows a successful return;
+    ``"error"`` follows a thrown exception.
+    """
+
+    module_path: str
+    config: dict[str, Any]
+    phase: Literal["start", "end", "error"]
+    duration_ns: int = 0
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ApiRegisterEvent:
+    """Fires synchronously from ``ExtensionAPI`` register methods.
+
+    Emitted via ``bus.emit_sync`` so it works from inside sync ``install``
+    bodies. Lets subscribers see what each extension contributes.
+    """
+
+    kind: Literal["tool", "command", "provider", "renderer"]
+    name: str
+    extension: str
+    payload: Any
+
+
+@dataclass(frozen=True, slots=True)
+class ApiSendUserMessageEvent:
+    """Fires when an extension calls ``api.send_user_message``."""
+
+    extension: str
+    content: Any
+
+
+@dataclass(frozen=True, slots=True)
 class ResourcesDiscoverEvent:
     """Fires when an extension wants peers to contribute resource paths."""
 
@@ -160,11 +196,14 @@ class ResourcesDiscoverEvent:
 
 __all__ = [
     "AfterCompactEvent",
+    "ApiRegisterEvent",
+    "ApiSendUserMessageEvent",
     "BeforeAgentStartEvent",
     "BeforeCompactEvent",
     "ChildSessionEndEvent",
     "ChildSessionStartEvent",
     "CostBudgetExceededEvent",
+    "ExtensionInstallEvent",
     "PlanSubmittedEvent",
     "ResourcesDiscoverEvent",
     "SessionReadyEvent",
