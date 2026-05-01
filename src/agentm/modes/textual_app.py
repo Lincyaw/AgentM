@@ -21,7 +21,7 @@ from textual.containers import Container, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import ModalScreen
-from textual.widgets import Collapsible, Footer, Input, OptionList, Static, TextArea
+from textual.widgets import Collapsible, Input, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from agentm.core.abi import (
@@ -476,7 +476,6 @@ class AgentMApp(App[int]):
             with Container(id="input-bar"):
                 yield PromptInput()
             yield StatusLine(id="status-line")
-            yield Footer()
 
     def on_mount(self) -> None:
         self.query_one(PromptInput).focus()
