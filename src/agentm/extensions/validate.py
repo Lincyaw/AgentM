@@ -33,6 +33,7 @@ from agentm.extensions.discover import discover_builtin
 
 # Modules an extension is allowed to import. See design §11.1 rule 4.
 _ALLOWED_PREFIXES: tuple[str, ...] = (
+    "agentm.core.catalog",
     "agentm.core.compaction",
     "agentm.core.edit_diff",
     "agentm.core.kernel",
