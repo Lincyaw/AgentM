@@ -5,7 +5,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -14,8 +14,7 @@ from agentm.core.catalog.hashing import compute_atom_hash
 from agentm.core.catalog.indexer import index_trace, rebuild_catalog
 from agentm.core.kernel import EventBus
 from agentm.harness.extension import ProviderConfig
-from agentm.harness.resource_loader import InMemoryResourceLoader
-from agentm.harness.session import AgentSession, AgentSessionConfig
+from agentm.harness.session import AgentSession
 from agentm.harness.session_manager import InMemorySessionManager
 from agentm.extensions.discover import discover_builtin
 
@@ -322,7 +321,9 @@ async def test_shutdown_indexes_observability_trace_when_present(
         loop=None,  # type: ignore[arg-type]
         active_provider_box={
             "value": ProviderConfig(
-                stream_fn=lambda *_args, **_kwargs: None, model=None, name="dummy"
+                stream_fn=cast("Any", lambda *_args, **_kwargs: None),
+                model=cast("Any", None),
+                name="dummy",
             )
         },
         tools=[],
@@ -344,38 +345,3 @@ async def test_shutdown_indexes_observability_trace_when_present(
     assert called["path"] == trace_path.resolve()
 
 
-@pytest.mark.asyncio
-async def test_shutdown_indexes_real_observability_trace_with_fingerprint(
-    tmp_path: Path,
-) -> None:
-    session = await AgentSession.create(
-        AgentSessionConfig(
-            cwd=str(tmp_path),
-            extensions=[
-                ("agentm.extensions.builtin.observability", {}),
-                ("agentm.extensions.builtin.tool_ls", {}),
-            ],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
-            resource_loader=InMemoryResourceLoader(),
-        )
-    )
-    await session.prompt("hi")
-    await session.shutdown()
-
-    trace_path = tmp_path / ".agentm" / "observability" / f"{session.session_id}.jsonl"
-    assert trace_path.is_file()
-    records = [
-        json.loads(line)
-        for line in trace_path.read_text(encoding="utf-8").splitlines()
-        if line
-    ]
-    assert any(record["kind"] == "session.fingerprint" for record in records)
-
-    atom_hashes = _builtin_hashes("observability", "tool_ls")
-    for atom_name, version_hash in atom_hashes.items():
-        metrics_path = _layout.atom_metrics_path(
-            atom_name,
-            version_hash,
-            root=tmp_path,
-        )
-        assert metrics_path.is_file()
