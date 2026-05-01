@@ -31,6 +31,13 @@ def build_recipe(*, data_dir: str, task_type: str = "scout") -> list[tuple[str, 
         ("agentm.extensions.builtin.prompt_templates", {}),
         ("agentm.extensions.builtin.skill_loader", {}),
         ("agentm.extensions.builtin.dedup", {"window": 8}),
+        (
+            "agentm_rca.sanitizer.extension",
+            {
+                "hypothesis_store": hypothesis_store,
+                "profile_store": profile_store,
+            },
+        ),
         ("agentm.extensions.builtin.trajectory", {"path": "rca_trajectory.jsonl"}),
         (
             "agentm.extensions.builtin.system_prompt",
