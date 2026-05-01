@@ -19,6 +19,7 @@ from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import IO, Any
 
+from agentm.core.catalog import compute_active_set_fingerprint, compute_atom_hash
 from agentm.core.kernel import (
     EventBusObserver,
     LlmRequestEndEvent,
@@ -29,10 +30,12 @@ from agentm.core.kernel import (
     TurnStartEvent,
 )
 from agentm.extensions import ExtensionManifest
+from agentm.extensions.discover import discover_builtin
 from agentm.harness.events import (
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
     ExtensionInstallEvent,
+    ExtensionReloadEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
 )
@@ -78,6 +81,7 @@ MANIFEST = ExtensionManifest(
         "event:api_register",
         "event:api_send_user_message",
         "event:extension_install",
+        "event:extension_reload",
         "event:session_ready",
         "event:session_shutdown",
     ),
@@ -536,8 +540,40 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     # All other signals: subscribe to bus channels.
     aggregator = _TurnAggregator(sink, trace_id)
+    discovered_builtin = discover_builtin()
+    builtin_by_module_path = {
+        entry.module_path: entry for entry in discovered_builtin.values()
+    }
+    loaded_builtin_module_paths: set[str] = set()
+    active_atom_hashes: dict[str, str] = {}
+    current_fingerprint: dict[str, Any] | None = None
+
+    def _compute_loaded_fingerprint(*, scenario: str | None = None) -> dict[str, Any]:
+        """Build the active-set fingerprint for the builtins loaded in this session.
+
+        R10 deviation: ``session.start`` fires during ``install()`` before the
+        final loaded set exists, so the canonical fingerprint is emitted later
+        as ``session.fingerprint`` at ``session_ready``.
+        """
+
+        nonlocal active_atom_hashes
+        active_atom_hashes = {}
+        for module_path in sorted(loaded_builtin_module_paths):
+            entry = builtin_by_module_path.get(module_path)
+            if entry is None:
+                continue
+            source = inspect.getsource(entry.module)
+            active_atom_hashes[entry.name] = compute_atom_hash(source)
+        return compute_active_set_fingerprint(
+            loaded=active_atom_hashes,
+            scenario=scenario,
+            core_hash=None,
+        )
+
 
     def _on_extension_install(event: ExtensionInstallEvent) -> None:
+        if event.phase == "end" and event.module_path in builtin_by_module_path:
+            loaded_builtin_module_paths.add(event.module_path)
         now = _now_ns()
         sink.write(
             {
@@ -634,6 +670,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         )
 
     def _on_ready(event: SessionReadyEvent) -> None:
+        nonlocal current_fingerprint
         sink.write(
             {
                 "schema": "otel/span/v0",
@@ -650,6 +687,61 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "model": _serialize(event.model),
                 },
                 "status": {"code": "OK"},
+            }
+        )
+        current_fingerprint = _compute_loaded_fingerprint()
+        sink.write(
+            {
+                "schema": "otel/span/v0",
+                "kind": "session.fingerprint",
+                "trace_id": trace_id,
+                "span_id": _new_id(),
+                "name": "session.fingerprint",
+                "start_time_unix_nano": _now_ns(),
+                "attributes": {
+                    **current_fingerprint,
+                    "task_meta": {
+                        "type": None,
+                        "difficulty": None,
+                        "external_id": None,
+                    },
+                },
+                "status": {"code": "OK"},
+            }
+        )
+
+    def _on_extension_reload(event: ExtensionReloadEvent) -> None:
+        nonlocal current_fingerprint
+        if event.name in active_atom_hashes or event.old_hash is None:
+            active_atom_hashes[event.name] = event.new_hash
+        fingerprint_after = compute_active_set_fingerprint(
+            loaded=active_atom_hashes,
+            scenario=(
+                None if current_fingerprint is None else current_fingerprint.get("scenario")
+            ),
+            core_hash=None,
+        )
+        current_fingerprint = fingerprint_after
+        sink.write(
+            {
+                "schema": "otel/span/v0",
+                "kind": "atom.reload",
+                "trace_id": trace_id,
+                "span_id": _new_id(),
+                "name": f"atom.reload:{event.name}",
+                "start_time_unix_nano": _now_ns(),
+                "attributes": {
+                    "name": event.name,
+                    "old_hash": event.old_hash,
+                    "new_hash": event.new_hash,
+                    "trigger": event.trigger,
+                    "tier": event.tier,
+                    "fingerprint_after": fingerprint_after,
+                },
+                "status": {
+                    "code": "ERROR" if event.error else "OK",
+                    "message": event.error,
+                },
             }
         )
 
@@ -675,6 +767,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     original_on("api_send_user_message", _on_api_send)
     original_on("llm_request_start", _on_llm_start)
     original_on("llm_request_end", _on_llm_end)
+    original_on("extension_reload", _on_extension_reload)
     original_on("session_ready", _on_ready)
     original_on("session_shutdown", _on_shutdown)
     original_on("turn_start", aggregator.on_turn_start)
