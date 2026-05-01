@@ -23,6 +23,10 @@ def test_load_scenario_resolves_builtin_name() -> None:
         ("agentm.extensions.builtin.tool_bash", {}),
         ("agentm.extensions.builtin.tool_edit", {}),
         ("agentm.extensions.builtin.tool_write", {}),
+        ("agentm.extensions.builtin.tool_grep", {}),
+        ("agentm.extensions.builtin.tool_find", {}),
+        ("agentm.extensions.builtin.tool_ls", {}),
+        ("agentm.extensions.builtin.prompt_templates", {}),
         (
             "agentm.extensions.builtin.system_prompt",
             {
