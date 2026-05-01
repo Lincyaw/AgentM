@@ -344,3 +344,42 @@ async def test_G10_dirty_human_changes_are_snapshot_before_agent_commit(tmp_path
     assert skill_path.read_text(encoding="utf-8") == "agent final\n"
     assert history[0] == "agent|agent rewrite"
     assert history[1] == "human|auto: pre-agent snapshot"
+
+
+@pytest.mark.asyncio
+async def test_batch_coalesces_multiple_managed_writes_into_one_commit(
+    tmp_path: Path,
+) -> None:
+    """Batch handle is load-bearing because tool-level multi-file edits must not
+    fracture into unrelated commits once reload paths start using it."""
+
+    _init_repo(tmp_path)
+    left = tmp_path / "skills" / "foo" / "SKILL.md"
+    right = tmp_path / "prompts" / "note.txt"
+    left.parent.mkdir(parents=True, exist_ok=True)
+    right.parent.mkdir(parents=True, exist_ok=True)
+    left.write_text("left before\n", encoding="utf-8")
+    right.write_text("right before\n", encoding="utf-8")
+    _git(tmp_path, "add", "skills/foo/SKILL.md", "prompts/note.txt")
+    _git(tmp_path, "commit", "-m", "seed managed files", "--quiet")
+    before = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+    writer = GitBackedResourceWriter(
+        cwd=str(tmp_path),
+        session_id="batch-session",
+        bus=EventBus(),
+    )
+    async with writer.batch(rationale="batch update") as batch:
+        await batch.write("skills/foo/SKILL.md", b"left after\n")
+        await batch.write("prompts/note.txt", b"right after\n")
+
+    history = _git(tmp_path, "log", "--format=%an|%s", "-n", "2").stdout.splitlines()
+    changed = set(
+        _git(tmp_path, "show", "--name-only", "--format=", "HEAD").stdout.splitlines()
+    )
+    assert _git(tmp_path, "rev-parse", "HEAD").stdout.strip() != before
+    assert history[0] == "agent|batch update"
+    assert history[1] == "Test User|seed managed files"
+    assert left.read_text(encoding="utf-8") == "left after\n"
+    assert right.read_text(encoding="utf-8") == "right after\n"
+    assert changed == {"prompts/note.txt", "skills/foo/SKILL.md"}

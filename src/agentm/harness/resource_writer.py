@@ -121,6 +121,13 @@ class _PendingBatchOp:
     new: bytes | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _RestoreState:
+    resolved: Path
+    existed: bool
+    content: bytes | None
+
+
 class _BatchImpl(BatchHandle):
     def __init__(self) -> None:
         self.pending: list[_PendingBatchOp] = []
@@ -382,29 +389,91 @@ class GitBackedResourceWriter:
         async def _manager() -> AsyncIterator[BatchHandle]:
             handle = _BatchImpl()
             yield handle
-            for op in handle.pending:
-                if op.kind == "write":
-                    assert op.content is not None
-                    await self.write(
-                        op.path,
-                        op.content,
-                        rationale=rationale,
-                        author=author,
-                    )
-                elif op.kind == "replace":
-                    assert op.old is not None
-                    assert op.new is not None
-                    await self.replace(
-                        op.path,
-                        op.old,
-                        op.new,
-                        rationale=rationale,
-                        author=author,
-                    )
-                else:
-                    await self.delete(op.path, rationale=rationale, author=author)
+            await self._apply_batch(handle.pending, rationale=rationale, author=author)
 
         return _manager()
+
+    async def _apply_batch(
+        self,
+        pending: list[_PendingBatchOp],
+        *,
+        rationale: str,
+        author: WriterAuthor,
+    ) -> None:
+        if not pending:
+            return
+
+        managed_ops: list[tuple[_PendingBatchOp, Path, str]] = []
+        unmanaged_ops: list[tuple[_PendingBatchOp, Path]] = []
+
+        for op in pending:
+            path_class = self.classify(op.path)
+            if path_class == "constitution":
+                raise RuntimeError(f"Refusing to modify constitution path {op.path!r}")
+
+            resolved = self._resolve_path(op.path)
+            if path_class == "managed" and not self._advisory_mode:
+                relative = resolved.relative_to(self._cwd)
+                relative_posix = PurePosixPath(relative).as_posix()
+                managed_ops.append((op, resolved, relative_posix))
+            else:
+                unmanaged_ops.append((op, resolved))
+
+        unmanaged_restore: list[_RestoreState] = []
+        try:
+            for op, resolved in unmanaged_ops:
+                unmanaged_restore.append(await asyncio.to_thread(self._capture_restore_state, resolved))
+                await asyncio.to_thread(self._apply_pending_op, op, resolved)
+        except Exception:  # noqa: BLE001
+            await asyncio.to_thread(self._restore_paths, unmanaged_restore)
+            raise
+
+        if not managed_ops:
+            return
+
+        await asyncio.to_thread(self._ensure_git_ready)
+        pre_sha = await asyncio.to_thread(self._head_sha)
+        managed_restore = await asyncio.to_thread(
+            self._capture_restore_states,
+            [resolved for _, resolved, _ in managed_ops],
+        )
+
+        try:
+            await asyncio.to_thread(
+                self._snapshot_human_for_dirty_paths,
+                [relative_posix for _, _, relative_posix in managed_ops],
+            )
+            for op, resolved, _ in managed_ops:
+                await asyncio.to_thread(self._apply_pending_op, op, resolved)
+
+            relative_paths = [relative_posix for _, _, relative_posix in managed_ops]
+            await asyncio.to_thread(self._stage_paths, relative_paths)
+            if await asyncio.to_thread(self._is_index_clean_for_paths, relative_paths):
+                return
+
+            await asyncio.to_thread(self._commit, rationale, author)
+            post_sha = await asyncio.to_thread(self._head_sha)
+        except Exception:
+            await asyncio.to_thread(
+                self._restore_after_failure_batch,
+                managed_restore,
+                pre_sha,
+                [relative_posix for _, _, relative_posix in managed_ops],
+            )
+            await asyncio.to_thread(self._restore_paths, unmanaged_restore)
+            raise
+
+        for _, _, relative_posix in managed_ops:
+            await self._bus.emit(
+                "resource_write",
+                ResourceWriteEvent(
+                    path=relative_posix,
+                    pre_sha=pre_sha,
+                    post_sha=post_sha,
+                    rationale=rationale,
+                    author=author,
+                ),
+            )
 
     async def _commit_single_path(
         self,
@@ -526,11 +595,30 @@ class GitBackedResourceWriter:
         return result.stdout.strip()
 
     def _snapshot_human_if_dirty(self, relative_path: str) -> None:
-        status = self._run_git_sync(("status", "--porcelain", "--", relative_path))
-        if not status.stdout.strip():
+        if not self._has_uncommitted_diff(relative_path):
             return
         self._stage_paths([relative_path])
         self._commit("auto: pre-agent snapshot", "human")
+
+    def _snapshot_human_for_dirty_paths(self, relative_paths: list[str]) -> None:
+        dirty_paths = [
+            relative_path
+            for relative_path in relative_paths
+            if self._has_uncommitted_diff(relative_path)
+        ]
+        if not dirty_paths:
+            return
+        self._stage_paths(dirty_paths)
+        self._commit("auto: pre-agent snapshot", "human")
+
+    def _has_uncommitted_diff(self, relative_path: str) -> bool:
+        try:
+            self._run_git_sync(("diff", "--quiet", "--", relative_path))
+        except GitOperationError as exc:
+            if exc.exit_code == 1:
+                return True
+            raise
+        return False
 
     def _stage_paths(self, relative_paths: list[str]) -> None:
         self._run_git_sync(("add", "--", *relative_paths))
@@ -592,6 +680,55 @@ class GitBackedResourceWriter:
                     self._run_git_sync(("reset", "--hard", pre_sha))
         except Exception:  # noqa: BLE001
             logger.exception("failed to restore resource after git write failure")
+
+    def _restore_after_failure_batch(
+        self,
+        restore_states: list[_RestoreState],
+        pre_sha: str | None,
+        relative_paths: list[str],
+    ) -> None:
+        try:
+            self._restore_paths(restore_states)
+            if pre_sha is not None:
+                self._run_git_sync(("restore", "--source", pre_sha, "--", *relative_paths))
+                if self._head_sha() != pre_sha:
+                    self._run_git_sync(("reset", "--hard", pre_sha))
+        except Exception:  # noqa: BLE001
+            logger.exception("failed to restore resource batch after git write failure")
+
+    def _capture_restore_state(self, resolved: Path) -> _RestoreState:
+        existed = resolved.exists()
+        content = resolved.read_bytes() if existed else None
+        return _RestoreState(resolved=resolved, existed=existed, content=content)
+
+    def _capture_restore_states(self, resolved_paths: list[Path]) -> list[_RestoreState]:
+        return [self._capture_restore_state(path) for path in resolved_paths]
+
+    def _restore_paths(self, restore_states: list[_RestoreState]) -> None:
+        for state in restore_states:
+            if state.existed:
+                assert state.content is not None
+                state.resolved.parent.mkdir(parents=True, exist_ok=True)
+                state.resolved.write_bytes(state.content)
+            else:
+                state.resolved.unlink(missing_ok=True)
+
+    def _apply_pending_op(self, op: _PendingBatchOp, resolved: Path) -> None:
+        if op.kind == "write":
+            assert op.content is not None
+            self._write_bytes(resolved, op.content)
+            return
+        if op.kind == "replace":
+            assert op.old is not None
+            assert op.new is not None
+            current = resolved.read_bytes()
+            if current != op.old:
+                raise RuntimeError(
+                    f"Current bytes for {op.path!r} no longer match expected content"
+                )
+            self._write_bytes(resolved, op.new)
+            return
+        self._delete_path(resolved)
 
     def _author_identity(self, author: WriterAuthor) -> tuple[str, str]:
         if author == "agent":
