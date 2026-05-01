@@ -35,6 +35,7 @@ MANIFEST = ExtensionManifest(
         "required": ["limit"],
         "additionalProperties": True,
     },
+    tier=2,
 )
 
 
