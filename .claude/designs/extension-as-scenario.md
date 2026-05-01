@@ -291,6 +291,7 @@ Each is one Python module with `install(api, config)` doing **one thing**. The a
 | `extensions.builtin.system_prompt` | `before_agent_start`: prepends `config["prompt"]` to the assembled system prompt. Single most-reused atom. |
 | `extensions.builtin.turn_reminder` | (was `system_reminder`) Re-injects `config["reminder"]` every `every_n_turns`. |
 | `extensions.builtin.micro_compact` | Compacts context near limit; emits `before_compact` / `after_compact`. |
+| `extensions.builtin.llm_compaction` | Performs pi-mono-style LLM compaction when the durable session branch exceeds the reserved-token threshold; rebuilds context from the session tree after persisting a `compaction` entry. |
 | `extensions.builtin.trajectory` | Records every event to JSONL. |
 
 #### Policy atoms
@@ -382,6 +383,7 @@ src/agentm/
 │   │   ├── tool_result_budget.py
 │   │   ├── file_mutation_queue.py
 │   │   ├── micro_compact.py
+│   │   ├── llm_compaction.py
 │   │   ├── trajectory.py
 │   │   └── sub_agent.py
 │   │
