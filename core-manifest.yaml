@@ -4,15 +4,9 @@ version: 1
 constitution:
   paths:
     # The kernel — mechanism, must not change without human review
-    - src/agentm/core/kernel/**
-    - src/agentm/core/operations.py
-    - src/agentm/core/path_utils.py
-    - src/agentm/core/text_truncate.py
-    - src/agentm/core/edit_diff.py
-    - src/agentm/core/frontmatter.py
-    - src/agentm/core/skills.py
-    - src/agentm/core/prompt_templates.py
-    - src/agentm/core/compaction/**
+    - src/agentm/core/abi/**
+    - src/agentm/core/lib/**
+    - src/agentm/core/_internal/**
     # Provider boundary
     - src/agentm/llm/**
     - src/agentm/ai/**
@@ -53,4 +47,4 @@ reload:
     - cost_budget
     - tool_filter
     - llm_compaction
-    - claude_agents
+    - cc_agents

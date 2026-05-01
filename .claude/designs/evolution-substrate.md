@@ -15,6 +15,8 @@
 
 Without this layer, self-mod degenerates to "react to install errors". With it, self-mod becomes an MLOps loop: atoms = models, scenarios = compositions, traces = training data, catalog = experiment tracking + model registry.
 
+**Concrete example.** Compaction prompts (`_SUMMARIZATION_PROMPT`, `_BRANCH_SUMMARY_PROMPT`) used to live as hard-coded constants in `core/compaction/`. After the constitution split (see `self-modifiable-architecture.md` §2.2), they live in the `llm_compaction` atom — a tier-1 autonomy module whose source is now versioned in `.agentm/catalog/atoms/llm_compaction/<hash>/`, paired with `metrics.jsonl` recording per-version compression ratio, downstream task completion, refusal rate, and cost. The agent can propose a tighter prompt, run it, compare against the previous hash via `tool_catalog.compare`, and roll back through `decisions.jsonl` if the guard metrics regress. Same machinery as for tool atoms — the substrate does not distinguish "tool" from "prompt" from "scheduler"; it only distinguishes versioned (atom, scenario) artifacts from observation streams.
+
 ---
 
 ## 2. Layer Position
@@ -36,7 +38,7 @@ The substrate has three roles:
 | Role | Owner | Direction |
 |---|---|---|
 | Producer | `observability` extension (autonomy, but pure subscriber) | writes raw JSONL |
-| Indexer | catalog indexer (constitution-layer module: `agentm.core.catalog`) | reads raw, writes aggregated metrics |
+| Indexer | catalog indexer (constitution-layer module: `agentm.core._internal.catalog`) | reads raw, writes aggregated metrics |
 | Query | `tool_catalog` (autonomy, tier-1) | exposes read API to agent |
 
 The agent never writes raw observability; the indexer never runs in the autonomy layer; the catalog data is write-protected from the agent (sister doc §3).
@@ -187,7 +189,7 @@ Subsequent events in the same trace are attributed to the new fingerprint by the
 
 ## 5. The Indexer
 
-Lives at `agentm/core/catalog/indexer.py` (constitution layer). Triggered after each session ends (default), or by cron, or by explicit CLI command. **Idempotent**: catalog is fully derivable from raw observability + catalog/atoms/<hash>/source.py (which is the frozen artifact).
+Lives at `agentm/core/_internal/catalog/indexer.py` (constitution layer). Triggered after each session ends (default), or by cron, or by explicit CLI command. **Idempotent**: catalog is fully derivable from raw observability + catalog/atoms/<hash>/source.py (which is the frozen artifact).
 
 ### 5.1 Pipeline
 
@@ -392,7 +394,7 @@ The closure hash makes scenarios A/B-able as a unit: "is `general_purpose@d4e5f6
 | E2 | After 5 traces under `@v2`, same compare call | Returns `inconclusive: true`, `n_samples: 5`, "insufficient data to decide" message |
 | E3 | `find_best("context.tokens", task_type="rca")` while top candidate has `safety.refusal_rate` regressed | Candidate excluded; either next candidate or `None` |
 | E4 | Agent calls `tool_edit` on `.agentm/catalog/atoms/tool_read/abc/metrics.jsonl` | Rejected by constitution path check |
-| E5 | Operator runs `python -m agentm.core.catalog.indexer rebuild` after wiping catalog | `metrics.jsonl` byte-identical to original (modulo timestamp ordering); `decisions.jsonl` not regenerated (it's not derivable) |
+| E5 | Operator runs `python -m agentm.core._internal.catalog.indexer rebuild` after wiping catalog | `metrics.jsonl` byte-identical to original (modulo timestamp ordering); `decisions.jsonl` not regenerated (it's not derivable) |
 | E6 | Agent A in experiment mode for `tool_read`, agent B (or same agent) calls `propose_change("tool_bash", ...)` | Rejected; "another atom in experiment mode: tool_read" |
 | E7 | Agent proposes reactivating a version previously regressed for safety | Blocked with prior decision record cited; agent must use explicit override + rationale |
 | E8 | Active-set fingerprint changes mid-session via reload | New fingerprint recorded as `atom.reload` event; downstream events flagged `mid_session_reload: true`; default `compare()` excludes them |
@@ -409,7 +411,7 @@ Goal: turn raw observability into a queryable atom registry. No decision-making 
 
 - Active-set fingerprint in observability `session.start` headers (modify `observability` extension).
 - Catalog directory layout (`atoms/<name>/<hash>/`, `scenarios/<name>/<hash>/`).
-- Content-hash for atoms (constitution module: `agentm.core.catalog.hashing`).
+- Content-hash for atoms (constitution module: `agentm.core._internal.catalog.hashing`).
 - `freeze_current` writes the source + manifest into the catalog at every reload (called from sister doc §5.2).
 - Indexer (minimal): on session end, parse fingerprint, attribute basic counters (n_runs, completion, cost) to involved atom versions.
 - `tool_catalog`: `list_versions`, `get_manifest`, `runs_for` (read-only browsing).

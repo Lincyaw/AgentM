@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agentm.core.kernel import TextContent
+from agentm.core.abi import TextContent
 from agentm.harness.session import AgentSession
 from agentm.harness.session_cwd import assert_session_cwd_exists
 from agentm.harness.session_manager import SessionManager

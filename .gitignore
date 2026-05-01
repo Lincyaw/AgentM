@@ -30,3 +30,7 @@ eval-data
 logs
 debug
 eval-trajectories
+
+# Runtime artifacts
+.agentm/
+trajectory.jsonl

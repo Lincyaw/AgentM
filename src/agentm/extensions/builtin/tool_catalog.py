@@ -11,8 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from agentm.core.catalog import get_manifest_at, list_versions, runs_for
-from agentm.core.kernel import FunctionTool, TextContent, ToolResult
+from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
@@ -77,7 +76,7 @@ _RUNS_FOR_PARAMS = {
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # ``root`` is the *project* root that contains ``.agentm/catalog/``.
-    # ``agentm.core.catalog._layout.catalog_root`` prepends that segment, so
+    # ``agentm.core._internal.catalog._layout.catalog_root`` prepends that segment, so
     # callers must not include it here. Defaults to the session cwd.
     raw_root = config.get("root")
     if raw_root is None:
@@ -88,14 +87,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             root = Path(api.cwd) / root
 
     async def _list_versions_tool(args: dict[str, Any]) -> ToolResult:
-        versions = list_versions(str(args["atom"]), root)
+        versions = api.catalog.list_versions(str(args["atom"]), root)
         return _json_result(versions)
 
     async def _get_manifest_tool(args: dict[str, Any]) -> ToolResult:
         atom = str(args["atom"])
         version = str(args["version"])
         try:
-            return _json_result(get_manifest_at(atom, version, root))
+            return _json_result(api.catalog.get_manifest_at(atom, version, root))
         except Exception as exc:
             return _error(
                 f"Failed to load manifest for {atom}@{version}: {exc}"
@@ -103,7 +102,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     async def _runs_for_tool(args: dict[str, Any]) -> ToolResult:
         try:
-            trace_ids = runs_for(args["fingerprint"], root)
+            trace_ids = api.catalog.runs_for(args["fingerprint"], root)
             return _json_result(trace_ids)
         except Exception as exc:
             return _error(f"Failed to resolve catalog runs: {exc}")

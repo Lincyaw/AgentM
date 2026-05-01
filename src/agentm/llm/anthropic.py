@@ -8,7 +8,7 @@ extension mechanism described in ``.claude/designs/extension-as-scenario.md``
 
 Boundaries:
 
-* The kernel layer (``agentm.core.kernel``) is the only AgentM dependency
+* The kernel layer (``agentm.core.abi``) is the only AgentM dependency
   imported at module import time. The harness layer is **not** imported here;
   ``ProviderConfig`` is resolved lazily inside :func:`install` so this module
   remains usable in isolation (e.g. notebook embedding, harness-less tests).
@@ -33,7 +33,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from agentm.core.kernel.messages import (
+from agentm.core.abi.messages import (
     AgentMessage,
     AssistantContent,
     AssistantMessage,
@@ -46,7 +46,7 @@ from agentm.core.kernel.messages import (
     Usage,
     UserMessage,
 )
-from agentm.core.kernel.stream import (
+from agentm.core.abi.stream import (
     AssistantStreamEvent,
     MessageEnd,
     Model,
@@ -56,7 +56,7 @@ from agentm.core.kernel.stream import (
     ToolCallEnd,
     ToolCallStart,
 )
-from agentm.core.kernel.tool import Tool
+from agentm.core.abi.tool import Tool
 
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from anthropic import AsyncAnthropic
@@ -67,32 +67,28 @@ logger = logging.getLogger(__name__)
 # --- Model registry ---------------------------------------------------------
 
 
-# Hard-coded defaults for known Anthropic models. Unknown ids fall back to
-# (200_000, 8_192) and emit a warning.
-_KNOWN_MODELS: dict[str, tuple[int, int]] = {
-    "claude-opus-4-7": (200_000, 32_768),
-    "claude-sonnet-4-6": (200_000, 64_000),
-    "claude-haiku-4-5-20251001": (200_000, 8_192),
-}
+def _build_model(
+    model_id: str,
+    *,
+    context_window: int = 200_000,
+    max_output_tokens: int = 8_192,
+) -> Model:
+    """Construct a kernel ``Model`` descriptor for the given Anthropic id.
 
+    ``context_window`` and ``max_output_tokens`` come from caller config —
+    we do not maintain a hard-coded model table, since Anthropic-compatible
+    proxies (mimo, MiniMax, Doubao, …) ship arbitrary ids that no static
+    table can keep up with. Defaults are conservative: the 200K/8192 pair
+    works for every modern Claude model and most proxies advertise at
+    least that. Override via ``config['context_window']`` /
+    ``config['max_output_tokens']`` when the deployed model differs.
+    """
 
-def _build_model(model_id: str) -> Model:
-    """Construct a kernel ``Model`` descriptor for the given Anthropic id."""
-
-    if model_id in _KNOWN_MODELS:
-        ctx, max_out = _KNOWN_MODELS[model_id]
-    else:
-        logger.warning(
-            "anthropic: unknown model id %r; falling back to context_window=200000, "
-            "max_output_tokens=8192",
-            model_id,
-        )
-        ctx, max_out = 200_000, 8_192
     return Model(
         id=model_id,
         provider="anthropic",
-        context_window=ctx,
-        max_output_tokens=max_out,
+        context_window=context_window,
+        max_output_tokens=max_output_tokens,
     )
 
 
@@ -583,7 +579,13 @@ def install(api: Any, config: dict[str, Any]) -> None:
     api_key = config.get("api_key")
     base_url = config.get("base_url")
     stream_fn = AnthropicStreamFn(api_key=api_key, base_url=base_url)
-    model = _build_model(model_id)
+    # Optional model-spec overrides; defaults handled in ``_build_model``.
+    model_kwargs: dict[str, int] = {}
+    if "context_window" in config:
+        model_kwargs["context_window"] = int(config["context_window"])
+    if "max_output_tokens" in config:
+        model_kwargs["max_output_tokens"] = int(config["max_output_tokens"])
+    model = _build_model(model_id, **model_kwargs)
 
     # Lazy import: ``ProviderConfig`` is defined in the harness layer that is
     # being implemented in parallel; this keeps the LLM module independent

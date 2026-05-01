@@ -9,10 +9,11 @@ from typing import Any, cast
 
 import pytest
 
-from agentm.core.catalog import _layout
-from agentm.core.catalog.hashing import compute_atom_hash
-from agentm.core.catalog.indexer import index_trace, rebuild_catalog
-from agentm.core.kernel import EventBus
+from agentm.core._internal.catalog import _layout
+from agentm.core._internal.catalog.hashing import compute_atom_hash
+from agentm.core._internal.catalog.indexer import index_trace, rebuild_catalog
+from agentm.core.abi import EventBus
+from agentm.harness.atom_reloader import AtomReloader
 from agentm.harness.extension import ProviderConfig
 from agentm.harness.session import AgentSession
 from agentm.harness.session_manager import InMemorySessionManager
@@ -279,7 +280,7 @@ def test_cli_rebuild_returns_zero_on_clean_run(tmp_path: Path) -> None:
         [
             sys.executable,
             "-m",
-            "agentm.core.catalog.indexer",
+            "agentm.core._internal.catalog.indexer",
             "rebuild",
             "--root",
             str(root),
@@ -311,11 +312,22 @@ async def test_shutdown_indexes_observability_trace_when_present(
     def _fake_index_trace(path: Path, *, root: Path | None = None) -> None:
         called["path"] = path
 
-    monkeypatch.setattr("agentm.core.catalog.indexer.index_trace", _fake_index_trace)
+    monkeypatch.setattr("agentm.core._internal.catalog.indexer.index_trace", _fake_index_trace)
 
+    bus = EventBus()
+    reloader = AtomReloader(
+        cwd=str(tmp_path),
+        bus=bus,
+        tools=[],
+        commands={},
+        providers={},
+        renderers={},
+        apis={},
+        on_provider_changed=lambda: None,
+    )
     session = AgentSession(
         cwd=str(tmp_path),
-        bus=EventBus(),
+        bus=bus,
         session_manager=InMemorySessionManager(cwd=str(tmp_path)),
         resource_loader=None,  # type: ignore[arg-type]
         loop=None,  # type: ignore[arg-type]
@@ -331,8 +343,7 @@ async def test_shutdown_indexes_observability_trace_when_present(
         providers={},
         renderers={},
         apis={},
-        command_owners={},
-        loaded_atoms_by_name={},
+        reloader=reloader,
         pending_user_messages=[],
         session_id="session-123",
         parent_bus=None,

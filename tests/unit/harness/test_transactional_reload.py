@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from agentm.core.kernel.messages import (
+from agentm.core.abi.messages import (
     AssistantMessage,
     TextContent,
     ToolResultBlock,
@@ -35,7 +35,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
-from agentm.core.kernel import AssistantMessage, MessageEnd, Model, TextContent, ToolCallBlock
+from agentm.core.abi import AssistantMessage, MessageEnd, Model, TextContent, ToolCallBlock
 from agentm.harness.extension import ProviderConfig
 
 
@@ -88,7 +88,7 @@ def _tool_source(
     return f'''
 from __future__ import annotations
 
-from agentm.core.kernel import FunctionTool, TextContent, ToolResult
+from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 {state_import}

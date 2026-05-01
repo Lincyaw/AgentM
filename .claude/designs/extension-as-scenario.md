@@ -508,7 +508,7 @@ Provider re-use: a child session is constructed with `provider=parent.provider` 
 To honour `pluggable-architecture.md` §3.2 (acceptance scenario 2 — bash over SSH), the `general_purpose` scenario's `read`/`bash`/`edit`/`write` tools must NOT call `subprocess`/`pathlib` directly. Instead:
 
 ```python
-# src/agentm/core/operations.py
+# src/agentm/core/abi/operations.py  — Protocols (atom + harness import)
 class FileOperations(Protocol):
     async def read_file(self, path: str) -> bytes: ...
     async def write_file(self, path: str, content: bytes) -> None: ...
@@ -520,8 +520,9 @@ class BashOperations(Protocol):
                    on_data: Callable[[bytes], None] | None = None,
                    signal: asyncio.Event | None = None) -> ExecResult: ...
 
-class LocalFileOperations: ...     # default, stdlib-backed
-class LocalBashOperations: ...     # default, asyncio.subprocess-backed
+# src/agentm/core/_internal/operations_impl.py — default impls
+class LocalFileOperations: ...     # stdlib-backed
+class LocalBashOperations: ...     # asyncio.subprocess-backed
 ```
 
 Tool atoms (`tool_read` / `tool_bash` / `tool_edit` / `tool_write`) accept the Operations objects via their config dict — `config["file_ops"]`, defaulting to `LocalFileOperations()`. Swapping to SSH = passing a different impl in the scenario YAML, no code fork.
@@ -604,11 +605,11 @@ The §10b.7 method is reachable as `api.session.append_entry(...)`, **not** `api
 3. **`install(api, config)` is the only callable surface.** Internal helpers may exist as module-private functions (`_underscore_prefixed`); they are never imported by other modules.
 4. **Allowed imports** (enforced by validator):
    - stdlib
-   - `agentm.core.kernel.*`
-   - `agentm.core.operations` (once Group A0 lands)
+   - `agentm.core.abi.*` — types and Protocols (Tool, Message, StreamFn, events, FileOperations / BashOperations / ExecResult, SkillRecord, PromptTemplateRecord, Operations, CompactionSettings, ...)
+   - `agentm.core.lib.*` — pure-function utility shelf (edit_diff, frontmatter, path_utils, text_truncate); use as stdlib
    - `agentm.harness.extension`, `agentm.harness.events`, `agentm.harness.session_manager`, `agentm.harness.resource_loader`
    - `agentm.extensions` (the public surface — `ExtensionManifest`)
-   - **Forbidden**: `agentm.harness.session` (extensions never reach inside the orchestrator), other `agentm.extensions.builtin.*` modules (no atom-to-atom coupling), legacy `agentm.harness.middleware/runtime/...`.
+   - **Forbidden**: `agentm.core._internal.*` (constitution-private; reach via `api.get_operations()` / `api.skills` / `api.prompt_templates` / `api.catalog` / `api.compaction`), `agentm.harness.session` (extensions never reach inside the orchestrator), other `agentm.extensions.builtin.*` modules (no atom-to-atom coupling), legacy `agentm.harness.middleware/runtime/...`.
 5. **Config schema is declared, not implied.** `MANIFEST.config_schema` is a JSON-Schema `dict` (or `None` for "no config accepted"). The validator uses it to (a) reject unknown keys at load time, (b) provide an explicit contract for agent-driven config generation.
 
 ### 11.2 `ExtensionManifest` shape

@@ -6,7 +6,7 @@ import asyncio
 import os
 from typing import Any
 
-from agentm.core.kernel import AgentStartEvent, Tool, ToolResult
+from agentm.core.abi import AgentStartEvent, Tool, ToolResult
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI, ExtensionLoadError
 

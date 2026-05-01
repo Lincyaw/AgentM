@@ -6,7 +6,7 @@
 
 ## Overview
 
-A pure-function module `core/edit_diff.py` containing the edit-application algorithm used by `tool_edit` (and reusable by future scenarios needing in-place file mutation): line-ending detection/restoration, BOM handling, NFKC + smart-quote / dash / space fuzzy normalization, and the multi-edit application pipeline that produces a final new content string from a base content + a list of `Edit{old, new}` operations. Pi-mono reference: [`packages/coding-agent/src/core/tools/edit-diff.ts`](/tmp/pi-analysis/pi-mono/packages/coding-agent/src/core/tools/edit-diff.ts).
+A pure-function module `core/lib/edit_diff.py` containing the edit-application algorithm used by `tool_edit` (and reusable by future scenarios needing in-place file mutation): line-ending detection/restoration, BOM handling, NFKC + smart-quote / dash / space fuzzy normalization, and the multi-edit application pipeline that produces a final new content string from a base content + a list of `Edit{old, new}` operations. Pi-mono reference: [`packages/coding-agent/src/core/tools/edit-diff.ts`](/tmp/pi-analysis/pi-mono/packages/coding-agent/src/core/tools/edit-diff.ts).
 
 ## Motivation
 
@@ -23,7 +23,7 @@ This module owns those rules so they live in one place and are independently tes
 ### Public API
 
 ```python
-# core/edit_diff.py
+# core/lib/edit_diff.py
 from typing import Literal, NamedTuple
 
 LineEnding = Literal["\n", "\r\n"]
@@ -101,9 +101,9 @@ Tier 2 work — the implementer of the `tool_edit` upgrade must:
 3. Return a small diff preview in `ToolResult.extras` (line-level: count of additions/deletions). Use stdlib `difflib.unified_diff` for the actual rendered diff text.
 4. Persist via `FileOperations.write_file(path, final_bytes)` — re-encode `final` as UTF-8.
 
-The atom does **not** import `core/edit_diff.py` directly inside its module body if the §11.1 import allow-list disallows `core` modules other than `kernel`/`operations`. **This means we must explicitly add `agentm.core.edit_diff` to the allow-list when this module lands**, mirroring the existing exception for `agentm.core.operations`. Plan task records this allow-list addition.
+The atom imports `from agentm.core.lib import edit_diff` directly: `agentm.core.lib.*` is on the §11.1 allow-list as the constitution's pure-function utility shelf (stdlib-style). No allow-list amendment is needed.
 
-Same allow-list addition applies for `core/text_truncate.py` and `core/path_utils.py` from [search-tools.md](search-tools.md).
+Same arrangement applies for `core/lib/text_truncate.py` and `core/lib/path_utils.py` from [search-tools.md](search-tools.md).
 
 ### Python-equivalent for Node specifics
 
@@ -131,7 +131,7 @@ See API block above. Stdlib-only module: imports `unicodedata`, `re`, `difflib`.
 ## Related Concepts
 
 - [extension-as-scenario.md](extension-as-scenario.md) §7.1 (`tool_edit` row)
-- [search-tools.md](search-tools.md) — sibling Tier 2 module sharing the `core/path_utils.py` neighbor
+- [search-tools.md](search-tools.md) — sibling Tier 2 module sharing the `core/lib/path_utils.py` neighbor
 - [pluggable-architecture.md](pluggable-architecture.md) §3.2 — `FileOperations` port the upgraded `tool_edit` writes through
 
 ## Constraints and Decisions
@@ -142,7 +142,7 @@ See API block above. Stdlib-only module: imports `unicodedata`, `re`, `difflib`.
 | BOM and line ending restored at the very end, not inside `apply_edits` | Lets `apply_edits` stay a pure string function with no encoding awareness | Make `apply_edits` accept bytes — couples it to I/O |
 | `replace_all` semantics handled in `tool_edit`, not `apply_edits` | Keeps `apply_edits` contract clean (one occurrence required by default) | Pass `replace_all` down — bigger surface |
 | Use stdlib `difflib` for previews | Zero dep cost; "good enough" diff is good enough | Pull in `diff` lib equivalent (`diff-match-patch`) |
-| Allow `agentm.core.edit_diff` import from `tool_edit` | Without this, the algorithm has nowhere to live | Inline into `tool_edit.py` — exceeds 300-LoC budget |
+| Place `edit_diff` in `core/lib/` so `tool_edit` imports stdlib-style | Without this, the algorithm has nowhere to live | Inline into `tool_edit.py` — exceeds 300-LoC budget |
 
 ## Out of Scope
 

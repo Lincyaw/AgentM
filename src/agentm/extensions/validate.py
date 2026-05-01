@@ -32,32 +32,31 @@ from importlib import import_module
 from pathlib import Path
 from types import ModuleType
 
-from agentm.core.catalog import manifest as core_manifest_mod
+from agentm.core._internal.catalog import manifest as core_manifest_mod
 from agentm.extensions import ExtensionManifest, parse_register_tag
 from agentm.extensions.discover import discover_builtin
 
 # Modules an extension is allowed to import. See design §11.1 rule 4.
 _ALLOWED_PREFIXES: tuple[str, ...] = (
-    "agentm.core.catalog",
-    "agentm.core.compaction",
-    "agentm.core.edit_diff",
-    "agentm.core.kernel",
-    "agentm.core.operations",
-    "agentm.core.path_utils",
-    "agentm.core.text_truncate",
+    "agentm.core.abi",
+    "agentm.core.lib",
     "agentm.harness.extension",
     "agentm.harness.events",
     "agentm.harness.session_manager",
+    "agentm.harness.session_config",
     "agentm.harness.resource_loader",
-    "agentm.core.frontmatter",
-    "agentm.core.prompt_templates",
-    "agentm.core.skills",
-    "agentm.extensions",  # the public surface (ExtensionManifest et al.)
+    "agentm.extensions",
 )
 
 # Imports that are explicitly forbidden — listed for clearer error messages
 # than "not on the allow-list".
 _FORBIDDEN_PREFIXES: tuple[tuple[str, str], ...] = (
+    (
+        "agentm.core._internal",
+        "constitution-private modules — reach via api.skills / "
+        "api.prompt_templates / api.catalog / api.compaction / "
+        "api.get_operations() instead",
+    ),
     (
         "agentm.harness.session",
         "extensions never reach inside the orchestrator",
@@ -65,6 +64,11 @@ _FORBIDDEN_PREFIXES: tuple[tuple[str, str], ...] = (
     (
         "agentm.extensions.builtin.",
         "atom-to-atom coupling forbidden — depend via events / api only",
+    ),
+    (
+        "agentm._scenarios.",
+        "scenario-local atom-to-atom coupling forbidden — depend via "
+        "events / api only",
     ),
     (
         "agentm.harness.middleware",
@@ -125,7 +129,7 @@ def validate_builtin() -> list[ValidationIssue]:
 
     # §11.4.9 / §11.4.10 read constants from the core manifest. Resolve
     # through the module namespace so test fixtures that monkeypatch
-    # ``agentm.core.catalog.manifest.load_core_manifest`` take effect.
+    # ``agentm.core._internal.catalog.manifest.load_core_manifest`` take effect.
     core_manifest = core_manifest_mod.load_core_manifest()
     # Rule 1: subpackages are forbidden.
     for info in pkgutil.iter_modules([str(builtin_dir)]):
@@ -226,10 +230,39 @@ def _check_imports(
         elif isinstance(node, ast.ImportFrom):
             if node.module is not None and node.level == 0:
                 names = [node.module]
+        elif isinstance(node, ast.Call):
+            # Catch ``importlib.import_module("agentm.harness.session")``
+            # and ``__import__("agentm.harness.session")`` — dynamic imports
+            # bypass the static check above and have been used in the past
+            # (sub_agent before A2) to silently slip past the §11.4.5
+            # forbidden list. We only flag *constant* arguments; expressions
+            # are out of scope for AST-only checking.
+            target = _dynamic_import_target(node)
+            if target is not None:
+                names = [target]
         for imported in names:
             issues.extend(_classify_import(module_path, imported))
 
     return issues
+
+
+def _dynamic_import_target(node: ast.Call) -> str | None:
+    """Return the constant module name passed to ``importlib.import_module``
+    or ``__import__``, or ``None`` if the call is unrelated or non-constant."""
+
+    func = node.func
+    is_dynamic_import = False
+    if isinstance(func, ast.Attribute) and func.attr == "import_module":
+        # importlib.import_module(...)
+        is_dynamic_import = True
+    elif isinstance(func, ast.Name) and func.id in {"import_module", "__import__"}:
+        is_dynamic_import = True
+    if not is_dynamic_import or not node.args:
+        return None
+    first = node.args[0]
+    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+        return first.value
+    return None
 
 
 def _classify_import(
@@ -241,7 +274,11 @@ def _classify_import(
     # philosophy: extensions can pull in any *neutral* stdlib helper, but
     # AgentM-internal coupling is what we lock down.
     for forbidden, reason in _FORBIDDEN_PREFIXES:
-        if imported == forbidden.rstrip(".") or imported.startswith(forbidden):
+        bare = forbidden.rstrip(".")
+        # Match the exact module OR a subpackage of it (boundary on '.').
+        # Without the dot, ``agentm.harness.session`` would also reject the
+        # legitimate ``agentm.harness.session_config`` and ``session_manager``.
+        if imported == bare or imported.startswith(bare + "."):
             return [
                 ValidationIssue(
                     module_path=module_path,
