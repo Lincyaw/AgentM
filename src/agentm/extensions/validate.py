@@ -17,6 +17,9 @@ Checks (numbered to match design §11.4):
 7. ``MANIFEST.requires`` / ``MANIFEST.conflicts`` reference known atoms.
 8. ``MANIFEST.config_schema`` is a syntactically valid JSON-Schema dict
    (light check: dict-shaped, top-level ``type`` or ``properties`` if set).
+9. ``MANIFEST.api_version`` is within the host's
+   ``[current - grace, current]`` window (self-modifiable-architecture §4).
+10. ``MANIFEST.tier`` agrees with ``core-manifest.yaml::reload.tier_2_atoms``.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 
+from agentm.core.catalog import manifest as core_manifest_mod
 from agentm.extensions import parse_register_tag
 from agentm.extensions.discover import discover_builtin
 
@@ -85,6 +89,11 @@ class ValidationIssue:
     module_path: str
     rule: str  # e.g. "11.4.5-import"
     message: str
+    severity: str = "error"
+    """``"error"`` (default, blocks reload) or ``"warning"`` (visible drift,
+    does not block CI). Introduced for §11.4.10 tier-list mismatches that
+    surface during in-progress rollouts where the atom and the manifest list
+    are updated in the same PR."""
 
 
 def _builtin_dir() -> Path:
@@ -98,6 +107,13 @@ def validate_builtin() -> list[ValidationIssue]:
     """Validate every module under ``builtin/``.
 
     Returns a list of issues; empty list ⇒ compliant catalog.
+
+    §11.4.10 (tier-list mismatch) is the load-time half of a two-layer
+    defense: an agent-driven tier downgrade also gets rejected at the
+    ``propose_change`` layer in Phase 2, but this check fires at module
+    import time so a hand-edited atom drifting from
+    ``core-manifest.yaml::reload.tier_2_atoms`` surfaces in PR review
+    rather than at runtime.
     """
 
     issues: list[ValidationIssue] = []
@@ -105,6 +121,14 @@ def validate_builtin() -> list[ValidationIssue]:
 
     discovered = discover_builtin()
     discovered_names = set(discovered)
+
+    # §11.4.9 / §11.4.10 read constants from the core manifest. Resolve
+    # through the module namespace so test fixtures that monkeypatch
+    # ``agentm.core.catalog.manifest.load_core_manifest`` take effect.
+    core_manifest = core_manifest_mod.load_core_manifest()
+    api_current = core_manifest.extension_api_current
+    api_grace = core_manifest.extension_api_grace
+    tier_2_set = set(core_manifest.tier_2_atoms)
 
     # Rule 1: subpackages are forbidden.
     for info in pkgutil.iter_modules([str(builtin_dir)]):
@@ -247,6 +271,64 @@ def validate_builtin() -> list[ValidationIssue]:
                         ),
                     )
                 )
+
+        # Rule 9: api_version is inside the host's [current - grace, current]
+        # window. See self-modifiable-architecture.md §4.2.
+        api_version = manifest.api_version
+        if api_version > api_current:
+            issues.append(
+                ValidationIssue(
+                    module_path=module_path,
+                    rule="11.4.9-api-version-too-new",
+                    message=(
+                        f"atom requires api_version {api_version}, "
+                        f"current is {api_current}"
+                    ),
+                )
+            )
+        if api_version < api_current - api_grace:
+            issues.append(
+                ValidationIssue(
+                    module_path=module_path,
+                    rule="11.4.9-api-version-too-old",
+                    message=(
+                        f"atom api_version {api_version} is older than "
+                        f"the grace window (current={api_current}, "
+                        f"grace={api_grace})"
+                    ),
+                )
+            )
+
+        # Rule 10: tier declaration agrees with the canonical tier-2 list in
+        # core-manifest.yaml. Warning-severity (not error) so an in-progress
+        # rollout that touches both the atom and the list does not block CI
+        # mid-PR. See self-modifiable-architecture.md §7.3.
+        tier = manifest.tier
+        if tier == 2 and name not in tier_2_set:
+            issues.append(
+                ValidationIssue(
+                    module_path=module_path,
+                    rule="11.4.10-tier-list-mismatch",
+                    message=(
+                        f"atom {name!r} declares tier=2 but is not listed in "
+                        "core-manifest.yaml::reload.tier_2_atoms"
+                    ),
+                    severity="warning",
+                )
+            )
+        if tier != 2 and name in tier_2_set:
+            issues.append(
+                ValidationIssue(
+                    module_path=module_path,
+                    rule="11.4.10-tier-list-mismatch",
+                    message=(
+                        f"atom {name!r} is listed in "
+                        "core-manifest.yaml::reload.tier_2_atoms "
+                        f"but declares tier={tier}"
+                    ),
+                    severity="warning",
+                )
+            )
 
     return issues
 
