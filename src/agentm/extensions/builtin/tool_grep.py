@@ -99,7 +99,15 @@ class _GrepTool(Tool):
                 signal,
             )
             fallback = True
-        lines, line_cut = await _render(self._ops, search_path, is_dir, hits[:limit], context, prefetched_text)
+        lines, line_cut = await _render(
+            self._ops,
+            search_path,
+            is_dir,
+            hits[:limit],
+            context,
+            prefetched_text,
+            self._cwd,
+        )
         if not lines:
             text = "No matches found"
             if fallback:
@@ -218,6 +226,7 @@ async def _render(
     hits: list[tuple[str, int]],
     context: int,
     prefetched_text: str | None,
+    cwd: str,
 ) -> tuple[list[str], bool]:
     cache: dict[str, list[str]] = (
         {root: _split_lines(prefetched_text)} if prefetched_text is not None and not is_dir else {}
@@ -231,7 +240,11 @@ async def _render(
             cache[file_path] = lines
         if context and offset:
             output.append("--")
-        rel = os.path.relpath(file_path, root).replace(os.sep, "/") if is_dir else os.path.basename(file_path)
+        rel = (
+            os.path.relpath(file_path, root).replace(os.sep, "/")
+            if is_dir
+            else os.path.relpath(file_path, cwd).replace(os.sep, "/")
+        )
         for current in range(max(1, line_no - context), min(len(lines), line_no + context) + 1):
             text, cut = truncate_line(lines[current - 1], GREP_MAX_LINE_LENGTH)
             line_cut = line_cut or cut

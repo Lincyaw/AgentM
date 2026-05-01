@@ -116,6 +116,24 @@ async def test_grep_uses_custom_ops_for_file_search(tmp_path: Path, monkeypatch:
 
 
 @pytest.mark.asyncio
+async def test_grep_single_file_search_uses_path_relative_to_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tool_grep.shutil, "which", lambda name: None)
+    target = tmp_path / "pkg" / "nested.py"
+    target.parent.mkdir()
+    target.write_text("def foo():\n    pass\n", encoding="utf-8")
+    session = await _session(tmp_path, {})
+
+    result = await session.tools[0].execute(
+        {"path": "pkg/nested.py", "pattern": "def foo", "literal": True}
+    )
+
+    assert result.content[0].text == "pkg/nested.py:1: def foo():"
+    await session.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_grep_uses_custom_ops_for_directory_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tool_grep.shutil, "which", lambda name: "/usr/bin/rg")
     root = tmp_path / "remote-dir"
