@@ -33,13 +33,25 @@ three sibling v2 modules.
 from __future__ import annotations
 
 import asyncio
+import importlib
+import importlib.util
 import inspect
+import logging
+import os
+import sys
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
+from agentm.core.catalog import (
+    compute_atom_hash,
+    freeze_current as freeze_atom_snapshot,
+    is_constitution_path,
+)
 from agentm.core.kernel import (
     AgentEndEvent,
     AgentLoop,
@@ -54,22 +66,29 @@ from agentm.core.kernel import (
 )
 
 from agentm.harness.events import (
+    ApiRegisterEvent,
     BeforeAgentStartEvent,
     ChildSessionEndEvent,
     ChildSessionStartEvent,
     ExtensionInstallEvent,
+    ExtensionReloadEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
 )
 from agentm.harness.extension import (
+    AtomInfo,
     CommandSpec,
     ExtensionLoadError,
     ProviderConfig,
     ReadonlySession,
+    ReloadResult,
     Renderer,
     _ExtensionAPIImpl,
     load_extension,
 )
+from agentm.extensions import ExtensionManifest
+from agentm.extensions import discover as discover_mod
+from agentm.extensions import validate as validate_mod
 from agentm.harness.resource_loader import (
     DefaultResourceLoader,
     ResourceLoader,
@@ -79,6 +98,9 @@ from agentm.harness.session_manager import (
     SessionEntry,
     SessionManager,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # --- Config -----------------------------------------------------------------
@@ -179,6 +201,16 @@ def _collect_system_replacement(returns: list[Any]) -> str | None:
     return chosen
 
 
+@dataclass(slots=True)
+class _LoadedAtom:
+    name: str
+    module_path: str
+    file_path: Path
+    config: dict[str, Any]
+    manifest: ExtensionManifest | None
+    is_provider: bool = False
+
+
 # --- AgentSession -----------------------------------------------------------
 
 
@@ -193,12 +225,14 @@ class AgentSession:
         session_manager: SessionManager,
         resource_loader: ResourceLoader,
         loop: AgentLoop,
-        active_provider: ProviderConfig,
+        active_provider_box: dict[str, ProviderConfig | None],
         tools: list[Tool],
         commands: dict[str, CommandSpec],
         providers: dict[str, ProviderConfig],
         renderers: dict[str, Renderer],
-        api: _ExtensionAPIImpl,
+        apis: dict[str, _ExtensionAPIImpl],
+        command_owners: dict[str, str],
+        loaded_atoms_by_name: dict[str, _LoadedAtom],
         pending_user_messages: list[str | list[Any]],
         session_id: str,
         parent_bus: EventBus | None,
@@ -210,12 +244,15 @@ class AgentSession:
         self._session_manager = session_manager
         self._resources = resource_loader
         self._loop = loop
-        self._active_provider = active_provider
+        self._active_provider_box = active_provider_box
         self._tools = tools
         self._commands = commands
         self._providers = providers
         self._renderers = renderers
-        self._extension_api = api
+        self._apis = apis
+        self._command_owners = command_owners
+        self._loaded_atoms_by_name = loaded_atoms_by_name
+        self._extension_api = next(iter(apis.values())) if apis else None
         self._pending_user_messages = pending_user_messages
         self._session_id = session_id
         self._parent_bus = parent_bus
@@ -249,10 +286,17 @@ class AgentSession:
         providers: dict[str, ProviderConfig] = {}
         renderers: dict[str, Renderer] = {}
         pending_user_messages: list[str | list[Any]] = []
+        apis: dict[str, _ExtensionAPIImpl] = {}
+        handlers_by_atom: dict[str, list[Any]] = {}
+        registrations_by_atom: dict[str, list[tuple[str, str, Any]]] = {}
+        command_owners: dict[str, str] = {}
+        loaded_atoms_by_module: dict[str, _LoadedAtom] = {}
+        loaded_atoms_by_name: dict[str, _LoadedAtom] = {}
 
         # We need a forward reference to the picked-up active provider so the
         # api.model property reflects it once the provider extension runs.
         active_provider_box: dict[str, ProviderConfig | None] = {"value": None}
+        loop_box: dict[str, AgentLoop | None] = {"value": None}
 
         def _model_getter() -> Model | None:
             cur = active_provider_box["value"]
@@ -263,20 +307,392 @@ class AgentSession:
 
         session_view: ReadonlySession = _SessionView(session_manager)
 
-        api = _ExtensionAPIImpl(
-            bus=bus,
-            cwd=config.cwd,
-            session=session_view,
-            tools=tools,
-            commands=commands,
-            providers=providers,
-            renderers=renderers,
-            pending_user_messages=pending_user_messages,
-            model_getter=_model_getter,
-            provider_getter=_provider_getter,
-        )
+        def _refresh_active_provider() -> None:
+            active_provider_box["value"] = (
+                providers[next(reversed(providers))] if providers else None
+            )
+            loop = loop_box["value"]
+            active = active_provider_box["value"]
+            if loop is not None and active is not None:
+                loop._stream_fn = active.stream_fn  # type: ignore[attr-defined]
 
-        async def _install_with_events(module_path: str, ext_cfg: dict[str, Any]) -> None:
+        def _track_registration(event: ApiRegisterEvent) -> None:
+            registrations_by_atom.setdefault(event.extension, []).append(
+                (event.kind, event.name, event.payload)
+            )
+            if event.kind == "command":
+                command_owners[event.name] = event.extension
+
+        bus.on("api_register", _track_registration)
+
+        def _wrap_on(api: _ExtensionAPIImpl, owner: str) -> None:
+            original_on = api.on
+
+            def tracked(channel: str, handler: Any) -> Any:
+                try:
+                    setattr(handler, "_agentm_obs_owner", owner)
+                except (AttributeError, TypeError):
+                    pass
+                unsub = original_on(channel, handler)
+                handlers_by_atom.setdefault(owner, []).append(unsub)
+                return unsub
+
+            api.on = tracked  # type: ignore[method-assign]
+
+        def _default_manifest(name: str) -> ExtensionManifest:
+            return ExtensionManifest(
+                name=name,
+                description=f"Reload snapshot for {name}",
+                registers=(),
+            )
+
+        def _remove_handlers(owner: str) -> None:
+            for unsub in handlers_by_atom.pop(owner, []):
+                unsub()
+
+        def _remove_registrations(owner: str) -> None:
+            for kind, name, payload in registrations_by_atom.pop(owner, []):
+                if kind == "tool":
+                    tools[:] = [tool for tool in tools if tool is not payload]
+                elif kind == "command":
+                    if commands.get(name) is payload:
+                        commands.pop(name, None)
+                    if command_owners.get(name) == owner:
+                        command_owners.pop(name, None)
+                elif kind == "provider":
+                    if providers.get(name) is payload:
+                        providers.pop(name, None)
+                        _refresh_active_provider()
+                elif kind == "renderer":
+                    if renderers.get(name) is payload:
+                        renderers.pop(name, None)
+
+        def _module_name(module_path: str, module: ModuleType) -> str:
+            manifest_obj = getattr(module, "MANIFEST", None)
+            if isinstance(manifest_obj, ExtensionManifest):
+                return manifest_obj.name
+            return module_path.rsplit(".", 1)[-1]
+
+        def _module_manifest(module: ModuleType) -> ExtensionManifest | None:
+            manifest_obj = getattr(module, "MANIFEST", None)
+            return manifest_obj if isinstance(manifest_obj, ExtensionManifest) else None
+
+        def _record_loaded_atom(
+            module_path: str,
+            ext_cfg: dict[str, Any],
+            *,
+            is_provider: bool,
+        ) -> None:
+            module = importlib.import_module(module_path)
+            module_file = getattr(module, "__file__", None)
+            file_path = Path(module_file).resolve() if module_file else Path(".")
+            manifest = _module_manifest(module)
+            atom = _LoadedAtom(
+                name=_module_name(module_path, module),
+                module_path=module_path,
+                file_path=file_path,
+                config=dict(ext_cfg),
+                manifest=manifest,
+                is_provider=is_provider,
+            )
+            loaded_atoms_by_module[module_path] = atom
+            loaded_atoms_by_name[atom.name] = atom
+
+        def _clear_module_bytecode(path: Path) -> None:
+            cache_dir = path.parent / "__pycache__"
+            if not cache_dir.exists():
+                return
+            for pyc in cache_dir.glob(f"{path.stem}*.pyc"):
+                try:
+                    pyc.unlink()
+                except OSError:
+                    pass
+
+        def _validate_reload_source(
+            name: str,
+            module_path: str,
+            new_source: str,
+        ) -> ExtensionManifest | None:
+            with tempfile.TemporaryDirectory(prefix=f"agentm-reload-{name}-") as tmpdir:
+                src_path = Path(tmpdir) / f"{name}.py"
+                src_path.write_text(new_source, encoding="utf-8")
+                issues = validate_mod._check_imports(module_path, src_path)
+                if issues:
+                    raise RuntimeError(issues[0].message)
+                spec = importlib.util.spec_from_file_location(
+                    f"_agentm_reload_validate_{name}_{uuid.uuid4().hex}",
+                    src_path,
+                )
+                if spec is None or spec.loader is None:
+                    raise RuntimeError(f"could not build spec for {name!r}")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+
+            install = getattr(module, "install", None)
+            if install is None or not callable(install):
+                raise RuntimeError("missing callable 'install(api, config)'")
+            sig = inspect.signature(install)
+            positional = [
+                p
+                for p in sig.parameters.values()
+                if p.kind
+                in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ]
+            if len(positional) < 2:
+                raise RuntimeError(f"'install' must accept (api, config); got {sig}")
+
+            manifest = _module_manifest(module)
+            if manifest is None:
+                return None
+            if manifest.name != name:
+                raise RuntimeError(
+                    f"MANIFEST.name {manifest.name!r} does not match atom name {name!r}"
+                )
+
+            core_manifest = validate_mod.core_manifest_mod.load_core_manifest()
+            if manifest.api_version > core_manifest.extension_api_current:
+                raise RuntimeError(
+                    f"atom requires api_version {manifest.api_version}, "
+                    f"current is {core_manifest.extension_api_current}"
+                )
+            if (
+                manifest.api_version
+                < core_manifest.extension_api_current
+                - core_manifest.extension_api_grace
+            ):
+                raise RuntimeError(
+                    f"atom api_version {manifest.api_version} is older than "
+                    "the grace window"
+                )
+            return manifest
+
+        class _Gateway:
+            def reload_atom(
+                self,
+                name: str,
+                new_source: str,
+                *,
+                agent_initiated: bool = True,
+                rationale: str | None = None,
+            ) -> ReloadResult:
+                del rationale
+                atom = loaded_atoms_by_name.get(name)
+                if atom is None:
+                    return ReloadResult(
+                        ok=False,
+                        name=name,
+                        old_hash=None,
+                        new_hash=None,
+                        error=f"unknown atom {name!r}",
+                    )
+                if is_constitution_path(str(atom.file_path)):
+                    return ReloadResult(
+                        ok=False,
+                        name=name,
+                        old_hash=None,
+                        new_hash=None,
+                        error=f"refusing to reload constitution layer path {atom.file_path}",
+                    )
+
+                try:
+                    manifest = _validate_reload_source(name, atom.module_path, new_source)
+                except Exception as exc:  # noqa: BLE001
+                    return ReloadResult(
+                        ok=False,
+                        name=name,
+                        old_hash=None,
+                        new_hash=None,
+                        error=str(exc),
+                    )
+
+                effective_manifest = manifest or atom.manifest or _default_manifest(name)
+                if effective_manifest.tier == 2:
+                    logger.warning("tier-2 reload proceeds in MVP for %s", name)
+
+                try:
+                    current_source = atom.file_path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    return ReloadResult(
+                        ok=False,
+                        name=name,
+                        old_hash=None,
+                        new_hash=None,
+                        error=str(exc),
+                    )
+
+                old_hash = freeze_atom_snapshot(
+                    name,
+                    current_source,
+                    atom.manifest or _default_manifest(name),
+                    root=Path(config.cwd),
+                )
+                new_hash = compute_atom_hash(new_source)
+
+                fd, tmp_name = tempfile.mkstemp(
+                    prefix=f".reload-{name}-",
+                    suffix=atom.file_path.suffix,
+                    dir=str(atom.file_path.parent),
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(new_source)
+
+                previous_api = apis.get(atom.module_path)
+                if previous_api is not None:
+                    previous_api.mark_stale()
+                _remove_handlers(atom.module_path)
+                _remove_registrations(atom.module_path)
+                sys.modules.pop(atom.module_path, None)
+
+                try:
+                    os.replace(tmp_name, atom.file_path)
+                    _clear_module_bytecode(atom.file_path)
+                    importlib.invalidate_caches()
+                    install_result = load_extension(
+                        atom.module_path,
+                        _make_api(atom.module_path),
+                        dict(atom.config),
+                    )
+                    if inspect.isawaitable(install_result):
+                        raise RuntimeError(
+                            "reload_atom is sync-only; async install is not supported"
+                        )
+                    _record_loaded_atom(
+                        atom.module_path,
+                        atom.config,
+                        is_provider=atom.is_provider,
+                    )
+                    apis[atom.module_path]._owner_name = atom.module_path
+                    discover_mod.reset_cache()
+                    bus.emit_sync(
+                        "extension_reload",
+                        ExtensionReloadEvent(
+                            name=name,
+                            old_hash=old_hash,
+                            new_hash=new_hash,
+                            trigger="agent" if agent_initiated else "human",
+                            tier=effective_manifest.tier,
+                        ),
+                    )
+                    return ReloadResult(
+                        ok=True,
+                        name=name,
+                        old_hash=old_hash,
+                        new_hash=new_hash,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    try:
+                        atom.file_path.write_text(current_source, encoding="utf-8")
+                        sys.modules.pop(atom.module_path, None)
+                        _clear_module_bytecode(atom.file_path)
+                        importlib.invalidate_caches()
+                        rollback_result = load_extension(
+                            atom.module_path,
+                            _make_api(atom.module_path),
+                            dict(atom.config),
+                        )
+                        if inspect.isawaitable(rollback_result):
+                            raise RuntimeError(
+                                "reload rollback is sync-only; async install is not supported"
+                            )
+                        _record_loaded_atom(
+                            atom.module_path,
+                            atom.config,
+                            is_provider=atom.is_provider,
+                        )
+                    except Exception as rollback_exc:  # noqa: BLE001
+                        loaded_atoms_by_module.pop(atom.module_path, None)
+                        loaded_atoms_by_name.pop(atom.name, None)
+                        apis.pop(atom.module_path, None)
+                        bus.emit_sync(
+                            "extension_reload",
+                            ExtensionReloadEvent(
+                                name=name,
+                                old_hash=old_hash,
+                                new_hash=new_hash,
+                                trigger="agent" if agent_initiated else "human",
+                                tier=effective_manifest.tier,
+                                error="rollback_failure",
+                            ),
+                        )
+                        return ReloadResult(
+                            ok=False,
+                            name=name,
+                            old_hash=old_hash,
+                            new_hash=new_hash,
+                            error=f"{exc}; rollback failed: {rollback_exc}",
+                            rolled_back=True,
+                        )
+                    return ReloadResult(
+                        ok=False,
+                        name=name,
+                        old_hash=old_hash,
+                        new_hash=new_hash,
+                        error=str(exc),
+                        rolled_back=True,
+                    )
+
+            def freeze_current(self, name: str) -> str:
+                atom = loaded_atoms_by_name[name]
+                source = atom.file_path.read_text(encoding="utf-8")
+                return freeze_atom_snapshot(
+                    name,
+                    source,
+                    atom.manifest or _default_manifest(name),
+                    root=Path(config.cwd),
+                )
+
+            def list_atoms(self) -> list[AtomInfo]:
+                out: list[AtomInfo] = []
+                for atom in sorted(loaded_atoms_by_name.values(), key=lambda item: item.name):
+                    current_hash = (
+                        compute_atom_hash(atom.file_path.read_text(encoding="utf-8"))
+                        if atom.file_path.exists()
+                        else None
+                    )
+                    manifest = atom.manifest or _default_manifest(atom.name)
+                    out.append(
+                        AtomInfo(
+                            name=atom.name,
+                            current_hash=current_hash,
+                            tier=manifest.tier,
+                            api_version=manifest.api_version,
+                        )
+                    )
+                return out
+
+            def is_constitution_path(self, path: str) -> bool:
+                return is_constitution_path(path)
+
+        gateway = _Gateway()
+
+        def _make_api(owner: str) -> _ExtensionAPIImpl:
+            api = _ExtensionAPIImpl(
+                bus=bus,
+                cwd=config.cwd,
+                session=session_view,
+                tools=tools,
+                commands=commands,
+                providers=providers,
+                renderers=renderers,
+                pending_user_messages=pending_user_messages,
+                model_getter=_model_getter,
+                provider_getter=_provider_getter,
+                gateway=gateway,
+                owner_name=owner,
+            )
+            _wrap_on(api, owner)
+            apis[owner] = api
+            return api
+
+        async def _install_with_events(
+            module_path: str,
+            ext_cfg: dict[str, Any],
+            *,
+            is_provider: bool = False,
+        ) -> None:
             await bus.emit(
                 "extension_install",
                 ExtensionInstallEvent(
@@ -285,7 +701,7 @@ class AgentSession:
             )
             t0 = time.perf_counter_ns()
             try:
-                result = load_extension(module_path, api, ext_cfg)
+                result = load_extension(module_path, _make_api(module_path), ext_cfg)
                 if inspect.isawaitable(result):
                     await result
             except Exception as exc:
@@ -300,6 +716,7 @@ class AgentSession:
                     ),
                 )
                 raise
+            _record_loaded_atom(module_path, ext_cfg, is_provider=is_provider)
             await bus.emit(
                 "extension_install",
                 ExtensionInstallEvent(
@@ -317,7 +734,7 @@ class AgentSession:
         # Load the provider extension. After it returns, we expect it to have
         # registered a ProviderConfig.
         provider_path, provider_cfg = config.provider
-        await _install_with_events(provider_path, provider_cfg)
+        await _install_with_events(provider_path, provider_cfg, is_provider=True)
 
         if not providers:
             raise ExtensionLoadError(
@@ -340,6 +757,7 @@ class AgentSession:
             bus=bus,
             config=config.loop_config or LoopConfig(),
         )
+        loop_box["value"] = loop
 
         # Seed initial messages (if any) into the session manager.
         for msg in config.initial_messages:
@@ -352,12 +770,14 @@ class AgentSession:
             session_manager=session_manager,
             resource_loader=resource_loader,
             loop=loop,
-            active_provider=active_provider,
+            active_provider_box=active_provider_box,
             tools=tools,
             commands=commands,
             providers=providers,
             renderers=renderers,
-            api=api,
+            apis=apis,
+            command_owners=command_owners,
+            loaded_atoms_by_name=loaded_atoms_by_name,
             pending_user_messages=pending_user_messages,
             session_id=session_id,
             parent_bus=config.parent_bus,
@@ -425,7 +845,8 @@ class AgentSession:
 
     @property
     def model(self) -> Model | None:
-        return self._active_provider.model
+        active = self._active_provider_box["value"]
+        return active.model if active is not None else None
 
     @property
     def cwd(self) -> str:
@@ -511,7 +932,7 @@ class AgentSession:
         # 5. Run the loop.
         final_messages = await self._loop.run(
             messages=messages,
-            model=self._active_provider.model,
+            model=self._require_model(),
             tools=self._tools,
             system=system_prompt,
             signal=signal,
@@ -565,7 +986,9 @@ class AgentSession:
             return text, None
         cmd = self._commands.get(head)
         if cmd is not None:
-            result = cmd.handler(rest.strip(), self._extension_api)
+            owner = self._command_owners.get(head)
+            api = self._apis[owner] if owner is not None else next(iter(self._apis.values()))
+            result = cmd.handler(rest.strip(), api)
             if inspect.isawaitable(result):
                 await result
             return text, self._session_manager.get_messages()
@@ -605,6 +1028,12 @@ class AgentSession:
 
     def _append_message(self, msg: AgentMessage) -> Any:
         return self._session_manager.append_message(msg)
+
+    def _require_model(self) -> Model:
+        model = self.model
+        if model is None:
+            raise RuntimeError("no active provider model is available")
+        return model
 
     # --- Lifecycle --------------------------------------------------------
 

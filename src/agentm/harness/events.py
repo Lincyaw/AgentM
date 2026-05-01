@@ -166,7 +166,7 @@ class ExtensionInstallEvent:
 
 @dataclass(frozen=True, slots=True)
 class ExtensionReloadEvent:
-    """Fires when a live session reloads an already-loaded extension."""
+    """Fires after a transactional reload succeeds or hits rollback failure."""
 
     name: str
     old_hash: str | None
