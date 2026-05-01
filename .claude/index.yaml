@@ -8,21 +8,35 @@ concepts:
   pluggable_architecture:
     description: "First-principles pluggable architecture inspired by pi-mono (badlogic/pi-mono). Three-layer package boundary (agentm-llm / agentm-core / agentm-harness / agentm-modes). Five pluggability axes as Protocol ports: StreamFn (LLM), Tool+Operations (env), SessionManager (state), ResourceLoader (project context), EventBus+ExtensionAPI (policy). Built-in features become default extensions. Reference index to pi-mono source paths."
     design: "designs/pluggable-architecture.md"
-    related_concepts: [extension_as_scenario, operations_ports, observability]
+    related_concepts: [extension_as_scenario, operations_ports, observability, self_modifiable_architecture, evolution_substrate]
     plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
     tasks: []
 
+  self_modifiable_architecture:
+    description: "Boundary refinement of pluggable_architecture: core/extensions split is drawn by 'what an agent can safely self-modify' rather than mechanism vs policy. Three layers — Constitution (kernel + validator + reload primitive + catalog write-protect, listed in core-manifest.yaml), Autonomy (atoms + scenarios + skills + prompts, with tier-1 freely editable / tier-2 reviewable), Discovery (filesystem scan + reload + assert_active). Adds versioned ExtensionAPI (api_version with grace window), transactional reload (validator → snapshot → install → rollback on failure), assert_active() stale-ctx invalidation ported from pi-mono runtime, and a new ExtensionAPI surface (reload_atom, freeze_current, list_atoms, is_constitution_path). Tier-2 atoms (permission, cost_budget, tool_filter, llm_compaction, claude_agents) require propose_change approval to reload. Establishes that change is safe and atomic; evolution-substrate.md establishes that change is evidence-driven."
+    design: "designs/self-modifiable-architecture.md"
+    related_concepts: [pluggable_architecture, extension_as_scenario, single_file_extension_contract, observability, evolution_substrate]
+    plans: []
+    tasks: []
+
+  evolution_substrate:
+    description: "Constitution-owned data layer that binds every (atom, scenario) version to all observation data generated under it, so rollback / composition / optimization become evidence-driven, not error-driven. Adds .agentm/catalog/{atoms,scenarios}/<hash>/ with frozen source + manifest.yaml + metrics.jsonl + runs/ + decisions.jsonl. Active-set fingerprint in every observability session.start header binds traces to the exact loaded version set. Indexer (constitution-layer, idempotent, rebuildable from raw observability) aggregates per-(atom_hash, scenario, task_type) statistics. tool_catalog atom (tier-1 read API + propose_change as the only mediated write) exposes list_versions / get_manifest / compare / find_best / runs_for / decisions_for / propose_change to the agent. Hard problems addressed: statistical power (CI + inconclusive enforcement), confounding (experiment-mode lock), Goodhart (universal guard metrics + regressed flag), replayability (LLM response cache, Phase 3), catalog corruption (constitution-layer write-protect on .agentm/catalog/**). Phased: MVP = fingerprint + freeze + browse; Phase 2 = compare + decisions; Phase 3 = replay cache + experiment lock."
+    design: "designs/evolution-substrate.md"
+    related_concepts: [self_modifiable_architecture, observability, pluggable_architecture, extension_as_scenario]
+    plans: []
+    tasks: []
+
   observability:
-    description: "Per-session OTel-flavored JSONL diagnostic stream complementary to trajectory. Single principle: every signal goes through the bus. EventBus exposes EventBusObserver + emit_sync (sync handlers only, async skipped). New bus events: ApiRegisterEvent / ApiSendUserMessageEvent (harness, emit_sync from ExtensionAPI), LlmRequestStartEvent / LlmRequestEndEvent (kernel, around stream_fn drain in AgentLoop with try/except for error path), ExtensionInstallEvent (harness, around load_extension). observability builtin is a pure subscriber + Observer; only API-level monkey-patch is api.on for handler→extension attribution and mutation diffing. Records: session.start/ready/end, extension.install, api.register, api.send_user_message, llm.request.start/end, event.dispatch, handler.invoke, handler.mutated, turn.summary. Writes to <cwd>/.agentm/observability/<trace_id>.jsonl, flushed per record."
+    description: "Per-session OTel-flavored JSONL diagnostic stream complementary to trajectory. Single principle: every signal goes through the bus. EventBus exposes EventBusObserver + emit_sync (sync handlers only, async skipped). New bus events: ApiRegisterEvent / ApiSendUserMessageEvent (harness, emit_sync from ExtensionAPI), LlmRequestStartEvent / LlmRequestEndEvent (kernel, around stream_fn drain in AgentLoop with try/except for error path), ExtensionInstallEvent (harness, around load_extension). observability builtin is a pure subscriber + Observer; only API-level monkey-patch is api.on for handler→extension attribution and mutation diffing. Records: session.start/ready/end, extension.install, api.register, api.send_user_message, llm.request.start/end, event.dispatch, handler.invoke, handler.mutated, turn.summary. Writes to <cwd>/.agentm/observability/<trace_id>.jsonl, flushed per record. evolution_substrate extends session.start with active-set fingerprint binding the trace to exact (core, scenario, atom_versions) tuple."
     design: "designs/observability.md"
-    related_concepts: [pluggable_architecture, extension_as_scenario]
+    related_concepts: [pluggable_architecture, extension_as_scenario, evolution_substrate, self_modifiable_architecture]
     plans: []
     tasks: []
 
   extension_as_scenario:
-    description: "Pluggability model: a scenario is a *composition* of atomic extensions, expressed as data (YAML), not code. Atoms (one Python module, one responsibility) live in extensions/builtin/; scenario recipes live in extensions/scenarios/*.yaml. load_scenario(name) flattens a YAML to list[(module, config)] for AgentSession.create. Same mechanism for built-in and third-party scenarios — no privileged path. Legacy harness/scenarios/tools tree is deleted in Phase 2.5 single sweep."
+    description: "Pluggability model: a scenario is a *composition* of atomic extensions, expressed as data (YAML), not code. Atoms (one Python module, one responsibility) live in extensions/builtin/; scenario recipes live in extensions/scenarios/*.yaml. load_scenario(name) flattens a YAML to list[(module, config)] for AgentSession.create. Same mechanism for built-in and third-party scenarios — no privileged path. Legacy harness/scenarios/tools tree is deleted in Phase 2.5 single sweep. self_modifiable_architecture extends ExtensionManifest with api_version, affects, tier fields; evolution_substrate makes scenarios catalogable and queryable like atoms."
     design: "designs/extension-as-scenario.md"
-    related_concepts: [pluggable_architecture, operations_ports, single_file_extension_contract]
+    related_concepts: [pluggable_architecture, operations_ports, single_file_extension_contract, self_modifiable_architecture, evolution_substrate]
     plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
     tasks:
       - "tasks/2026-04-30-phase2-group-0b.md"
@@ -36,9 +50,9 @@ concepts:
       - "tasks/2026-04-30-legacy-cleanup.md"
 
   single_file_extension_contract:
-    description: "§11 hard rule: one new built-in extension = one new .py file under extensions/builtin/<name>.py with module-level MANIFEST: ExtensionManifest plus install(api, config). Auto-discovery (extensions.discover) and a mechanical validator (extensions.validate, 8 checks keyed to design §11.4) gate the catalog. Designed so future agent self-edits have a tiny, verifiable surface — atom-to-atom imports forbidden, harness.session import forbidden, allow-listed imports only. Phase 2.0c scaffolding landed; A/B/C/D1 atoms must conform."
+    description: "§11 hard rule: one new built-in extension = one new .py file under extensions/builtin/<name>.py with module-level MANIFEST: ExtensionManifest plus install(api, config). Auto-discovery (extensions.discover) and a mechanical validator (extensions.validate, 8 checks keyed to design §11.4) gate the catalog. Designed so future agent self-edits have a tiny, verifiable surface — atom-to-atom imports forbidden, harness.session import forbidden, allow-listed imports only. Phase 2.0c scaffolding landed; A/B/C/D1 atoms must conform. self_modifiable_architecture grows the manifest with api_version (integer ABI + grace window), affects (declared metric surface for catalog), tier (1 free / 2 reviewable). Validator gains api_version compatibility check and constitution-path rejection."
     design: "designs/extension-as-scenario.md#11-single-file-self-contained-extension-contract"
-    related_concepts: [extension_as_scenario, pluggable_architecture]
+    related_concepts: [extension_as_scenario, pluggable_architecture, self_modifiable_architecture, evolution_substrate]
     plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
     tasks: ["tasks/2026-04-30-phase2-group-0c.md"]
 
