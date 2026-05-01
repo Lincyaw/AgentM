@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from agentm.core.kernel import TextContent
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
 
@@ -79,5 +80,6 @@ async def test_tool_write_returns_error_result_on_failure(tmp_path: Path) -> Non
     result = await session.tools[0].execute({"path": "note.txt", "content": "hello"})
 
     assert result.is_error
+    assert isinstance(result.content[0], TextContent)
     assert "note.txt" in result.content[0].text
     await session.shutdown()

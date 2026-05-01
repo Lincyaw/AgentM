@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -38,7 +38,7 @@ async def test_install_filters_registered_tools_immediately() -> None:
         return ToolResult(content=[TextContent(type="text", text=text)])
 
     api = API()
-    tool_filter.install(api, {"deny": ["echo"]})
+    tool_filter.install(cast(Any, api), {"deny": ["echo"]})
 
     assert [tool.name for tool in api._tools] == ["other"]
 
@@ -91,6 +91,7 @@ async def test_integration_filters_tool_before_loop_runs(tmp_path) -> None:
 
     tool_result_message = final[2]
     assert isinstance(tool_result_message, ToolResultMessage)
+    assert isinstance(tool_result_message.content[0].content[0], TextContent)
     assert tool_result_message.content[0].content[0].text == "Unknown tool: echo"
 
     await session.shutdown()

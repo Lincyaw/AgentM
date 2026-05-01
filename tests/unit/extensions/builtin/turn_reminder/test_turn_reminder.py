@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from agentm.core.kernel import text_message
+from agentm.core.kernel import AgentMessage, text_message
 from tests.unit.extensions.builtin import _helpers
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
@@ -20,7 +20,9 @@ async def test_turn_reminder_fires_every_n_turns(
     initial_count: int,
     should_remind: bool,
 ) -> None:
-    initial_messages = [text_message(f"m{i}", timestamp=float(i)) for i in range(initial_count)]
+    initial_messages: list[AgentMessage] = [
+        text_message(f"m{i}", timestamp=float(i)) for i in range(initial_count)
+    ]
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),

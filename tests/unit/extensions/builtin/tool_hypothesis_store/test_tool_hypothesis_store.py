@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agentm.core.kernel import TextContent
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
 
@@ -46,6 +47,7 @@ async def test_tool_hypothesis_store_adds_and_lists_entries(tmp_path: Path) -> N
     listed = await tools["list_hypotheses"].execute({})
 
     assert not added.is_error
+    assert isinstance(listed.content[0], TextContent)
     payload = json.loads(listed.content[0].text)
     assert payload == [
         {
@@ -74,5 +76,6 @@ async def test_tool_hypothesis_store_returns_error_for_unknown_update(tmp_path: 
     result = await tools["update_hypothesis"].execute({"id": "missing", "status": "confirmed"})
 
     assert result.is_error
+    assert isinstance(result.content[0], TextContent)
     assert "Unknown hypothesis" in result.content[0].text
     await session.shutdown()

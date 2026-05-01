@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -22,7 +22,7 @@ async def test_handler_blocks_denylisted_tool() -> None:
             return lambda: None
 
     api = API()
-    permission.install(api, {"deny": ["bash"]})
+    permission.install(cast(Any, api), {"deny": ["bash"]})
 
     result = api.handlers["tool_call"](
         ToolCallEvent(tool_call_id="c1", tool_name="bash", args={})

@@ -5,7 +5,7 @@ hiding from the model why a tool call was denied.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from agentm.core.kernel import TextContent, ToolResult, ToolResultEvent
 
@@ -34,7 +34,7 @@ def _event(text: str, *, is_error: bool) -> ToolResultEvent:
 
 def test_error_floor_preserves_short_block_reasons_but_not_normal_results() -> None:
     api = _API()
-    tool_result_budget.install(api, {"max_chars": 5})
+    tool_result_budget.install(cast(Any, api), {"max_chars": 5})
 
     # An error payload longer than max_chars but well under the floor must
     # pass through untouched so the block reason remains intact.

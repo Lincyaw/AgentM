@@ -36,6 +36,7 @@ import asyncio
 import inspect
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -96,7 +97,7 @@ class AgentSessionConfig:
     provider: str | tuple[str, dict[str, Any]]
     model: str | None = None
     provider_config: dict[str, Any] = field(default_factory=dict)
-    initial_messages: list[AgentMessage] = field(default_factory=list)
+    initial_messages: Sequence[AgentMessage] = field(default_factory=list)
     session_manager: SessionManager | None = None
     resource_loader: ResourceLoader | None = None
     loop_config: LoopConfig | None = None

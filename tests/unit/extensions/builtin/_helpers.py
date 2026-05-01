@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
 from agentm.core.kernel import (
     AssistantMessage,
@@ -54,7 +54,7 @@ def install(api: Any, config: dict[str, Any]) -> None:
 
     for index, text in enumerate(response_texts):
         content: list[Any]
-        stop_reason = "end_turn"
+        stop_reason: Literal["end_turn", "tool_use"] = "end_turn"
         if index < len(tool_calls):
             tc = tool_calls[index]
             content = [

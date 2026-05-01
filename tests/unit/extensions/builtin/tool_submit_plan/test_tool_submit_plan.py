@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import MethodType
 
 import pytest
 
+from agentm.core.kernel import TextContent
 from agentm.harness.events import PlanSubmittedEvent
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
@@ -66,10 +68,11 @@ async def test_tool_submit_plan_returns_error_when_session_append_fails(tmp_path
         del type, payload, parent_id
         raise RuntimeError("broken")
 
-    session._extension_api._session.append_entry = _boom  # type: ignore[attr-defined]
+    session._extension_api._session.append_entry = MethodType(_boom, session._extension_api._session)  # type: ignore[method-assign]
     result = await session.tools[0].execute({"plan": "draft"})
-    session._extension_api._session.append_entry = original  # type: ignore[attr-defined]
+    session._extension_api._session.append_entry = original  # type: ignore[method-assign]
 
     assert result.is_error
+    assert isinstance(result.content[0], TextContent)
     assert "broken" in result.content[0].text
     await session.shutdown()

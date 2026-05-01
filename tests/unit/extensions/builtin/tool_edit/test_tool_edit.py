@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from agentm.core.kernel import TextContent
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
 
@@ -82,6 +83,7 @@ async def test_tool_edit_returns_error_for_non_unique_match(tmp_path: Path) -> N
     )
 
     assert result.is_error
+    assert isinstance(result.content[0], TextContent)
     assert "not unique" in result.content[0].text
     assert file_ops.write_calls == []
     await session.shutdown()

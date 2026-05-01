@@ -7,7 +7,14 @@ from typing import Any
 
 import pytest
 
-from agentm.core.kernel import AssistantMessage, EventBus, MessageEnd, Model, TextContent
+from agentm.core.kernel import (
+    AssistantMessage,
+    EventBus,
+    MessageEnd,
+    Model,
+    TextContent,
+    UserMessage,
+)
 from agentm.harness.events import CostBudgetExceededEvent
 from agentm.harness.extension import ProviderConfig, ReadonlySession, _ExtensionAPIImpl
 from agentm.harness.resource_loader import InMemoryResourceLoader
@@ -55,7 +62,13 @@ async def test_handler_emits_cost_budget_exceeded_payload() -> None:
     await bus.emit(
         "before_send_to_llm",
         cost_budget.BeforeSendToLlmEvent(
-            messages=[{"role": "user", "content": "hello"}],
+            messages=[
+                UserMessage(
+                    role="user",
+                    content=[TextContent(type="text", text="hello")],
+                    timestamp=0.0,
+                )
+            ],
             model=model,
             tools=[],
             system=None,

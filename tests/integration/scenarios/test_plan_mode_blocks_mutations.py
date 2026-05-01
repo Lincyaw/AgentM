@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agentm.core.kernel import TextContent, ToolResultBlock, ToolResultMessage
 from agentm.core.operations import BashOperations, ExecResult
 from agentm.extensions.loader import load_scenario
 from agentm.harness.resource_loader import InMemoryResourceLoader
@@ -58,9 +59,12 @@ async def test_plan_mode_blocks_mutating_bash_tool(tmp_path: Path) -> None:
     try:
         final = await session.prompt("try to mutate")
         tool_result_message = final[2]
+        assert isinstance(tool_result_message, ToolResultMessage)
         result_block = tool_result_message.content[0]
+        assert isinstance(result_block, ToolResultBlock)
 
         assert result_block.is_error is True
+        assert isinstance(result_block.content[0], TextContent)
         assert "Tool call blocked" in result_block.content[0].text
         assert "denied by denylist" in result_block.content[0].text
         assert bash_ops.calls == []

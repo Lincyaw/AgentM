@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agentm.core.kernel import TextContent
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
 
@@ -77,6 +78,7 @@ async def test_tool_trajectory_loader_loads_and_summarizes_jsonl(tmp_path: Path)
 
     assert not loaded.is_error
     assert file_ops.read_calls == ["traj.jsonl"]
+    assert isinstance(summary.content[0], TextContent)
     assert json.loads(summary.content[0].text) == {
         "channels": {"tool_call": 1, "tool_result": 1},
         "event_count": 2,
@@ -101,5 +103,6 @@ async def test_tool_trajectory_loader_returns_error_for_missing_file(tmp_path: P
     result = await session.tools[0].execute({"path": "missing.jsonl"})
 
     assert result.is_error
+    assert isinstance(result.content[0], TextContent)
     assert "missing.jsonl" in result.content[0].text
     await session.shutdown()

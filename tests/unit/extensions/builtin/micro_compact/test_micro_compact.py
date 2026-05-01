@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from agentm.core.kernel import text_message
+from agentm.core.kernel import AgentMessage, text_message
 from tests.unit.extensions.builtin import _helpers
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
@@ -14,7 +14,9 @@ from agentm.harness.session import AgentSession, AgentSessionConfig
 async def test_micro_compact_compacts_and_records_entry(tmp_path: Path) -> None:
     seen_before: list[object] = []
     seen_after: list[object] = []
-    initial_messages = [text_message("x" * 200, timestamp=float(i)) for i in range(10)]
+    initial_messages: list[AgentMessage] = [
+        text_message("x" * 200, timestamp=float(i)) for i in range(10)
+    ]
 
     session = await AgentSession.create(
         AgentSessionConfig(

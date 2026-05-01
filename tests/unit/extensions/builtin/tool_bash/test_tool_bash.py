@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agentm.core.kernel import TextContent
 from agentm.core.operations import ExecResult
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
@@ -63,6 +64,7 @@ async def test_tool_bash_executes_via_bash_ops(tmp_path: Path) -> None:
 
     assert bash_ops.calls == [("pwd", str(tmp_path), 9.0)]
     assert not result.is_error
+    assert isinstance(result.content[0], TextContent)
     assert json.loads(result.content[0].text) == {
         "exit_code": 0,
         "stderr": "",
@@ -89,5 +91,6 @@ async def test_tool_bash_returns_error_result_for_non_zero_exit(tmp_path: Path) 
     result = await session.tools[0].execute({"cmd": "false"})
 
     assert result.is_error
+    assert isinstance(result.content[0], TextContent)
     assert json.loads(result.content[0].text)["exit_code"] == 7
     await session.shutdown()

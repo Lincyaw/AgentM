@@ -558,42 +558,4 @@ async def _translate_event(
     return
 
 
-# --- Extension entrypoint --------------------------------------------------
-
-
-def install(api: Any, config: dict[str, Any]) -> None:
-    """Provider extension entrypoint.
-
-    Reads ``config["model"]`` (required), optional ``config["api_key"]`` and
-    ``config["base_url"]``, then registers the resulting ``AnthropicStreamFn``
-    on the given :class:`ExtensionAPI` under the name ``"anthropic"``.
-
-    ``ProviderConfig`` is imported from :mod:`agentm.harness.extension`
-    lazily so that this module can be loaded without the harness present
-    (e.g. embedded SDK use cases or kernel-only tests).
-    """
-
-    model_id = config.get("model")
-    if not model_id or not isinstance(model_id, str):
-        raise ValueError(
-            "agentm.llm.anthropic.install: config['model'] is required and must "
-            "be a non-empty string (e.g. 'claude-opus-4-7')."
-        )
-
-    api_key = config.get("api_key")
-    base_url = config.get("base_url")
-    stream_fn = AnthropicStreamFn(api_key=api_key, base_url=base_url)
-    model = _build_model(model_id)
-
-    # Lazy import: ``ProviderConfig`` is defined in the harness layer that is
-    # being implemented in parallel; this keeps the LLM module independent
-    # for kernel-only consumers.
-    from agentm.harness.extension import ProviderConfig  # noqa: PLC0415
-
-    api.register_provider(
-        "anthropic",
-        ProviderConfig(stream_fn=stream_fn, model=model, name="anthropic"),
-    )
-
-
-__all__ = ["AnthropicStreamFn", "install"]
+__all__ = ["AnthropicStreamFn"]

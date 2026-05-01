@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -24,7 +24,7 @@ async def test_handler_truncates_text_and_keeps_images() -> None:
             return lambda: None
 
     api = API()
-    tool_result_budget.install(api, {"max_chars": 5})
+    tool_result_budget.install(cast(Any, api), {"max_chars": 5})
 
     result = api.handlers["tool_result"](
         ToolResultEvent(
@@ -42,6 +42,7 @@ async def test_handler_truncates_text_and_keeps_images() -> None:
     assert isinstance(result, ToolResult)
     assert result.content[0] == TextContent(type="text", text="abcde")
     assert isinstance(result.content[1], ImageContent)
+    assert isinstance(result.content[2], TextContent)
     assert "truncated 5 chars" in result.content[2].text
 
 
@@ -81,7 +82,9 @@ async def test_integration_truncates_large_tool_output(tmp_path) -> None:
 
     tool_result_message = final[2]
     assert isinstance(tool_result_message, ToolResultMessage)
+    assert isinstance(tool_result_message.content[0].content[0], TextContent)
     assert tool_result_message.content[0].content[0].text == "xxxxx"
+    assert isinstance(tool_result_message.content[0].content[1], TextContent)
     assert "tool_result_budget truncated" in tool_result_message.content[0].content[1].text
 
     await session.shutdown()

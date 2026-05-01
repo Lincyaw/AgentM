@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import types
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -33,7 +33,7 @@ async def test_handler_blocks_recent_duplicate_call() -> None:
             return lambda: None
 
     api = API()
-    dedup.install(api, {"window": 2})
+    dedup.install(cast(Any, api), {"window": 2})
     api.handlers["agent_start"](object())
 
     first = api.handlers["tool_call"](
@@ -137,6 +137,7 @@ async def test_integration_blocks_second_duplicate_call(tmp_path) -> None:
 
     duplicate_result = final[4]
     assert isinstance(duplicate_result, ToolResultMessage)
+    assert isinstance(duplicate_result.content[0].content[0], TextContent)
     assert "duplicate of recent call" in duplicate_result.content[0].content[0].text
 
     await session.shutdown()

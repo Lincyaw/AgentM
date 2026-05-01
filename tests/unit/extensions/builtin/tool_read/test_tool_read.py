@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from agentm.core.kernel import TextContent
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
 
@@ -61,6 +62,7 @@ async def test_tool_read_executes_with_line_slicing(tmp_path: Path) -> None:
 
     assert file_ops.read_calls == ["note.txt"]
     assert not result.is_error
+    assert isinstance(result.content[0], TextContent)
     assert result.content[0].text == "one\ntwo"
     await session.shutdown()
 
@@ -81,5 +83,6 @@ async def test_tool_read_returns_error_result_for_missing_file(tmp_path: Path) -
     result = await session.tools[0].execute({"path": "missing.txt"})
 
     assert result.is_error
+    assert isinstance(result.content[0], TextContent)
     assert "missing.txt" in result.content[0].text
     await session.shutdown()
