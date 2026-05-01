@@ -27,7 +27,12 @@ from agentm.core.abi import (
 )
 from agentm.harness import AgentSessionConfig
 from agentm.harness.events import ChildSessionEndEvent, ChildSessionStartEvent, ExtensionInstallEvent
-from agentm.modes.textual_app import AgentMApp, SlashCommandEntry, ToolCallBlock, TurnContainer
+from agentm.modes.textual_app import (
+    AgentMApp,
+    SlashCommandEntry,
+    ToolCallBlock,
+    TurnContainer,
+)
 
 
 PromptScript = Callable[[EventBus, str], Awaitable[list[Any]]]
@@ -359,17 +364,30 @@ async def test_T8_many_turns_keep_scrollable_log(tmp_path: Path) -> None:
         for turn_index in range(500):
             turn = TurnContainer(logical_turn=turn_index + 1)
             app._root_turns[turn_index] = turn
-            if turn_index < 60:
+            turn.text_buffer = f"turn {turn_index}"
+            turn.assistant.set_text(turn.text_buffer)
+            if turn_index >= 460:
                 await app._mount_turn(turn)
-                turn.text_buffer = f"turn {turn_index}"
-                turn.assistant.set_text(turn.text_buffer)
         await pilot.pause(0.2)
         log = app.query_one("#conversation-log")
+        widget_count = sum(1 for _ in app.walk_children(with_self=True))
+        log.focus()
+        log.scroll_home(animate=False)
+        await pilot.pause(0.05)
         before = log.scroll_y
         await pilot.press("pagedown")
         await pilot.pause(0.05)
+        after_page_down = log.scroll_y
+        await pilot.press("pageup")
+        await pilot.pause(0.05)
         assert len(app._root_turns) == 500
-        assert log.scroll_y >= before
+        assert len(log.children) <= 40
+        assert widget_count < 260
+        latest = app._latest_turn()
+        assert latest is not None
+        assert latest.assistant.text == "turn 499"
+        assert after_page_down > before
+        assert log.scroll_y < after_page_down
 
 
 @pytest.mark.asyncio

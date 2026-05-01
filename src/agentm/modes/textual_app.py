@@ -59,6 +59,7 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/help": "Show key bindings and slash commands.",
     "/copy-last": "Copy the most recent assistant text block.",
 }
+_MAX_VISIBLE_TURNS = 40
 
 
 class _SessionLike(Protocol):
@@ -467,6 +468,7 @@ class AgentMApp(App[int]):
         self._history_index: int | None = None
         self._ctrl_c_armed = False
         self._turn_counter = 0
+        self._needs_scroll_end = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="app-root"):
@@ -529,6 +531,7 @@ class AgentMApp(App[int]):
     async def _append_user_turn(self, text: str) -> None:
         log = self.query_one(ConversationLog)
         await log.mount(UserTurn(text))
+        self._needs_scroll_end = True
         log.scroll_end(animate=False)
 
     def set_phase(self, phase: str) -> None:
@@ -670,16 +673,23 @@ class AgentMApp(App[int]):
             focused.toggle_collapsed()
 
     def flush_stream_buffers(self) -> None:
+        updated = False
         for turn in self._root_turns.values():
-            turn.assistant.set_text(turn.text_buffer)
-            turn.thinking.set_text(turn.thinking_buffer)
+            if turn.assistant.text != turn.text_buffer:
+                turn.assistant.set_text(turn.text_buffer)
+                updated = True
+            if turn.thinking.text != turn.thinking_buffer:
+                turn.thinking.set_text(turn.thinking_buffer)
+                updated = True
             if turn.text_buffer:
                 self._last_assistant_text = turn.text_buffer
         try:
             log = self.query_one(ConversationLog)
         except NoMatches:
             return
-        log.scroll_end(animate=False)
+        if updated or self._needs_scroll_end:
+            log.scroll_end(animate=False)
+            self._needs_scroll_end = False
 
     def _ensure_root_turn_sync(self, turn_index: int) -> TurnContainer:
         turn = self._root_turns.get(turn_index)
@@ -693,8 +703,23 @@ class AgentMApp(App[int]):
         return turn
 
     async def _mount_turn(self, turn: TurnContainer) -> None:
-        await self.query_one(ConversationLog).mount(turn)
-        self.query_one(ConversationLog).scroll_end(animate=False)
+        log = self.query_one(ConversationLog)
+        await log.mount(turn)
+        await self._trim_visible_turns()
+        self._needs_scroll_end = True
+        log.scroll_end(animate=False)
+
+    async def _trim_visible_turns(self) -> None:
+        log = self.query_one(ConversationLog)
+        while len(log.children) > _MAX_VISIBLE_TURNS:
+            oldest = log.children[0]
+            await oldest.remove()
+            if not isinstance(oldest, TurnContainer):
+                continue
+            for turn_index, turn in list(self._root_turns.items()):
+                if turn is oldest:
+                    del self._root_turns[turn_index]
+                    break
 
     def _latest_turn(self) -> TurnContainer | None:
         if not self._root_turns:
@@ -738,6 +763,7 @@ class AgentMApp(App[int]):
         if isinstance(delta, TextDelta):
             turn.text_buffer += delta.text
             self.set_phase("streaming")
+            self._needs_scroll_end = True
             if self._child_turns:
                 self._render_child_delta(delta)
             return
@@ -745,6 +771,7 @@ class AgentMApp(App[int]):
             turn.thinking_buffer += delta.text
             turn.thinking.visible = True
             self.set_phase("thinking")
+            self._needs_scroll_end = True
             if self._child_turns:
                 self._render_child_delta(delta)
             return
@@ -755,6 +782,7 @@ class AgentMApp(App[int]):
                 args_json_fragments=[],
             )
             self.run_worker(turn.ensure_tool(delta.id, delta.name), exclusive=False)
+            self._needs_scroll_end = True
             if self._child_turns:
                 self._render_child_delta(delta)
             return
@@ -783,6 +811,7 @@ class AgentMApp(App[int]):
             block.set_pending_args(dict(event.args), _truncate(_format_args_preview(event.args), 48))
 
         self.run_worker(_apply(), exclusive=False)
+        self._needs_scroll_end = True
 
     def handle_tool_result(self, event: ToolResultEvent) -> None:
         turn = self._latest_turn()
@@ -801,6 +830,7 @@ class AgentMApp(App[int]):
 
         self.run_worker(_apply(), exclusive=False)
         self.set_phase("tool")
+        self._needs_scroll_end = True
 
     def handle_llm_start(self, event: LlmRequestStartEvent) -> None:
         self._ensure_root_turn_sync(event.turn_index)
@@ -830,12 +860,14 @@ class AgentMApp(App[int]):
 
         self.run_worker(_apply(), exclusive=False)
         self.set_phase("subagent")
+        self._needs_scroll_end = True
 
     def handle_child_end(self, event: ChildSessionEndEvent) -> None:
         block = self._child_turns.pop(event.child_session_id, None)
         if block is not None:
             block.mark_error(event.error)
         self.set_phase("idle")
+        self._needs_scroll_end = True
 
     def handle_extension_install(self, event: ExtensionInstallEvent) -> None:
         if event.phase == "error":
