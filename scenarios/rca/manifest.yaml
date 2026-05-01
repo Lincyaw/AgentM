@@ -1,15 +1,49 @@
 name: rca
-description: Root-cause analysis with hypothesis tracking.
+description: Root-cause analysis over parquet observability data via DuckDB SQL.
 extensions:
-  - module: agentm.extensions.builtin.tool_read
-  - module: agentm.extensions.builtin.tool_grep
-  - module: agentm.extensions.builtin.tool_find
-  - module: agentm.extensions.builtin.tool_ls
-  - module: agentm.extensions.builtin.tool_bash
+  - module: agentm_rca.tools.duckdb_sql
+    config:
+      # data_dir can be overridden via the AGENTM_RCA_DATA_DIR env var.
+      exclude:
+        - conclusion.parquet
+      row_limit: 200
+      token_limit: 5000
+  - module: agentm_rca.tools.hypothesis_tools
+  - module: agentm.extensions.builtin.trajectory
+    config:
+      path: rca_trajectory.jsonl
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: |
-        You are doing root-cause analysis. Form hypotheses, gather evidence,
-        record updates via the hypothesis_store tool. Iterate until you can
-        explain the failure and propose a remediation.
-  - module: agentm_rca.tools.hypothesis_tools
+        You are doing root-cause analysis on a microservice incident.
+
+        The ONLY way to access the data is through DuckDB SQL via the
+        `query_sql` tool. Other filesystem / shell tools are intentionally
+        unavailable. Use `list_tables` first to discover what views exist
+        and what columns each has.
+
+        Dataset shape (parquet files, registered as same-named DuckDB views):
+          - normal_*    — baseline window before the fault
+          - abnormal_*  — window during the fault
+          - *_metrics, *_metrics_histogram, *_metrics_sum — gauge / sum / histogram telemetry
+          - *_traces — distributed traces (trace_id, span_id, parent_span_id,
+                       span_name, service_name, duration in nanoseconds,
+                       attr.http.response.status_code, etc.)
+          - *_logs — application logs (service_name, level, message, trace_id, ...)
+          - The `time` column is `TIMESTAMP WITH TIME ZONE`.
+
+        Investigation rules:
+          - Compare normal vs abnormal periods to localise the fault.
+          - Walk service / span topology via parent_span_id, attr.source/destination.
+          - Track working hypotheses with `update_hypothesis` /
+            `remove_hypothesis`. Each hypothesis must cite the SQL evidence
+            that supports or refutes it.
+          - You are done when one hypothesis is `confirmed` with concrete
+            SQL evidence and you can name (a) the faulty service / span and
+            (b) the symptom signature (latency / error / log pattern).
+
+        Output the final answer as a short report:
+          - Root-cause service / component
+          - Triggering signal (which metric / span / log first deviated)
+          - Supporting evidence (cite the SQL queries you ran)
+          - Suggested remediation
