@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agentm.core.kernel import TextContent
 from agentm_rca import build_observability_tools
 from agentm_rca.tools import MANIFEST
 
@@ -31,6 +32,7 @@ async def test_build_observability_tools_executes_metrics_query(
 
     assert result.is_error is False
     assert len(result.content) == 1
+    assert isinstance(result.content[0], TextContent)
 
     payload = json.loads(result.content[0].text)
     assert isinstance(payload, list)
