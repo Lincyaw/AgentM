@@ -107,7 +107,7 @@ class AgentSessionConfig:
     child-lifecycle events. ``None`` becomes ``"unknown"`` in the payload."""
 
     purpose: str = "root"
-    """Caller-defined purpose label, e.g. ``"subagent:rca_worker"``;
+    """Caller-defined purpose label, e.g. ``"subagent:worker"``;
     surfaces verbatim in :class:`ChildSessionStartEvent`."""
 
 
