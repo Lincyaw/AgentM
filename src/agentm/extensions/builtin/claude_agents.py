@@ -44,6 +44,7 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": True,
     },
+    tier=2,
 )
 
 

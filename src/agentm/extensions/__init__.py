@@ -61,6 +61,31 @@ class ExtensionManifest:
     """Names of other built-in extensions that MUST NOT be loaded in the
     same session. The runner enforces this."""
 
+    # --- Self-modifiable architecture fields (manifest-schema task) --------
+    # Defaults preserve backward compatibility: every existing atom keeps
+    # building unmodified. See ``.claude/designs/self-modifiable-architecture.md``
+    # §4 (versioned API) and §7 (tier rationale).
+
+    api_version: int = 1
+    """Integer ABI the atom expects. Validated against
+    ``core-manifest.yaml::extension_api.current`` plus its grace window
+    (§11.4.9). An atom written for a future revision is rejected at load
+    time rather than crashing on first event delivery."""
+
+    affects: tuple[str, ...] = field(default_factory=tuple)
+    """Metric surface this atom influences. Consumed by the Phase 2 indexer
+    when ``compare()`` lands; MVP atoms can leave this empty. Tuple (not
+    list) for the same hashable-value-type reasons as ``registers``. The
+    richer ``{primary, secondary}`` shape from evolution-substrate §3.1 is
+    deferred until ``compare()`` actually consumes it."""
+
+    tier: int = 1
+    """Reload-cost classification. ``1`` = freely-editable (validator runs,
+    reload happens). ``2`` = reviewable (reload deferred to a
+    ``propose_change`` decision in Phase 2). The canonical tier-2 list lives
+    in ``core-manifest.yaml::reload.tier_2_atoms``; the validator's
+    §11.4.10 check warns on disagreement between this field and that list."""
+
 
 # --- Tag parsing helper (used by validator + future tooling) ----------------
 
