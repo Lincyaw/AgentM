@@ -30,10 +30,7 @@ from agentm.harness.events import (
     ChildSessionEndEvent,
     ChildSessionStartEvent,
 )
-from agentm.harness.extension import (
-    CommandSpec,
-    UnknownCommandError,
-)
+from agentm.harness.extension import CommandSpec
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
 
@@ -254,21 +251,28 @@ async def test_prompt_dispatches_slash_command_without_calling_stream(
 
 
 @pytest.mark.asyncio
-async def test_prompt_unknown_slash_command_raises(tmp_path: Path) -> None:
+async def test_prompt_unknown_slash_command_falls_through_verbatim(
+    tmp_path: Path,
+) -> None:
     config = AgentSessionConfig(
         cwd=str(tmp_path),
         extensions=[],
-        provider=("tests.unit.harness_v2._fixtures.fake_provider", {}),
+        provider=("tests.unit.extensions.builtin._helpers", {"response_texts": ["ok"]}),
         resource_loader=InMemoryResourceLoader(),
     )
     session = await AgentSession.create(config)
 
-    with pytest.raises(UnknownCommandError):
-        await session.prompt("/no-such-command")
+    final = await session.prompt("/no-such-command arg")
+    first = final[0]
+    assert isinstance(first, UserMessage)
+    assert isinstance(first.content[0], TextContent)
+    assert first.content[0].text == "/no-such-command arg"
 
-    # Bare "/" is also unknown.
-    with pytest.raises(UnknownCommandError):
-        await session.prompt("/")
+    bare = await session.prompt("/")
+    bare_first = bare[-2]
+    assert isinstance(bare_first, UserMessage)
+    assert isinstance(bare_first.content[0], TextContent)
+    assert bare_first.content[0].text == "/"
 
     await session.shutdown()
 
