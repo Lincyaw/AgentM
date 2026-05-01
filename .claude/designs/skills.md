@@ -173,7 +173,7 @@ Rationale for using `session_ready` (not `install`) to populate the cache: `reso
 - Pros: zero new deps; matches pi's <40-line `frontmatter.ts`; already battle-tested in `resource_loader.py`.
 - Cons: need to handle one extra case the current impl doesn't: CRLF normalization (pi does it explicitly). Trivial.
 
-**Recommendation: Option B (promote in-house).** Frontmatter is a write-once parser; the dependency cost outweighs the maintenance cost. Surface the existing `_split_frontmatter` as `parse_frontmatter(text) -> tuple[dict, str]` and add CRLF normalization. The implementer phase may revisit if a real edge case forces it.
+**Recommendation: Option A (`python-frontmatter`).** User-confirmed 2026-05-01: prefer the maintained package over rolling our own. `uv add python-frontmatter`. Wrap it in `core/frontmatter.py` with a single `parse_frontmatter(text) -> tuple[dict, str]` function so the rest of the code base depends on AgentM's surface, not the third-party API directly. Update `harness/resource_loader.py::_split_frontmatter` to call through this wrapper.
 
 ### Python-equivalent for Node specifics
 
@@ -244,7 +244,7 @@ Handlers return `dict[str, list[str]]` (or None). Recognized keys: `skill_paths`
 |---|---|---|
 | Skills injected via `before_agent_start` mutation, not via `context` event | `before_agent_start` is the documented system-prompt mutation hook; `context` rewrites messages | Inject via a fake user message — pollutes history |
 | Cache built at `session_ready`, not `install` | Other extensions' `resources_discover` handlers aren't visible in `install()` | Eager load in install — misses extension-contributed paths |
-| Hand-roll frontmatter (Option B) | Existing 30-line impl is sufficient | `python-frontmatter` package |
+| Use `python-frontmatter` package (Option A) | User-chosen 2026-05-01: prefer maintained dep | Hand-roll — small but yet another in-house parser to own |
 | Pathspec for `.gitignore` | Closest to pi's `ignore` semantics | Hand-roll a subset matcher |
 | Silently load skills with name warnings (only drop on missing description) | Matches pi behavior; avoids breaking users who have lightly-misnamed skills | Strict mode — too brittle for v1 |
 
