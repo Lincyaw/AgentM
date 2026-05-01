@@ -23,6 +23,22 @@ class FakeGrepOps:
         return self.content
 
 
+class FakeDirectoryGrepOps:
+    def __init__(self, files: dict[str, str]) -> None:
+        self.files = files
+        self.walk_calls: list[tuple[str, str | None]] = []
+
+    async def is_directory(self, path: str) -> bool:
+        return path.endswith("remote-dir")
+
+    async def read_file(self, path: str) -> str:
+        return self.files[path]
+
+    async def walk_files(self, root: str, *, glob: str | None = None) -> list[str]:
+        self.walk_calls.append((root, glob))
+        return sorted(self.files)
+
+
 class _Stdout:
     def __init__(self, lines: list[str]) -> None:
         self._lines = [line.encode("utf-8") for line in lines]
@@ -94,8 +110,31 @@ async def test_grep_uses_custom_ops_for_file_search(tmp_path: Path, monkeypatch:
 
     result = await session.tools[0].execute({"path": "remote.txt", "pattern": "def foo", "literal": True})
 
-    assert ops.read_calls == [str(path), str(path)]
+    assert ops.read_calls == [str(path)]
     assert result.content[0].text == "remote.txt:2: def foo"
+    await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_grep_uses_custom_ops_for_directory_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tool_grep.shutil, "which", lambda name: "/usr/bin/rg")
+    root = tmp_path / "remote-dir"
+    alpha = str(root / "pkg" / "alpha.py")
+    beta = str(root / "pkg" / "beta.py")
+    ops = FakeDirectoryGrepOps(
+        {
+            alpha: "def foo():\n    pass\n",
+            beta: "skip me\n",
+        }
+    )
+    session = await _session(tmp_path, {"ops": ops})
+
+    result = await session.tools[0].execute(
+        {"path": "remote-dir", "pattern": "def foo", "literal": True, "glob": "*.py"}
+    )
+
+    assert ops.walk_calls == [(str(root), "*.py")]
+    assert result.content[0].text == "pkg/alpha.py:1: def foo():"
     await session.shutdown()
 
 

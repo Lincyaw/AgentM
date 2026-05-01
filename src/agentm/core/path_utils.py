@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 import os
+from pathlib import Path
 import unicodedata
 
 _UNICODE_SPACE_MAP = {
@@ -43,3 +45,25 @@ def resolve_read_path(p: str, cwd: str) -> str:
         if os.path.exists(candidate):
             return candidate
     return resolved
+
+
+def load_gitignore_patterns(root: str, *, extra: Iterable[str] = ()) -> list[str]:
+    patterns = list(extra)
+    for dirpath, _dirnames, filenames in os.walk(root):
+        if ".gitignore" not in filenames:
+            continue
+        prefix = os.path.relpath(dirpath, root).replace(os.sep, "/")
+        prefix = "" if prefix == "." else prefix
+        raw_text = Path(os.path.join(dirpath, ".gitignore")).read_text(encoding="utf-8")
+        for raw in raw_text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if prefix:
+                if line.startswith("/"):
+                    patterns.append(f"{prefix}{line}")
+                else:
+                    patterns.append(f"{prefix}/{line.lstrip('/')}")
+                continue
+            patterns.append(line)
+    return patterns

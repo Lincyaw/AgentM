@@ -12,7 +12,7 @@ from typing import Any, Protocol
 import pathspec
 
 from agentm.core.kernel import TextContent, Tool, ToolResult
-from agentm.core.path_utils import resolve_to_cwd
+from agentm.core.path_utils import load_gitignore_patterns, resolve_to_cwd
 from agentm.core.text_truncate import DEFAULT_MAX_BYTES, format_size, truncate_head
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
@@ -232,22 +232,7 @@ def _matches(pattern: str, rel_path: str, name: str) -> bool:
 
 
 def _ignore_spec(root: str, extra: list[str]) -> pathspec.PathSpec:
-    patterns = list(extra)
-    for dirpath, _dirnames, filenames in os.walk(root):
-        if ".gitignore" not in filenames:
-            continue
-        prefix = os.path.relpath(dirpath, root).replace(os.sep, "/")
-        if prefix == ".":
-            prefix = ""
-        with open(os.path.join(dirpath, ".gitignore"), encoding="utf-8") as handle:
-            for raw in handle:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if prefix:
-                    line = f"{prefix}/{line.lstrip('/')}" if not line.startswith("/") else f"{prefix}{line}"
-                patterns.append(line)
-    return pathspec.PathSpec.from_lines("gitignore", patterns)
+    return pathspec.PathSpec.from_lines("gitignore", load_gitignore_patterns(root, extra=extra))
 
 
 def _normalize_custom_paths(paths: list[str], root: str) -> list[str]:

@@ -15,7 +15,7 @@ import pathspec
 
 from agentm.core.kernel import TextContent, Tool, ToolResult
 from agentm.core.operations import LocalFileOperations
-from agentm.core.path_utils import resolve_to_cwd
+from agentm.core.path_utils import load_gitignore_patterns, resolve_to_cwd
 from agentm.core.text_truncate import DEFAULT_MAX_BYTES, GREP_MAX_LINE_LENGTH, format_size, truncate_head, truncate_line
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
@@ -69,6 +69,7 @@ class _GrepTool(Tool):
     def __init__(self, cwd: str, ops: GrepOperations | None) -> None:
         self._cwd = cwd
         self._ops = ops or _LocalGrepOperations()
+        self._has_custom_ops = ops is not None
 
     async def execute(self, args: dict[str, Any], *, signal: asyncio.Event | None = None, on_update: Any = None) -> ToolResult:
         del on_update
@@ -79,17 +80,26 @@ class _GrepTool(Tool):
         glob = str(args["glob"]) if args.get("glob") is not None else None
         context = max(0, int(args.get("context", 0)))
         limit = max(1, int(args.get("limit", 100)))
-        if not os.path.exists(search_path):
-            raise Exception(f"Path not found: {search_path}")
-        is_dir = await self._ops.is_directory(search_path)
+        is_dir, prefetched_text = await _classify_path(self._ops, search_path)
         rg_path = shutil.which("rg")
-        if rg_path:
+        if rg_path and not self._has_custom_ops:
             hits = await _grep_with_rg(rg_path, pattern, search_path, glob, bool(args.get("ignore_case", False)), bool(args.get("literal", False)), limit, signal)
             fallback = False
         else:
-            hits = await _grep_fallback(self._ops, pattern, search_path, glob, bool(args.get("ignore_case", False)), bool(args.get("literal", False)), limit, is_dir, signal)
+            hits = await _grep_fallback(
+                self._ops,
+                pattern,
+                search_path,
+                glob,
+                bool(args.get("ignore_case", False)),
+                bool(args.get("literal", False)),
+                limit,
+                is_dir,
+                prefetched_text,
+                signal,
+            )
             fallback = True
-        lines, line_cut = await _render(self._ops, search_path, is_dir, hits[:limit], context)
+        lines, line_cut = await _render(self._ops, search_path, is_dir, hits[:limit], context, prefetched_text)
         if not lines:
             text = "No matches found"
             if fallback:
@@ -159,16 +169,17 @@ async def _grep_fallback(
     literal: bool,
     limit: int,
     is_dir: bool,
+    prefetched_text: str | None,
     signal: asyncio.Event | None,
 ) -> list[tuple[str, int]]:
     compiled = re.compile(re.escape(pattern) if literal else pattern, re.IGNORECASE if ignore_case else 0)
-    files = [search_path] if not is_dir else await asyncio.to_thread(_walk_files, search_path, glob)
+    files = [search_path] if not is_dir else await _list_search_files(ops, search_path, glob)
     hits: list[tuple[str, int]] = []
     for file_path in files:
         if signal is not None and signal.is_set():
             raise Exception("Operation aborted")
         try:
-            text = await ops.read_file(file_path)
+            text = prefetched_text if file_path == search_path and prefetched_text is not None else await ops.read_file(file_path)
         except Exception:
             continue
         for line_no, line in enumerate(_split_lines(text), start=1):
@@ -179,8 +190,38 @@ async def _grep_fallback(
     return hits
 
 
-async def _render(ops: GrepOperations, root: str, is_dir: bool, hits: list[tuple[str, int]], context: int) -> tuple[list[str], bool]:
-    cache: dict[str, list[str]] = {}
+async def _classify_path(ops: GrepOperations, search_path: str) -> tuple[bool, str | None]:
+    try:
+        if await ops.is_directory(search_path):
+            return True, None
+        return False, await ops.read_file(search_path)
+    except Exception as exc:
+        raise Exception(f"Path not found: {search_path}") from exc
+
+
+async def _list_search_files(
+    ops: GrepOperations,
+    root: str,
+    glob: str | None,
+) -> list[str]:
+    walk_files = getattr(ops, "walk_files", None)
+    if callable(walk_files):
+        return sorted(await walk_files(root, glob=glob))
+    ignore = pathspec.PathSpec.from_lines("gitignore", load_gitignore_patterns(root, extra=[".git/"]))
+    return await asyncio.to_thread(_walk_files, root, glob, ignore)
+
+
+async def _render(
+    ops: GrepOperations,
+    root: str,
+    is_dir: bool,
+    hits: list[tuple[str, int]],
+    context: int,
+    prefetched_text: str | None,
+) -> tuple[list[str], bool]:
+    cache: dict[str, list[str]] = (
+        {root: _split_lines(prefetched_text)} if prefetched_text is not None and not is_dir else {}
+    )
     output: list[str] = []
     line_cut = False
     for offset, (file_path, line_no) in enumerate(sorted(hits, key=lambda item: (item[0], item[1]))):
@@ -199,8 +240,7 @@ async def _render(ops: GrepOperations, root: str, is_dir: bool, hits: list[tuple
     return output, line_cut
 
 
-def _walk_files(root: str, glob: str | None) -> list[str]:
-    ignore = _ignore_spec(root)
+def _walk_files(root: str, glob: str | None, ignore: pathspec.PathSpec) -> list[str]:
     files: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=True):
         rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
@@ -212,22 +252,6 @@ def _walk_files(root: str, glob: str | None) -> list[str]:
                 continue
             files.append(os.path.join(dirpath, filename))
     return sorted(files)
-
-
-def _ignore_spec(root: str) -> pathspec.PathSpec:
-    patterns = [".git/"]
-    for dirpath, _dirnames, filenames in os.walk(root):
-        if ".gitignore" not in filenames:
-            continue
-        prefix = os.path.relpath(dirpath, root).replace(os.sep, "/")
-        prefix = "" if prefix == "." else prefix
-        with open(os.path.join(dirpath, ".gitignore"), encoding="utf-8") as handle:
-            for raw in handle:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                patterns.append(f"{prefix}/{line.lstrip('/')}" if prefix and not line.startswith("/") else f"{prefix}{line}" if prefix else line)
-    return pathspec.PathSpec.from_lines("gitignore", patterns)
 
 
 def _ignored(spec: pathspec.PathSpec, rel_dir: str, name: str) -> bool:
