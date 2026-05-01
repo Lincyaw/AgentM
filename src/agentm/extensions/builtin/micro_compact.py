@@ -72,12 +72,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         entry_id = api.session.append_entry("compaction", details)
         details["entry_id"] = entry_id
 
-        messages[:] = compacted_messages
+        # Rebuild from SessionManager so the in-flight context matches the
+        # persisted compaction entry instead of an ad-hoc synthetic message.
+        messages[:] = api.session.get_messages()
         await api.events.emit(
             "after_compact",
             AfterCompactEvent(
                 summary=summary_text,
-                kept_message_count=len(compacted_messages),
+                kept_message_count=len(messages),
                 discarded_message_count=max(0, len(original_messages) - len(compacted_messages)),
                 details=details,
             ),

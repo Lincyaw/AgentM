@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agentm.core.kernel import AssistantMessage, TextContent, text_message
+from agentm.core.kernel import TextContent, text_message
 
 from agentm.harness.session_manager import (
     InMemorySessionManager,
@@ -72,25 +72,14 @@ def test_inmemory_find_returns_entry_or_none() -> None:
 
 def test_build_session_context_uses_latest_compaction_summary() -> None:
     sm = InMemorySessionManager()
-    first = sm.append_message(text_message("first", timestamp=1.0))
+    sm.append_message(text_message("first", timestamp=1.0))
     sm.append_message(text_message("second", timestamp=2.0))
-    sm.append_message(text_message("third", timestamp=3.0))
-    sm.append(
-        message_entry(
-            AssistantMessage(
-                role="assistant",
-                content=[TextContent(type="text", text="summary should disappear")],
-                timestamp=4.0,
-                stop_reason="end_turn",
-            ),
-            parent_id=sm.get_leaf_id(),
-        )
-    )
+    third = sm.append_message(text_message("third", timestamp=3.0))
     sm.append_custom_entry(
         "compaction",
         {
             "summary": "Compaction summary of 2 earlier messages",
-            "first_kept_entry_id": first.id,
+            "first_kept_entry_id": third.id,
         },
     )
     sm.append_message(text_message("after", timestamp=5.0))
@@ -102,7 +91,43 @@ def test_build_session_context_uses_latest_compaction_summary() -> None:
         if isinstance(block, TextContent)
     ]
     assert texts[0] == "Compaction summary of 2 earlier messages"
+    assert "first" not in texts
+    assert "second" not in texts
+    assert "third" in texts
     assert texts[-1] == "after"
+
+
+def test_get_tree_marks_nodes_with_compacted_ancestor_state() -> None:
+    sm = InMemorySessionManager()
+    root = sm.append_message(text_message("root", timestamp=1.0))
+    kept = sm.append_message(text_message("kept", timestamp=2.0))
+    compact = sm.append_custom_entry(
+        "compaction",
+        {
+            "summary": "Compaction summary",
+            "first_kept_entry_id": kept.id,
+        },
+    )
+    tail = sm.append_message(text_message("tail", timestamp=3.0))
+
+    sm.branch(root.id)
+    sibling = sm.append_message(text_message("sibling", timestamp=4.0))
+
+    roots = sm.get_tree()
+    assert len(roots) == 1
+    root_node = roots[0]
+    assert root_node.entry.id == root.id
+    assert root_node.has_compacted_ancestor is False
+
+    child_map = {child.entry.id: child for child in root_node.children}
+    assert child_map[kept.id].has_compacted_ancestor is False
+    assert child_map[sibling.id].has_compacted_ancestor is False
+
+    compact_node = child_map[kept.id].children[0]
+    assert compact_node.entry.id == compact.id
+    assert compact_node.has_compacted_ancestor is False
+    assert compact_node.children[0].entry.id == tail.id
+    assert compact_node.children[0].has_compacted_ancestor is True
 
 
 def test_jsonl_durable_round_trip(tmp_path: Path) -> None:
