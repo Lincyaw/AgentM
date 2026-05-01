@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import sys
 import time
 from dataclasses import dataclass
@@ -506,6 +507,7 @@ class AgentMApp(App[int]):
             return
         self._history.append(text)
         self._history_index = None
+        self._ctrl_c_armed = False
         await self._append_user_turn(text)
         input_widget.clear()
         self.refresh_input_height()
@@ -640,6 +642,7 @@ class AgentMApp(App[int]):
         self._child_turns.clear()
         self._tool_states.clear()
         self._last_assistant_text = ""
+        self._ctrl_c_armed = False
 
     def action_open_palette_binding(self) -> None:
         self.open_command_palette(initial="")
@@ -927,11 +930,11 @@ def _render_tool_result(tool_name: str, text: str) -> Any:
 
 
 def _format_args_preview(args: dict[str, Any]) -> str:
-    return repr(args)
+    return _dump_json(args)
 
 
 def _format_full_args(args: dict[str, Any]) -> str:
-    return repr(args)
+    return _dump_json(args, indent=2)
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -940,6 +943,18 @@ def _truncate(text: str, limit: int) -> str:
 
 def _line_count(text: str) -> int:
     return 0 if not text else text.count("\n") + 1
+
+
+def _dump_json(value: Any, *, indent: int | None = None) -> str:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=True,
+            indent=indent,
+            sort_keys=True,
+        )
+    except TypeError:
+        return repr(value)
 
 
 __all__ = ["AgentMApp", "run"]

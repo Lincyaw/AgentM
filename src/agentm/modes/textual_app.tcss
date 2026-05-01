@@ -29,6 +29,8 @@ Screen {
     height: 1;
     padding: 0 1;
     text-style: italic dim;
+    content-align: left middle;
+    overflow: hidden hidden;
 }
 
 .turn,
@@ -43,12 +45,29 @@ Screen {
     text-style: italic;
 }
 
+.thinking-body {
+    color: $text-muted;
+    text-style: italic;
+}
+
 .tool-call {
     border: tall $warning;
 }
 
+.tool-call .collapsible--title {
+    color: $warning;
+}
+
 .tool-call.failed {
     border: tall $error;
+}
+
+.tool-call.failed .collapsible--title {
+    color: $error;
+}
+
+.tool-body {
+    color: $text;
 }
 
 .subagent {
