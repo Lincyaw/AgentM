@@ -66,7 +66,6 @@ from agentm.harness.extension import (
     ProviderConfig,
     ReadonlySession,
     Renderer,
-    UnknownCommandError,
     _ExtensionAPIImpl,
     load_extension,
 )
@@ -424,9 +423,10 @@ class AgentSession:
         message list. Stays a mechanical dispatcher per design §4.
         """
 
-        # 0. Slash-command short-circuit (delegates to a handler, bypasses
-        # the agent loop entirely; ``//foo`` is the literal-prefix escape).
-        slash_handled = await self._maybe_dispatch_command(text)
+        # 0. Slash-command dispatch / input preprocessing. Code commands win;
+        # otherwise ``input`` handlers may rewrite slash-prefixed text before
+        # it falls through to the agent loop.
+        text, slash_handled = await self._preprocess_input(text)
         if slash_handled is not None:
             return slash_handled
 
@@ -509,30 +509,33 @@ class AgentSession:
 
     # --- prompt helpers ---------------------------------------------------
 
-    async def _maybe_dispatch_command(
+    async def _preprocess_input(
         self, text: str
-    ) -> list[AgentMessage] | None:
-        """Dispatch ``/cmd args``; return the post-command message list, or
-        ``None`` if the input was not a slash-command (so ``prompt`` proceeds).
+    ) -> tuple[str, list[AgentMessage] | None]:
+        """Dispatch code commands, then let ``input`` handlers rewrite text.
 
-        ``//foo`` is the literal-prefix escape; recognized here only as
-        "not a command" — the caller strips one slash before sending to the
-        LLM.
+        Unknown slash-prefixed text is left alone unless an ``input`` handler
+        mutates it, so templates can expand and unmatched commands still reach
+        the model verbatim.
         """
 
         stripped = text.lstrip()
         if not stripped.startswith("/") or stripped.startswith("//"):
-            return None
+            return text, None
         head, _, rest = stripped[1:].partition(" ")
         if not head:
-            raise UnknownCommandError("Unknown command: /")
+            return text, None
         cmd = self._commands.get(head)
-        if cmd is None:
-            raise UnknownCommandError(f"Unknown command: /{head}")
-        result = cmd.handler(rest.strip(), self._extension_api)
-        if inspect.isawaitable(result):
-            await result
-        return self._session_manager.get_messages()
+        if cmd is not None:
+            result = cmd.handler(rest.strip(), self._extension_api)
+            if inspect.isawaitable(result):
+                await result
+            return text, self._session_manager.get_messages()
+
+        event = {"text": text}
+        await self._bus.emit("input", event)
+        new_text = event.get("text")
+        return (new_text if isinstance(new_text, str) else text), None
 
     async def _drain_pending_user_messages(self) -> None:
         """Pop every queued ``send_user_message`` payload and append it as a
