@@ -59,7 +59,7 @@ Applied **in this order** to avoid recursive substitution of placeholder-shaped 
 
 **Important**: substitution is non-recursive. If `$1` is replaced by a string containing `$2`, that `$2` is **not** further substituted. This is critical for safety (an arg like `'$ARGUMENTS'` won't blow up the body).
 
-### Public API (in `core/prompt_templates.py`)
+### Public API (in `core/_internal/prompt_templates.py`)
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -146,7 +146,7 @@ If a template name collides with a registered code command, the code command win
 
 ## Interface Definition
 
-See API block above. Everything is in stdlib + `agentm.core.kernel` + `agentm.harness.events` + `agentm.harness.extension`.
+See API block above. Everything is in stdlib + `agentm.core.abi` + `agentm.harness.events` + `agentm.harness.extension`.
 
 ## Acceptance Scenarios
 

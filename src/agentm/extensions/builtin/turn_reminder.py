@@ -26,6 +26,9 @@ MANIFEST = ExtensionManifest(
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+    # ``reminder`` and ``every_n_turns`` are required by
+    # MANIFEST.config_schema; the discovery filter skips this atom when
+    # configured with ``{}``.
     reminder = str(config["reminder"])
     every_n_turns = int(config["every_n_turns"])
 

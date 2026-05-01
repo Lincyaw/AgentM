@@ -1,3 +1,14 @@
+"""Builtin ``sub_agent`` atom: spawn nested ``AgentSession`` workers.
+
+Architecture:
+- Module-level helpers handle config-shape parsing and JSON-payload building.
+- :class:`_ChildTaskManager` owns the long-lived state (worker registry,
+  registry lock, reserved-slot counter, parent session id, shutdown grace
+  logic). Pulling this out of the closure-heavy ``install`` body keeps
+  ``install`` itself a thin "wire-up the manager" entry point per
+  the extension-as-scenario §4 dispatcher rule.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -5,16 +16,16 @@ import json
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from importlib import import_module
 from typing import Any, Literal, cast
 
-from agentm.core.kernel import FunctionTool, TextContent, ToolResult
+from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.harness.events import (
     ChildSessionEndEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
 )
 from agentm.harness.extension import ExtensionAPI, ExtensionLoadError, ProviderConfig
+from agentm.harness.session_config import AgentSessionConfig
 from agentm.extensions import ExtensionManifest
 
 _RUNNING: Literal["running"] = "running"
@@ -65,7 +76,8 @@ MANIFEST = ExtensionManifest(
             },
             "max_workers": {"type": "integer", "minimum": 1, "default": 4},
         },
-        "additionalProperties": False,
+        "required": ["available_inherited_extensions"],
+        "additionalProperties": True,
     },
 )
 
@@ -142,11 +154,6 @@ def _get_active_provider(api: ExtensionAPI) -> ProviderConfig:
     return provider
 
 
-def _load_session_types() -> tuple[Any, Any]:
-    session_mod = import_module("agentm.harness.session")
-    return session_mod.AgentSession, session_mod.AgentSessionConfig
-
-
 async def _shutdown_child_with_error(
     child: Any,
     *,
@@ -167,38 +174,43 @@ async def _shutdown_child_with_error(
     child.bus.clear()
 
 
-async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    bridge_provider = config.get("_bridge_provider")
-    if isinstance(bridge_provider, ProviderConfig):
-        api.register_provider(bridge_provider.name, bridge_provider)
-        return
+class _ChildTaskManager:
+    """Per-session registry + lifecycle for dispatched child agents.
 
-    inherit_extensions = list(
-        config.get("inherit_extensions", _DEFAULT_INHERIT_EXTENSIONS)
-    )
-    available_inherited = dict(config.get("available_inherited_extensions", {}))
-    missing = [name for name in inherit_extensions if name not in available_inherited]
-    if missing:
-        # Fast-fail: silently dropping inherited extensions hides subtle child
-        # misbehaviour (e.g. permission policy not applied). Match design
-        # §10b.4 ordering errors and surface this at install time.
-        raise ExtensionLoadError(
-            __name__,
-            ValueError(
-                "sub_agent.inherit_extensions references "
-                f"{missing!r} but available_inherited_extensions does not "
-                "supply them; parent must populate the resolution map for "
-                "every inherited name."
-            ),
-        )
-    max_workers = int(config.get("max_workers", 4))
-    registry: dict[str, _ChildTask] = {}
-    registry_lock = asyncio.Lock()
-    parent_session_id = "unknown"
-    reserved_slots = 0
+    Holds:
+    * the running ``task_id → _ChildTask`` registry and a single
+      ``asyncio.Lock`` guarding mutations.
+    * ``reserved_slots``, a counter that tracks in-flight ``dispatch_agent``
+      calls so we can enforce ``max_workers`` against not-yet-registered
+      tasks. Without it, two parallel dispatches could both observe
+      ``running_children == 0`` and bypass the limit.
+    * the parent session id, captured from ``session_ready`` so shutdown
+      events on this manager's children can reference the parent.
 
-    async def _drain_instructions(state: _ChildTask) -> str | None:
-        async with registry_lock:
+    Public entry points (one per registered tool / lifecycle event):
+    ``dispatch``, ``check_tasks``, ``inject_instruction``, ``abort``,
+    ``on_session_ready``, ``on_session_shutdown``.
+    """
+
+    def __init__(
+        self,
+        *,
+        api: ExtensionAPI,
+        inherit_extensions: list[str],
+        available_inherited: dict[str, Any],
+        max_workers: int,
+    ) -> None:
+        self._api = api
+        self._inherit_extensions = inherit_extensions
+        self._available_inherited = available_inherited
+        self._max_workers = max_workers
+        self._registry: dict[str, _ChildTask] = {}
+        self._registry_lock = asyncio.Lock()
+        self._reserved_slots = 0
+        self._parent_session_id = "unknown"
+
+    async def _drain_instructions(self, state: _ChildTask) -> str | None:
+        async with self._registry_lock:
             if not state.pending_instructions:
                 return None
             batched = "\n\n".join(state.pending_instructions)
@@ -206,6 +218,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return batched
 
     async def _finalize_state(
+        self,
         state: _ChildTask,
         *,
         status: _Status,
@@ -220,15 +233,13 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         else:
             await _shutdown_child_with_error(
                 state.session,
-                parent_bus=api.events,
-                parent_session_id=parent_session_id,
+                parent_bus=self._api.events,
+                parent_session_id=self._parent_session_id,
                 error=error,
             )
 
     async def _run_child(
-        *,
-        state: _ChildTask,
-        initial_prompt: str,
+        self, *, state: _ChildTask, initial_prompt: str
     ) -> list[Any] | None:
         next_prompt: str | None = initial_prompt
         final_messages: list[Any] | None = None
@@ -242,8 +253,8 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 )
                 if state.abort_signal.is_set():
                     raise _ChildAborted()
-                next_prompt = await _drain_instructions(state)
-            await _finalize_state(
+                next_prompt = await self._drain_instructions(state)
+            await self._finalize_state(
                 state,
                 status=_COMPLETED,
                 final_messages=final_messages,
@@ -251,7 +262,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             )
             return final_messages
         except _ChildAborted:
-            await _finalize_state(
+            await self._finalize_state(
                 state,
                 status=_ABORTED,
                 final_messages=state.session.session_manager.get_messages(),
@@ -259,7 +270,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             )
             return state.final_messages
         except Exception as exc:  # noqa: BLE001
-            await _finalize_state(
+            await self._finalize_state(
                 state,
                 status=_ERROR,
                 final_messages=state.session.session_manager.get_messages(),
@@ -267,48 +278,49 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             )
             return state.final_messages
 
-    async def _dispatch_agent(args: dict[str, Any]) -> ToolResult:
-        nonlocal reserved_slots
+    async def dispatch(self, args: dict[str, Any]) -> ToolResult:
         purpose = str(args.get("purpose", "subagent"))
         prompt = str(args.get("prompt", ""))
         child_extensions = _coerce_extension_specs(args.get("extensions"))
         inherited_extensions = _resolve_inherited_extensions(
-            inherit_extensions,
-            available_inherited,
+            self._inherit_extensions,
+            self._available_inherited,
         )
-        provider = _get_active_provider(api)
+        provider = _get_active_provider(self._api)
         task_id = uuid.uuid4().hex
-        session_cls, session_config_cls = _load_session_types()
 
-        async with registry_lock:
+        async with self._registry_lock:
             running_children = sum(
-                1 for child in registry.values() if child.status == _RUNNING
+                1
+                for child in self._registry.values()
+                if child.status == _RUNNING
             )
-            if running_children + reserved_slots >= max_workers:
+            if running_children + self._reserved_slots >= self._max_workers:
                 return _tool_result(
                     {
                         "error": (
-                            f"max_workers limit reached ({max_workers}); "
+                            f"max_workers limit reached ({self._max_workers}); "
                             "refusing to dispatch another child"
                         )
                     },
                     is_error=True,
                 )
-            reserved_slots += 1
+            self._reserved_slots += 1
 
-        child_config = session_config_cls(
-            cwd=api.cwd,
+        # ``parent_bus`` / ``parent_session_id`` are overridden by the harness
+        # inside ``api.spawn_child_session``; we leave them at the dataclass
+        # default so the override is unambiguous.
+        child_config = AgentSessionConfig(
+            cwd=self._api.cwd,
             extensions=child_extensions + inherited_extensions,
             provider=(__name__, {"_bridge_provider": provider}),
-            parent_bus=api.events,
-            parent_session_id=parent_session_id,
             purpose=purpose,
         )
         try:
-            child = await session_cls.create(child_config)
+            child = await self._api.spawn_child_session(child_config)
         except Exception as exc:  # noqa: BLE001
-            async with registry_lock:
-                reserved_slots -= 1
+            async with self._registry_lock:
+                self._reserved_slots -= 1
             return _tool_result(
                 {
                     "error": (
@@ -326,17 +338,19 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             task=asyncio.create_task(asyncio.sleep(0)),
             abort_signal=abort_signal,
         )
-        state.task = asyncio.create_task(_run_child(state=state, initial_prompt=prompt))
-        async with registry_lock:
-            reserved_slots -= 1
-            registry[task_id] = state
+        state.task = asyncio.create_task(
+            self._run_child(state=state, initial_prompt=prompt)
+        )
+        async with self._registry_lock:
+            self._reserved_slots -= 1
+            self._registry[task_id] = state
         return _tool_result(
             {"task_id": task_id, "status": _RUNNING, "purpose": purpose}
         )
 
-    async def _check_tasks(_args: dict[str, Any]) -> ToolResult:
-        async with registry_lock:
-            tasks = list(registry.values())
+    async def check_tasks(self, _args: dict[str, Any]) -> ToolResult:
+        async with self._registry_lock:
+            tasks = list(self._registry.values())
         payload = {
             "tasks": [
                 {
@@ -355,11 +369,11 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         }
         return _tool_result(payload)
 
-    async def _inject_instruction(args: dict[str, Any]) -> ToolResult:
+    async def inject_instruction(self, args: dict[str, Any]) -> ToolResult:
         task_id = str(args.get("task_id", ""))
         message = str(args.get("message", ""))
-        async with registry_lock:
-            state = registry.get(task_id)
+        async with self._registry_lock:
+            state = self._registry.get(task_id)
             if state is None:
                 return _tool_result(
                     {"error": f"unknown task_id: {task_id}"}, is_error=True
@@ -377,10 +391,10 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             state.pending_instructions.append(message)
         return _tool_result({"task_id": task_id, "status": _RUNNING})
 
-    async def _abort_task(args: dict[str, Any]) -> ToolResult:
+    async def abort(self, args: dict[str, Any]) -> ToolResult:
         task_id = str(args.get("task_id", ""))
-        async with registry_lock:
-            state = registry.get(task_id)
+        async with self._registry_lock:
+            state = self._registry.get(task_id)
             if state is None:
                 return _tool_result(
                     {"error": f"unknown task_id: {task_id}"}, is_error=True
@@ -398,13 +412,12 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             state.abort_signal.set()
         return _tool_result({"task_id": task_id, "status": _ABORTED})
 
-    async def _on_session_ready(event: SessionReadyEvent) -> None:
-        nonlocal parent_session_id
-        parent_session_id = event.session_id
+    async def on_session_ready(self, event: SessionReadyEvent) -> None:
+        self._parent_session_id = event.session_id
 
-    async def _on_session_shutdown(_event: SessionShutdownEvent) -> None:
-        async with registry_lock:
-            children = list(registry.values())
+    async def on_session_shutdown(self, _event: SessionShutdownEvent) -> None:
+        async with self._registry_lock:
+            children = list(self._registry.values())
         pending = [child for child in children if child.status == _RUNNING]
         if not pending:
             return
@@ -419,8 +432,48 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     child.abort_signal.set()
             await asyncio.gather(*still_running, return_exceptions=True)
 
-    api.on("session_ready", _on_session_ready)
-    api.on("session_shutdown", _on_session_shutdown)
+
+async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+    # Bridge mode: the harness loads sub_agent as the *provider* extension
+    # for a freshly-spawned child session, passing ``_bridge_provider``.
+    # We just hand the parent's provider through so the child can stream.
+    bridge_provider = config.get("_bridge_provider")
+    if isinstance(bridge_provider, ProviderConfig):
+        api.register_provider(bridge_provider.name, bridge_provider)
+        return
+
+    # Dispatch mode: parent populates ``available_inherited_extensions`` so
+    # children can inherit selected parent atoms. The discovery filter
+    # already skips this atom when config is ``{}`` (the key is in
+    # MANIFEST.config_schema.required), so we can assume it is present.
+    inherit_extensions = list(
+        config.get("inherit_extensions", _DEFAULT_INHERIT_EXTENSIONS)
+    )
+    available_inherited = dict(config["available_inherited_extensions"])
+    missing = [name for name in inherit_extensions if name not in available_inherited]
+    if missing:
+        # Fast-fail: silently dropping inherited extensions hides subtle child
+        # misbehaviour (e.g. permission policy not applied). Match design
+        # §10b.4 ordering errors and surface this at install time.
+        raise ExtensionLoadError(
+            __name__,
+            ValueError(
+                "sub_agent.inherit_extensions references "
+                f"{missing!r} but available_inherited_extensions does not "
+                "supply them; parent must populate the resolution map for "
+                "every inherited name."
+            ),
+        )
+
+    manager = _ChildTaskManager(
+        api=api,
+        inherit_extensions=inherit_extensions,
+        available_inherited=available_inherited,
+        max_workers=int(config.get("max_workers", 4)),
+    )
+
+    api.on("session_ready", manager.on_session_ready)
+    api.on("session_shutdown", manager.on_session_shutdown)
     api.register_tool(
         FunctionTool(
             name="dispatch_agent",
@@ -446,7 +499,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "required": ["purpose", "prompt"],
                 "additionalProperties": False,
             },
-            fn=_dispatch_agent,
+            fn=manager.dispatch,
         )
     )
     api.register_tool(
@@ -458,7 +511,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "properties": {},
                 "additionalProperties": False,
             },
-            fn=_check_tasks,
+            fn=manager.check_tasks,
         )
     )
     api.register_tool(
@@ -474,7 +527,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "required": ["task_id", "message"],
                 "additionalProperties": False,
             },
-            fn=_inject_instruction,
+            fn=manager.inject_instruction,
         )
     )
     api.register_tool(
@@ -487,6 +540,6 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "required": ["task_id"],
                 "additionalProperties": False,
             },
-            fn=_abort_task,
+            fn=manager.abort,
         )
     )

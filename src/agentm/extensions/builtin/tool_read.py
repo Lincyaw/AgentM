@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentm.core.kernel import FunctionTool, TextContent, ToolResult
-from agentm.core.operations import FileOperations, LocalFileOperations
+from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.abi.operations import FileOperations
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
@@ -36,7 +36,7 @@ _PARAMETERS = {
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    file_ops = _coerce_file_ops(config.get("file_ops"))
+    file_ops = _coerce_file_ops(api, config.get("file_ops"))
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
         path = str(args["path"])
@@ -63,8 +63,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     )
 
 
-def _coerce_file_ops(candidate: Any) -> FileOperations:
-    return candidate if candidate is not None else LocalFileOperations()
+def _coerce_file_ops(api: ExtensionAPI, candidate: Any) -> FileOperations:
+    return candidate if candidate is not None else api.get_operations().file
 
 
 def _ok(text: str) -> ToolResult:

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agentm.core.kernel import AgentMessage, LoopConfig
+from agentm.core.abi import AgentMessage, LoopConfig
 from agentm.harness.resource_loader import DefaultResourceLoader, ResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
 from agentm.harness.session_manager import SessionManager

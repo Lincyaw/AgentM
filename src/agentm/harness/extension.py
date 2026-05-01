@@ -7,7 +7,7 @@ exporting an ``install(api, config)`` callable. The harness loads it via
 privileged path: built-ins, providers, and user plugins are all the same shape.
 
 Pluggability hard rule (see ``.claude/designs/pluggable-architecture.md`` §1):
-this module imports only stdlib + ``agentm.core.kernel``. It MUST NOT import
+this module imports only stdlib + ``agentm.core.abi``. It MUST NOT import
 any legacy ``agentm.harness.*`` module.
 """
 
@@ -20,12 +20,27 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from agentm.core.kernel import (
+from agentm.core.abi import (
     AgentMessage,
     EventBus,
     Model,
     StreamFn,
     Tool,
+)
+from agentm.core.abi.operations import (
+    BashOperations,
+    FileOperations,
+    Operations,
+)
+from agentm.harness.services import (
+    CatalogService,
+    CompactionService,
+    PromptTemplatesService,
+    SkillsService,
+    default_catalog_service,
+    default_compaction_service,
+    default_prompt_templates_service,
+    default_skills_service,
 )
 
 
@@ -84,6 +99,20 @@ class _NoopSessionGateway:
     def is_constitution_path(self, path: str) -> bool:
         del path
         return False
+
+
+# Forward-declared so we don't have to import ``agentm.harness.session`` here.
+# The concrete factory closes over ``AgentSession.create`` and is injected by
+# the session at api-construction time. Returning ``Any`` keeps the import
+# graph one-way; callers expecting an ``AgentSession`` rely on docs/tests.
+ChildSessionFactory = Callable[[Any], Awaitable[Any]]
+
+
+class _NoopChildSessionFactory:
+    async def __call__(self, _config: Any) -> Any:
+        raise RuntimeError(
+            "spawn_child_session is unavailable on this ExtensionAPI instance"
+        )
 
 
 # Set by ``load_extension`` for the duration of an ``install`` call so
@@ -241,6 +270,20 @@ class ExtensionAPI(Protocol):
 
     # --- Actions ------------------------------------------------------------
     def send_user_message(self, content: str | list[Any]) -> None: ...
+    async def spawn_child_session(self, config: Any) -> Any:
+        """Create a nested ``AgentSession`` rooted at this one.
+
+        ``config`` is an ``AgentSessionConfig`` (typed ``Any`` here to avoid
+        pulling ``agentm.harness.session`` into the §11 import allow-list).
+        The harness fills in ``parent_bus`` and ``parent_session_id`` from
+        the current session — caller-supplied values for those fields are
+        ignored. Returns the constructed child session.
+
+        Replaces the legacy pattern of dynamically importing
+        ``agentm.harness.session`` from inside an extension, which used to
+        bypass the §11.4.5 import contract.
+        """
+        ...
     def reload_atom(
         self,
         name: str,
@@ -268,6 +311,20 @@ class ExtensionAPI(Protocol):
     def provider(self) -> ProviderConfig | None: ...
     @property
     def events(self) -> EventBus: ...
+
+    # --- Service facades ----------------------------------------------------
+    # See ``harness/services.py`` for the per-service Protocols. Atoms reach
+    # ``core._internal`` exclusively via these handles so the §11 import
+    # contract can forbid ``agentm.core._internal`` outright.
+    def get_operations(self) -> Operations: ...
+    @property
+    def skills(self) -> SkillsService: ...
+    @property
+    def prompt_templates(self) -> PromptTemplatesService: ...
+    @property
+    def catalog(self) -> CatalogService: ...
+    @property
+    def compaction(self) -> CompactionService: ...
 
 
 # --- Concrete impl ----------------------------------------------------------
@@ -300,6 +357,12 @@ class _ExtensionAPIImpl:
         provider_getter: Callable[[], ProviderConfig | None],
         gateway: _SessionGateway | None = None,
         owner_name: str = "<unknown>",
+        operations: Operations | None = None,
+        skills_service: SkillsService | None = None,
+        prompt_templates_service: PromptTemplatesService | None = None,
+        catalog_service: CatalogService | None = None,
+        compaction_service: CompactionService | None = None,
+        child_session_factory: ChildSessionFactory | None = None,
     ) -> None:
         self._bus = bus
         self._cwd = cwd
@@ -312,9 +375,19 @@ class _ExtensionAPIImpl:
         self._pending_user_messages = pending_user_messages
         self._model_getter = model_getter
         self._provider_getter = provider_getter
-        self._gateway = gateway or _NoopSessionGateway()
+        self._gateway: _SessionGateway = gateway or _NoopSessionGateway()
         self._owner_name = owner_name
         self._stale = False
+        self._child_session_factory: ChildSessionFactory = (
+            child_session_factory or _NoopChildSessionFactory()
+        )
+        self._operations = operations or _default_local_operations()
+        self._skills = skills_service or default_skills_service()
+        self._prompt_templates = (
+            prompt_templates_service or default_prompt_templates_service()
+        )
+        self._catalog = catalog_service or default_catalog_service()
+        self._compaction = compaction_service or default_compaction_service()
 
     def mark_stale(self) -> None:
         self._stale = True
@@ -397,6 +470,15 @@ class _ExtensionAPIImpl:
             ),
         )
 
+    async def spawn_child_session(self, config: Any) -> Any:
+        """Spawn a child session via the harness-injected factory.
+
+        See ``ExtensionAPI.spawn_child_session`` for the contract; the
+        factory is closed-over by ``AgentSession.create``.
+        """
+        self._assert_active()
+        return await self._child_session_factory(config)
+
     def reload_atom(
         self,
         name: str,
@@ -460,6 +542,51 @@ class _ExtensionAPIImpl:
     def events(self) -> EventBus:
         """Shared bus access remains valid even from stale API references."""
         return self._bus
+
+    # --- Service facades ----------------------------------------------------
+
+    def get_operations(self) -> Operations:
+        self._assert_active()
+        return self._operations
+
+    @property
+    def skills(self) -> SkillsService:
+        self._assert_active()
+        return self._skills
+
+    @property
+    def prompt_templates(self) -> PromptTemplatesService:
+        self._assert_active()
+        return self._prompt_templates
+
+    @property
+    def catalog(self) -> CatalogService:
+        self._assert_active()
+        return self._catalog
+
+    @property
+    def compaction(self) -> CompactionService:
+        self._assert_active()
+        return self._compaction
+
+
+def _default_local_operations() -> Operations:
+    """Build the default ``Operations`` bundle backed by local stdlib I/O.
+
+    Imports the concrete impls lazily so the ``ExtensionAPI`` module itself
+    does not pull in ``core._internal`` at import time (the harness is
+    constitution and may import it, but keeping the dependency lazy lets
+    test fixtures supply alternative bundles without any teardown).
+    """
+
+    from agentm.core._internal.operations_impl import (
+        LocalBashOperations,
+        LocalFileOperations,
+    )
+
+    file_ops: FileOperations = LocalFileOperations()
+    bash_ops: BashOperations = LocalBashOperations()
+    return Operations(file=file_ops, bash=bash_ops)
 
 
 # --- Loader -----------------------------------------------------------------

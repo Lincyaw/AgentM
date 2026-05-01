@@ -4,7 +4,7 @@ Mirrors pi-mono's session model closely enough for AgentM's v2 harness:
 append-only entries with parent pointers, a movable active leaf, branch-aware
 context reconstruction, and optional JSONL persistence.
 
-Layer purity: stdlib + ``agentm.core.kernel`` only.
+Layer purity: stdlib + ``agentm.core.abi`` only.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Self
 
-from agentm.core.kernel import (
+from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
     ImageContent,

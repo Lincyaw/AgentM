@@ -21,7 +21,7 @@ owns each event (cost_budget, plan_submitted) or in ``AgentSession``
 itself (child_session_*, session_ready, before/after_compact when the
 default compaction extension is loaded).
 
-Layer purity: imports only stdlib + ``agentm.core.kernel``.
+Layer purity: imports only stdlib + ``agentm.core.abi``.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from agentm.core.kernel import AgentMessage, Model
+from agentm.core.abi import AgentMessage, Model
 
 
 @dataclass(slots=True)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agentm.core.catalog import (
+from agentm.core._internal.catalog import (
     compute_active_set_fingerprint,
     compute_atom_hash,
 )

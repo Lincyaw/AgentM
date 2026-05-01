@@ -19,11 +19,11 @@ from typing import Any
 
 import pytest
 
-from agentm.core.catalog.freeze import freeze_current
-from agentm.core.catalog.hashing import compute_active_set_fingerprint
-from agentm.core.catalog.indexer import index_trace, rebuild_catalog
-from agentm.core.catalog.manifest import reload_manifest
-from agentm.core.kernel import AssistantMessage, AssistantStreamEvent, MessageEnd, Model, TextContent
+from agentm.core._internal.catalog.freeze import freeze_current
+from agentm.core._internal.catalog.hashing import compute_active_set_fingerprint
+from agentm.core._internal.catalog.indexer import index_trace, rebuild_catalog
+from agentm.core._internal.catalog.manifest import reload_manifest
+from agentm.core.abi import AssistantMessage, AssistantStreamEvent, MessageEnd, Model, TextContent
 from agentm.extensions.builtin import observability as observability_mod
 from agentm.extensions.builtin import tool_catalog as tool_catalog_mod
 from agentm.extensions.builtin import tool_read as tool_read_mod
@@ -152,7 +152,7 @@ async def test_S10_manifest_change_moves_constitution_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """§9 / S10: editing core-manifest.yaml redraws what counts as constitution."""
-    from agentm.core.catalog import manifest as manifest_mod
+    from agentm.core._internal.catalog import manifest as manifest_mod
 
     custom_manifest = tmp_path / "core-manifest.yaml"
     custom_manifest.write_text(

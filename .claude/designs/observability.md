@@ -34,7 +34,7 @@ diff event mutations.
 
 ### EventBus instrumentation hook
 
-`core/kernel/events.py` adds:
+`core/abi/events.py` adds:
 
 - An `EventBusObserver` Protocol with three hooks (`on_emit_start`,
   `on_handler_done`, `on_emit_end`). `EventBus._observer` is optional;

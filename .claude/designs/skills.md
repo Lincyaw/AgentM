@@ -54,7 +54,7 @@ Any rule violation produces a `SkillDiagnostic(level="warning", message=..., pat
 
 Collisions (same `name` from two paths) produce a `level="collision"` diagnostic; first-discovered wins, later ones discarded. Symlinks resolving to the same real path are silently deduplicated.
 
-### Public API surface (in `core/skills.py`)
+### Public API surface (in `core/_internal/skills.py`)
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -163,17 +163,17 @@ Rationale for using `session_ready` (not `install`) to populate the cache: `reso
 
 ### Frontmatter parsing — package vs. hand-roll
 
-`AgentM/src/agentm/harness/resource_loader.py` already has a 30-line in-house `_split_frontmatter` using `yaml.safe_load`. Two options for `core/frontmatter.py`:
+`AgentM/src/agentm/harness/resource_loader.py` already has a 30-line in-house `_split_frontmatter` using `yaml.safe_load`. Two options for `core/lib/frontmatter.py`:
 
 **Option A — adopt [`python-frontmatter`](https://pypi.org/project/python-frontmatter/)** (`uv add python-frontmatter`).
 - Pros: well-maintained, handles JSON/TOML frontmatter too, used by Pelican/MkDocs ecosystem, ~1k LoC of edge cases we don't have to own.
 - Cons: extra dependency for a 30-line problem; pulls `pyyaml` (already a dep) and `python-dateutil`.
 
-**Option B — promote the existing `_split_frontmatter` to public `core/frontmatter.py`**.
+**Option B — promote the existing `_split_frontmatter` to public `core/lib/frontmatter.py`**.
 - Pros: zero new deps; matches pi's <40-line `frontmatter.ts`; already battle-tested in `resource_loader.py`.
 - Cons: need to handle one extra case the current impl doesn't: CRLF normalization (pi does it explicitly). Trivial.
 
-**Recommendation: Option A (`python-frontmatter`).** User-confirmed 2026-05-01: prefer the maintained package over rolling our own. `uv add python-frontmatter`. Wrap it in `core/frontmatter.py` with a single `parse_frontmatter(text) -> tuple[dict, str]` function so the rest of the code base depends on AgentM's surface, not the third-party API directly. Update `harness/resource_loader.py::_split_frontmatter` to call through this wrapper.
+**Recommendation: Option A (`python-frontmatter`).** User-confirmed 2026-05-01: prefer the maintained package over rolling our own. `uv add python-frontmatter`. Wrap it in `core/lib/frontmatter.py` with a single `parse_frontmatter(text) -> tuple[dict, str]` function so the rest of the code base depends on AgentM's surface, not the third-party API directly. Update `harness/resource_loader.py::_split_frontmatter` to call through this wrapper.
 
 ### Python-equivalent for Node specifics
 
@@ -187,7 +187,7 @@ Rationale for using `session_ready` (not `install`) to populate the cache: `reso
 ## Interface Definition
 
 ```python
-# core/skills.py
+# core/_internal/skills.py
 @dataclass(frozen=True, slots=True)
 class SkillRecord: ...
 
@@ -198,7 +198,7 @@ def load_skills(*, cwd, agent_dir, skill_paths=(), include_defaults=True) -> tup
 
 def format_skills_for_prompt(skills: list[SkillRecord]) -> str: ...
 
-# core/frontmatter.py  (option B; see decision)
+# core/lib/frontmatter.py  (option B; see decision)
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]: ...
 
 # extensions/builtin/skill_loader.py

@@ -13,10 +13,10 @@ from typing import Any, Protocol
 
 import pathspec
 
-from agentm.core.kernel import TextContent, Tool, ToolResult
-from agentm.core.operations import LocalFileOperations
-from agentm.core.path_utils import load_gitignore_patterns, resolve_to_cwd
-from agentm.core.text_truncate import DEFAULT_MAX_BYTES, GREP_MAX_LINE_LENGTH, format_size, truncate_head, truncate_line
+from agentm.core.abi import TextContent, Tool, ToolResult
+from agentm.core.abi.operations import FileOperations
+from agentm.core.lib.path_utils import load_gitignore_patterns, resolve_to_cwd
+from agentm.core.lib.text_truncate import DEFAULT_MAX_BYTES, GREP_MAX_LINE_LENGTH, format_size, truncate_head, truncate_line
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
@@ -50,8 +50,8 @@ class GrepOperations(Protocol):
 
 
 class _LocalGrepOperations:
-    def __init__(self) -> None:
-        self._file_ops = LocalFileOperations()
+    def __init__(self, file_ops: FileOperations) -> None:
+        self._file_ops = file_ops
 
     async def is_directory(self, path: str) -> bool:
         return await asyncio.to_thread(os.path.isdir, path)
@@ -66,9 +66,14 @@ class _GrepTool(Tool):
     description = "Search files for regex or literal matches, honoring .gitignore."
     parameters = _PARAMETERS
 
-    def __init__(self, cwd: str, ops: GrepOperations | None) -> None:
+    def __init__(
+        self,
+        cwd: str,
+        ops: GrepOperations | None,
+        file_ops: FileOperations,
+    ) -> None:
         self._cwd = cwd
-        self._ops = ops or _LocalGrepOperations()
+        self._ops = ops or _LocalGrepOperations(file_ops)
         self._has_custom_ops = ops is not None
 
     async def execute(self, args: dict[str, Any], *, signal: asyncio.Event | None = None, on_update: Any = None) -> ToolResult:
@@ -284,4 +289,6 @@ def _split_lines(text: str) -> list[str]:
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    api.register_tool(_GrepTool(api.cwd, config.get("ops")))
+    api.register_tool(
+        _GrepTool(api.cwd, config.get("ops"), api.get_operations().file)
+    )

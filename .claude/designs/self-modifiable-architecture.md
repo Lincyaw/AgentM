@@ -16,31 +16,51 @@
 
 This is operational, not philosophical: it tells us where to put a feature by asking "if a self-modifying agent rewrites this file wrongly, can it still recover?"
 
+### Recovery-floor invariant
+
+A stronger property follows from this boundary, and the constitution split is designed around it:
+
+> **`core/abi/` + `core/lib/` + `llm/` + stdlib must be sufficient to launch a working agent loop.** No import from `agentm.harness` or `agentm.extensions` may be required.
+
+This is not just "agent cannot break core" — it is "core alone yields a usable agent". When the autonomy layer is corrupted (a self-edited atom misbehaves, a scenario YAML is malformed, an extension reload leaves harness in an inconsistent state), the operator still has a path to launch an agent: the minimal mode at `src/agentm/minimal.py`, exposed by `agentm --minimal`. That agent has only stdlib-backed tools (`read_file`, `write_file`, `bash`, `list_dir`) and no observability or session state, but it launches, accepts a prompt, calls tools, and returns — enough to inspect and repair whatever is broken above.
+
+The invariant is enforced structurally (the import graph of `agentm.minimal` is clean of `harness`/`extensions`) and is the load-bearing reason for keeping `core/abi/` and `core/lib/` import-closed. Future PRs that introduce a `harness` import into `core/abi/` or `core/lib/` should be rejected on this basis alone.
+
 ---
 
 ## 2. Three Layers
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  Constitution layer                                                  │
-│    core/kernel · operations · validator · reload primitive · llm     │
+│  Constitution layer  (write-protected; only humans + PR review)      │
+│                                                                      │
+│    core/abi/        types & Protocols (Tool, Message, StreamFn,      │
+│                     events, FileOperations / BashOperations)         │
+│                     → atom AND llm provider may import               │
+│    core/lib/        pure-function utilities (edit_diff, frontmatter, │
+│                     path_utils, text_truncate)                       │
+│                     → atom may import (stdlib-style)                 │
+│    core/_internal/  stateful subsystems & default impls              │
+│                     (operations_impl, skills, prompt_templates,      │
+│                     catalog/, compaction/ engine)                    │
+│                     → atom should reach via ExtensionAPI             │
+│                                                                      │
+│    llm/, ai/                          (provider boundary)            │
 │    harness/{session, extension, events, session_manager, ...}       │
 │    extensions/{loader, discover, validate}                           │
-│    cli (presenter startup contract)                                  │
-│    .agentm/catalog/  (write-protected even from agent)               │
-│    core-manifest.yaml (self-referential lock)                        │
-│    >>> only humans + PR review modify <<<                            │
+│    cli                                (presenter startup contract)   │
+│    .agentm/catalog/                   (write-protected from agent)   │
+│    core-manifest.yaml                 (self-referential lock)        │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Evolution substrate (see evolution-substrate.md)                    │
 │    catalog: versioned (atom, scenario) × observation × decisions     │
 │    indexer (constitution-owned)                                      │
 │    tool_catalog (read API to agent; propose_change is the only write)│
 ├──────────────────────────────────────────────────────────────────────┤
-│  Autonomy layer                                                      │
+│  Autonomy layer  (agent self-edits + reloads)                        │
 │    extensions/builtin/<atom>.py (tier 1 free / tier 2 review)        │
 │    extensions/scenarios/<name>.yaml                                  │
 │    skills/, prompts/, settings                                       │
-│    >>> agent self-edits + reloads <<<                                │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Discovery layer                                                     │
 │    filesystem scan · reload() · assert_active() · stale invalidation │
@@ -49,6 +69,38 @@ This is operational, not philosophical: it tells us where to put a feature by as
 ```
 
 Dependency rule unchanged from `pluggable-architecture.md`: arrows point downward only. The new ordering inserts the evolution substrate between constitution and autonomy — the substrate is constitution-owned (write side) but agent-readable (query side).
+
+### 2.1 Why the constitution is split into abi / lib / _internal
+
+The constitution is uniform on the **modifiability** axis — nothing in `core/` is agent-modifiable. But it is heterogeneous on the **visibility** axis — different parts have different rules for who may `import` them. The three subtrees are the visibility layer; they are not three privilege levels.
+
+| Subtree | Modifiability | Atom may import? | Why |
+|---|---|---|---|
+| `core/abi/` | constitution | yes | the ABI surface — types and Protocols both atoms and the llm provider depend on |
+| `core/lib/` | constitution | yes (stdlib-style) | pure functions with no state; routing through ExtensionAPI would only add boilerplate |
+| `core/_internal/` | constitution | **no** — atoms use ExtensionAPI services | stateful subsystems and default impls. Atoms reach them via `api.get_operations()`, `api.skills`, `api.prompt_templates`, `api.catalog`, `api.compaction` — harness owns instance lifecycle and substitution |
+
+Concretely, this means an atom like `tool_edit` can `from agentm.core.lib import edit_diff` (pure function) freely and `from agentm.core.abi.operations import FileOperations` for the type, but obtains the bound instance through `api.get_operations().file` — never `from agentm.core._internal.operations_impl import LocalFileOperations`. The validator forbids any import under `agentm.core._internal.*` from atom modules.
+
+Pure data types that atoms exchange (e.g. `SkillRecord`, `PromptTemplateRecord`, `Operations` bundle, `CompactionSettings`) live in `core/abi/` so the atom can construct and pattern-match against them without traversing the API. Only behaviour (loaders, engines, fingerprint computation) hides behind the API.
+
+### 2.2 Worked example: compaction prompts move out of constitution
+
+The split forces a useful question on every constitution module: "is this mechanism, or has policy leaked in?" Compaction is the canonical case.
+
+Before the split, `core/compaction/compaction.py` and `core/compaction/branch_summarization.py` carried two large hard-coded prompt strings (`_SUMMARIZATION_PROMPT`, `_BRANCH_SUMMARY_PROMPT`) inside what is otherwise pure mechanism (token estimation, splice points, message replacement). The prompts dictate **how aggressively** to summarize and **what shape** the summary takes — that is policy. Locking them in constitution made them un-evolvable: the agent could not A/B-test a tighter prompt, could not roll back a regression via `tool_catalog`, could not even propose a change.
+
+After the split:
+
+| Concern | Old location | New location | Layer |
+|---|---|---|---|
+| Splice / token math / message replacement | `core/compaction/` | `core/_internal/compaction/` | constitution (mechanism) |
+| `_SUMMARIZATION_PROMPT`, `_BRANCH_SUMMARY_PROMPT` | hard-coded constant in core | module constant in `extensions/builtin/llm_compaction.py` | autonomy (tier-1, agent-modifiable) |
+| Engine signature | `compact(messages, ...)` | `compact(messages, ..., summarization_prompt: str)` | constitution (mechanism takes policy as a parameter) |
+
+The atom now passes its prompt into the engine on every call. The engine has no default — refusing to compact without an explicit prompt is the cleanest expression of "engine doesn't carry policy".
+
+This is the pattern to apply elsewhere when in doubt: if a `core/_internal/` module contains a constant whose value is a judgment call (a prompt, a threshold, a strategy choice), that constant belongs in an autonomy-layer atom and should be passed in. Mechanism receives policy; mechanism does not own policy.
 
 ---
 
@@ -62,16 +114,10 @@ version: 1
 
 constitution:
   paths:
-    # The kernel — mechanism, must not change without human review
-    - src/agentm/core/kernel/**
-    - src/agentm/core/operations.py
-    - src/agentm/core/path_utils.py
-    - src/agentm/core/text_truncate.py
-    - src/agentm/core/edit_diff.py
-    - src/agentm/core/frontmatter.py
-    - src/agentm/core/skills.py
-    - src/agentm/core/prompt_templates.py
-    - src/agentm/core/compaction/**
+    # core/ — three visibility tiers, all write-protected
+    - src/agentm/core/abi/**         # ABI surface (atom + llm import)
+    - src/agentm/core/lib/**         # pure-function utility shelf (atom import)
+    - src/agentm/core/_internal/**   # stateful subsystems & default impls
     # Provider boundary
     - src/agentm/llm/**
     - src/agentm/ai/**
@@ -112,7 +158,7 @@ reload:
     - cost_budget
     - tool_filter
     - llm_compaction
-    - claude_agents
+    - cc_agents
 ```
 
 The constitution list is **closed**: anything not on the list and inside `src/agentm/extensions/builtin/`, `src/agentm/extensions/scenarios/`, `skills/`, `prompts/`, `.claude/`, or `.agentm/` (except catalog) defaults to autonomy-layer. Outside-tree paths are out of scope.
@@ -252,7 +298,7 @@ Atoms whose worst-case bug is "agent does worse on its task". Validator runs, re
 |---|---|
 | `tool_read`, `tool_bash`, `tool_edit`, `tool_write`, `tool_grep`, `tool_find`, `tool_ls` | Bad tool → bad output → caught by metrics |
 | `tool_hypothesis_store`, `tool_submit_plan`, `tool_trajectory_loader` | Domain tools, same logic |
-| `system_prompt`, `prompt_templates`, `skill_loader`, `claude_commands` | Prompt drift is observable |
+| `system_prompt`, `prompt_templates`, `skill_loader`, `cc_commands` | Prompt drift is observable |
 | `observability`, `trajectory` | Pure subscribers; cannot affect agent behavior |
 | `micro_compact`, `tool_result_budget`, `turn_reminder`, `dedup`, `sub_agent` | Behavior tweaks; bounded blast radius |
 | `file_mutation_queue` | Local I/O scheduling |
@@ -267,7 +313,7 @@ Atoms whose worst-case bug breaks safety, cost, or trust boundaries. Validator r
 | `cost_budget` | Removing the budget is the canonical failure mode |
 | `tool_filter` | Re-enabling a deny-listed tool is the canonical failure mode |
 | `llm_compaction` | Affects context fidelity; bad strategies amplify silently |
-| `claude_agents` | Sub-agent dispatch policy; recursion-bomb risk |
+| `cc_agents` | Sub-agent dispatch policy; recursion-bomb risk |
 
 ### 7.3 Tier declaration
 
@@ -314,7 +360,7 @@ The design is correct iff the following all behave as specified.
 |---|----------|----------|
 | S1 | Agent generates new `tool_read.py` adding an arg, calls `reload_atom("tool_read", new_src)` | Validator passes → reload → next turn uses new tool_read; old version frozen in catalog |
 | S2 | Agent calls `reload_atom("permission", new_src)` (tier 2) | Reload deferred; `propose_change` entry created; reload waits for approval |
-| S3 | Agent attempts `tool_edit` on `core/kernel/loop.py` | `tool_edit` rejects; `is_constitution_path` returns true |
+| S3 | Agent attempts `tool_edit` on `core/abi/loop.py` | `tool_edit` rejects; `is_constitution_path` returns true |
 | S4 | Agent submits `tool_read.py` with syntax error | Validator rejects; no file written; agent receives errors |
 | S5 | New `tool_read` passes validator but raises in `install()` | Rollback to previous version; failure logged to catalog |
 | S6 | Mid-turn reload: atom A captured `api`, A reloaded, deferred coroutine fires after | `ExtensionStaleError` with informative message; outer loop catches and continues |

@@ -4,14 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentm.core.compaction import (
-    CompactionSettings,
-    compact,
-    estimate_context_tokens,
-    prepare_compaction,
-    should_compact,
-)
-from agentm.core.kernel import (
+from agentm.core.abi.compaction import CompactionSettings
+from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
     BeforeSendToLlmEvent,
@@ -23,6 +17,74 @@ from agentm.core.kernel import (
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import AfterCompactEvent, BeforeCompactEvent
 from agentm.harness.extension import ExtensionAPI, ProviderConfig
+
+
+_SUMMARIZATION_PROMPT = """The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
+
+Use this EXACT format:
+
+## Goal
+[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
+
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned by user]
+- [Or "(none)" if none were mentioned]
+
+## Progress
+### Done
+- [x] [Completed tasks/changes]
+
+### In Progress
+- [ ] [Current work]
+
+### Blocked
+- [Issues preventing progress, if any]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [Ordered list of what should happen next]
+
+## Critical Context
+- [Any data, examples, or references needed to continue]
+- [Or "(none)" if not applicable]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages."""
+
+_BRANCH_SUMMARY_PREAMBLE = (
+    "The user explored a different conversation branch before returning here.\n"
+    "Summary of that exploration:\n\n"
+)
+
+_BRANCH_SUMMARY_PROMPT = """Create a structured summary of this conversation branch for context when returning later.
+
+Use this EXACT format:
+
+## Goal
+[What was the user trying to accomplish in this branch?]
+
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned]
+- [Or "(none)" if none were mentioned]
+
+## Progress
+### Done
+- [x] [Completed tasks/changes]
+
+### In Progress
+- [ ] [Work that was started but not finished]
+
+### Blocked
+- [Issues preventing progress, if any]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [What should happen next to continue this work]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages."""
 
 
 MANIFEST = ExtensionManifest(
@@ -60,12 +122,16 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return
 
         session_messages = api.session.get_messages()
-        usage_estimate = estimate_context_tokens(session_messages)
-        if not should_compact(usage_estimate.tokens, model.context_window, settings):
+        usage_estimate = api.compaction.estimate_context_tokens(session_messages)
+        if not api.compaction.should_compact(
+            usage_estimate.tokens, model.context_window, settings
+        ):
             return
 
         branch = api.session.get_branch()
-        preparation = prepare_compaction(branch, settings, current_messages=session_messages)
+        preparation = api.compaction.prepare_compaction(
+            branch, settings, current_messages=session_messages
+        )
         if preparation is None:
             return
         if not preparation.messages_to_summarize and not preparation.turn_prefix_messages:
@@ -74,9 +140,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         before = BeforeCompactEvent(messages=event.messages, reason="llm_auto_overflow")
         await api.events.emit("before_compact", before)
 
-        result = await compact(
+        result = await api.compaction.compact(
             preparation,
             _ProviderSummarizer(provider, model),
+            _SUMMARIZATION_PROMPT,
             custom_instructions,
         )
 
