@@ -373,7 +373,7 @@ Quick lookup for implementation. All paths relative to `pi-mono/packages/`.
 2. **Async event bus dispatch**: serial vs. concurrent. Pi runs serially per channel (so mutation order is stable). AgentM should match — concurrent extension execution has no upside and breaks the "later handlers see earlier mutations" contract.
 3. **Middleware-to-event migration**: see §7 open decision. Keep `Middleware` as facade vs. fully replace.
 4. **Mode parity**: do we need `interactive` TUI in v0.1? Pi has 7 modes; AgentM might ship `sdk + json` first and add CLI later. The architecture supports either order.
-5. **Where do "Scenarios" sit?** Suggestion: a Scenario is a function that takes a fresh `ExtensionAPI` and registers everything needed (tools, middleware, prompts, default extensions). This makes scenarios trivially composable and indistinguishable from third-party extensions. See [generic-state-wrapper.md](generic-state-wrapper.md) for the existing direction; harmonize in a follow-up plan.
+5. **Where do "Scenarios" sit?** Suggestion: a Scenario is a function that takes a fresh `ExtensionAPI` and registers everything needed (tools, middleware, prompts, default extensions). This makes scenarios trivially composable and indistinguishable from third-party extensions. See [generic-state-wrapper.md](historical/generic-state-wrapper.md) for the existing direction; harmonize in a follow-up plan.
 
 ---
 

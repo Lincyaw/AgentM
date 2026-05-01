@@ -1,6 +1,6 @@
 **Status**: HISTORICAL — describes the pre-v2 architecture removed in Phase 2.5 (2026-04-30).
-The current architecture lives in [pluggable-architecture.md](pluggable-architecture.md) and
-[extension-as-scenario.md](extension-as-scenario.md).
+The current architecture lives in [pluggable-architecture.md](../pluggable-architecture.md) and
+[extension-as-scenario.md](../extension-as-scenario.md).
 
 ---
 
@@ -15,7 +15,7 @@ The current architecture lives in [pluggable-architecture.md](pluggable-architec
 
 ### 1.1 What Prompted This
 
-A reverse-engineering analysis of Claude Code's multi-agent architecture (see [reference doc](../../docs/references/claude-code-agent-team-architecture.md)) revealed a key architectural insight:
+A reverse-engineering analysis of Claude Code's multi-agent architecture (see [reference doc](../../../docs/references/claude-code-agent-team-architecture.md)) revealed a key architectural insight:
 
 > **The SDK is a Harness — it controls agent conversation loops, manages lifecycle, and routes messages. The LLM is a stateless function being called.**
 
@@ -1050,4 +1050,4 @@ This allows incremental migration — existing middleware works immediately, and
 | [orchestrator.md](orchestrator.md) | Orchestrator uses `SimpleAgentLoop` |
 | [sub-agent.md](sub-agent.md) | Workers use `SimpleAgentLoop` |
 | [generic-state-wrapper.md](generic-state-wrapper.md) | `Scenario` protocol replaces `ReasoningStrategy`; `GenericAgentSystemBuilder` evolves into scenario-level builder using `AgentRuntime` |
-| [Claude Code architecture reference](../../docs/references/claude-code-agent-team-architecture.md) | External reference that motivated this design |
+| [Claude Code architecture reference](../../../docs/references/claude-code-agent-team-architecture.md) | External reference that motivated this design |
