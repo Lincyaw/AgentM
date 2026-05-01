@@ -6,10 +6,27 @@ import uuid
 
 import pytest
 
+from agentm.core.kernel.messages import (
+    AssistantMessage,
+    TextContent,
+    ToolResultBlock,
+    ToolResultMessage,
+    UserMessage,
+)
 from agentm.harness.events import ExtensionReloadEvent
 from agentm.harness.extension import ExtensionStaleError
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig, _LoadedAtom
+
+
+def _tool_result_text(message: UserMessage | AssistantMessage | ToolResultMessage) -> str:
+    """Extract the text payload from a ToolResultMessage."""
+    assert isinstance(message, ToolResultMessage)
+    block = message.content[0]
+    assert isinstance(block, ToolResultBlock)
+    inner = block.content[0]
+    assert isinstance(inner, TextContent)
+    return inner.text
 
 
 _PROVIDER_SOURCE = '''
@@ -171,14 +188,14 @@ async def test_S1_reload_tool_atom_takes_effect_next_turn(tmp_path: Path, monkey
     )
     try:
         first = await session.prompt("hi")
-        assert first[2].content[0].content[0].text == "v1"
+        assert _tool_result_text(first[2]) == "v1"
 
         api = session._apis[f"{session._test_pkg}.tool_demo"]  # type: ignore[attr-defined]
         result = api.reload_atom("tool_demo", _tool_source("tool_demo", "v2"))
 
         assert result.ok is True
         second = await session.prompt("hi again")
-        assert second[-2].content[0].content[0].text == "v2"
+        assert _tool_result_text(second[-2]) == "v2"
     finally:
         await session.shutdown()
 
@@ -244,7 +261,7 @@ async def test_S5_install_failure_rolls_back(tmp_path: Path, monkeypatch: pytest
         assert tool_path.read_text(encoding="utf-8") == original
 
         follow_up = await session.prompt("still works")
-        assert follow_up[-2].content[0].content[0].text == "stable"
+        assert _tool_result_text(follow_up[-2]) == "stable"
     finally:
         await session.shutdown()
 
@@ -260,7 +277,7 @@ async def test_reload_supports_async_install_atoms(
     )
     try:
         first = await session.prompt("hi")
-        assert first[2].content[0].content[0].text == "v1"
+        assert _tool_result_text(first[2]) == "v1"
 
         result = session._apis[f"{session._test_pkg}.tool_demo"].reload_atom(  # type: ignore[attr-defined]
             "tool_demo",
@@ -269,7 +286,7 @@ async def test_reload_supports_async_install_atoms(
         assert result.ok is True
 
         second = await session.prompt("hi again")
-        assert second[-2].content[0].content[0].text == "v2"
+        assert _tool_result_text(second[-2]) == "v2"
     finally:
         await session.shutdown()
 
