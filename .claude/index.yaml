@@ -8,8 +8,15 @@ concepts:
   pluggable_architecture:
     description: "First-principles pluggable architecture inspired by pi-mono (badlogic/pi-mono). Three-layer package boundary (agentm-llm / agentm-core / agentm-harness / agentm-modes). Five pluggability axes as Protocol ports: StreamFn (LLM), Tool+Operations (env), SessionManager (state), ResourceLoader (project context), EventBus+ExtensionAPI (policy). Built-in features become default extensions. Reference index to pi-mono source paths."
     design: "designs/pluggable-architecture.md"
-    related_concepts: [extension_as_scenario, operations_ports]
+    related_concepts: [extension_as_scenario, operations_ports, observability]
     plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
+    tasks: []
+
+  observability:
+    description: "Per-session OTel-flavored JSONL diagnostic stream complementary to trajectory. Single principle: every signal goes through the bus. EventBus exposes EventBusObserver + emit_sync (sync handlers only, async skipped). New bus events: ApiRegisterEvent / ApiSendUserMessageEvent (harness, emit_sync from ExtensionAPI), LlmRequestStartEvent / LlmRequestEndEvent (kernel, around stream_fn drain in AgentLoop with try/except for error path), ExtensionInstallEvent (harness, around load_extension). observability builtin is a pure subscriber + Observer; only API-level monkey-patch is api.on for handler→extension attribution and mutation diffing. Records: session.start/ready/end, extension.install, api.register, api.send_user_message, llm.request.start/end, event.dispatch, handler.invoke, handler.mutated, turn.summary. Writes to <cwd>/.agentm/observability/<trace_id>.jsonl, flushed per record."
+    design: "designs/observability.md"
+    related_concepts: [pluggable_architecture, extension_as_scenario]
+    plans: []
     tasks: []
 
   extension_as_scenario:

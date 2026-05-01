@@ -19,6 +19,7 @@ def test_load_scenario_resolves_builtin_name() -> None:
     loaded = load_scenario("general_purpose")
 
     assert loaded == [
+        ("agentm.extensions.builtin.observability", {}),
         ("agentm.extensions.builtin.tool_read", {}),
         ("agentm.extensions.builtin.tool_bash", {}),
         ("agentm.extensions.builtin.tool_edit", {}),
@@ -38,6 +39,9 @@ def test_load_scenario_resolves_builtin_name() -> None:
                 "keep_recent_tokens": 20000,
             },
         ),
+        ("agentm.extensions.builtin.skill_loader", {}),
+        ("agentm.extensions.builtin.claude_commands", {}),
+        ("agentm.extensions.builtin.claude_agents", {}),
         ("agentm.extensions.builtin.prompt_templates", {}),
         (
             "agentm.extensions.builtin.system_prompt",
@@ -49,7 +53,7 @@ def test_load_scenario_resolves_builtin_name() -> None:
             },
         ),
     ]
-    assert loaded[0][0] == "agentm.extensions.builtin.tool_read"
+    assert loaded[0][0] == "agentm.extensions.builtin.observability"
 
 
 def test_load_scenario_accepts_absolute_path() -> None:
@@ -78,6 +82,29 @@ def test_load_scenario_rejects_missing_module_key(tmp_path: Path) -> None:
     path.write_text("extensions:\n  - config: {}\n", encoding="utf-8")
 
     with pytest.raises(ScenarioLoadError, match="module"):
+        load_scenario(str(path))
+
+
+def test_load_scenario_rejects_unimportable_module(tmp_path: Path) -> None:
+    path = tmp_path / "bad.yaml"
+    path.write_text(
+        "extensions:\n  - module: agentm.extensions.builtin.does_not_exist\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ScenarioLoadError, match="not importable"):
+        load_scenario(str(path))
+
+
+def test_load_scenario_rejects_module_without_install(tmp_path: Path) -> None:
+    path = tmp_path / "bad.yaml"
+    # `agentm.extensions.loader` itself has no install() — perfect stand-in.
+    path.write_text(
+        "extensions:\n  - module: agentm.extensions.loader\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ScenarioLoadError, match="does not export install"):
         load_scenario(str(path))
 
 

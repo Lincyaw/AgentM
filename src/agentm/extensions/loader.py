@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
@@ -66,9 +67,29 @@ def _parse_extensions(
                 source,
                 ValueError(_entry_error(index, "'config' must be a mapping")),
             )
+        _validate_module(source, index, module)
         extensions.append((module, dict(config)))
 
     return extensions
+
+
+def _validate_module(source: str, index: int, module: str) -> None:
+    try:
+        mod = importlib.import_module(module)
+    except ImportError as exc:
+        raise ScenarioLoadError(
+            source,
+            ValueError(
+                _entry_error(index, f"module {module!r} is not importable: {exc}")
+            ),
+        ) from exc
+    if not callable(getattr(mod, "install", None)):
+        raise ScenarioLoadError(
+            source,
+            ValueError(
+                _entry_error(index, f"module {module!r} does not export install()")
+            ),
+        )
 
 
 def _entry_error(index: int, detail: str) -> str:

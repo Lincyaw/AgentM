@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import inspect
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal, overload
+from typing import Any, Literal, Protocol, overload
 
 from .messages import AgentMessage, AssistantMessage
 from .stream import Model
@@ -131,6 +132,29 @@ class BeforeSendToLlmEvent(Event):
     system: str | None
 
 
+@dataclass(slots=True, frozen=True)
+class LlmRequestStartEvent(Event):
+    """Emitted right before the loop drains ``stream_fn``."""
+
+    turn_index: int
+    message_count: int
+    tool_count: int
+    system_chars: int
+    model_id: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class LlmRequestEndEvent(Event):
+    """Emitted after the loop finishes draining ``stream_fn`` (success or
+    error). ``error`` is ``repr(exc)`` on failure, ``None`` on success.
+    """
+
+    turn_index: int
+    chunk_count: int
+    duration_ns: int
+    error: str | None = None
+
+
 @dataclass(slots=True)
 class ContextEvent(Event):
     """Emitted before each LLM call with the current message list.
@@ -150,11 +174,51 @@ class ContextEvent(Event):
 Handler = Callable[[Any], Any] | Callable[[Any], Awaitable[Any]]
 
 
+class EventBusObserver(Protocol):
+    """Optional sidecar that observes every ``EventBus.emit`` dispatch.
+
+    The bus invokes these methods synchronously inside ``emit``/``emit_sync``;
+    any exception they raise is logged and swallowed so observers cannot
+    affect handler outputs.
+    """
+
+    def on_emit_start(self, channel: str, event: Any) -> None: ...
+
+    def on_handler_done(
+        self,
+        channel: str,
+        handler: Handler,
+        result: Any,
+        error: BaseException | None,
+        duration_ns: int,
+    ) -> None: ...
+
+    def on_emit_end(
+        self, channel: str, event: Any, results: list[Any]
+    ) -> None: ...
+
+
 @dataclass(slots=True)
 class EventBus:
     """Minimal channel-keyed pub/sub. See module docstring for the contract."""
 
     _handlers: dict[str, list[Handler]] = field(default_factory=dict)
+    _observer: EventBusObserver | None = None
+    _strict_sync_handlers: bool = False
+
+    def set_observer(self, observer: EventBusObserver | None) -> None:
+        """Install (or clear) a single observer. The bus invokes its hooks
+        from inside ``emit``; observer exceptions are logged and swallowed.
+        Only one observer at a time — second call replaces the first.
+        """
+        self._observer = observer
+
+    def set_strict_sync(self, strict: bool) -> None:
+        """If True, ``emit_sync`` raises ``RuntimeError`` when it encounters
+        an async handler instead of silently skipping it. Use during
+        development to surface mistakes; off by default for production.
+        """
+        self._strict_sync_handlers = strict
 
     # Typed overloads for kernel-owned channels. Harness-level channels
     # (``before_agent_start``, ``session_shutdown``, ``before_compact``,
@@ -283,19 +347,104 @@ class EventBus:
         the corresponding return slot holds ``None``.
         """
 
-        handlers = list(self._handlers.get(channel, ()))
+        registered = self._handlers.get(channel)
+        if not registered and self._observer is None:
+            return []
+        handlers = list(registered or ())
+        observer = self._observer
+        self._safe_observe("on_emit_start", channel, event)
         results: list[Any] = []
         for h in handlers:
+            err: BaseException | None = None
+            start_ns = time.perf_counter_ns() if observer is not None else 0
             try:
                 value = h(event)
                 if inspect.isawaitable(value):
                     value = await value
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "Event handler raised on channel %r; suppressing.", channel
                 )
+                err = exc
                 value = None
+            if observer is not None:
+                self._safe_observe(
+                    "on_handler_done",
+                    channel,
+                    h,
+                    value,
+                    err,
+                    time.perf_counter_ns() - start_ns,
+                )
             results.append(value)
+        self._safe_observe("on_emit_end", channel, event, results)
+        return results
+
+    def _safe_observe(self, method: str, *args: Any) -> None:
+        observer = self._observer
+        if observer is None:
+            return
+        try:
+            getattr(observer, method)(*args)
+        except Exception:
+            logger.exception("EventBus observer.%s raised; suppressing.", method)
+
+    def emit_sync(self, channel: str, event: Any) -> list[Any]:
+        """Synchronous emit — runs only sync handlers; coroutine-returning
+        handlers are logged-and-skipped.
+
+        Exists so sync code paths (``ExtensionAPI.register_tool`` and friends,
+        which cannot ``await``) can still publish events on the bus without
+        forcing the API surface async. Observer hooks fire normally.
+        """
+        registered = self._handlers.get(channel)
+        if not registered and self._observer is None:
+            return []
+        handlers = list(registered or ())
+        observer = self._observer
+        self._safe_observe("on_emit_start", channel, event)
+        results: list[Any] = []
+        async_violation: tuple[str, Any] | None = None
+        for h in handlers:
+            err: BaseException | None = None
+            start_ns = time.perf_counter_ns() if observer is not None else 0
+            try:
+                value = h(event)
+                if inspect.isawaitable(value):
+                    if hasattr(value, "close"):
+                        value.close()
+                    if self._strict_sync_handlers and async_violation is None:
+                        async_violation = (channel, h)
+                    else:
+                        logger.warning(
+                            "Async handler on channel %r skipped during emit_sync; "
+                            "use a sync handler or subscribe via an async-only channel.",
+                            channel,
+                        )
+                    value = None
+            except Exception as exc:
+                logger.exception(
+                    "Event handler raised on channel %r; suppressing.", channel
+                )
+                err = exc
+                value = None
+            if observer is not None:
+                self._safe_observe(
+                    "on_handler_done",
+                    channel,
+                    h,
+                    value,
+                    err,
+                    time.perf_counter_ns() - start_ns,
+                )
+            results.append(value)
+        self._safe_observe("on_emit_end", channel, event, results)
+        if async_violation is not None:
+            ch, handler = async_violation
+            raise RuntimeError(
+                f"async handler {handler!r} on sync-only channel {ch!r}; "
+                "use a sync handler or disable strict_sync mode"
+            )
         return results
 
     def clear(self) -> None:
@@ -311,6 +460,7 @@ __all__ = [
     "ContextEvent",
     "Event",
     "EventBus",
+    "EventBusObserver",
     "Handler",
     "ToolCallEvent",
     "ToolResultEvent",
