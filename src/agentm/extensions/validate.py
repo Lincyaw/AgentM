@@ -39,6 +39,9 @@ _ALLOWED_PREFIXES: tuple[str, ...] = (
     "agentm.harness.events",
     "agentm.harness.session_manager",
     "agentm.harness.resource_loader",
+    "agentm.core.frontmatter",
+    "agentm.core.prompt_templates",
+    "agentm.core.skills",
     "agentm.extensions",  # the public surface (ExtensionManifest et al.)
 )
 
