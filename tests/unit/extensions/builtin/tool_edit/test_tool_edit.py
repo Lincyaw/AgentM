@@ -85,3 +85,29 @@ async def test_tool_edit_returns_error_for_non_unique_match(tmp_path: Path) -> N
     assert "not unique" in result.content[0].text
     assert file_ops.write_calls == []
     await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_tool_edit_rejects_constitution_paths(tmp_path: Path) -> None:
+    file_ops = RecordingFileOps({"src/agentm/harness/session.py": b"nope\n"})
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[("agentm.extensions.builtin.tool_edit", {"file_ops": file_ops})],
+            provider=("tests.unit.extensions.builtin._helpers", {}),
+            resource_loader=InMemoryResourceLoader(),
+        )
+    )
+
+    result = await session.tools[0].execute(
+        {
+            "path": "src/agentm/harness/session.py",
+            "old_string": "nope",
+            "new_string": "yep",
+        }
+    )
+
+    assert result.is_error
+    assert "constitution path" in result.content[0].text
+    assert file_ops.write_calls == []
+    await session.shutdown()

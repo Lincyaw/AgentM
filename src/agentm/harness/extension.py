@@ -45,6 +45,47 @@ Unsubscribe = Callable[[], None]
 """Returned by ``ExtensionAPI.on``; calling it removes the subscription."""
 
 
+class _SessionGateway(Protocol):
+    def reload_atom(
+        self,
+        name: str,
+        new_source: str,
+        *,
+        agent_initiated: bool = True,
+        rationale: str | None = None,
+    ) -> "ReloadResult": ...
+
+    def freeze_current(self, name: str) -> str: ...
+
+    def list_atoms(self) -> list["AtomInfo"]: ...
+
+    def is_constitution_path(self, path: str) -> bool: ...
+
+
+class _NoopSessionGateway:
+    def reload_atom(
+        self,
+        name: str,
+        new_source: str,
+        *,
+        agent_initiated: bool = True,
+        rationale: str | None = None,
+    ) -> "ReloadResult":
+        del name, new_source, agent_initiated, rationale
+        raise RuntimeError("reload_atom is unavailable on this ExtensionAPI instance")
+
+    def freeze_current(self, name: str) -> str:
+        del name
+        raise RuntimeError("freeze_current is unavailable on this ExtensionAPI instance")
+
+    def list_atoms(self) -> list["AtomInfo"]:
+        return []
+
+    def is_constitution_path(self, path: str) -> bool:
+        del path
+        return False
+
+
 # Set by ``load_extension`` for the duration of an ``install`` call so
 # attribution-aware listeners (e.g. the ``observability`` atom) can tag
 # handlers and registrations with the originating extension's module path.
@@ -94,6 +135,24 @@ class ProviderConfig:
     name: str
 
 
+@dataclass(frozen=True, slots=True)
+class ReloadResult:
+    ok: bool
+    name: str
+    old_hash: str | None
+    new_hash: str | None
+    error: str | None = None
+    rolled_back: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AtomInfo:
+    name: str
+    current_hash: str | None
+    tier: int
+    api_version: int
+
+
 # --- Errors ----------------------------------------------------------------
 
 
@@ -118,6 +177,10 @@ class ExtensionLoadError(Exception):
         super().__init__(msg)
         self.module_path = module_path
         self.cause = cause
+
+
+class ExtensionStaleError(RuntimeError):
+    """Raised when a stale ExtensionAPI reference is used after reload."""
 
 
 # --- ExtensionAPI Protocol --------------------------------------------------
@@ -178,6 +241,17 @@ class ExtensionAPI(Protocol):
 
     # --- Actions ------------------------------------------------------------
     def send_user_message(self, content: str | list[Any]) -> None: ...
+    def reload_atom(
+        self,
+        name: str,
+        new_source: str,
+        *,
+        agent_initiated: bool = True,
+        rationale: str | None = None,
+    ) -> ReloadResult: ...
+    def freeze_current(self, name: str) -> str: ...
+    def list_atoms(self) -> list[AtomInfo]: ...
+    def is_constitution_path(self, path: str) -> bool: ...
 
     # --- Read-only context --------------------------------------------------
     @property
@@ -221,6 +295,8 @@ class _ExtensionAPIImpl:
         pending_user_messages: list[str | list[Any]],
         model_getter: Callable[[], Model | None],
         provider_getter: Callable[[], ProviderConfig | None],
+        gateway: _SessionGateway | None = None,
+        owner_name: str = "<unknown>",
     ) -> None:
         self._bus = bus
         self._cwd = cwd
@@ -232,10 +308,26 @@ class _ExtensionAPIImpl:
         self._pending_user_messages = pending_user_messages
         self._model_getter = model_getter
         self._provider_getter = provider_getter
+        self._gateway = gateway or _NoopSessionGateway()
+        self._owner_name = owner_name
+        self._stale = False
+
+    def mark_stale(self) -> None:
+        self._stale = True
+
+    def _assert_active(self) -> None:
+        if self._stale:
+            raise ExtensionStaleError(
+                f"Extension {self._owner_name!r} was reloaded; this api/ctx "
+                f"reference is stale. Re-acquire via the new install() call. "
+                f"To exit gracefully on reload, catch ExtensionStaleError "
+                f"around long-running operations that capture api or ctx."
+            )
 
     # --- Event subscription ------------------------------------------------
 
     def on(self, channel: str, handler: Handler) -> Unsubscribe:
+        self._assert_active()
         return self._bus.on(channel, handler)
 
     # --- Registrations ----------------------------------------------------
@@ -259,20 +351,24 @@ class _ExtensionAPIImpl:
         )
 
     def register_tool(self, tool: Tool) -> None:
+        self._assert_active()
         self._tools.append(tool)
         self._emit_register("tool", tool.name, tool)
 
     def register_command(self, name: str, spec: CommandSpec) -> None:
+        self._assert_active()
         self._commands[name] = spec
         self._emit_register("command", name, spec)
 
     def register_provider(self, name: str, config: ProviderConfig) -> None:
+        self._assert_active()
         self._providers[name] = config
         self._emit_register("provider", name, config)
 
     def register_message_renderer(
         self, custom_type: str, renderer: Renderer
     ) -> None:
+        self._assert_active()
         self._renderers[custom_type] = renderer
         self._emit_register("renderer", custom_type, renderer)
 
@@ -286,6 +382,7 @@ class _ExtensionAPIImpl:
         ``inject_instruction`` and any extension that wants to nudge the
         conversation without driving a synchronous turn.
         """
+        self._assert_active()
         from agentm.harness.events import ApiSendUserMessageEvent
 
         self._pending_user_messages.append(content)
@@ -296,30 +393,64 @@ class _ExtensionAPIImpl:
             ),
         )
 
+    def reload_atom(
+        self,
+        name: str,
+        new_source: str,
+        *,
+        agent_initiated: bool = True,
+        rationale: str | None = None,
+    ) -> ReloadResult:
+        self._assert_active()
+        return self._gateway.reload_atom(
+            name,
+            new_source,
+            agent_initiated=agent_initiated,
+            rationale=rationale,
+        )
+
+    def freeze_current(self, name: str) -> str:
+        self._assert_active()
+        return self._gateway.freeze_current(name)
+
+    def list_atoms(self) -> list[AtomInfo]:
+        self._assert_active()
+        return self._gateway.list_atoms()
+
+    def is_constitution_path(self, path: str) -> bool:
+        self._assert_active()
+        return self._gateway.is_constitution_path(path)
+
     # --- Read-only context -------------------------------------------------
 
     @property
     def cwd(self) -> str:
+        self._assert_active()
         return self._cwd
 
     @property
     def tools(self) -> list[Tool]:
+        self._assert_active()
         return self._tools
 
     @property
     def session(self) -> ReadonlySession:
+        self._assert_active()
         return self._session
 
     @property
     def model(self) -> Model | None:
+        self._assert_active()
         return self._model_getter()
 
     @property
     def provider(self) -> ProviderConfig | None:
+        self._assert_active()
         return self._provider_getter()
 
     @property
     def events(self) -> EventBus:
+        """Shared bus access remains valid even from stale API references."""
         return self._bus
 
 
@@ -387,13 +518,16 @@ def load_extension(
 
 
 __all__ = [
+    "AtomInfo",
     "CommandSpec",
     "ExtensionAPI",
     "ExtensionFactory",
     "ExtensionLoadError",
+    "ExtensionStaleError",
     "Handler",
     "ProviderConfig",
     "ReadonlySession",
+    "ReloadResult",
     "Renderer",
     "Unsubscribe",
     "UnknownCommandError",

@@ -30,9 +30,10 @@ import pkgutil
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
+from types import ModuleType
 
 from agentm.core.catalog import manifest as core_manifest_mod
-from agentm.extensions import parse_register_tag
+from agentm.extensions import ExtensionManifest, parse_register_tag
 from agentm.extensions.discover import discover_builtin
 
 # Modules an extension is allowed to import. See design §11.1 rule 4.
@@ -126,10 +127,6 @@ def validate_builtin() -> list[ValidationIssue]:
     # through the module namespace so test fixtures that monkeypatch
     # ``agentm.core.catalog.manifest.load_core_manifest`` take effect.
     core_manifest = core_manifest_mod.load_core_manifest()
-    api_current = core_manifest.extension_api_current
-    api_grace = core_manifest.extension_api_grace
-    tier_2_set = set(core_manifest.tier_2_atoms)
-
     # Rule 1: subpackages are forbidden.
     for info in pkgutil.iter_modules([str(builtin_dir)]):
         if info.ispkg and not info.name.startswith("_"):
@@ -147,7 +144,6 @@ def validate_builtin() -> list[ValidationIssue]:
     for name, entry in discovered.items():
         module_path = entry.module_path
         module = entry.module
-        manifest = entry.manifest
 
         # Rule 2: install exists and is a 2-arg callable.
         install = getattr(module, "install", None)
@@ -188,147 +184,17 @@ def validate_builtin() -> list[ValidationIssue]:
         # Rule 3 + 4: manifest already validated by discover_builtin (it
         # raises if missing or stem-mismatched). Nothing to add here.
 
-        # Rule 5: import allow-list — parse the source AST so we don't
-        # rely on accidentally-resolved runtime imports.
         src_file = inspect.getsourcefile(module)
-        if src_file is not None:
-            issues.extend(
-                _check_imports(module_path, Path(src_file))
+        issues.extend(
+            validate_extension_contract(
+                module_path=module_path,
+                module=module,
+                src_file=Path(src_file) if src_file is not None else None,
+                known_extension_names=discovered_names,
+                core_manifest=core_manifest,
+                manifest=entry.manifest,
             )
-
-        # Rule 6: register tag grammar.
-        for tag in manifest.registers:
-            try:
-                parse_register_tag(tag)
-            except ValueError as exc:
-                issues.append(
-                    ValidationIssue(
-                        module_path=module_path,
-                        rule="11.4.6-register-tag",
-                        message=str(exc),
-                    )
-                )
-
-        # Rule 7: requires / conflicts reference known atoms.
-        for ref in manifest.requires:
-            if ref not in discovered_names:
-                issues.append(
-                    ValidationIssue(
-                        module_path=module_path,
-                        rule="11.4.7-requires",
-                        message=(
-                            f"requires {ref!r} which is not a discovered "
-                            "built-in extension"
-                        ),
-                    )
-                )
-        for ref in manifest.conflicts:
-            if ref not in discovered_names:
-                issues.append(
-                    ValidationIssue(
-                        module_path=module_path,
-                        rule="11.4.7-conflicts",
-                        message=(
-                            f"conflicts with {ref!r} which is not a discovered "
-                            "built-in extension"
-                        ),
-                    )
-                )
-            if ref == name:
-                issues.append(
-                    ValidationIssue(
-                        module_path=module_path,
-                        rule="11.4.7-conflicts",
-                        message="extension cannot conflict with itself",
-                    )
-                )
-
-        # Rule 8: config_schema is a dict (or None).
-        schema = manifest.config_schema
-        if schema is not None and not isinstance(schema, dict):
-            issues.append(
-                ValidationIssue(
-                    module_path=module_path,
-                    rule="11.4.8-config-schema",
-                    message=(
-                        "MANIFEST.config_schema must be a dict (JSON-Schema) "
-                        "or None"
-                    ),
-                )
-            )
-
-        # Rule 8 (light shape check): if schema is set and non-empty, it
-        # should declare either a top-level ``type`` or ``properties``.
-        if isinstance(schema, dict) and schema:
-            if "type" not in schema and "properties" not in schema:
-                issues.append(
-                    ValidationIssue(
-                        module_path=module_path,
-                        rule="11.4.8-config-schema",
-                        message=(
-                            "MANIFEST.config_schema should declare 'type' "
-                            "or 'properties' at the top level"
-                        ),
-                    )
-                )
-
-        # Rule 9: api_version is inside the host's [current - grace, current]
-        # window. See self-modifiable-architecture.md §4.2.
-        api_version = manifest.api_version
-        if api_version > api_current:
-            issues.append(
-                ValidationIssue(
-                    module_path=module_path,
-                    rule="11.4.9-api-version-too-new",
-                    message=(
-                        f"atom requires api_version {api_version}, "
-                        f"current is {api_current}"
-                    ),
-                )
-            )
-        if api_version < api_current - api_grace:
-            issues.append(
-                ValidationIssue(
-                    module_path=module_path,
-                    rule="11.4.9-api-version-too-old",
-                    message=(
-                        f"atom api_version {api_version} is older than "
-                        f"the grace window (current={api_current}, "
-                        f"grace={api_grace})"
-                    ),
-                )
-            )
-
-        # Rule 10: tier declaration agrees with the canonical tier-2 list in
-        # core-manifest.yaml. Warning-severity (not error) so an in-progress
-        # rollout that touches both the atom and the list does not block CI
-        # mid-PR. See self-modifiable-architecture.md §7.3.
-        tier = manifest.tier
-        if tier == 2 and name not in tier_2_set:
-            issues.append(
-                ValidationIssue(
-                    module_path=module_path,
-                    rule="11.4.10-tier-list-mismatch",
-                    message=(
-                        f"atom {name!r} declares tier=2 but is not listed in "
-                        "core-manifest.yaml::reload.tier_2_atoms"
-                    ),
-                    severity="warning",
-                )
-            )
-        if tier != 2 and name in tier_2_set:
-            issues.append(
-                ValidationIssue(
-                    module_path=module_path,
-                    rule="11.4.10-tier-list-mismatch",
-                    message=(
-                        f"atom {name!r} is listed in "
-                        "core-manifest.yaml::reload.tier_2_atoms "
-                        f"but declares tier={tier}"
-                    ),
-                    severity="warning",
-                )
-            )
+        )
 
     return issues
 
@@ -403,7 +269,162 @@ def _classify_import(
     return []
 
 
+def validate_extension_contract(
+    *,
+    module_path: str,
+    module: ModuleType,
+    src_file: Path | None,
+    known_extension_names: set[str],
+    core_manifest: core_manifest_mod.CoreManifest | None = None,
+    manifest: ExtensionManifest | None = None,
+) -> list[ValidationIssue]:
+    """Validate one already-imported extension module against rules 5-10."""
+
+    issues: list[ValidationIssue] = []
+    resolved_manifest = (
+        manifest if manifest is not None else getattr(module, "MANIFEST")
+    )
+    name = resolved_manifest.name
+    resolved_core_manifest = (
+        core_manifest
+        if core_manifest is not None
+        else core_manifest_mod.load_core_manifest()
+    )
+    api_current = resolved_core_manifest.extension_api_current
+    api_grace = resolved_core_manifest.extension_api_grace
+    tier_2_set = set(resolved_core_manifest.tier_2_atoms)
+
+    if src_file is not None:
+        issues.extend(_check_imports(module_path, src_file))
+
+    for tag in resolved_manifest.registers:
+        try:
+            parse_register_tag(tag)
+        except ValueError as exc:
+            issues.append(
+                ValidationIssue(
+                    module_path=module_path,
+                    rule="11.4.6-register-tag",
+                    message=str(exc),
+                )
+            )
+
+    for ref in resolved_manifest.requires:
+        if ref not in known_extension_names:
+            issues.append(
+                ValidationIssue(
+                    module_path=module_path,
+                    rule="11.4.7-requires",
+                    message=(
+                        f"requires {ref!r} which is not a discovered "
+                        "built-in extension"
+                    ),
+                )
+            )
+    for ref in resolved_manifest.conflicts:
+        if ref not in known_extension_names:
+            issues.append(
+                ValidationIssue(
+                    module_path=module_path,
+                    rule="11.4.7-conflicts",
+                    message=(
+                        f"conflicts with {ref!r} which is not a discovered "
+                        "built-in extension"
+                    ),
+                )
+            )
+        if ref == name:
+            issues.append(
+                ValidationIssue(
+                    module_path=module_path,
+                    rule="11.4.7-conflicts",
+                    message="extension cannot conflict with itself",
+                )
+            )
+
+    schema = resolved_manifest.config_schema
+    if schema is not None and not isinstance(schema, dict):
+        issues.append(
+            ValidationIssue(
+                module_path=module_path,
+                rule="11.4.8-config-schema",
+                message=(
+                    "MANIFEST.config_schema must be a dict (JSON-Schema) "
+                    "or None"
+                ),
+            )
+        )
+
+    if isinstance(schema, dict) and schema:
+        if "type" not in schema and "properties" not in schema:
+            issues.append(
+                ValidationIssue(
+                    module_path=module_path,
+                    rule="11.4.8-config-schema",
+                    message=(
+                        "MANIFEST.config_schema should declare 'type' "
+                        "or 'properties' at the top level"
+                    ),
+                )
+            )
+
+    api_version = resolved_manifest.api_version
+    if api_version > api_current:
+        issues.append(
+            ValidationIssue(
+                module_path=module_path,
+                rule="11.4.9-api-version-too-new",
+                message=(
+                    f"atom requires api_version {api_version}, "
+                    f"current is {api_current}"
+                ),
+            )
+        )
+    if api_version < api_current - api_grace:
+        issues.append(
+            ValidationIssue(
+                module_path=module_path,
+                rule="11.4.9-api-version-too-old",
+                message=(
+                    f"atom api_version {api_version} is older than "
+                    f"the grace window (current={api_current}, "
+                    f"grace={api_grace})"
+                ),
+            )
+        )
+
+    tier = resolved_manifest.tier
+    if tier == 2 and name not in tier_2_set:
+        issues.append(
+            ValidationIssue(
+                module_path=module_path,
+                rule="11.4.10-tier-list-mismatch",
+                message=(
+                    f"atom {name!r} declares tier=2 but is not listed in "
+                    "core-manifest.yaml::reload.tier_2_atoms"
+                ),
+                severity="warning",
+            )
+        )
+    if tier != 2 and name in tier_2_set:
+        issues.append(
+            ValidationIssue(
+                module_path=module_path,
+                rule="11.4.10-tier-list-mismatch",
+                message=(
+                    f"atom {name!r} is listed in "
+                    "core-manifest.yaml::reload.tier_2_atoms "
+                    f"but declares tier={tier}"
+                ),
+                severity="warning",
+            )
+        )
+
+    return issues
+
+
 __all__ = [
     "ValidationIssue",
+    "validate_extension_contract",
     "validate_builtin",
 ]
