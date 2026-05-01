@@ -1,186 +1,209 @@
 # AgentM
 
-A generic multi-agent orchestration SDK built on LangGraph. Supports custom state types, pluggable reasoning strategies, and middleware pipelines for diverse agent workflows.
+A pluggable agent framework in Python. The SDK is a **mechanism**; every policy
+is a port; every port has a default; every default is a replaceable extension.
 
-## Quick Start
+Inspired by [`badlogic/pi-mono`](https://github.com/badlogic/pi-mono). See
+`.claude/designs/pluggable-architecture.md` for the boundary contract.
 
-```bash
-# Install dependencies
-uv sync
+---
 
-# Set required environment variables
-export AGENTM_API_KEY="your-api-key"
-export AGENTM_API_BASE_URL="https://your-api-endpoint"  # optional, OpenAI-compatible
+## Architecture at a glance
+
+Four layers, dependency arrows point downward only.
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  agentm.cli  /  embedded SDK  /  (future: HTTP, RPC)                     │  presenters
+│  thin: load scenario → prompt → print                                    │
+├──────────────────────────────────────────────────────────────────────────┤
+│  agentm.harness                                                          │
+│    AgentSession  ── orchestrator façade (no business logic)              │  harness
+│    EventBus      ── before_agent_start / tool events / observability     │
+│    SessionManager · ResourceLoader · ExtensionAPI · load_extension       │
+├──────────────────────────────────────────────────────────────────────────┤
+│  agentm.core                                                             │
+│    kernel/  AgentLoop · Tool · Message · StreamFn · LoopConfig           │  pure SDK
+│    operations.py  FileOperations / BashOperations Protocols + locals     │
+│    skills · prompt_templates · edit_diff · frontmatter · path_utils      │
+│    compaction/  llm + branch summarization                               │
+├──────────────────────────────────────────────────────────────────────────┤
+│  agentm.llm  (provider layer, analogous to pi-ai)                        │  provider
+│    anthropic StreamFn · ai/api_registry · OAuth / env keys               │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-## CLI Commands
+`agentm.core` must be importable in a Jupyter notebook with no harness, no CLI,
+no filesystem touched. The kernel knows nothing about sessions, files, or
+scenarios; the harness knows nothing about concrete scenarios or UI.
 
-### `analyze` — Single Trajectory Analysis
+---
 
-Analyze completed RCA trajectories and extract reusable knowledge.
-Accepts both JSONL (event format) and JSON (eval DB export with `_eval_meta`).
+## Five pluggability axes
 
-```bash
-# Failed trajectory — analyze what went wrong
-agentm analyze trajectories/rca-20260312-091500.jsonl \
-    --task "failure: missed ts-order-service, anchored on ts-preserve-service"
+Every axis is a `typing.Protocol` in `agentm.core`. The harness ships a default;
+extensions or users can substitute without forking.
 
-# Eval DB export (JSON with _eval_meta)
-agentm analyze eval-trajectories/agentm-v11_7901_incorrect.json \
-    --task "failure: ground truth is ts-basic-service,ts-price-service"
+| # | Axis                | Protocol / Port          | Default impl                       |
+|---|---------------------|--------------------------|------------------------------------|
+| 1 | LLM stream          | `StreamFn`               | `agentm.llm.anthropic`             |
+| 2 | Tool environment    | `Tool` + `*Operations`   | `LocalFileOperations`, `LocalBashOperations` |
+| 3 | Session state       | `SessionManager`         | `InMemorySessionManager`           |
+| 4 | Project context     | `ResourceLoader`         | `DefaultResourceLoader`            |
+| 5 | Policy / cross-cut  | `EventBus` + `ExtensionAPI` | bus + per-extension install hook |
 
-# Multiple files
-agentm analyze trajectories/rca-*.jsonl \
-    --task "2/3 succeeded, 1 failed on cascade identification"
+---
 
-# With live dashboard
-agentm analyze trajectories/rca-20260311-162834.jsonl \
-    --task "success: root cause identified" --dashboard --port 8765
+## Extension-as-Scenario
+
+A *scenario* is a **composition of atomic extensions**, expressed as data (YAML),
+not code. There is no privileged path between built-in and third-party scenarios.
+
+```
+                         ┌──────────────────────────────┐
+   scenarios/*.yaml ───▶ │ extensions.loader            │ ──▶ list[(module, config)]
+   (recipe of atoms)     │ load_scenario(name)          │
+                         └──────────────────────────────┘
+                                      │
+                                      ▼
+                         ┌──────────────────────────────┐
+                         │ AgentSession.create()        │
+                         │ for each (module, cfg):      │
+                         │   load_extension → install() │
+                         │ register handlers on bus     │
+                         └──────────────────────────────┘
 ```
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--task` | _(required)_ | Analysis task with evaluation feedback |
-| `--scenario` | `config/scenarios/trajectory_analysis` | Scenario directory |
-| `--config` | `config/system.yaml` | System config YAML |
-| `--max-steps` | 60 | Maximum orchestrator steps |
-| `--debug` | false | Enable rich debug terminal UI |
-| `--verbose` | false | Extra detail in output |
-| `--dashboard` | false | Start web dashboard for real-time monitoring |
-| `--port` | 8765 | Dashboard server port |
-| `--dashboard-host` | `0.0.0.0` | Dashboard server bind address (binds all interfaces by default; restrict to `127.0.0.1` on untrusted networks) |
-
-### `judge` — Trajectory Judging
-
-Judge evaluation trajectories using the trajectory_judger scenario. Driven by a YAML config file.
-
-```bash
-# Judge cases from default config
-agentm judge config/batch/default.yaml
-
-# Override filters
-agentm judge config/batch/default.yaml --filter all --limit 30
-
-# Filter by experiment
-agentm judge config/batch/default.yaml --exp-id agentm-v12
-```
-
-**Judge config structure** (`config/batch/*.yaml`):
-
-```yaml
-source:
-  type: "directory"              # "directory" or "database"
-  directory: "./eval-trajectories"
-  filter: "incorrect"            # incorrect | correct | all
-  # exp_id: "agentm-v11"        # optional experiment filter
-  # limit: 50                   # optional case cap
-  data_base_dir: "${RCABENCH_DATA_DIR}"
-
-concurrency: 10                  # parallel judge workers
-scenario: "config/scenarios/trajectory_analysis"
-system_config: "config/system.yaml"
-```
-
-### `debug` — Trajectory Inspection
-
-Inspect and analyze trajectory JSONL files offline.
-
-```bash
-# Show summary statistics
-agentm debug trajectories/rca-20260311-162834.jsonl --summary
-
-# Show tool call timeline
-agentm debug trajectories/rca-20260311-162834.jsonl --timeline
-
-# Filter by agent or event type
-agentm debug trajectories/rca-20260311-162834.jsonl --filter-agent orchestrator
-agentm debug trajectories/rca-20260311-162834.jsonl --filter-type tool_call
-```
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--summary` | false | Print summary statistics |
-| `--timeline` | false | Show tool call timeline |
-| `--filter-agent` | _(none)_ | Filter by agent path prefix |
-| `--filter-type` | _(none)_ | Filter by event_type |
-
-### `export-result` — Export Single Trajectory
-
-Export case_dir + ground_truth + final outputs from one trajectory.
-
-```bash
-agentm export-result trajectories/rca-20260311-162834.jsonl
-agentm export-result trajectories/rca-20260311-162834.jsonl -o result.json
-```
-
-### `export-batch` — Batch Export
-
-Batch export from a directory of trajectories.
-
-```bash
-agentm export-batch trajectories/
-agentm export-batch trajectories/ -p "rca-*.jsonl" -o exported/
-```
-
-## Programmatic API (Eval Integration)
-
-For batch evaluation via rcabench-platform, use `AgentMAgent`:
+Each atom is **one Python file** under `extensions/builtin/<name>.py` exporting:
 
 ```python
-from agentm.agents.eval_agent import AgentMAgent
-
-agent = AgentMAgent(
-    scenario_dir="config/scenarios/rca_hypothesis",
-    config_path="config/system.yaml",
-    max_steps=100,
-    timeout=600,
-)
-ok, fail = await benchmark.rollout(agent)
+MANIFEST: ExtensionManifest
+def install(api: ExtensionAPI, config: dict) -> None: ...
 ```
 
-## Data Pipeline
+A mechanical validator (`extensions.validate`) enforces the §11 single-file
+contract: no atom-to-atom imports, no `harness.session` import, allow-listed
+imports only. This keeps the surface tiny enough that future agent self-edits
+remain verifiable.
+
+### Built-in atoms (`src/agentm/extensions/builtin/`)
+
+| Group        | Atoms |
+|--------------|-------|
+| Tools        | `tool_read`, `tool_write`, `tool_edit`, `tool_bash`, `tool_grep`, `tool_find`, `tool_ls`, `tool_hypothesis_store`, `tool_submit_plan`, `tool_trajectory_loader` |
+| Prompt/skill | `system_prompt`, `prompt_templates`, `skill_loader`, `claude_commands`, `claude_agents` |
+| Compaction   | `micro_compact`, `llm_compaction`, `tool_result_budget` |
+| Policy       | `permission`, `tool_filter`, `cost_budget`, `dedup`, `turn_reminder` |
+| Observability| `observability`, `trajectory` |
+| Misc         | `sub_agent`, `file_mutation_queue` |
+
+### Built-in scenarios (`src/agentm/extensions/scenarios/`)
+
+- `general_purpose.yaml` — read/bash/edit/write coding agent
+- `plan_mode.yaml` — read-only planning before execution
+- `trajectory_analysis.yaml` — analyze completed trajectories
+
+---
+
+## Session lifecycle
 
 ```
-1. Run eval         rcabench rollout --agent agentm ...
-                         |
-                         v
-2. Judge             rcabench judge --exp-id agentm-v11
-                         |
-                         v
-3. Export             python scripts/export_eval_trajectories.py \
-                         --exp-id agentm-v11 --correct false
-                         |
-                         v
-4. Batch analyze     agentm analyze-batch config/batch/default.yaml
-                         |
-                         v
-5. Knowledge         knowledge/vault/ (accumulated analysis entries)
+AgentSession.create(config)
+    │
+    ├─ build EventBus, SessionManager, ResourceLoader, ExtensionAPI
+    ├─ load_extension(...)  for each (module, cfg)  → emit ExtensionInstallEvent
+    ├─ load provider extension last (last registration wins)
+    └─ append initial_messages
+
+session.prompt(text)
+    │
+    ├─ append UserMessage
+    ├─ assemble system prompt (context files + skills index)
+    ├─ emit before_agent_start  ── handlers may rewrite system prompt
+    ├─ AgentLoop.run            ── kernel: stream LLM → dispatch tools → repeat
+    │     emits LlmRequestStart/End, ToolCall events on the bus
+    ├─ append assistant + tool_result entries
+    └─ return updated message list
+
+session.shutdown()
+    └─ emit SessionShutdownEvent
 ```
 
-## Environment Variables
+Every signal — install, LLM request, tool call, mutation, turn summary — flows
+through the **same** `EventBus`. The `observability` builtin is a pure subscriber
+that writes OTel-flavored JSONL to `<cwd>/.agentm/observability/<trace_id>.jsonl`.
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `AGENTM_API_KEY` | Yes | LLM API key |
-| `AGENTM_API_BASE_URL` | No | Custom API base URL (OpenAI-compatible) |
-| `AGENTM_ORCHESTRATOR_MODEL` | No | Override orchestrator model name (default: from config) |
-| `AGENTM_WORKER_MODEL` | No | Override worker model name (default: from config) |
-| `AGENTM_LOG_LEVEL` | No | Log level for agentm loggers (default: `INFO`) |
-| `LLM_EVAL_DB_URL` | For DB mode | PostgreSQL connection URL for eval database |
+---
 
-## Configuration
+## Quick start
 
-AgentM uses layered config files:
+```bash
+uv sync                               # install
+export ANTHROPIC_API_KEY="..."        # or use api_registry
+uv run agentm "list files in src/"    # one-shot prompt via CLI
+```
 
-- **`config/system.yaml`** — model registry, storage backend, debug settings
-- **`config/scenarios/<name>/scenario.yaml`** — scenario-specific orchestrator/agent config
-- **`config/batch/<name>.yaml`** — batch analysis config (data source, grouping, goals)
+Programmatic use:
 
-Available scenarios:
+```python
+from agentm.harness import AgentSession, AgentSessionConfig
+from agentm.extensions.loader import load_scenario
 
-| Scenario | Description |
-|----------|-------------|
-| `rca_hypothesis` | RCA investigation with hypothesis-driven reasoning |
-| `trajectory_analysis` | Extract knowledge from completed trajectories |
-| `memory_extraction` | Extract and organize knowledge from trajectory data |
-| `general_purpose` | General-purpose agent orchestration |
+extensions = load_scenario("general_purpose")
+session = await AgentSession.create(AgentSessionConfig(
+    cwd=".",
+    extensions=extensions,
+    provider=("agentm.llm.anthropic", {"model": "claude-sonnet-4-6"}),
+))
+final_messages = await session.prompt("explain core/kernel/loop.py")
+await session.shutdown()
+```
+
+---
+
+## Build & development
+
+```bash
+uv sync
+uv run agentm "..."
+uv run pytest
+uv run ruff check src/
+uv run mypy src/
+```
+
+- Python 3.12+, build backend `uv_build`.
+- Source layout: `src/agentm/`.
+- Entry point: `agentm:main`.
+
+---
+
+## Repository layout
+
+```
+src/agentm/
+├── cli.py                    # thin presenter
+├── core/                     # pure SDK (no I/O, no sessions)
+│   ├── kernel/               # AgentLoop, Tool, Message, StreamFn, events
+│   ├── compaction/           # llm + branch summarization
+│   ├── operations.py         # FileOperations / BashOperations Protocols
+│   ├── skills.py             # SKILL.md discovery
+│   ├── prompt_templates.py   # /name args expansion
+│   ├── edit_diff.py          # multi-edit application
+│   ├── frontmatter.py        # YAML frontmatter parser
+│   └── path_utils.py · text_truncate.py
+├── llm/                      # StreamFn implementations (anthropic)
+├── ai/                       # provider/api registry, OAuth, env keys
+├── harness/                  # AgentSession, EventBus, SessionManager, ...
+└── extensions/
+    ├── loader.py · discover.py · validate.py
+    ├── builtin/<atom>.py     # one file per atom (§11 contract)
+    └── scenarios/<name>.yaml # composition recipes
+
+.claude/
+├── designs/                  # active design docs (continuously maintained)
+├── plans/   · tasks/         # append-only history
+└── index.yaml                # concept relationship graph
+```
+
+See `CLAUDE.md` for design-doc workflow and the architect / planner / tdd /
+implementer / reviewer agent pipeline.
