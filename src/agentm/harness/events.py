@@ -147,6 +147,7 @@ class SessionReadyEvent:
     session_id: str
     tool_names: tuple[str, ...]
     command_names: tuple[str, ...]
+    extension_module_paths: tuple[str, ...]
     model: Model | None
 
 
