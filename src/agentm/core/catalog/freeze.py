@@ -90,3 +90,11 @@ def _replace_current_pointer(
 def _remove_path(path: Path) -> None:
     if path.is_symlink() or path.exists():
         path.unlink()
+
+
+def source_path_for_hash(
+    name: str, content_hash: str, *, root: Path | None = None
+) -> Path:
+    """Return the on-disk path of a frozen atom's source.py for a given hash."""
+
+    return _layout.atom_source_path(name, content_hash, root=root)
