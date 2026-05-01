@@ -57,6 +57,7 @@ from agentm.harness.events import (
     BeforeAgentStartEvent,
     ChildSessionEndEvent,
     ChildSessionStartEvent,
+    ExtensionInstallEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
 )
@@ -275,18 +276,48 @@ class AgentSession:
             provider_getter=_provider_getter,
         )
 
+        async def _install_with_events(module_path: str, ext_cfg: dict[str, Any]) -> None:
+            await bus.emit(
+                "extension_install",
+                ExtensionInstallEvent(
+                    module_path=module_path, config=dict(ext_cfg), phase="start"
+                ),
+            )
+            t0 = time.perf_counter_ns()
+            try:
+                result = load_extension(module_path, api, ext_cfg)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                await bus.emit(
+                    "extension_install",
+                    ExtensionInstallEvent(
+                        module_path=module_path,
+                        config=dict(ext_cfg),
+                        phase="error",
+                        duration_ns=time.perf_counter_ns() - t0,
+                        error=repr(exc),
+                    ),
+                )
+                raise
+            await bus.emit(
+                "extension_install",
+                ExtensionInstallEvent(
+                    module_path=module_path,
+                    config=dict(ext_cfg),
+                    phase="end",
+                    duration_ns=time.perf_counter_ns() - t0,
+                ),
+            )
+
         # Load auxiliary extensions first.
         for module_path, ext_cfg in config.extensions:
-            result = load_extension(module_path, api, ext_cfg)
-            if inspect.isawaitable(result):
-                await result
+            await _install_with_events(module_path, ext_cfg)
 
         # Load the provider extension. After it returns, we expect it to have
         # registered a ProviderConfig.
         provider_path, provider_cfg = config.provider
-        result = load_extension(provider_path, api, provider_cfg)
-        if inspect.isawaitable(result):
-            await result
+        await _install_with_events(provider_path, provider_cfg)
 
         if not providers:
             raise ExtensionLoadError(

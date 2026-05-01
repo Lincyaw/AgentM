@@ -39,6 +39,8 @@ from .events import (
     BeforeSendToLlmEvent,
     ContextEvent,
     EventBus,
+    LlmRequestEndEvent,
+    LlmRequestStartEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnEndEvent,
@@ -269,16 +271,52 @@ class AgentLoop:
                 )
                 await self._bus.emit("before_send_to_llm", before_send_event)
 
-                # Drain the LLM stream.
+                # Drain the LLM stream, emitting llm_request_start/end so
+                # observers (cost trackers, observability) see request
+                # boundaries without wrapping ``stream_fn`` themselves.
+                await self._bus.emit(
+                    "llm_request_start",
+                    LlmRequestStartEvent(
+                        turn_index=turn_index,
+                        message_count=len(messages),
+                        tool_count=len(tools),
+                        system_chars=len(system or ""),
+                        model_id=getattr(model, "id", None),
+                    ),
+                )
                 stream_events: list[AssistantStreamEvent] = []
-                async for ev in self._stream_fn(
-                    messages=messages,
-                    model=model,
-                    tools=tools,
-                    system=system,
-                    signal=signal,
-                ):
-                    stream_events.append(ev)
+                stream_start_ns = time.perf_counter_ns()
+                stream_error: str | None = None
+                try:
+                    async for ev in self._stream_fn(
+                        messages=messages,
+                        model=model,
+                        tools=tools,
+                        system=system,
+                        signal=signal,
+                    ):
+                        stream_events.append(ev)
+                except Exception as exc:
+                    stream_error = repr(exc)
+                    await self._bus.emit(
+                        "llm_request_end",
+                        LlmRequestEndEvent(
+                            turn_index=turn_index,
+                            chunk_count=len(stream_events),
+                            duration_ns=time.perf_counter_ns() - stream_start_ns,
+                            error=stream_error,
+                        ),
+                    )
+                    raise
+                await self._bus.emit(
+                    "llm_request_end",
+                    LlmRequestEndEvent(
+                        turn_index=turn_index,
+                        chunk_count=len(stream_events),
+                        duration_ns=time.perf_counter_ns() - stream_start_ns,
+                        error=None,
+                    ),
+                )
 
                 assistant_msg = _assemble_assistant_message(
                     stream_events, fallback_timestamp=_now()

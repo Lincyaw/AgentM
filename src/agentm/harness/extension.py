@@ -16,8 +16,9 @@ from __future__ import annotations
 import importlib
 import inspect
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from agentm.core.kernel import (
     AgentMessage,
@@ -42,6 +43,24 @@ Handler = Callable[[Any], Any] | Callable[[Any], Awaitable[Any]]
 
 Unsubscribe = Callable[[], None]
 """Returned by ``ExtensionAPI.on``; calling it removes the subscription."""
+
+
+# Set by ``load_extension`` for the duration of an ``install`` call so
+# attribution-aware listeners (e.g. the ``observability`` atom) can tag
+# handlers and registrations with the originating extension's module path.
+# Reads ``"<unknown>"`` outside of an install scope.
+_INSTALLING_EXTENSION: ContextVar[str] = ContextVar(
+    "agentm_installing_extension", default="<unknown>"
+)
+
+
+def current_installing_extension() -> str:
+    """Return the module path of the extension currently inside ``install``.
+
+    Returns ``"<unknown>"`` when called outside an install scope. Used by the
+    ``observability`` atom to attribute handler registrations to extensions.
+    """
+    return _INSTALLING_EXTENSION.get()
 
 
 # --- Specs ------------------------------------------------------------------
@@ -221,19 +240,41 @@ class _ExtensionAPIImpl:
 
     # --- Registrations ----------------------------------------------------
 
+    def _emit_register(
+        self,
+        kind: Literal["tool", "command", "provider", "renderer"],
+        name: str,
+        payload: Any,
+    ) -> None:
+        from agentm.harness.events import ApiRegisterEvent
+
+        self._bus.emit_sync(
+            "api_register",
+            ApiRegisterEvent(
+                kind=kind,
+                name=name,
+                extension=current_installing_extension(),
+                payload=payload,
+            ),
+        )
+
     def register_tool(self, tool: Tool) -> None:
         self._tools.append(tool)
+        self._emit_register("tool", tool.name, tool)
 
     def register_command(self, name: str, spec: CommandSpec) -> None:
         self._commands[name] = spec
+        self._emit_register("command", name, spec)
 
     def register_provider(self, name: str, config: ProviderConfig) -> None:
         self._providers[name] = config
+        self._emit_register("provider", name, config)
 
     def register_message_renderer(
         self, custom_type: str, renderer: Renderer
     ) -> None:
         self._renderers[custom_type] = renderer
+        self._emit_register("renderer", custom_type, renderer)
 
     # --- Actions -----------------------------------------------------------
 
@@ -245,7 +286,15 @@ class _ExtensionAPIImpl:
         ``inject_instruction`` and any extension that wants to nudge the
         conversation without driving a synchronous turn.
         """
+        from agentm.harness.events import ApiSendUserMessageEvent
+
         self._pending_user_messages.append(content)
+        self._bus.emit_sync(
+            "api_send_user_message",
+            ApiSendUserMessageEvent(
+                extension=current_installing_extension(), content=content
+            ),
+        )
 
     # --- Read-only context -------------------------------------------------
 
@@ -290,6 +339,9 @@ def load_extension(
 
     Raises ``ExtensionLoadError`` on any failure (missing module, missing
     ``install`` symbol, exception thrown by ``install`` itself).
+
+    While ``install`` runs, ``current_installing_extension()`` returns
+    ``module_path`` so observers can attribute side effects.
     """
 
     try:
@@ -306,14 +358,32 @@ def load_extension(
             ),
         )
 
+    token = _INSTALLING_EXTENSION.set(module_path)
     try:
         result = install(api, config)
     except Exception as exc:  # noqa: BLE001
+        _INSTALLING_EXTENSION.reset(token)
         raise ExtensionLoadError(module_path, exc) from exc
+    if not inspect.isawaitable(result):
+        _INSTALLING_EXTENSION.reset(token)
+        return None
+    # Reset eagerly here — sync portion of install() has finished. The
+    # awaitable runs in its own task/context where the contextvar default
+    # already reads ``module_path`` only if the caller awaits inside the
+    # same context (which is fine for the harness's sequential await).
+    awaitable_result = result
+    _INSTALLING_EXTENSION.reset(token)
 
-    if inspect.isawaitable(result):
-        return result
-    return None
+    async def _await_install() -> None:
+        inner_token = _INSTALLING_EXTENSION.set(module_path)
+        try:
+            await awaitable_result
+        except Exception as exc:  # noqa: BLE001
+            raise ExtensionLoadError(module_path, exc) from exc
+        finally:
+            _INSTALLING_EXTENSION.reset(inner_token)
+
+    return _await_install()
 
 
 __all__ = [
@@ -327,5 +397,6 @@ __all__ = [
     "Renderer",
     "Unsubscribe",
     "UnknownCommandError",
+    "current_installing_extension",
     "load_extension",
 ]
