@@ -57,7 +57,14 @@ dependencies = [
     { name = "agentm" },
     { name = "duckdb" },
     { name = "pyarrow" },
+    { name = "pydantic" },
     { name = "tiktoken" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
 ]
 
 [package.metadata]
@@ -65,7 +72,14 @@ requires-dist = [
     { name = "agentm", editable = "." },
     { name = "duckdb", specifier = ">=1.4.4" },
     { name = "pyarrow", specifier = ">=23.0.1" },
+    { name = "pydantic", specifier = ">=2.11.0" },
     { name = "tiktoken", specifier = ">=0.12.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-asyncio", specifier = ">=0.23" },
 ]
 
 [[package]]
