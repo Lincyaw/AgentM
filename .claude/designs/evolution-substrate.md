@@ -49,6 +49,8 @@ The agent never writes raw observability; the indexer never runs in the autonomy
 
 Lives at `.agentm/catalog/`. Constitution-layer write-protected.
 
+> **Boundary note**: per [git-backed-versioning.md](git-backed-versioning.md), `source.py`, `manifest.yaml`, `parent_hash`, `author`, and `authored_at` are no longer stored in the catalog directly — they live in the git history of the source file's working-tree path. The catalog retains `metrics.jsonl` and `runs/` (the parts git does not provide). Version identifiers (`<content_hash>` below) become 40-char git SHAs. The schema is preserved here as the conceptual model; reads route through git plumbing.
+
 ```
 .agentm/catalog/
 ├── core/
@@ -411,7 +413,7 @@ Goal: turn raw observability into a queryable atom registry. No decision-making 
 
 - Active-set fingerprint in observability `session.start` headers (modify `observability` extension).
 - Catalog directory layout (`atoms/<name>/<hash>/`, `scenarios/<name>/<hash>/`).
-- Content-hash for atoms (constitution module: `agentm.core._internal.catalog.hashing`).
+- Git-SHA-based version IDs via `ResourceWriter` (see [git-backed-versioning.md](git-backed-versioning.md)); legacy `compute_atom_hash` retained only for parsing pre-migration trace fingerprints.
 - `freeze_current` writes the source + manifest into the catalog at every reload (called from sister doc §5.2).
 - Indexer (minimal): on session end, parse fingerprint, attribute basic counters (n_runs, completion, cost) to involved atom versions.
 - `tool_catalog`: `list_versions`, `get_manifest`, `runs_for` (read-only browsing).
