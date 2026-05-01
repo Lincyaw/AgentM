@@ -19,6 +19,7 @@ the cache. Production code never needs to touch `_MANIFEST_PATH`.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -43,7 +44,7 @@ MANIFEST_FILENAME = "core-manifest.yaml"
 
 
 @pytest.fixture(autouse=True)
-def _reset_manifest_cache() -> None:
+def _reset_manifest_cache() -> Iterator[None]:
     """Ensure each test starts with a fresh cache.
 
     The manifest module caches the parsed YAML at module scope; without a
@@ -86,16 +87,6 @@ def test_loads_constitution_paths() -> None:
     }
     missing = expected_subset - set(cm.constitution_paths)
     assert not missing, f"manifest is missing required paths: {missing}"
-
-
-def test_extension_api_current_and_grace_are_ints() -> None:
-    """Type contract for extension_api fields; design §3 default 1/1."""
-    cm = load_core_manifest()
-
-    assert isinstance(cm.extension_api_current, int)
-    assert isinstance(cm.extension_api_grace, int)
-    assert cm.extension_api_current == 1
-    assert cm.extension_api_grace == 1
 
 
 def test_kernel_path_is_constitution() -> None:

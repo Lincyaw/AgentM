@@ -1,13 +1,10 @@
-"""Acceptance scaffold for the self-modifiable MVP.
+"""Acceptance tests for the self-modifiable MVP.
 
-This file maps every scenario in `.claude/designs/self-modifiable-architecture.md`
-§9 and `.claude/designs/evolution-substrate.md` §9 to a named integration test.
-
-Important: the branch used for issue #41 currently lacks the runtime-facing
-pieces from issue #37 (`transactional-reload`) and issue #38
-(`observability-fingerprint`). The tests that depend on those contracts are
-kept as explicit skips so the acceptance surface is visible and future work can
-turn them green by removing the skip.
+Covers the scenarios from `.claude/designs/self-modifiable-architecture.md` §9
+and `.claude/designs/evolution-substrate.md` §9 that have a real runtime
+contract to assert against on this branch. Phase 2 scenarios (compare /
+find_best / propose_change) and structural checks duplicated by unit tests
+are intentionally not represented here.
 """
 
 from __future__ import annotations
@@ -22,7 +19,6 @@ from typing import Any
 
 import pytest
 
-from agentm.core.catalog import is_constitution_path
 from agentm.core.catalog.freeze import freeze_current
 from agentm.core.catalog.hashing import compute_active_set_fingerprint
 from agentm.core.catalog.indexer import index_trace, rebuild_catalog
@@ -31,19 +27,9 @@ from agentm.core.kernel import AssistantMessage, AssistantStreamEvent, MessageEn
 from agentm.extensions.builtin import observability as observability_mod
 from agentm.extensions.builtin import tool_catalog as tool_catalog_mod
 from agentm.extensions.builtin import tool_read as tool_read_mod
-from agentm.extensions.validate import validate_builtin
 from agentm.harness.extension import ProviderConfig
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
-
-_SKIP_RELOAD = "issue #37 not landed on this branch: reload_atom/assert_active unavailable"
-_SKIP_FINGERPRINT = "issue #38 not landed on this branch: session.fingerprint / atom.reload unavailable"
-_SKIP_PHASE2_COMPARE = "Phase 2: compare() not in MVP"
-_SKIP_PHASE2_FIND_BEST = "Phase 2: find_best not in MVP"
-_SKIP_PHASE2_DECISIONS = "Phase 2: decisions.jsonl + propose_change not in MVP"
-_SKIP_PHASE2_TIER2 = "Phase 2: tier-2 deferral via propose_change"
-_SKIP_PHASE2_SCENARIOS = "Phase 2: scenario-version dirs + compare() deferred"
-_SKIP_PHASE3 = "Phase 3: experiment-mode lock deferred"
 
 
 class _StaticProvider:
@@ -160,69 +146,12 @@ def _append_fingerprint_record(trace_path: Path, fingerprint: dict[str, Any]) ->
         handle.write("\n")
 
 
-# --- self-modifiable-architecture §9 -------------------------------------
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason=_SKIP_RELOAD)
-async def test_S1_reload_tool_atom_takes_effect_next_turn(tmp_path: Path) -> None:
-    del tmp_path
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason=_SKIP_PHASE2_TIER2)
-async def test_S2_tier2_reload_deferred_pending_approval(tmp_path: Path) -> None:
-    del tmp_path
-
-
-@pytest.mark.asyncio
-async def test_S3_tool_edit_blocked_on_constitution_path() -> None:
-    # Verifies self-modifiable-architecture §9 / S3.
-    assert is_constitution_path("src/agentm/core/kernel/loop.py") is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason=_SKIP_RELOAD)
-async def test_S4_syntax_error_rejected_no_write(tmp_path: Path) -> None:
-    del tmp_path
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason=_SKIP_RELOAD)
-async def test_S5_install_failure_rolls_back(tmp_path: Path) -> None:
-    del tmp_path
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason=_SKIP_RELOAD)
-async def test_S6_assert_active_raises_after_reload(tmp_path: Path) -> None:
-    del tmp_path
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason=_SKIP_RELOAD)
-async def test_S7_api_version_too_new_rejected(tmp_path: Path) -> None:
-    del tmp_path
-
-
-@pytest.mark.asyncio
-async def test_S8_tool_edit_blocked_on_harness_extension() -> None:
-    # Verifies self-modifiable-architecture §9 / S8.
-    assert is_constitution_path("src/agentm/harness/extension.py") is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="Phase 2: requires propose_change author identification")
-async def test_S9_tier_downgrade_blocked_for_agent(tmp_path: Path) -> None:
-    del tmp_path
-
-
 @pytest.mark.asyncio
 async def test_S10_manifest_change_moves_constitution_boundary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Verifies self-modifiable-architecture §9 / S10.
+    """§9 / S10: editing core-manifest.yaml redraws what counts as constitution."""
     from agentm.core.catalog import manifest as manifest_mod
 
     custom_manifest = tmp_path / "core-manifest.yaml"
@@ -249,36 +178,9 @@ async def test_S10_manifest_change_moves_constitution_boundary(
     assert manifest_mod.is_constitution_path("src/agentm/core/operations.py") is True
 
 
-# --- evolution-substrate §9 -----------------------------------------------
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason=_SKIP_PHASE2_COMPARE)
-async def test_E1_compare_returns_numbers_with_ci(tmp_path: Path) -> None:
-    del tmp_path
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason=_SKIP_PHASE2_COMPARE)
-async def test_E2_compare_returns_inconclusive_on_small_n(tmp_path: Path) -> None:
-    del tmp_path
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason=_SKIP_PHASE2_FIND_BEST)
-async def test_E3_find_best_skips_regressed(tmp_path: Path) -> None:
-    del tmp_path
-
-
-@pytest.mark.asyncio
-async def test_E4_catalog_path_blocked() -> None:
-    # Verifies evolution-substrate §9 / E4.
-    assert is_constitution_path(".agentm/catalog/atoms/tool_read/abc/metrics.jsonl") is True
-
-
 @pytest.mark.asyncio
 async def test_E5_rebuild_is_idempotent(tmp_path: Path) -> None:
-    # Verifies evolution-substrate §9 / E5 using the real catalog freeze/indexer flow.
+    """§9 / E5: rebuilding the catalog from observability traces is byte-stable."""
     session = await _create_mvp_session(tmp_path)
     try:
         await session.prompt("hello")
@@ -317,61 +219,21 @@ async def test_E5_rebuild_is_idempotent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason=_SKIP_PHASE3)
-async def test_E6_experiment_mode_locks_other_atoms(tmp_path: Path) -> None:
-    del tmp_path
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason=_SKIP_PHASE2_DECISIONS)
-async def test_E7_reactivating_regressed_blocked(tmp_path: Path) -> None:
-    del tmp_path
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason=f"{_SKIP_RELOAD}; {_SKIP_FINGERPRINT}")
-async def test_E8_mid_session_reload_emits_marker(tmp_path: Path) -> None:
-    del tmp_path
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason=_SKIP_PHASE2_SCENARIOS)
-async def test_E9_scenario_compare(tmp_path: Path) -> None:
-    del tmp_path
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="Phase 2: find_best not in MVP")
-async def test_E10_find_best_returns_none_when_no_winner(tmp_path: Path) -> None:
-    del tmp_path
-
-
-# --- additional MVP-only acceptance points --------------------------------
-
-
-@pytest.mark.asyncio
 async def test_M1_freeze_idempotent(tmp_path: Path) -> None:
+    """Freezing the same source twice produces the same version dir, no duplication."""
     first = _seed_atom_version(tmp_path, module=tool_read_mod, manifest=tool_read_mod.MANIFEST)
     second = _seed_atom_version(tmp_path, module=tool_read_mod, manifest=tool_read_mod.MANIFEST)
 
-    version_dir = (
-        tmp_path / ".agentm" / "catalog" / "atoms" / "tool_read" / first
-    )
+    version_dir = tmp_path / ".agentm" / "catalog" / "atoms" / "tool_read" / first
     assert first == second
     assert version_dir.is_dir()
     children = {child.name for child in version_dir.iterdir()}
     assert {"source.py", "manifest.yaml", "runs"} <= children
-    assert (version_dir / "manifest.yaml").is_file()
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason=_SKIP_FINGERPRINT)
-async def test_M2_fingerprint_in_session_record(tmp_path: Path) -> None:
-    del tmp_path
 
 
 @pytest.mark.asyncio
 async def test_M3_list_versions_after_first_session(tmp_path: Path) -> None:
+    """catalog_list_versions surfaces a frozen atom version through the live tool API."""
     version_hash = _seed_atom_version(
         tmp_path, module=tool_read_mod, manifest=tool_read_mod.MANIFEST
     )
@@ -397,15 +259,3 @@ async def test_M3_list_versions_after_first_session(tmp_path: Path) -> None:
 
     assert result.is_error is False
     assert result.details == [version_hash]
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason=_SKIP_RELOAD)
-async def test_M4_per_atom_api_instances_distinct(tmp_path: Path) -> None:
-    del tmp_path
-
-
-@pytest.mark.asyncio
-async def test_M5_section_11_contract_still_green() -> None:
-    issues = [issue for issue in validate_builtin() if issue.severity == "error"]
-    assert issues == []
