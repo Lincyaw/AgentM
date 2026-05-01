@@ -36,6 +36,8 @@ _ALLOWED_PREFIXES: tuple[str, ...] = (
     "agentm.core.edit_diff",
     "agentm.core.kernel",
     "agentm.core.operations",
+    "agentm.core.path_utils",
+    "agentm.core.text_truncate",
     "agentm.harness.extension",
     "agentm.harness.events",
     "agentm.harness.session_manager",
