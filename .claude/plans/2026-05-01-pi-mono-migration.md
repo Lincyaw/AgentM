@@ -32,7 +32,7 @@ Same shape as the Phase 2 catalog work: every atom is a single `.py` file under 
 
 | Group | Artifacts | Risk | Depends on |
 |---|---|---|---|
-| **α — Soft resources** | `core/skills.py` · `core/prompt_templates.py` · `core/frontmatter.py` (promote existing in-house parser) · `extensions/builtin/skill_loader.py` · `extensions/builtin/prompt_templates.py` · `harness/events.py::ResourcesDiscoverEvent` · §11.1 import allow-list addition for `agentm.core.{skills,prompt_templates,frontmatter}` · `agentm.harness.events` already allowed | Medium | none (Phase 2 baseline) |
+| **α — Soft resources** | `core/skills.py` · `core/prompt_templates.py` · `core/frontmatter.py` (thin wrapper around `python-frontmatter` package) · `extensions/builtin/skill_loader.py` · `extensions/builtin/prompt_templates.py` · `harness/events.py::ResourcesDiscoverEvent` · `pyproject.toml`: `uv add python-frontmatter` · §11.1 import allow-list addition for `agentm.core.{skills,prompt_templates,frontmatter}` · `agentm.harness.events` already allowed | Medium | none (Phase 2 baseline) |
 | **β — Search tools** | `core/text_truncate.py` · `core/path_utils.py` · `extensions/builtin/tool_grep.py` · `extensions/builtin/tool_find.py` · `extensions/builtin/tool_ls.py` · §11.1 import allow-list addition for `agentm.core.{text_truncate,path_utils}` · `pyproject.toml`: `uv add pathspec` | Medium | none |
 | **γ — Tool foundations** | `core/edit_diff.py` · §11.1 import allow-list addition for `agentm.core.edit_diff` | Low | none |
 
@@ -42,7 +42,7 @@ Same shape as the Phase 2 catalog work: every atom is a single `.py` file under 
 
 #### Group α (soft resources)
 
-- Implementer reads `harness/resource_loader.py` and `_split_frontmatter` first; promote that function to `core/frontmatter.py` with CRLF normalization. Update `resource_loader.py` to import from `core/frontmatter.py` (one-line refactor).
+- `uv add python-frontmatter` first. Then write `core/frontmatter.py` as a thin wrapper exposing `parse_frontmatter(text) -> tuple[dict, str]` (so the rest of the code base does not depend on the third-party API directly). Update `harness/resource_loader.py::_split_frontmatter` to delegate to the wrapper (one-line refactor).
 - `skill_loader` and `prompt_templates` both subscribe to `resources_discover` and `session_ready`. The `resources_discover` event is *emitted by the consumer*, not by `AgentSession` — i.e., `skill_loader` emits it during its own discovery pass; same for `prompt_templates`. (See [skills.md](../designs/skills.md) "resources_discover event".)
 - Slash-command runner ordering update in `harness/session.py::AgentSession.prompt`: when text starts with `/` and no code command matches, run `input` event handlers (which `prompt_templates` hooks) **before** falling through to the agent loop. Document this in the group α task.
 - Validator allow-list (`agentm.extensions.validate`): add `agentm.core.skills`, `agentm.core.prompt_templates`, `agentm.core.frontmatter` to the allowed `agentm.core.*` imports list.
