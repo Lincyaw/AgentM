@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import sys
-import types
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -10,16 +8,15 @@ import pytest
 from agentm.core.kernel import (
     AssistantMessage,
     MessageEnd,
-    Model,
     TextContent,
     ToolCallBlock,
     ToolResultMessage,
 )
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
-from agentm.harness.extension import ProviderConfig
 
 from agentm.extensions.builtin import dedup
+from tests.support.provider_registry import temporary_provider
 
 
 @pytest.mark.asyncio
@@ -49,9 +46,6 @@ async def test_handler_blocks_recent_duplicate_call() -> None:
 
 @pytest.mark.asyncio
 async def test_integration_blocks_second_duplicate_call(tmp_path) -> None:
-    provider_name = "tests.unit.extensions.builtin.dedup._provider"
-    provider_mod = types.ModuleType(provider_name)
-
     class RepeatStream:
         def __init__(self) -> None:
             self.calls = 0
@@ -104,40 +98,23 @@ async def test_integration_blocks_second_duplicate_call(tmp_path) -> None:
                 )
             )
 
-    def install_provider(api: Any, _config: dict[str, Any]) -> None:
-        api.register_provider(
-            "fake-repeat",
-            ProviderConfig(
-                stream_fn=RepeatStream(),
-                model=Model(
-                    id="fake-repeat",
-                    provider="fake",
-                    context_window=10000,
-                    max_output_tokens=1000,
-                ),
-                name="fake-repeat",
-            ),
+    with temporary_provider(RepeatStream(), provider_id="fake-repeat") as provider_id:
+        config = AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                ("tests.unit.harness_v2._fixtures.echo_ext", {}),
+                ("agentm.extensions.builtin.dedup", {"window": 10}),
+            ],
+            provider=provider_id,
+            resource_loader=InMemoryResourceLoader(),
         )
+        session = await AgentSession.create(config)
 
-    provider_mod.install = install_provider  # type: ignore[attr-defined]
-    sys.modules[provider_name] = provider_mod
+        final = await session.prompt("hello")
 
-    config = AgentSessionConfig(
-        cwd=str(tmp_path),
-        extensions=[
-            ("tests.unit.harness_v2._fixtures.echo_ext", {}),
-            ("agentm.extensions.builtin.dedup", {"window": 10}),
-        ],
-        provider=(provider_name, {}),
-        resource_loader=InMemoryResourceLoader(),
-    )
-    session = await AgentSession.create(config)
+        duplicate_result = final[4]
+        assert isinstance(duplicate_result, ToolResultMessage)
+        assert isinstance(duplicate_result.content[0].content[0], TextContent)
+        assert "duplicate of recent call" in duplicate_result.content[0].content[0].text
 
-    final = await session.prompt("hello")
-
-    duplicate_result = final[4]
-    assert isinstance(duplicate_result, ToolResultMessage)
-    assert isinstance(duplicate_result.content[0].content[0], TextContent)
-    assert "duplicate of recent call" in duplicate_result.content[0].content[0].text
-
-    await session.shutdown()
+        await session.shutdown()

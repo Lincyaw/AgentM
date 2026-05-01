@@ -42,7 +42,7 @@ async def test_integration_blocks_tool_call_in_session(tmp_path) -> None:
             ("tests.unit.harness_v2._fixtures.echo_ext", {}),
             ("agentm.extensions.builtin.permission", {"deny": ["echo"]}),
         ],
-        provider=("tests.unit.harness_v2._fixtures.fake_provider", {}),
+        provider="fake",
         resource_loader=InMemoryResourceLoader(),
     )
     session = await AgentSession.create(config)

@@ -22,8 +22,6 @@ extension's value path so the test prevents:
 
 from __future__ import annotations
 
-import sys
-import types
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -42,9 +40,9 @@ from agentm.core.kernel import (
 from agentm.extensions.discover import discover_builtin
 from agentm.extensions.loader import load_scenario
 from agentm.harness.events import CostBudgetExceededEvent
-from agentm.harness.extension import ProviderConfig
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
+from tests.support.provider_registry import temporary_provider
 
 
 # --- Fake provider ---------------------------------------------------------
@@ -88,30 +86,6 @@ class _ScriptedProvider:
 
     async def _iter(self, msg: AssistantMessage) -> AsyncIterator[AssistantStreamEvent]:
         yield MessageEnd(message=msg)
-
-
-def _install_provider_module(name: str, provider: _ScriptedProvider) -> str:
-    module = types.ModuleType(name)
-
-    def install(api: Any, _config: dict[str, Any]) -> None:
-        api.register_provider(
-            "fake-composition",
-            ProviderConfig(
-                stream_fn=provider,
-                model=Model(
-                    id="fake-composition",
-                    provider="fake",
-                    context_window=10_000,
-                    max_output_tokens=1_000,
-                ),
-                name="fake-composition",
-            ),
-        )
-
-    module.install = install  # type: ignore[attr-defined]
-    sys.modules[name] = module
-    return name
-
 
 def _tool_call_msg(
     *, call_id: str, name: str, arguments: dict[str, Any], ts: float
@@ -239,9 +213,6 @@ async def test_full_stack_composition_routes_each_extensions_value_path(
         _text_msg("composition done", ts=5.0),
     ]
     provider = _ScriptedProvider(scripted)
-    provider_module = _install_provider_module(
-        "tests.integration._fake_composition_provider_full", provider
-    )
 
     # Channels we expect trajectory to record at least once. before_compact /
     # after_compact are exercised in their own dedicated test below — under
@@ -259,78 +230,83 @@ async def test_full_stack_composition_routes_each_extensions_value_path(
     }
     seen_channels: set[str] = set()
 
-    config = AgentSessionConfig(
-        cwd=str(tmp_path),
-        extensions=_composition_extensions(
-            cost_limit=1_000_000.0,  # high enough to never trip here
-            tool_result_max_chars=80,
-            inherit_extensions=[],
-        ),
-        provider=(provider_module, {}),
-        resource_loader=InMemoryResourceLoader(),
-    )
-    session = await AgentSession.create(config)
+    with temporary_provider(
+        provider,
+        provider_id="fake-composition-full",
+        default_model="fake-composition-full",
+    ) as provider_id:
+        config = AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=_composition_extensions(
+                cost_limit=1_000_000.0,  # high enough to never trip here
+                tool_result_max_chars=80,
+                inherit_extensions=[],
+            ),
+            provider=provider_id,
+            resource_loader=InMemoryResourceLoader(),
+        )
+        session = await AgentSession.create(config)
 
-    for ch in expected_channels:
-        session.bus.on(ch, lambda _e, _c=ch: seen_channels.add(_c))
+        for ch in expected_channels:
+            session.bus.on(ch, lambda _e, _c=ch: seen_channels.add(_c))
 
-    final = await session.prompt("kick off")
+        final = await session.prompt("kick off")
 
-    # Collect post-extension-pipeline ToolResultBlocks from the final
-    # messages keyed by tool_call_id so we assert what the loop actually
-    # committed (truncations from tool_result_budget land here).
-    blocked_by_id: dict[str, tuple[bool, str]] = {}
-    for msg in final:
-        for block in getattr(msg, "content", []):
-            if not isinstance(block, ToolResultBlock):
-                continue
-            text = "\n".join(
-                b.text for b in block.content if isinstance(b, TextContent)
-            )
-            blocked_by_id[block.tool_call_id] = (block.is_error, text)
+        # Collect post-extension-pipeline ToolResultBlocks from the final
+        # messages keyed by tool_call_id so we assert what the loop actually
+        # committed (truncations from tool_result_budget land here).
+        blocked_by_id: dict[str, tuple[bool, str]] = {}
+        for msg in final:
+            for block in getattr(msg, "content", []):
+                if not isinstance(block, ToolResultBlock):
+                    continue
+                text = "\n".join(
+                    b.text for b in block.content if isinstance(b, TextContent)
+                )
+                blocked_by_id[block.tool_call_id] = (block.is_error, text)
 
-    # 1) Trajectory observed every required channel — composition didn't
-    #    silently drop any extension's events.
-    assert expected_channels <= seen_channels, (
-        f"trajectory missed channels: {expected_channels - seen_channels}"
-    )
+        # 1) Trajectory observed every required channel — composition didn't
+        #    silently drop any extension's events.
+        assert expected_channels <= seen_channels, (
+            f"trajectory missed channels: {expected_channels - seen_channels}"
+        )
 
-    # 2) Permission denied the rca-scenario denylist tool ('bash') was never
-    #    called; the provider only invoked 'forbidden_tool' once and got a
-    #    single block with the permission reason. No double-blocking.
-    is_err, text = blocked_by_id["c1"]
-    assert is_err is True
-    assert "Tool call blocked" in text and "denied by denylist" in text
+        # 2) Permission denied the rca-scenario denylist tool ('bash') was never
+        #    called; the provider only invoked 'forbidden_tool' once and got a
+        #    single block with the permission reason. No double-blocking.
+        is_err, text = blocked_by_id["c1"]
+        assert is_err is True
+        assert "Tool call blocked" in text and "denied by denylist" in text
 
-    # 3) First add_hypothesis succeeded (no block); second was dedup-blocked
-    #    with exactly one reason — permission did not also weigh in (denylist
-    #    does not include 'add_hypothesis').
-    first_err, _first_text = blocked_by_id["c2"]
-    assert first_err is False
-    second_err, second_text = blocked_by_id["c4"]
-    assert second_err is True
-    assert "duplicate of recent call" in second_text
-    assert "denied by denylist" not in second_text
+        # 3) First add_hypothesis succeeded (no block); second was dedup-blocked
+        #    with exactly one reason — permission did not also weigh in (denylist
+        #    does not include 'add_hypothesis').
+        first_err, _first_text = blocked_by_id["c2"]
+        assert first_err is False
+        second_err, second_text = blocked_by_id["c4"]
+        assert second_err is True
+        assert "duplicate of recent call" in second_text
+        assert "denied by denylist" not in second_text
 
-    # 4) tool_result_budget truncated the oversized read() output.
-    read_err, read_text = blocked_by_id["c3"]
-    assert read_err is False
-    assert "tool_result_budget truncated" in read_text
+        # 4) tool_result_budget truncated the oversized read() output.
+        read_err, read_text = blocked_by_id["c3"]
+        assert read_err is False
+        assert "tool_result_budget truncated" in read_text
 
-    # 5) The rca recipe's permission denylist + tool_hypothesis_store wiring
-    #    landed: bash/edit/write are absent, hypothesis tools are present.
-    tool_names = {t.name for t in session.tools}
-    assert {"add_hypothesis", "list_hypotheses", "read"} <= tool_names
-    assert {"bash", "edit", "write"}.isdisjoint(tool_names)
+        # 5) The rca recipe's permission denylist + tool_hypothesis_store wiring
+        #    landed: bash/edit/write are absent, hypothesis tools are present.
+        tool_names = {t.name for t in session.tools}
+        assert {"add_hypothesis", "list_hypotheses", "read"} <= tool_names
+        assert {"bash", "edit", "write"}.isdisjoint(tool_names)
 
-    # 6) Final assistant text is the scripted terminator, proving the loop
-    #    completed instead of stalling on a blocked tool.
-    assert any(
-        isinstance(block, TextContent) and block.text == "composition done"
-        for block in final[-1].content
-    )
+        # 6) Final assistant text is the scripted terminator, proving the loop
+        #    completed instead of stalling on a blocked tool.
+        assert any(
+            isinstance(block, TextContent) and block.text == "composition done"
+            for block in final[-1].content
+        )
 
-    await session.shutdown()
+        await session.shutdown()
 
 
 @pytest.mark.asyncio
@@ -346,41 +322,43 @@ async def test_cost_budget_exceeded_terminates_next_prompt_with_budget_stop(
     """
 
     provider = _ScriptedProvider([_text_msg("ok", ts=1.0)])
-    provider_module = _install_provider_module(
-        "tests.integration._fake_composition_provider_budget", provider
-    )
+    with temporary_provider(
+        provider,
+        provider_id="fake-composition-budget",
+        default_model="fake-composition-budget",
+        model_provider="fake",
+    ) as provider_id:
+        config = AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=_composition_extensions(
+                cost_limit=0.0,
+                tool_result_max_chars=100,
+                inherit_extensions=[],
+            ),
+            provider=provider_id,
+            resource_loader=InMemoryResourceLoader(),
+        )
+        session = await AgentSession.create(config)
 
-    config = AgentSessionConfig(
-        cwd=str(tmp_path),
-        extensions=_composition_extensions(
-            cost_limit=0.0,
-            tool_result_max_chars=100,
-            inherit_extensions=[],
-        ),
-        provider=(provider_module, {}),
-        resource_loader=InMemoryResourceLoader(),
-    )
-    session = await AgentSession.create(config)
+        overflow_events: list[CostBudgetExceededEvent] = []
+        end_reasons: list[str] = []
+        session.bus.on(
+            "cost_budget_exceeded", lambda e: overflow_events.append(e)
+        )
+        session.bus.on(
+            "agent_end", lambda e: end_reasons.append(e.stop_reason)
+        )
 
-    overflow_events: list[CostBudgetExceededEvent] = []
-    end_reasons: list[str] = []
-    session.bus.on(
-        "cost_budget_exceeded", lambda e: overflow_events.append(e)
-    )
-    session.bus.on(
-        "agent_end", lambda e: end_reasons.append(e.stop_reason)
-    )
+        # First turn trips the budget (limit=0). Second turn must short-circuit.
+        await session.prompt("first")
+        await session.prompt("second — should be budget-killed")
 
-    # First turn trips the budget (limit=0). Second turn must short-circuit.
-    await session.prompt("first")
-    await session.prompt("second — should be budget-killed")
+        assert overflow_events, "cost_budget never emitted overflow under composition"
+        assert "budget" in end_reasons, (
+            f"expected agent_end stop_reason='budget' in {end_reasons}"
+        )
 
-    assert overflow_events, "cost_budget never emitted overflow under composition"
-    assert "budget" in end_reasons, (
-        f"expected agent_end stop_reason='budget' in {end_reasons}"
-    )
-
-    await session.shutdown()
+        await session.shutdown()
 
 
 @pytest.mark.asyncio
@@ -411,72 +389,72 @@ async def test_sub_agent_child_inherits_only_configured_extension_set(
         _text_msg("dispatched", ts=2.0),
     ]
     parent_provider = _ScriptedProvider(parent_scripted)
-    parent_module = _install_provider_module(
-        "tests.integration._fake_composition_provider_subagent", parent_provider
-    )
 
     # Child shares the same provider closure (per §10b.5 the StreamFn is
-    # safe to share across sessions). To keep the script deterministic the
-    # child uses a *separate* scripted provider injected via the inherited
-    # `_bridge_provider` mechanism in sub_agent — but for simplicity we let
-    # the child fall through to the scripted-provider's terminal "terminal"
-    # text message, which is enough to assert wiring without a tool call.
-    config = AgentSessionConfig(
-        cwd=str(tmp_path),
-        extensions=_composition_extensions(
-            cost_limit=1_000_000.0,
-            tool_result_max_chars=1_000,
-            inherit_extensions=["permission"],
-        ),
-        provider=(parent_module, {}),
-        resource_loader=InMemoryResourceLoader(),
-    )
-    session = await AgentSession.create(config)
+    # safe to share across sessions). For simplicity we let the child fall
+    # through to the scripted provider's terminal "terminal" text message,
+    # which is enough to assert wiring without a tool call.
+    with temporary_provider(
+        parent_provider,
+        provider_id="fake-composition-subagent",
+        default_model="fake-composition-subagent",
+    ) as provider_id:
+        config = AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=_composition_extensions(
+                cost_limit=1_000_000.0,
+                tool_result_max_chars=1_000,
+                inherit_extensions=["permission"],
+            ),
+            provider=provider_id,
+            resource_loader=InMemoryResourceLoader(),
+        )
+        session = await AgentSession.create(config)
 
-    # Capture child_session_start to find the child instance via the bus
-    # event — it carries the child's session id; we use it to assert
-    # exactly one child was launched.
-    child_starts: list[str] = []
-    session.bus.on(
-        "child_session_start",
-        lambda e: child_starts.append(e.child_session_id),
-    )
+        # Capture child_session_start to find the child instance via the bus
+        # event — it carries the child's session id; we use it to assert
+        # exactly one child was launched.
+        child_starts: list[str] = []
+        session.bus.on(
+            "child_session_start",
+            lambda e: child_starts.append(e.child_session_id),
+        )
 
-    await session.prompt("dispatch please")
+        await session.prompt("dispatch please")
 
-    # Wait for the child to reach 'completed' so its trajectory writes etc.
-    # finish; we re-use the sub_agent's check_tasks tool.
-    check_tool = next(t for t in session.tools if t.name == "check_tasks")
-    import asyncio as _asyncio
+        # Wait for the child to reach 'completed' so its trajectory writes etc.
+        # finish; we re-use the sub_agent's check_tasks tool.
+        check_tool = next(t for t in session.tools if t.name == "check_tasks")
+        import asyncio as _asyncio
 
-    async def _wait_completed() -> dict[str, Any]:
-        while True:
-            payload = await check_tool.execute({})
-            details = payload.details
-            assert isinstance(details, dict)
-            tasks = details["tasks"]
-            if tasks and all(t["status"] != "running" for t in tasks):
-                return details
-            await _asyncio.sleep(0)
+        async def _wait_completed() -> dict[str, Any]:
+            while True:
+                payload = await check_tool.execute({})
+                details = payload.details
+                assert isinstance(details, dict)
+                tasks = details["tasks"]
+                if tasks and all(t["status"] != "running" for t in tasks):
+                    return details
+                await _asyncio.sleep(0)
 
-    summary = await _asyncio.wait_for(_wait_completed(), timeout=2.0)
+        summary = await _asyncio.wait_for(_wait_completed(), timeout=2.0)
 
-    # Exactly one child spawned + lifecycle event observed.
-    assert len(child_starts) == 1
-    assert len(summary["tasks"]) == 1
-    # Child completed without error → inherit list ('permission') applied
-    # cleanly; if dedup or trajectory had been forced into the child without
-    # being on the inherit list, sub_agent would have tried to install them
-    # via available_inherited_extensions — but we listed only 'permission'
-    # so neither could leak.
-    assert summary["tasks"][0]["status"] in {"completed", "error"}
-    # Specifically: with inherit_extensions=['permission'], the only
-    # extension reachable through available_inherited_extensions that
-    # actually loads is permission — dedup/trajectory entries in the
-    # available map are inert.
-    assert summary["tasks"][0]["error"] is None
+        # Exactly one child spawned + lifecycle event observed.
+        assert len(child_starts) == 1
+        assert len(summary["tasks"]) == 1
+        # Child completed without error → inherit list ('permission') applied
+        # cleanly; if dedup or trajectory had been forced into the child without
+        # being on the inherit list, sub_agent would have tried to install them
+        # via available_inherited_extensions — but we listed only 'permission'
+        # so neither could leak.
+        assert summary["tasks"][0]["status"] in {"completed", "error"}
+        # Specifically: with inherit_extensions=['permission'], the only
+        # extension reachable through available_inherited_extensions that
+        # actually loads is permission — dedup/trajectory entries in the
+        # available map are inert.
+        assert summary["tasks"][0]["error"] is None
 
-    await session.shutdown()
+        await session.shutdown()
 
 
 # --- §6 acceptance reachability (smoke-only matrix) ------------------------
@@ -567,33 +545,34 @@ async def test_micro_compact_emits_before_compact_under_pressure(
         _text_msg("compact done", ts=2.0),
     ]
     provider = _ScriptedProvider(scripted)
-    provider_module = _install_provider_module(
-        "tests.integration._fake_composition_provider_compact", provider
-    )
+    with temporary_provider(
+        provider,
+        provider_id="fake-composition-compact",
+        default_model="fake-composition-compact",
+    ) as provider_id:
+        config = AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                (
+                    "agentm.extensions.builtin.micro_compact",
+                    {"threshold_pct": 0.0001, "keep_last": 1},
+                ),
+                ("agentm.extensions.builtin.tool_hypothesis_store", {}),
+                ("agentm.extensions.builtin.trajectory", {"path": "trajectory.jsonl"}),
+            ],
+            provider=provider_id,
+            resource_loader=InMemoryResourceLoader(),
+        )
+        session = await AgentSession.create(config)
 
-    config = AgentSessionConfig(
-        cwd=str(tmp_path),
-        extensions=[
-            (
-                "agentm.extensions.builtin.micro_compact",
-                {"threshold_pct": 0.0001, "keep_last": 1},
-            ),
-            ("agentm.extensions.builtin.tool_hypothesis_store", {}),
-            ("agentm.extensions.builtin.trajectory", {"path": "trajectory.jsonl"}),
-        ],
-        provider=(provider_module, {}),
-        resource_loader=InMemoryResourceLoader(),
-    )
-    session = await AgentSession.create(config)
+        before_compacts: list[Any] = []
+        after_compacts: list[Any] = []
+        session.bus.on("before_compact", lambda e: before_compacts.append(e))
+        session.bus.on("after_compact", lambda e: after_compacts.append(e))
 
-    before_compacts: list[Any] = []
-    after_compacts: list[Any] = []
-    session.bus.on("before_compact", lambda e: before_compacts.append(e))
-    session.bus.on("after_compact", lambda e: after_compacts.append(e))
+        await session.prompt("warm up then finish")
 
-    await session.prompt("warm up then finish")
+        assert before_compacts, "micro_compact never emitted before_compact"
+        assert after_compacts, "micro_compact never emitted after_compact"
 
-    assert before_compacts, "micro_compact never emitted before_compact"
-    assert after_compacts, "micro_compact never emitted after_compact"
-
-    await session.shutdown()
+        await session.shutdown()

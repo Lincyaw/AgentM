@@ -80,7 +80,7 @@ async def test_integration_filters_tool_before_loop_runs(tmp_path) -> None:
             (module_name, {}),
             ("agentm.extensions.builtin.tool_filter", {"deny": ["echo"]}),
         ],
-        provider=("tests.unit.harness_v2._fixtures.fake_provider", {}),
+        provider="fake",
         resource_loader=InMemoryResourceLoader(),
     )
     session = await AgentSession.create(config)

@@ -168,11 +168,6 @@ async def _shutdown_child_with_error(
 
 
 async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    bridge_provider = config.get("_bridge_provider")
-    if isinstance(bridge_provider, ProviderConfig):
-        api.register_provider(bridge_provider.name, bridge_provider)
-        return
-
     inherit_extensions = list(
         config.get("inherit_extensions", _DEFAULT_INHERIT_EXTENSIONS)
     )
@@ -299,7 +294,8 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         child_config = session_config_cls(
             cwd=api.cwd,
             extensions=child_extensions + inherited_extensions,
-            provider=(__name__, {"_bridge_provider": provider}),
+            provider=provider.name,
+            provider_override=provider,
             parent_bus=api.events,
             parent_session_id=parent_session_id,
             purpose=purpose,

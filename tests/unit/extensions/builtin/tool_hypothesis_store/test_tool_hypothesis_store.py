@@ -16,7 +16,7 @@ async def test_tool_hypothesis_store_install_smoke(tmp_path: Path) -> None:
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[("agentm.extensions.builtin.tool_hypothesis_store", {})],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -35,7 +35,7 @@ async def test_tool_hypothesis_store_adds_and_lists_entries(tmp_path: Path) -> N
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[("agentm.extensions.builtin.tool_hypothesis_store", {})],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -67,7 +67,7 @@ async def test_tool_hypothesis_store_returns_error_for_unknown_update(tmp_path: 
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[("agentm.extensions.builtin.tool_hypothesis_store", {})],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )

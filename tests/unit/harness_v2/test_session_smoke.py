@@ -59,7 +59,7 @@ async def test_v2_session_smoke(tmp_path: Path) -> None:
             ("tests.unit.harness_v2._fixtures.echo_ext", {}),
             ("tests.unit.harness_v2._fixtures.permission_demo", {}),
         ],
-        provider=("tests.unit.harness_v2._fixtures.fake_provider", {}),
+        provider="fake",
         # Use an in-memory resource loader to avoid touching real ~/.agentm
         # or filesystem ancestors during the test.
         resource_loader=InMemoryResourceLoader(),
@@ -131,7 +131,7 @@ async def test_v2_session_active_provider_exposed(tmp_path: Path) -> None:
         extensions=[
             ("tests.unit.harness_v2._fixtures.echo_ext", {}),
         ],
-        provider=("tests.unit.harness_v2._fixtures.fake_provider", {}),
+        provider="fake",
         resource_loader=InMemoryResourceLoader(),
     )
 
@@ -167,7 +167,7 @@ async def test_child_session_lifecycle_events_fire_on_parent_bus(
         extensions=[
             ("tests.unit.harness_v2._fixtures.echo_ext", {}),
         ],
-        provider=("tests.unit.harness_v2._fixtures.fake_provider", {}),
+        provider="fake",
         resource_loader=InMemoryResourceLoader(),
         parent_bus=parent_bus,
         parent_session_id="parent-id",
@@ -233,7 +233,7 @@ async def test_prompt_dispatches_slash_command_without_calling_stream(
         extensions=[
             ("tests.unit.harness_v2._fixtures._ping_ext", {}),
         ],
-        provider=("tests.unit.harness_v2._fixtures.fake_provider", {}),
+        provider="fake",
         resource_loader=InMemoryResourceLoader(),
     )
     session = await AgentSession.create(config)
@@ -260,7 +260,7 @@ async def test_prompt_unknown_slash_command_raises(tmp_path: Path) -> None:
     config = AgentSessionConfig(
         cwd=str(tmp_path),
         extensions=[],
-        provider=("tests.unit.harness_v2._fixtures.fake_provider", {}),
+        provider="fake",
         resource_loader=InMemoryResourceLoader(),
     )
     session = await AgentSession.create(config)
@@ -285,7 +285,7 @@ async def test_double_slash_escapes_to_literal_user_message(tmp_path: Path) -> N
         extensions=[
             ("tests.unit.harness_v2._fixtures.echo_ext", {}),
         ],
-        provider=("tests.unit.harness_v2._fixtures.fake_provider", {}),
+        provider="fake",
         resource_loader=InMemoryResourceLoader(),
     )
     session = await AgentSession.create(config)

@@ -19,7 +19,7 @@ async def test_tool_read_and_tool_write_roundtrip(tmp_path: Path) -> None:
                 ("agentm.extensions.builtin.tool_write", {}),
                 ("agentm.extensions.builtin.tool_read", {}),
             ],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -42,7 +42,7 @@ async def test_hypothesis_store_persists_entries_in_active_branch(tmp_path: Path
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[("agentm.extensions.builtin.tool_hypothesis_store", {})],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )

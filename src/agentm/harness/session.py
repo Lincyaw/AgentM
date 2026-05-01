@@ -63,7 +63,6 @@ from agentm.harness.events import (
 )
 from agentm.harness.extension import (
     CommandSpec,
-    ExtensionLoadError,
     ProviderConfig,
     ReadonlySession,
     Renderer,
@@ -94,9 +93,10 @@ class AgentSessionConfig:
 
     cwd: str
     extensions: list[tuple[str, dict[str, Any]]]
-    provider: str | tuple[str, dict[str, Any]]
+    provider: str
     model: str | None = None
     provider_config: dict[str, Any] = field(default_factory=dict)
+    provider_override: ProviderConfig | None = None
     initial_messages: Sequence[AgentMessage] = field(default_factory=list)
     session_manager: SessionManager | None = None
     resource_loader: ResourceLoader | None = None
@@ -278,24 +278,9 @@ class AgentSession:
             if inspect.isawaitable(result):
                 await result
 
-        if isinstance(config.provider, tuple):
-            # Legacy test path: keep dynamic provider modules working while
-            # production call sites move to the provider registry.
-            provider_path, provider_cfg = config.provider
-            result = load_extension(provider_path, api, provider_cfg)
-            if inspect.isawaitable(result):
-                await result
-
-            if not providers:
-                raise ExtensionLoadError(
-                    provider_path,
-                    RuntimeError(
-                        "provider extension did not call api.register_provider"
-                    ),
-                )
-
-            active_name = next(reversed(providers))
-            active_provider = providers[active_name]
+        if config.provider_override is not None:
+            providers[config.provider_override.name] = config.provider_override
+            active_provider = config.provider_override
         else:
             resolved = await ModelResolver().resolve(
                 config.provider,

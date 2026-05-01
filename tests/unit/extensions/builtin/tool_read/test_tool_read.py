@@ -36,7 +36,7 @@ async def test_tool_read_install_smoke(tmp_path: Path) -> None:
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[("agentm.extensions.builtin.tool_read", {})],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -52,7 +52,7 @@ async def test_tool_read_executes_with_line_slicing(tmp_path: Path) -> None:
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[("agentm.extensions.builtin.tool_read", {"file_ops": file_ops})],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -75,7 +75,7 @@ async def test_tool_read_returns_error_result_for_missing_file(tmp_path: Path) -
             extensions=[
                 ("agentm.extensions.builtin.tool_read", {"file_ops": RecordingFileOps({})})
             ],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )

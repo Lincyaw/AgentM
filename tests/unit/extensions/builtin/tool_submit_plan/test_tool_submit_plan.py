@@ -17,7 +17,7 @@ async def test_tool_submit_plan_install_smoke(tmp_path: Path) -> None:
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[("agentm.extensions.builtin.tool_submit_plan", {})],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -32,7 +32,7 @@ async def test_tool_submit_plan_appends_entry_and_emits_event(tmp_path: Path) ->
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[("agentm.extensions.builtin.tool_submit_plan", {})],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -57,7 +57,7 @@ async def test_tool_submit_plan_returns_error_when_session_append_fails(tmp_path
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[("agentm.extensions.builtin.tool_submit_plan", {})],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )

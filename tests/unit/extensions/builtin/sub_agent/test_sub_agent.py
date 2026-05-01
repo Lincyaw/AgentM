@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
-import types
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -21,8 +19,9 @@ from agentm.core.kernel import (
     ToolCallEnd,
     ToolCallStart,
 )
+from agentm.ai.api_registry import register_api_provider
+from agentm.ai.types import ProviderDefinition, ResolvedAuth
 from agentm.harness.events import ChildSessionEndEvent, ChildSessionStartEvent
-from agentm.harness.extension import ProviderConfig
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
 
@@ -94,28 +93,36 @@ def _text_message_end(
     )
 
 
-def _make_provider_module(name: str, provider: SharedProvider) -> str:
-    module = types.ModuleType(name)
-
-    def install(api: Any, config: dict[str, Any]) -> None:
-        _ = config
-        api.register_provider(
-            "shared",
-            ProviderConfig(
-                stream_fn=provider,
-                model=Model(
-                    id="shared",
-                    provider="shared",
-                    context_window=10000,
-                    max_output_tokens=1000,
-                ),
-                name="shared",
-            ),
+def _register_provider(provider: SharedProvider) -> str:
+    def model_factory(model_id: str) -> Model:
+        return Model(
+            id=model_id,
+            provider="shared",
+            context_window=10_000,
+            max_output_tokens=1_000,
         )
 
-    module.install = install  # type: ignore[attr-defined]
-    sys.modules[name] = module
-    return name
+    def stream_factory(
+        model: Model,
+        config: dict[str, object],
+        auth: ResolvedAuth | None,
+    ) -> SharedProvider:
+        del model, config, auth
+        return provider
+
+    register_api_provider(
+        ProviderDefinition(
+            id="shared",
+            display_name="Shared",
+            api="test-shared",
+            default_model="shared",
+            model_factory=model_factory,
+            stream_factory=stream_factory,
+            requires_auth=False,
+        ),
+        source_id="tests.unit.extensions.builtin.sub_agent",
+    )
+    return "shared"
 
 
 def _tool(session: AgentSession, name: str) -> Any:
@@ -195,17 +202,14 @@ async def test_sub_agent_smoke_emits_child_lifecycle_events(
         return [TextDelta(text=f"child:{last_user}"), _text_message_end(f"child:{last_user}")]
 
     provider = SharedProvider(handler)
-    provider_module = _make_provider_module(
-        "tests.unit.extensions.builtin.sub_agent._provider_smoke",
-        provider,
-    )
+    provider_module = _register_provider(provider)
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[
                 ("agentm.extensions.builtin.sub_agent", {"inherit_extensions": []})
             ],
-            provider=(provider_module, {}),
+            provider=provider_module,
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -255,17 +259,14 @@ async def test_inject_instruction_is_consumed_by_child_second_turn(
         return [TextDelta(text=f"second:{last_user}"), _text_message_end(f"second:{last_user}")]
 
     provider = SharedProvider(handler)
-    provider_module = _make_provider_module(
-        "tests.unit.extensions.builtin.sub_agent._provider_inject",
-        provider,
-    )
+    provider_module = _register_provider(provider)
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[
                 ("agentm.extensions.builtin.sub_agent", {"inherit_extensions": []})
             ],
-            provider=(provider_module, {}),
+            provider=provider_module,
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -304,17 +305,14 @@ async def test_abort_task_emits_aborted_child_end_event(
         return [TextDelta(text="aborted"), _text_message_end("aborted", stop_reason="aborted")]
 
     provider = SharedProvider(handler)
-    provider_module = _make_provider_module(
-        "tests.unit.extensions.builtin.sub_agent._provider_abort",
-        provider,
-    )
+    provider_module = _register_provider(provider)
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[
                 ("agentm.extensions.builtin.sub_agent", {"inherit_extensions": []})
             ],
-            provider=(provider_module, {}),
+            provider=provider_module,
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -353,10 +351,7 @@ async def test_dispatch_agent_enforces_max_workers_cap(
         return [TextDelta(text="done"), _text_message_end("done")]
 
     provider = SharedProvider(handler)
-    provider_module = _make_provider_module(
-        "tests.unit.extensions.builtin.sub_agent._provider_cap",
-        provider,
-    )
+    provider_module = _register_provider(provider)
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),
@@ -366,7 +361,7 @@ async def test_dispatch_agent_enforces_max_workers_cap(
                     {"inherit_extensions": [], "max_workers": 4},
                 )
             ],
-            provider=(provider_module, {}),
+            provider=provider_module,
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -418,10 +413,7 @@ async def test_dispatch_agent_reserves_worker_slots_during_child_creation(
         return [TextDelta(text="done"), _text_message_end("done")]
 
     provider = SharedProvider(handler)
-    provider_module = _make_provider_module(
-        "tests.unit.extensions.builtin.sub_agent._provider_reserved_slot",
-        provider,
-    )
+    provider_module = _register_provider(provider)
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),
@@ -431,7 +423,7 @@ async def test_dispatch_agent_reserves_worker_slots_during_child_creation(
                     {"inherit_extensions": [], "max_workers": 1},
                 )
             ],
-            provider=(provider_module, {}),
+            provider=provider_module,
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -470,17 +462,14 @@ async def test_parent_shutdown_aborts_children_within_grace(
         return [TextDelta(text="shutdown"), _text_message_end("shutdown", stop_reason="aborted")]
 
     provider = SharedProvider(handler)
-    provider_module = _make_provider_module(
-        "tests.unit.extensions.builtin.sub_agent._provider_shutdown",
-        provider,
-    )
+    provider_module = _register_provider(provider)
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[
                 ("agentm.extensions.builtin.sub_agent", {"inherit_extensions": []})
             ],
-            provider=(provider_module, {}),
+            provider=provider_module,
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -552,17 +541,14 @@ async def test_concurrent_children_share_parent_stream_without_cross_talk(
         ]
 
     provider = SharedProvider(handler)
-    provider_module = _make_provider_module(
-        "tests.unit.extensions.builtin.sub_agent._provider_crosstalk",
-        provider,
-    )
+    provider_module = _register_provider(provider)
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[
                 ("agentm.extensions.builtin.sub_agent", {"inherit_extensions": []})
             ],
-            provider=(provider_module, {}),
+            provider=provider_module,
             resource_loader=InMemoryResourceLoader(),
         )
     )

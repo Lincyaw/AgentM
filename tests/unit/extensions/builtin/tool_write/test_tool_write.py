@@ -38,7 +38,7 @@ async def test_tool_write_install_smoke(tmp_path: Path) -> None:
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[("agentm.extensions.builtin.tool_write", {})],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -54,7 +54,7 @@ async def test_tool_write_executes_via_file_ops(tmp_path: Path) -> None:
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[("agentm.extensions.builtin.tool_write", {"file_ops": file_ops})],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -72,7 +72,7 @@ async def test_tool_write_returns_error_result_on_failure(tmp_path: Path) -> Non
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[("agentm.extensions.builtin.tool_write", {"file_ops": FailingFileOps()})],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )

@@ -67,6 +67,7 @@ class ProviderDefinition:
     default_model: str
     model_factory: ModelFactory
     stream_factory: StreamFactory
+    requires_auth: bool = True
     env_vars: tuple[str, ...] = ()
     oauth_provider_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)

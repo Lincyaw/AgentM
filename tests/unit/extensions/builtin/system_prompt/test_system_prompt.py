@@ -17,7 +17,7 @@ async def test_system_prompt_prepends_configured_text(tmp_path: Path) -> None:
             extensions=[
                 ("agentm.extensions.builtin.system_prompt", {"prompt": "PREFIX"}),
             ],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -38,7 +38,7 @@ async def test_system_prompt_stacks_in_declaration_order(tmp_path: Path) -> None
                 ("agentm.extensions.builtin.system_prompt", {"prompt": "FIRST"}),
                 ("agentm.extensions.builtin.system_prompt", {"prompt": "SECOND"}),
             ],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )

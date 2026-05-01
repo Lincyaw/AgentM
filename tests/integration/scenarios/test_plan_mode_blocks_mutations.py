@@ -44,14 +44,12 @@ async def test_plan_mode_blocks_mutating_bash_tool(tmp_path: Path) -> None:
                     {"bash_ops": bash_ops},
                 )
             ],
-            provider=(
-                "tests.integration.scenarios._fixtures.scripted_provider",
-                {
-                    "tool_name": "bash",
-                    "arguments": {"cmd": "echo should-not-run"},
-                    "final_text": "blocked",
-                },
-            ),
+            provider="scripted-fake",
+            provider_config={
+                "tool_name": "bash",
+                "arguments": {"cmd": "echo should-not-run"},
+                "final_text": "blocked",
+            },
             resource_loader=InMemoryResourceLoader(),
         )
     )

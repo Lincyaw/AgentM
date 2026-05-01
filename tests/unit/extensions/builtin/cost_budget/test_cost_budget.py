@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import sys
-import types
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -20,6 +18,7 @@ from agentm.harness.extension import ProviderConfig, ReadonlySession, _Extension
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
 from agentm.harness.session_manager import InMemorySessionManager
+from tests.support.provider_registry import temporary_provider
 
 from agentm.extensions.builtin import cost_budget
 
@@ -83,9 +82,6 @@ async def test_handler_emits_cost_budget_exceeded_payload() -> None:
 
 @pytest.mark.asyncio
 async def test_integration_prompt_emits_budget_agent_end(tmp_path) -> None:
-    provider_name = "tests.unit.extensions.builtin.cost_budget._provider"
-    provider_mod = types.ModuleType(provider_name)
-
     class FinalStream:
         def __call__(self, **_: Any) -> AsyncIterator[Any]:
             return self._iter()
@@ -100,47 +96,34 @@ async def test_integration_prompt_emits_budget_agent_end(tmp_path) -> None:
                 )
             )
 
-    def install_provider(api: Any, _config: dict[str, Any]) -> None:
-        api.register_provider(
-            "fake-budget",
-            ProviderConfig(
-                stream_fn=FinalStream(),
-                model=Model(
-                    id="fake-budget",
-                    provider="fake",
-                    context_window=10000,
-                    max_output_tokens=1000,
-                ),
-                name="fake-budget",
-            ),
+    with temporary_provider(
+        FinalStream(),
+        provider_id="fake-budget",
+        model_provider="fake",
+    ) as provider_id:
+        config = AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[("agentm.extensions.builtin.cost_budget", {"limit": 0.0})],
+            provider=provider_id,
+            resource_loader=InMemoryResourceLoader(),
+            session_manager=InMemorySessionManager(),
+        )
+        session = await AgentSession.create(config)
+
+        seen_budget: list[str] = []
+        seen_events: list[CostBudgetExceededEvent] = []
+        session.bus.on(
+            "agent_end",
+            lambda event: seen_budget.append(event.stop_reason),
+        )
+        session.bus.on(
+            "cost_budget_exceeded",
+            lambda event: seen_events.append(event),
         )
 
-    provider_mod.install = install_provider  # type: ignore[attr-defined]
-    sys.modules[provider_name] = provider_mod
+        await session.prompt("hello")
 
-    config = AgentSessionConfig(
-        cwd=str(tmp_path),
-        extensions=[("agentm.extensions.builtin.cost_budget", {"limit": 0.0})],
-        provider=(provider_name, {}),
-        resource_loader=InMemoryResourceLoader(),
-        session_manager=InMemorySessionManager(),
-    )
-    session = await AgentSession.create(config)
+        assert seen_events
+        assert seen_budget[-1] == "budget"
 
-    seen_budget: list[str] = []
-    seen_events: list[CostBudgetExceededEvent] = []
-    session.bus.on(
-        "agent_end",
-        lambda event: seen_budget.append(event.stop_reason),
-    )
-    session.bus.on(
-        "cost_budget_exceeded",
-        lambda event: seen_events.append(event),
-    )
-
-    await session.prompt("hello")
-
-    assert seen_events
-    assert seen_budget[-1] == "budget"
-
-    await session.shutdown()
+        await session.shutdown()

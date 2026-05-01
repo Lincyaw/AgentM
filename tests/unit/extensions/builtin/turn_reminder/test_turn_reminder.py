@@ -32,7 +32,7 @@ async def test_turn_reminder_fires_every_n_turns(
                     {"reminder": "REMEMBER", "every_n_turns": 3},
                 ),
             ],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             initial_messages=initial_messages,
             resource_loader=InMemoryResourceLoader(),
         )

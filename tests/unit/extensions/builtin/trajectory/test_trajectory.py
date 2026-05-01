@@ -31,7 +31,7 @@ async def test_trajectory_persists_one_record_per_fired_event(tmp_path: Path) ->
                     },
                 ),
             ],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )

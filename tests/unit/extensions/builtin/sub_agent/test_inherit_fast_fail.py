@@ -26,7 +26,7 @@ async def test_install_raises_when_inherit_name_not_in_available_map(
                 {"inherit_extensions": ["permission"]},
             )
         ],
-        provider=("tests.unit.harness_v2._fixtures.fake_provider", {}),
+        provider="fake",
         resource_loader=InMemoryResourceLoader(),
     )
 

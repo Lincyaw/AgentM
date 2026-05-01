@@ -13,8 +13,6 @@ diff is the only correct way to harvest "what was added".
 
 from __future__ import annotations
 
-import sys
-import types
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -29,9 +27,9 @@ from agentm.core.kernel import (
     TextContent,
     ToolCallBlock,
 )
-from agentm.harness.extension import ProviderConfig
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
+from tests.support.provider_registry import temporary_provider
 
 
 class _ScriptedProvider:
@@ -67,29 +65,6 @@ class _ScriptedProvider:
 
     async def _iter(self, msg: AssistantMessage) -> AsyncIterator[AssistantStreamEvent]:
         yield MessageEnd(message=msg)
-
-
-def _install_provider_module(name: str, provider: _ScriptedProvider) -> str:
-    module = types.ModuleType(name)
-
-    def install(api: Any, _config: dict[str, Any]) -> None:
-        api.register_provider(
-            "fake-compaction-persist",
-            ProviderConfig(
-                stream_fn=provider,
-                model=Model(
-                    id="fake-compaction-persist",
-                    provider="fake",
-                    context_window=10_000,
-                    max_output_tokens=1_000,
-                ),
-                name="fake-compaction-persist",
-            ),
-        )
-
-    module.install = install  # type: ignore[attr-defined]
-    sys.modules[name] = module
-    return name
 
 
 @pytest.mark.asyncio
@@ -141,36 +116,37 @@ async def test_new_turn_messages_persist_when_micro_compact_fires_mid_turn(
         ),
     ]
     provider = _ScriptedProvider(scripted)
-    provider_module = _install_provider_module(
-        "tests.integration._fake_compaction_persist_provider", provider
-    )
+    with temporary_provider(
+        provider,
+        provider_id="fake-compaction-persist",
+        default_model="fake-compaction-persist",
+    ) as provider_id:
+        config = AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                (
+                    "agentm.extensions.builtin.micro_compact",
+                    {"threshold_pct": 0.0001, "keep_last": 1},
+                ),
+                ("agentm.extensions.builtin.tool_hypothesis_store", {}),
+            ],
+            provider=provider_id,
+            resource_loader=InMemoryResourceLoader(),
+        )
+        session = await AgentSession.create(config)
 
-    config = AgentSessionConfig(
-        cwd=str(tmp_path),
-        extensions=[
-            (
-                "agentm.extensions.builtin.micro_compact",
-                {"threshold_pct": 0.0001, "keep_last": 1},
-            ),
-            ("agentm.extensions.builtin.tool_hypothesis_store", {}),
-        ],
-        provider=(provider_module, {}),
-        resource_loader=InMemoryResourceLoader(),
-    )
-    session = await AgentSession.create(config)
+        await session.prompt("warm up")
+        await session.prompt("now finish")
 
-    await session.prompt("warm up")
-    await session.prompt("now finish")
+        persisted = session.session_manager.get_messages()
+        texts = [
+            block.text
+            for msg in persisted
+            for block in getattr(msg, "content", [])
+            if isinstance(block, TextContent)
+        ]
+        assert "post compact" in texts, (
+            f"final assistant text was lost from SessionManager: {texts!r}"
+        )
 
-    persisted = session.session_manager.get_messages()
-    texts = [
-        block.text
-        for msg in persisted
-        for block in getattr(msg, "content", [])
-        if isinstance(block, TextContent)
-    ]
-    assert "post compact" in texts, (
-        f"final assistant text was lost from SessionManager: {texts!r}"
-    )
-
-    await session.shutdown()
+        await session.shutdown()

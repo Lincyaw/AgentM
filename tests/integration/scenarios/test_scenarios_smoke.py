@@ -58,14 +58,12 @@ async def test_scenarios_smoke(
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=load_scenario(scenario_name),
-            provider=(
-                "tests.integration.scenarios._fixtures.scripted_provider",
-                {
-                    "tool_name": tool_name,
-                    "arguments": scenario_arguments,
-                    "final_text": f"{scenario_name} complete",
-                },
-            ),
+            provider="scripted-fake",
+            provider_config={
+                "tool_name": tool_name,
+                "arguments": scenario_arguments,
+                "final_text": f"{scenario_name} complete",
+            },
             resource_loader=InMemoryResourceLoader(),
         )
     )

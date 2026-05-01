@@ -37,7 +37,7 @@ async def test_tool_trajectory_loader_install_smoke(tmp_path: Path) -> None:
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[("agentm.extensions.builtin.tool_trajectory_loader", {})],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -67,7 +67,7 @@ async def test_tool_trajectory_loader_loads_and_summarizes_jsonl(tmp_path: Path)
             extensions=[
                 ("agentm.extensions.builtin.tool_trajectory_loader", {"file_ops": file_ops})
             ],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -95,7 +95,7 @@ async def test_tool_trajectory_loader_returns_error_for_missing_file(tmp_path: P
             extensions=[
                 ("agentm.extensions.builtin.tool_trajectory_loader", {"file_ops": RecordingFileOps({})})
             ],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )

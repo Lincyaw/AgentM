@@ -60,7 +60,7 @@ async def test_file_mutation_queue_serializes_same_path_mutations(tmp_path: Path
                 (module_name, {}),
                 ("agentm.extensions.builtin.file_mutation_queue", {}),
             ],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )
@@ -87,7 +87,7 @@ async def test_file_mutation_queue_fast_fails_when_loaded_before_tools(tmp_path:
             extensions=[
                 ("agentm.extensions.builtin.file_mutation_queue", {}),
             ],
-            provider=("tests.unit.extensions.builtin._helpers", {}),
+            provider="recording",
             resource_loader=InMemoryResourceLoader(),
         )
     )

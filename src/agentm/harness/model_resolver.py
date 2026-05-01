@@ -51,7 +51,7 @@ class ModelResolver:
             else None
         )
         config_dict = dict(provider_config or {})
-        if auth is None and not config_dict.get("api_key"):
+        if definition.requires_auth and auth is None and not config_dict.get("api_key"):
             raise RuntimeError(format_no_api_key_found_message(provider_id))
         stream_fn = definition.stream_factory(model, config_dict, auth)
         provider_config_obj = ProviderConfig(

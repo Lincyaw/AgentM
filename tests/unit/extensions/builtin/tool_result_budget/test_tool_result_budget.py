@@ -73,7 +73,7 @@ async def test_integration_truncates_large_tool_output(tmp_path) -> None:
             (module_name, {}),
             ("agentm.extensions.builtin.tool_result_budget", {"max_chars": 5}),
         ],
-        provider=("tests.unit.harness_v2._fixtures.fake_provider", {}),
+        provider="fake",
         resource_loader=InMemoryResourceLoader(),
     )
     session = await AgentSession.create(config)
