@@ -34,3 +34,4 @@ eval-trajectories
 # Runtime artifacts
 .agentm/
 trajectory.jsonl
+*_trajectory.jsonl
