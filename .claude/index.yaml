@@ -8,28 +8,42 @@ concepts:
   pluggable_architecture:
     description: "First-principles pluggable architecture inspired by pi-mono (badlogic/pi-mono). Three-layer package boundary (agentm-llm / agentm-core / agentm-harness / agentm-modes). Five pluggability axes as Protocol ports: StreamFn (LLM), Tool+Operations (env), SessionManager (state), ResourceLoader (project context), EventBus+ExtensionAPI (policy). Built-in features become default extensions. Reference index to pi-mono source paths."
     design: "designs/pluggable-architecture.md"
-    related_concepts: [extension_as_scenario, operations_ports, observability, self_modifiable_architecture, evolution_substrate]
+    related_concepts: [extension_as_scenario, operations_ports, observability, self_modifiable_architecture, evolution_substrate, git_backed_versioning, textual_tui]
     plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
     tasks: []
 
   self_modifiable_architecture:
     description: "Boundary refinement of pluggable_architecture: core/extensions split is drawn by 'what an agent can safely self-modify' rather than mechanism vs policy. Constitution layer is uniform on the modifiability axis (none of core/ is agent-modifiable) but split on the visibility axis into core/abi/ (types & Protocols, atom + llm import), core/lib/ (pure-function utilities, atom imports as stdlib), and core/_internal/ (stateful subsystems & default impls — operations_impl, skills, prompt_templates, catalog/, compaction engine — atoms reach exclusively via ExtensionAPI services: api.get_operations / api.skills / api.prompt_templates / api.catalog / api.compaction; direct import forbidden by validator). Autonomy layer holds atoms + scenarios + skills + prompts (tier-1 free / tier-2 reviewable). Discovery layer = fs scan + reload + assert_active. Adds versioned ExtensionAPI (api_version with grace window), transactional reload (validator → snapshot → install → rollback on failure), and a new ExtensionAPI surface (reload_atom, freeze_current, list_atoms, is_constitution_path). Tier-2 atoms (permission, cost_budget, tool_filter, llm_compaction, cc_agents) require propose_change approval to reload. Compaction prompts are the canonical mechanism→policy split: prompt strings moved out of core into the llm_compaction atom, engine in core/_internal/compaction/ takes prompt as a required parameter. Establishes that change is safe and atomic; evolution-substrate.md establishes that change is evidence-driven."
     design: "designs/self-modifiable-architecture.md"
-    related_concepts: [pluggable_architecture, extension_as_scenario, single_file_extension_contract, observability, evolution_substrate]
+    related_concepts: [pluggable_architecture, extension_as_scenario, single_file_extension_contract, observability, evolution_substrate, git_backed_versioning]
     plans: []
     tasks: []
 
   evolution_substrate:
     description: "Constitution-owned data layer that binds every (atom, scenario) version to all observation data generated under it, so rollback / composition / optimization become evidence-driven, not error-driven. Adds .agentm/catalog/{atoms,scenarios}/<hash>/ with frozen source + manifest.yaml + metrics.jsonl + runs/ + decisions.jsonl. Active-set fingerprint in every observability session.start header binds traces to the exact loaded version set. Indexer (constitution-layer, idempotent, rebuildable from raw observability) aggregates per-(atom_hash, scenario, task_type) statistics. tool_catalog atom (tier-1 read API + propose_change as the only mediated write) exposes list_versions / get_manifest / compare / find_best / runs_for / decisions_for / propose_change to the agent. Hard problems addressed: statistical power (CI + inconclusive enforcement), confounding (experiment-mode lock), Goodhart (universal guard metrics + regressed flag), replayability (LLM response cache, Phase 3), catalog corruption (constitution-layer write-protect on .agentm/catalog/**). Phased: MVP = fingerprint + freeze + browse; Phase 2 = compare + decisions; Phase 3 = replay cache + experiment lock."
     design: "designs/evolution-substrate.md"
-    related_concepts: [self_modifiable_architecture, observability, pluggable_architecture, extension_as_scenario]
+    related_concepts: [self_modifiable_architecture, observability, pluggable_architecture, extension_as_scenario, git_backed_versioning]
+    plans: []
+    tasks: []
+
+  git_backed_versioning:
+    description: "Replaces bespoke per-atom version store with git as the version layer. Catalog keeps only what git does not provide — metrics.jsonl + runs/<trace_id> attribution. Source content, lineage (parent commits), authorship, timestamp, and rationale (commit message) all flow through git plumbing. New harness service ResourceWriter (constitution layer) is the single chokepoint for all managed writes: classifies path as constitution / managed / unmanaged from core-manifest.yaml's managed.globs section, rejects constitution writes, git-commits managed writes before mutation, passes through unmanaged writes uncommitted. tool_edit / tool_write / reload_atom retrofit to write through ResourceWriter; the freeze→tempfile→os.replace→rollback dance in atom_reloader collapses into writer.write + git restore on failure. Browse API becomes git-log/git-cat-file wrappers; version IDs become full git SHAs replacing compute_atom_hash content hashes. Rollback is rollback_resource(path, target_sha, rationale) routed through the same writer. On absent .git/ the writer auto-inits .agentm/repo/ as a shadow worktree; advisory mode if git binary missing. Skills, prompts, scenarios, and .claude/ docs all gain versioning for free. ~300 LoC deleted from freeze.py + _layout.py; parent_hash dead-code problem disappears (git provides it); direct-edit bypass closed."
+    design: "designs/git-backed-versioning.md"
+    related_concepts: [self_modifiable_architecture, evolution_substrate, pluggable_architecture]
+    plans: []
+    tasks: []
+
+  textual_tui:
+    description: "Replaces the minimal rich.live interactive mode (modes/interactive.py, ~150 lines) with a Textual-based TUI mirroring Claude Code's interaction style: scrollable ConversationLog of TurnContainers (ThinkingBlock + AssistantTextBlock + Collapsible ToolCallBlock), multi-line PromptInput TextArea with slash command palette, persistent StatusLine showing model/turn/tokens/cost/phase. Maps each public bus event to one widget mutation (stream_delta → text/tool block; tool_call/tool_result → fill + status glyph; llm_request_start/end → status phase + token totals; child_session_start/end → nested SubagentBlock; extension_install error → toast). 20 Hz batched stream flush via set_interval; no per-token repaint. Key bindings: Esc soft-cancels in-flight prompt (never exits), Ctrl+C interrupts then quits, Ctrl+L clear visual log (not session), Ctrl+R command palette, Shift+Enter newline. Slash commands open a CommandPalette modal listing ExtensionAPI-registered commands plus TUI-built-ins (/quit, /clear, /help, /copy-last); unknown slashes pass through as raw text. Theming via CSS file textual_app.tcss with dark/light themes. Migration: keep modes/interactive.py as 'simple' fallback; new mode at modes/textual_app.py selected via CLI --tui textual; default flips after stabilization. Mode-layer contract from pluggable-architecture.md §5 unchanged: run(config) owns session lifecycle, subscribes to public bus channels only. Permission-prompt UX deferred (no permission_request event yet); gracefully degrades to red tool-result errors."
+    design: "designs/textual-tui.md"
+    related_concepts: [pluggable_architecture, observability]
     plans: []
     tasks: []
 
   observability:
     description: "Per-session OTel-flavored JSONL diagnostic stream complementary to trajectory. Single principle: every signal goes through the bus. EventBus exposes EventBusObserver + emit_sync (sync handlers only, async skipped). New bus events: ApiRegisterEvent / ApiSendUserMessageEvent (harness, emit_sync from ExtensionAPI), LlmRequestStartEvent / LlmRequestEndEvent (kernel, around stream_fn drain in AgentLoop with try/except for error path), ExtensionInstallEvent (harness, around load_extension). observability builtin is a pure subscriber + Observer; only API-level monkey-patch is api.on for handler→extension attribution and mutation diffing. Records: session.start/ready/end, extension.install, api.register, api.send_user_message, llm.request.start/end, event.dispatch, handler.invoke, handler.mutated, turn.summary. Writes to <cwd>/.agentm/observability/<trace_id>.jsonl, flushed per record. evolution_substrate extends session.start with active-set fingerprint binding the trace to exact (core, scenario, atom_versions) tuple."
     design: "designs/observability.md"
-    related_concepts: [pluggable_architecture, extension_as_scenario, evolution_substrate, self_modifiable_architecture]
+    related_concepts: [pluggable_architecture, extension_as_scenario, evolution_substrate, self_modifiable_architecture, textual_tui]
     plans: []
     tasks: []
 
