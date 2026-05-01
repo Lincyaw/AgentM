@@ -34,11 +34,8 @@ MANIFEST = ExtensionManifest(
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     threshold_pct = float(config.get("threshold_pct", 0.85))
     keep_last = int(config.get("keep_last", 8))
-    last_compaction_id: str | None = None
 
     async def before_send_to_llm(event: BeforeSendToLlmEvent) -> None:
-        nonlocal last_compaction_id
-
         model = api.model
         if model is None or model.context_window <= 0:
             return
@@ -54,6 +51,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
         original_messages = list(before.messages)
         compacted_messages, summary_text = _compact_messages(original_messages, keep_last)
+        branch = api.session.get_branch()
+        message_entries = [entry for entry in branch if entry.type == "message"]
+        first_kept_entry_id = (
+            message_entries[-keep_last].id
+            if len(message_entries) >= keep_last
+            else (message_entries[0].id if message_entries else None)
+        )
         details = {
             "reason": "auto_overflow",
             "threshold_pct": threshold_pct,
@@ -61,12 +65,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "estimated_tokens_before": estimated_tokens,
             "estimated_tokens_after": _estimate_messages(compacted_messages),
             "discarded_message_count": max(0, len(original_messages) - len(compacted_messages)),
-            "parent_id": last_compaction_id,
             "summary": summary_text,
         }
-        entry_id = api.session.append_entry("compaction", details, parent_id=last_compaction_id)
+        if first_kept_entry_id is not None:
+            details["first_kept_entry_id"] = first_kept_entry_id
+        entry_id = api.session.append_entry("compaction", details)
         details["entry_id"] = entry_id
-        last_compaction_id = entry_id
 
         messages[:] = compacted_messages
         await api.events.emit(

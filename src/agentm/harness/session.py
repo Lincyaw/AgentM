@@ -77,7 +77,6 @@ from agentm.harness.session_manager import (
     InMemorySessionManager,
     SessionEntry,
     SessionManager,
-    message_entry,
 )
 
 
@@ -128,6 +127,15 @@ class _SessionView:
 
     def get_messages(self) -> list[AgentMessage]:
         return self._sm.get_messages()
+
+    def get_branch(self) -> list[SessionEntry]:
+        return self._sm.get_active_branch()
+
+    def get_leaf_id(self) -> str | None:
+        return self._sm.get_leaf_id()
+
+    def get_entry(self, entry_id: str) -> SessionEntry | None:
+        return self._sm.get_entry(entry_id)
 
     def append_entry(
         self,
@@ -227,7 +235,7 @@ class AgentSession:
         session_manager: SessionManager = (
             config.session_manager
             if config.session_manager is not None
-            else InMemorySessionManager()
+            else InMemorySessionManager(cwd=config.cwd)
         )
         resource_loader: ResourceLoader = (
             config.resource_loader
@@ -303,15 +311,8 @@ class AgentSession:
         )
 
         # Seed initial messages (if any) into the session manager.
-        parent_id: str | None = (
-            session_manager.get_active_branch()[-1].id
-            if session_manager.get_active_branch()
-            else None
-        )
         for msg in config.initial_messages:
-            entry = message_entry(msg, parent_id=parent_id)
-            session_manager.append(entry)
-            parent_id = entry.id
+            session_manager.append_message(msg)
 
         session_id = uuid.uuid4().hex
         instance = cls(
@@ -434,14 +435,15 @@ class AgentSession:
         # short-circuit with a stop_reason='budget' agent_end and persist
         # nothing. The flag stays latched until reset by an extension.
         if self._budget_exceeded:
+            messages = self._session_manager.build_session_context().messages
             await self._bus.emit(
                 "agent_end",
                 AgentEndEvent(
-                    messages=self._session_manager.get_messages(),
+                    messages=messages,
                     stop_reason="budget",
                 ),
             )
-            return self._session_manager.get_messages()
+            return messages
 
         # 2. Drain ``send_user_message`` queue (FIFO) into user-message
         # entries in the session. This is how ``sub_agent.inject_instruction``
@@ -455,7 +457,7 @@ class AgentSession:
         entry = self._append_message(user_msg)
 
         # 4. Gather active-branch messages and run before_agent_start.
-        messages = self._session_manager.get_messages()
+        messages = self._session_manager.build_session_context().messages
         system_prompt = self._build_system_prompt()
         before_returns = await self._bus.emit(
             "before_agent_start",
@@ -487,13 +489,15 @@ class AgentSession:
         # 6. Append every new assistant / tool_result message — those whose
         # identities did not exist in the pre-run snapshot, in the order
         # they appear in the returned list.
-        active_branch = self._session_manager.get_active_branch()
-        cursor: str | None = active_branch[-1].id if active_branch else entry.id
+        cursor: str | None = self._session_manager.get_leaf_id() or entry.id
         for msg in final_messages:
             if id(msg) in pre_run_ids:
                 continue
-            child = message_entry(msg, parent_id=cursor)
-            self._session_manager.append(child)
+            if cursor is None:
+                self._session_manager.reset_leaf()
+            else:
+                self._session_manager.branch(cursor)
+            child = self._session_manager.append_message(msg)
             cursor = child.id
 
         if self._budget_exceeded and not budget_before_run:
@@ -566,11 +570,7 @@ class AgentSession:
         return UserMessage(role="user", content=content, timestamp=_now())
 
     def _append_message(self, msg: AgentMessage) -> Any:
-        active_branch = self._session_manager.get_active_branch()
-        parent_id: str | None = active_branch[-1].id if active_branch else None
-        entry = message_entry(msg, parent_id=parent_id)
-        self._session_manager.append(entry)
-        return entry
+        return self._session_manager.append_message(msg)
 
     # --- Lifecycle --------------------------------------------------------
 
@@ -592,9 +592,7 @@ class AgentSession:
                 ChildSessionEndEvent(
                     child_session_id=self._session_id,
                     parent_session_id=self._parent_session_id or "unknown",
-                    final_message_count=len(
-                        self._session_manager.get_messages()
-                    ),
+                    final_message_count=len(self._session_manager.get_messages()),
                     error=None,
                 ),
             )
