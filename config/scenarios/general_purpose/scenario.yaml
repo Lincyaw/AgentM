@@ -2,6 +2,7 @@ system:
   type: "general_purpose"
 
 orchestrator:
+  provider: "openai"
   model: "gpt-5.1"
   temperature: 0.7
   orchestrator_mode: "node"
@@ -30,6 +31,7 @@ orchestrator:
 
 agents:
   worker:
+    provider: "openai"
     model: "gpt-5.1-mini"
     temperature: 0.3
     task_type_prompts:

@@ -2,6 +2,7 @@ system:
   type: "trajectory_judger"
 
 orchestrator:
+  provider: "openai"
   model: "gpt-5.1-mini"
   temperature: 0.3
   orchestrator_mode: "node"
@@ -20,6 +21,7 @@ orchestrator:
 
 agents:
   worker:
+    provider: "openai"
     model: "gpt-5.1-mini"
     temperature: 0.3
     prompt: "prompts/worker.md"

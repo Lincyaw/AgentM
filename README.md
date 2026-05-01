@@ -8,9 +8,13 @@ A generic multi-agent orchestration SDK built on LangGraph. Supports custom stat
 # Install dependencies
 uv sync
 
-# Set required environment variables
-export AGENTM_API_KEY="your-api-key"
-export AGENTM_API_BASE_URL="https://your-api-endpoint"  # optional, OpenAI-compatible
+# Authenticate with a registry-backed provider
+uv run agentm auth providers
+uv run agentm auth login anthropic
+
+# Or use provider-specific environment variables instead of OAuth
+export ANTHROPIC_API_KEY="your-anthropic-key"
+# export OPENAI_API_KEY="your-openai-key"
 ```
 
 ## CLI Commands
@@ -161,8 +165,11 @@ ok, fail = await benchmark.rollout(agent)
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `AGENTM_API_KEY` | Yes | LLM API key |
-| `AGENTM_API_BASE_URL` | No | Custom API base URL (OpenAI-compatible) |
+| `ANTHROPIC_API_KEY` | No | Anthropic API key fallback when OAuth is not configured |
+| `ANTHROPIC_OAUTH_TOKEN` | No | Explicit Anthropic OAuth access token override |
+| `OPENAI_API_KEY` | No | OpenAI API key for the `openai` registry provider |
+| `OPENAI_BASE_URL` | No | Custom OpenAI-compatible base URL for the `openai` provider |
+| `AGENTM_AUTH_PATH` | No | Override persistent auth-storage path (default: `~/.agentm/auth.json`) |
 | `AGENTM_ORCHESTRATOR_MODEL` | No | Override orchestrator model name (default: from config) |
 | `AGENTM_WORKER_MODEL` | No | Override worker model name (default: from config) |
 | `AGENTM_LOG_LEVEL` | No | Log level for agentm loggers (default: `INFO`) |
@@ -172,8 +179,8 @@ ok, fail = await benchmark.rollout(agent)
 
 AgentM uses layered config files:
 
-- **`config/system.yaml`** — model registry, storage backend, debug settings
-- **`config/scenarios/<name>/scenario.yaml`** — scenario-specific orchestrator/agent config
+- **`config/system.yaml`** — system-wide storage/debug defaults plus legacy examples
+- **`config/scenarios/<name>/scenario.yaml`** — scenario-specific orchestrator/agent config, including provider registry keys
 - **`config/batch/<name>.yaml`** — batch analysis config (data source, grouping, goals)
 
 Available scenarios:

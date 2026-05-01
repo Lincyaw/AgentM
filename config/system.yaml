@@ -1,57 +1,63 @@
 models:
   gpt-5.1:
-    api_key: "${AGENTM_API_KEY}"
-    base_url: "${AGENTM_API_BASE_URL:}"
+    provider: "openai"
+    model: "gpt-5.1"
+    config:
+      base_url: "${OPENAI_BASE_URL:}"
     rate_limit:
       requests_per_second: 20
       max_bucket_size: 50
   gpt-5.1-mini:
-    api_key: "${AGENTM_API_KEY}"
-    base_url: "${AGENTM_API_BASE_URL:}"
+    provider: "openai"
+    model: "gpt-5.1-mini"
+    config:
+      base_url: "${OPENAI_BASE_URL:}"
     rate_limit:
       requests_per_second: 20
       max_bucket_size: 50
   MiniMax-M2.5:
-    api_key: "${AGENTM_API_KEY}"
-    base_url: "${AGENTM_API_BASE_URL:}"
+    provider: "minimax"
+    model: "MiniMax-M2.5"
     rate_limit:
       requests_per_second: 20
       max_bucket_size: 50
   GLM-5:
-    api_key: "${AGENTM_API_KEY}"
-    base_url: "${AGENTM_API_BASE_URL:}"
+    provider: "zai"
+    model: "GLM-5"
     rate_limit:
       requests_per_second: 20
       max_bucket_size: 50
   "${AGENTM_CUSTOM_ENDPOINT_MODEL:ep-custom}":
-    api_key: "${AGENTM_API_KEY}"
-    base_url: "${AGENTM_API_BASE_URL:}"
+    provider: "openai"
+    model: "${AGENTM_CUSTOM_ENDPOINT_MODEL:ep-custom}"
+    config:
+      base_url: "${OPENAI_BASE_URL:}"
     rate_limit:
       requests_per_second: 20
       max_bucket_size: 50
   claude-sonnet-4-6:
-    api_key: "${AGENTM_API_KEY}"
-    base_url: "${AGENTM_API_BASE_URL:}"
     provider: "anthropic"
+    model: "claude-sonnet-4-6"
     rate_limit:
       requests_per_second: 20
       max_bucket_size: 50
   deepseek-v3.2:
-    api_key: "${AGENTM_API_KEY}"
-    base_url: "${AGENTM_API_BASE_URL:}"
+    provider: "deepseek"
+    model: "deepseek-v3.2"
     rate_limit:
       requests_per_second: 20
       max_bucket_size: 50
   claude-haiku-4-5-20251001:
-    api_key: "${AGENTM_API_KEY}"
-    base_url: "${AGENTM_API_BASE_URL:}"
     provider: "anthropic"
+    model: "claude-haiku-4-5-20251001"
     rate_limit:
       requests_per_second: 20
       max_bucket_size: 50
   Doubao-Seed-2.0-pro:
-    api_key: "${AGENTM_API_KEY}"
-    base_url: "${AGENTM_API_BASE_URL:}"
+    provider: "openai"
+    model: "Doubao-Seed-2.0-pro"
+    config:
+      base_url: "${OPENAI_BASE_URL:}"
     rate_limit:
       requests_per_second: 20
       max_bucket_size: 50 
