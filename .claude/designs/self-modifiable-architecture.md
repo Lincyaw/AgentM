@@ -247,9 +247,13 @@ Key properties:
 
 Writes the current source + manifest to `.agentm/catalog/atoms/<name>/<content_hash>/` (constitution-owned path). See sister doc §3 for catalog schema. Idempotent: if hash already exists, no rewrite.
 
+> **Implementation note**: as of [git-backed-versioning.md](git-backed-versioning.md), this snapshot mechanism is provided by git plumbing through the harness `ResourceWriter` service. The catalog directory still exists for `metrics.jsonl` and `runs/`; source/manifest content moves into the git object store. The transactional reload flow simplifies to `writer.write(...) → on install failure: git restore + git reset --hard <pre_sha>`.
+
 ### 5.3 What `restore_from_snapshot` does
 
 Atomically replaces the file at `extensions/builtin/<name>.py` with the snapshot bytes. Then re-runs `load_extension(name)` against the restored source — in the rare case this also fails, the system enters degraded mode (atom marked unavailable, error reported, session continues without it).
+
+> Per [git-backed-versioning.md](git-backed-versioning.md), this is `git restore --source=<pre_sha> -- <path>` followed by `git reset --hard <pre_sha>` on the auto-commit produced by the writer.
 
 ---
 
