@@ -21,6 +21,11 @@ from agentm.harness.resource_loader import (
     InMemoryResourceLoader,
     ResourceLoader,
 )
+from agentm.harness.resource_writer import (
+    GitBackedResourceWriter,
+    ResourceWriter,
+    WriteResult,
+)
 from agentm.harness.session_cwd import MissingSessionCwdError
 from agentm.harness.session import AgentSession, AgentSessionConfig
 from agentm.harness.session_manager import (
@@ -56,6 +61,7 @@ __all__ = [
     "ProviderConfig",
     "ReadonlySession",
     "ResourceLoader",
+    "ResourceWriter",
     "SessionContext",
     "SessionEntry",
     "SessionHeader",
@@ -70,5 +76,7 @@ __all__ = [
     "create_agent_session_from_services",
     "create_agent_session_services",
     "events",
+    "GitBackedResourceWriter",
     "load_extension",
+    "WriteResult",
 ]

@@ -45,6 +45,7 @@ _ALLOWED_PREFIXES: tuple[str, ...] = (
     "agentm.harness.session_manager",
     "agentm.harness.session_config",
     "agentm.harness.resource_loader",
+    "agentm.harness.resource_writer",
     "agentm.extensions",
 )
 
