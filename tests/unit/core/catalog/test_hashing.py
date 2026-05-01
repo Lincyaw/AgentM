@@ -70,8 +70,11 @@ def test_active_set_fingerprint_optional_core_and_scenario() -> None:
 def test_public_surface_all_matches_contract() -> None:
     # PR #42 froze the catalog-storage surface; PR #43 (tool-catalog-atom)
     # additively extended it with the read-API helpers
-    # (CatalogAtom/list_versions/get_manifest_at/runs_for). Both are part of
-    # the agreed Wave-2 contract.
+    # (CatalogAtom/list_versions/get_manifest_at/runs_for). PR #46
+    # (transactional-reload) additively extended it with
+    # source_path_for_hash so the harness reload pipeline can locate the
+    # frozen source for a known content hash. All are part of the agreed
+    # Wave-2 contract.
     assert catalog.__all__ == [
         "CatalogAtom",
         "compute_active_set_fingerprint",
@@ -82,6 +85,7 @@ def test_public_surface_all_matches_contract() -> None:
         "list_atoms",
         "list_versions",
         "runs_for",
+        "source_path_for_hash",
     ]
 
 
