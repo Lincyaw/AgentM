@@ -45,6 +45,13 @@ from agentm.harness.events import CostBudgetExceededEvent
 from agentm.harness.extension import ProviderConfig
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
+from agentm.harness.session_runtime import AgentSessionRuntime
+from agentm.harness.session_services import (
+    CreateAgentSessionFromServicesOptions,
+    CreateAgentSessionServicesOptions,
+    create_agent_session_from_services,
+    create_agent_session_services,
+)
 
 
 # --- Fake provider ---------------------------------------------------------
@@ -611,3 +618,104 @@ async def test_micro_compact_emits_before_compact_under_pressure(
     assert after_compacts, "micro_compact never emitted after_compact"
 
     await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_composition_runtime_fork_branches_cleanly(
+    tmp_path: Path,
+) -> None:
+    """A composed session can fork before a user turn and continue on a new branch.
+
+    Bug this prevents: branch creation around a fully-loaded extension stack
+    accidentally reuses the old active branch head, so the forked session
+    inherits unrelated hypothesis/trajectory state instead of starting from
+    the selected prefix.
+    """
+
+    scripted = [
+        _tool_call_msg(
+            call_id="b1",
+            name="add_hypothesis",
+            arguments={"id": "B1", "description": "seed"},
+            ts=1.0,
+        ),
+        _text_msg("seed complete", ts=2.0),
+        _text_msg("fork branch reply", ts=3.0),
+    ]
+    provider = _ScriptedProvider(scripted)
+    provider_module = _install_provider_module(
+        "tests.integration._fake_composition_provider_branch", provider
+    )
+
+    resource_loader = InMemoryResourceLoader()
+    services = await create_agent_session_services(
+        CreateAgentSessionServicesOptions(
+            cwd=str(tmp_path),
+            resource_loader=resource_loader,
+        )
+    )
+    session = await create_agent_session_from_services(
+        CreateAgentSessionFromServicesOptions(
+            services=services,
+            extensions=_composition_extensions(
+                cost_limit=50.0,
+                tool_result_max_chars=4_000,
+                inherit_extensions=["permission", "trajectory"],
+            ),
+            provider=(provider_module, {}),
+        )
+    )
+    await session.prompt("seed branch")
+
+    first_user_entry = next(
+        entry
+        for entry in session.session_manager.get_active_branch()
+        if entry.type == "message" and getattr(entry.payload, "role", None) == "user"
+    )
+
+    async def create_runtime(
+        cwd: str,
+        current_services: Any,
+        session_manager: Any,
+        _reason: str,
+    ) -> Any:
+        new_services = await create_agent_session_services(
+            CreateAgentSessionServicesOptions(
+                cwd=cwd,
+                resource_loader=current_services.resource_loader,
+            )
+        )
+        new_session = await create_agent_session_from_services(
+            CreateAgentSessionFromServicesOptions(
+                services=new_services,
+                extensions=_composition_extensions(
+                    cost_limit=50.0,
+                    tool_result_max_chars=4_000,
+                    inherit_extensions=["permission", "trajectory"],
+                ),
+                provider=(provider_module, {}),
+                session_manager=session_manager,
+            )
+        )
+        return types.SimpleNamespace(
+            session=new_session,
+            services=new_services,
+            diagnostics=[],
+        )
+
+    runtime = AgentSessionRuntime(session, services, create_runtime)
+    fork_result = await runtime.fork(first_user_entry.id, position="before")
+
+    assert fork_result["selected_text"] == "seed branch"
+    assert runtime.session.session_manager.get_messages() == []
+
+    final = await runtime.session.prompt("forked follow-up")
+    texts = [
+        block.text
+        for msg in final
+        for block in getattr(msg, "content", [])
+        if isinstance(block, TextContent)
+    ]
+    assert "fork branch reply" in texts
+
+    await runtime.session.shutdown()

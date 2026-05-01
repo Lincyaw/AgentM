@@ -6,18 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from agentm.core.kernel import text_message
+from agentm.core.kernel import AssistantMessage, TextContent, text_message
 
 from agentm.harness.session_manager import (
     InMemorySessionManager,
     JsonlSessionManager,
+    SessionManager,
     message_entry,
 )
 
 
 def test_inmemory_append_and_get_messages_in_order() -> None:
-    """Appended messages appear in the active branch in insertion order."""
-
     sm = InMemorySessionManager()
     msg_a = text_message("a", timestamp=0.0)
     msg_b = text_message("b", timestamp=0.0)
@@ -33,9 +32,6 @@ def test_inmemory_append_and_get_messages_in_order() -> None:
 
 
 def test_inmemory_fork_diverges_from_parent() -> None:
-    """Forking at an entry produces a manager whose appends create a sibling
-    branch; the parent manager's view is unaffected."""
-
     sm = InMemorySessionManager()
     root = message_entry(text_message("root"), parent_id=None)
     sm.append(root)
@@ -46,25 +42,19 @@ def test_inmemory_fork_diverges_from_parent() -> None:
     child_b = message_entry(text_message("b"), parent_id=root.id)
     fork.append(child_b)
 
-    # Parent still on its branch (root → a).
     assert [e.id for e in sm.get_active_branch()] == [root.id, child_a.id]
-    # Fork is on the new branch (root → b).
     assert [e.id for e in fork.get_active_branch()] == [root.id, child_b.id]
 
 
 def test_inmemory_navigate_to_changes_active_branch() -> None:
-    """Navigating to a different leaf updates ``get_active_branch`` output."""
-
     sm = InMemorySessionManager()
     root = message_entry(text_message("root"), parent_id=None)
     sm.append(root)
     a = message_entry(text_message("a"), parent_id=root.id)
     sm.append(a)
-    # Manually create a sibling entry by setting parent_id to root.
     b = message_entry(text_message("b"), parent_id=root.id)
     sm.append(b)
 
-    # After appending b, b is the active leaf.
     assert sm.get_active_branch()[-1].id == b.id
 
     sm.navigate_to(a.id)
@@ -80,58 +70,94 @@ def test_inmemory_find_returns_entry_or_none() -> None:
     assert sm.find("does-not-exist") is None
 
 
+def test_build_session_context_uses_latest_compaction_summary() -> None:
+    sm = InMemorySessionManager()
+    first = sm.append_message(text_message("first", timestamp=1.0))
+    sm.append_message(text_message("second", timestamp=2.0))
+    sm.append_message(text_message("third", timestamp=3.0))
+    sm.append(
+        message_entry(
+            AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text="summary should disappear")],
+                timestamp=4.0,
+                stop_reason="end_turn",
+            ),
+            parent_id=sm.get_leaf_id(),
+        )
+    )
+    sm.append_custom_entry(
+        "compaction",
+        {
+            "summary": "Compaction summary of 2 earlier messages",
+            "first_kept_entry_id": first.id,
+        },
+    )
+    sm.append_message(text_message("after", timestamp=5.0))
+
+    texts = [
+        block.text
+        for msg in sm.get_messages()
+        for block in getattr(msg, "content", [])
+        if isinstance(block, TextContent)
+    ]
+    assert texts[0] == "Compaction summary of 2 earlier messages"
+    assert texts[-1] == "after"
+
+
 def test_jsonl_durable_round_trip(tmp_path: Path) -> None:
-    """Entries written by one manager are readable by a fresh instance.
-
-    Payload reconstruction is best-effort (becomes a dict) — assert metadata
-    equality only, per the module-docstring limitation note.
-    """
-
     path = tmp_path / "session.jsonl"
 
     sm1 = JsonlSessionManager(path)
-    e1 = message_entry(text_message("hello"), parent_id=None)
-    sm1.append(e1)
-    e2 = message_entry(text_message("world"), parent_id=e1.id)
-    sm1.append(e2)
+    e1 = sm1.append_message(text_message("hello"))
+    e2 = sm1.append_message(text_message("world"))
 
-    # File is on disk and contains both entries.
     assert path.exists()
     lines = path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 2
+    assert len(lines) == 3
 
-    # Reopen.
     sm2 = JsonlSessionManager(path)
     branch = sm2.get_active_branch()
     assert [e.id for e in branch] == [e1.id, e2.id]
     assert [e.type for e in branch] == ["message", "message"]
     assert [e.parent_id for e in branch] == [None, e1.id]
-    # Payload is dict-shaped after reload (Phase 1 limitation).
-    for e in branch:
-        assert isinstance(e.payload, dict)
+    assert [msg.role for msg in sm2.get_messages()] == ["user", "user"]
 
 
 def test_jsonl_appends_are_durable_after_reopen(tmp_path: Path) -> None:
-    """Appending after reopening preserves earlier entries."""
-
     path = tmp_path / "s.jsonl"
     sm1 = JsonlSessionManager(path)
-    e1 = message_entry(text_message("first"), parent_id=None)
-    sm1.append(e1)
+    e1 = sm1.append_message(text_message("first"))
 
     sm2 = JsonlSessionManager(path)
-    e2 = message_entry(text_message("second"), parent_id=e1.id)
-    sm2.append(e2)
+    e2 = sm2.append_message(text_message("second"))
 
-    # Third instance sees both.
     sm3 = JsonlSessionManager(path)
     assert [e.id for e in sm3.get_active_branch()] == [e1.id, e2.id]
 
 
-def test_inmemory_rejects_dangling_parent_id() -> None:
-    """Appending an entry whose parent_id doesn't exist surfaces as an
-    explicit ValueError rather than silently producing an orphan."""
+def test_create_branched_session_linearizes_selected_path(tmp_path: Path) -> None:
+    manager = SessionManager.create(str(tmp_path), tmp_path / "sessions")
+    root = manager.append_message(text_message("root"))
+    left = manager.append_message(text_message("left"))
+    manager.branch(root.id)
+    right = manager.append_message(text_message("right"))
 
+    fork_path = manager.create_branched_session(right.id)
+    assert fork_path is not None
+
+    forked = SessionManager.open(fork_path)
+    texts = [
+        block.text
+        for msg in forked.get_messages()
+        for block in getattr(msg, "content", [])
+        if isinstance(block, TextContent)
+    ]
+    assert texts == ["root", "right"]
+    assert left.id != right.id
+
+
+def test_inmemory_rejects_dangling_parent_id() -> None:
     sm = InMemorySessionManager()
     orphan = message_entry(text_message("orphan"), parent_id="nonexistent")
     with pytest.raises(ValueError):
