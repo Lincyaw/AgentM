@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 
@@ -168,11 +168,13 @@ async def _run_interactive(
     tool_allowlist: list[str] | None,
     model: str,
     cwd: str,
+    tui: Literal["simple", "textual"],
 ) -> int:
     """Build a session config and hand off to the TUI runner."""
 
     from agentm.harness import AgentSessionConfig
-    from agentm.modes.interactive import run as run_tui
+    from agentm.modes.interactive import run as run_simple_tui
+    from agentm.modes.textual_app import run as run_textual_tui
 
     provider_config: dict[str, str] = {"model": model}
     base_url = os.environ.get("ANTHROPIC_BASE_URL")
@@ -210,7 +212,9 @@ async def _run_interactive(
         tool_allowlist=tool_allowlist,
         bus=bus,
     )
-    return await run_tui(config)
+    if tui == "textual":
+        return await run_textual_tui(config)
+    return await run_simple_tui(config)
 
 
 def run_cmd(
@@ -288,6 +292,14 @@ def run_cmd(
             help="Open a multi-turn TUI instead of running a single prompt.",
         ),
     ] = False,
+    tui: Annotated[
+        Literal["simple", "textual"],
+        typer.Option(
+            "--tui",
+            help="Interactive frontend: 'simple' (rich) or 'textual'.",
+            case_sensitive=False,
+        ),
+    ] = "simple",
 ) -> None:
     """Send a single prompt and print the agent's final text."""
 
@@ -301,6 +313,7 @@ def run_cmd(
                 tool_allowlist=_parse_tools(tools),
                 model=model,
                 cwd=cwd,
+                tui=tui,
             )
         )
         raise typer.Exit(code=rc)
