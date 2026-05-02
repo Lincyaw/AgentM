@@ -8,7 +8,10 @@ from typing import Any
 from agentm.core._internal.catalog import _layout
 from agentm.core._internal.catalog.browse import (
     CatalogAtom,
+    UnparseableManifestError,
+    current_version,
     get_manifest_at,
+    get_source_at,
     list_versions,
     runs_for,
 )
@@ -52,10 +55,13 @@ def list_atoms(*, root: Path | None = None) -> list[dict[str, Any]]:
 
 __all__ = [
     "CatalogAtom",
+    "UnparseableManifestError",
     "compute_active_set_fingerprint",
     "compute_atom_hash",
+    "current_version",
     "freeze_current",
     "get_manifest_at",
+    "get_source_at",
     "is_constitution_path",
     "list_atoms",
     "list_versions",
