@@ -42,6 +42,10 @@ from agentm.harness.services import (
     default_prompt_templates_service,
     default_skills_service,
 )
+from agentm.harness.resource_writer import (
+    GitBackedResourceWriter,
+    ResourceWriter,
+)
 
 
 # --- Type aliases ----------------------------------------------------------
@@ -295,6 +299,7 @@ class ExtensionAPI(Protocol):
     def freeze_current(self, name: str) -> str: ...
     def list_atoms(self) -> list[AtomInfo]: ...
     def is_constitution_path(self, path: str) -> bool: ...
+    def get_resource_writer(self) -> ResourceWriter: ...
 
     # --- Read-only context --------------------------------------------------
     @property
@@ -363,6 +368,7 @@ class _ExtensionAPIImpl:
         catalog_service: CatalogService | None = None,
         compaction_service: CompactionService | None = None,
         child_session_factory: ChildSessionFactory | None = None,
+        resource_writer: ResourceWriter | None = None,
     ) -> None:
         self._bus = bus
         self._cwd = cwd
@@ -388,6 +394,11 @@ class _ExtensionAPIImpl:
         )
         self._catalog = catalog_service or default_catalog_service()
         self._compaction = compaction_service or default_compaction_service()
+        self._resource_writer = resource_writer or GitBackedResourceWriter(
+            cwd=cwd,
+            session_id=session_id,
+            bus=bus,
+        )
 
     def mark_stale(self) -> None:
         self._stale = True
@@ -506,6 +517,10 @@ class _ExtensionAPIImpl:
     def is_constitution_path(self, path: str) -> bool:
         self._assert_active()
         return self._gateway.is_constitution_path(path)
+
+    def get_resource_writer(self) -> ResourceWriter:
+        self._assert_active()
+        return self._resource_writer
 
     # --- Read-only context -------------------------------------------------
 

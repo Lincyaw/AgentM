@@ -33,6 +33,7 @@ class CoreManifest:
     extension_api_current: int
     extension_api_grace: int
     tier_2_atoms: tuple[str, ...]
+    managed_globs: tuple[str, ...] = ()
 
 
 def load_core_manifest() -> CoreManifest:
@@ -47,7 +48,12 @@ def reload_manifest() -> CoreManifest:
 def is_constitution_path(path: str) -> bool:
     cm = load_core_manifest()
     normalized = _normalize_to_repo_relative(path)
-    return any(_glob_matches(pattern, normalized) for pattern in cm.constitution_paths)
+    return any(matches_manifest_glob(pattern, normalized) for pattern in cm.constitution_paths)
+
+
+def matches_manifest_glob(pattern: str, path: str) -> bool:
+    normalized = _normalize_to_repo_relative(path)
+    return _glob_matches(pattern, normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +71,8 @@ def _load_cached(manifest_path: Path) -> CoreManifest:
     constitution = data.get("constitution") or {}
     paths_raw = constitution.get("paths") or ()
     constitution_paths = tuple(str(p) for p in paths_raw)
+    managed = data.get("managed") or {}
+    managed_globs = tuple(str(p) for p in (managed.get("globs") or ()))
 
     ext_api = data.get("extension_api") or {}
     current = int(ext_api.get("current", 1))
@@ -77,6 +85,7 @@ def _load_cached(manifest_path: Path) -> CoreManifest:
     return CoreManifest(
         version=version,
         constitution_paths=constitution_paths,
+        managed_globs=managed_globs,
         extension_api_current=current,
         extension_api_grace=grace,
         tier_2_atoms=tier_2,
@@ -138,5 +147,6 @@ __all__ = [
     "CoreManifest",
     "is_constitution_path",
     "load_core_manifest",
+    "matches_manifest_glob",
     "reload_manifest",
 ]

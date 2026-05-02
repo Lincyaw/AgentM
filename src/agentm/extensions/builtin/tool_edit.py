@@ -30,6 +30,7 @@ _PARAMETERS = {
         "old_string": {"type": "string"},
         "new_string": {"type": "string"},
         "replace_all": {"type": "boolean", "default": False},
+        "rationale": {"type": "string", "default": "agent edit via tool_edit"},
     },
     "required": ["path", "old_string", "new_string"],
     "additionalProperties": False,
@@ -38,17 +39,17 @@ _PARAMETERS = {
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     file_ops = _coerce_file_ops(api, config.get("file_ops"))
+    writer = api.get_resource_writer()
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
         path = str(args["path"])
         old_string = str(args["old_string"])
         new_string = str(args["new_string"])
         replace_all = bool(args.get("replace_all", False))
+        rationale = str(args.get("rationale", "agent edit via tool_edit"))
 
         if not old_string:
             return _error("old_string must not be empty")
-        if api.is_constitution_path(path):
-            return _error(f"Refusing to edit constitution path {path!r}")
 
         try:
             original = (await file_ops.read_file(path)).decode(
@@ -67,7 +68,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 if replace_all
                 else original.replace(old_string, new_string, 1)
             )
-            await file_ops.write_file(path, updated.encode("utf-8"))
+            result = await writer.replace(
+                path,
+                original.encode("utf-8"),
+                updated.encode("utf-8"),
+                rationale=rationale,
+            )
+            if result.error is not None:
+                return _error(result.error)
             return _ok(f"Updated {path!r}")
         except Exception as exc:
             return _error(f"Failed to edit {path!r}: {exc}")

@@ -77,6 +77,7 @@ from agentm.harness.resource_loader import (
     DefaultResourceLoader,
     ResourceLoader,
 )
+from agentm.harness.resource_writer import GitBackedResourceWriter
 from agentm.harness.session_manager import (
     InMemorySessionManager,
     SessionEntry,
@@ -292,6 +293,11 @@ class AgentSession:
 
         session_id = uuid.uuid4().hex
         session_view: ReadonlySession = _SessionView(session_manager)
+        resource_writer = GitBackedResourceWriter(
+            cwd=config.cwd,
+            session_id=session_id,
+            bus=bus,
+        )
 
         def _refresh_active_provider() -> None:
             active_provider_box["value"] = (
@@ -352,6 +358,7 @@ class AgentSession:
                 gateway=reloader,
                 owner_name=owner,
                 child_session_factory=_spawn_child_session,
+                resource_writer=resource_writer,
             )
             reloader.wrap_api_on(api, owner)
             apis[owner] = api
