@@ -1,6 +1,8 @@
 name: rca
 description: Root-cause analysis over parquet observability data via DuckDB SQL.
 extensions:
+  # Orchestrator-side: registers SQL tools the lead investigator can drive
+  # directly (and that worker personas inherit).
   - module: agentm_rca.tools.duckdb_sql
     config:
       # data_dir can be overridden via the AGENTM_RCA_DATA_DIR env var.
@@ -12,38 +14,29 @@ extensions:
   - module: agentm.extensions.builtin.trajectory
     config:
       path: rca_trajectory.jsonl
-  - module: agentm.extensions.builtin.system_prompt
+
+  # Multi-agent wiring. ``orchestrator_setup`` (scenario-local) loads the
+  # orchestrator system prompt and answers ``resolve_subagent`` for the
+  # personas under ``agents/``. ``sub_agent`` registers ``dispatch_agent`` /
+  # ``check_tasks`` / ``inject_instruction`` / ``abort_task`` and, when
+  # ``subagent_type`` is supplied, asks orchestrator_setup to inject the
+  # persona body + tool allowlist into the child session.
+  - local: orchestrator_setup
+  - module: agentm.extensions.builtin.sub_agent
     config:
-      prompt: |
-        You are doing root-cause analysis on a microservice incident.
-
-        The ONLY way to access the data is through DuckDB SQL via the
-        `query_sql` tool. Other filesystem / shell tools are intentionally
-        unavailable. Use `list_tables` first to discover what views exist
-        and what columns each has.
-
-        Dataset shape (parquet files, registered as same-named DuckDB views):
-          - normal_*    — baseline window before the fault
-          - abnormal_*  — window during the fault
-          - *_metrics, *_metrics_histogram, *_metrics_sum — gauge / sum / histogram telemetry
-          - *_traces — distributed traces (trace_id, span_id, parent_span_id,
-                       span_name, service_name, duration in nanoseconds,
-                       attr.http.response.status_code, etc.)
-          - *_logs — application logs (service_name, level, message, trace_id, ...)
-          - The `time` column is `TIMESTAMP WITH TIME ZONE`.
-
-        Investigation rules:
-          - Compare normal vs abnormal periods to localise the fault.
-          - Walk service / span topology via parent_span_id, attr.source/destination.
-          - Track working hypotheses with `update_hypothesis` /
-            `remove_hypothesis`. Each hypothesis must cite the SQL evidence
-            that supports or refutes it.
-          - You are done when one hypothesis is `confirmed` with concrete
-            SQL evidence and you can name (a) the faulty service / span and
-            (b) the symptom signature (latency / error / log pattern).
-
-        Output the final answer as a short report:
-          - Root-cause service / component
-          - Triggering signal (which metric / span / log first deviated)
-          - Supporting evidence (cite the SQL queries you ran)
-          - Suggested remediation
+      max_workers: 4
+      inherit_extensions:
+        - duckdb_sql
+        - trajectory
+      available_inherited_extensions:
+        duckdb_sql:
+          module: agentm_rca.tools.duckdb_sql
+          config:
+            exclude:
+              - conclusion.parquet
+            row_limit: 200
+            token_limit: 5000
+        trajectory:
+          module: agentm.extensions.builtin.trajectory
+          config:
+            path: rca_worker_trajectory.jsonl
