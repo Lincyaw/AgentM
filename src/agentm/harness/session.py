@@ -347,6 +347,7 @@ class AgentSession:
             spec = AgentSessionConfig(**{**child_config.__dict__})
             spec.parent_bus = bus
             spec.parent_session_id = session_id
+            spec.root_session_id = config.root_session_id or session_id
             return await cls.create(spec)
 
         def _make_api(owner: str) -> _ExtensionAPIImpl:
@@ -555,6 +556,9 @@ class AgentSession:
                     module_path for module_path, _ext_cfg in to_load
                 ),
                 model=active_provider.model,
+                root_session_id=config.root_session_id or session_id,
+                task_id=config.task_id,
+                persona=config.persona,
             ),
         )
 

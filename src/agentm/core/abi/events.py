@@ -64,6 +64,19 @@ class AgentEndEvent(Event):
     stop_reason: str
 
 
+@dataclass(slots=True)
+class BeforeAgentEndEvent(Event):
+    """Fires after a text-only assistant turn but before ``agent_end``.
+
+    Handlers may return ``{\"cancel\": True, \"append\": list[AgentMessage]}``
+    to keep the loop alive and inject new user-visible context for the next
+    turn.
+    """
+
+    messages: list[AgentMessage]
+    stop_reason: str
+
+
 @dataclass(slots=True, frozen=True)
 class TurnStartEvent(Event):
     """Emitted at the start of each loop turn (one LLM call)."""
@@ -277,6 +290,13 @@ class EventBus:
     @overload
     def on(
         self,
+        channel: Literal["before_agent_end"],
+        handler: Callable[[BeforeAgentEndEvent], Any]
+        | Callable[[BeforeAgentEndEvent], Awaitable[Any]],
+    ) -> Callable[[], None]: ...
+    @overload
+    def on(
+        self,
         channel: Literal["turn_start"],
         handler: Callable[[TurnStartEvent], Any]
         | Callable[[TurnStartEvent], Awaitable[Any]],
@@ -352,6 +372,10 @@ class EventBus:
     @overload
     async def emit(
         self, channel: Literal["agent_end"], event: AgentEndEvent
+    ) -> list[Any]: ...
+    @overload
+    async def emit(
+        self, channel: Literal["before_agent_end"], event: BeforeAgentEndEvent
     ) -> list[Any]: ...
     @overload
     async def emit(
@@ -496,6 +520,7 @@ class EventBus:
 __all__ = [
     "AgentEndEvent",
     "AgentStartEvent",
+    "BeforeAgentEndEvent",
     "BeforeSendToLlmEvent",
     "ContextEvent",
     "DiagnosticEvent",

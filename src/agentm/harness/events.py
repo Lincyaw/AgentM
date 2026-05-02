@@ -149,6 +149,9 @@ class SessionReadyEvent:
     command_names: tuple[str, ...]
     extension_module_paths: tuple[str, ...]
     model: Model | None
+    root_session_id: str
+    task_id: str | None = None
+    persona: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
