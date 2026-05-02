@@ -17,13 +17,15 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-# Repo root: this file lives at src/agentm/core/_internal/catalog/manifest.py,
-# so five ``parents`` hops get us to the repo root.
-_REPO_ROOT: Path = Path(__file__).resolve().parents[5]
+# Default repo root: this file lives at
+# src/agentm/core/_internal/catalog/manifest.py, so five ``parents`` hops get
+# us to the checkout root. Tests may monkeypatch ``_MANIFEST_PATH`` to repoint
+# the boundary to a temp repo; path normalization follows that root.
+_DEFAULT_REPO_ROOT: Path = Path(__file__).resolve().parents[5]
 
-# Test seam — tests monkeypatch this attribute then call
-# ``reload_manifest()`` to repoint the loader at a temp file.
-_MANIFEST_PATH: Path = _REPO_ROOT / "core-manifest.yaml"
+# Test seam — tests monkeypatch this attribute then call ``reload_manifest()``
+# to repoint the loader at a temp file.
+_MANIFEST_PATH: Path = _DEFAULT_REPO_ROOT / "core-manifest.yaml"
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,9 +96,10 @@ def _load_cached(manifest_path: Path) -> CoreManifest:
 
 def _normalize_to_repo_relative(path: str) -> str:
     candidate = Path(path)
+    repo_root = _MANIFEST_PATH.resolve().parent
     if candidate.is_absolute():
         try:
-            rel = candidate.resolve().relative_to(_REPO_ROOT)
+            rel = candidate.resolve().relative_to(repo_root)
         except ValueError:
             rel = candidate
         return PurePosixPath(rel).as_posix()

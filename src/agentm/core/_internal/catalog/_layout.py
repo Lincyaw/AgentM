@@ -5,6 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 CATALOG_ROOT = Path(".agentm/catalog")
+LEGACY_PREFIX = ".legacy-"
+METRICS_FILENAME = "metrics.jsonl"
+RUNS_DIRNAME = "runs"
 
 
 def catalog_root(*, root: Path | None = None) -> Path:
@@ -21,53 +24,28 @@ def atoms_dir(
 
 
 def atom_version_dir(
-    name: str, content_hash: str, *, root: Path | None = None
+    name: str, version_key: str, *, root: Path | None = None
 ) -> Path:
-    return atoms_dir(name, root=root) / content_hash
+    return atoms_dir(name, root=root) / version_key
 
 
 def atom_runs_dir(
-    name: str, content_hash: str, *, root: Path | None = None
+    name: str, version_key: str, *, root: Path | None = None
 ) -> Path:
-    return atom_version_dir(name, content_hash, root=root) / "runs"
+    return atom_version_dir(name, version_key, root=root) / RUNS_DIRNAME
 
 
 def atom_metrics_path(
-    name: str, content_hash: str, *, root: Path | None = None
+    name: str, version_key: str, *, root: Path | None = None
 ) -> Path:
-    return atom_version_dir(name, content_hash, root=root) / "metrics.jsonl"
+    return atom_version_dir(name, version_key, root=root) / METRICS_FILENAME
 
 
-def atom_manifest_path(
-    name: str, content_hash: str, *, root: Path | None = None
-) -> Path:
-    return atom_version_dir(name, content_hash, root=root) / "manifest.yaml"
-
-
-def atom_source_path(
-    name: str, content_hash: str, *, root: Path | None = None
-) -> Path:
-    return atom_version_dir(name, content_hash, root=root) / "source.py"
-
-
-def atom_current_symlink(name: str, *, root: Path | None = None) -> Path:
-    return atoms_dir(name, root=root) / "current"
-
-
-
-def core_dir(content_hash: str, *, root: Path | None = None) -> Path:
-    return catalog_root(root=root) / "core" / content_hash
-
-
-# --- Indexer helpers (PR #44) -------------------------------------------------
-#
+# --- Indexer helpers -----------------------------------------------------
 # The indexer treats its ``root`` argument as the catalog root itself
 # (``<cwd>/.agentm/catalog``) rather than the cwd. The helpers below provide
-# that view onto the same on-disk tree so freeze.py / indexer.py can share the
+# that view onto the same on-disk tree so other catalog modules can share the
 # same ``_layout`` module while keeping their respective conventions.
-
-METRICS_FILENAME = "metrics.jsonl"
-RUNS_DIRNAME = "runs"
 
 
 def resolve_root(root: Path) -> Path:
@@ -86,8 +64,7 @@ def atoms_root(root: Path) -> Path:
 
 def _from_catalog_root(catalog_root_path: Path) -> Path:
     """Translate a catalog-root path back into the cwd-style ``root`` accepted
-    by the freeze.py-flavoured helpers (``catalog_root(root=cwd)``)."""
+    by the freeze/indexer-flavoured helpers (``catalog_root(root=cwd)``)."""
 
     catalog_root_path = Path(catalog_root_path)
-    # CATALOG_ROOT is ``.agentm/catalog`` (2 components); strip them off.
     return catalog_root_path.parent.parent

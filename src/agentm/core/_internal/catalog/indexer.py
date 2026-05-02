@@ -8,7 +8,6 @@ layers and is not derivable from raw observability.
 from __future__ import annotations
 
 import argparse
-import inspect
 import json
 import logging
 import os
@@ -18,11 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from agentm.core._internal.catalog import _layout
-from agentm.core._internal.catalog.freeze import freeze_current
-from agentm.extensions import ExtensionManifest
-from agentm.extensions.discover import discover_builtin
 
 logger = logging.getLogger(__name__)
+_LEGACY_FINGERPRINT_WARNED = False
 
 
 @dataclass(slots=True)
@@ -51,10 +48,6 @@ class _EpochState:
 
 def _now_iso8601_utc() -> str:
     return datetime.now(tz=UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _default_catalog_root(trace_path: Path) -> Path:
-    return trace_path.resolve().parent.parent / "catalog"
 
 
 def _parse_atom_versions(payload: Any) -> dict[str, str] | None:
@@ -119,17 +112,6 @@ def _symlink_run(trace_path: Path, dest: Path) -> None:
     os.symlink(trace_path.resolve(), dest)
 
 
-def _load_module_source(name: str) -> tuple[str, ExtensionManifest] | None:
-    entry = discover_builtin().get(name)
-    if entry is None:
-        return None
-    source_path = inspect.getsourcefile(entry.module)
-    if source_path is None:
-        return None
-    source = Path(source_path).read_text(encoding="utf-8")
-    return source, entry.manifest
-
-
 def _ensure_version_dir(
     atom_name: str,
     expected_hash: str,
@@ -137,25 +119,34 @@ def _ensure_version_dir(
     cwd_root: Path,
     warnings: list[str],
 ) -> str | None:
-    version_dir = _layout.atom_version_dir(
-        atom_name, expected_hash, root=cwd_root
-    )
-    if version_dir.exists():
-        return expected_hash
-
-    frozen = _load_module_source(atom_name)
-    if frozen is None:
-        warnings.append(f"atom {atom_name!r} missing from builtin catalog; skipping")
-        return None
-    source, manifest = frozen
-    frozen_hash = freeze_current(
-        atom_name, source, manifest, root=cwd_root
-    )
-    if frozen_hash != expected_hash:
+    if not _is_git_sha(expected_hash):
+        _warn_legacy_fingerprint(atom_name, expected_hash)
         warnings.append(
-            f"atom {atom_name!r} drifted after fingerprint: expected {expected_hash}, got {frozen_hash}"
+            f"atom {atom_name!r} uses pre-migration fingerprint {expected_hash}; skipping"
         )
-    return frozen_hash
+        return None
+
+    _layout.atom_runs_dir(atom_name, expected_hash, root=cwd_root).mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    return expected_hash
+
+
+def _warn_legacy_fingerprint(atom_name: str, expected_hash: str) -> None:
+    global _LEGACY_FINGERPRINT_WARNED
+    if _LEGACY_FINGERPRINT_WARNED:
+        return
+    logger.warning(
+        "agentm catalog indexer skipping pre-migration fingerprint %s@%s",
+        atom_name,
+        expected_hash,
+    )
+    _LEGACY_FINGERPRINT_WARNED = True
+
+
+def _is_git_sha(value: str) -> bool:
+    return len(value) == 40 and all(ch in "0123456789abcdef" for ch in value.lower())
 
 
 def _build_metrics_row(
@@ -165,7 +156,6 @@ def _build_metrics_row(
     completion_rate: float,
     tokens_per_task: int | None,
     mid_session_reload: bool,
-    warning: str | None,
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "indexed_at": _now_iso8601_utc(),
@@ -181,8 +171,6 @@ def _build_metrics_row(
     }
     if mid_session_reload:
         row["mid_session_reload"] = True
-    if warning is not None:
-        row["attributes"] = {"warning": warning}
     return row
 
 
@@ -191,7 +179,7 @@ def index_trace(trace_path: Path, *, root: Path | None = None) -> IndexerResult:
 
     ``root`` is interpreted as the **cwd** (parent of ``.agentm/``); pass the
     same value the harness uses for ``AgentSessionConfig.cwd``. ``None``
-    derives the cwd from the trace path layout (``<cwd>/.agentm/observability/<id>.jsonl``).
+    derives the cwd from the trace path layout.
     """
 
     trace_path = trace_path.resolve()
@@ -199,8 +187,7 @@ def index_trace(trace_path: Path, *, root: Path | None = None) -> IndexerResult:
         cwd_root = trace_path.parent.parent.parent
     else:
         cwd_root = Path(root).expanduser().resolve()
-    catalog_root = _layout.catalog_root(root=cwd_root)
-    catalog_root.mkdir(parents=True, exist_ok=True)
+    _layout.catalog_root(root=cwd_root).mkdir(parents=True, exist_ok=True)
     result = IndexerResult()
     trace_id = trace_path.stem
     state = _EpochState()
@@ -257,16 +244,12 @@ def index_trace(trace_path: Path, *, root: Path | None = None) -> IndexerResult:
         )
         if resolved_hash is None:
             continue
-        warning = None
-        if resolved_hash != expected_hash:
-            warning = "source_drifted_post_fingerprint"
         row = _build_metrics_row(
             trace_id=trace_id,
             scenario=state.scenario,
             completion_rate=completion_rate,
             tokens_per_task=tokens_per_task,
             mid_session_reload=state.saw_reload,
-            warning=warning,
         )
         metrics_path = _layout.atom_metrics_path(atom_name, resolved_hash, root=cwd_root)
         _append_jsonl_row(metrics_path, row)

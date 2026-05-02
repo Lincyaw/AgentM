@@ -43,12 +43,9 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
 
-from agentm.core._internal.catalog import (
-    compute_atom_hash,
-    freeze_current as freeze_atom_snapshot,
-    is_constitution_path,
-    source_path_for_hash,
-)
+from agentm.core._internal.catalog import _layout
+from agentm.core._internal.catalog.hashing import compute_atom_hash
+from agentm.core._internal.catalog.manifest import is_constitution_path
 from agentm.core.abi import EventBus, Tool
 from agentm.extensions import ExtensionManifest
 from agentm.extensions import discover as discover_mod
@@ -63,6 +60,7 @@ from agentm.harness.extension import (
     _ExtensionAPIImpl,
     load_extension,
 )
+from agentm.harness.resource_writer import GitBackedResourceWriter, ResourceWriter
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +104,7 @@ class AtomReloader:
         self,
         *,
         cwd: str,
+        resource_writer: ResourceWriter,
         bus: EventBus,
         tools: list[Tool],
         commands: dict[str, CommandSpec],
@@ -115,6 +114,7 @@ class AtomReloader:
         on_provider_changed: Callable[[], None],
     ) -> None:
         self._cwd = cwd
+        self._resource_writer = resource_writer
         self._bus = bus
         self._tools = tools
         self._commands = commands
@@ -341,6 +341,72 @@ class AtomReloader:
         if error:
             raise error[0]
 
+    @staticmethod
+    def _run_coro_sync(coro: Any) -> Any:
+        """Await a coroutine from sync code, even if an event loop is active."""
+
+        result: list[Any] = []
+        error: list[BaseException] = []
+
+        def _runner() -> None:
+            try:
+                result.append(asyncio.run(coro))
+            except BaseException as exc:  # pragma: no cover - exercised via caller
+                error.append(exc)
+
+        thread = threading.Thread(
+            target=_runner,
+            name="agentm-reload-async-bridge",
+        )
+        thread.start()
+        thread.join()
+        if error:
+            raise error[0]
+        return result[0]
+
+    def _activate_atom_install(self, atom: LoadedAtom) -> None:
+        if self._api_factory is None:
+            raise RuntimeError(
+                "AtomReloader.set_api_factory must be called before reload_atom"
+            )
+        previous_api = self._apis.get(atom.module_path)
+        if previous_api is not None:
+            previous_api.mark_stale()
+        self._remove_handlers(atom.module_path)
+        self._remove_registrations(atom.module_path)
+        sys.modules.pop(atom.module_path, None)
+        self._clear_module_bytecode(atom.file_path)
+        importlib.invalidate_caches()
+        self._finish_install_sync(
+            atom.module_path,
+            self._api_factory(atom.module_path),
+            dict(atom.config),
+        )
+        self.record_loaded_atom(
+            atom.module_path,
+            atom.config,
+            is_provider=atom.is_provider,
+        )
+        self._apis[atom.module_path]._owner_name = atom.module_path
+        discover_mod.reset_cache()
+
+    def _restore_git_path(self, atom: LoadedAtom, pre_sha: str) -> None:
+        if not isinstance(self._resource_writer, GitBackedResourceWriter):
+            raise RuntimeError("git rollback requires GitBackedResourceWriter")
+
+        relative = atom.file_path.resolve().relative_to(Path(self._cwd).resolve())
+        rel_posix = relative.as_posix()
+        self._resource_writer._run_git_sync(  # type: ignore[attr-defined]
+            ("restore", "--source", pre_sha, "--", rel_posix)
+        )
+        self._resource_writer._run_git_sync(  # type: ignore[attr-defined]
+            ("reset", "--hard", pre_sha)
+        )
+
+    def _advisory_hash(self, source: str) -> str:
+        # Legacy fallback for git-less/advisory environments only.
+        return compute_atom_hash(source)
+
     # --- _SessionGateway protocol -----------------------------------------
 
     def reload_atom(
@@ -351,7 +417,6 @@ class AtomReloader:
         agent_initiated: bool = True,
         rationale: str | None = None,
     ) -> ReloadResult:
-        del rationale
         if self._api_factory is None:
             raise RuntimeError(
                 "AtomReloader.set_api_factory must be called before reload_atom"
@@ -405,49 +470,34 @@ class AtomReloader:
                 new_hash=None,
                 error=str(exc),
             )
-
-        cwd_root = Path(self._cwd)
-        old_hash = freeze_atom_snapshot(
-            name,
-            current_source,
-            atom.manifest or _default_manifest(name),
-            root=cwd_root,
+        write_result = self._run_coro_sync(
+            self._resource_writer.write(
+                str(atom.file_path),
+                new_source.encode("utf-8"),
+                rationale=rationale or f"reload {name}",
+                author="agent" if agent_initiated else "human",
+            )
         )
-        snapshot_path = source_path_for_hash(name, old_hash, root=cwd_root)
-        snapshot_source = snapshot_path.read_text(encoding="utf-8")
-        new_hash = compute_atom_hash(new_source)
+        if write_result.error is not None:
+            return ReloadResult(
+                ok=False,
+                name=name,
+                old_hash=write_result.commit_sha_before,
+                new_hash=write_result.commit_sha_after,
+                error=write_result.error,
+            )
 
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=f".reload-{name}-",
-            suffix=atom.file_path.suffix,
-            dir=str(atom.file_path.parent),
-        )
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(new_source)
-
-        previous_api = self._apis.get(atom.module_path)
-        if previous_api is not None:
-            previous_api.mark_stale()
-        self._remove_handlers(atom.module_path)
-        self._remove_registrations(atom.module_path)
-        sys.modules.pop(atom.module_path, None)
+        advisory_mode = (
+            write_result.path_class == "managed" and not write_result.committed
+        ) or write_result.path_class == "unmanaged"
+        old_hash = write_result.commit_sha_before
+        new_hash = write_result.commit_sha_after
+        if advisory_mode:
+            old_hash = self._advisory_hash(current_source)
+            new_hash = self._advisory_hash(new_source)
 
         try:
-            os.replace(tmp_name, atom.file_path)
-            self._clear_module_bytecode(atom.file_path)
-            importlib.invalidate_caches()
-            self._finish_install_sync(
-                atom.module_path,
-                self._api_factory(atom.module_path),
-                dict(atom.config),
-            )
-            self.record_loaded_atom(
-                atom.module_path,
-                atom.config,
-                is_provider=atom.is_provider,
-            )
-            self._apis[atom.module_path]._owner_name = atom.module_path
-            discover_mod.reset_cache()
+            self._activate_atom_install(atom)
             self._bus.emit_sync(
                 "extension_reload",
                 ExtensionReloadEvent(
@@ -466,29 +516,20 @@ class AtomReloader:
             )
         except Exception as exc:  # noqa: BLE001
             try:
-                rollback_fd, rollback_tmp_name = tempfile.mkstemp(
-                    prefix=f".rollback-{name}-",
-                    suffix=atom.file_path.suffix,
-                    dir=str(atom.file_path.parent),
-                )
-                with os.fdopen(
-                    rollback_fd, "w", encoding="utf-8"
-                ) as rollback_handle:
-                    rollback_handle.write(snapshot_source)
-                os.replace(rollback_tmp_name, atom.file_path)
-                sys.modules.pop(atom.module_path, None)
-                self._clear_module_bytecode(atom.file_path)
-                importlib.invalidate_caches()
-                self._finish_install_sync(
-                    atom.module_path,
-                    self._api_factory(atom.module_path),
-                    dict(atom.config),
-                )
-                self.record_loaded_atom(
-                    atom.module_path,
-                    atom.config,
-                    is_provider=atom.is_provider,
-                )
+                if advisory_mode:
+                    rollback_fd, rollback_tmp_name = tempfile.mkstemp(
+                        prefix=f".rollback-{name}-",
+                        suffix=atom.file_path.suffix,
+                        dir=str(atom.file_path.parent),
+                    )
+                    with os.fdopen(
+                        rollback_fd, "w", encoding="utf-8"
+                    ) as rollback_handle:
+                        rollback_handle.write(current_source)
+                    os.replace(rollback_tmp_name, atom.file_path)
+                elif write_result.commit_sha_before is not None:
+                    self._restore_git_path(atom, write_result.commit_sha_before)
+                self._activate_atom_install(atom)
             except Exception as rollback_exc:  # noqa: BLE001
                 self._loaded_by_module.pop(atom.module_path, None)
                 self._loaded_by_name.pop(atom.name, None)
@@ -524,23 +565,37 @@ class AtomReloader:
     def freeze_current(self, name: str) -> str:
         atom = self._loaded_by_name[name]
         source = atom.file_path.read_text(encoding="utf-8")
-        return freeze_atom_snapshot(
-            name,
-            source,
-            atom.manifest or _default_manifest(name),
-            root=Path(self._cwd),
+        result = self._run_coro_sync(
+            self._resource_writer.write(
+                str(atom.file_path),
+                source.encode("utf-8"),
+                rationale="freeze_current snapshot",
+                author="indexer",
+            )
         )
+        if result.error is not None:
+            raise RuntimeError(result.error)
+        version_key = (
+            result.commit_sha_after
+            or result.commit_sha_before
+            or self._advisory_hash(source)
+        )
+        _layout.atom_runs_dir(name, version_key, root=Path(self._cwd)).mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        return version_key
 
     def list_atoms(self) -> list[AtomInfo]:
         out: list[AtomInfo] = []
         for atom in sorted(
             self._loaded_by_name.values(), key=lambda item: item.name
         ):
-            current_hash = (
-                compute_atom_hash(atom.file_path.read_text(encoding="utf-8"))
-                if atom.file_path.exists()
-                else None
-            )
+            current_hash = self.current_version_for_path(str(atom.file_path))
+            if current_hash is None and atom.file_path.exists():
+                current_hash = self._advisory_hash(
+                    atom.file_path.read_text(encoding="utf-8")
+                )
             manifest = atom.manifest or _default_manifest(atom.name)
             out.append(
                 AtomInfo(
@@ -555,6 +610,11 @@ class AtomReloader:
     @staticmethod
     def is_constitution_path(path: str) -> bool:
         return is_constitution_path(path)
+
+    def current_version_for_path(self, path: str) -> str | None:
+        if isinstance(self._resource_writer, GitBackedResourceWriter):
+            return self._resource_writer.current_version_for_path(path)
+        return None
 
 
 __all__ = ["AtomReloader", "LoadedAtom"]
