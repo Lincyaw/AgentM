@@ -7,12 +7,22 @@ Usage:
 """
 
 import argparse
+import importlib
+import importlib.util
 import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
-from dotenv import load_dotenv
+_dotenv = importlib.import_module("dotenv") if importlib.util.find_spec("dotenv") else None
+
+
+def load_dotenv() -> bool:
+    if _dotenv is None:
+        return False
+    return bool(_dotenv.load_dotenv())
+
 
 load_dotenv()
 
@@ -20,9 +30,9 @@ DEFAULT_DB_URL = os.environ.get("LLM_EVAL_DB_URL")
 DEFAULT_OUTPUT_DIR = "./eval-trajectories"
 
 
-def build_query(args: argparse.Namespace) -> tuple[str, list]:
+def build_query(args: argparse.Namespace) -> tuple[str, list[object]]:
     conditions = ["stage = 'judged'", "trajectories IS NOT NULL"]
-    params: list = []
+    params: list[object] = []
     idx = 1
 
     if args.exp_id:
@@ -63,7 +73,7 @@ def build_query(args: argparse.Namespace) -> tuple[str, list]:
     return query, params
 
 
-def export_row(row: dict, output_dir: Path) -> str:
+def export_row(row: dict[str, Any], output_dir: Path) -> str:
     """Export a single row to a JSON file. Returns the filename."""
     row_id = row["id"]
     exp_id = row["exp_id"]
@@ -141,8 +151,8 @@ def main() -> None:
 
     # Import psycopg2 here so the script fails with a clear message
     try:
-        import psycopg2
-        import psycopg2.extras
+        import psycopg2  # type: ignore[import-untyped]
+        import psycopg2.extras  # type: ignore[import-untyped]
     except ImportError:
         print(
             "ERROR: psycopg2 is required. Install with: uv add psycopg2-binary",
