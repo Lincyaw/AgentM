@@ -36,6 +36,7 @@ from typing import Any
 from .events import (
     AgentEndEvent,
     AgentStartEvent,
+    BeforeAgentEndEvent,
     BeforeSendToLlmEvent,
     ContextEvent,
     EventBus,
@@ -54,6 +55,7 @@ from .messages import (
     ToolCallBlock,
     ToolResultBlock,
     ToolResultMessage,
+    UserMessage,
 )
 from .stream import (
     AssistantStreamEvent,
@@ -142,6 +144,31 @@ def _collect_error(returns: list[Any]) -> BaseException | None:
         if isinstance(value, BaseException):
             chosen = value
     return chosen
+
+
+def _collect_before_agent_end_decision(
+    returns: list[Any],
+) -> tuple[bool, list[AgentMessage]]:
+    """Collect cancel + appended-message decisions from handler returns."""
+
+    cancel = False
+    appended: list[AgentMessage] = []
+    for value in returns:
+        if not isinstance(value, dict):
+            continue
+        if value.get("cancel") is True:
+            cancel = True
+        raw_append = value.get("append")
+        if isinstance(raw_append, list):
+            appended.extend(
+                message
+                for message in raw_append
+                if isinstance(
+                    message,
+                    (AssistantMessage, ToolResultMessage, UserMessage),
+                )
+            )
+    return cancel, appended
 
 
 def _assemble_assistant_message(
@@ -326,6 +353,21 @@ class AgentLoop:
 
                 tool_calls = _extract_tool_calls(assistant_msg)
                 if not tool_calls:
+                    before_end_event = BeforeAgentEndEvent(
+                        messages=messages,
+                        stop_reason="end_turn",
+                    )
+                    before_end_returns = await self._bus.emit(
+                        "before_agent_end", before_end_event
+                    )
+                    messages = list(before_end_event.messages)
+                    cancel_end, appended = _collect_before_agent_end_decision(
+                        before_end_returns
+                    )
+                    if appended:
+                        messages.extend(appended)
+                    if cancel_end:
+                        continue
                     await self._bus.emit(
                         "agent_end",
                         AgentEndEvent(
@@ -432,6 +474,17 @@ class AgentLoop:
                 )
 
             # Loop fell out without returning → exhausted max_turns.
+            before_end_event = BeforeAgentEndEvent(
+                messages=messages,
+                stop_reason="max_turns",
+            )
+            before_end_returns = await self._bus.emit(
+                "before_agent_end", before_end_event
+            )
+            messages = list(before_end_event.messages)
+            _, appended = _collect_before_agent_end_decision(before_end_returns)
+            if appended:
+                messages.extend(appended)
             await self._bus.emit(
                 "agent_end",
                 AgentEndEvent(messages=messages, stop_reason="max_turns"),
