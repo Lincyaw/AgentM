@@ -12,9 +12,16 @@ from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Literal, Protocol
+from typing import Literal
 
 from agentm.core.abi import EventBus
+from agentm.core.abi.resource import (
+    BatchHandle,
+    PathClass,
+    ResourceWriter,
+    WriteResult,
+    WriterAuthor,
+)
 from agentm.core._internal.catalog.manifest import (
     is_constitution_path,
     load_core_manifest,
@@ -22,20 +29,7 @@ from agentm.core._internal.catalog.manifest import (
 )
 from agentm.harness.events import ResourceWriteEvent
 
-WriterAuthor = Literal["agent", "human", "indexer"]
-PathClass = Literal["managed", "unmanaged", "constitution"]
-
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class WriteResult:
-    path: str
-    path_class: PathClass
-    committed: bool
-    commit_sha_before: str | None
-    commit_sha_after: str | None
-    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,52 +58,6 @@ class GitOperationError(RuntimeError):
         self.exit_code = exit_code
         self.stdout = stdout
         self.stderr = stderr
-
-
-class BatchHandle(Protocol):
-    async def write(self, path: str, content: bytes) -> None: ...
-
-    async def replace(self, path: str, old: bytes, new: bytes) -> None: ...
-
-    async def delete(self, path: str) -> None: ...
-
-
-class ResourceWriter(Protocol):
-    async def write(
-        self,
-        path: str,
-        content: bytes,
-        *,
-        rationale: str,
-        author: WriterAuthor = "agent",
-    ) -> WriteResult: ...
-
-    async def replace(
-        self,
-        path: str,
-        old: bytes,
-        new: bytes,
-        *,
-        rationale: str,
-        author: WriterAuthor = "agent",
-    ) -> WriteResult: ...
-
-    async def delete(
-        self,
-        path: str,
-        *,
-        rationale: str,
-        author: WriterAuthor = "agent",
-    ) -> WriteResult: ...
-
-    def classify(self, path: str) -> PathClass: ...
-
-    def batch(
-        self,
-        *,
-        rationale: str,
-        author: WriterAuthor = "agent",
-    ) -> AbstractAsyncContextManager[BatchHandle]: ...
 
 
 @dataclass(slots=True)
