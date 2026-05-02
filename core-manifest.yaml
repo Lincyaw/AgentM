@@ -14,6 +14,7 @@ constitution:
     - src/agentm/harness/session.py
     - src/agentm/harness/extension.py
     - src/agentm/harness/events.py
+    - src/agentm/harness/resource_writer.py
     - src/agentm/harness/session_manager.py
     - src/agentm/harness/resource_loader.py
     - src/agentm/harness/session_runtime.py
@@ -29,6 +30,15 @@ constitution:
     - .agentm/catalog/**
     # The manifest itself — self-referential lock
     - core-manifest.yaml
+
+managed:
+  globs:
+    - src/agentm/extensions/builtin/**.py
+    - scenarios/**
+    - skills/**
+    - prompts/**
+    - .claude/**.md
+    - "*.md"
 
 extension_api:
   current: 1

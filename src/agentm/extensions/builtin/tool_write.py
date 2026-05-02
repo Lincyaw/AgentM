@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.abi.operations import FileOperations
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
@@ -28,6 +27,7 @@ _PARAMETERS = {
     "properties": {
         "path": {"type": "string"},
         "content": {"type": "string"},
+        "rationale": {"type": "string", "default": "agent write via tool_write"},
     },
     "required": ["path", "content"],
     "additionalProperties": False,
@@ -35,13 +35,21 @@ _PARAMETERS = {
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    file_ops = _coerce_file_ops(api, config.get("file_ops"))
+    del config
+    writer = api.get_resource_writer()
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
         path = str(args["path"])
         content = str(args["content"])
+        rationale = str(args.get("rationale", "agent write via tool_write"))
         try:
-            await file_ops.write_file(path, content.encode("utf-8"))
+            result = await writer.write(
+                path,
+                content.encode("utf-8"),
+                rationale=rationale,
+            )
+            if result.error is not None:
+                return _error(result.error)
             return _ok(f"Wrote {len(content)} bytes to {path!r}")
         except Exception as exc:
             return _error(f"Failed to write {path!r}: {exc}")
@@ -54,10 +62,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             fn=_execute,
         )
     )
-
-
-def _coerce_file_ops(api: ExtensionAPI, candidate: Any) -> FileOperations:
-    return candidate if candidate is not None else api.get_operations().file
 
 
 def _ok(text: str) -> ToolResult:
