@@ -152,7 +152,7 @@ def main() -> None:
 
     query, params = build_query(args)
 
-    print(f"Connecting to database...")
+    print("Connecting to database...")
     print(f"Output directory: {output_dir.resolve()}")
 
     try:
@@ -181,7 +181,7 @@ def main() -> None:
     errors = 0
     for row in rows:
         try:
-            filename = export_row(dict(row), output_dir)
+            export_row(dict(row), output_dir)
             exported += 1
         except Exception as e:
             errors += 1
@@ -190,7 +190,7 @@ def main() -> None:
     # Summary
     print()
     print("=" * 50)
-    print(f"Export complete.")
+    print("Export complete.")
     print(f"  Total rows found : {len(rows)}")
     print(f"  Files exported   : {exported}")
     if errors:

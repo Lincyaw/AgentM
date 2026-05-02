@@ -75,6 +75,7 @@ class LoopConfig:
     """Loop tuning knobs. Defaults are deliberately conservative."""
 
     max_turns: int = 32
+    max_tool_calls: int | None = None
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -229,6 +230,34 @@ class AgentLoop:
         self._bus = bus
         self._config = config if config is not None else LoopConfig()
 
+    async def _finish(
+        self,
+        *,
+        messages: list[AgentMessage],
+        stop_reason: str,
+        allow_cancel: bool,
+    ) -> tuple[list[AgentMessage], bool]:
+        before_end_event = BeforeAgentEndEvent(
+            messages=messages,
+            stop_reason=stop_reason,
+        )
+        before_end_returns = await self._bus.emit(
+            "before_agent_end", before_end_event
+        )
+        messages = list(before_end_event.messages)
+        cancel_end, appended = _collect_before_agent_end_decision(
+            before_end_returns
+        )
+        if appended:
+            messages.extend(appended)
+        if allow_cancel and cancel_end:
+            return messages, True
+        await self._bus.emit(
+            "agent_end",
+            AgentEndEvent(messages=messages, stop_reason=stop_reason),
+        )
+        return messages, False
+
     async def run(
         self,
         *,
@@ -254,6 +283,8 @@ class AgentLoop:
 
         tool_index = {t.name: t for t in tools}
         max_turns = self._config.max_turns
+        max_tool_calls = self._config.max_tool_calls
+        tool_calls_used = 0
 
         try:
             for turn_index in range(max_turns):
@@ -263,6 +294,16 @@ class AgentLoop:
                         AgentEndEvent(messages=messages, stop_reason="aborted"),
                     )
                     return messages
+                if (
+                    max_tool_calls is not None
+                    and tool_calls_used >= max_tool_calls
+                ):
+                    final_messages, _ = await self._finish(
+                        messages=messages,
+                        stop_reason="max_tool_calls",
+                        allow_cancel=False,
+                    )
+                    return final_messages
 
                 await self._bus.emit("turn_start", TurnStartEvent(turn_index=turn_index))
 
@@ -353,32 +394,21 @@ class AgentLoop:
 
                 tool_calls = _extract_tool_calls(assistant_msg)
                 if not tool_calls:
-                    before_end_event = BeforeAgentEndEvent(
+                    final_messages, cancelled = await self._finish(
                         messages=messages,
-                        stop_reason="end_turn",
+                        stop_reason=assistant_msg.stop_reason or "end_turn",
+                        allow_cancel=True,
                     )
-                    before_end_returns = await self._bus.emit(
-                        "before_agent_end", before_end_event
-                    )
-                    messages = list(before_end_event.messages)
-                    cancel_end, appended = _collect_before_agent_end_decision(
-                        before_end_returns
-                    )
-                    if appended:
-                        messages.extend(appended)
-                    if cancel_end:
+                    if cancelled:
+                        # ``_finish(..., allow_cancel=True)`` returns the
+                        # updated history without emitting ``agent_end``.
+                        messages = final_messages
                         continue
-                    await self._bus.emit(
-                        "agent_end",
-                        AgentEndEvent(
-                            messages=messages,
-                            stop_reason=assistant_msg.stop_reason or "end_turn",
-                        ),
-                    )
-                    return messages
+                    return final_messages
 
                 # Execute tool calls sequentially.
                 result_blocks: list[ToolResultBlock] = []
+                budget_exhausted = False
                 for tc in tool_calls:
                     if signal is not None and signal.is_set():
                         await self._bus.emit(
@@ -386,6 +416,12 @@ class AgentLoop:
                             AgentEndEvent(messages=messages, stop_reason="aborted"),
                         )
                         return messages
+                    if (
+                        max_tool_calls is not None
+                        and tool_calls_used >= max_tool_calls
+                    ):
+                        budget_exhausted = True
+                        break
 
                     tc_event = ToolCallEvent(
                         tool_call_id=tc.id,
@@ -464,32 +500,31 @@ class AgentLoop:
                             is_error=final_result.is_error,
                         )
                     )
+                    tool_calls_used += 1
 
-                messages.append(
-                    ToolResultMessage(
-                        role="tool_result",
-                        content=result_blocks,
-                        timestamp=_now(),
+                if result_blocks:
+                    messages.append(
+                        ToolResultMessage(
+                            role="tool_result",
+                            content=result_blocks,
+                            timestamp=_now(),
+                        )
                     )
-                )
+                if budget_exhausted:
+                    final_messages, _ = await self._finish(
+                        messages=messages,
+                        stop_reason="max_tool_calls",
+                        allow_cancel=False,
+                    )
+                    return final_messages
 
             # Loop fell out without returning → exhausted max_turns.
-            before_end_event = BeforeAgentEndEvent(
+            final_messages, _ = await self._finish(
                 messages=messages,
                 stop_reason="max_turns",
+                allow_cancel=False,
             )
-            before_end_returns = await self._bus.emit(
-                "before_agent_end", before_end_event
-            )
-            messages = list(before_end_event.messages)
-            _, appended = _collect_before_agent_end_decision(before_end_returns)
-            if appended:
-                messages.extend(appended)
-            await self._bus.emit(
-                "agent_end",
-                AgentEndEvent(messages=messages, stop_reason="max_turns"),
-            )
-            return messages
+            return final_messages
 
         except asyncio.CancelledError:
             # Already emitted agent_end above where we caught it; just
