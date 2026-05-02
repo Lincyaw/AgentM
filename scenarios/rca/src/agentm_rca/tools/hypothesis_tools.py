@@ -9,7 +9,10 @@ from typing import Any
 from agentm.core.abi.messages import TextContent
 from agentm.core.abi.tool import FunctionTool, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.extensions.builtin.artifact_store import ArtifactStoreHandle
+from agentm.extensions.builtin.artifact_store import (
+    ArtifactStore,
+    get_artifact_store,
+)
 from agentm.harness.events import SessionReadyEvent
 from agentm.harness.extension import ExtensionAPI
 
@@ -47,10 +50,29 @@ def _err(msg: str) -> ToolResult:
 
 
 def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
-    store = ArtifactStoreHandle(api, {})
+    # Defer the artifact_store lookup to ``session_ready`` — by then every
+    # extension's ``install()`` has run, and the canonical store instance
+    # owned by the ``artifact_store`` extension is registered. Constructing
+    # our own would create a parallel state-divergent store (see
+    # PR #65 follow-up cleanup).
+    store_cell: list[ArtifactStore | None] = [None]
 
-    async def _on_session_ready(event: SessionReadyEvent) -> None:
-        await store.on_session_ready(event)
+    async def _on_session_ready(_event: SessionReadyEvent) -> None:
+        store = get_artifact_store(api.session_id)
+        if store is None:
+            raise RuntimeError(
+                "hypothesis_tools requires the 'artifact_store' extension to "
+                "be loaded for the same session"
+            )
+        store_cell[0] = store
+
+    def _store() -> ArtifactStore:
+        store = store_cell[0]
+        if store is None:
+            raise RuntimeError(
+                "hypothesis_tools called before session_ready"
+            )
+        return store
 
     async def _write_hypothesis(
         *,
@@ -69,7 +91,7 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
             "evidence_summary": evidence_summary,
             "parent_id": parent_id,
         }
-        result = await store.write_artifact(
+        result = await _store().write_artifact(
             kind="hypothesis",
             title=f"{hid} {status}",
             body=json.dumps(payload, ensure_ascii=False, indent=2),
@@ -111,7 +133,7 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
         hid = str(args.get("id", "")).strip()
         if not hid:
             return _err("id is required")
-        result = await store.write_artifact(
+        result = await _store().write_artifact(
             kind="hypothesis",
             title=f"{hid} removed",
             body=json.dumps({"id": hid, "removed": True}, ensure_ascii=False, indent=2),
@@ -134,7 +156,7 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
             limit = max(1, int(args.get("limit", 50)))
         except (TypeError, ValueError):
             return _err("limit must be an integer")
-        artifact_listing = await store.list_artifacts(
+        artifact_listing = await _store().list_artifacts(
             {"kind": "hypothesis", "limit": limit}
         )
         if artifact_listing.is_error:

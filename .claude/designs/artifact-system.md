@@ -241,8 +241,9 @@ When a worker calls `agent_end`:
 1. The harness extracts its final assistant message text → `summary`.
 2. The artifact directory is scanned for sidecars with
    `created_by.task_id == task_id` → `artifact_ids`.
-3. `before_agent_end` (parent side) builds the notification block from
-   these two fields, not from the full `final_messages` history.
+3. `decide_turn_action` (parent side, on a voluntary `Stop(ModelEndTurn)`)
+   builds the notification block from these two fields, not from the full
+   `final_messages` history, and returns it via `Inject(messages=[...])`.
 
 If a worker writes zero artifacts, the block degrades to the
 `sub_agent_lifecycle.md` baseline (just `<summary>` text). If a worker

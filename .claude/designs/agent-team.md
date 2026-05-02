@@ -105,7 +105,7 @@ A scenario is operating in "team mode" when all four hold:
 
 | Pillar | Mechanism | Status |
 |---|---|---|
-| A. Lifecycle floor | `BeforeAgentEndEvent` + sub_agent handler | designed in `sub_agent_lifecycle.md` |
+| A. Lifecycle floor | `decide_turn_action` + sub_agent `Inject` handler | implemented; see [sub-agent-lifecycle.md](sub-agent-lifecycle.md) |
 | B. Shared memory tier | `artifact_store` extension + sub_agent integration | designed in `artifact-system.md` |
 | C. Brief contract | persona `input_schema` advisory + persona-body self-rejection | this doc |
 | D. Budget awareness | persona `budget_defaults` + per-dispatch `budget` override | this doc |

@@ -267,7 +267,7 @@ def _extensions(
 
 
 @pytest.mark.asyncio
-async def test_check_tasks_marks_results_read_so_before_agent_end_does_not_redeliver(
+async def test_check_tasks_marks_results_read_so_decide_turn_action_does_not_redeliver(
     tmp_path: Path,
 ) -> None:
     provider = _LifecycleProvider("check_tasks")
