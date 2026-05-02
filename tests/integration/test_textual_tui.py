@@ -273,10 +273,10 @@ async def test_T1_golden_path_updates_stream_and_status(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.press("h", "i", "enter")
         await pilot.pause(0.2)
-        status = app.query_one("#status-line")
+        status = app.query_one("#status-header")
         assert "turn 1" in status.current_text
-        assert "in: 128" in status.current_text
-        assert "out: 32" in status.current_text
+        assert "in 128" in status.current_text
+        assert "out 32" in status.current_text
         assert "idle" in status.current_text
         assert app._last_assistant_text == "Hello from AgentM"
 
@@ -289,7 +289,7 @@ async def test_T2_escape_soft_cancels_and_keeps_partial_text(tmp_path: Path) -> 
         await pilot.pause(0.1)
         await pilot.press("escape")
         await pilot.pause(0.1)
-        status = app.query_one("#status-line")
+        status = app.query_one("#status-header")
         assert "idle" in status.current_text
         assert app._last_assistant_text == "partial"
         assert app._prompt_task is None
@@ -403,33 +403,22 @@ async def test_T8_many_turns_keep_scrollable_log(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_T9_cli_simple_and_textual_frontends_dispatch_separately(
+async def test_T9_cli_dispatches_to_textual_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    called: list[str] = []
+    """``_run_interactive`` builds a session config and hands off to the
+    Textual runner. Regression guard: removing the legacy ``simple`` TUI
+    must not break the dispatch path the ``-i`` CLI flag depends on."""
 
-    async def _fake_simple(config: AgentSessionConfig) -> int:
-        called.append(f"simple:{config.cwd}")
-        return 11
+    called: list[str] = []
 
     async def _fake_textual(config: AgentSessionConfig, *, theme: str = "dark") -> int:
         called.append(f"textual:{theme}:{config.cwd}")
         return 22
 
-    monkeypatch.setattr("agentm.modes.interactive.run", _fake_simple)
     monkeypatch.setattr("agentm.modes.textual_app.run", _fake_textual)
 
-    rc_simple = await _run_interactive(
-        scenario=None,
-        no_extensions=True,
-        no_skills=True,
-        no_prompt_templates=True,
-        tool_allowlist=None,
-        model="fake-model",
-        cwd="/tmp/simple",
-        tui="simple",
-    )
-    rc_textual = await _run_interactive(
+    rc = await _run_interactive(
         scenario=None,
         no_extensions=True,
         no_skills=True,
@@ -437,12 +426,10 @@ async def test_T9_cli_simple_and_textual_frontends_dispatch_separately(
         tool_allowlist=None,
         model="fake-model",
         cwd="/tmp/textual",
-        tui="textual",
     )
 
-    assert rc_simple == 11
-    assert rc_textual == 22
-    assert called == ["simple:/tmp/simple", "textual:dark:/tmp/textual"]
+    assert rc == 22
+    assert called == ["textual:dark:/tmp/textual"]
 
 
 @pytest.mark.asyncio
@@ -464,7 +451,7 @@ async def test_T10_layout_remains_usable_without_truecolor(
         # The three required regions remain mounted and addressable.
         assert app.query_one("#conversation-log") is not None
         assert app.query_one("#input-bar") is not None
-        assert app.query_one("#status-line") is not None
+        assert app.query_one("#status-header") is not None
         # Submitting a prompt still drives the log + status line end-to-end.
         await pilot.press("h", "i", "enter")
         await pilot.pause(0.2)
