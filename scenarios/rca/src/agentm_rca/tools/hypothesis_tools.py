@@ -1,27 +1,21 @@
-"""Lightweight hypothesis-tracking tools for the RCA scenario.
-
-Provides two atoms (``update_hypothesis``, ``remove_hypothesis``) backed by
-an in-memory dict scoped to the extension install. The agent uses these to
-keep an explicit list of working hypotheses while it investigates. The
-store is intentionally simple: no persistence, no ordering guarantees
-beyond insertion order, no concurrent-writer protection (single-session).
-"""
+"""Compatibility wrappers that persist RCA hypotheses as shared artifacts."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from typing import Any
 
 from agentm.core.abi.messages import TextContent
 from agentm.core.abi.tool import FunctionTool, ToolResult
 from agentm.extensions import ExtensionManifest
+from agentm.extensions.builtin.artifact_store import ArtifactStoreHandle
+from agentm.harness.events import SessionReadyEvent
 from agentm.harness.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(
     name="hypothesis_tools",
-    description="Track RCA hypotheses in an in-memory list of dicts.",
-    registers=("tool:update_hypothesis", "tool:remove_hypothesis"),
+    description="Persist RCA hypotheses as append-only shared artifacts.",
+    registers=("tool:update_hypothesis", "tool:remove_hypothesis", "event:session_ready"),
 )
 
 _STATUSES = (
@@ -32,20 +26,6 @@ _STATUSES = (
     "refined",
     "inconclusive",
 )
-
-
-@dataclass
-class _Entry:
-    id: str
-    description: str
-    status: str = "formed"
-    evidence_summary: str | None = None
-    parent_id: str | None = None
-
-
-@dataclass
-class _Store:
-    entries: dict[str, _Entry] = field(default_factory=dict)
 
 
 def _ok(text: str) -> ToolResult:
@@ -60,7 +40,10 @@ def _err(msg: str) -> ToolResult:
 
 
 def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
-    store = _Store()
+    store = ArtifactStoreHandle(api, {})
+
+    async def _on_session_ready(event: SessionReadyEvent) -> None:
+        await store.on_session_ready(event)
 
     async def _update(args: dict[str, Any]) -> ToolResult:
         hid = str(args.get("id", "")).strip()
@@ -70,39 +53,47 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
         status = str(args.get("status", "formed"))
         if status not in _STATUSES:
             return _err(f"status must be one of {_STATUSES}")
-        entry = _Entry(
-            id=hid,
-            description=desc,
-            status=status,
-            evidence_summary=_maybe_str(args.get("evidence_summary")),
-            parent_id=_maybe_str(args.get("parent_id")),
+        evidence_summary = _maybe_str(args.get("evidence_summary"))
+        parent_id = _maybe_str(args.get("parent_id"))
+        payload = {
+            "id": hid,
+            "status": status,
+            "description": desc,
+            "evidence_summary": evidence_summary,
+            "parent_id": parent_id,
+        }
+        result = await store.write_artifact(
+            kind="hypothesis",
+            title=f"{hid} {status}",
+            body=json.dumps(payload, ensure_ascii=False, indent=2),
+            tags=["hypothesis", status],
+            parent_artifact_ids=[parent_id] if parent_id else [],
         )
-        store.entries[hid] = entry
-        return _ok(
-            json.dumps(
-                {
-                    "id": entry.id,
-                    "status": entry.status,
-                    "description": entry.description,
-                    "evidence_summary": entry.evidence_summary,
-                    "parent_id": entry.parent_id,
-                    "total": len(store.entries),
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        payload["artifact_id"] = result["artifact_id"]
+        payload["path"] = result["path"]
+        return _ok(json.dumps(payload, ensure_ascii=False, indent=2))
 
     async def _remove(args: dict[str, Any]) -> ToolResult:
         hid = str(args.get("id", "")).strip()
-        existed = store.entries.pop(hid, None) is not None
+        result = await store.write_artifact(
+            kind="hypothesis",
+            title=f"{hid} removed",
+            body=json.dumps({"id": hid, "removed": True}, ensure_ascii=False, indent=2),
+            tags=["hypothesis", "removed"],
+        )
         return _ok(
             json.dumps(
-                {"id": hid, "removed": existed, "remaining": len(store.entries)},
+                {
+                    "id": hid,
+                    "removed": True,
+                    "artifact_id": result["artifact_id"],
+                    "path": result["path"],
+                },
                 ensure_ascii=False,
             )
         )
 
+    api.on("session_ready", _on_session_ready)
     api.register_tool(
         FunctionTool(
             name="update_hypothesis",
@@ -129,7 +120,7 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
     api.register_tool(
         FunctionTool(
             name="remove_hypothesis",
-            description="Remove a hypothesis by id.",
+            description="Record that a hypothesis was removed by id.",
             parameters={
                 "type": "object",
                 "properties": {"id": {"type": "string"}},

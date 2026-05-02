@@ -13,6 +13,12 @@ import time
 from typing import Any
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.lib.artifact_files import (
+    artifacts_dir_for,
+    find_metadata_files,
+    list_artifacts_for_task,
+    scan_artifact_metadata,
+)
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import SessionReadyEvent
 from agentm.harness.extension import ExtensionAPI
@@ -24,6 +30,7 @@ _DEFAULT_SNIPPET_LINES = 2
 _NEXT_ID_WIDTH = 3
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _KIND_RE = re.compile(r"[^A-Za-z0-9_-]+")
+_ID_LOCKS: dict[str, asyncio.Lock] = {}
 
 MANIFEST = ExtensionManifest(
     name="artifact_store",
@@ -59,7 +66,7 @@ class _StoreContext:
 
     @property
     def artifacts_dir(self) -> Path:
-        return self.cwd / ".agentm" / "artifacts" / self.root_session_id
+        return artifacts_dir_for(self.cwd, self.root_session_id)
 
 
 class _ArtifactStore:
@@ -74,7 +81,6 @@ class _ArtifactStore:
             persona=_maybe_str(config.get("persona")),
             max_inline_bytes=int(config.get("max_inline_bytes", _DEFAULT_INLINE_BYTES)),
         )
-        self._id_lock = asyncio.Lock()
 
     async def on_session_ready(self, event: SessionReadyEvent) -> None:
         self._ctx.session_id = event.session_id
@@ -83,27 +89,49 @@ class _ArtifactStore:
         self._ctx.persona = event.persona
 
     async def write(self, args: dict[str, Any]) -> ToolResult:
-        kind = _sanitize_kind(str(args.get("kind", "")).strip())
-        title = str(args.get("title", "")).strip()
-        body = str(args.get("body", ""))
-        if not kind or not title:
-            return _error("kind and title are required")
-        tags = _coerce_tags(args.get("tags"))
-        parent_artifact_ids = _coerce_parent_ids(args.get("parent_artifact_ids"))
+        try:
+            result = await self.write_artifact(
+                kind=str(args.get("kind", "")),
+                title=str(args.get("title", "")),
+                body=str(args.get("body", "")),
+                tags=args.get("tags"),
+                parent_artifact_ids=args.get("parent_artifact_ids"),
+            )
+        except ValueError as exc:
+            return _error(str(exc))
+        except OSError as exc:
+            return _error(f"failed to write artifact: {exc}")
+        return _ok(result)
+
+    async def write_artifact(
+        self,
+        *,
+        kind: str,
+        title: str,
+        body: str,
+        tags: Any = None,
+        parent_artifact_ids: Any = None,
+    ) -> dict[str, str]:
+        clean_kind = _sanitize_kind(str(kind).strip())
+        clean_title = str(title).strip()
+        if not clean_kind or not clean_title:
+            raise ValueError("kind and title are required")
+        clean_tags = _coerce_tags(tags)
+        clean_parent_ids = _coerce_parent_ids(parent_artifact_ids)
         artifact_id = await self._allocate_id()
-        slug = _slugify(title)
-        body_path = self._ctx.artifacts_dir / f"{artifact_id}__{kind}__{slug}.md"
+        slug = _slugify(clean_title)
+        body_path = self._ctx.artifacts_dir / f"{artifact_id}__{clean_kind}__{slug}.md"
         meta_path = body_path.with_suffix(".meta.json")
         timestamp = time.time()
         metadata = {
             "artifact_id": artifact_id,
-            "kind": kind,
-            "title": title,
+            "kind": clean_kind,
+            "title": clean_title,
             "slug": slug,
             "path": str(body_path),
-            "parent_id": parent_artifact_ids[0] if parent_artifact_ids else None,
-            "parent_artifact_ids": parent_artifact_ids,
-            "tags": tags,
+            "parent_id": clean_parent_ids[0] if clean_parent_ids else None,
+            "parent_artifact_ids": clean_parent_ids,
+            "tags": clean_tags,
             "created_by": {
                 "session_id": self._ctx.session_id,
                 "task_id": self._ctx.task_id,
@@ -111,16 +139,13 @@ class _ArtifactStore:
                 "timestamp": timestamp,
             },
         }
-        try:
-            await asyncio.to_thread(_atomic_write_text, body_path, body)
-            await asyncio.to_thread(
-                _atomic_write_text,
-                meta_path,
-                json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True),
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _error(f"failed to write artifact {artifact_id}: {exc}")
-        return _ok({"artifact_id": artifact_id, "path": str(body_path)})
+        await asyncio.to_thread(_atomic_write_text, body_path, str(body))
+        await asyncio.to_thread(
+            _atomic_write_text,
+            meta_path,
+            json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True),
+        )
+        return {"artifact_id": artifact_id, "path": str(body_path)}
 
     async def read(self, args: dict[str, Any]) -> ToolResult:
         artifact_id = str(args.get("artifact_id", "")).strip()
@@ -153,12 +178,15 @@ class _ArtifactStore:
         }
         return _ok(payload)
 
-    async def list(self, args: dict[str, Any]) -> ToolResult:
-        kind_filter = _maybe_str(args.get("kind"))
-        tags_filter = _coerce_tags(args.get("tags"))
-        created_by_task = _maybe_str(args.get("created_by_task"))
-        since = _parse_since(args.get("since"))
-        limit = max(1, int(args.get("limit", _DEFAULT_LIST_LIMIT)))
+    async def list_artifacts(self, args: dict[str, Any]) -> ToolResult:
+        try:
+            kind_filter = _maybe_str(args.get("kind"))
+            tags_filter = _coerce_tags(args.get("tags"))
+            created_by_task = _maybe_str(args.get("created_by_task"))
+            since = _parse_since(args.get("since"))
+            limit = max(1, int(args.get("limit", _DEFAULT_LIST_LIMIT)))
+        except ValueError as exc:
+            return _error(str(exc))
         metas = await self._filtered_metadata(
             kind=kind_filter,
             tags=tags_filter,
@@ -187,10 +215,13 @@ class _ArtifactStore:
             compiled = re.compile(pattern)
         except re.error as exc:
             return _error(f"invalid regex: {exc}")
-        kind_filter = _maybe_str(args.get("kind"))
-        tags_filter = _coerce_tags(args.get("tags"))
-        max_hits = max(1, int(args.get("max_hits", _DEFAULT_GREP_MAX_HITS)))
-        snippet_lines = max(0, int(args.get("snippet_lines", _DEFAULT_SNIPPET_LINES)))
+        try:
+            kind_filter = _maybe_str(args.get("kind"))
+            tags_filter = _coerce_tags(args.get("tags"))
+            max_hits = max(1, int(args.get("max_hits", _DEFAULT_GREP_MAX_HITS)))
+            snippet_lines = max(0, int(args.get("snippet_lines", _DEFAULT_SNIPPET_LINES)))
+        except ValueError as exc:
+            return _error(str(exc))
         metas = await self._filtered_metadata(kind=kind_filter, tags=tags_filter)
         hits: list[dict[str, Any]] = []
         for meta in metas:
@@ -221,8 +252,8 @@ class _ArtifactStore:
         return _ok({"hits": hits})
 
     async def _allocate_id(self) -> str:
-        async with self._id_lock:
-            artifacts_dir = self._ctx.artifacts_dir
+        artifacts_dir = self._ctx.artifacts_dir
+        async with _id_lock_for(artifacts_dir):
             await asyncio.to_thread(artifacts_dir.mkdir, parents=True, exist_ok=True)
             next_id_path = artifacts_dir / ".next_id"
             next_value = 1
@@ -255,7 +286,12 @@ class _ArtifactStore:
             meta_tags = [str(tag) for tag in meta.get("tags", []) if isinstance(tag, str)]
             if tags and not set(tags).issubset(set(meta_tags)):
                 continue
-            created_by = meta.get("created_by") if isinstance(meta.get("created_by"), dict) else {}
+            raw_created_by = meta.get("created_by")
+            created_by: dict[str, Any]
+            if isinstance(raw_created_by, dict):
+                created_by = raw_created_by
+            else:
+                created_by = {}
             if created_by_task is not None and created_by.get("task_id") != created_by_task:
                 continue
             timestamp = created_by.get("timestamp")
@@ -271,7 +307,9 @@ class _ArtifactStore:
         return filtered
 
     async def _load_metadata(self, artifact_id: str) -> dict[str, Any] | None:
-        matches = await asyncio.to_thread(self._find_metadata_files, artifact_id)
+        matches = await asyncio.to_thread(
+            find_metadata_files, self._ctx.artifacts_dir, artifact_id
+        )
         if not matches:
             return None
         try:
@@ -279,24 +317,8 @@ class _ArtifactStore:
         except (OSError, json.JSONDecodeError):
             return None
 
-    def _find_metadata_files(self, artifact_id: str) -> list[Path]:
-        root = self._ctx.cwd / ".agentm" / "artifacts"
-        if not root.exists():
-            return []
-        pattern = f"{artifact_id}__*.meta.json"
-        return sorted(root.glob(f"*/{pattern}"))
-
     def _scan_metadata(self) -> list[dict[str, Any]]:
-        root = self._ctx.artifacts_dir
-        if not root.exists():
-            return []
-        metas: list[dict[str, Any]] = []
-        for meta_path in sorted(root.glob("*.meta.json")):
-            try:
-                metas.append(json.loads(meta_path.read_text(encoding="utf-8")))
-            except (OSError, json.JSONDecodeError):
-                continue
-        return metas
+        return scan_artifact_metadata(self._ctx.artifacts_dir)
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
@@ -374,7 +396,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 },
                 "additionalProperties": False,
             },
-            fn=store.list,
+            fn=store.list_artifacts,
         )
     )
     api.register_tool(
@@ -513,6 +535,15 @@ def _file_size(meta: dict[str, Any]) -> int:
         return 0
 
 
+def _id_lock_for(artifacts_dir: Path) -> asyncio.Lock:
+    key = str(artifacts_dir.resolve(strict=False))
+    lock = _ID_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _ID_LOCKS[key] = lock
+    return lock
+
+
 def _ok(payload: dict[str, Any]) -> ToolResult:
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))],
@@ -528,5 +559,15 @@ def _error(message: str) -> ToolResult:
         details=payload,
     )
 
+ArtifactStoreHandle = _ArtifactStore
 
-__all__ = ["MANIFEST", "install"]
+
+__all__ = [
+    "ArtifactStoreHandle",
+    "MANIFEST",
+    "artifacts_dir_for",
+    "find_metadata_files",
+    "install",
+    "list_artifacts_for_task",
+    "scan_artifact_metadata",
+]

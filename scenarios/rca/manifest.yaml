@@ -11,6 +11,7 @@ extensions:
       row_limit: 200
       token_limit: 5000
   - module: agentm_rca.tools.hypothesis_tools
+  - module: agentm.extensions.builtin.artifact_store
   - module: agentm.extensions.builtin.trajectory
     config:
       path: rca_trajectory.jsonl
@@ -27,6 +28,7 @@ extensions:
       max_workers: 4
       inherit_extensions:
         - duckdb_sql
+        - artifact_store
         - trajectory
       available_inherited_extensions:
         duckdb_sql:
@@ -36,6 +38,9 @@ extensions:
               - conclusion.parquet
             row_limit: 200
             token_limit: 5000
+        artifact_store:
+          module: agentm.extensions.builtin.artifact_store
+          config: {}
         trajectory:
           module: agentm.extensions.builtin.trajectory
           config:

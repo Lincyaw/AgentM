@@ -16,9 +16,13 @@ import json
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
+import time
 from typing import Any, Literal, cast
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.abi import BeforeAgentEndEvent, FunctionTool, TextContent, ToolResult
+from agentm.core.lib.artifact_files import list_artifacts_for_task
+from agentm.core.abi.messages import UserMessage
 from agentm.harness.events import (
     ChildSessionEndEvent,
     SessionReadyEvent,
@@ -44,6 +48,7 @@ MANIFEST = ExtensionManifest(
         "tool:check_tasks",
         "tool:inject_instruction",
         "tool:abort_task",
+        "event:before_agent_end",
         "event:session_shutdown",
         "event:session_ready",
     ),
@@ -92,6 +97,10 @@ class _ChildTask:
     status: _Status = _RUNNING
     pending_instructions: list[str] = field(default_factory=list)
     final_messages: list[Any] | None = None
+    summary: str | None = None
+    artifact_ids: list[str] = field(default_factory=list)
+    artifact_refs: list[dict[str, str]] = field(default_factory=list)
+    result_delivered: bool = False
     error: str | None = None
 
 
@@ -131,6 +140,39 @@ def _final_assistant_text(messages: list[Any] | None) -> str | None:
         if chunks:
             return "\n".join(chunks)
     return None
+
+
+def _xml_attr(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _format_subagent_result(state: _ChildTask) -> str | None:
+    if state.summary is None and not state.artifact_refs:
+        return None
+    lines = [
+        (
+            f"<subagent_result task_id={_xml_attr(state.task_id)} "
+            f"purpose={_xml_attr(state.purpose)}>"
+        )
+    ]
+    if state.summary is not None:
+        lines.append(f"  <summary>{_xml_attr(state.summary)}</summary>")
+    if state.artifact_refs:
+        lines.append("  <artifacts>")
+        for ref in state.artifact_refs:
+            lines.append(
+                "    "
+                f"<ref id={_xml_attr(ref['id'])} kind={_xml_attr(ref['kind'])} "
+                f"title={_xml_attr(ref['title'])} />"
+            )
+        lines.append("  </artifacts>")
+    lines.append("</subagent_result>")
+    return "\n".join(lines)
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
@@ -242,6 +284,7 @@ class _ChildTaskManager:
         self._registry_lock = asyncio.Lock()
         self._reserved_slots = 0
         self._parent_session_id = "unknown"
+        self._root_session_id = "unknown"
 
     async def _resolve_subagent(self, name: str) -> dict[str, Any] | None:
         """Ask peer extensions to resolve ``name`` to a persona definition.
@@ -276,6 +319,22 @@ class _ChildTaskManager:
     ) -> None:
         state.status = status
         state.final_messages = final_messages
+        state.summary = _final_assistant_text(final_messages)
+        if state.task_id:
+            refs = list_artifacts_for_task(
+                cwd=Path(self._api.cwd),
+                root_session_id=self._root_session_id,
+                task_id=state.task_id,
+            )
+            state.artifact_ids = [str(meta.get("artifact_id", "")) for meta in refs]
+            state.artifact_refs = [
+                {
+                    "id": str(meta.get("artifact_id", "")),
+                    "kind": str(meta.get("kind", "")),
+                    "title": str(meta.get("title", "")),
+                }
+                for meta in refs
+            ]
         state.error = error
         if error is None:
             await state.session.shutdown()
@@ -388,6 +447,12 @@ class _ChildTaskManager:
             cwd=self._api.cwd,
             extensions=persona_extensions + child_extensions + inherited_extensions,
             provider=(__name__, {"_bridge_provider": provider}),
+            task_id=task_id,
+            persona=(
+                subagent_type.strip()
+                if isinstance(subagent_type, str) and subagent_type.strip()
+                else None
+            ),
             purpose=purpose,
             tool_allowlist=persona_tool_allowlist,
         )
@@ -438,6 +503,9 @@ class _ChildTaskManager:
             await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
         async with self._registry_lock:
             tasks = list(self._registry.values())
+            for state in tasks:
+                if state.status != _RUNNING:
+                    state.result_delivered = True
         payload = {
             "tasks": [
                 {
@@ -450,7 +518,8 @@ class _ChildTaskManager:
                         if state.final_messages is not None
                         else None
                     ),
-                    "final_text": _final_assistant_text(state.final_messages),
+                    "final_text": state.summary,
+                    "artifact_ids": list(state.artifact_ids),
                 }
                 for state in tasks
             ]
@@ -502,6 +571,32 @@ class _ChildTaskManager:
 
     async def on_session_ready(self, event: SessionReadyEvent) -> None:
         self._parent_session_id = event.session_id
+        self._root_session_id = event.root_session_id
+
+    async def on_before_agent_end(
+        self, _event: BeforeAgentEndEvent
+    ) -> dict[str, Any] | None:
+        async with self._registry_lock:
+            unread = [
+                state
+                for state in self._registry.values()
+                if state.status != _RUNNING
+                and not state.result_delivered
+                and (state.summary is not None or state.artifact_refs)
+            ]
+            if not unread:
+                return None
+            for state in unread:
+                state.result_delivered = True
+        blocks = [block for state in unread if (block := _format_subagent_result(state))]
+        if not blocks:
+            return None
+        notification = UserMessage(
+            role="user",
+            content=[TextContent(type="text", text="\n".join(blocks))],
+            timestamp=time.time(),
+        )
+        return {"cancel": True, "append": [notification]}
 
     async def on_session_shutdown(self, _event: SessionShutdownEvent) -> None:
         async with self._registry_lock:
@@ -561,6 +656,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     )
 
     api.on("session_ready", manager.on_session_ready)
+    api.on("before_agent_end", manager.on_before_agent_end)
     api.on("session_shutdown", manager.on_session_shutdown)
     api.register_tool(
         FunctionTool(

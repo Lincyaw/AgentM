@@ -31,11 +31,12 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from .events import (
     AgentEndEvent,
     AgentStartEvent,
+    BeforeAgentEndEvent,
     BeforeSendToLlmEvent,
     ContextEvent,
     EventBus,
@@ -142,6 +143,22 @@ def _collect_error(returns: list[Any]) -> BaseException | None:
         if isinstance(value, BaseException):
             chosen = value
     return chosen
+
+
+def _collect_before_agent_end(
+    returns: list[Any],
+) -> tuple[bool, list[AgentMessage]]:
+    cancel = False
+    appended: list[AgentMessage] = []
+    for value in returns:
+        if not isinstance(value, dict):
+            continue
+        if value.get("cancel") is True:
+            cancel = True
+        raw_append = value.get("append")
+        if isinstance(raw_append, list):
+            appended.extend(cast(list[AgentMessage], raw_append))
+    return cancel, appended
 
 
 def _assemble_assistant_message(
@@ -326,6 +343,20 @@ class AgentLoop:
 
                 tool_calls = _extract_tool_calls(assistant_msg)
                 if not tool_calls:
+                    before_end_event = BeforeAgentEndEvent(
+                        messages=messages,
+                        stop_reason=assistant_msg.stop_reason or "end_turn",
+                    )
+                    before_end_returns = await self._bus.emit(
+                        "before_agent_end", before_end_event
+                    )
+                    cancel_end, appended = _collect_before_agent_end(
+                        before_end_returns
+                    )
+                    if cancel_end:
+                        if appended:
+                            messages.extend(appended)
+                        continue
                     await self._bus.emit(
                         "agent_end",
                         AgentEndEvent(
