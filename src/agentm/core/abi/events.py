@@ -64,6 +64,18 @@ class AgentEndEvent(Event):
     stop_reason: str
 
 
+@dataclass(slots=True)
+class BeforeAgentEndEvent(Event):
+    """Fires immediately before ``AgentLoop.run`` declares ``agent_end``.
+
+    Handlers may cancel an ``end_turn`` exit and append one or more
+    user-visible messages so the loop stays alive for another turn.
+    """
+
+    messages: list[AgentMessage]
+    stop_reason: Literal["end_turn", "max_turns"]
+
+
 @dataclass(slots=True, frozen=True)
 class TurnStartEvent(Event):
     """Emitted at the start of each loop turn (one LLM call)."""
@@ -277,6 +289,13 @@ class EventBus:
     @overload
     def on(
         self,
+        channel: Literal["before_agent_end"],
+        handler: Callable[[BeforeAgentEndEvent], Any]
+        | Callable[[BeforeAgentEndEvent], Awaitable[Any]],
+    ) -> Callable[[], None]: ...
+    @overload
+    def on(
+        self,
         channel: Literal["turn_start"],
         handler: Callable[[TurnStartEvent], Any]
         | Callable[[TurnStartEvent], Awaitable[Any]],
@@ -352,6 +371,10 @@ class EventBus:
     @overload
     async def emit(
         self, channel: Literal["agent_end"], event: AgentEndEvent
+    ) -> list[Any]: ...
+    @overload
+    async def emit(
+        self, channel: Literal["before_agent_end"], event: BeforeAgentEndEvent
     ) -> list[Any]: ...
     @overload
     async def emit(

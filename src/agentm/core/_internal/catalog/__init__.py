@@ -15,7 +15,6 @@ from agentm.core._internal.catalog.browse import (
     list_versions,
     runs_for,
 )
-from agentm.core._internal.catalog.freeze import freeze_current, source_path_for_hash
 from agentm.core._internal.catalog.hashing import (
     compute_active_set_fingerprint,
     compute_atom_hash,
@@ -51,6 +50,30 @@ def list_atoms(*, root: Path | None = None) -> list[dict[str, Any]]:
             }
         )
     return atoms
+
+
+def freeze_current(
+    name: str,
+    source: str,
+    manifest: Any,
+    *,
+    root: Path | None = None,
+) -> str:
+    from agentm.core._internal.catalog.freeze import (
+        freeze_current as _freeze_current,
+    )
+
+    return _freeze_current(name, source, manifest, root=root)
+
+
+def source_path_for_hash(
+    name: str, version_key: str, *, root: Path | None = None
+) -> Path:
+    from agentm.core._internal.catalog.freeze import (
+        source_path_for_hash as _source_path_for_hash,
+    )
+
+    return _source_path_for_hash(name, version_key, root=root)
 
 
 __all__ = [

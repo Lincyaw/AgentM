@@ -19,6 +19,7 @@ from __future__ import annotations
 from .events import (
     AgentEndEvent,
     AgentStartEvent,
+    BeforeAgentEndEvent,
     BeforeSendToLlmEvent,
     ContextEvent,
     Event,
@@ -87,6 +88,7 @@ __all__ = [
     # events
     "AgentEndEvent",
     "AgentStartEvent",
+    "BeforeAgentEndEvent",
     "BeforeSendToLlmEvent",
     "ContextEvent",
     "Event",
