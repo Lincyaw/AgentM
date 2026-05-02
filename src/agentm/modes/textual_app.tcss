@@ -1,46 +1,135 @@
+/* ============================================================
+ * AgentM Textual TUI — outside-in dock layout
+ *   ┌───────────────────────────────────────────┐
+ *   │ #status-header   (dock: top, h: 1)       │   model · turn · tokens · cost · phase
+ *   ├───────────────────────────────────────────┤
+ *   │ #conversation-log (1fr)                   │   scrollable VerticalScroll
+ *   ├───────────────────────────────────────────┤
+ *   │ #input-bar  (dock: bottom, h: auto)       │   PromptInput TextArea
+ *   ├───────────────────────────────────────────┤
+ *   │ Footer       (dock: bottom, h: 1)         │   key bindings hint
+ *   └───────────────────────────────────────────┘
+ * Theming uses Textual's built-in theme system; do NOT hardcode
+ * hex colors here — reference variables ($primary, $surface, etc.)
+ * so theme changes flow through.
+ * ============================================================ */
+
 Screen {
-    layout: vertical;
+    background: $surface;
 }
 
-#app-root {
-    layout: vertical;
-    height: 100%;
-}
+/* === top status header === */
 
-#conversation-log {
-    height: 1fr;
-    overflow-y: auto;
+#status-header {
+    dock: top;
+    height: 1;
+    background: $primary 60%;
+    color: $text;
     padding: 0 1;
+    text-style: bold;
+    overflow: hidden hidden;
 }
+
+/* === bottom region: input + footer === */
 
 #input-bar {
+    dock: bottom;
     height: auto;
     padding: 0 1;
-    border-top: solid $accent;
+    background: $surface;
 }
 
 #prompt-input {
     width: 100%;
     min-height: 3;
     max-height: 8;
-}
-
-#status-line {
-    height: 1;
+    border: round $accent 50%;
+    background: $boost;
     padding: 0 1;
-    text-style: italic dim;
-    content-align: left middle;
-    overflow: hidden hidden;
 }
 
+#prompt-input:focus {
+    border: round $accent;
+}
+
+/* The Footer widget is yielded last, so it sits at the very bottom. */
+
+Footer {
+    background: $panel;
+    color: $text-muted;
+}
+
+FooterKey {
+    background: $panel;
+}
+
+FooterKey > .footer-key--key {
+    background: $primary;
+    color: $text;
+}
+
+/* === conversation log === */
+
+#conversation-log {
+    height: 1fr;
+    padding: 1 2;
+    background: $surface;
+    scrollbar-background: $surface;
+    scrollbar-color: $primary 30%;
+    scrollbar-color-hover: $primary 60%;
+}
+
+/* Common margin between turn-level blocks. */
 .turn,
 .user-turn,
 .tool-call,
 .subagent {
     margin: 0 0 1 0;
+    width: 100%;
 }
 
-.thinking .collapsible--title {
+/* === user turn — right-side flush, blue gutter === */
+
+.user-turn {
+    border-left: thick $primary;
+    padding: 0 1;
+    background: $boost;
+    color: $text;
+}
+
+/* Injected user message (api.send_user_message) — yellow gutter so the
+ * user can tell at a glance that this turn was synthesized by an
+ * extension rather than typed. */
+
+.user-turn.injected {
+    border-left: thick $warning;
+    background: $warning 10%;
+}
+
+.user-turn-label {
+    color: $primary;
+    text-style: bold;
+}
+
+/* === assistant turn === */
+
+.turn {
+    padding: 0 0;
+}
+
+.assistant-label {
+    color: $accent;
+    text-style: bold;
+    margin: 0 0 1 0;
+}
+
+/* === thinking block === */
+
+.thinking {
+    margin: 0 0 1 0;
+}
+
+.thinking > CollapsibleTitle {
     color: $text-muted;
     text-style: italic;
 }
@@ -48,40 +137,74 @@ Screen {
 .thinking-body {
     color: $text-muted;
     text-style: italic;
+    padding: 0 1;
 }
+
+/* === tool call block — single gutter, no double border === */
 
 .tool-call {
-    border: tall $warning;
-}
-
-.tool-call .collapsible--title {
-    color: $warning;
+    border-left: thick $warning;
+    padding: 0 1;
+    background: $surface;
 }
 
 .tool-call.failed {
-    border: tall $error;
+    border-left: thick $error;
 }
 
-.tool-call.failed .collapsible--title {
+.tool-call > CollapsibleTitle {
+    color: $warning;
+    text-style: bold;
+}
+
+.tool-call.failed > CollapsibleTitle {
     color: $error;
+}
+
+.tool-call:focus-within {
+    background: $boost;
 }
 
 .tool-body {
     color: $text;
+    padding: 0 1;
 }
 
+/* === subagent block — cyan gutter, no Rich Panel === */
+
 .subagent {
-    border-left: thick cyan;
-    padding-left: 1;
+    border-left: thick $accent;
+    padding: 0 1;
+    margin: 1 0;
+    background: $boost 50%;
+    layout: vertical;
+    height: auto;
 }
 
 .subagent.failed {
-    border-left: thick red;
+    border-left: thick $error;
 }
 
+.subagent-title {
+    color: $accent;
+    text-style: bold;
+}
+
+.subagent.failed .subagent-title {
+    color: $error;
+}
+
+.subagent-body {
+    color: $text;
+    padding: 0 0 0 1;
+}
+
+/* === modal screens === */
+
 #command-palette,
-#help-screen {
-    width: 70;
+#help-screen,
+#info-modal {
+    width: 90;
     height: auto;
     max-height: 80%;
     border: round $accent;
@@ -89,22 +212,25 @@ Screen {
     background: $surface;
 }
 
-.theme-dark {
-    background: #0f1115;
-    color: #f5f7fa;
+#command-palette OptionList {
+    height: auto;
+    max-height: 20;
 }
 
-.theme-dark #status-line {
-    background: #161b22;
-    color: #9aa4b2;
+#help-screen Static {
+    width: 100%;
 }
 
-.theme-light {
-    background: #f7f7f2;
-    color: #14213d;
+#info-modal {
+    layout: vertical;
 }
 
-.theme-light #status-line {
-    background: #e9ecef;
-    color: #4f5d75;
+#info-modal .info-title {
+    color: $accent;
+    margin: 0 0 1 0;
+}
+
+#info-modal .info-body {
+    width: 100%;
+    height: auto;
 }
