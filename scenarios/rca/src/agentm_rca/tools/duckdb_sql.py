@@ -30,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import duckdb  # type: ignore[import-untyped]
+import duckdb  # type: ignore[import-not-found,import-untyped]
 
 from agentm.core.abi.messages import TextContent
 from agentm.core.abi.tool import FunctionTool, ToolResult

@@ -300,3 +300,35 @@ async def test_hypothesis_tools_persist_append_only_artifacts(tmp_path: Path) ->
         assert all(item["kind"] == "hypothesis" for item in listing["artifacts"])
     finally:
         await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_hypothesis_tools_preserve_legacy_add_and_list_api(tmp_path: Path) -> None:
+    hypothesis_module = _install_hypothesis_module()
+    session = await _create_session(
+        tmp_path,
+        root_session_id="root-hypothesis-legacy",
+        task_id="task-hypothesis-legacy",
+        extensions=[
+            ("agentm.extensions.builtin.artifact_store", {}),
+            (hypothesis_module, {}),
+        ],
+    )
+    try:
+        add = _tool(session, "add_hypothesis")
+        list_tool = _tool(session, "list_hypotheses")
+
+        first = await _tool_json(
+            add,
+            {
+                "id": "hyp-legacy",
+                "description": "Legacy compatibility hypothesis",
+            },
+        )
+        listing = await _tool_json(list_tool, {"id": "hyp-legacy", "status": "formed"})
+
+        assert first["status"] == "formed"
+        assert listing["hypotheses"][0]["id"] == "hyp-legacy"
+        assert listing["hypotheses"][0]["artifact_id"] == first["artifact_id"]
+    finally:
+        await session.shutdown()

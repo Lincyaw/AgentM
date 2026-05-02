@@ -73,6 +73,7 @@ def _load_from_path(path: Path) -> list[tuple[str, dict[str, Any]]]:
         raise ScenarioLoadError(str(path), exc) from exc
 
     scenario_dir = path.parent
+    _ensure_scenario_import_roots(scenario_dir)
     scenario_name = _resolve_scenario_name(payload, scenario_dir, source=str(path))
     return _parse_extensions(
         payload,
@@ -191,22 +192,46 @@ def _parse_extensions(
 
 
 def _validate_module(source: str, index: int, module: str) -> None:
-    try:
-        mod = importlib.import_module(module)
-    except ImportError as exc:
+    spec = importlib.util.find_spec(module)
+    if spec is None:
         raise ScenarioLoadError(
             source,
             ValueError(
-                _entry_error(index, f"module {module!r} is not importable: {exc}")
+                _entry_error(index, f"module {module!r} is not importable")
             ),
-        ) from exc
-    if not callable(getattr(mod, "install", None)):
+        )
+
+    # Prefer a cheap existence check here: scenario manifests should validate
+    # even when optional third-party runtime dependencies (for example DuckDB
+    # in the RCA package) are not installed in the current test environment.
+    # If the module has already been imported elsewhere, keep the stronger
+    # ``install()`` assertion.
+    loaded = sys.modules.get(module)
+    if loaded is not None and not callable(getattr(loaded, "install", None)):
         raise ScenarioLoadError(
             source,
             ValueError(
                 _entry_error(index, f"module {module!r} does not export install()")
             ),
         )
+
+
+def _ensure_scenario_import_roots(scenario_dir: Path) -> None:
+    """Make editable-style scenario packages importable during manifest load.
+
+    Scenario manifests are allowed to reference modules from
+    ``<scenario_dir>/src`` (for example ``agentm_rca.tools.duckdb_sql``).
+    Tests and local dev runs load manifests straight from the repo checkout
+    without first installing each scenario package, so the loader needs to
+    surface that source root on ``sys.path`` before validating imports.
+    """
+
+    src_root = scenario_dir / "src"
+    if not src_root.is_dir():
+        return
+    src_str = str(src_root)
+    if src_str not in sys.path:
+        sys.path.insert(0, src_str)
 
 
 def _register_local(

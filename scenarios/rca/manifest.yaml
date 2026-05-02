@@ -3,14 +3,14 @@ description: Root-cause analysis over parquet observability data via DuckDB SQL.
 extensions:
   # Orchestrator-side: registers SQL tools the lead investigator can drive
   # directly (and that worker personas inherit).
-  - module: agentm_rca.tools.duckdb_sql
+  - local: duckdb_sql
     config:
       # data_dir can be overridden via the AGENTM_RCA_DATA_DIR env var.
       exclude:
         - conclusion.parquet
       row_limit: 200
       token_limit: 5000
-  - module: agentm_rca.tools.hypothesis_tools
+  - local: hypothesis_tools
   - module: agentm.extensions.builtin.artifact_store
   - module: agentm.extensions.builtin.trajectory
     config:
@@ -32,7 +32,7 @@ extensions:
         - trajectory
       available_inherited_extensions:
         duckdb_sql:
-          module: agentm_rca.tools.duckdb_sql
+          module: agentm._scenarios.rca.duckdb_sql
           config:
             exclude:
               - conclusion.parquet

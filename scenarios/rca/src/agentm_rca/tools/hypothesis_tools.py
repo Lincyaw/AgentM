@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from agentm.core.abi.messages import TextContent
@@ -15,7 +16,13 @@ from agentm.harness.extension import ExtensionAPI
 MANIFEST = ExtensionManifest(
     name="hypothesis_tools",
     description="Persist RCA hypotheses as append-only shared artifacts.",
-    registers=("tool:update_hypothesis", "tool:remove_hypothesis", "event:session_ready"),
+    registers=(
+        "tool:add_hypothesis",
+        "tool:update_hypothesis",
+        "tool:remove_hypothesis",
+        "tool:list_hypotheses",
+        "event:session_ready",
+    ),
 )
 
 _STATUSES = (
@@ -45,16 +52,16 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
     async def _on_session_ready(event: SessionReadyEvent) -> None:
         await store.on_session_ready(event)
 
-    async def _update(args: dict[str, Any]) -> ToolResult:
-        hid = str(args.get("id", "")).strip()
-        desc = str(args.get("description", "")).strip()
-        if not hid or not desc:
-            return _err("id and description are required")
-        status = str(args.get("status", "formed"))
+    async def _write_hypothesis(
+        *,
+        hid: str,
+        desc: str,
+        status: str,
+        evidence_summary: str | None,
+        parent_id: str | None,
+    ) -> ToolResult:
         if status not in _STATUSES:
             return _err(f"status must be one of {_STATUSES}")
-        evidence_summary = _maybe_str(args.get("evidence_summary"))
-        parent_id = _maybe_str(args.get("parent_id"))
         payload = {
             "id": hid,
             "status": status,
@@ -73,8 +80,37 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
         payload["path"] = result["path"]
         return _ok(json.dumps(payload, ensure_ascii=False, indent=2))
 
+    async def _add(args: dict[str, Any]) -> ToolResult:
+        hid = str(args.get("id", "")).strip()
+        desc = str(args.get("description", "")).strip()
+        if not hid or not desc:
+            return _err("id and description are required")
+        return await _write_hypothesis(
+            hid=hid,
+            desc=desc,
+            status="formed",
+            evidence_summary=_maybe_str(args.get("evidence_summary")),
+            parent_id=_maybe_str(args.get("parent_id")),
+        )
+
+    async def _update(args: dict[str, Any]) -> ToolResult:
+        hid = str(args.get("id", "")).strip()
+        desc = str(args.get("description", "")).strip()
+        if not hid or not desc:
+            return _err("id and description are required")
+        status = str(args.get("status", "formed"))
+        return await _write_hypothesis(
+            hid=hid,
+            desc=desc,
+            status=status,
+            evidence_summary=_maybe_str(args.get("evidence_summary")),
+            parent_id=_maybe_str(args.get("parent_id")),
+        )
+
     async def _remove(args: dict[str, Any]) -> ToolResult:
         hid = str(args.get("id", "")).strip()
+        if not hid:
+            return _err("id is required")
         result = await store.write_artifact(
             kind="hypothesis",
             title=f"{hid} removed",
@@ -93,7 +129,65 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
             )
         )
 
+    async def _list(args: dict[str, Any]) -> ToolResult:
+        try:
+            limit = max(1, int(args.get("limit", 50)))
+        except (TypeError, ValueError):
+            return _err("limit must be an integer")
+        artifact_listing = await store.list_artifacts(
+            {"kind": "hypothesis", "limit": limit}
+        )
+        if artifact_listing.is_error:
+            return artifact_listing
+        artifacts = artifact_listing.details.get("artifacts", [])
+        if not isinstance(artifacts, list):
+            return _err("artifact store returned an invalid listing")
+        hid_filter = _maybe_str(args.get("id"))
+        status_filter = _maybe_str(args.get("status"))
+        items: list[dict[str, Any]] = []
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            path = _maybe_str(artifact.get("path"))
+            if path is None:
+                continue
+            try:
+                payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if hid_filter is not None and payload.get("id") != hid_filter:
+                continue
+            if status_filter is not None and payload.get("status") != status_filter:
+                continue
+            payload["artifact_id"] = artifact.get("id")
+            payload["path"] = path
+            items.append(payload)
+        return _ok(json.dumps({"hypotheses": items}, ensure_ascii=False, indent=2))
+
     api.on("session_ready", _on_session_ready)
+    api.register_tool(
+        FunctionTool(
+            name="add_hypothesis",
+            description=(
+                "Compatibility alias for recording a newly formed hypothesis. "
+                "Creates a new append-only shared artifact with status='formed'."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "description": {"type": "string"},
+                    "evidence_summary": {"type": ["string", "null"]},
+                    "parent_id": {"type": ["string", "null"]},
+                },
+                "required": ["id", "description"],
+                "additionalProperties": False,
+            },
+            fn=_add,
+        )
+    )
     api.register_tool(
         FunctionTool(
             name="update_hypothesis",
@@ -128,6 +222,26 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
                 "additionalProperties": False,
             },
             fn=_remove,
+        )
+    )
+    api.register_tool(
+        FunctionTool(
+            name="list_hypotheses",
+            description=(
+                "Compatibility listing view over hypothesis artifacts. "
+                "Returns the latest matching hypothesis snapshots without "
+                "loading unrelated artifact kinds."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "id": {"type": ["string", "null"]},
+                    "status": {"type": ["string", "null"], "enum": [*_STATUSES, "removed", None]},
+                    "limit": {"type": "integer", "minimum": 1},
+                },
+                "additionalProperties": False,
+            },
+            fn=_list,
         )
     )
 
