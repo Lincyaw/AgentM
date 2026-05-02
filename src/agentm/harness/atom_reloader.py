@@ -603,6 +603,7 @@ class AtomReloader:
                     current_hash=current_hash,
                     tier=manifest.tier,
                     api_version=manifest.api_version,
+                    source_path=str(atom.file_path),
                 )
             )
         return out

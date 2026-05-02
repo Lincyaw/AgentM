@@ -41,6 +41,12 @@ def atom_metrics_path(
     return atom_version_dir(name, version_key, root=root) / METRICS_FILENAME
 
 
+def atom_decisions_path(
+    name: str, version_key: str, *, root: Path | None = None
+) -> Path:
+    return atom_version_dir(name, version_key, root=root) / "decisions.jsonl"
+
+
 # --- Indexer helpers -----------------------------------------------------
 # The indexer treats its ``root`` argument as the catalog root itself
 # (``<cwd>/.agentm/catalog``) rather than the cwd. The helpers below provide
