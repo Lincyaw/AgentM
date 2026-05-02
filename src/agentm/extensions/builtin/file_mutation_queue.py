@@ -6,7 +6,7 @@ import asyncio
 import os
 from typing import Any
 
-from agentm.core.abi import AgentStartEvent, Tool, ToolResult
+from agentm.core.abi import AgentStartEvent, Tool, ToolOutcome, ToolResult
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI, ExtensionLoadError
 
@@ -44,7 +44,7 @@ class _QueuedTool:
         *,
         signal: asyncio.Event | None = None,
         on_update: Any = None,
-    ) -> ToolResult:
+    ) -> ToolResult | ToolOutcome:
         lock = self._locks.setdefault(_normalize_path(args), asyncio.Lock())
         async with lock:
             return await self._wrapped.execute(

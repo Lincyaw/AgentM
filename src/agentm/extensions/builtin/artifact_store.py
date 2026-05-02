@@ -20,7 +20,7 @@ from agentm.core.lib.artifact_files import (
     scan_artifact_metadata,
 )
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import SessionReadyEvent
+from agentm.harness.events import SessionReadyEvent, SessionShutdownEvent
 from agentm.harness.extension import ExtensionAPI
 
 _DEFAULT_INLINE_BYTES = 8 * 1024
@@ -31,6 +31,22 @@ _NEXT_ID_WIDTH = 3
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _KIND_RE = re.compile(r"[^A-Za-z0-9_-]+")
 _ID_LOCKS: dict[str, asyncio.Lock] = {}
+_STORES_BY_SESSION: dict[str, "ArtifactStore"] = {}
+
+
+def get_artifact_store(session_id: str) -> "ArtifactStore | None":
+    """Look up the live ``artifact_store`` instance for ``session_id``.
+
+    Other extensions and scenario tools that need shared-artifact write/read
+    access (e.g. ``hypothesis_tools`` in the RCA scenario) call this from
+    inside their own ``session_ready`` handler — by then every extension's
+    ``install()`` has run, so the registry is populated. Returns ``None`` if
+    ``artifact_store`` is not loaded for the session, so callers can fail
+    fast with a clear error instead of silently constructing a parallel,
+    state-divergent store.
+    """
+
+    return _STORES_BY_SESSION.get(session_id)
 
 MANIFEST = ExtensionManifest(
     name="artifact_store",
@@ -69,7 +85,7 @@ class _StoreContext:
         return artifacts_dir_for(self.cwd, self.root_session_id)
 
 
-class _ArtifactStore:
+class ArtifactStore:
     def __init__(self, api: ExtensionAPI, config: dict[str, Any]) -> None:
         self._api = api
         root_session_id = str(config.get("root_session_id") or api.session_id)
@@ -322,8 +338,14 @@ class _ArtifactStore:
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    store = _ArtifactStore(api, config)
+    store = ArtifactStore(api, config)
+    _STORES_BY_SESSION[api.session_id] = store
+
+    def _on_session_shutdown(_event: SessionShutdownEvent) -> None:
+        _STORES_BY_SESSION.pop(api.session_id, None)
+
     api.on("session_ready", store.on_session_ready)
+    api.on("session_shutdown", _on_session_shutdown)
     api.register_tool(
         FunctionTool(
             name="artifact_write",
@@ -559,14 +581,12 @@ def _error(message: str) -> ToolResult:
         details=payload,
     )
 
-ArtifactStoreHandle = _ArtifactStore
-
-
 __all__ = [
-    "ArtifactStoreHandle",
     "MANIFEST",
+    "ArtifactStore",
     "artifacts_dir_for",
     "find_metadata_files",
+    "get_artifact_store",
     "install",
     "list_artifacts_for_task",
     "scan_artifact_metadata",

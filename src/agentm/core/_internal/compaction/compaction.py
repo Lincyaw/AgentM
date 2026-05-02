@@ -20,7 +20,7 @@ from agentm.core.abi.compaction import (
     CompactionSettings,
     ContextUsageEstimate,
 )
-from agentm.harness.session_manager import SessionEntry
+from agentm.core.abi.session import SessionEntry
 
 from .utils import (
     FileOperations,

@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from agentm.core.abi import AgentMessage
-from agentm.harness.session_manager import SessionEntry, SessionManager
+from agentm.core.abi.session import SessionEntry, SessionTree
 
 from .compaction import estimate_tokens, get_message_from_entry
 from .utils import (
@@ -51,7 +51,7 @@ class GenerateBranchSummaryOptions:
 
 
 def collect_entries_for_branch_summary(
-    session: SessionManager,
+    session: SessionTree,
     old_leaf_id: str | None,
     target_id: str,
 ) -> CollectEntriesResult:

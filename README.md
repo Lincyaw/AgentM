@@ -108,11 +108,20 @@ verifiable.
 | Group        | Atoms |
 |--------------|-------|
 | Tools        | `tool_read`, `tool_write`, `tool_edit`, `tool_bash`, `tool_grep`, `tool_find`, `tool_ls`, `tool_hypothesis_store`, `tool_submit_plan`, `tool_trajectory_loader` |
-| Prompt/skill | `system_prompt`, `prompt_templates`, `skill_loader`, `cc_commands`, `cc_agents`, `cc_plugins` |
+| Prompt/skill | `system_prompt`, `prompt_templates`, `skill_loader` |
 | Compaction   | `micro_compact`, `llm_compaction`, `tool_result_budget` |
 | Policy       | `permission`, `tool_filter`, `cost_budget`, `dedup`, `turn_reminder` |
 | Observability| `observability`, `trajectory` |
 | Misc         | `sub_agent`, `file_mutation_queue` |
+
+### Contrib atoms (`src/agentm/extensions/contrib/`)
+
+Opt-in adapters for third-party tools. NOT auto-discovered: scenarios
+load them explicitly via `available_inherited_extensions`.
+
+- `cc_agents`, `cc_commands`, `cc_plugins` — Claude Code compatibility
+  (read `~/.claude/{agents,commands,plugins}` and surface them through
+  the generic `resources_discover` event).
 
 ### Built-in scenarios (`src/agentm/extensions/scenarios/`)
 

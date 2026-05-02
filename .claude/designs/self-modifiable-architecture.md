@@ -153,12 +153,13 @@ extension_api:
 
 reload:
   # Atoms in tier_2 require explicit `propose_change` decision to reload.
+  # cc_agents lives under extensions/contrib/ (opt-in); scenarios that load
+  # it can re-list it in their own scenario manifest's reload.tier_2_atoms.
   tier_2_atoms:
     - permission
     - cost_budget
     - tool_filter
     - llm_compaction
-    - cc_agents
 ```
 
 The constitution list is **closed**: anything not on the list and inside `src/agentm/extensions/builtin/`, `src/agentm/extensions/scenarios/`, `skills/`, `prompts/`, `.claude/`, or `.agentm/` (except catalog) defaults to autonomy-layer. Outside-tree paths are out of scope.
@@ -302,7 +303,7 @@ Atoms whose worst-case bug is "agent does worse on its task". Validator runs, re
 |---|---|
 | `tool_read`, `tool_bash`, `tool_edit`, `tool_write`, `tool_grep`, `tool_find`, `tool_ls` | Bad tool → bad output → caught by metrics |
 | `tool_hypothesis_store`, `tool_submit_plan`, `tool_trajectory_loader` | Domain tools, same logic |
-| `system_prompt`, `prompt_templates`, `skill_loader`, `cc_commands` | Prompt drift is observable |
+| `system_prompt`, `prompt_templates`, `skill_loader` | Prompt drift is observable |
 | `observability`, `trajectory` | Pure subscribers; cannot affect agent behavior |
 | `micro_compact`, `tool_result_budget`, `turn_reminder`, `dedup`, `sub_agent` | Behavior tweaks; bounded blast radius |
 | `file_mutation_queue` | Local I/O scheduling |
@@ -317,7 +318,10 @@ Atoms whose worst-case bug breaks safety, cost, or trust boundaries. Validator r
 | `cost_budget` | Removing the budget is the canonical failure mode |
 | `tool_filter` | Re-enabling a deny-listed tool is the canonical failure mode |
 | `llm_compaction` | Affects context fidelity; bad strategies amplify silently |
-| `cc_agents` | Sub-agent dispatch policy; recursion-bomb risk |
+
+Contrib atoms (e.g. `cc_agents` under `extensions/contrib/`) declare their own
+tier; scenarios opting in are responsible for re-listing them in the scenario
+manifest's `reload.tier_2_atoms`.
 
 ### 7.3 Tier declaration
 

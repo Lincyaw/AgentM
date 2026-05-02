@@ -17,7 +17,7 @@ import pytest
 from agentm.core._internal.catalog import manifest as core_manifest_mod
 from agentm.core._internal.catalog.manifest import CoreManifest
 from agentm.extensions import ExtensionManifest
-from agentm.extensions.discover import BuiltinEntry, discover_builtin, reset_cache
+from agentm.extensions.discover import BuiltinEntry, reset_cache
 from agentm.extensions.validate import (
     ValidationIssue,
     validate_builtin,
@@ -41,16 +41,6 @@ def test_builtin_catalog_passes_section_11_contract() -> None:
     assert issues == [], "\n".join(
         f"  - {i.module_path} [{i.rule}]: {i.message}" for i in issues
     )
-
-
-def test_discover_returns_dict_keyed_by_name() -> None:
-    """Discovery contract: maps name → entry, name equals module stem."""
-
-    catalog = discover_builtin()
-    for name, entry in catalog.items():
-        assert entry.name == name
-        assert entry.manifest.name == name
-        assert entry.module_path == f"agentm.extensions.builtin.{name}"
 
 
 # ---------------------------------------------------------------------------

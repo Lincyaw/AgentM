@@ -5,16 +5,13 @@ from __future__ import annotations
 import inspect
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from agentm.core._internal.catalog import _layout
 from agentm.core._internal.catalog.hashing import compute_atom_hash
 from agentm.core.abi import EventBus
+from agentm.core.abi.resource import ResourceWriter, WriteResult
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
-
-if TYPE_CHECKING:
-    from agentm.harness.resource_writer import GitBackedResourceWriter, WriteResult
 
 
 _INDEXER_SESSION_ID = "catalog-freeze"
@@ -26,22 +23,31 @@ def freeze_current(
     manifest: ExtensionManifest,
     *,
     root: Path | None = None,
+    writer: ResourceWriter | None = None,
 ) -> str:
     if manifest.name != name:
         raise ValueError(
             f"manifest.name {manifest.name!r} does not match atom name {name!r}"
         )
 
-    from agentm.harness.resource_writer import GitBackedResourceWriter
-
     cwd_root = (root or Path.cwd()).resolve()
     atom_path = _resolve_atom_source_path(name, root=cwd_root)
     relative_path = atom_path.relative_to(cwd_root)
-    writer = GitBackedResourceWriter(
-        cwd=str(cwd_root),
-        session_id=_INDEXER_SESSION_ID,
-        bus=EventBus(),
-    )
+
+    if writer is None:
+        # Default-impl escape hatch for the catalog freeze CLI / unit tests:
+        # constitution layer normally types only against ``ResourceWriter`` —
+        # the concrete ``GitBackedResourceWriter`` is owned by the harness.
+        # This lazy import is the one allowed reverse dependency, scoped to
+        # "no writer was injected; fall back to the harness default."
+        from agentm.harness.resource_writer import GitBackedResourceWriter
+
+        writer = GitBackedResourceWriter(
+            cwd=str(cwd_root),
+            session_id=_INDEXER_SESSION_ID,
+            bus=EventBus(),
+        )
+
     result = _write_via_writer(writer, relative_path, source)
     version_key = (
         result.commit_sha_after
@@ -85,14 +91,13 @@ def _resolve_atom_source_path(name: str, *, root: Path) -> Path:
 
 
 def _write_via_writer(
-    writer: "GitBackedResourceWriter",
+    writer: ResourceWriter,
     relative_path: Path,
     source: str,
-) -> "WriteResult":
+) -> WriteResult:
     import asyncio
 
-
-    async def _write():
+    async def _write() -> WriteResult:
         return await writer.write(
             str(relative_path),
             source.encode("utf-8"),
