@@ -342,7 +342,9 @@ class _ChildTaskManager:
         if not running:
             return []
         for state in running:
-            state.abort_signal.set()
+            # Reuse the public abort path so auto-aborts and explicit
+            # ``abort_task`` calls share the same state transition logic.
+            await self.abort({"task_id": state.task_id})
         await asyncio.wait(
             [state.task for state in running],
             timeout=_SHUTDOWN_GRACE_SECONDS,
