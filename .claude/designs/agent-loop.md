@@ -28,6 +28,8 @@ Handlers may return a `LoopAction` (or `None` for "no opinion") to override `def
 
 Tools may return either a bare `ToolResult` or a `ToolOutcome`. Bare results normalize to `ToolContinue`, so legacy tools keep working. The terminal-tool case (e.g. `submit_final_report` in the RCA scenario) returns `ToolTerminate` directly from its `fn`.
 
+**`reason` namespace convention.** `ToolTerminate.reason` is opaque to the kernel — it is surfaced verbatim through `ToolTerminated.reason`. To prevent accidental collisions when two scenarios pick the same bare label, prefix the reason with the extension or scenario short name and a colon: `"rca:final-report-submitted"`, `"plan_mode:plan-accepted"`, `"code_review:approved"`. The kernel does not enforce the convention, but observability indexers should treat the reason as opaque inside the namespace.
+
 ### `TerminationCause` — why the loop is stopping
 
 | variant | `final` | rationale |
@@ -49,6 +51,29 @@ Tools may return either a bare `ToolResult` or a `ToolOutcome`. Bare results nor
 | `Step` | continue to the next turn with current messages (default after a successful tools-and-results round) |
 | `Stop(cause)` | terminate the loop with the given cause; `_finish_with_cause` emits `agent_end` |
 | `Inject(messages)` | continue to next turn after appending these messages; used by extensions to override a default `Stop` (e.g. inject a continuation prompt instead of terminating) |
+
+## Backlog: sum-typify the remaining handler return conventions
+
+The kernel currently uses four different return-shape conventions across
+its event channels:
+
+| channel | return shape | notes |
+|---|---|---|
+| `decide_turn_action` | `LoopAction \| None` | sealed sum (this redesign) |
+| `tool_call` | `{"block": True, "reason": str} \| None` | dict literal |
+| `context` | `list[AgentMessage] \| {"messages": [...]} \| None` | dual shape |
+| `tool_result` | bare `ToolResult \| None` | no wrapper |
+
+The sum-type approach for `decide_turn_action` is strictly better: typed,
+discoverable through autocomplete, and the resolution lattice
+(`Inject > Stop > Step`) is explicit instead of buried in folklore. Extending
+the same pattern to the other three channels — defining `ToolCallAction`
+(`Allow | Block(reason)`), `ContextAction` (`Keep | Replace(messages)`),
+`ToolResultAction` (`Keep | Replace(result)`) — is the natural follow-up and
+will land in a separate PR. It is not blocking PR #65 cleanup because each
+channel has only 1–2 in-tree handlers and the dict shapes have not caused
+incidents yet, but it is the only way to scale to 10+ extensions without
+re-reading every helper to remember which channel takes which shape.
 
 ## Default Action Computation
 

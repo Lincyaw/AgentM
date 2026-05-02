@@ -88,6 +88,15 @@ class ToolTerminate(ToolOutcome):
     ``reason`` is opaque to the kernel — surfaced verbatim through the
     ``ToolTerminated`` cause to extensions and observability so downstream
     consumers can distinguish *which* terminal tool fired.
+
+    Namespace convention (recommended): prefix ``reason`` with the
+    extension or scenario short name and a colon, e.g.
+    ``"rca:final-report-submitted"`` or ``"plan_mode:plan-accepted"``.
+    The kernel cannot enumerate scenario-defined reasons, so a
+    namespaced string keeps observers safe from collisions when two
+    scenarios pick the same bare label. The §11 validator emits a
+    soft warning for unprefixed reasons; existing single-scenario
+    reasons keep working.
     """
 
     result: ToolResult

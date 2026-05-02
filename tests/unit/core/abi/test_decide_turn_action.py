@@ -248,14 +248,14 @@ def test_default_action_maps_tool_terminate_to_tool_terminated_cause() -> None:
     )
     outcome = ToolTerminate(
         result=ToolResult(content=[TextContent(type="text", text="done")]),
-        reason="rca-final-report-submitted",
+        reason="rca:final-report-submitted",
     )
     action = _default_action_with_names(msg, [("submit_final_report", outcome)])
 
     assert isinstance(action, Stop)
     assert isinstance(action.cause, ToolTerminated)
     assert action.cause.tool_name == "submit_final_report"
-    assert action.cause.reason == "rca-final-report-submitted"
+    assert action.cause.reason == "rca:final-report-submitted"
 
 
 def test_resolve_action_concatenates_multiple_inject_returns_in_order() -> None:

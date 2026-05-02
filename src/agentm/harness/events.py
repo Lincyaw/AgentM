@@ -63,9 +63,12 @@ class SessionShutdownEvent:
 class BeforeCompactEvent:
     """Fires before an extension performs context compaction.
 
-    Handlers may return ``{"cancel": True}`` to abort the compaction, or
-    ``{"replacement": <CompactionResult>}`` to fully replace it. Multiple
-    extensions registering on this channel: last non-None replacement wins.
+    This is currently an observation-only channel: emitters (``llm_compaction``,
+    ``micro_compact``) discard handler return values. Subscribers may inspect
+    or mutate ``messages`` in place to influence the buffer that compaction
+    will see, but cannot cancel or replace the compaction itself. Adding a
+    cancel/replacement contract is on the backlog (PR #65 follow-up) and
+    would require both emitters to opt in.
 
     Mutability: ``messages`` is intentionally mutable (not frozen) so a
     handler can adjust the in-flight buffer before compaction kicks off.

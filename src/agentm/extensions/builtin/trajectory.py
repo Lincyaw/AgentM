@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agentm.core.abi import AgentEndEvent
+from agentm.core.abi.events import TerminationCause
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
@@ -112,6 +113,23 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
 
 def _serialize(value: Any) -> Any:
+    if isinstance(value, TerminationCause):
+        # Sum-type subclasses lose their identity through ``asdict`` because
+        # the ``final`` discriminator is a ClassVar (excluded from
+        # dataclass fields) and the class identity isn't carried otherwise.
+        # Stamp ``cause_kind`` (class name) and ``final`` explicitly so
+        # downstream consumers (catalog indexer, evolution metrics) can
+        # disambiguate ModelEndTurn / MaxTurnsExhausted / SignalAborted (all
+        # serialize to ``{}``) and ProviderProtocolViolation /
+        # BudgetExhausted (both carry ``detail``). ``cause_kind`` is used
+        # instead of ``kind`` because ``ProviderTruncated`` declares its own
+        # ``kind: Literal["max_tokens", "error"]`` field.
+        payload = {
+            key: _serialize(val) for key, val in asdict(value).items()
+        }
+        payload["cause_kind"] = type(value).__name__
+        payload["final"] = type(value).final
+        return payload
     if is_dataclass(value) and not isinstance(value, type):
         return {key: _serialize(val) for key, val in asdict(value).items()}
     if isinstance(value, dict):

@@ -87,6 +87,18 @@ def _extract_usage_tokens(record: dict[str, Any]) -> int | None:
     return input_tokens + output_tokens
 
 
+_CAUSE_KIND_TO_LABEL: dict[str, str] = {
+    "ModelEndTurn": "end_turn",
+    "ToolTerminated": "tool_terminated",
+    "MaxTurnsExhausted": "max_turns",
+    "SignalAborted": "aborted",
+    "BudgetExhausted": "budget",
+    # ProviderTruncated and ProviderProtocolViolation are mapped from
+    # their own discriminators below (kind=max_tokens/error, or
+    # the literal "protocol_violation" label).
+}
+
+
 def _extract_stop_reason(record: dict[str, Any]) -> str | None:
     """Read the termination identity from an ``agent_end`` record.
 
@@ -94,10 +106,12 @@ def _extract_stop_reason(record: dict[str, Any]) -> str | None:
     * Legacy: ``attributes.stop_reason`` is a bare string (test fixtures and
       pre-redesign traces).
     * Current: ``attributes.cause`` is a serialized :class:`TerminationCause`
-      whose dataclass fields (``final``, plus subclass-specific attrs) name
-      the cause via its sentinel keys. We derive the canonical label from
-      whichever discriminator is present so completion-rate stays accurate
-      for new traces without forcing the indexer to import kernel types.
+      stamped with a ``kind`` discriminator (the class name, written by
+      ``trajectory._serialize``) plus the cause's ClassVar ``final`` flag and
+      any subclass-specific fields. The ``kind`` field is the load-bearing
+      discriminator — without it ``ModelEndTurn`` / ``MaxTurnsExhausted`` /
+      ``SignalAborted`` (all serialize to no fields besides ``final``) are
+      indistinguishable.
     """
 
     attributes = record.get("attributes")
@@ -109,28 +123,25 @@ def _extract_stop_reason(record: dict[str, Any]) -> str | None:
         return legacy
 
     cause = attributes.get("cause")
-    if isinstance(cause, dict):
-        # Successful "model finished" terminations: ModelEndTurn has no
-        # discriminating fields; ToolTerminated carries ``tool_name`` and
-        # ``reason``. Both map to completion_rate=1.0 below.
-        if "tool_name" in cause and "reason" in cause:
-            return "tool_terminated"
-        # ProviderTruncated has ``kind`` (max_tokens|error).
-        kind = cause.get("kind")
-        if isinstance(kind, str):
-            return kind
-        # ProviderProtocolViolation has ``detail``.
-        if "detail" in cause:
-            return "protocol_violation"
-        # Final-cause classes (MaxTurnsExhausted/SignalAborted/Budget) only
-        # have ``final=True`` and no other discriminator. Fall through with
-        # ``final=true`` indicator; ``last_stop_reason`` stays unset for
-        # max_turns/aborted/budget so completion_rate=0.0 — same as before.
-        if cause.get("final") is True:
-            return None
-        # Bare ``ModelEndTurn`` carries only ``final=False``.
-        return "end_turn"
+    if not isinstance(cause, dict):
+        return None
 
+    cause_kind = cause.get("cause_kind")
+    if isinstance(cause_kind, str):
+        if cause_kind == "ProviderTruncated":
+            inner = cause.get("kind")
+            return inner if inner in {"max_tokens", "error"} else "max_tokens"
+        if cause_kind == "ProviderProtocolViolation":
+            return "protocol_violation"
+        label = _CAUSE_KIND_TO_LABEL.get(cause_kind)
+        if label is not None:
+            # BudgetExhausted gets enriched with which budget tripped.
+            detail = cause.get("detail")
+            if cause_kind == "BudgetExhausted" and isinstance(detail, str) and detail:
+                return f"budget:{detail}"
+            return label
+
+    # Unknown / pre-trajectory-stamping shape: best-effort fall-through.
     return None
 
 

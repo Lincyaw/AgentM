@@ -34,6 +34,13 @@ from agentm.modes.textual_app import (
     TurnContainer,
 )
 
+# All cases here exercise the Textual TUI rendering layer. They pass but
+# do not map to any AgentM fail-stop core position (CLAUDE.md "Testing
+# Philosophy" §1), so they are excluded from the default suite. Run with
+# ``uv run pytest -m ui`` when touching ``modes/textual_app.py`` or its
+# event wiring.
+pytestmark = pytest.mark.ui
+
 
 PromptScript = Callable[[EventBus, str], Awaitable[list[Any]]]
 

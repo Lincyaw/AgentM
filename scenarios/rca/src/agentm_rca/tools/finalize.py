@@ -131,7 +131,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     )
                 ]
             ),
-            reason="rca-final-report-submitted",
+            reason="rca:final-report-submitted",
         )
 
     api.register_tool(
