@@ -11,8 +11,8 @@ from typing import Any, Protocol
 
 from rich.console import Group
 from rich.markdown import Markdown
-from rich.panel import Panel
 from rich.syntax import Syntax
+from rich.table import Table as RichTable
 from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult, ScreenStackError
@@ -21,7 +21,7 @@ from textual.containers import Container, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import ModalScreen
-from textual.widgets import Collapsible, Input, OptionList, Static, TextArea
+from textual.widgets import Collapsible, Footer, Input, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from agentm.core.abi import (
@@ -43,9 +43,12 @@ from agentm.extensions.builtin.cost_budget import _PRICING as _COST_PRICING
 from agentm.harness import AgentSession, AgentSessionConfig
 from agentm.harness.events import (
     ApiRegisterEvent,
+    ApiSendUserMessageEvent,
     ChildSessionEndEvent,
     ChildSessionStartEvent,
+    CostBudgetExceededEvent,
     ExtensionInstallEvent,
+    ExtensionReloadEvent,
 )
 from agentm.harness.extension import CommandSpec
 
@@ -58,6 +61,28 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/clear": "Clear the visible conversation log.",
     "/help": "Show key bindings and slash commands.",
     "/copy-last": "Copy the most recent assistant text block.",
+    "/extensions": "List loaded extensions and their status.",
+    "/tools": "List tools registered with the agent.",
+    "/budget": "Show current cost-budget state.",
+}
+
+# Reload triggers that represent self-modification — the agent (or an
+# approved propose_change) edited an atom under its own catalog. The TUI
+# highlights these so the framework's signature behavior is *visible*
+# rather than silently happening through git.
+_SELF_MODIFY_TRIGGERS = frozenset({"agent", "propose_change_approved"})
+
+_PHASE_GLYPHS: dict[str, str] = {
+    "idle": "●",
+    "thinking": "◐",
+    "streaming": "◑",
+    "tool": "▶",
+    "subagent": "↳",
+}
+
+_THEME_ALIASES: dict[str, str] = {
+    "dark": "textual-dark",
+    "light": "textual-light",
 }
 
 
@@ -87,6 +112,20 @@ class SlashCommandEntry:
 
 
 @dataclass(slots=True)
+class ToolEntry:
+    """Snapshot of a tool registered via ``api.register_tool``.
+
+    Populated from ``ApiRegisterEvent(kind="tool")``; surfaced to the
+    user via the ``/tools`` modal so they can see which capabilities the
+    agent actually has at the current moment.
+    """
+
+    name: str
+    description: str
+    source: str
+
+
+@dataclass(slots=True)
 class ToolRenderState:
     tool_name: str
     start_ns: int
@@ -98,14 +137,27 @@ class ConversationLog(VerticalScroll):
     pass
 
 
-class StatusLine(Static):
-    model_name = reactive("?")
-    current_text = reactive("? · turn 0 · in: 0 · out: 0 · $0.000 · idle")
-    turn_number = reactive(0)
-    tokens_in = reactive(0)
-    tokens_out = reactive(0)
-    cost_usd = reactive(0.0)
-    phase = reactive("idle")
+class StatusHeader(Static):
+    """Top dock-bar showing model · turn · tokens · cost · phase.
+
+    Rendered as a single-line strip at the top of the app. Replaces the
+    legacy bottom italic-dim status row; that one was unreadable and the
+    information density warrants prime real estate.
+    """
+
+    model_name: reactive[str] = reactive("?")
+    current_text: reactive[str] = reactive(
+        " AgentM  ▎?  ·  turn 0  ·  in 0  out 0  ·  $0.000  ·  ● idle "
+    )
+    turn_number: reactive[int] = reactive(0)
+    tokens_in: reactive[int] = reactive(0)
+    tokens_out: reactive[int] = reactive(0)
+    cost_usd: reactive[float] = reactive(0.0)
+    phase: reactive[str] = reactive("idle")
+    extensions_loaded: reactive[int] = reactive(0)
+    extensions_failed: reactive[int] = reactive(0)
+    tools_registered: reactive[int] = reactive(0)
+    budget_exceeded: reactive[bool] = reactive(False)
 
     def watch_model_name(self, _: str) -> None:
         self._refresh()
@@ -125,10 +177,34 @@ class StatusLine(Static):
     def watch_phase(self, _: str) -> None:
         self._refresh()
 
+    def watch_extensions_loaded(self, _: int) -> None:
+        self._refresh()
+
+    def watch_extensions_failed(self, _: int) -> None:
+        self._refresh()
+
+    def watch_tools_registered(self, _: int) -> None:
+        self._refresh()
+
+    def watch_budget_exceeded(self, _: bool) -> None:
+        self._refresh()
+
     def _refresh(self) -> None:
+        glyph = _PHASE_GLYPHS.get(self.phase, "●")
+        ext_segment = f"{self.extensions_loaded} ext"
+        if self.extensions_failed:
+            ext_segment = f"{ext_segment} ({self.extensions_failed} failed)"
+        cost_segment = f"${self.cost_usd:.3f}"
+        if self.budget_exceeded:
+            cost_segment = f"{cost_segment} ⚠"
         self.current_text = (
-            f"{self.model_name} · turn {self.turn_number} · in: {self.tokens_in}"
-            f" · out: {self.tokens_out} · ${self.cost_usd:.3f} · {self.phase}"
+            f" AgentM  ▎{self.model_name}"
+            f"  ·  turn {self.turn_number}"
+            f"  ·  {ext_segment}"
+            f"  ·  {self.tools_registered} tools"
+            f"  ·  in {self.tokens_in}  out {self.tokens_out}"
+            f"  ·  {cost_segment}"
+            f"  ·  {glyph} {self.phase} "
         )
         self.update(self.current_text)
 
@@ -159,13 +235,21 @@ class ThinkingBlock(Collapsible):
 
 
 class ToolCallBlock(Collapsible):
+    """Tool call rendered as a Collapsible with a clean two-row body.
+
+    Title format: ``tool_name  ✓ 142ms`` — keep status with the name; args
+    live in the body where they can wrap. Previous design crammed
+    args-preview-truncated-to-48-chars into the title which was hard to
+    scan and broke alignment when args were long.
+    """
+
     can_focus = True
 
     def __init__(self, tool_call_id: str, tool_name: str) -> None:
         self.tool_call_id = tool_call_id
         self.tool_name = tool_name
         self.body = Static(classes="tool-body")
-        super().__init__(self.body, title=f"→ {tool_name} …  [pending]", collapsed=False)
+        super().__init__(self.body, title=f"{tool_name}  …  pending", collapsed=False)
         self.add_class("tool-call")
         self.result_text = ""
         self.args: dict[str, Any] = {}
@@ -177,8 +261,9 @@ class ToolCallBlock(Collapsible):
         self.collapsed = not self.collapsed
 
     def set_pending_args(self, args: dict[str, Any], args_preview: str) -> None:
+        del args_preview  # title no longer carries args; body does
         self.args = dict(args)
-        self.title = f"→ {self.tool_name} {args_preview}  [pending]"
+        self.title = f"{self.tool_name}  …  pending"
         self._render_body(None)
 
     def set_result(self, *, result: Any, duration_ms: int) -> None:
@@ -186,8 +271,7 @@ class ToolCallBlock(Collapsible):
         self.ok = not getattr(result, "is_error", False)
         self.result_text = _tool_result_text(result)
         status = "✓" if self.ok else "✗"
-        args_preview = _truncate(_format_args_preview(self.args), 48) if self.args else "{}"
-        self.title = f"→ {self.tool_name} {args_preview}  [{status} {duration_ms}ms]"
+        self.title = f"{self.tool_name}  {status} {duration_ms}ms"
         self.collapsed = self.ok and _line_count(self.result_text) < 20
         self._render_body(result)
         if self.ok:
@@ -196,65 +280,97 @@ class ToolCallBlock(Collapsible):
             self.add_class("failed")
 
     def _render_body(self, result: Any | None) -> None:
-        args_text = _format_full_args(self.args)
-        result_text = self.result_text if result is not None else ""
+        args_text = _format_full_args(self.args) if self.args else "{}"
         if result is None:
-            renderable: Any = Text(f"args\n{args_text}", style="yellow")
+            renderable: Any = Group(
+                Text("args", style="bold yellow"),
+                Text(args_text),
+            )
             self.body_kind = "text"
         else:
-            result_renderable = _render_tool_result(self.tool_name, result_text)
+            result_renderable = _render_tool_result(self.tool_name, self.result_text)
             self.body_kind = type(result_renderable).__name__
+            ok = not getattr(result, "is_error", False)
             renderable = Group(
-                Text("args", style="yellow"),
+                Text("args", style="bold yellow"),
                 Text(args_text),
-                Text("result", style="green" if not getattr(result, "is_error", False) else "red"),
+                Text(""),
+                Text("result", style="bold green" if ok else "bold red"),
                 result_renderable,
             )
         self.body.update(renderable)
 
 
-class SubagentBlock(Static):
+class SubagentBlock(Vertical):
+    """Subagent panel rendered with native Textual widgets.
+
+    Replaces the prior ``rich.Panel(border_style="cyan")`` rendering — that
+    fought with the CSS ``.subagent { border-left: thick cyan }`` and
+    produced a doubled border. Now: the gutter comes from CSS only, the
+    title and body are plain widgets composed inside.
+    """
+
     def __init__(self, child_session_id: str, purpose: str) -> None:
         super().__init__(classes="subagent")
         self.child_session_id = child_session_id
         self.purpose = purpose
-        self.lines: list[str] = [f"subagent: {purpose}"]
+        self.lines: list[str] = []
         self.failed = False
-        self._refresh()
+        self.title_widget = Static(f"↳ {purpose}", classes="subagent-title")
+        self.body_widget = Static("", classes="subagent-body")
+
+    def compose(self) -> ComposeResult:
+        yield self.title_widget
+        yield self.body_widget
 
     def add_line(self, text: str) -> None:
-        if text:
-            self.lines.append(text)
-            self._refresh()
+        if not text:
+            return
+        self.lines.append(text)
+        self._refresh_body()
 
     def mark_error(self, error: str | None) -> None:
         self.failed = bool(error)
         if error:
             self.lines.append(f"error: {error}")
         self.set_class(self.failed, "failed")
-        self._refresh()
+        self._refresh_body()
 
-    def _refresh(self) -> None:
-        border = "red" if self.failed else "cyan"
-        self.update(
-            Panel(
-                Markdown("\n\n".join(self.lines)),
-                title=f"↳ {self.purpose}",
-                border_style=border,
-            )
-        )
+    def _refresh_body(self) -> None:
+        if not self.lines:
+            return
+        if self.is_mounted:
+            self.body_widget.update(Markdown("\n\n".join(self.lines)))
 
 
 class UserTurn(Static):
-    def __init__(self, text: str) -> None:
-        super().__init__(classes="user-turn")
-        self.update(Panel(Markdown(text), title="user", border_style="blue"))
+    """Visual block for a user message in the conversation log.
+
+    ``injected_from`` distinguishes a real keystroke-from-user message
+    (None) from a synthetic one routed through
+    ``api.send_user_message`` from inside an extension. Both end up in
+    the model's message list, but the user should be able to *see* when
+    a turn was injected on their behalf — that's the difference between
+    "I asked for X" and "an atom asked for X on my behalf and now I'm
+    looking at the answer."
+    """
+
+    def __init__(self, text: str, *, injected_from: str | None = None) -> None:
+        css_class = "user-turn injected" if injected_from else "user-turn"
+        super().__init__(classes=css_class)
+        if injected_from:
+            label = f"**system → you** _(from `{injected_from}`)_"
+        else:
+            label = "**you**"
+        body = f"{label}\n\n{text}" if text.strip() else label
+        self.update(Markdown(body))
 
 
 class TurnContainer(Vertical):
     def __init__(self, logical_turn: int) -> None:
         super().__init__(classes="turn")
         self.logical_turn = logical_turn
+        self.label = Static("● assistant", classes="assistant-label")
         self.thinking = ThinkingBlock()
         self.assistant = AssistantTextBlock()
         self.tools: dict[str, ToolCallBlock] = {}
@@ -263,6 +379,7 @@ class TurnContainer(Vertical):
         self.thinking_buffer = ""
 
     def compose(self) -> ComposeResult:
+        yield self.label
         yield self.thinking
         yield self.assistant
 
@@ -286,7 +403,10 @@ class PromptInput(TextArea):
         super().__init__(id="prompt-input")
         self.show_line_numbers = False
         self.soft_wrap = True
-        self.tab_behavior = "indent"
+        # Tab moves focus rather than indenting — App-level Tab binding
+        # was previously misleading because TextArea ate the key when
+        # focused. With "focus" here, tab leaves the input naturally.
+        self.tab_behavior = "focus"
 
     async def on_key(self, event: events.Key) -> None:
         app = self.app
@@ -404,15 +524,24 @@ class HelpScreen(ModalScreen[None]):
             "## Keys\n"
             "- `Enter` submit\n"
             "- `Shift+Enter` newline\n"
-            "- `Esc` soft-cancel\n"
-            "- `Ctrl+C` interrupt / quit\n"
-            "- `Ctrl+D` quit\n"
-            "- `Ctrl+L` clear log\n"
-            "- `Ctrl+R` command palette\n"
-            "- `Tab` focus toggle\n"
-            "- `PageUp` / `PageDown` scroll\n"
+            "- `Esc` soft-cancel (in-flight prompt) / clear draft / no-op (toast)\n"
+            "- `Ctrl+C` interrupt; press twice within 1.5s to quit\n"
+            "- `Ctrl+D` quit immediately\n"
+            "- `Ctrl+L` clear visible log (session memory preserved)\n"
+            "- `Ctrl+R` open command palette\n"
+            "- `Tab` move focus (input ↔ tool blocks ↔ log)\n"
+            "- `PageUp` / `PageDown` scroll log\n"
             "- `Up` / `Down` history when input is empty\n"
             "- `Ctrl+E` toggle focused tool block\n\n"
+            "## Control / observability\n"
+            "- `/extensions` list loaded extensions and their status\n"
+            "- `/tools` list every tool the agent can call right now\n"
+            "- `/budget` show current cost-budget state (exceeded?)\n"
+            "- Header shows live: `N ext (M failed) · K tools · $cost ⚠`\n"
+            "- Self-modification reloads (`agent` / `propose_change_approved`) "
+            "raise a `★ self-modify` warning toast\n"
+            "- Extension-injected user messages render with a yellow gutter "
+            "and a `system → you` label\n\n"
             "## Slash commands\n"
             f"{command_lines}"
         )
@@ -430,18 +559,53 @@ class HelpScreen(ModalScreen[None]):
             return
 
 
+class InfoModal(ModalScreen[None]):
+    """Generic scrollable modal that displays a Rich renderable.
+
+    Used for ``/extensions``, ``/tools``, and ``/budget`` so each does
+    not need its own bespoke modal class. Snapshots the renderable at
+    open time — close and reopen to refresh, the same way ``man`` works
+    on the command line.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Close")]
+
+    def __init__(self, title: str, body: Any) -> None:
+        super().__init__()
+        self._title = title
+        self._body = body
+
+    def compose(self) -> ComposeResult:
+        with Container(id="info-modal"):
+            yield Static(Text(self._title, style="bold"), classes="info-title")
+            yield Static(self._body, classes="info-body")
+
+    def action_cancel(self) -> None:
+        if self.app.screen is not self:
+            return
+        try:
+            self.dismiss(None)
+        except ScreenStackError:
+            return
+
+
 class AgentMApp(App[int]):
     CSS_PATH = str(Path(__file__).with_name("textual_app.tcss"))
+    # The built-in command palette (Ctrl+P) is disabled — we have our own
+    # at Ctrl+R so atom-registered slash commands surface naturally.
+    ENABLE_COMMAND_PALETTE = False
     BINDINGS = [
-        Binding("ctrl+c", "interrupt_or_quit", show=False),
-        Binding("ctrl+d", "force_quit", show=False),
-        Binding("ctrl+l", "clear_log", show=False),
-        Binding("ctrl+r", "open_palette_binding", show=False),
-        Binding("tab", "toggle_focus", show=False),
+        Binding("ctrl+c", "interrupt_or_quit", "Interrupt", show=True, priority=True),
+        Binding("ctrl+d", "force_quit", "Quit", show=True, priority=True),
+        Binding("ctrl+l", "clear_log", "Clear", show=True),
+        Binding("ctrl+r", "open_palette_binding", "Commands", show=True),
+        Binding("ctrl+e", "toggle_tool", "Toggle tool", show=True),
         Binding("pageup", "scroll_page_up", show=False),
         Binding("pagedown", "scroll_page_down", show=False),
-        Binding("ctrl+e", "toggle_tool", show=False),
     ]
+
+    # Window during which a second Ctrl+C escalates from "cancel" to "quit".
+    _CTRL_C_ESCALATE_WINDOW_S = 1.5
 
     def __init__(
         self,
@@ -450,12 +614,22 @@ class AgentMApp(App[int]):
         theme: str = "dark",
         session: _SessionLike,
         slash_commands: list[SlashCommandEntry],
+        extensions: dict[str, ExtensionInstallEvent] | None = None,
+        tools: list[ToolEntry] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
         self._session = session
         self._theme_name = theme
         self._slash_commands = slash_commands
+        # Snapshots that drive the /extensions and /tools modals. The
+        # ``run()`` factory accumulates create-time events into these
+        # dicts so the user can ``/extensions`` immediately after
+        # launch. Live updates from reload / runtime registration mutate
+        # the same dicts via the bus handlers.
+        self._extensions: dict[str, ExtensionInstallEvent] = dict(extensions or {})
+        self._tools: dict[str, ToolEntry] = {entry.name: entry for entry in (tools or [])}
+        self._budget_state: CostBudgetExceededEvent | None = None
         self._prompt_task: asyncio.Task[None] | None = None
         self._flush_timer: Any = None
         self._root_turns: dict[int, TurnContainer] = {}
@@ -465,26 +639,45 @@ class AgentMApp(App[int]):
         self._last_assistant_text = ""
         self._history: list[str] = []
         self._history_index: int | None = None
-        self._ctrl_c_armed = False
+        self._ctrl_c_armed_at: float | None = None
         self._turn_counter = 0
         self._needs_scroll_end = False
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="app-root"):
-            yield ConversationLog(id="conversation-log")
-            with Container(id="input-bar"):
-                yield PromptInput()
-            yield StatusLine(id="status-line")
+        # outside-in: status header docks top, footer + input bar dock
+        # bottom, conversation log fills the remaining 1fr middle.
+        yield StatusHeader(id="status-header")
+        yield ConversationLog(id="conversation-log")
+        with Container(id="input-bar"):
+            yield PromptInput()
+        yield Footer()
 
     def on_mount(self) -> None:
+        # Use Textual's built-in theme system instead of our custom
+        # .theme-dark / .theme-light classes. The CLI flag still accepts
+        # short aliases ("dark", "light") for backwards compat.
+        theme_name = _THEME_ALIASES.get(self._theme_name, self._theme_name)
+        try:
+            self.theme = theme_name
+        except Exception:  # noqa: BLE001 — tolerate unknown theme strings
+            self.theme = "textual-dark"
+        # Keep one custom class on the App so existing tests (and any
+        # ad-hoc scripts) can still observe the requested theme name.
+        self.add_class(f"theme-{self._theme_name}")
         self.query_one(PromptInput).focus()
         self.refresh_input_height()
-        self.query_one(StatusLine).model_name = getattr(self._session.model, "id", "?") or "?"
-        if self._theme_name == "light":
-            self.add_class("theme-light")
-        else:
-            self.add_class("theme-dark")
+        header = self.query_one(StatusHeader)
+        header.model_name = getattr(self._session.model, "id", "?") or "?"
+        self._refresh_registry_counters()
         self._flush_timer = self.set_interval(0.05, self.flush_stream_buffers)
+
+    def _refresh_registry_counters(self) -> None:
+        header = self.query_one(StatusHeader)
+        loaded = sum(1 for ev in self._extensions.values() if ev.phase == "end")
+        failed = sum(1 for ev in self._extensions.values() if ev.phase == "error")
+        header.extensions_loaded = loaded
+        header.extensions_failed = failed
+        header.tools_registered = len(self._tools)
 
     async def on_unmount(self) -> None:
         if self._flush_timer is not None:
@@ -507,7 +700,7 @@ class AgentMApp(App[int]):
             return
         self._history.append(text)
         self._history_index = None
-        self._ctrl_c_armed = False
+        self._ctrl_c_armed_at = None
         await self._append_user_turn(text)
         input_widget.clear()
         self.refresh_input_height()
@@ -533,7 +726,7 @@ class AgentMApp(App[int]):
         log.scroll_end(animate=False)
 
     def set_phase(self, phase: str) -> None:
-        self.query_one(StatusLine).phase = phase
+        self.query_one(StatusHeader).phase = phase
 
     def cycle_history(self, direction: int) -> bool:
         if not self._history:
@@ -550,7 +743,7 @@ class AgentMApp(App[int]):
 
     async def _handle_builtin_command(self, text: str) -> bool:
         lowered = text.lower()
-        if lowered in {"/quit", "/exit", "/q"}:
+        if lowered in _QUIT_COMMANDS:
             self.exit(0)
             return True
         if lowered == "/clear":
@@ -561,6 +754,15 @@ class AgentMApp(App[int]):
             return True
         if lowered == "/copy-last":
             self._copy_last_assistant_text()
+            return True
+        if lowered == "/extensions":
+            self.push_screen(InfoModal("Extensions", _build_extensions_table(self._extensions)))
+            return True
+        if lowered == "/tools":
+            self.push_screen(InfoModal("Tools", _build_tools_table(self._tools)))
+            return True
+        if lowered == "/budget":
+            self.push_screen(InfoModal("Budget", _build_budget_panel(self._budget_state)))
             return True
         return False
 
@@ -617,21 +819,41 @@ class AgentMApp(App[int]):
             prompt.clear()
             self.refresh_input_height()
             return
+        # Idle Esc was previously a silent no-op which made users wonder
+        # whether the app had stalled. Emit an explicit toast so the key
+        # is visibly acknowledged.
+        self.notify("Nothing to cancel.", timeout=1.5)
         prompt.focus()
 
     async def action_interrupt_or_quit(self) -> None:
+        now = time.monotonic()
+        armed_within_window = (
+            self._ctrl_c_armed_at is not None
+            and (now - self._ctrl_c_armed_at) < self._CTRL_C_ESCALATE_WINDOW_S
+        )
         if self._prompt_task is not None:
+            if armed_within_window:
+                self.exit(0)
+                return
             await self.action_soft_cancel()
+            self._ctrl_c_armed_at = now
+            self.notify(
+                "Cancelled. Press Ctrl+C again within 1.5s to quit.",
+                timeout=1.5,
+            )
             return
         log = self.query_one(ConversationLog)
         if not log.children:
             self.exit(0)
             return
-        if self._ctrl_c_armed:
+        if armed_within_window:
             self.exit(0)
             return
-        self._ctrl_c_armed = True
-        self.notify("Press Ctrl+C again to quit.")
+        self._ctrl_c_armed_at = now
+        self.notify(
+            "Press Ctrl+C again within 1.5s to quit.",
+            timeout=1.5,
+        )
 
     async def action_force_quit(self) -> None:
         self.exit(0)
@@ -643,21 +865,10 @@ class AgentMApp(App[int]):
         self._child_turns.clear()
         self._tool_states.clear()
         self._last_assistant_text = ""
-        self._ctrl_c_armed = False
+        self._ctrl_c_armed_at = None
 
     def action_open_palette_binding(self) -> None:
         self.open_command_palette(initial="")
-
-    def action_toggle_focus(self) -> None:
-        focused = self.focused
-        if isinstance(focused, PromptInput):
-            target = self._latest_tool_block()
-            if target is not None:
-                target.focus()
-            else:
-                self.query_one(ConversationLog).focus()
-            return
-        self.query_one(PromptInput).focus()
 
     def action_scroll_page_up(self) -> None:
         self.query_one(ConversationLog).scroll_page_up(animate=False)
@@ -697,7 +908,7 @@ class AgentMApp(App[int]):
         turn = TurnContainer(logical_turn=self._turn_counter)
         self._root_turns[turn_index] = turn
         self.run_worker(self._mount_turn(turn), exclusive=False)
-        self.query_one(StatusLine).turn_number = self._turn_counter
+        self.query_one(StatusHeader).turn_number = self._turn_counter
         return turn
 
     async def _mount_turn(self, turn: TurnContainer) -> None:
@@ -721,7 +932,7 @@ class AgentMApp(App[int]):
     def _update_usage(self, usage: Usage | None) -> None:
         if usage is None:
             return
-        status = self.query_one(StatusLine)
+        status = self.query_one(StatusHeader)
         status.tokens_in = usage.input_tokens
         status.tokens_out = usage.output_tokens
         model = self._session.model
@@ -793,7 +1004,7 @@ class AgentMApp(App[int]):
 
         async def _apply() -> None:
             block = await turn.ensure_tool(event.tool_call_id, event.tool_name)
-            block.set_pending_args(dict(event.args), _truncate(_format_args_preview(event.args), 48))
+            block.set_pending_args(dict(event.args), "")
 
         self.run_worker(_apply(), exclusive=False)
         self._needs_scroll_end = True
@@ -821,7 +1032,7 @@ class AgentMApp(App[int]):
         self._ensure_root_turn_sync(event.turn_index)
         self.set_phase("thinking")
         model_id = event.model_id or getattr(self._session.model, "id", "?") or "?"
-        self.query_one(StatusLine).model_name = model_id
+        self.query_one(StatusHeader).model_name = model_id
 
     def handle_llm_end(self, event: LlmRequestEndEvent) -> None:
         del event
@@ -855,12 +1066,120 @@ class AgentMApp(App[int]):
         self._needs_scroll_end = True
 
     def handle_extension_install(self, event: ExtensionInstallEvent) -> None:
+        # Track the latest event for /extensions; later phases overwrite
+        # earlier ones (start → end / error). Toast on error so a hot
+        # reload that fails does not hide silently.
+        self._extensions[event.module_path] = event
+        self._refresh_registry_counters()
         if event.phase == "error":
             self.notify(
                 f"Extension install failed: {event.module_path}: {event.error}",
                 severity="error",
                 timeout=5,
             )
+
+    def handle_api_register(self, event: ApiRegisterEvent) -> None:
+        """Capture late tool/command registrations (post-create reload).
+
+        The same event is also accumulated by ``run()`` *before* the
+        app exists, so create-time registrations land in the snapshot
+        passed to ``__init__``. This handler covers the live path:
+        atoms registered after a hot reload.
+        """
+
+        if event.kind == "tool":
+            tool = event.payload
+            self._tools[event.name] = ToolEntry(
+                name=event.name,
+                description=str(getattr(tool, "description", "")),
+                source=event.extension,
+            )
+            self._refresh_registry_counters()
+        elif event.kind == "command" and isinstance(event.payload, CommandSpec):
+            entry = SlashCommandEntry(
+                name=f"/{event.name}",
+                description=event.payload.description,
+                source=event.extension,
+            )
+            # Replace any prior entry under the same name; this matches
+            # the create-time accumulator's last-write-wins semantics.
+            self._slash_commands = [
+                e for e in self._slash_commands if e.name != entry.name
+            ] + [entry]
+
+    def handle_extension_reload(self, event: ExtensionReloadEvent) -> None:
+        """Surface hot reloads as toasts.
+
+        Self-modification (``trigger=agent`` or
+        ``propose_change_approved``) gets a more prominent warning-level
+        toast — that is the framework's headline behavior and should
+        never be invisible. Human-triggered reloads stay info-level.
+        """
+
+        is_self_modify = event.trigger in _SELF_MODIFY_TRIGGERS
+        if event.error:
+            self.notify(
+                f"Atom reload failed: {event.name} ({event.trigger}): {event.error}",
+                severity="error",
+                timeout=6,
+            )
+            return
+        prefix = "★ self-modify" if is_self_modify else "atom reload"
+        old = (event.old_hash or "—")[:8]
+        new = event.new_hash[:8]
+        if is_self_modify:
+            self.notify(
+                f"{prefix}: {event.name} ({event.trigger}) {old} → {new}",
+                severity="warning",
+                timeout=4,
+            )
+        else:
+            self.notify(
+                f"{prefix}: {event.name} ({event.trigger}) {old} → {new}",
+                severity="information",
+                timeout=4,
+            )
+
+    def handle_cost_budget_exceeded(self, event: CostBudgetExceededEvent) -> None:
+        """Latch budget-exceeded state and warn loudly.
+
+        After this fires, ``AgentSession`` will short-circuit the next
+        ``prompt`` with ``stop_reason='budget'``. The user needs to
+        know *now* — toast plus persistent header indicator.
+        """
+
+        self._budget_state = event
+        header = self.query_one(StatusHeader)
+        header.budget_exceeded = True
+        self.notify(
+            f"Budget exceeded: ${event.used:.4f} / ${event.limit:.4f} {event.currency}. "
+            "Next prompt will halt with stop_reason='budget'.",
+            severity="error",
+            timeout=8,
+        )
+
+    def handle_api_send_user_message(self, event: ApiSendUserMessageEvent) -> None:
+        """Render an extension-injected user message as a distinct turn.
+
+        The kernel treats this exactly like a user-typed message, but
+        the user did not type it — making this visible matters for
+        trust. We pull a string out of ``event.content`` if it is a
+        plain string; otherwise we fall back to ``repr`` so something
+        renders.
+        """
+
+        if isinstance(event.content, str):
+            text = event.content
+        else:
+            text = repr(event.content)
+
+        async def _mount() -> None:
+            log = self.query_one(ConversationLog)
+            await log.mount(UserTurn(text, injected_from=event.extension))
+            log.scroll_end(animate=False)
+
+        self.run_worker(_mount(), exclusive=False)
+        self._needs_scroll_end = True
 
 
 async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
@@ -870,29 +1189,62 @@ async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
 
         bus = EventBus()
 
+    # ------------------------------------------------------------------
+    # Phase 1 — pre-create accumulators.
+    #
+    # ``AgentSession.create`` triggers extension load which fires
+    # ``api_register`` (kind=command/tool) and ``extension_install``
+    # (start/end/error) on the bus. We have to subscribe BEFORE create
+    # to capture those, because the AgentMApp instance does not exist
+    # yet. The accumulated dicts are then handed to ``__init__`` so the
+    # /extensions and /tools modals are useful from the very first
+    # keystroke after launch.
+    # ------------------------------------------------------------------
+
     slash_commands: dict[str, SlashCommandEntry] = {
         name: SlashCommandEntry(name=name, description=description, source="builtin")
         for name, description in _BUILTIN_COMMANDS.items()
     }
+    tools: dict[str, ToolEntry] = {}
+    extensions: dict[str, ExtensionInstallEvent] = {}
 
-    def _capture_command(event: ApiRegisterEvent) -> None:
-        if event.kind != "command" or not isinstance(event.payload, CommandSpec):
-            return
-        slash_commands[f"/{event.name}"] = SlashCommandEntry(
-            name=f"/{event.name}",
-            description=event.payload.description,
-            source=event.extension,
-        )
+    def _capture_register(event: ApiRegisterEvent) -> None:
+        if event.kind == "command" and isinstance(event.payload, CommandSpec):
+            slash_commands[f"/{event.name}"] = SlashCommandEntry(
+                name=f"/{event.name}",
+                description=event.payload.description,
+                source=event.extension,
+            )
+        elif event.kind == "tool":
+            tools[event.name] = ToolEntry(
+                name=event.name,
+                description=str(getattr(event.payload, "description", "")),
+                source=event.extension,
+            )
 
-    bus.on("api_register", _capture_command)
+    def _capture_extension_install(event: ExtensionInstallEvent) -> None:
+        extensions[event.module_path] = event
+
+    bus.on("api_register", _capture_register)
+    bus.on("extension_install", _capture_extension_install)
+
     session_cfg = AgentSessionConfig(**{**config.__dict__, "bus": bus})
     session = await AgentSession.create(session_cfg)
+
     app = AgentMApp(
         session_cfg,
         theme=theme,
         session=session,
         slash_commands=list(slash_commands.values()),
+        extensions=extensions,
+        tools=list(tools.values()),
     )
+
+    # ------------------------------------------------------------------
+    # Phase 2 — live subscriptions. Hot reloads, late tool registration,
+    # budget overflow, and extension-injected user messages all happen
+    # after create. Hook them now so the running TUI mutates in place.
+    # ------------------------------------------------------------------
 
     bus.on("stream_delta", app.handle_stream_delta)
     bus.on("tool_call", app.handle_tool_call)
@@ -902,6 +1254,10 @@ async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
     bus.on("child_session_start", app.handle_child_start)
     bus.on("child_session_end", app.handle_child_end)
     bus.on("extension_install", app.handle_extension_install)
+    bus.on("api_register", app.handle_api_register)
+    bus.on("extension_reload", app.handle_extension_reload)
+    bus.on("cost_budget_exceeded", app.handle_cost_budget_exceeded)
+    bus.on("api_send_user_message", app.handle_api_send_user_message)
 
     result = await app.run_async()
     return 0 if result is None else int(result)
@@ -972,6 +1328,89 @@ def _dump_json(value: Any, *, indent: int | None = None) -> str:
         )
     except TypeError:
         return repr(value)
+
+
+# ---------------------------------------------------------------------------
+# Modal renderable builders (control + observability surface).
+#
+# These produce Rich renderables for the generic InfoModal so /extensions,
+# /tools, and /budget can render uniform tables without each carrying its
+# own Textual subclass.
+# ---------------------------------------------------------------------------
+
+
+_INSTALL_PHASE_GLYPH: dict[str, tuple[str, str]] = {
+    "start": ("⏳", "yellow"),
+    "end": ("✓", "green"),
+    "error": ("✗", "red"),
+}
+
+
+def _build_extensions_table(extensions: dict[str, ExtensionInstallEvent]) -> Any:
+    if not extensions:
+        return Text(
+            "No extensions tracked yet. Either none loaded, or the bus "
+            "subscribers were wired after AgentSession.create.",
+            style="dim italic",
+        )
+    table = RichTable(show_header=True, header_style="bold", expand=True)
+    table.add_column("Status", width=8)
+    table.add_column("Module", overflow="fold")
+    table.add_column("Error", overflow="fold")
+    for module_path in sorted(extensions):
+        event = extensions[module_path]
+        glyph, style = _INSTALL_PHASE_GLYPH.get(event.phase, ("?", "white"))
+        table.add_row(
+            Text(f"{glyph} {event.phase}", style=style),
+            module_path,
+            event.error or "",
+        )
+    return table
+
+
+def _build_tools_table(tools: dict[str, ToolEntry]) -> Any:
+    if not tools:
+        return Text(
+            "No tools registered. The agent has no callable surface — "
+            "check that the scenario or auto-discovered atoms loaded.",
+            style="dim italic",
+        )
+    table = RichTable(show_header=True, header_style="bold", expand=True)
+    table.add_column("Tool", width=24)
+    table.add_column("Source", width=20)
+    table.add_column("Description", overflow="fold")
+    for name in sorted(tools):
+        entry = tools[name]
+        table.add_row(
+            Text(entry.name, style="bold yellow"),
+            entry.source,
+            entry.description or "—",
+        )
+    return table
+
+
+def _build_budget_panel(state: CostBudgetExceededEvent | None) -> Any:
+    if state is None:
+        return Text(
+            "Budget OK. No cost_budget_exceeded event has fired in this "
+            "session — either the cost_budget atom is not loaded, or "
+            "spend has not crossed the configured limit yet.",
+            style="dim italic",
+        )
+    table = RichTable(show_header=False, expand=False)
+    table.add_column(width=12)
+    table.add_column()
+    table.add_row(Text("status", style="bold"), Text("EXCEEDED", style="bold red"))
+    table.add_row("used", f"{state.used:.6f} {state.currency}")
+    table.add_row("limit", f"{state.limit:.6f} {state.currency}")
+    table.add_row(
+        "next prompt",
+        Text(
+            "will halt with stop_reason='budget'",
+            style="red italic",
+        ),
+    )
+    return table
 
 
 __all__ = ["AgentMApp", "run"]

@@ -273,10 +273,10 @@ async def test_T1_golden_path_updates_stream_and_status(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.press("h", "i", "enter")
         await pilot.pause(0.2)
-        status = app.query_one("#status-line")
+        status = app.query_one("#status-header")
         assert "turn 1" in status.current_text
-        assert "in: 128" in status.current_text
-        assert "out: 32" in status.current_text
+        assert "in 128" in status.current_text
+        assert "out 32" in status.current_text
         assert "idle" in status.current_text
         assert app._last_assistant_text == "Hello from AgentM"
 
@@ -289,7 +289,7 @@ async def test_T2_escape_soft_cancels_and_keeps_partial_text(tmp_path: Path) -> 
         await pilot.pause(0.1)
         await pilot.press("escape")
         await pilot.pause(0.1)
-        status = app.query_one("#status-line")
+        status = app.query_one("#status-header")
         assert "idle" in status.current_text
         assert app._last_assistant_text == "partial"
         assert app._prompt_task is None
@@ -451,7 +451,7 @@ async def test_T10_layout_remains_usable_without_truecolor(
         # The three required regions remain mounted and addressable.
         assert app.query_one("#conversation-log") is not None
         assert app.query_one("#input-bar") is not None
-        assert app.query_one("#status-line") is not None
+        assert app.query_one("#status-header") is not None
         # Submitting a prompt still drives the log + status line end-to-end.
         await pilot.press("h", "i", "enter")
         await pilot.pause(0.2)
