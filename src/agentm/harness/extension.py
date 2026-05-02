@@ -184,6 +184,7 @@ class AtomInfo:
     current_hash: str | None
     tier: int
     api_version: int
+    source_path: str | None = None
 
 
 # --- Errors ----------------------------------------------------------------
