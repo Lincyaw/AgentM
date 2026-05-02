@@ -66,14 +66,15 @@ class AgentEndEvent(Event):
 
 @dataclass(slots=True)
 class BeforeAgentEndEvent(Event):
-    """Fires immediately before ``AgentLoop.run`` declares ``agent_end``.
+    """Fires after a text-only assistant turn but before ``agent_end``.
 
-    Handlers may cancel an ``end_turn`` exit and append one or more
-    user-visible messages so the loop stays alive for another turn.
+    Handlers may return ``{"cancel": True, "append": list[AgentMessage]}``
+    to keep the loop alive and inject new user-visible context for the next
+    turn.
     """
 
     messages: list[AgentMessage]
-    stop_reason: Literal["end_turn", "max_turns"]
+    stop_reason: str
 
 
 @dataclass(slots=True, frozen=True)

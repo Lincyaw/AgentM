@@ -38,7 +38,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from agentm.core.abi import (
     AgentEndEvent,
@@ -108,8 +108,14 @@ class _SessionView:
     else (fork / navigate) stays inside the harness.
     """
 
-    def __init__(self, sm: SessionManager) -> None:
+    def __init__(
+        self,
+        sm: SessionManager,
+        *,
+        loop_config_getter: Callable[[], LoopConfig],
+    ) -> None:
         self._sm = sm
+        self._loop_config_getter = loop_config_getter
 
     def get_messages(self) -> list[AgentMessage]:
         return self._sm.get_messages()
@@ -122,6 +128,9 @@ class _SessionView:
 
     def get_entry(self, entry_id: str) -> SessionEntry | None:
         return self._sm.get_entry(entry_id)
+
+    def get_loop_config(self) -> LoopConfig:
+        return self._loop_config_getter()
 
     def append_entry(
         self,
@@ -283,6 +292,7 @@ class AgentSession:
         # api.model property reflects it once the provider extension runs.
         active_provider_box: dict[str, ProviderConfig | None] = {"value": None}
         loop_box: dict[str, AgentLoop | None] = {"value": None}
+        configured_loop_config = config.loop_config or LoopConfig()
 
         def _model_getter() -> Model | None:
             cur = active_provider_box["value"]
@@ -292,7 +302,10 @@ class AgentSession:
             return active_provider_box["value"]
 
         session_id = uuid.uuid4().hex
-        session_view: ReadonlySession = _SessionView(session_manager)
+        session_view: ReadonlySession = _SessionView(
+            session_manager,
+            loop_config_getter=lambda: configured_loop_config,
+        )
         resource_writer = GitBackedResourceWriter(
             cwd=config.cwd,
             session_id=session_id,
@@ -347,6 +360,7 @@ class AgentSession:
             spec = AgentSessionConfig(**{**child_config.__dict__})
             spec.parent_bus = bus
             spec.parent_session_id = session_id
+            spec.root_session_id = config.root_session_id or session_id
             return await cls.create(spec)
 
         def _make_api(owner: str) -> _ExtensionAPIImpl:
@@ -503,7 +517,7 @@ class AgentSession:
         loop = AgentLoop(
             stream_fn=active_provider.stream_fn,
             bus=bus,
-            config=config.loop_config or LoopConfig(),
+            config=configured_loop_config,
         )
         loop_box["value"] = loop
 
@@ -555,6 +569,9 @@ class AgentSession:
                     module_path for module_path, _ext_cfg in to_load
                 ),
                 model=active_provider.model,
+                root_session_id=config.root_session_id or session_id,
+                task_id=config.task_id,
+                persona=config.persona,
             ),
         )
 

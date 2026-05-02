@@ -17,16 +17,19 @@ import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, cast
-from xml.sax.saxutils import escape, quoteattr
 
 from agentm.core.abi import (
     BeforeAgentEndEvent,
     FunctionTool,
+    LoopConfig,
     TextContent,
     ToolResult,
     UserMessage,
 )
+from agentm.core.lib.artifact_files import list_artifacts_for_task
+from agentm.extensions import ExtensionManifest
 from agentm.harness.events import (
     ChildSessionEndEvent,
     SessionReadyEvent,
@@ -34,7 +37,6 @@ from agentm.harness.events import (
 )
 from agentm.harness.extension import ExtensionAPI, ExtensionLoadError, ProviderConfig
 from agentm.harness.session_config import AgentSessionConfig
-from agentm.extensions import ExtensionManifest
 
 _RUNNING: Literal["running"] = "running"
 _COMPLETED: Literal["completed"] = "completed"
@@ -102,8 +104,12 @@ class _ChildTask:
     status: _Status = _RUNNING
     pending_instructions: list[str] = field(default_factory=list)
     final_messages: list[Any] | None = None
+    summary: str | None = None
+    artifact_ids: list[str] = field(default_factory=list)
+    artifact_refs: list[dict[str, str]] = field(default_factory=list)
     error: str | None = None
     read: bool = False
+    applied_budget: dict[str, int] = field(default_factory=dict)
 
 
 class _ChildAborted(RuntimeError):
@@ -156,6 +162,71 @@ def _is_terminal(status: _Status) -> bool:
     return status in {_COMPLETED, _ABORTED, _ERROR}
 
 
+def _xml_attr(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _summary_text(state: _ChildTask) -> str | None:
+    if state.summary:
+        return state.summary
+    if state.status == _ABORTED:
+        return "Task aborted before producing final text."
+    if state.status == _ERROR and state.error:
+        return f"Task failed: {state.error}"
+    if state.error:
+        return state.error
+    return None
+
+
+def _format_subagent_result(state: _ChildTask) -> str:
+    lines = [
+        (
+            f"<subagent_result task_id={_xml_attr(state.task_id)} "
+            f"purpose={_xml_attr(state.purpose)}>"
+        )
+    ]
+    summary = _summary_text(state)
+    if summary is not None:
+        lines.append(f"  <summary>{_xml_attr(summary)}</summary>")
+    if state.artifact_refs:
+        lines.append("  <artifacts>")
+        for ref in state.artifact_refs:
+            lines.append(
+                "    "
+                f"<ref id={_xml_attr(ref['id'])} kind={_xml_attr(ref['kind'])} "
+                f"title={_xml_attr(ref['title'])} />"
+            )
+        lines.append("  </artifacts>")
+    lines.append("</subagent_result>")
+    return "\n".join(lines)
+
+
+def _notification_message(
+    *,
+    pending: list[_ChildTask],
+    running: list[_ChildTask],
+) -> UserMessage:
+    parts: list[str] = []
+    for state in pending:
+        parts.append(_format_subagent_result(state))
+    for state in running:
+        parts.append(
+            "<subagent_pending"
+            f" task_id={_xml_attr(state.task_id)}"
+            f" purpose={_xml_attr(state.purpose)} />"
+        )
+    return UserMessage(
+        role="user",
+        content=[TextContent(type="text", text="\n\n".join(parts))],
+        timestamp=time.time(),
+    )
+
+
 def _task_payload(state: _ChildTask) -> dict[str, Any]:
     return {
         "task_id": state.task_id,
@@ -165,7 +236,9 @@ def _task_payload(state: _ChildTask) -> dict[str, Any]:
         "final_message_count": (
             len(state.final_messages) if state.final_messages is not None else None
         ),
-        "final_text": _final_assistant_text(state.final_messages),
+        "final_text": _summary_text(state),
+        "artifact_ids": list(state.artifact_ids),
+        "budget": dict(state.applied_budget),
     }
 
 
@@ -186,47 +259,6 @@ def _last_assistant_text(messages: list[Any]) -> str:
         if isinstance(text, str):
             chunks.append(text)
     return "\n".join(chunks).strip()
-
-
-def _notification_message(
-    *,
-    pending: list[_ChildTask],
-    running: list[_ChildTask],
-) -> UserMessage:
-    parts: list[str] = []
-    for state in pending:
-        final_text = escape(_notification_text(state))
-        parts.append(
-            "<subagent_result"
-            f" task_id={quoteattr(state.task_id)}"
-            f" purpose={quoteattr(state.purpose)}>"
-            f"{final_text}"
-            "</subagent_result>"
-        )
-    for state in running:
-        parts.append(
-            "<subagent_pending"
-            f" task_id={quoteattr(state.task_id)}"
-            f" purpose={quoteattr(state.purpose)} />"
-        )
-    return UserMessage(
-        role="user",
-        content=[TextContent(type="text", text="\n\n".join(parts))],
-        timestamp=time.time(),
-    )
-
-
-def _notification_text(state: _ChildTask) -> str:
-    final_text = _final_assistant_text(state.final_messages)
-    if final_text:
-        return final_text
-    if state.status == _ABORTED:
-        return "Task aborted before producing final text."
-    if state.status == _ERROR and state.error:
-        return f"Task failed: {state.error}"
-    if state.error:
-        return state.error
-    return ""
 
 
 def _normalize_extension_spec(spec: Any) -> tuple[str, dict[str, Any]]:
@@ -269,6 +301,40 @@ def _resolve_inherited_extensions(
     return resolved
 
 
+def _coerce_budget(raw: Any) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        return {}
+    budget: dict[str, int] = {}
+    for key in ("max_tool_calls", "max_turns"):
+        value = raw.get(key)
+        if isinstance(value, int) and value > 0:
+            budget[key] = value
+    return budget
+
+
+def _resolve_child_loop_config(
+    *,
+    parent: LoopConfig,
+    persona_budget: dict[str, int],
+    dispatch_budget: dict[str, int],
+) -> tuple[LoopConfig, dict[str, int]]:
+    max_turns = dispatch_budget.get(
+        "max_turns",
+        persona_budget.get("max_turns", parent.max_turns),
+    )
+    max_tool_calls = dispatch_budget.get(
+        "max_tool_calls",
+        persona_budget.get("max_tool_calls", parent.max_tool_calls),
+    )
+    applied_budget = {"max_turns": max_turns}
+    if max_tool_calls is not None:
+        applied_budget["max_tool_calls"] = max_tool_calls
+    return (
+        LoopConfig(max_turns=max_turns, max_tool_calls=max_tool_calls),
+        applied_budget,
+    )
+
+
 def _get_active_provider(api: ExtensionAPI) -> ProviderConfig:
     provider = api.provider
     if provider is None:
@@ -297,22 +363,7 @@ async def _shutdown_child_with_error(
 
 
 class _ChildTaskManager:
-    """Per-session registry + lifecycle for dispatched child agents.
-
-    Holds:
-    * the running ``task_id → _ChildTask`` registry and a single
-      ``asyncio.Lock`` guarding mutations.
-    * ``reserved_slots``, a counter that tracks in-flight ``dispatch_agent``
-      calls so we can enforce ``max_workers`` against not-yet-registered
-      tasks. Without it, two parallel dispatches could both observe
-      ``running_children == 0`` and bypass the limit.
-    * the parent session id, captured from ``session_ready`` so shutdown
-      events on this manager's children can reference the parent.
-
-    Public entry points (one per registered tool / lifecycle event):
-    ``dispatch``, ``check_tasks``, ``inject_instruction``, ``abort``,
-    ``on_session_ready``, ``on_session_shutdown``.
-    """
+    """Per-session registry + lifecycle for dispatched child agents."""
 
     def __init__(
         self,
@@ -330,6 +381,7 @@ class _ChildTaskManager:
         self._registry_lock = asyncio.Lock()
         self._reserved_slots = 0
         self._parent_session_id = "unknown"
+        self._root_session_id = "unknown"
         self._running_only_cancels = 0
 
     async def _reset_running_only_cancels(self) -> None:
@@ -342,8 +394,6 @@ class _ChildTaskManager:
         if not running:
             return []
         for state in running:
-            # Reuse the public abort path so auto-aborts and explicit
-            # ``abort_task`` calls share the same state transition logic.
             await self.abort({"task_id": state.task_id})
         await asyncio.wait(
             [state.task for state in running],
@@ -358,12 +408,6 @@ class _ChildTaskManager:
             return terminal
 
     async def _resolve_subagent(self, name: str) -> dict[str, Any] | None:
-        """Ask peer extensions to resolve ``name`` to a persona definition.
-
-        A peer (e.g. a scenario-local extension) handles ``resolve_subagent``
-        by returning ``{"body": str, "tools": list[str] | None}`` when the
-        name is known, otherwise ``None``. The first non-None response wins.
-        """
         responses = await self._api.events.emit(
             "resolve_subagent", {"name": name}
         )
@@ -390,6 +434,22 @@ class _ChildTaskManager:
     ) -> None:
         state.status = status
         state.final_messages = final_messages
+        state.summary = _final_assistant_text(final_messages)
+        refs = list_artifacts_for_task(
+            cwd=Path(self._api.cwd),
+            root_session_id=self._root_session_id,
+            task_id=state.task_id,
+        )
+        state.artifact_ids = [str(meta.get("artifact_id", "")) for meta in refs]
+        state.artifact_refs = [
+            {
+                "id": str(meta.get("artifact_id", "")),
+                "kind": str(meta.get("kind", "")),
+                "title": str(meta.get("title", "")),
+            }
+            for meta in refs
+            if str(meta.get("artifact_id", ""))
+        ]
         state.error = error
         if error is None:
             await state.session.shutdown()
@@ -450,6 +510,7 @@ class _ChildTaskManager:
         purpose = str(args.get("purpose", "subagent"))
         prompt = str(args.get("prompt", ""))
         subagent_type = args.get("subagent_type")
+        dispatch_budget = _coerce_budget(args.get("budget"))
         child_extensions = _coerce_extension_specs(args.get("extensions"))
         inherited_extensions = _resolve_inherited_extensions(
             self._inherit_extensions,
@@ -457,8 +518,11 @@ class _ChildTaskManager:
         )
         persona_extensions: list[tuple[str, dict[str, Any]]] = []
         persona_tool_allowlist: list[str] | None = None
+        persona_budget: dict[str, int] = {}
+        persona_name: str | None = None
         if isinstance(subagent_type, str) and subagent_type.strip():
-            persona = await self._resolve_subagent(subagent_type.strip())
+            persona_name = subagent_type.strip()
+            persona = await self._resolve_subagent(persona_name)
             if persona is None:
                 return _tool_result(
                     {
@@ -479,8 +543,15 @@ class _ChildTaskManager:
             tools = persona.get("tools")
             if isinstance(tools, list) and tools:
                 persona_tool_allowlist = [str(t) for t in tools]
+            persona_budget = _coerce_budget(persona.get("budget_defaults"))
         provider = _get_active_provider(self._api)
         task_id = uuid.uuid4().hex
+        parent_loop_config = self._api.session.get_loop_config()
+        child_loop_config, applied_budget = _resolve_child_loop_config(
+            parent=parent_loop_config,
+            persona_budget=persona_budget,
+            dispatch_budget=dispatch_budget,
+        )
 
         async with self._registry_lock:
             running_children = sum(
@@ -500,13 +571,13 @@ class _ChildTaskManager:
                 )
             self._reserved_slots += 1
 
-        # ``parent_bus`` / ``parent_session_id`` are overridden by the harness
-        # inside ``api.spawn_child_session``; we leave them at the dataclass
-        # default so the override is unambiguous.
         child_config = AgentSessionConfig(
             cwd=self._api.cwd,
             extensions=persona_extensions + child_extensions + inherited_extensions,
             provider=(__name__, {"_bridge_provider": provider}),
+            loop_config=child_loop_config,
+            task_id=task_id,
+            persona=persona_name,
             purpose=purpose,
             tool_allowlist=persona_tool_allowlist,
         )
@@ -531,6 +602,7 @@ class _ChildTaskManager:
             session=child,
             task=asyncio.create_task(asyncio.sleep(0)),
             abort_signal=abort_signal,
+            applied_budget=applied_budget,
         )
         state.task = asyncio.create_task(
             self._run_child(state=state, initial_prompt=prompt)
@@ -539,15 +611,16 @@ class _ChildTaskManager:
             self._reserved_slots -= 1
             self._registry[task_id] = state
         return _tool_result(
-            {"task_id": task_id, "status": _RUNNING, "purpose": purpose}
+            {
+                "task_id": task_id,
+                "status": _RUNNING,
+                "purpose": purpose,
+                "budget": dict(applied_budget),
+            }
         )
 
     async def check_tasks(self, _args: dict[str, Any]) -> ToolResult:
         await self._reset_running_only_cancels()
-        # Block until at least one running child changes state, so a single
-        # ``check_tasks`` call always makes forward progress and the parent
-        # does not burn LLM turns on no-op polls. Returns immediately when
-        # there is nothing left to wait for.
         async with self._registry_lock:
             running = [
                 child.task
@@ -561,10 +634,7 @@ class _ChildTaskManager:
             for state in tasks:
                 if _is_terminal(state.status):
                     state.read = True
-        payload = {
-            "tasks": [_task_payload(state) for state in tasks]
-        }
-        return _tool_result(payload)
+        return _tool_result({"tasks": [_task_payload(state) for state in tasks]})
 
     async def wait_subagent(self, args: dict[str, Any]) -> ToolResult:
         await self._reset_running_only_cancels()
@@ -668,16 +738,17 @@ class _ChildTaskManager:
             aborted = await self._abort_running_states(running)
             if not aborted:
                 return None
-            event.messages.append(
-                _notification_message(pending=aborted, running=[])
-            )
+            event.messages.append(_notification_message(pending=aborted, running=[]))
             return None
 
-        message = _notification_message(pending=pending, running=running)
-        return {"cancel": True, "append": [message]}
+        return {
+            "cancel": True,
+            "append": [_notification_message(pending=pending, running=running)],
+        }
 
     async def on_session_ready(self, event: SessionReadyEvent) -> None:
         self._parent_session_id = event.session_id
+        self._root_session_id = event.root_session_id
 
     async def on_session_shutdown(self, _event: SessionShutdownEvent) -> None:
         async with self._registry_lock:
@@ -698,27 +769,17 @@ class _ChildTaskManager:
 
 
 async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    # Bridge mode: the harness loads sub_agent as the *provider* extension
-    # for a freshly-spawned child session, passing ``_bridge_provider``.
-    # We just hand the parent's provider through so the child can stream.
     bridge_provider = config.get("_bridge_provider")
     if isinstance(bridge_provider, ProviderConfig):
         api.register_provider(bridge_provider.name, bridge_provider)
         return
 
-    # Dispatch mode: parent populates ``available_inherited_extensions`` so
-    # children can inherit selected parent atoms. The discovery filter
-    # already skips this atom when config is ``{}`` (the key is in
-    # MANIFEST.config_schema.required), so we can assume it is present.
     inherit_extensions = list(
         config.get("inherit_extensions", _DEFAULT_INHERIT_EXTENSIONS)
     )
     available_inherited = dict(config["available_inherited_extensions"])
     missing = [name for name in inherit_extensions if name not in available_inherited]
     if missing:
-        # Fast-fail: silently dropping inherited extensions hides subtle child
-        # misbehaviour (e.g. permission policy not applied). Match design
-        # §10b.4 ordering errors and surface this at install time.
         raise ExtensionLoadError(
             __name__,
             ValueError(
@@ -746,8 +807,8 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "Spawn a child AgentSession and return its task id immediately. "
                 "Pass ``subagent_type`` to launch a named persona (resolved by "
                 "peer extensions via the ``resolve_subagent`` event); the "
-                "persona's system prompt and tool allowlist are applied to the "
-                "child."
+                "persona's system prompt, tool allowlist, and advisory budget "
+                "defaults are applied to the child."
             ),
             parameters={
                 "type": "object",
@@ -755,6 +816,14 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "purpose": {"type": "string"},
                     "prompt": {"type": "string"},
                     "subagent_type": {"type": "string"},
+                    "budget": {
+                        "type": "object",
+                        "properties": {
+                            "max_tool_calls": {"type": "integer", "minimum": 1},
+                            "max_turns": {"type": "integer", "minimum": 1},
+                        },
+                        "additionalProperties": False,
+                    },
                     "extensions": {
                         "type": "array",
                         "items": {

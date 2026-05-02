@@ -2,19 +2,14 @@ from __future__ import annotations
 
 import importlib
 import subprocess
-import sys
-import types
 import uuid
-from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from agentm.core.abi import AssistantMessage, AssistantStreamEvent, MessageEnd, Model, TextContent
-from agentm.core.abi.messages import ToolCallBlock, ToolResultBlock, ToolResultMessage, UserMessage
+from agentm.core.abi import AssistantMessage, TextContent
+from agentm.core.abi.messages import ToolResultBlock, ToolResultMessage, UserMessage
 from agentm.core._internal.catalog.manifest import reload_manifest
-from agentm.harness.extension import ProviderConfig
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
 
