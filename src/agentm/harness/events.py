@@ -207,6 +207,17 @@ class ResourcesDiscoverEvent:
     reason: Literal["startup", "reload"]
 
 
+@dataclass(frozen=True, slots=True)
+class ResourceWriteEvent:
+    """Fires when a managed resource write lands as a git commit."""
+
+    path: str
+    pre_sha: str
+    post_sha: str
+    rationale: str
+    author: Literal["agent", "human", "indexer"]
+
+
 __all__ = [
     "AfterCompactEvent",
     "ApiRegisterEvent",
@@ -219,6 +230,7 @@ __all__ = [
     "ExtensionInstallEvent",
     "ExtensionReloadEvent",
     "PlanSubmittedEvent",
+    "ResourceWriteEvent",
     "ResourcesDiscoverEvent",
     "SessionReadyEvent",
     "SessionShutdownEvent",
