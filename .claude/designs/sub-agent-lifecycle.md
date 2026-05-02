@@ -1,10 +1,12 @@
 # Sub-Agent Lifecycle
 
-Status: design (not yet implemented)
+Status: implemented (PR #62 lifecycle floor; PR #65 sum-type loop redesign)
 Owner: subagent + orchestration
 
 Reaches into: `core/abi/events.py`, `core/abi/loop.py`, `extensions/builtin/sub_agent.py`,
-`harness/events.py` (re-export only).
+`harness/events.py` (re-export only). The lifecycle floor is implemented as a
+`decide_turn_action` handler returning `LoopAction.Inject(messages=[...])` — see
+[agent-loop.md](agent-loop.md) for the per-turn termination protocol.
 
 ## Problem
 
@@ -58,65 +60,67 @@ wait, it can abort, or it can finalize.
 
 ## Mechanism
 
-### One new core event
+### Hook into the per-turn decision protocol
 
-`core.abi.events.BeforeAgentEndEvent`, mutable, fired immediately before
-`AgentLoop.run` declares `agent_end`:
+The lifecycle floor lives on `decide_turn_action` — the single per-turn
+override channel defined in [agent-loop.md](agent-loop.md). Each turn, the
+kernel computes a default `LoopAction` from the assistant message and any
+tool outcomes, fires `DecideTurnActionEvent`, and resolves the result via the
+`Inject > Stop > Step` lattice. To keep the loop alive when there are
+unconsumed sibling findings, the handler returns
+`Inject(messages=[user_msg])`; messages from concurrent handlers are
+concatenated in registration order.
 
 ```python
-@dataclass(slots=True)
-class BeforeAgentEndEvent(Event):
-    """Fires after the LLM emits a text-only assistant turn but before the loop
-    declares ``agent_end``. Handlers may cancel the exit and append messages to
-    keep the loop alive for another turn.
+# core/abi/events.py — abridged
+@dataclass(slots=True, frozen=True)
+class TurnObservation:
+    turn_index: int
+    assistant_message: AssistantMessage | None
+    tool_outcomes: list[ToolOutcome]
+    default_action: LoopAction          # what the kernel would do if no handler runs
 
-    Mutability: this event is intentionally **not frozen**. Handlers return either
-    ``None`` (allow exit) or ``{cancel: True, append: list[AgentMessage]}`` to
-    cancel the exit and inject one or more user-role messages into ``messages``
-    before the next turn begins. Multiple handlers may cancel; appended messages
-    are concatenated in handler-registration order.
-    """
+@dataclass(slots=True, frozen=True)
+class DecideTurnActionEvent(Event):
+    observation: TurnObservation
 
-    messages: list[AgentMessage]   # the live history; do not mutate in-place
-    stop_reason: Literal["end_turn", "max_turns"]
+# Handler signature: ``LoopAction | None``. ``None`` = no opinion.
+# ``Inject(messages=[...])`` keeps the loop alive AND seeds the next turn.
+# ``Stop(cause)`` opts to terminate; the kernel honors only causes whose
+# ``final`` flag is False (final causes shadow all overrides).
 ```
-
-`AgentLoop.run` change is roughly ten lines: when the assistant message has no
-tool-use blocks, emit `before_agent_end` first; if any handler returned
-`{cancel: True, append}`, append the messages and continue the loop instead of
-firing `agent_end`. `max_turns` is still respected — handlers cannot extend the
-budget; only the natural `end_turn` path is interceptable.
 
 ### `sub_agent` extension uses the hook to enforce the floor
 
-`_ChildTaskManager` already tracks `running` / `completed` / `aborted` / `error` per
-task. We add a `read` flag (default false) flipped when the parent has consumed a
-task's `final_text`, plus a single `before_agent_end` handler:
+`_ChildTaskManager` tracks `running` / `completed` / `aborted` / `error` per
+task plus a `read` flag (default `False`) flipped when the parent consumes a
+task's `final_text`. The `decide_turn_action` handler:
 
 ```
-on before_agent_end(messages, stop_reason):
+on decide_turn_action(observation):
+    # Only intervene when the kernel was about to stop voluntarily.
+    if not isinstance(observation.default_action, Stop):
+        return None
+    if not isinstance(observation.default_action.cause, ModelEndTurn):
+        return None                       # final causes / tool-driven stops untouched
+
     pending  = tasks where status in {completed, error, aborted} and not read
     running  = tasks where status == running
 
     if not pending and not running:
-        return None                        # allow exit
+        return None                       # allow exit
 
     notification_blocks = []
-
     for task in pending:
         notification_blocks.append(format_completed(task))
         task.read = True
-
     for task in running:
         notification_blocks.append(format_pending(task))
 
     if not notification_blocks:
         return None
 
-    return {
-        "cancel": True,
-        "append": [user_message(notification_blocks)],
-    }
+    return Inject(messages=[user_message(notification_blocks)])
 ```
 
 Two structured XML-ish blocks per task. They live inside one synthesized user
@@ -139,8 +143,8 @@ call `check_tasks` to block until any one progresses, or `abort_task` to kill.
 ### `check_tasks` and `wait_subagent` are explicit waits
 
 Both are tools the LLM may call *during* the loop, when it knows it needs the
-answer to make the next move. Distinct from the `before_agent_end` floor, which
-fires unconditionally.
+answer to make the next move. Distinct from the `decide_turn_action` floor,
+which fires unconditionally on every voluntary `Stop(ModelEndTurn)`.
 
 - `check_tasks()` blocks until at least one running child changes state (already
   implemented as part of (2)). Returns the full table with `final_text` for
@@ -149,7 +153,7 @@ fires unconditionally.
   state. Returns the same shape as one row of `check_tasks`. Flips `read`.
 
 There is no separate "pop result" tool. Reading via `check_tasks` /
-`wait_subagent` consumes the read flag the same way `before_agent_end` does;
+`wait_subagent` consumes the read flag the same way the lifecycle floor does;
 findings cannot be delivered twice.
 
 ### `dispatch_agent` is unchanged
@@ -161,11 +165,11 @@ needs no signature change.
 
 ## Three usage patterns, one mechanism
 
-| Pattern             | What the LLM does                              | What the runtime does                                                                  |
-|---------------------|------------------------------------------------|-----------------------------------------------------------------------------------------|
-| Fire and forget     | Dispatch, then continue with own SQL / notes    | At end of turn-stream, `before_agent_end` injects every completed child's `final_text` |
-| Explicit wait       | Dispatch, next turn `wait_subagent(id)`         | Blocks the tool call; returns final text on completion                                  |
-| Steered fan-out     | Dispatch N, loop `check_tasks` reading as ready | Each `check_tasks` blocks until one more makes progress; `inject_instruction` to steer  |
+| Pattern             | What the LLM does                              | What the runtime does                                                                       |
+|---------------------|------------------------------------------------|----------------------------------------------------------------------------------------------|
+| Fire and forget     | Dispatch, then continue with own SQL / notes    | On `Stop(ModelEndTurn)`, `decide_turn_action` Injects every completed child's `final_text`  |
+| Explicit wait       | Dispatch, next turn `wait_subagent(id)`         | Blocks the tool call; returns final text on completion                                       |
+| Steered fan-out     | Dispatch N, loop `check_tasks` reading as ready | Each `check_tasks` blocks until one more makes progress; `inject_instruction` to steer       |
 
 The same `_ChildTaskManager` registry, the same `read` flag, the same
 notification format. No mode switch.
@@ -177,7 +181,7 @@ running ──(child finishes normally)──> completed (read=False)
 running ──(child raises)──────────────> error     (read=False)
 running ──(parent abort_task)─────────> aborted   (read=False)
 
-(any terminal, read=False) ──(check_tasks / wait_subagent / before_agent_end)──> read=True
+(any terminal, read=False) ──(check_tasks / wait_subagent / decide_turn_action Inject)──> read=True
 ```
 
 The `read` flag is the single source of truth. It is never reset; once a task's
@@ -185,42 +189,46 @@ findings have been delivered to the parent, they will not be redelivered.
 
 ## Failure modes and edge cases
 
-- **Repeated `before_agent_end` cancels.** If the parent emits text after
-  consuming notifications and tries to end again, `before_agent_end` fires
-  again. Pending now empty (we just flipped them read), running may still
-  hold workers. The risk is a cancel-loop: LLM trained to not repeat itself
-  emits empty text → handler cancels → next turn LLM emits empty text again →
-  same cancel.
-  Decision: the LLM gets **one** "still-running notice" cancel. The
+- **Repeated `Inject` keep-alives.** If the parent emits text after consuming
+  notifications and tries to end again, the handler fires again. Pending now
+  empty (we just flipped them read), running may still hold workers. The risk
+  is an Inject-loop: LLM trained to not repeat itself emits empty text →
+  handler Injects → next turn LLM emits empty text again → same Inject.
+  Decision: the LLM gets **one** "still-running notice" Inject. The
   `_ChildTaskManager` keeps a `_running_only_cancels: int` counter,
-  incremented when the handler cancels solely because of running-no-pending,
+  incremented when the handler Injects solely because of running-no-pending,
   reset to zero when the parent does anything else (tool call, non-empty
   text). When the counter would hit 2, the handler instead **auto-aborts
   every running child** (calling `abort_task` for each), waits for their
-  finalizers (bounded by the existing 5s grace), records aborted summaries
-  via the same notification block, and **does not cancel** — the loop exits.
-  This makes "agent gives up on pending workers" reachable in finite turns
-  without a new tool, and turns the ambiguous second cancel into an explicit,
-  loud abort visible in trajectory.
+  finalizers (bounded by the existing 5s grace), Injects the aborted
+  summaries one last time, and lets the kernel exit on the next turn. This
+  makes "agent gives up on pending workers" reachable in finite turns without
+  a new tool, and turns the ambiguous second Inject into an explicit, loud
+  abort visible in trajectory.
 
-- **`max_turns` reached.** `before_agent_end.stop_reason == "max_turns"`. The
-  hook still fires so findings are not silently lost, but the loop terminates
-  after handler runs regardless of `cancel`. Equivalent to "you ran out of
-  budget; here's what your workers had said." The handler still flips `read`.
+- **`max_turns` reached.** The kernel terminates with
+  `Stop(MaxTurnsExhausted())`. `MaxTurnsExhausted.final` is `True`, so per
+  the resolution lattice the handler's `Inject` would be ignored — but
+  `decide_turn_action` still fires so observers see the termination. The
+  notification block is therefore *not* injected for `max_turns`; pending
+  findings stay marked unread for the next session to inherit (or for an
+  out-of-band consumer). If the scenario must surface them, the orchestrator
+  should drain `check_tasks` / `wait_subagent` *before* the budget runs out.
 
 - **Child crashes during dispatch.** `_run_child` catches and sets
-  `status=error, error=<str>`. `before_agent_end` reports it like any other
-  terminal state; the parent decides whether to retry or skip.
+  `status=error, error=<str>`. The Inject notification reports it like any
+  other terminal state; the parent decides whether to retry or skip.
 
 - **Parent shutdown with running children.** Existing
-  `on_session_shutdown` grace logic (5 s) is unchanged. `before_agent_end` runs
-  before shutdown, so well-behaved sessions never reach the grace cutoff with
-  unread completions.
+  `on_session_shutdown` grace logic (5 s) is unchanged. The lifecycle floor
+  runs before shutdown so well-behaved sessions never reach the grace cutoff
+  with unread completions.
 
-- **Two extensions both want to cancel `agent_end`.** `cost_budget` (e.g.) might
-  later use the same hook. Multiple handlers' appends are concatenated; the
-  kernel checks `cancel` as `any(handler returned cancel=True)`. Order is
-  registration order — same as every other event. No special arbitration.
+- **Two extensions both want to keep the loop alive.** `cost_budget` (e.g.)
+  might later use the same hook. Per the `Inject > Stop > Step` lattice,
+  every handler's `Inject` messages are concatenated in registration order
+  into one combined `Inject(messages=[...])`. No handler silently wins; no
+  special arbitration.
 
 - **Dispatch from inside a child.** Allowed today (each session has its own
   sub_agent install). Each manager only sees its own children. Nested cancels
@@ -237,9 +245,9 @@ findings have been delivered to the parent, they will not be redelivered.
   edge-triggered through `_run_child.finalize` → `_ChildTask.task` future.
   `check_tasks` / `wait_subagent` await directly on those futures.
 
-- **Re-delivery / dead-letter.** A finding consumed by `before_agent_end` and
-  not actually attended to by the LLM is on the agent — exactly as a user-side
-  message that gets ignored is on the agent.
+- **Re-delivery / dead-letter.** A finding consumed by the lifecycle floor
+  Inject and not actually attended to by the LLM is on the agent — exactly
+  as a user-side message that gets ignored is on the agent.
 
 - **Synchronous dispatch.** Considered (Claude Code shape); rejected because
   AgentM's kernel runs `tool_calls` sequentially (`loop.py:340 for tc in
@@ -260,17 +268,12 @@ findings have been delivered to the parent, they will not be redelivered.
   semantics now load-bearing rather than optional. Tests that asserted
   immediate return must adapt.
 - `inject_instruction`, `abort_task` unchanged.
-- `BeforeAgentEndEvent` is additive — extensions that don't register a
-  handler observe today's behavior.
-- `LoopConfig.max_turns` semantics unchanged. The hook does not bypass it.
+- The `decide_turn_action` channel is additive at the kernel level —
+  extensions that don't register a handler observe today's behavior. Per
+  [agent-loop.md](agent-loop.md), the kernel always fires
+  `decide_turn_action` exactly once per turn and once per kernel-imposed
+  termination, so observers see every transition through one channel.
+- `LoopConfig.max_turns` semantics unchanged. `MaxTurnsExhausted.final` is
+  `True`, so handler `Inject` returns are ignored at that boundary.
 - Scenario manifests do not need to opt in. Loading `sub_agent` enables the
-  hook automatically.
-
-## Effort estimate
-
-- core: `BeforeAgentEndEvent` + ten lines in `AgentLoop.run`
-- `sub_agent`: ~50 lines (read flag + handler + `wait_subagent` tool)
-- prompt updates: trim rca/orchestrator.md polling section to match the new
-  pattern table
-
-Total: roughly 100–150 lines of code plus this design doc. No data migration.
+  handler automatically.

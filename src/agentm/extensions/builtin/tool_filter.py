@@ -34,16 +34,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     if not allow and not deny:
         return
 
-    tools = getattr(api, "_tools", None)
-    if not isinstance(tools, list):
-        return
-
-    kept = []
-    for tool in tools:
-        name = getattr(tool, "name", "")
-        if name in deny:
-            continue
-        if allow and name not in allow:
-            continue
-        kept.append(tool)
+    # ``api.tools`` is the live tool-catalog list (per ExtensionAPI contract);
+    # ``tools[:] = kept`` mutates the registry in place so the kernel and
+    # downstream extensions see the filtered set on every subsequent turn.
+    tools = api.tools
+    kept = [
+        tool
+        for tool in tools
+        if tool.name not in deny and (not allow or tool.name in allow)
+    ]
     tools[:] = kept
