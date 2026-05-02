@@ -3,40 +3,42 @@ description: Root-cause analysis over parquet observability data via DuckDB SQL.
 extensions:
   # Orchestrator-side: registers SQL tools the lead investigator can drive
   # directly (and that worker personas inherit).
-  - module: agentm_rca.tools.duckdb_sql
+  - local: duckdb_sql
     config:
       # data_dir can be overridden via the AGENTM_RCA_DATA_DIR env var.
       exclude:
         - conclusion.parquet
       row_limit: 200
       token_limit: 5000
-  - module: agentm_rca.tools.hypothesis_tools
+  - local: hypothesis_tools
   - module: agentm_rca.tools.finalize
+  - module: agentm.extensions.builtin.artifact_store
   - module: agentm.extensions.builtin.trajectory
     config:
       path: rca_trajectory.jsonl
 
   # Multi-agent wiring. ``orchestrator_setup`` (scenario-local) loads the
-  # orchestrator system prompt and answers ``resolve_subagent`` for the
-  # personas under ``agents/``. ``sub_agent`` registers ``dispatch_agent`` /
-  # ``check_tasks`` / ``inject_instruction`` / ``abort_task`` and, when
-  # ``subagent_type`` is supplied, asks orchestrator_setup to inject the
-  # persona body + tool allowlist into the child session.
+  # orchestrator system prompt, appends the available-personas block, and
+  # answers ``resolve_subagent`` for the personas under ``agents/``.
   - local: orchestrator_setup
   - module: agentm.extensions.builtin.sub_agent
     config:
       max_workers: 4
       inherit_extensions:
         - duckdb_sql
+        - artifact_store
         - trajectory
       available_inherited_extensions:
         duckdb_sql:
-          module: agentm_rca.tools.duckdb_sql
+          module: agentm._scenarios.rca.duckdb_sql
           config:
             exclude:
               - conclusion.parquet
             row_limit: 200
             token_limit: 5000
+        artifact_store:
+          module: agentm.extensions.builtin.artifact_store
+          config: {}
         trajectory:
           module: agentm.extensions.builtin.trajectory
           config:

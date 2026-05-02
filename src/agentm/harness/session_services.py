@@ -41,6 +41,9 @@ class CreateAgentSessionFromServicesOptions:
     loop_config: LoopConfig | None = None
     parent_bus: Any = None
     parent_session_id: str | None = None
+    root_session_id: str | None = None
+    task_id: str | None = None
+    persona: str | None = None
     purpose: str = "root"
 
 
@@ -68,6 +71,9 @@ async def create_agent_session_from_services(
             loop_config=options.loop_config,
             parent_bus=options.parent_bus,
             parent_session_id=options.parent_session_id,
+            root_session_id=options.root_session_id,
+            task_id=options.task_id,
+            persona=options.persona,
             purpose=options.purpose,
         )
     )

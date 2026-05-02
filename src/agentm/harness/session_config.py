@@ -45,6 +45,16 @@ class AgentSessionConfig:
     """Caller-supplied id of the parent session. Surfaces verbatim in the
     child-lifecycle events. ``None`` becomes ``"unknown"`` in the payload."""
 
+    root_session_id: str | None = None
+    """Stable root id shared across a session tree. ``None`` means this
+    session is itself the root and should use its own session id."""
+
+    task_id: str | None = None
+    """Caller-defined task id for sub-agent dispatch provenance."""
+
+    persona: str | None = None
+    """Optional persona / role label for provenance-bearing extensions."""
+
     purpose: str = "root"
     """Caller-defined purpose label, e.g. ``"subagent:worker"``;
     surfaces verbatim in :class:`ChildSessionStartEvent`."""

@@ -23,6 +23,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 from agentm.core.abi import (
     AgentMessage,
     EventBus,
+    LoopConfig,
     Model,
     StreamFn,
     Tool,
@@ -238,6 +239,8 @@ class ReadonlySession(Protocol):
     def get_leaf_id(self) -> str | None: ...
 
     def get_entry(self, entry_id: str) -> Any | None: ...
+
+    def get_loop_config(self) -> LoopConfig: ...
 
     def append_entry(
         self,
