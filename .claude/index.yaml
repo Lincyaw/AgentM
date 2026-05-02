@@ -113,6 +113,27 @@ concepts:
     plans: ["plans/2026-05-01-pi-mono-migration.md"]
     tasks: []
 
+  sub_agent_lifecycle:
+    description: "Async sub-agent dispatch lifecycle: parent's kernel loop must not declare agent_end while a child has unread findings. Adds a single new core event BeforeAgentEndEvent (mutable; handlers return {cancel: True, append: list[AgentMessage]}) fired in AgentLoop.run when an assistant turn has no tool_use blocks. The sub_agent extension uses it as a 'runtime guards the boundary, agent owns the decision' floor: completed-but-unread children's final_text plus still-running children are concatenated into one synthesized user-role notification (<subagent_result task_id=... purpose=...>...</subagent_result> + <subagent_pending task_id=... purpose=... />). The parent then chooses: write final report, wait_subagent(id) to block on one, check_tasks to block until any one progresses, or abort_task. Single read flag per task is the source of truth (never reset; consumed by check_tasks / wait_subagent / before_agent_end). Three usage patterns share one mechanism — fire-and-forget (passive collection at exit), explicit wait (synchronous wait_subagent), steered fan-out (loop check_tasks reading as ready). Rejects synchronous dispatch (would lose parallel fan-out absent kernel-level parallel tool execution) and dead-letter / re-delivery (consumed-but-unattended findings are on the agent, same as ignored user messages). max_turns still strictly enforced; cost_budget and other extensions can layer on the same hook."
+    design: "designs/sub-agent-lifecycle.md"
+    related_concepts: [pluggable_architecture, extension_as_scenario, single_file_extension_contract, artifact_system, agent_team]
+    plans: []
+    tasks: []
+
+  artifact_system:
+    description: "Append-only typed artifact store for sub-agent findings — replaces lossy 'final_text blob' handoff with reference-based handoff. New extensions/builtin/artifact_store.py registers four tools (artifact_write, artifact_read, artifact_list, artifact_grep) backed by sqlite at <cwd>/.agentm/artifacts/<root_session_id>.db. Session-tree-scoped: every descendant of a root session shares one db; cross-root sharing deferred to evolution_substrate / git_backed_versioning. Data model: Artifact{artifact_id, parent_id, kind, title, body, created_by: ProvenanceRef{session_id, task_id, persona, timestamp}, tags, parent_artifact_ids}. Append-only by design — no artifact_edit / artifact_delete; revisions create new artifacts referencing predecessors. Integrates with sub_agent_lifecycle's notification block: workers return <summary>...</summary> + <artifacts><ref id=... kind=... title=.../></artifacts> instead of full final_text dump, so orchestrator context grows logarithmically rather than linearly with worker count. Personas declare expected artifact_kinds in frontmatter as documentation. Maps to MAST failure-mode taxonomy: defends context-loss-at-handoff, cascade context poisoning, supervisor context bloat, summarization drift, inconsistent shared state. Out of scope: binary artifacts, ACL beyond session-tree, transactional updates, reference-counted GC (uses time-based retention)."
+    design: "designs/artifact-system.md"
+    related_concepts: [sub_agent_lifecycle, agent_team, evolution_substrate, pluggable_architecture, single_file_extension_contract]
+    plans: []
+    tasks: []
+
+  agent_team:
+    description: "Composition pattern for multi-agent scenarios — explicitly NOT a Team SDK type, NOT a runtime mode switch. Built on four orthogonal pillars: (A) lifecycle floor from sub_agent_lifecycle, (B) shared memory tier from artifact_system, (C) brief contract via persona frontmatter input_schema (required/optional field-name list; sub_agent dispatch validates the prompt for <field>...</field> markers and rejects on missing required fields with structured error), (D) budget awareness via per-dispatch budget arg + scenario manifest team_profile (task_complexity: simple|comparison|deep_research → derived defaults for max_workers and per-worker max_tool_calls). Each pillar maps to specific named failure modes from the multi-agent literature (MAST taxonomy, Anthropic research-system lessons): context loss, cascade poisoning, supervisor context bloat, scope misinterpretation, token over/under-spend, etc. Core insight 'there is no mode switch': dispatch_agent + artifact_* + wait_subagent are always-loaded capabilities; LLM decides per-task whether to fan out, cache to artifacts, etc. — same shape as Claude Code's Agent tool. Runtime extension loading (api.reload_atom from self_modifiable_architecture) is orthogonal — for acquiring NEW capabilities mid-flight, not for switching team mode. Rejected: first-class Team type, peer-to-peer dispatch (orchestrator-only convention), built-in voting/arbitration (LLM does it), output schema enforcement (deferred), adaptive budget escalation. Persona frontmatter gains: input_schema, artifact_kinds, budget_defaults. Manifest gains: team_profile.task_complexity. All additions opt-in; existing scenarios continue to work."
+    design: "designs/agent-team.md"
+    related_concepts: [sub_agent_lifecycle, artifact_system, self_modifiable_architecture, extension_as_scenario, pluggable_architecture, single_file_extension_contract]
+    plans: []
+    tasks: []
+
   # === HISTORICAL ===
   # Pre-v2 architecture. Code deleted in Phase 2.5 (2026-04-30).
   # Designs preserved under designs/historical/ for archival reference only.
