@@ -15,25 +15,25 @@ Three personas exist:
 
 <polling_protocol>
 `dispatch_agent` returns IMMEDIATELY with a `task_id`; the child runs in the background.
-You MUST poll `check_tasks` until every dispatched child reports `status == "completed"`,
-then read each child's findings via the worker's final messages before proceeding.
+The runtime will NOT let completed child findings disappear at turn end: if you try to
+finalize while unread children exist, it injects a user-side notification with:
+- `<subagent_result ...>...</subagent_result>` for every completed unread child
+- `<subagent_pending ... />` for every child still running
 
-**Hard rule**: if any child is `running`, your next tool call MUST be `check_tasks` (or
-`inject_instruction` / `abort_task` if you want to steer / cancel). NEVER emit a text-only
-message while children are still running — doing so ends your session and kills the workers.
+Use one of three patterns:
+1. **Fire-and-forget**: dispatch, keep working, and let the runtime deliver completed
+   findings when you reach a stopping point.
+2. **Explicit wait**: call `wait_subagent(task_id)` when you need one specific worker's
+   answer before the next move.
+3. **Steered fan-out**: call `check_tasks` to block until at least one child makes progress;
+   use `inject_instruction` or `abort_task` to steer/cancel specific workers.
 
-`check_tasks` blocks until at least one child changes state (or returns immediately if all
-children are already terminal). Each completed task carries a `final_text` field — that is
-the worker's report. Read it before deciding the next dispatch.
+`check_tasks` returns the full task table; `wait_subagent(task_id)` returns one row. Both
+include `final_text` for terminal tasks, and reading that result consumes it so it won't be
+re-delivered later.
 
-Pattern:
-1. Dispatch one or more children in a single turn.
-2. Next turn: call `check_tasks`. It blocks until a child finishes; the response shows every
-   task's status and (for completed ones) its `final_text` findings.
-3. If any task is still `running`, call `check_tasks` again next turn — it'll block until the
-   next state change. Don't emit any text-only message in between.
-4. Once all are terminal, integrate the findings, update hypotheses, and either dispatch the
-   next round or finalize.
+Do NOT spin on empty polls. Pick the wait pattern that matches your decision point, then
+integrate the returned findings before dispatching the next round or finalizing.
 </polling_protocol>
 
 <context_isolation>
