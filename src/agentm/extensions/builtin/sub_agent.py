@@ -13,12 +13,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
+from xml.sax.saxutils import escape, quoteattr
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.abi import (
+    BeforeAgentEndEvent,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+    UserMessage,
+)
 from agentm.harness.events import (
     ChildSessionEndEvent,
     SessionReadyEvent,
@@ -42,8 +50,10 @@ MANIFEST = ExtensionManifest(
     registers=(
         "tool:dispatch_agent",
         "tool:check_tasks",
+        "tool:wait_subagent",
         "tool:inject_instruction",
         "tool:abort_task",
+        "event:before_agent_end",
         "event:session_shutdown",
         "event:session_ready",
     ),
@@ -93,10 +103,45 @@ class _ChildTask:
     pending_instructions: list[str] = field(default_factory=list)
     final_messages: list[Any] | None = None
     error: str | None = None
+    read: bool = False
 
 
 class _ChildAborted(RuntimeError):
     pass
+
+
+def _final_assistant_text(messages: list[Any] | None) -> str | None:
+    """Pull the last assistant text block out of a child session's final
+    messages. Returns ``None`` while the child is still running or produced
+    no text output."""
+    if not messages:
+        return None
+    for msg in reversed(messages):
+        role = getattr(msg, "role", None) or (
+            msg.get("role") if isinstance(msg, dict) else None
+        )
+        if role != "assistant":
+            continue
+        content = getattr(msg, "content", None) or (
+            msg.get("content") if isinstance(msg, dict) else None
+        )
+        if not isinstance(content, list):
+            continue
+        chunks: list[str] = []
+        for block in content:
+            block_type = getattr(block, "type", None) or (
+                block.get("type") if isinstance(block, dict) else None
+            )
+            if block_type != "text":
+                continue
+            text = getattr(block, "text", None) or (
+                block.get("text") if isinstance(block, dict) else None
+            )
+            if isinstance(text, str):
+                chunks.append(text)
+        if chunks:
+            return "\n".join(chunks)
+    return None
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
@@ -105,6 +150,83 @@ def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResu
         is_error=is_error,
         details=payload,
     )
+
+
+def _is_terminal(status: _Status) -> bool:
+    return status in {_COMPLETED, _ABORTED, _ERROR}
+
+
+def _task_payload(state: _ChildTask) -> dict[str, Any]:
+    return {
+        "task_id": state.task_id,
+        "purpose": state.purpose,
+        "status": state.status,
+        "error": state.error,
+        "final_message_count": (
+            len(state.final_messages) if state.final_messages is not None else None
+        ),
+        "final_text": _final_assistant_text(state.final_messages),
+    }
+
+
+def _last_assistant_text(messages: list[Any]) -> str:
+    if not messages:
+        return ""
+    last = messages[-1]
+    if getattr(last, "role", None) != "assistant":
+        return ""
+    content = getattr(last, "content", None)
+    if not isinstance(content, list):
+        return ""
+    chunks: list[str] = []
+    for block in content:
+        if getattr(block, "type", None) != "text":
+            continue
+        text = getattr(block, "text", None)
+        if isinstance(text, str):
+            chunks.append(text)
+    return "\n".join(chunks).strip()
+
+
+def _notification_message(
+    *,
+    pending: list[_ChildTask],
+    running: list[_ChildTask],
+) -> UserMessage:
+    parts: list[str] = []
+    for state in pending:
+        final_text = escape(_notification_text(state))
+        parts.append(
+            "<subagent_result"
+            f" task_id={quoteattr(state.task_id)}"
+            f" purpose={quoteattr(state.purpose)}>"
+            f"{final_text}"
+            "</subagent_result>"
+        )
+    for state in running:
+        parts.append(
+            "<subagent_pending"
+            f" task_id={quoteattr(state.task_id)}"
+            f" purpose={quoteattr(state.purpose)} />"
+        )
+    return UserMessage(
+        role="user",
+        content=[TextContent(type="text", text="\n\n".join(parts))],
+        timestamp=time.time(),
+    )
+
+
+def _notification_text(state: _ChildTask) -> str:
+    final_text = _final_assistant_text(state.final_messages)
+    if final_text:
+        return final_text
+    if state.status == _ABORTED:
+        return "Task aborted before producing final text."
+    if state.status == _ERROR and state.error:
+        return f"Task failed: {state.error}"
+    if state.error:
+        return state.error
+    return ""
 
 
 def _normalize_extension_spec(spec: Any) -> tuple[str, dict[str, Any]]:
@@ -208,6 +330,47 @@ class _ChildTaskManager:
         self._registry_lock = asyncio.Lock()
         self._reserved_slots = 0
         self._parent_session_id = "unknown"
+        self._running_only_cancels = 0
+
+    async def _reset_running_only_cancels(self) -> None:
+        async with self._registry_lock:
+            self._running_only_cancels = 0
+
+    async def _abort_running_states(
+        self, running: list[_ChildTask]
+    ) -> list[_ChildTask]:
+        if not running:
+            return []
+        for state in running:
+            # Reuse the public abort path so auto-aborts and explicit
+            # ``abort_task`` calls share the same state transition logic.
+            await self.abort({"task_id": state.task_id})
+        await asyncio.wait(
+            [state.task for state in running],
+            timeout=_SHUTDOWN_GRACE_SECONDS,
+        )
+        async with self._registry_lock:
+            terminal: list[_ChildTask] = []
+            for state in running:
+                if _is_terminal(state.status):
+                    state.read = True
+                    terminal.append(state)
+            return terminal
+
+    async def _resolve_subagent(self, name: str) -> dict[str, Any] | None:
+        """Ask peer extensions to resolve ``name`` to a persona definition.
+
+        A peer (e.g. a scenario-local extension) handles ``resolve_subagent``
+        by returning ``{"body": str, "tools": list[str] | None}`` when the
+        name is known, otherwise ``None``. The first non-None response wins.
+        """
+        responses = await self._api.events.emit(
+            "resolve_subagent", {"name": name}
+        )
+        for response in responses:
+            if isinstance(response, dict) and isinstance(response.get("body"), str):
+                return response
+        return None
 
     async def _drain_instructions(self, state: _ChildTask) -> str | None:
         async with self._registry_lock:
@@ -265,7 +428,11 @@ class _ChildTaskManager:
             await self._finalize_state(
                 state,
                 status=_ABORTED,
-                final_messages=state.session.session_manager.get_messages(),
+                final_messages=(
+                    final_messages
+                    if final_messages is not None
+                    else state.session.session_manager.get_messages()
+                ),
                 error="aborted",
             )
             return state.final_messages
@@ -279,13 +446,39 @@ class _ChildTaskManager:
             return state.final_messages
 
     async def dispatch(self, args: dict[str, Any]) -> ToolResult:
+        await self._reset_running_only_cancels()
         purpose = str(args.get("purpose", "subagent"))
         prompt = str(args.get("prompt", ""))
+        subagent_type = args.get("subagent_type")
         child_extensions = _coerce_extension_specs(args.get("extensions"))
         inherited_extensions = _resolve_inherited_extensions(
             self._inherit_extensions,
             self._available_inherited,
         )
+        persona_extensions: list[tuple[str, dict[str, Any]]] = []
+        persona_tool_allowlist: list[str] | None = None
+        if isinstance(subagent_type, str) and subagent_type.strip():
+            persona = await self._resolve_subagent(subagent_type.strip())
+            if persona is None:
+                return _tool_result(
+                    {
+                        "error": (
+                            f"unknown subagent_type {subagent_type!r}; no peer "
+                            "extension resolved it via the 'resolve_subagent' "
+                            "event"
+                        )
+                    },
+                    is_error=True,
+                )
+            persona_extensions.append(
+                (
+                    "agentm.extensions.builtin.system_prompt",
+                    {"prompt": persona["body"]},
+                )
+            )
+            tools = persona.get("tools")
+            if isinstance(tools, list) and tools:
+                persona_tool_allowlist = [str(t) for t in tools]
         provider = _get_active_provider(self._api)
         task_id = uuid.uuid4().hex
 
@@ -312,9 +505,10 @@ class _ChildTaskManager:
         # default so the override is unambiguous.
         child_config = AgentSessionConfig(
             cwd=self._api.cwd,
-            extensions=child_extensions + inherited_extensions,
+            extensions=persona_extensions + child_extensions + inherited_extensions,
             provider=(__name__, {"_bridge_provider": provider}),
             purpose=purpose,
+            tool_allowlist=persona_tool_allowlist,
         )
         try:
             child = await self._api.spawn_child_session(child_config)
@@ -349,27 +543,51 @@ class _ChildTaskManager:
         )
 
     async def check_tasks(self, _args: dict[str, Any]) -> ToolResult:
+        await self._reset_running_only_cancels()
+        # Block until at least one running child changes state, so a single
+        # ``check_tasks`` call always makes forward progress and the parent
+        # does not burn LLM turns on no-op polls. Returns immediately when
+        # there is nothing left to wait for.
+        async with self._registry_lock:
+            running = [
+                child.task
+                for child in self._registry.values()
+                if child.status == _RUNNING
+            ]
+        if running:
+            await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
         async with self._registry_lock:
             tasks = list(self._registry.values())
+            for state in tasks:
+                if _is_terminal(state.status):
+                    state.read = True
         payload = {
-            "tasks": [
-                {
-                    "task_id": state.task_id,
-                    "purpose": state.purpose,
-                    "status": state.status,
-                    "error": state.error,
-                    "final_message_count": (
-                        len(state.final_messages)
-                        if state.final_messages is not None
-                        else None
-                    ),
-                }
-                for state in tasks
-            ]
+            "tasks": [_task_payload(state) for state in tasks]
         }
         return _tool_result(payload)
 
+    async def wait_subagent(self, args: dict[str, Any]) -> ToolResult:
+        await self._reset_running_only_cancels()
+        task_id = str(args.get("task_id", ""))
+        async with self._registry_lock:
+            state = self._registry.get(task_id)
+            if state is None:
+                return _tool_result(
+                    {"error": f"unknown task_id: {task_id}"}, is_error=True
+                )
+            task = state.task
+        if state.status == _RUNNING:
+            await task
+        async with self._registry_lock:
+            state = self._registry.get(task_id)
+            assert state is not None
+            if _is_terminal(state.status):
+                state.read = True
+            payload = _task_payload(state)
+        return _tool_result(payload)
+
     async def inject_instruction(self, args: dict[str, Any]) -> ToolResult:
+        await self._reset_running_only_cancels()
         task_id = str(args.get("task_id", ""))
         message = str(args.get("message", ""))
         async with self._registry_lock:
@@ -392,6 +610,7 @@ class _ChildTaskManager:
         return _tool_result({"task_id": task_id, "status": _RUNNING})
 
     async def abort(self, args: dict[str, Any]) -> ToolResult:
+        await self._reset_running_only_cancels()
         task_id = str(args.get("task_id", ""))
         async with self._registry_lock:
             state = self._registry.get(task_id)
@@ -411,6 +630,51 @@ class _ChildTaskManager:
                 )
             state.abort_signal.set()
         return _tool_result({"task_id": task_id, "status": _ABORTED})
+
+    async def before_agent_end(
+        self, event: BeforeAgentEndEvent
+    ) -> dict[str, Any] | None:
+        last_text = _last_assistant_text(event.messages)
+        should_auto_abort = False
+        async with self._registry_lock:
+            pending = [
+                state
+                for state in self._registry.values()
+                if _is_terminal(state.status) and not state.read
+            ]
+            running = [
+                state for state in self._registry.values() if state.status == _RUNNING
+            ]
+            if pending:
+                for state in pending:
+                    state.read = True
+                self._running_only_cancels = 0
+            elif not running:
+                self._running_only_cancels = 0
+            elif last_text:
+                self._running_only_cancels = 0
+
+            if event.stop_reason == "end_turn" and not pending and running:
+                if self._running_only_cancels >= 1:
+                    should_auto_abort = True
+                    self._running_only_cancels = 0
+                else:
+                    self._running_only_cancels += 1
+
+        if not pending and not running:
+            return None
+
+        if should_auto_abort:
+            aborted = await self._abort_running_states(running)
+            if not aborted:
+                return None
+            event.messages.append(
+                _notification_message(pending=aborted, running=[])
+            )
+            return None
+
+        message = _notification_message(pending=pending, running=running)
+        return {"cancel": True, "append": [message]}
 
     async def on_session_ready(self, event: SessionReadyEvent) -> None:
         self._parent_session_id = event.session_id
@@ -474,15 +738,23 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     api.on("session_ready", manager.on_session_ready)
     api.on("session_shutdown", manager.on_session_shutdown)
+    api.on("before_agent_end", manager.before_agent_end)
     api.register_tool(
         FunctionTool(
             name="dispatch_agent",
-            description="Spawn a child AgentSession and return its task id immediately.",
+            description=(
+                "Spawn a child AgentSession and return its task id immediately. "
+                "Pass ``subagent_type`` to launch a named persona (resolved by "
+                "peer extensions via the ``resolve_subagent`` event); the "
+                "persona's system prompt and tool allowlist are applied to the "
+                "child."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
                     "purpose": {"type": "string"},
                     "prompt": {"type": "string"},
+                    "subagent_type": {"type": "string"},
                     "extensions": {
                         "type": "array",
                         "items": {
@@ -512,6 +784,19 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "additionalProperties": False,
             },
             fn=manager.check_tasks,
+        )
+    )
+    api.register_tool(
+        FunctionTool(
+            name="wait_subagent",
+            description="Wait for one child task to reach a terminal state.",
+            parameters={
+                "type": "object",
+                "properties": {"task_id": {"type": "string"}},
+                "required": ["task_id"],
+                "additionalProperties": False,
+            },
+            fn=manager.wait_subagent,
         )
     )
     api.register_tool(

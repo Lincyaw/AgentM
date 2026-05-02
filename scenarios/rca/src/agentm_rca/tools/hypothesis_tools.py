@@ -1,121 +1,151 @@
-"""RCA hypothesis-management tool atoms."""
+"""Lightweight hypothesis-tracking tools for the RCA scenario.
+
+Provides two atoms (``update_hypothesis``, ``remove_hypothesis``) backed by
+an in-memory dict scoped to the extension install. The agent uses these to
+keep an explicit list of working hypotheses while it investigates. The
+store is intentionally simple: no persistence, no ordering guarantees
+beyond insertion order, no concurrent-writer protection (single-session).
+"""
 
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import dataclass, field
 from typing import Any
 
-from agentm.core.kernel import FunctionTool, TextContent, ToolResult
+from agentm.core.abi.messages import TextContent
+from agentm.core.abi.tool import FunctionTool, ToolResult
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
-from agentm_rca.stores import HypothesisStore
-
 MANIFEST = ExtensionManifest(
     name="hypothesis_tools",
-    description="Register RCA hypothesis store tool atoms.",
+    description="Track RCA hypotheses in an in-memory list of dicts.",
     registers=("tool:update_hypothesis", "tool:remove_hypothesis"),
 )
 
-_UPDATE_PARAMETERS = {
-    "type": "object",
-    "properties": {
-        "id": {"type": "string"},
-        "description": {"type": "string"},
-        "status": {
-            "type": "string",
-            "enum": [
-                "formed",
-                "investigating",
-                "confirmed",
-                "rejected",
-                "refined",
-                "inconclusive",
-            ],
-            "default": "formed",
-        },
-        "evidence_summary": {"type": ["string", "null"]},
-        "parent_id": {"type": ["string", "null"]},
-    },
-    "required": ["id", "description"],
-    "additionalProperties": False,
-}
-
-_REMOVE_PARAMETERS = {
-    "type": "object",
-    "properties": {"id": {"type": "string"}},
-    "required": ["id"],
-    "additionalProperties": False,
-}
+_STATUSES = (
+    "formed",
+    "investigating",
+    "confirmed",
+    "rejected",
+    "refined",
+    "inconclusive",
+)
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    store = _expect_store(config)
+@dataclass
+class _Entry:
+    id: str
+    description: str
+    status: str = "formed"
+    evidence_summary: str | None = None
+    parent_id: str | None = None
+
+
+@dataclass
+class _Store:
+    entries: dict[str, _Entry] = field(default_factory=dict)
+
+
+def _ok(text: str) -> ToolResult:
+    return ToolResult(content=[TextContent(type="text", text=text)])
+
+
+def _err(msg: str) -> ToolResult:
+    return ToolResult(
+        content=[TextContent(type="text", text=json.dumps({"error": msg}))],
+        is_error=True,
+    )
+
+
+def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
+    store = _Store()
 
     async def _update(args: dict[str, Any]) -> ToolResult:
-        entry = store.update(
-            id=str(args["id"]),
-            description=str(args["description"]),
-            status=str(args.get("status", "formed")),
+        hid = str(args.get("id", "")).strip()
+        desc = str(args.get("description", "")).strip()
+        if not hid or not desc:
+            return _err("id and description are required")
+        status = str(args.get("status", "formed"))
+        if status not in _STATUSES:
+            return _err(f"status must be one of {_STATUSES}")
+        entry = _Entry(
+            id=hid,
+            description=desc,
+            status=status,
             evidence_summary=_maybe_str(args.get("evidence_summary")),
             parent_id=_maybe_str(args.get("parent_id")),
         )
-        api.session.append_entry("hypothesis", asdict(entry))
-        text = f"Hypothesis {entry.id} updated: {entry.status} -- {entry.description}"
-        return _ok(text, details=asdict(entry))
+        store.entries[hid] = entry
+        return _ok(
+            json.dumps(
+                {
+                    "id": entry.id,
+                    "status": entry.status,
+                    "description": entry.description,
+                    "evidence_summary": entry.evidence_summary,
+                    "parent_id": entry.parent_id,
+                    "total": len(store.entries),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
 
     async def _remove(args: dict[str, Any]) -> ToolResult:
-        hypothesis_id = str(args["id"])
-        existed = store.remove(hypothesis_id)
-        if existed:
-            api.session.append_entry(
-                "hypothesis",
-                {"id": hypothesis_id, "status": "removed"},
-            )
+        hid = str(args.get("id", "")).strip()
+        existed = store.entries.pop(hid, None) is not None
         return _ok(
-            f"Hypothesis {hypothesis_id} removed"
-            if existed
-            else f"Hypothesis {hypothesis_id} not found"
+            json.dumps(
+                {"id": hid, "removed": existed, "remaining": len(store.entries)},
+                ensure_ascii=False,
+            )
         )
 
     api.register_tool(
         FunctionTool(
             name="update_hypothesis",
-            description="Create or update a hypothesis in the RCA investigation.",
-            parameters=_UPDATE_PARAMETERS,
+            description=(
+                "Create or update a working hypothesis. Status must be one of "
+                f"{list(_STATUSES)}. Use this to record what you currently "
+                "believe and why — keep evidence_summary terse."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "description": {"type": "string"},
+                    "status": {"type": "string", "enum": list(_STATUSES)},
+                    "evidence_summary": {"type": ["string", "null"]},
+                    "parent_id": {"type": ["string", "null"]},
+                },
+                "required": ["id", "description"],
+                "additionalProperties": False,
+            },
             fn=_update,
         )
     )
     api.register_tool(
         FunctionTool(
             name="remove_hypothesis",
-            description="Remove a hypothesis from the RCA investigation.",
-            parameters=_REMOVE_PARAMETERS,
+            description="Remove a hypothesis by id.",
+            parameters={
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+                "additionalProperties": False,
+            },
             fn=_remove,
         )
     )
 
 
-def _expect_store(config: dict[str, Any]) -> HypothesisStore:
-    store = config.get("store")
-    if not isinstance(store, HypothesisStore):
-        raise TypeError("hypothesis_tools.install requires config['store']=HypothesisStore")
-    return store
-
-
 def _maybe_str(value: Any) -> str | None:
     if value is None:
         return None
-    return str(value)
+    text = str(value).strip()
+    return text or None
 
 
-def _ok(text: str, *, details: Any = None) -> ToolResult:
-    return ToolResult(
-        content=[TextContent(type="text", text=text)],
-        details=details,
-    )
-
-
-def format_hypothesis_payload(payload: Any) -> str:
-    return json.dumps(payload, default=str, indent=2, sort_keys=True)
+__all__ = ["MANIFEST", "install"]
