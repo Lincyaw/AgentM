@@ -44,6 +44,7 @@ from agentm.harness.extension import (
     Handler,
     current_installing_extension,
 )
+from agentm.harness.resource_writer import GitBackedResourceWriter
 
 logger = logging.getLogger(__name__)
 
@@ -588,12 +589,21 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
         nonlocal active_atom_hashes
         active_atom_hashes = {}
+        writer = api.get_resource_writer()
         for module_path in sorted(loaded_builtin_module_paths):
             entry = builtin_by_module_path.get(module_path)
             if entry is None:
                 continue
-            source = inspect.getsource(entry.module)
-            active_atom_hashes[entry.name] = api.catalog.compute_atom_hash(source)
+            source_path = inspect.getsourcefile(entry.module)
+            if source_path is None:
+                continue
+            version_hash: str | None = None
+            if isinstance(writer, GitBackedResourceWriter):
+                version_hash = writer.current_version_for_path(source_path)
+            if version_hash is None:
+                source = inspect.getsource(entry.module)
+                version_hash = api.catalog.compute_atom_hash(source)
+            active_atom_hashes[entry.name] = version_hash
         return api.catalog.compute_active_set_fingerprint(
             loaded=active_atom_hashes,
             scenario=scenario,

@@ -298,6 +298,12 @@ class AgentSession:
             session_id=session_id,
             bus=bus,
         )
+        try:
+            from agentm.core._internal.catalog.migrate import migrate_catalog_v2
+
+            migrate_catalog_v2(root=Path(config.cwd))
+        except Exception as exc:
+            logger.warning("agentm catalog migration failed during startup: %r", exc)
 
         def _refresh_active_provider() -> None:
             active_provider_box["value"] = (
@@ -313,6 +319,7 @@ class AgentSession:
         # class rather than ~400 lines of closures inline in ``create``.
         reloader = AtomReloader(
             cwd=config.cwd,
+            resource_writer=resource_writer,
             bus=bus,
             tools=tools,
             commands=commands,

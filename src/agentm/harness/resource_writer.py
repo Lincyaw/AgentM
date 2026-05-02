@@ -393,6 +393,28 @@ class GitBackedResourceWriter:
 
         return _manager()
 
+    def current_version_for_path(self, path: str) -> str | None:
+        path_class = self.classify(path)
+        if path_class != "managed" or self._advisory_mode:
+            return None
+
+        resolved = self._resolve_path(path)
+        try:
+            relative = resolved.relative_to(self._cwd)
+        except ValueError:
+            return None
+
+        try:
+            self._ensure_git_ready()
+            result = self._run_git_sync(
+                ("log", "-n", "1", "--format=%H", "--", PurePosixPath(relative).as_posix())
+            )
+        except GitOperationError:
+            return None
+
+        sha = result.stdout.strip()
+        return sha or None
+
     async def _apply_batch(
         self,
         pending: list[_PendingBatchOp],

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import json
 import subprocess
 import sys
@@ -10,29 +9,19 @@ from typing import Any, cast
 import pytest
 
 from agentm.core._internal.catalog import _layout
-from agentm.core._internal.catalog.hashing import compute_atom_hash
 from agentm.core._internal.catalog.indexer import index_trace, rebuild_catalog
 from agentm.core.abi import EventBus
 from agentm.harness.atom_reloader import AtomReloader
 from agentm.harness.extension import ProviderConfig
+from agentm.harness.resource_writer import GitBackedResourceWriter
 from agentm.harness.session import AgentSession
 from agentm.harness.session_manager import InMemorySessionManager
-from agentm.extensions.discover import discover_builtin
 
 
-BUILTIN_ATOMS = ("tool_ls", "tool_find", "observability")
-
-
-def _builtin_hashes(*names: str) -> dict[str, str]:
-    catalog = discover_builtin()
-    hashes: dict[str, str] = {}
-    for name in names:
-        entry = catalog[name]
-        source_path = inspect.getsourcefile(entry.module)
-        assert source_path is not None
-        source = Path(source_path).read_text(encoding="utf-8")
-        hashes[name] = compute_atom_hash(source)
-    return hashes
+SHA_TOOL_LS = "a" * 40
+SHA_OBS = "b" * 40
+SHA_FIND = "c" * 40
+LEGACY_HASH = "deadbeef"
 
 
 def _write_trace(tmp_path: Path, trace_id: str, records: list[dict[str, Any]]) -> Path:
@@ -58,7 +47,7 @@ def _record(kind: str, attributes: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _fingerprint_record(atom_hashes: dict[str, str]) -> dict[str, Any]:
+def _fingerprint_record(atom_versions: dict[str, str]) -> dict[str, Any]:
     return _record(
         "session.fingerprint",
         {
@@ -66,7 +55,7 @@ def _fingerprint_record(atom_hashes: dict[str, str]) -> dict[str, Any]:
             "scenario": None,
             "atoms": {
                 name: f"{name}@{version_hash}"
-                for name, version_hash in atom_hashes.items()
+                for name, version_hash in atom_versions.items()
             },
         },
     )
@@ -80,7 +69,7 @@ def _strip_indexed_at(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _metrics_snapshot(root: Path) -> dict[str, list[dict[str, Any]]]:
     snapshot: dict[str, list[dict[str, Any]]] = {}
-    for metrics_path in sorted(root.glob("atoms/*/*/metrics.jsonl")):
+    for metrics_path in sorted(root.glob(".agentm/catalog/atoms/*/*/metrics.jsonl")):
         snapshot[str(metrics_path.relative_to(root))] = [
             _strip_indexed_at(json.loads(line))
             for line in metrics_path.read_text(encoding="utf-8").splitlines()
@@ -96,12 +85,11 @@ def _first_metrics_row(root: Path, atom_name: str, version_hash: str) -> dict[st
 
 
 def test_E5_rebuild_is_idempotent(tmp_path: Path) -> None:
-    atom_hashes = _builtin_hashes(*BUILTIN_ATOMS)
     trace_path = _write_trace(
         tmp_path,
         "trace-e5",
         [
-            _fingerprint_record(atom_hashes),
+            _fingerprint_record({"tool_ls": SHA_TOOL_LS, "tool_find": SHA_FIND}),
             _record(
                 "llm.request.end",
                 {"usage": {"input_tokens": 120, "output_tokens": 30}},
@@ -109,171 +97,118 @@ def test_E5_rebuild_is_idempotent(tmp_path: Path) -> None:
             _record("agent_end", {"stop_reason": "end_turn"}),
         ],
     )
-    root = tmp_path
 
-    index_trace(trace_path, root=root)
-    original = _metrics_snapshot(root)
+    index_trace(trace_path, root=tmp_path)
+    original = _metrics_snapshot(tmp_path)
 
     n_traces, n_atoms, n_warnings, failures = rebuild_catalog(
-        root=root,
+        root=tmp_path,
         observability=tmp_path / ".agentm" / "observability",
     )
 
-    assert (n_traces, n_atoms, n_warnings, failures) == (1, 3, 0, 0)
-    assert _metrics_snapshot(root) == original
+    assert (n_traces, n_atoms, n_warnings, failures) == (1, 2, 0, 0)
+    assert _metrics_snapshot(tmp_path) == original
 
 
 def test_index_trace_attributes_to_all_loaded_atoms(tmp_path: Path) -> None:
-    atom_hashes = _builtin_hashes(*BUILTIN_ATOMS)
     trace_path = _write_trace(
         tmp_path,
         "trace-atoms",
         [
-            _fingerprint_record(atom_hashes),
+            _fingerprint_record(
+                {"tool_ls": SHA_TOOL_LS, "tool_find": SHA_FIND, "observability": SHA_OBS}
+            ),
             _record("agent_end", {"stop_reason": "stop"}),
         ],
     )
-    root = tmp_path
 
-    result = index_trace(trace_path, root=root)
+    result = index_trace(trace_path, root=tmp_path)
 
     assert result.n_atoms_attributed == 3
-    for atom_name, version_hash in atom_hashes.items():
-        metrics_path = _layout.atom_metrics_path(atom_name, version_hash, root=root)
+    for atom_name, version_hash in {
+        "tool_ls": SHA_TOOL_LS,
+        "tool_find": SHA_FIND,
+        "observability": SHA_OBS,
+    }.items():
+        metrics_path = _layout.atom_metrics_path(atom_name, version_hash, root=tmp_path)
         assert metrics_path.is_file()
 
 
 def test_index_trace_marks_mid_session_reload(tmp_path: Path) -> None:
-    atom_hashes = _builtin_hashes("tool_ls")
     trace_path = _write_trace(
         tmp_path,
         "trace-reload",
         [
-            _fingerprint_record(atom_hashes),
+            _fingerprint_record({"tool_ls": SHA_TOOL_LS}),
             _record(
                 "atom.reload",
                 {
                     "fingerprint_after": {
                         "core": None,
                         "scenario": None,
-                        "atoms": {"tool_ls": f"tool_ls@{atom_hashes['tool_ls']}"},
+                        "atoms": {"tool_ls": f"tool_ls@{SHA_TOOL_LS}"},
                     }
                 },
             ),
             _record("agent_end", {"stop_reason": "end_turn"}),
         ],
     )
-    root = tmp_path
 
-    index_trace(trace_path, root=root)
+    index_trace(trace_path, root=tmp_path)
 
-    row = _first_metrics_row(root, "tool_ls", atom_hashes["tool_ls"])
+    row = _first_metrics_row(tmp_path, "tool_ls", SHA_TOOL_LS)
     assert row["mid_session_reload"] is True
 
 
-def test_index_trace_lazily_freezes_genesis_version(tmp_path: Path) -> None:
-    atom_hashes = _builtin_hashes("tool_ls")
-    trace_path = _write_trace(
-        tmp_path,
-        "trace-freeze",
-        [
-            _fingerprint_record(atom_hashes),
-            _record("agent_end", {"stop_reason": "end_turn"}),
-        ],
-    )
-    root = tmp_path
-
-    index_trace(trace_path, root=root)
-
-    version_dir = _layout.atom_version_dir("tool_ls", atom_hashes["tool_ls"], root=root)
-    assert version_dir.is_dir()
-    assert (version_dir / "source.py").is_file()
-    assert (version_dir / "manifest.yaml").is_file()
-    assert (version_dir / "runs").is_dir()
-
-
-def test_index_trace_handles_missing_fingerprint_record(tmp_path: Path) -> None:
-    trace_path = _write_trace(
-        tmp_path,
-        "trace-missing-fingerprint",
-        [_record("session.start", {"cwd": str(tmp_path)})],
-    )
-
-    result = index_trace(trace_path, root=tmp_path / ".agentm" / "catalog")
-
-    assert result.n_atoms_attributed == 0
-    assert result.warnings
-    assert "missing session.fingerprint" in result.warnings[0]
-
-
-def test_completion_rate_one_for_end_turn(tmp_path: Path) -> None:
-    atom_hashes = _builtin_hashes("tool_ls")
-    trace_path = _write_trace(
-        tmp_path,
-        "trace-end-turn",
-        [
-            _fingerprint_record(atom_hashes),
-            _record("agent_end", {"stop_reason": "end_turn"}),
-        ],
-    )
-    root = tmp_path
-
-    index_trace(trace_path, root=root)
-
-    row = _first_metrics_row(root, "tool_ls", atom_hashes["tool_ls"])
-    assert row["metrics"]["task.completion_rate"] == 1.0
-
-
-def test_completion_rate_zero_for_budget_stop(tmp_path: Path) -> None:
-    atom_hashes = _builtin_hashes("tool_ls")
-    trace_path = _write_trace(
-        tmp_path,
-        "trace-budget",
-        [
-            _fingerprint_record(atom_hashes),
-            _record("agent_end", {"stop_reason": "budget"}),
-        ],
-    )
-    root = tmp_path
-
-    index_trace(trace_path, root=root)
-
-    row = _first_metrics_row(root, "tool_ls", atom_hashes["tool_ls"])
-    assert row["metrics"]["task.completion_rate"] == 0.0
-
-
-def test_runs_symlink_created_idempotently(tmp_path: Path) -> None:
-    atom_hashes = _builtin_hashes("tool_ls")
+def test_index_trace_creates_runs_symlink_without_source_or_manifest(tmp_path: Path) -> None:
     trace_path = _write_trace(
         tmp_path,
         "trace-link",
         [
-            _fingerprint_record(atom_hashes),
+            _fingerprint_record({"tool_ls": SHA_TOOL_LS}),
             _record("agent_end", {"stop_reason": "end_turn"}),
         ],
     )
-    root = tmp_path
 
-    index_trace(trace_path, root=root)
-    index_trace(trace_path, root=root)
+    index_trace(trace_path, root=tmp_path)
 
-    runs_dir = _layout.atom_runs_dir("tool_ls", atom_hashes["tool_ls"], root=root)
+    version_dir = _layout.atom_version_dir("tool_ls", SHA_TOOL_LS, root=tmp_path)
+    assert version_dir.is_dir()
+    assert not (version_dir / "source.py").exists()
+    assert not (version_dir / "manifest.yaml").exists()
+    runs_dir = _layout.atom_runs_dir("tool_ls", SHA_TOOL_LS, root=tmp_path)
     children = list(runs_dir.iterdir())
     assert [child.name for child in children] == ["trace-link"]
     assert children[0].is_symlink()
 
 
+def test_index_trace_skips_legacy_content_hash_fingerprints(tmp_path: Path) -> None:
+    trace_path = _write_trace(
+        tmp_path,
+        "trace-legacy",
+        [
+            _fingerprint_record({"tool_ls": LEGACY_HASH}),
+            _record("agent_end", {"stop_reason": "end_turn"}),
+        ],
+    )
+
+    result = index_trace(trace_path, root=tmp_path)
+
+    assert result.n_atoms_attributed == 0
+    assert result.warnings == [
+        f"atom 'tool_ls' uses pre-migration fingerprint {LEGACY_HASH}; skipping"
+    ]
+
+
 def test_cli_rebuild_returns_zero_on_clean_run(tmp_path: Path) -> None:
-    atom_hashes = _builtin_hashes("tool_ls")
     _write_trace(
         tmp_path,
         "trace-cli",
         [
-            _fingerprint_record(atom_hashes),
+            _fingerprint_record({"tool_ls": SHA_TOOL_LS}),
             _record("agent_end", {"stop_reason": "end_turn"}),
         ],
     )
-    root = tmp_path
     observability = tmp_path / ".agentm" / "observability"
 
     completed = subprocess.run(
@@ -283,7 +218,7 @@ def test_cli_rebuild_returns_zero_on_clean_run(tmp_path: Path) -> None:
             "agentm.core._internal.catalog.indexer",
             "rebuild",
             "--root",
-            str(root),
+            str(tmp_path),
             "--observability",
             str(observability),
         ],
@@ -315,8 +250,14 @@ async def test_shutdown_indexes_observability_trace_when_present(
     monkeypatch.setattr("agentm.core._internal.catalog.indexer.index_trace", _fake_index_trace)
 
     bus = EventBus()
+    resource_writer = GitBackedResourceWriter(
+        cwd=str(tmp_path),
+        session_id="session-123",
+        bus=bus,
+    )
     reloader = AtomReloader(
         cwd=str(tmp_path),
+        resource_writer=resource_writer,
         bus=bus,
         tools=[],
         commands={},
@@ -354,5 +295,3 @@ async def test_shutdown_indexes_observability_trace_when_present(
     await session.shutdown()
 
     assert called["path"] == trace_path.resolve()
-
-

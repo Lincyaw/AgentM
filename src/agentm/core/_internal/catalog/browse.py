@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 from agentm.core._internal.catalog import _layout
 
@@ -22,28 +19,19 @@ def list_versions(name: str, root: Path | None = None) -> list[str]:
     atom_root = _layout.atoms_dir(name, root=root)
     if not atom_root.exists():
         return []
-    versions = {
+    return sorted(
         entry.name
         for entry in atom_root.iterdir()
-        if entry.name != "current" and entry.is_dir()
-    }
-    current = _read_current_version(name, root=root)
-    if current:
-        versions.add(current)
-    return sorted(versions)
+        if entry.is_dir() and not entry.name.startswith(_layout.LEGACY_PREFIX)
+    )
 
 
 def get_manifest_at(
     name: str, version: str, root: Path | None = None
 ) -> dict[str, Any]:
-    manifest_path = _layout.atom_manifest_path(name, version, root=root)
-    with manifest_path.open("r", encoding="utf-8") as handle:
-        payload = yaml.safe_load(handle) or {}
-    if not isinstance(payload, dict):
-        raise ValueError(
-            f"Manifest at {manifest_path} must decode to a mapping, got {type(payload).__name__}"
-        )
-    return payload
+    raise RuntimeError(
+        f"manifest browsing for {name}@{version} moved to git-backed plumbing and is handled in issue #3"
+    )
 
 
 def runs_for(fingerprint: dict[str, Any] | str, root: Path | None = None) -> list[str]:
@@ -90,13 +78,3 @@ def _split_atom_ref(value: str, fallback_atom: str | None) -> tuple[str, str]:
     if fallback_atom is None:
         raise ValueError(f"Expected 'atom@version', got {value!r}")
     return fallback_atom, value
-
-
-def _read_current_version(name: str, root: Path | None = None) -> str | None:
-    current_path = _layout.atom_current_symlink(name, root=root)
-    if current_path.is_symlink():
-        return Path(os.readlink(current_path)).name
-    if current_path.exists():
-        text = current_path.read_text(encoding="utf-8").strip()
-        return text or None
-    return None
