@@ -11,6 +11,7 @@ extensions:
       row_limit: 200
       token_limit: 5000
   - module: agentm_rca.tools.hypothesis_tools
+  - module: agentm_rca.tools.finalize
   - module: agentm.extensions.builtin.trajectory
     config:
       path: rca_trajectory.jsonl
