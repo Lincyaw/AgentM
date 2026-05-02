@@ -99,6 +99,40 @@ class _ChildAborted(RuntimeError):
     pass
 
 
+def _final_assistant_text(messages: list[Any] | None) -> str | None:
+    """Pull the last assistant text block out of a child session's final
+    messages. Returns ``None`` while the child is still running or produced
+    no text output."""
+    if not messages:
+        return None
+    for msg in reversed(messages):
+        role = getattr(msg, "role", None) or (
+            msg.get("role") if isinstance(msg, dict) else None
+        )
+        if role != "assistant":
+            continue
+        content = getattr(msg, "content", None) or (
+            msg.get("content") if isinstance(msg, dict) else None
+        )
+        if not isinstance(content, list):
+            continue
+        chunks: list[str] = []
+        for block in content:
+            block_type = getattr(block, "type", None) or (
+                block.get("type") if isinstance(block, dict) else None
+            )
+            if block_type != "text":
+                continue
+            text = getattr(block, "text", None) or (
+                block.get("text") if isinstance(block, dict) else None
+            )
+            if isinstance(text, str):
+                chunks.append(text)
+        if chunks:
+            return "\n".join(chunks)
+    return None
+
+
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(payload, default=str))],
@@ -209,6 +243,21 @@ class _ChildTaskManager:
         self._reserved_slots = 0
         self._parent_session_id = "unknown"
 
+    async def _resolve_subagent(self, name: str) -> dict[str, Any] | None:
+        """Ask peer extensions to resolve ``name`` to a persona definition.
+
+        A peer (e.g. a scenario-local extension) handles ``resolve_subagent``
+        by returning ``{"body": str, "tools": list[str] | None}`` when the
+        name is known, otherwise ``None``. The first non-None response wins.
+        """
+        responses = await self._api.events.emit(
+            "resolve_subagent", {"name": name}
+        )
+        for response in responses:
+            if isinstance(response, dict) and isinstance(response.get("body"), str):
+                return response
+        return None
+
     async def _drain_instructions(self, state: _ChildTask) -> str | None:
         async with self._registry_lock:
             if not state.pending_instructions:
@@ -281,11 +330,36 @@ class _ChildTaskManager:
     async def dispatch(self, args: dict[str, Any]) -> ToolResult:
         purpose = str(args.get("purpose", "subagent"))
         prompt = str(args.get("prompt", ""))
+        subagent_type = args.get("subagent_type")
         child_extensions = _coerce_extension_specs(args.get("extensions"))
         inherited_extensions = _resolve_inherited_extensions(
             self._inherit_extensions,
             self._available_inherited,
         )
+        persona_extensions: list[tuple[str, dict[str, Any]]] = []
+        persona_tool_allowlist: list[str] | None = None
+        if isinstance(subagent_type, str) and subagent_type.strip():
+            persona = await self._resolve_subagent(subagent_type.strip())
+            if persona is None:
+                return _tool_result(
+                    {
+                        "error": (
+                            f"unknown subagent_type {subagent_type!r}; no peer "
+                            "extension resolved it via the 'resolve_subagent' "
+                            "event"
+                        )
+                    },
+                    is_error=True,
+                )
+            persona_extensions.append(
+                (
+                    "agentm.extensions.builtin.system_prompt",
+                    {"prompt": persona["body"]},
+                )
+            )
+            tools = persona.get("tools")
+            if isinstance(tools, list) and tools:
+                persona_tool_allowlist = [str(t) for t in tools]
         provider = _get_active_provider(self._api)
         task_id = uuid.uuid4().hex
 
@@ -312,9 +386,10 @@ class _ChildTaskManager:
         # default so the override is unambiguous.
         child_config = AgentSessionConfig(
             cwd=self._api.cwd,
-            extensions=child_extensions + inherited_extensions,
+            extensions=persona_extensions + child_extensions + inherited_extensions,
             provider=(__name__, {"_bridge_provider": provider}),
             purpose=purpose,
+            tool_allowlist=persona_tool_allowlist,
         )
         try:
             child = await self._api.spawn_child_session(child_config)
@@ -349,6 +424,18 @@ class _ChildTaskManager:
         )
 
     async def check_tasks(self, _args: dict[str, Any]) -> ToolResult:
+        # Block until at least one running child changes state, so a single
+        # ``check_tasks`` call always makes forward progress and the parent
+        # does not burn LLM turns on no-op polls. Returns immediately when
+        # there is nothing left to wait for.
+        async with self._registry_lock:
+            running = [
+                child.task
+                for child in self._registry.values()
+                if child.status == _RUNNING
+            ]
+        if running:
+            await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
         async with self._registry_lock:
             tasks = list(self._registry.values())
         payload = {
@@ -363,6 +450,7 @@ class _ChildTaskManager:
                         if state.final_messages is not None
                         else None
                     ),
+                    "final_text": _final_assistant_text(state.final_messages),
                 }
                 for state in tasks
             ]
@@ -477,12 +565,19 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     api.register_tool(
         FunctionTool(
             name="dispatch_agent",
-            description="Spawn a child AgentSession and return its task id immediately.",
+            description=(
+                "Spawn a child AgentSession and return its task id immediately. "
+                "Pass ``subagent_type`` to launch a named persona (resolved by "
+                "peer extensions via the ``resolve_subagent`` event); the "
+                "persona's system prompt and tool allowlist are applied to the "
+                "child."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
                     "purpose": {"type": "string"},
                     "prompt": {"type": "string"},
+                    "subagent_type": {"type": "string"},
                     "extensions": {
                         "type": "array",
                         "items": {
