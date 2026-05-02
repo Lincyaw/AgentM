@@ -7,7 +7,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Generic, Literal, Protocol, TypeVar
 
 from rich.console import Group
 from rich.markdown import Markdown
@@ -113,13 +113,6 @@ class SlashCommandEntry:
 
 @dataclass(slots=True)
 class ToolEntry:
-    """Snapshot of a tool registered via ``api.register_tool``.
-
-    Populated from ``ApiRegisterEvent(kind="tool")``; surfaced to the
-    user via the ``/tools`` modal so they can see which capabilities the
-    agent actually has at the current moment.
-    """
-
     name: str
     description: str
     source: str
@@ -147,17 +140,25 @@ class StatusHeader(Static):
 
     model_name: reactive[str] = reactive("?")
     current_text: reactive[str] = reactive(
-        " AgentM  ▎?  ·  turn 0  ·  in 0  out 0  ·  $0.000  ·  ● idle "
+        "AgentM  ▎?  ·  turn 0  ·  in 0  out 0  ·  $0.000  ·  ● idle"
     )
     turn_number: reactive[int] = reactive(0)
     tokens_in: reactive[int] = reactive(0)
     tokens_out: reactive[int] = reactive(0)
     cost_usd: reactive[float] = reactive(0.0)
     phase: reactive[str] = reactive("idle")
-    extensions_loaded: reactive[int] = reactive(0)
-    extensions_failed: reactive[int] = reactive(0)
-    tools_registered: reactive[int] = reactive(0)
-    budget_exceeded: reactive[bool] = reactive(False)
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        # Plain (non-reactive) shadow state for registry counters and
+        # budget. They are derived from ``AgentMApp`` dicts, so giving
+        # them their own reactive setters would just create a second
+        # source of truth that has to be kept in sync. ``set_registry``
+        # / ``set_budget_exceeded`` are the single mutation entry points.
+        self._extensions_loaded = 0
+        self._extensions_failed = 0
+        self._tools_registered = 0
+        self._budget_exceeded = False
 
     def watch_model_name(self, _: str) -> None:
         self._refresh()
@@ -177,34 +178,40 @@ class StatusHeader(Static):
     def watch_phase(self, _: str) -> None:
         self._refresh()
 
-    def watch_extensions_loaded(self, _: int) -> None:
+    def set_registry(self, *, loaded: int, failed: int, tools: int) -> None:
+        if (loaded, failed, tools) == (
+            self._extensions_loaded,
+            self._extensions_failed,
+            self._tools_registered,
+        ):
+            return
+        self._extensions_loaded = loaded
+        self._extensions_failed = failed
+        self._tools_registered = tools
         self._refresh()
 
-    def watch_extensions_failed(self, _: int) -> None:
-        self._refresh()
-
-    def watch_tools_registered(self, _: int) -> None:
-        self._refresh()
-
-    def watch_budget_exceeded(self, _: bool) -> None:
+    def set_budget_exceeded(self, value: bool) -> None:
+        if value == self._budget_exceeded:
+            return
+        self._budget_exceeded = value
         self._refresh()
 
     def _refresh(self) -> None:
         glyph = _PHASE_GLYPHS.get(self.phase, "●")
-        ext_segment = f"{self.extensions_loaded} ext"
-        if self.extensions_failed:
-            ext_segment = f"{ext_segment} ({self.extensions_failed} failed)"
+        ext_segment = f"{self._extensions_loaded} ext"
+        if self._extensions_failed:
+            ext_segment = f"{ext_segment} ({self._extensions_failed} failed)"
         cost_segment = f"${self.cost_usd:.3f}"
-        if self.budget_exceeded:
+        if self._budget_exceeded:
             cost_segment = f"{cost_segment} ⚠"
         self.current_text = (
-            f" AgentM  ▎{self.model_name}"
+            f"AgentM  ▎{self.model_name}"
             f"  ·  turn {self.turn_number}"
             f"  ·  {ext_segment}"
-            f"  ·  {self.tools_registered} tools"
+            f"  ·  {self._tools_registered} tools"
             f"  ·  in {self.tokens_in}  out {self.tokens_out}"
             f"  ·  {cost_segment}"
-            f"  ·  {glyph} {self.phase} "
+            f"  ·  {glyph} {self.phase}"
         )
         self.update(self.current_text)
 
@@ -358,12 +365,12 @@ class UserTurn(Static):
     def __init__(self, text: str, *, injected_from: str | None = None) -> None:
         css_class = "user-turn injected" if injected_from else "user-turn"
         super().__init__(classes=css_class)
-        if injected_from:
-            label = f"**system → you** _(from `{injected_from}`)_"
-        else:
-            label = "**you**"
-        body = f"{label}\n\n{text}" if text.strip() else label
-        self.update(Markdown(body))
+        label = (
+            f"**system → you** _(from `{injected_from}`)_"
+            if injected_from
+            else "**you**"
+        )
+        self.update(Markdown(f"{label}\n\n{text}"))
 
 
 class TurnContainer(Vertical):
@@ -442,9 +449,32 @@ class PromptInput(TextArea):
         app.refresh_input_height()
 
 
-class CommandPaletteScreen(ModalScreen[str | None]):
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+_ModalResultT = TypeVar("_ModalResultT")
 
+
+class _DismissibleModal(
+    ModalScreen[_ModalResultT | None], Generic[_ModalResultT]
+):
+    """Modal screen base that closes on ``Esc``.
+
+    The cancel action is identical for all three modals we ship; pulling
+    it up here removes the ``ScreenStackError`` guard that was
+    triplicated. The guard exists because ``Esc`` can fire after the
+    modal has already begun popping (race against another close path).
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Close")]
+
+    def action_cancel(self) -> None:
+        if self.app.screen is not self:
+            return
+        try:
+            self.dismiss(None)
+        except ScreenStackError:
+            return
+
+
+class CommandPaletteScreen(_DismissibleModal[str]):
     def __init__(self, commands: list[SlashCommandEntry], *, initial: str = "") -> None:
         super().__init__()
         self._commands = commands
@@ -459,14 +489,6 @@ class CommandPaletteScreen(ModalScreen[str | None]):
     def on_mount(self) -> None:
         self._refresh_options(self._initial)
         self.query_one("#command-filter", Input).focus()
-
-    def action_cancel(self) -> None:
-        if self.app.screen is not self:
-            return
-        try:
-            self.dismiss(None)
-        except ScreenStackError:
-            return
 
     @on(Input.Changed, "#command-filter")
     def _on_changed(self, event: Input.Changed) -> None:
@@ -513,9 +535,7 @@ class CommandPaletteScreen(ModalScreen[str | None]):
             options.highlighted = 0
 
 
-class HelpScreen(ModalScreen[None]):
-    BINDINGS = [Binding("escape", "cancel", "Close")]
-
+class HelpScreen(_DismissibleModal[None]):
     def __init__(self, commands: list[SlashCommandEntry]) -> None:
         super().__init__()
         command_lines = "\n".join(f"- `{entry.name}` — {entry.description}" for entry in commands)
@@ -550,25 +570,12 @@ class HelpScreen(ModalScreen[None]):
         with Container(id="help-screen"):
             yield Static(self._markdown)
 
-    def action_cancel(self) -> None:
-        if self.app.screen is not self:
-            return
-        try:
-            self.dismiss(None)
-        except ScreenStackError:
-            return
 
+class InfoModal(_DismissibleModal[None]):
+    """Generic Rich-renderable modal shared by /extensions, /tools, /budget.
 
-class InfoModal(ModalScreen[None]):
-    """Generic scrollable modal that displays a Rich renderable.
-
-    Used for ``/extensions``, ``/tools``, and ``/budget`` so each does
-    not need its own bespoke modal class. Snapshots the renderable at
-    open time — close and reopen to refresh, the same way ``man`` works
-    on the command line.
+    Snapshots the renderable at open time — close and reopen to refresh.
     """
-
-    BINDINGS = [Binding("escape", "cancel", "Close")]
 
     def __init__(self, title: str, body: Any) -> None:
         super().__init__()
@@ -579,14 +586,6 @@ class InfoModal(ModalScreen[None]):
         with Container(id="info-modal"):
             yield Static(Text(self._title, style="bold"), classes="info-title")
             yield Static(self._body, classes="info-body")
-
-    def action_cancel(self) -> None:
-        if self.app.screen is not self:
-            return
-        try:
-            self.dismiss(None)
-        except ScreenStackError:
-            return
 
 
 class AgentMApp(App[int]):
@@ -630,6 +629,9 @@ class AgentMApp(App[int]):
         self._extensions: dict[str, ExtensionInstallEvent] = dict(extensions or {})
         self._tools: dict[str, ToolEntry] = {entry.name: entry for entry in (tools or [])}
         self._budget_state: CostBudgetExceededEvent | None = None
+        # Cached on first mount via on_mount; before then it stays None
+        # and registry counters live only in the snapshot dicts above.
+        self._header: StatusHeader | None = None
         self._prompt_task: asyncio.Task[None] | None = None
         self._flush_timer: Any = None
         self._root_turns: dict[int, TurnContainer] = {}
@@ -666,18 +668,24 @@ class AgentMApp(App[int]):
         self.add_class(f"theme-{self._theme_name}")
         self.query_one(PromptInput).focus()
         self.refresh_input_height()
-        header = self.query_one(StatusHeader)
-        header.model_name = getattr(self._session.model, "id", "?") or "?"
+        self._header = self.query_one(StatusHeader)
+        self._header.model_name = getattr(self._session.model, "id", "?") or "?"
         self._refresh_registry_counters()
         self._flush_timer = self.set_interval(0.05, self.flush_stream_buffers)
 
     def _refresh_registry_counters(self) -> None:
-        header = self.query_one(StatusHeader)
-        loaded = sum(1 for ev in self._extensions.values() if ev.phase == "end")
-        failed = sum(1 for ev in self._extensions.values() if ev.phase == "error")
-        header.extensions_loaded = loaded
-        header.extensions_failed = failed
-        header.tools_registered = len(self._tools)
+        if self._header is None:
+            return
+        loaded = 0
+        failed = 0
+        for ev in self._extensions.values():
+            if ev.phase == "end":
+                loaded += 1
+            elif ev.phase == "error":
+                failed += 1
+        self._header.set_registry(
+            loaded=loaded, failed=failed, tools=len(self._tools)
+        )
 
     async def on_unmount(self) -> None:
         if self._flush_timer is not None:
@@ -726,7 +734,8 @@ class AgentMApp(App[int]):
         log.scroll_end(animate=False)
 
     def set_phase(self, phase: str) -> None:
-        self.query_one(StatusHeader).phase = phase
+        if self._header is not None:
+            self._header.phase = phase
 
     def cycle_history(self, direction: int) -> bool:
         if not self._history:
@@ -908,7 +917,8 @@ class AgentMApp(App[int]):
         turn = TurnContainer(logical_turn=self._turn_counter)
         self._root_turns[turn_index] = turn
         self.run_worker(self._mount_turn(turn), exclusive=False)
-        self.query_one(StatusHeader).turn_number = self._turn_counter
+        if self._header is not None:
+            self._header.turn_number = self._turn_counter
         return turn
 
     async def _mount_turn(self, turn: TurnContainer) -> None:
@@ -930,9 +940,9 @@ class AgentMApp(App[int]):
         return None
 
     def _update_usage(self, usage: Usage | None) -> None:
-        if usage is None:
+        if usage is None or self._header is None:
             return
-        status = self.query_one(StatusHeader)
+        status = self._header
         status.tokens_in = usage.input_tokens
         status.tokens_out = usage.output_tokens
         model = self._session.model
@@ -1031,8 +1041,10 @@ class AgentMApp(App[int]):
     def handle_llm_start(self, event: LlmRequestStartEvent) -> None:
         self._ensure_root_turn_sync(event.turn_index)
         self.set_phase("thinking")
-        model_id = event.model_id or getattr(self._session.model, "id", "?") or "?"
-        self.query_one(StatusHeader).model_name = model_id
+        if self._header is not None:
+            self._header.model_name = (
+                event.model_id or getattr(self._session.model, "id", "?") or "?"
+            )
 
     def handle_llm_end(self, event: LlmRequestEndEvent) -> None:
         del event
@@ -1066,11 +1078,11 @@ class AgentMApp(App[int]):
         self._needs_scroll_end = True
 
     def handle_extension_install(self, event: ExtensionInstallEvent) -> None:
-        # Track the latest event for /extensions; later phases overwrite
-        # earlier ones (start → end / error). Toast on error so a hot
-        # reload that fails does not hide silently.
         self._extensions[event.module_path] = event
-        self._refresh_registry_counters()
+        # ``start`` does not change end/error counters — skip the
+        # refresh + DOM touch for it.
+        if event.phase != "start":
+            self._refresh_registry_counters()
         if event.phase == "error":
             self.notify(
                 f"Extension install failed: {event.module_path}: {event.error}",
@@ -1079,14 +1091,6 @@ class AgentMApp(App[int]):
             )
 
     def handle_api_register(self, event: ApiRegisterEvent) -> None:
-        """Capture late tool/command registrations (post-create reload).
-
-        The same event is also accumulated by ``run()`` *before* the
-        app exists, so create-time registrations land in the snapshot
-        passed to ``__init__``. This handler covers the live path:
-        atoms registered after a hot reload.
-        """
-
         if event.kind == "tool":
             tool = event.payload
             self._tools[event.name] = ToolEntry(
@@ -1101,22 +1105,15 @@ class AgentMApp(App[int]):
                 description=event.payload.description,
                 source=event.extension,
             )
-            # Replace any prior entry under the same name; this matches
-            # the create-time accumulator's last-write-wins semantics.
             self._slash_commands = [
                 e for e in self._slash_commands if e.name != entry.name
             ] + [entry]
 
     def handle_extension_reload(self, event: ExtensionReloadEvent) -> None:
-        """Surface hot reloads as toasts.
+        """Self-modification (``trigger=agent`` or ``propose_change_approved``)
+        gets a stronger toast severity than human reloads — the framework's
+        signature behavior should never be silent."""
 
-        Self-modification (``trigger=agent`` or
-        ``propose_change_approved``) gets a more prominent warning-level
-        toast — that is the framework's headline behavior and should
-        never be invisible. Human-triggered reloads stay info-level.
-        """
-
-        is_self_modify = event.trigger in _SELF_MODIFY_TRIGGERS
         if event.error:
             self.notify(
                 f"Atom reload failed: {event.name} ({event.trigger}): {event.error}",
@@ -1124,33 +1121,27 @@ class AgentMApp(App[int]):
                 timeout=6,
             )
             return
+        is_self_modify = event.trigger in _SELF_MODIFY_TRIGGERS
         prefix = "★ self-modify" if is_self_modify else "atom reload"
         old = (event.old_hash or "—")[:8]
         new = event.new_hash[:8]
-        if is_self_modify:
-            self.notify(
-                f"{prefix}: {event.name} ({event.trigger}) {old} → {new}",
-                severity="warning",
-                timeout=4,
-            )
-        else:
-            self.notify(
-                f"{prefix}: {event.name} ({event.trigger}) {old} → {new}",
-                severity="information",
-                timeout=4,
-            )
+        severity: Literal["warning", "information"] = (
+            "warning" if is_self_modify else "information"
+        )
+        self.notify(
+            f"{prefix}: {event.name} ({event.trigger}) {old} → {new}",
+            severity=severity,
+            timeout=4,
+        )
 
     def handle_cost_budget_exceeded(self, event: CostBudgetExceededEvent) -> None:
-        """Latch budget-exceeded state and warn loudly.
-
-        After this fires, ``AgentSession`` will short-circuit the next
-        ``prompt`` with ``stop_reason='budget'``. The user needs to
-        know *now* — toast plus persistent header indicator.
-        """
+        """Latch budget-exceeded state. The next ``prompt`` will short-
+        circuit with ``stop_reason='budget'`` (see ``cost_budget`` atom),
+        and the user needs to know *now*."""
 
         self._budget_state = event
-        header = self.query_one(StatusHeader)
-        header.budget_exceeded = True
+        if self._header is not None:
+            self._header.set_budget_exceeded(True)
         self.notify(
             f"Budget exceeded: ${event.used:.4f} / ${event.limit:.4f} {event.currency}. "
             "Next prompt will halt with stop_reason='budget'.",
@@ -1159,19 +1150,13 @@ class AgentMApp(App[int]):
         )
 
     def handle_api_send_user_message(self, event: ApiSendUserMessageEvent) -> None:
-        """Render an extension-injected user message as a distinct turn.
+        """The kernel treats an extension-injected message exactly like
+        a user-typed one; rendering it with a distinct gutter is the
+        only signal the user has that they did not, in fact, type it."""
 
-        The kernel treats this exactly like a user-typed message, but
-        the user did not type it — making this visible matters for
-        trust. We pull a string out of ``event.content`` if it is a
-        plain string; otherwise we fall back to ``repr`` so something
-        renders.
-        """
-
-        if isinstance(event.content, str):
-            text = event.content
-        else:
-            text = repr(event.content)
+        text = (
+            event.content if isinstance(event.content, str) else repr(event.content)
+        )
 
         async def _mount() -> None:
             log = self.query_one(ConversationLog)
@@ -1189,17 +1174,14 @@ async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
 
         bus = EventBus()
 
-    # ------------------------------------------------------------------
-    # Phase 1 — pre-create accumulators.
-    #
     # ``AgentSession.create`` triggers extension load which fires
-    # ``api_register`` (kind=command/tool) and ``extension_install``
-    # (start/end/error) on the bus. We have to subscribe BEFORE create
-    # to capture those, because the AgentMApp instance does not exist
-    # yet. The accumulated dicts are then handed to ``__init__`` so the
-    # /extensions and /tools modals are useful from the very first
-    # keystroke after launch.
-    # ------------------------------------------------------------------
+    # ``api_register`` (kind=command/tool) and ``extension_install`` on
+    # the bus. We must subscribe BEFORE create to capture those — the
+    # AgentMApp instance does not exist yet. The accumulators are then
+    # handed to ``__init__`` so /extensions and /tools modals are
+    # useful from the first keystroke. Each ``bus.on`` returns an
+    # unsubscribe callable; we hold them so the live ``app.handle_*``
+    # subscribers below are the only ones that keep firing.
 
     slash_commands: dict[str, SlashCommandEntry] = {
         name: SlashCommandEntry(name=name, description=description, source="builtin")
@@ -1225,11 +1207,19 @@ async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
     def _capture_extension_install(event: ExtensionInstallEvent) -> None:
         extensions[event.module_path] = event
 
-    bus.on("api_register", _capture_register)
-    bus.on("extension_install", _capture_extension_install)
+    unsub_register = bus.on("api_register", _capture_register)
+    unsub_install = bus.on("extension_install", _capture_extension_install)
 
     session_cfg = AgentSessionConfig(**{**config.__dict__, "bus": bus})
-    session = await AgentSession.create(session_cfg)
+    try:
+        session = await AgentSession.create(session_cfg)
+    finally:
+        # Drop the create-time accumulators no matter what — leaving
+        # them subscribed would mutate ``slash_commands`` / ``tools`` /
+        # ``extensions`` for the rest of the session even though those
+        # dicts are never read again.
+        unsub_register()
+        unsub_install()
 
     app = AgentMApp(
         session_cfg,
@@ -1240,11 +1230,9 @@ async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
         tools=list(tools.values()),
     )
 
-    # ------------------------------------------------------------------
-    # Phase 2 — live subscriptions. Hot reloads, late tool registration,
-    # budget overflow, and extension-injected user messages all happen
-    # after create. Hook them now so the running TUI mutates in place.
-    # ------------------------------------------------------------------
+    # Live subscriptions. Hot reloads, late tool registration, budget
+    # overflow, and extension-injected user messages all happen after
+    # create — these handlers carry the live state through.
 
     bus.on("stream_delta", app.handle_stream_delta)
     bus.on("tool_call", app.handle_tool_call)
@@ -1346,12 +1334,15 @@ _INSTALL_PHASE_GLYPH: dict[str, tuple[str, str]] = {
 }
 
 
+def _empty_state(message: str) -> Text:
+    return Text(message, style="dim italic")
+
+
 def _build_extensions_table(extensions: dict[str, ExtensionInstallEvent]) -> Any:
     if not extensions:
-        return Text(
+        return _empty_state(
             "No extensions tracked yet. Either none loaded, or the bus "
-            "subscribers were wired after AgentSession.create.",
-            style="dim italic",
+            "subscribers were wired after AgentSession.create."
         )
     table = RichTable(show_header=True, header_style="bold", expand=True)
     table.add_column("Status", width=8)
@@ -1370,10 +1361,9 @@ def _build_extensions_table(extensions: dict[str, ExtensionInstallEvent]) -> Any
 
 def _build_tools_table(tools: dict[str, ToolEntry]) -> Any:
     if not tools:
-        return Text(
+        return _empty_state(
             "No tools registered. The agent has no callable surface — "
-            "check that the scenario or auto-discovered atoms loaded.",
-            style="dim italic",
+            "check that the scenario or auto-discovered atoms loaded."
         )
     table = RichTable(show_header=True, header_style="bold", expand=True)
     table.add_column("Tool", width=24)
@@ -1391,11 +1381,10 @@ def _build_tools_table(tools: dict[str, ToolEntry]) -> Any:
 
 def _build_budget_panel(state: CostBudgetExceededEvent | None) -> Any:
     if state is None:
-        return Text(
+        return _empty_state(
             "Budget OK. No cost_budget_exceeded event has fired in this "
             "session — either the cost_budget atom is not loaded, or "
-            "spend has not crossed the configured limit yet.",
-            style="dim italic",
+            "spend has not crossed the configured limit yet."
         )
     table = RichTable(show_header=False, expand=False)
     table.add_column(width=12)
