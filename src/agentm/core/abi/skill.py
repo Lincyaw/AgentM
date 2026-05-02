@@ -1,6 +1,6 @@
 """Skill record types — public ABI shared between the harness, the
 ``skill_loader`` atom, and any peer atom that contributes skill records via
-``resources_discover`` (e.g. ``cc_commands``).
+the ``resources_discover`` event channel.
 
 The dataclasses here carry no logic; they exist so atoms can speak the same
 shape without reaching into ``core._internal``. The actual loading /

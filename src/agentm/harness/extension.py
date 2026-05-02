@@ -311,7 +311,16 @@ class ExtensionAPI(Protocol):
     @property
     def session_id(self) -> str: ...
     @property
-    def tools(self) -> list[Tool]: ...
+    def tools(self) -> list[Tool]:
+        """The live tool-catalog list for the session.
+
+        Returns the same list reference every call — mutations (append,
+        replace by index, ``tools[:] = kept``) are visible to the kernel
+        and to other extensions on subsequent turns. Atoms that need to
+        unregister or wrap registered tools (``tool_filter``,
+        ``file_mutation_queue``) rely on this contract.
+        """
+        ...
     @property
     def session(self) -> ReadonlySession: ...
     @property

@@ -87,12 +87,62 @@ def _extract_usage_tokens(record: dict[str, Any]) -> int | None:
     return input_tokens + output_tokens
 
 
+_CAUSE_KIND_TO_LABEL: dict[str, str] = {
+    "ModelEndTurn": "end_turn",
+    "ToolTerminated": "tool_terminated",
+    "MaxTurnsExhausted": "max_turns",
+    "SignalAborted": "aborted",
+    "BudgetExhausted": "budget",
+    # ProviderTruncated and ProviderProtocolViolation are mapped from
+    # their own discriminators below (kind=max_tokens/error, or
+    # the literal "protocol_violation" label).
+}
+
+
 def _extract_stop_reason(record: dict[str, Any]) -> str | None:
+    """Read the termination identity from an ``agent_end`` record.
+
+    Two shapes accepted:
+    * Legacy: ``attributes.stop_reason`` is a bare string (test fixtures and
+      pre-redesign traces).
+    * Current: ``attributes.cause`` is a serialized :class:`TerminationCause`
+      stamped with a ``kind`` discriminator (the class name, written by
+      ``trajectory._serialize``) plus the cause's ClassVar ``final`` flag and
+      any subclass-specific fields. The ``kind`` field is the load-bearing
+      discriminator — without it ``ModelEndTurn`` / ``MaxTurnsExhausted`` /
+      ``SignalAborted`` (all serialize to no fields besides ``final``) are
+      indistinguishable.
+    """
+
     attributes = record.get("attributes")
     if not isinstance(attributes, dict):
         return None
-    stop_reason = attributes.get("stop_reason")
-    return stop_reason if isinstance(stop_reason, str) else None
+
+    legacy = attributes.get("stop_reason")
+    if isinstance(legacy, str):
+        return legacy
+
+    cause = attributes.get("cause")
+    if not isinstance(cause, dict):
+        return None
+
+    cause_kind = cause.get("cause_kind")
+    if isinstance(cause_kind, str):
+        if cause_kind == "ProviderTruncated":
+            inner = cause.get("kind")
+            return inner if inner in {"max_tokens", "error"} else "max_tokens"
+        if cause_kind == "ProviderProtocolViolation":
+            return "protocol_violation"
+        label = _CAUSE_KIND_TO_LABEL.get(cause_kind)
+        if label is not None:
+            # BudgetExhausted gets enriched with which budget tripped.
+            detail = cause.get("detail")
+            if cause_kind == "BudgetExhausted" and isinstance(detail, str) and detail:
+                return f"budget:{detail}"
+            return label
+
+    # Unknown / pre-trajectory-stamping shape: best-effort fall-through.
+    return None
 
 
 def _append_jsonl_row(path: Path, row: dict[str, Any]) -> None:
@@ -232,7 +282,14 @@ def index_trace(trace_path: Path, *, root: Path | None = None) -> IndexerResult:
         result.warnings.append(f"trace {trace_id!r} missing session.fingerprint record")
         return result
 
-    completion_rate = 1.0 if state.last_stop_reason in {"end_turn", "stop"} else 0.0
+    # "Success" = the model voluntarily finished or a terminal tool ran to
+    # completion. Provider truncation, max_turns, signal abort, and budget
+    # exhaustion are all fail-stops.
+    completion_rate = (
+        1.0
+        if state.last_stop_reason in {"end_turn", "stop", "tool_terminated"}
+        else 0.0
+    )
     tokens_per_task = state.tokens_total if state.saw_tokens else None
 
     for atom_name, expected_hash in sorted(state.fingerprint.items()):

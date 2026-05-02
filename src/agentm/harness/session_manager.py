@@ -13,7 +13,7 @@ import json
 import os
 import time
 import uuid
-from dataclasses import asdict, dataclass, fields, is_dataclass
+from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Self
 
@@ -29,41 +29,16 @@ from agentm.core.abi import (
     Usage,
     UserMessage,
 )
-
-CURRENT_SESSION_VERSION = 1
-
-
-@dataclass(frozen=True, slots=True)
-class SessionHeader:
-    type: str
-    version: int
-    id: str
-    timestamp: float
-    cwd: str
-    parent_session: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SessionEntry:
-    """One immutable node in the session tree."""
-
-    type: str
-    id: str
-    parent_id: str | None
-    timestamp: float
-    payload: Any
-
-
-@dataclass(frozen=True, slots=True)
-class SessionContext:
-    messages: list[AgentMessage]
-
-
-@dataclass(slots=True)
-class SessionTreeNode:
-    entry: SessionEntry
-    children: list[SessionTreeNode]
-    has_compacted_ancestor: bool = False
+from agentm.core.abi.session import (
+    CURRENT_SESSION_VERSION,
+    SessionContext,
+    SessionEntry,
+    SessionHeader,
+    SessionTreeNode,
+    branch_summary_entry,
+    compaction_entry,
+    message_entry,
+)
 
 
 def _new_id() -> str:
@@ -72,46 +47,6 @@ def _new_id() -> str:
 
 def _now() -> float:
     return time.time()
-
-
-def message_entry(msg: AgentMessage, parent_id: str | None) -> SessionEntry:
-    return SessionEntry(
-        type="message",
-        id=_new_id(),
-        parent_id=parent_id,
-        timestamp=_now(),
-        payload=msg,
-    )
-
-
-def branch_summary_entry(
-    summary: str,
-    parent_id: str | None,
-    *,
-    from_id: str | None = None,
-    details: Any = None,
-) -> SessionEntry:
-    return SessionEntry(
-        type="branch_summary",
-        id=_new_id(),
-        parent_id=parent_id,
-        timestamp=_now(),
-        payload={
-            "summary": summary,
-            "from_id": from_id or "root",
-            "details": details,
-        },
-    )
-
-
-def compaction_entry(payload: Any, parent_id: str | None) -> SessionEntry:
-    return SessionEntry(
-        type="compaction",
-        id=_new_id(),
-        parent_id=parent_id,
-        timestamp=_now(),
-        payload=payload,
-    )
 
 
 def _serialize_payload(payload: Any) -> Any:

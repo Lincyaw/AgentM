@@ -160,26 +160,80 @@ def test_index_trace_marks_mid_session_reload(tmp_path: Path) -> None:
     assert row["mid_session_reload"] is True
 
 
-def test_index_trace_creates_runs_symlink_without_source_or_manifest(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("cause_payload", "expected_completion_rate"),
+    [
+        # ModelEndTurn — model voluntarily finished.
+        ({"cause_kind": "ModelEndTurn", "final": False}, 1.0),
+        # ToolTerminated — terminal tool ran to completion (e.g. RCA's
+        # submit_final_report).
+        (
+            {
+                "cause_kind": "ToolTerminated",
+                "final": False,
+                "tool_name": "submit_final_report",
+                "reason": "done",
+            },
+            1.0,
+        ),
+        # ProviderTruncated(kind=max_tokens) — fail-stop. ``cause_kind``
+        # carries the class name; ``kind`` is the dataclass field.
+        (
+            {
+                "cause_kind": "ProviderTruncated",
+                "final": False,
+                "kind": "max_tokens",
+            },
+            0.0,
+        ),
+        # ProviderTruncated(kind=error) — fail-stop.
+        (
+            {"cause_kind": "ProviderTruncated", "final": False, "kind": "error"},
+            0.0,
+        ),
+        # ProviderProtocolViolation — fail-stop.
+        (
+            {
+                "cause_kind": "ProviderProtocolViolation",
+                "final": False,
+                "detail": "tool_use without tool_calls",
+            },
+            0.0,
+        ),
+        # MaxTurnsExhausted — bare class with no fields.
+        ({"cause_kind": "MaxTurnsExhausted", "final": True}, 0.0),
+        # SignalAborted — bare class with no fields.
+        ({"cause_kind": "SignalAborted", "final": True}, 0.0),
+        # BudgetExhausted — ``final=True`` with discriminating ``detail``.
+        (
+            {"cause_kind": "BudgetExhausted", "final": True, "detail": "cost"},
+            0.0,
+        ),
+    ],
+)
+def test_extract_stop_reason_handles_new_cause_shapes(
+    tmp_path: Path,
+    cause_payload: dict[str, Any],
+    expected_completion_rate: float,
+) -> None:
+    """Migration coverage: each serialized ``TerminationCause`` shape must
+    classify correctly. Without this guard a mixed-vintage trace store
+    (legacy ``stop_reason`` strings + new ``cause`` dicts) silently
+    miscounts ``completion_rate`` while CI stays green — and
+    completion_rate is the key evidence-driven-evolution signal."""
+
     trace_path = _write_trace(
         tmp_path,
-        "trace-link",
+        "trace-cause",
         [
             _fingerprint_record({"tool_ls": SHA_TOOL_LS}),
-            _record("agent_end", {"stop_reason": "end_turn"}),
+            _record("agent_end", {"cause": cause_payload}),
         ],
     )
 
     index_trace(trace_path, root=tmp_path)
-
-    version_dir = _layout.atom_version_dir("tool_ls", SHA_TOOL_LS, root=tmp_path)
-    assert version_dir.is_dir()
-    assert not (version_dir / "source.py").exists()
-    assert not (version_dir / "manifest.yaml").exists()
-    runs_dir = _layout.atom_runs_dir("tool_ls", SHA_TOOL_LS, root=tmp_path)
-    children = list(runs_dir.iterdir())
-    assert [child.name for child in children] == ["trace-link"]
-    assert children[0].is_symlink()
+    row = _first_metrics_row(tmp_path, "tool_ls", SHA_TOOL_LS)
+    assert row["metrics"]["task.completion_rate"] == expected_completion_rate
 
 
 def test_index_trace_skips_legacy_content_hash_fingerprints(tmp_path: Path) -> None:

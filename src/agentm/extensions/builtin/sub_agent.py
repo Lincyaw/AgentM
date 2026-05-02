@@ -21,11 +21,16 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from agentm.core.abi import (
-    BeforeAgentEndEvent,
+    DecideTurnActionEvent,
     FunctionTool,
+    Inject,
+    LoopAction,
     LoopConfig,
+    ModelEndTurn,
+    Stop,
     TextContent,
     ToolResult,
+    ToolTerminated,
     UserMessage,
 )
 from agentm.core.lib.artifact_files import list_artifacts_for_task
@@ -55,7 +60,7 @@ MANIFEST = ExtensionManifest(
         "tool:wait_subagent",
         "tool:inject_instruction",
         "tool:abort_task",
-        "event:before_agent_end",
+        "event:decide_turn_action",
         "event:session_shutdown",
         "event:session_ready",
     ),
@@ -701,10 +706,40 @@ class _ChildTaskManager:
             state.abort_signal.set()
         return _tool_result({"task_id": task_id, "status": _ABORTED})
 
-    async def before_agent_end(
-        self, event: BeforeAgentEndEvent
-    ) -> dict[str, Any] | None:
-        last_text = _last_assistant_text(event.messages)
+    async def decide_turn_action(
+        self, event: DecideTurnActionEvent
+    ) -> LoopAction | None:
+        """Floor: refuse to terminate while children have unread findings.
+
+        Triggered on every turn, but only acts when the kernel default is a
+        *voluntary* termination (``ModelEndTurn`` or ``ToolTerminated``). For
+        kernel-imposed terminations (``MaxTurnsExhausted``, ``SignalAborted``,
+        ``BudgetExhausted``) the cause is ``final`` and any override would be
+        ignored anyway, so we return ``None``.
+
+        Auto-abort path: the second consecutive running-only cancel triggers
+        abort signals on every running child, then injects the resulting
+        notification. The next turn's model will see the abort message and
+        normally end immediately — costing one extra LLM call vs. the
+        previous in-place ``event.messages.append`` mutation, but keeping the
+        decision boundary clean.
+        """
+
+        default = event.observation.default_action
+        # Only intercept voluntary terminations. ``Step`` (more tool calls
+        # coming) and ``Inject`` (peer extension already overrode) are not
+        # our concern. ``Stop`` with a non-voluntary cause is ``final`` and
+        # cannot be overridden — the kernel will ignore us either way.
+        if not isinstance(default, Stop):
+            return None
+        if not isinstance(default.cause, (ModelEndTurn, ToolTerminated)):
+            return None
+
+        last_text = (
+            _last_assistant_text([event.observation.assistant_message])
+            if event.observation.assistant_message is not None
+            else ""
+        )
         should_auto_abort = False
         async with self._registry_lock:
             pending = [
@@ -724,7 +759,7 @@ class _ChildTaskManager:
             elif last_text:
                 self._running_only_cancels = 0
 
-            if event.stop_reason == "end_turn" and not pending and running:
+            if isinstance(default.cause, ModelEndTurn) and not pending and running:
                 if self._running_only_cancels >= 1:
                     should_auto_abort = True
                     self._running_only_cancels = 0
@@ -738,13 +773,12 @@ class _ChildTaskManager:
             aborted = await self._abort_running_states(running)
             if not aborted:
                 return None
-            event.messages.append(_notification_message(pending=aborted, running=[]))
-            return None
+            return Inject(
+                messages=[_notification_message(pending=aborted, running=[])]
+            )
 
-        return {
-            "cancel": True,
-            "append": [_notification_message(pending=pending, running=running)],
-        }
+        message = _notification_message(pending=pending, running=running)
+        return Inject(messages=[message])
 
     async def on_session_ready(self, event: SessionReadyEvent) -> None:
         self._parent_session_id = event.session_id
@@ -799,7 +833,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     api.on("session_ready", manager.on_session_ready)
     api.on("session_shutdown", manager.on_session_shutdown)
-    api.on("before_agent_end", manager.before_agent_end)
+    api.on("decide_turn_action", manager.decide_turn_action)
     api.register_tool(
         FunctionTool(
             name="dispatch_agent",

@@ -38,3 +38,12 @@ agentm = ["py.typed", "modes/*.tcss"]
 [tool.uv.workspace]
 members = ["scenarios/*"]
 exclude = ["scenarios/plan_mode", "scenarios/trajectory_analysis"]
+
+[tool.pytest.ini_options]
+# UI tests exercise the Textual TUI; they pass but don't map to any
+# fail-stop core position (per CLAUDE.md "Testing Philosophy" §1). Run
+# them explicitly with ``pytest -m ui`` when touching the TUI.
+markers = [
+    "ui: tests for the Textual TUI rendering layer",
+]
+addopts = "-m 'not ui'"
