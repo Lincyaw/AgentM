@@ -403,33 +403,22 @@ async def test_T8_many_turns_keep_scrollable_log(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_T9_cli_simple_and_textual_frontends_dispatch_separately(
+async def test_T9_cli_dispatches_to_textual_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    called: list[str] = []
+    """``_run_interactive`` builds a session config and hands off to the
+    Textual runner. Regression guard: removing the legacy ``simple`` TUI
+    must not break the dispatch path the ``-i`` CLI flag depends on."""
 
-    async def _fake_simple(config: AgentSessionConfig) -> int:
-        called.append(f"simple:{config.cwd}")
-        return 11
+    called: list[str] = []
 
     async def _fake_textual(config: AgentSessionConfig, *, theme: str = "dark") -> int:
         called.append(f"textual:{theme}:{config.cwd}")
         return 22
 
-    monkeypatch.setattr("agentm.modes.interactive.run", _fake_simple)
     monkeypatch.setattr("agentm.modes.textual_app.run", _fake_textual)
 
-    rc_simple = await _run_interactive(
-        scenario=None,
-        no_extensions=True,
-        no_skills=True,
-        no_prompt_templates=True,
-        tool_allowlist=None,
-        model="fake-model",
-        cwd="/tmp/simple",
-        tui="simple",
-    )
-    rc_textual = await _run_interactive(
+    rc = await _run_interactive(
         scenario=None,
         no_extensions=True,
         no_skills=True,
@@ -437,12 +426,10 @@ async def test_T9_cli_simple_and_textual_frontends_dispatch_separately(
         tool_allowlist=None,
         model="fake-model",
         cwd="/tmp/textual",
-        tui="textual",
     )
 
-    assert rc_simple == 11
-    assert rc_textual == 22
-    assert called == ["simple:/tmp/simple", "textual:dark:/tmp/textual"]
+    assert rc == 22
+    assert called == ["textual:dark:/tmp/textual"]
 
 
 @pytest.mark.asyncio

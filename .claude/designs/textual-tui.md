@@ -1,15 +1,15 @@
 # Design: Textual TUI
 
-**Status**: DRAFT
+**Status**: implemented (sole interactive frontend; `rich.live` simple TUI deleted 2026-05-02)
 **Created**: 2026-05-01
-**Last Updated**: 2026-05-01
+**Last Updated**: 2026-05-02
 **Builds on**: [pluggable-architecture.md](pluggable-architecture.md), [observability.md](observability.md)
 
 ---
 
 ## 1. Overview
 
-Replace the minimal `rich.live`-based interactive mode (`src/agentm/modes/interactive.py`, ~150 lines) with a Textual-based TUI that mirrors Claude Code's interaction style: streamed assistant text, inline tool calls with collapse-by-default, a slash-command picker, a persistent status line, and keyboard-first navigation.
+The interactive frontend is a Textual-based TUI that mirrors Claude Code's interaction style: streamed assistant text, inline tool calls with collapse-by-default, a slash-command picker, a persistent status line, and keyboard-first navigation. It superseded the original `rich.live`-based `modes/interactive.py` (deleted) and is now the only interactive mode reachable via `agentm -i`.
 
 The mode layer's contract from `pluggable-architecture.md` §5 stays unchanged: `run(config: AgentSessionConfig) -> int` owns the session lifecycle, subscribes to public bus channels (`stream_delta`, `tool_call`, `tool_result`, `child_session_start/end`, `extension_install`, `llm_request_*`), never reaches into harness internals. Textual replaces rich-live as the rendering engine; nothing else moves.
 
@@ -148,14 +148,13 @@ Color palette mirrors Claude Code:
 - subagent indent: cyan
 - status line: dim, single line, never wraps
 
-### 3.8 Migration path: keep both modes
+### 3.8 Migration path (historical)
 
-The current `agentm/modes/interactive.py` stays. New mode lives at `agentm/modes/textual_app.py`. CLI flag selects:
-
-- `agentm <prompt>` — single-shot, unchanged
-- `agentm -i` (existing) — current rich-based mode
-- `agentm -i --tui textual` — new mode
-- After the new mode is shipped and validated, the default for `-i` flips to `textual`; the rich-based mode stays as a `--tui simple` fallback for environments where Textual misbehaves (some terminals, ssh-into-screen sessions, etc.).
+Originally landed alongside the legacy `rich.live` mode at
+`modes/interactive.py`, selectable via `--tui {simple,textual}`. As of
+2026-05-02 the simple mode is deleted and the Textual app is the sole
+interactive frontend reachable via `agentm -i`. The `--tui` flag has
+been removed.
 
 ## 4. Interface Definition
 
@@ -182,20 +181,13 @@ class AgentMApp(App[int]):
     def __init__(self, config: AgentSessionConfig, *, theme: str = "dark") -> None: ...
 
 async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
-    """Drop-in replacement for modes/interactive.run. Owns session lifecycle."""
+    """Owns the session lifecycle for one ``agentm -i`` invocation."""
 ```
 
-CLI gains `--tui {simple,textual}` (default flips after stabilization):
+CLI: a single `-i` / `--interactive` flag opens the Textual TUI; there
+is no longer a frontend selector.
 
-```python
-# src/agentm/cli.py
-tui: Annotated[
-    str,
-    typer.Option("--tui", help="Interactive frontend: 'simple' (rich) or 'textual'."),
-] = "simple"
-```
-
-Dependencies: add `textual>=0.85` to `pyproject.toml`. Optional: `pyperclip` for `/copy-last` (graceful fallback to OSC 52 escape if absent).
+Dependencies: `textual>=0.85` is a hard requirement. Optional: `pyperclip` for `/copy-last` (graceful fallback to OSC 52 escape if absent).
 
 ## 5. Related Concepts
 
@@ -207,7 +199,7 @@ Dependencies: add `textual>=0.85` to `pyproject.toml`. Optional: `pyperclip` for
 | Decision | Rationale | Alternative |
 |---|---|---|
 | Textual, not raw curses or prompt_toolkit | Textual provides composition + reactive + Collapsible widgets out of the box; CSS-style theming; works over SSH | prompt_toolkit (lower-level, more code); urwid (legacy, slower iteration) |
-| Keep simple mode as fallback | Some environments break Textual (broken `TERM`, weird screen multiplexers). Don't burn the bridge | Drop simple mode immediately. Rejected: regressions are silent in CI |
+| ~~Keep simple mode as fallback~~ (reverted 2026-05-02) | Initially the rich-live mode stayed for environments where Textual misbehaves. In practice no such environment surfaced and maintaining two frontends doubled the test surface. Simple mode deleted. | — |
 | No left sidebar in MVP | Single-pane is enough to validate the framework migration; sidebar is feature creep | Build full Claude-Code-style multi-pane. Rejected: too much surface for one issue |
 | Streaming flushes at 20 Hz, not per-token | Token rate is ~50/s; per-token repaint is wasteful | Per-token. Rejected: CPU + screen flicker without visible benefit |
 | Esc cancels in-flight prompt, never exits | Bare-Esc-to-exit is a documented foot-gun | Esc exits if no prompt running. Rejected: muscle memory accidents |
@@ -218,7 +210,7 @@ Dependencies: add `textual>=0.85` to `pyproject.toml`. Optional: `pyperclip` for
 
 | # | Scenario | Expected |
 |---|----------|----------|
-| T1 | Launch `agentm -i --tui textual`; type "hello" + Enter | Single user turn appears; assistant streams a response; status line updates from `idle` → `thinking` → `streaming` → `idle` |
+| T1 | Launch `agentm -i`; type "hello" + Enter | Single user turn appears; assistant streams a response; status line updates from `idle` → `thinking` → `streaming` → `idle` |
 | T2 | Mid-stream press Esc | Stream stops; partial assistant text remains; status returns to `idle`; input bar regains focus |
 | T3 | Assistant calls `read` tool returning 200 lines | Tool block appears collapsed showing `→ read {"path":"foo"}  [✓ 12ms]`; one keystroke (Ctrl+E with block focused) expands to show full content |
 | T4 | Type `/` at start of empty input | Command palette opens; lists `/quit`, `/clear`, `/help` plus extension-registered commands; type filters; Enter inserts |
@@ -226,7 +218,7 @@ Dependencies: add `textual>=0.85` to `pyproject.toml`. Optional: `pyperclip` for
 | T6 | Press Shift+Enter in input | Newline inserted; input expands vertically; submission only fires on bare Enter |
 | T7 | `Ctrl+L` | ConversationLog clears; session messages preserved (next prompt continues the conversation) |
 | T8 | Rendering 500 turns | No visible lag on scroll; memory stays bounded (Textual's virtual scrolling handles this) |
-| T9 | `--tui simple` still works | Existing rich-live mode unchanged |
+| T9 | `agentm -i` dispatches to the Textual runner | `_run_interactive` builds a session config and invokes `modes.textual_app.run` (regression guard for the legacy `--tui` flag removal) |
 | T10 | Run in a terminal without 24-bit color | Theme falls back to 16-color; layout remains usable |
 
 ## 8. Open Questions
