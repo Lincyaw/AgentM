@@ -29,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from agentm.core.abi import AgentMessage, Model
+from agentm.core.abi import AgentMessage, BeforeAgentEndEvent, Model
 
 
 @dataclass(slots=True)
@@ -216,6 +216,26 @@ class ResourceWriteEvent:
     post_sha: str
     rationale: str
     author: Literal["agent", "human", "indexer"]
+
+
+__all__ = [
+    "ApiRegisterEvent",
+    "ApiSendUserMessageEvent",
+    "AfterCompactEvent",
+    "BeforeAgentEndEvent",
+    "BeforeAgentStartEvent",
+    "BeforeCompactEvent",
+    "ChildSessionEndEvent",
+    "ChildSessionStartEvent",
+    "CostBudgetExceededEvent",
+    "ExtensionInstallEvent",
+    "ExtensionReloadEvent",
+    "PlanSubmittedEvent",
+    "ResourceWriteEvent",
+    "ResourcesDiscoverEvent",
+    "SessionReadyEvent",
+    "SessionShutdownEvent",
+]
 
 
 __all__ = [
