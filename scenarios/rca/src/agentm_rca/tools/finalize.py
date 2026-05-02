@@ -1,7 +1,7 @@
 """Termination protocol for the RCA orchestrator.
 
 Complements the sub-agent lifecycle floor shipped in #57: that floor injects
-unread child findings on ``before_agent_end`` so background work isn't lost,
+unread child findings on ``decide_turn_action`` so background work isn't lost,
 but it does not stop the orchestrator from declaring the investigation over
 once every child is read. We still observed the model digest a long scout
 report, write a prose summary, and emit ``end_turn`` without producing the
@@ -10,19 +10,21 @@ final RCA deliverable.
 This extension layers a stricter policy on top:
 
   * Registers ``submit_final_report``: the only sanctioned termination tool.
-    Calling it flips an extension-local ``submitted`` flag; the report
-    payload itself reaches downstream observers via the ``tool_call`` /
-    ``tool_result`` channels, so we deliberately do not stash a duplicate
-    copy here.
-  * Subscribes to ``before_agent_end``: while ``submitted`` is still false,
-    returns ``{"cancel": True, "append": [<continuation user message>]}``.
-    Cancel is OR-ed across handlers and append lists are concatenated, so
-    this co-exists cleanly with sub_agent's own ``before_agent_end`` handler.
+    A successful call returns :class:`ToolTerminate` so the loop's default
+    action becomes ``Stop(ToolTerminated(...))`` and the orchestrator exits
+    cleanly. The report payload reaches downstream observers via the
+    ``tool_call`` / ``tool_result`` channels, so we deliberately do not stash
+    a duplicate copy here.
+  * Subscribes to ``decide_turn_action``: while ``submitted`` is still false
+    AND the kernel default is a voluntary :class:`ModelEndTurn`, returns
+    :class:`Inject` carrying a continuation user message that pushes the
+    model back into investigation. Coexists cleanly with sub_agent's own
+    handler (multiple ``Inject`` returns concatenate in registration order).
 
-Safety net: the loop's ``max_turns`` cap still applies. ``max_turns``
-terminations bypass the cancel field entirely (PR #57 design), so a model
-that refuses to call the tool eventually exits with ``stop_reason="max_turns"``
-rather than spinning forever.
+Safety net: the loop's ``max_turns`` cap still applies. ``MaxTurnsExhausted``
+has ``final=True`` so any ``Inject`` we return is ignored — a model that
+refuses to call the tool eventually exits with that cause rather than
+spinning forever.
 """
 
 from __future__ import annotations
@@ -32,9 +34,19 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from agentm.core.abi import BeforeAgentEndEvent
+from agentm.core.abi import (
+    DecideTurnActionEvent,
+    Inject,
+    LoopAction,
+    ModelEndTurn,
+    Stop,
+)
 from agentm.core.abi.messages import TextContent, UserMessage
-from agentm.core.abi.tool import FunctionTool, ToolResult
+from agentm.core.abi.tool import (
+    FunctionTool,
+    ToolResult,
+    ToolTerminate,
+)
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
@@ -75,7 +87,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         config.get("continuation_instruction") or _DEFAULT_INSTRUCTION
     )
 
-    async def _submit(args: dict[str, Any]) -> ToolResult:
+    async def _submit(args: dict[str, Any]) -> ToolResult | ToolTerminate:
         root_cause = _require_str(args.get("root_cause"))
         triggering_signal = _require_str(args.get("triggering_signal"))
         evidence = _require_str(args.get("evidence"))
@@ -91,6 +103,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             if not value
         ]
         if missing:
+            # Validation failure: stay in the loop so the model can retry.
             return ToolResult(
                 content=[
                     TextContent(
@@ -106,16 +119,19 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 is_error=True,
             )
         state.submitted = True
-        return ToolResult(
-            content=[
-                TextContent(
-                    type="text",
-                    text=(
-                        "Final report accepted. You may now end this turn; "
-                        "the investigation is complete."
-                    ),
-                )
-            ]
+        return ToolTerminate(
+            result=ToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=(
+                            "Final report accepted. The investigation is "
+                            "complete."
+                        ),
+                    )
+                ]
+            ),
+            reason="rca-final-report-submitted",
         )
 
     api.register_tool(
@@ -168,21 +184,30 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         )
     )
 
-    def _on_before_agent_end(event: BeforeAgentEndEvent) -> Any:
+    def _on_decide_turn_action(event: DecideTurnActionEvent) -> LoopAction | None:
         if state.submitted:
             return None
-        return {
-            "cancel": True,
-            "append": [
+        default = event.observation.default_action
+        # Only fight a voluntary ``ModelEndTurn`` exit. ``ToolTerminated``
+        # only fires when ``submit_final_report`` itself runs (we already
+        # filtered above), so any other terminal tool is policy-violating
+        # but final causes (max_turns / signal / budget) are not ours to
+        # override anyway.
+        if not isinstance(default, Stop) or not isinstance(
+            default.cause, ModelEndTurn
+        ):
+            return None
+        return Inject(
+            messages=[
                 UserMessage(
                     role="user",
                     content=[TextContent(type="text", text=instruction)],
                     timestamp=time.time(),
                 ),
-            ],
-        }
+            ]
+        )
 
-    api.on("before_agent_end", _on_before_agent_end)
+    api.on("decide_turn_action", _on_decide_turn_action)
 
 
 def _require_str(value: Any) -> str:

@@ -5,6 +5,14 @@ Implements §3.5 (Extension Bus) of
 ``packages/coding-agent/src/core/event-bus.ts`` (33 lines) to async Python,
 plus a minimal seed of typed event dataclasses used by ``loop.py``.
 
+Per-turn termination semantics follow the sum-type protocol described in
+``.claude/designs/agent-loop.md``: each turn ends with one
+:class:`LoopAction`, computed by the kernel from the assistant message and
+tool outcomes, then optionally overridden by extensions on the
+``decide_turn_action`` channel. ``TerminationCause`` subclasses carry rich
+data (no string literals); extensions and observability pattern-match on
+the concrete type.
+
 Dispatch contract:
 - **Serial per channel.** Handlers registered on the same channel run in
   registration order; a later handler observes mutations made by earlier
@@ -25,11 +33,11 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, overload
+from typing import Any, ClassVar, Literal, Protocol, overload
 
 from .messages import AgentMessage, AssistantMessage
 from .stream import Model
-from .tool import Tool, ToolResult
+from .tool import Tool, ToolOutcome, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +53,126 @@ class Event:
     """
 
 
+# --- Termination causes -----------------------------------------------------
+
+
+@dataclass(slots=True, frozen=True)
+class TerminationCause:
+    """Sealed sum-type base. Concrete subclasses describe WHO decided to
+    terminate and WHY.
+
+    ``final`` controls whether extensions can override the kernel default via
+    :class:`Inject`. When ``final`` is True, the loop emits
+    :class:`DecideTurnActionEvent` for observability but ignores any
+    :class:`LoopAction` overrides — used for kernel-imposed terminations such
+    as ``MaxTurnsExhausted`` and ``SignalAborted`` where the cause cannot be
+    safely contradicted.
+    """
+
+    final: ClassVar[bool] = False
+
+
+@dataclass(slots=True, frozen=True)
+class ModelEndTurn(TerminationCause):
+    """The assistant message had no tool_calls — model voluntarily finished."""
+
+
+@dataclass(slots=True, frozen=True)
+class ToolTerminated(TerminationCause):
+    """A tool returned :class:`ToolTerminate`.
+
+    ``tool_name`` and ``reason`` come from the terminal tool itself so
+    downstream consumers can distinguish *which* terminal tool fired.
+    """
+
+    tool_name: str
+    reason: str
+
+
+@dataclass(slots=True, frozen=True)
+class MaxTurnsExhausted(TerminationCause):
+    """Loop ran to its turn cap. Cannot be overridden."""
+
+    final: ClassVar[bool] = True
+
+
+@dataclass(slots=True, frozen=True)
+class SignalAborted(TerminationCause):
+    """External :class:`asyncio.Event` signalled abort. Cannot be overridden."""
+
+    final: ClassVar[bool] = True
+
+
+@dataclass(slots=True, frozen=True)
+class ProviderTruncated(TerminationCause):
+    """Provider stopped streaming due to its own limit (max_tokens or error)."""
+
+    kind: Literal["max_tokens", "error"]
+
+
+@dataclass(slots=True, frozen=True)
+class ProviderProtocolViolation(TerminationCause):
+    """Provider stop_reason said ``tool_use`` but no tool_calls were extracted.
+
+    Indicates a parser/provider disagreement worth surfacing distinctly
+    rather than silently mapping to ``ModelEndTurn``.
+    """
+
+    detail: str
+
+
+@dataclass(slots=True, frozen=True)
+class BudgetExhausted(TerminationCause):
+    """A budget cap was reached. ``detail`` names which budget — e.g.
+    ``"cost"`` (harness session-level cost cap) or ``"max_tool_calls"``
+    (kernel-loop tool-call cap). Cannot be overridden; extensions can cap
+    budgets but not un-cap them once tripped.
+    """
+
+    final: ClassVar[bool] = True
+
+    detail: str = ""
+
+
+# --- Loop actions -----------------------------------------------------------
+
+
+@dataclass(slots=True, frozen=True)
+class LoopAction:
+    """Sealed sum-type base for the loop's next action."""
+
+
+@dataclass(slots=True, frozen=True)
+class Step(LoopAction):
+    """Continue to the next turn with current messages.
+
+    Default action after a successful tools-and-results round when no tool
+    asked to terminate.
+    """
+
+
+@dataclass(slots=True, frozen=True)
+class Stop(LoopAction):
+    """Terminate the loop with the given cause."""
+
+    cause: TerminationCause
+
+
+@dataclass(slots=True, frozen=True)
+class Inject(LoopAction):
+    """Continue to next turn after appending these messages.
+
+    Used by extensions to override a default :class:`Stop` (e.g. inject a
+    continuation prompt instead of terminating). Multiple ``Inject`` returns
+    in the same turn are concatenated in registration order.
+    """
+
+    messages: list[AgentMessage]
+
+
+# --- Event payloads ---------------------------------------------------------
+
+
 @dataclass(slots=True, frozen=True)
 class AgentStartEvent(Event):
     """Emitted once at the start of ``AgentLoop.run``."""
@@ -56,25 +184,50 @@ class AgentStartEvent(Event):
 class AgentEndEvent(Event):
     """Emitted once when ``AgentLoop.run`` returns.
 
-    ``stop_reason`` is one of: ``end_turn``, ``max_turns``, ``aborted``,
-    ``error``.
+    ``cause`` is a :class:`TerminationCause` instance — pattern-match on the
+    concrete subclass to identify why the loop stopped. Replaces the previous
+    string-typed ``stop_reason`` field; consumers that just want a label can
+    take ``type(cause).__name__``.
     """
 
     messages: list[AgentMessage]
-    stop_reason: str
+    cause: TerminationCause
 
 
 @dataclass(slots=True)
-class BeforeAgentEndEvent(Event):
-    """Fires after a text-only assistant turn but before ``agent_end``.
+class TurnObservation:
+    """Snapshot of one turn's outcome.
 
-    Handlers may return ``{"cancel": True, "append": list[AgentMessage]}``
-    to keep the loop alive and inject new user-visible context for the next
-    turn.
+    Given to :class:`DecideTurnActionEvent` handlers along with the kernel's
+    default :class:`LoopAction`. ``assistant_message`` is ``None`` only on
+    kernel-imposed termination paths (``SignalAborted`` / ``MaxTurnsExhausted``)
+    that fire the hook for observability symmetry but skip the message
+    pipeline; in that case ``tool_outcomes`` is also empty.
     """
 
-    messages: list[AgentMessage]
-    stop_reason: str
+    turn_index: int
+    assistant_message: AssistantMessage | None
+    tool_outcomes: list[ToolOutcome]
+    default_action: LoopAction
+
+
+@dataclass(slots=True)
+class DecideTurnActionEvent(Event):
+    """Fires after every turn, before the loop advances or terminates.
+
+    Handlers may return a :class:`LoopAction` (or ``None`` for "no opinion")
+    to override the kernel's default. Resolution lattice (see
+    ``.claude/designs/agent-loop.md``):
+
+    1. If the kernel default is ``Stop(cause)`` and ``cause.final`` is True,
+       no override is honored — the hook fires for logging/observability
+       only.
+    2. Among handler returns, any :class:`Inject` wins (messages from all
+       Inject returns are concatenated in registration order); else any
+       :class:`Stop` overrides ``Step``; else the default applies.
+    """
+
+    observation: TurnObservation
 
 
 @dataclass(slots=True, frozen=True)
@@ -115,7 +268,7 @@ class ToolResultEvent(Event):
 
     **Replacement contract**: handlers may return a replacement
     :class:`ToolResult`; the last non-None replacement wins (see
-    ``loop._collect_replacement``).
+    ``loop._collect_tool_result_replacement``).
     """
 
     tool_call_id: str
@@ -290,9 +443,9 @@ class EventBus:
     @overload
     def on(
         self,
-        channel: Literal["before_agent_end"],
-        handler: Callable[[BeforeAgentEndEvent], Any]
-        | Callable[[BeforeAgentEndEvent], Awaitable[Any]],
+        channel: Literal["decide_turn_action"],
+        handler: Callable[[DecideTurnActionEvent], Any]
+        | Callable[[DecideTurnActionEvent], Awaitable[Any]],
     ) -> Callable[[], None]: ...
     @overload
     def on(
@@ -375,7 +528,9 @@ class EventBus:
     ) -> list[Any]: ...
     @overload
     async def emit(
-        self, channel: Literal["before_agent_end"], event: BeforeAgentEndEvent
+        self,
+        channel: Literal["decide_turn_action"],
+        event: DecideTurnActionEvent,
     ) -> list[Any]: ...
     @overload
     async def emit(
@@ -521,17 +676,31 @@ __all__ = [
     "AgentEndEvent",
     "AgentStartEvent",
     "BeforeSendToLlmEvent",
+    "BudgetExhausted",
     "ContextEvent",
+    "DecideTurnActionEvent",
     "DiagnosticEvent",
     "Event",
     "EventBus",
     "EventBusObserver",
     "Handler",
+    "Inject",
     "LlmRequestEndEvent",
     "LlmRequestStartEvent",
+    "LoopAction",
+    "MaxTurnsExhausted",
+    "ModelEndTurn",
+    "ProviderProtocolViolation",
+    "ProviderTruncated",
+    "SignalAborted",
+    "Step",
+    "Stop",
     "StreamDeltaEvent",
+    "TerminationCause",
     "ToolCallEvent",
     "ToolResultEvent",
+    "ToolTerminated",
     "TurnEndEvent",
+    "TurnObservation",
     "TurnStartEvent",
 ]

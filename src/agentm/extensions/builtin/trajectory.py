@@ -19,7 +19,7 @@ MANIFEST = ExtensionManifest(
     registers=(
         "event:agent_start",
         "event:agent_end",
-        "event:before_agent_end",
+        "event:decide_turn_action",
         "event:turn_start",
         "event:turn_end",
         "event:context",
@@ -49,7 +49,7 @@ MANIFEST = ExtensionManifest(
 _DEFAULT_CHANNELS = (
     "agent_start",
     "agent_end",
-    "before_agent_end",
+    "decide_turn_action",
     "turn_start",
     "turn_end",
     "context",

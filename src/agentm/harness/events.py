@@ -29,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from agentm.core.abi import AgentMessage, BeforeAgentEndEvent, Model
+from agentm.core.abi import AgentMessage, Model
 
 
 @dataclass(slots=True)
@@ -222,7 +222,6 @@ class ResourceWriteEvent:
 
 
 __all__ = [
-    "BeforeAgentEndEvent",
     "AfterCompactEvent",
     "ApiRegisterEvent",
     "ApiSendUserMessageEvent",

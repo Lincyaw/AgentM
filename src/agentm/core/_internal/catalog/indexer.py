@@ -88,11 +88,50 @@ def _extract_usage_tokens(record: dict[str, Any]) -> int | None:
 
 
 def _extract_stop_reason(record: dict[str, Any]) -> str | None:
+    """Read the termination identity from an ``agent_end`` record.
+
+    Two shapes accepted:
+    * Legacy: ``attributes.stop_reason`` is a bare string (test fixtures and
+      pre-redesign traces).
+    * Current: ``attributes.cause`` is a serialized :class:`TerminationCause`
+      whose dataclass fields (``final``, plus subclass-specific attrs) name
+      the cause via its sentinel keys. We derive the canonical label from
+      whichever discriminator is present so completion-rate stays accurate
+      for new traces without forcing the indexer to import kernel types.
+    """
+
     attributes = record.get("attributes")
     if not isinstance(attributes, dict):
         return None
-    stop_reason = attributes.get("stop_reason")
-    return stop_reason if isinstance(stop_reason, str) else None
+
+    legacy = attributes.get("stop_reason")
+    if isinstance(legacy, str):
+        return legacy
+
+    cause = attributes.get("cause")
+    if isinstance(cause, dict):
+        # Successful "model finished" terminations: ModelEndTurn has no
+        # discriminating fields; ToolTerminated carries ``tool_name`` and
+        # ``reason``. Both map to completion_rate=1.0 below.
+        if "tool_name" in cause and "reason" in cause:
+            return "tool_terminated"
+        # ProviderTruncated has ``kind`` (max_tokens|error).
+        kind = cause.get("kind")
+        if isinstance(kind, str):
+            return kind
+        # ProviderProtocolViolation has ``detail``.
+        if "detail" in cause:
+            return "protocol_violation"
+        # Final-cause classes (MaxTurnsExhausted/SignalAborted/Budget) only
+        # have ``final=True`` and no other discriminator. Fall through with
+        # ``final=true`` indicator; ``last_stop_reason`` stays unset for
+        # max_turns/aborted/budget so completion_rate=0.0 — same as before.
+        if cause.get("final") is True:
+            return None
+        # Bare ``ModelEndTurn`` carries only ``final=False``.
+        return "end_turn"
+
+    return None
 
 
 def _append_jsonl_row(path: Path, row: dict[str, Any]) -> None:
@@ -232,7 +271,14 @@ def index_trace(trace_path: Path, *, root: Path | None = None) -> IndexerResult:
         result.warnings.append(f"trace {trace_id!r} missing session.fingerprint record")
         return result
 
-    completion_rate = 1.0 if state.last_stop_reason in {"end_turn", "stop"} else 0.0
+    # "Success" = the model voluntarily finished or a terminal tool ran to
+    # completion. Provider truncation, max_turns, signal abort, and budget
+    # exhaustion are all fail-stops.
+    completion_rate = (
+        1.0
+        if state.last_stop_reason in {"end_turn", "stop", "tool_terminated"}
+        else 0.0
+    )
     tokens_per_task = state.tokens_total if state.saw_tokens else None
 
     for atom_name, expected_hash in sorted(state.fingerprint.items()):

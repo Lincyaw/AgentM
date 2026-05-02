@@ -1,29 +1,36 @@
 """Minimal agent loop tying messages, tools, stream, and event bus together.
 
 Implements the seed ``AgentLoop`` referenced across §3 of
-`.claude/designs/pluggable-architecture.md`. This is the only kernel module
-allowed to import all four others.
+`.claude/designs/pluggable-architecture.md`. Per-turn termination semantics
+follow the sum-type protocol in `.claude/designs/agent-loop.md`: each turn
+ends with one :class:`LoopAction` computed by the kernel from the assistant
+message and tool outcomes, optionally overridden by extensions on the
+``decide_turn_action`` channel.
 
 Loop sketch (one ``run`` invocation):
 
     emit "agent_start"
     while turn_index < max_turns:
-        if signal.is_set(): bail (stop_reason="aborted")
+        if signal.is_set(): _terminate(SignalAborted())
         emit "turn_start"
         emit "context"  (handlers may rewrite the messages list)
+        emit "before_send_to_llm"
         stream LLM, assemble AssistantMessage from events
         emit "turn_end"
         append assistant message to messages
-        if no tool_calls: emit "agent_end" and return
-        for each tool_call:
-            emit "tool_call" (handlers may mutate args, or block with an error)
-            execute tool (or synthesize block error result)
-            emit "tool_result" (handlers may replace the result)
-            append a ToolResultMessage entry
-    emit "agent_end" (stop_reason="max_turns")
+        if tool_calls:
+            execute each, collect ToolOutcome[]
+            append ToolResultMessage
+        compute default LoopAction
+        emit "decide_turn_action" (handlers may override)
+        if Stop:    _terminate(cause)
+        if Inject:  extend messages, continue
+        if Step:    continue
+    _terminate(MaxTurnsExhausted())
 
-Handler return-collection rule (``_collect_replacement``): scan returns in
-registration order and pick the **last non-None** value matching ``key``.
+``_terminate`` always emits ``decide_turn_action`` then ``agent_end`` so
+observability stays symmetric across every termination path; on ``final``
+causes the override returns are ignored.
 """
 
 from __future__ import annotations
@@ -36,16 +43,29 @@ from typing import Any
 from .events import (
     AgentEndEvent,
     AgentStartEvent,
-    BeforeAgentEndEvent,
     BeforeSendToLlmEvent,
+    BudgetExhausted,
     ContextEvent,
+    DecideTurnActionEvent,
     EventBus,
+    Inject,
     LlmRequestEndEvent,
     LlmRequestStartEvent,
+    LoopAction,
+    MaxTurnsExhausted,
+    ModelEndTurn,
+    ProviderProtocolViolation,
+    ProviderTruncated,
+    SignalAborted,
+    Step,
+    Stop,
     StreamDeltaEvent,
+    TerminationCause,
     ToolCallEvent,
     ToolResultEvent,
+    ToolTerminated,
     TurnEndEvent,
+    TurnObservation,
     TurnStartEvent,
 )
 from .messages import (
@@ -55,7 +75,6 @@ from .messages import (
     ToolCallBlock,
     ToolResultBlock,
     ToolResultMessage,
-    UserMessage,
 )
 from .stream import (
     AssistantStreamEvent,
@@ -64,7 +83,13 @@ from .stream import (
     StreamFn,
     TextDelta,
 )
-from .tool import Tool, ToolResult
+from .tool import (
+    Tool,
+    ToolContinue,
+    ToolOutcome,
+    ToolResult,
+    ToolTerminate,
+)
 
 
 # --- Config -----------------------------------------------------------------
@@ -107,12 +132,7 @@ def _collect_replacement(returns: list[Any], key: str) -> Any | None:
 
 
 def _collect_tool_result_replacement(returns: list[Any]) -> ToolResult | None:
-    """Return the last non-None ``ToolResult`` from handler returns.
-
-    Handlers on ``tool_result`` may directly return a replacement
-    :class:`ToolResult`; we accept that shape rather than requiring a dict
-    wrapper, mirroring how the seed events are typed.
-    """
+    """Return the last non-None ``ToolResult`` from handler returns."""
 
     chosen: ToolResult | None = None
     for value in returns:
@@ -147,29 +167,129 @@ def _collect_error(returns: list[Any]) -> BaseException | None:
     return chosen
 
 
-def _collect_before_agent_end_decision(
-    returns: list[Any],
-) -> tuple[bool, list[AgentMessage]]:
-    """Collect cancel + appended-message decisions from handler returns."""
+def _normalize_tool_output(out: ToolResult | ToolOutcome) -> ToolOutcome:
+    """Wrap a bare :class:`ToolResult` in :class:`ToolContinue`.
 
-    cancel = False
-    appended: list[AgentMessage] = []
-    for value in returns:
-        if not isinstance(value, dict):
-            continue
-        if value.get("cancel") is True:
-            cancel = True
-        raw_append = value.get("append")
-        if isinstance(raw_append, list):
-            appended.extend(
-                message
-                for message in raw_append
-                if isinstance(
-                    message,
-                    (AssistantMessage, ToolResultMessage, UserMessage),
+    Tools may return either a ``ToolResult`` (legacy / simple case) or any
+    :class:`ToolOutcome` subclass. The kernel normalizes everything to a
+    ``ToolOutcome`` so the per-turn decision logic doesn't have to handle
+    two shapes.
+    """
+
+    if isinstance(out, ToolOutcome):
+        return out
+    return ToolContinue(result=out)
+
+
+def _outcome_result(outcome: ToolOutcome) -> ToolResult:
+    """Extract the :class:`ToolResult` from any :class:`ToolOutcome` subclass."""
+
+    if isinstance(outcome, ToolContinue):
+        return outcome.result
+    if isinstance(outcome, ToolTerminate):
+        return outcome.result
+    raise TypeError(f"unknown ToolOutcome subclass: {type(outcome).__name__}")
+
+
+def _default_action(
+    assistant_msg: AssistantMessage, tool_outcomes: list[ToolOutcome]
+) -> LoopAction:
+    """Compute the kernel's default :class:`LoopAction` for a turn.
+
+    Order of precedence:
+    1. Any tool returned :class:`ToolTerminate` → ``Stop(ToolTerminated(...))``
+       (first wins so the cause maps to the *first* terminal tool call).
+    2. No tool calls at all → map the provider's ``stop_reason``:
+       - ``max_tokens`` / ``error`` → ``Stop(ProviderTruncated(kind=...))``
+       - ``tool_use`` (no calls extracted) → ``Stop(ProviderProtocolViolation)``
+       - else → ``Stop(ModelEndTurn())``
+    3. Tools ran successfully and none asked to terminate → ``Step()``.
+    """
+
+    for out in tool_outcomes:
+        if isinstance(out, ToolTerminate):
+            # Recover the tool name from the surrounding loop frame: callers
+            # in the loop pair outcomes with their originating tool_call so
+            # this helper only needs the outcomes themselves. The loop wraps
+            # the cause separately when it has the name handy.
+            return Stop(ToolTerminated(tool_name="", reason=out.reason))
+
+    if not tool_outcomes:
+        raw = assistant_msg.stop_reason
+        if raw == "max_tokens":
+            return Stop(ProviderTruncated(kind="max_tokens"))
+        if raw == "error":
+            return Stop(ProviderTruncated(kind="error"))
+        if raw == "tool_use":
+            return Stop(
+                ProviderProtocolViolation(
+                    detail=(
+                        "provider reported tool_use but no tool_calls were "
+                        "extracted"
+                    )
                 )
             )
-    return cancel, appended
+        return Stop(ModelEndTurn())
+
+    return Step()
+
+
+def _default_action_with_names(
+    assistant_msg: AssistantMessage,
+    paired_outcomes: list[tuple[str, ToolOutcome]],
+) -> LoopAction:
+    """Variant of :func:`_default_action` that knows each outcome's tool name.
+
+    Lifts ``tool_name`` from the loop's per-call bookkeeping into
+    :class:`ToolTerminated` so observers can identify *which* terminal tool
+    fired without a separate lookup.
+    """
+
+    for tool_name, out in paired_outcomes:
+        if isinstance(out, ToolTerminate):
+            return Stop(ToolTerminated(tool_name=tool_name, reason=out.reason))
+    return _default_action(
+        assistant_msg, [out for _, out in paired_outcomes]
+    )
+
+
+def _resolve_action(default: LoopAction, returns: list[Any]) -> LoopAction:
+    """Reconcile the kernel default with handler-supplied overrides.
+
+    Resolution lattice (see ``.claude/designs/agent-loop.md``):
+    1. If ``default`` is ``Stop(cause)`` and ``cause.final`` is True, the
+       default wins regardless of what handlers returned.
+    2. Among handler returns of type :class:`LoopAction`:
+       - Any :class:`Inject` wins; messages from all Injects are
+         concatenated in registration order.
+       - Else any :class:`Stop` wins; if multiple Stops were returned, the
+         last one's cause is used.
+       - Else :class:`Step` wins if returned; otherwise the default applies.
+    """
+
+    if isinstance(default, Stop) and default.cause.final:
+        return default
+
+    overrides = [r for r in returns if isinstance(r, LoopAction)]
+
+    inject_msgs: list[AgentMessage] = []
+    stop_override: Stop | None = None
+    has_step = False
+    for o in overrides:
+        if isinstance(o, Inject):
+            inject_msgs.extend(o.messages)
+        elif isinstance(o, Stop):
+            stop_override = o
+        elif isinstance(o, Step):
+            has_step = True
+
+    if inject_msgs:
+        return Inject(messages=inject_msgs)
+    if stop_override is not None:
+        return stop_override
+    if has_step:
+        return Step()
+    return default
 
 
 def _assemble_assistant_message(
@@ -230,34 +350,6 @@ class AgentLoop:
         self._bus = bus
         self._config = config if config is not None else LoopConfig()
 
-    async def _finish(
-        self,
-        *,
-        messages: list[AgentMessage],
-        stop_reason: str,
-        allow_cancel: bool,
-    ) -> tuple[list[AgentMessage], bool]:
-        before_end_event = BeforeAgentEndEvent(
-            messages=messages,
-            stop_reason=stop_reason,
-        )
-        before_end_returns = await self._bus.emit(
-            "before_agent_end", before_end_event
-        )
-        messages = list(before_end_event.messages)
-        cancel_end, appended = _collect_before_agent_end_decision(
-            before_end_returns
-        )
-        if appended:
-            messages.extend(appended)
-        if allow_cancel and cancel_end:
-            return messages, True
-        await self._bus.emit(
-            "agent_end",
-            AgentEndEvent(messages=messages, stop_reason=stop_reason),
-        )
-        return messages, False
-
     async def run(
         self,
         *,
@@ -267,10 +359,12 @@ class AgentLoop:
         system: str | None = None,
         signal: asyncio.Event | None = None,
     ) -> list[AgentMessage]:
-        """Drive the loop until ``end_turn``, ``max_turns``, or ``aborted``.
+        """Drive the loop until termination.
 
         Returns the full updated message list (input messages plus all
-        appended assistant and tool-result messages).
+        appended assistant and tool-result messages). The terminal
+        :class:`AgentEndEvent` carries the :class:`TerminationCause` that
+        explains why the loop stopped.
         """
 
         messages = list(messages)  # local copy; we won't mutate caller's list
@@ -285,25 +379,29 @@ class AgentLoop:
         max_turns = self._config.max_turns
         max_tool_calls = self._config.max_tool_calls
         tool_calls_used = 0
+        last_assistant: AssistantMessage | None = None
+        last_turn_index = -1
 
         try:
             for turn_index in range(max_turns):
+                last_turn_index = turn_index
                 if signal is not None and signal.is_set():
-                    await self._bus.emit(
-                        "agent_end",
-                        AgentEndEvent(messages=messages, stop_reason="aborted"),
+                    return await self._terminate(
+                        messages,
+                        SignalAborted(),
+                        last_assistant=last_assistant,
+                        turn_index=turn_index,
                     )
-                    return messages
                 if (
                     max_tool_calls is not None
                     and tool_calls_used >= max_tool_calls
                 ):
-                    final_messages, _ = await self._finish(
-                        messages=messages,
-                        stop_reason="max_tool_calls",
-                        allow_cancel=False,
+                    return await self._terminate(
+                        messages,
+                        BudgetExhausted(detail="max_tool_calls"),
+                        last_assistant=last_assistant,
+                        turn_index=turn_index,
                     )
-                    return final_messages
 
                 await self._bus.emit("turn_start", TurnStartEvent(turn_index=turn_index))
 
@@ -386,6 +484,7 @@ class AgentLoop:
                 assistant_msg = _assemble_assistant_message(
                     stream_events, fallback_timestamp=_now()
                 )
+                last_assistant = assistant_msg
                 await self._bus.emit(
                     "turn_end",
                     TurnEndEvent(turn_index=turn_index, message=assistant_msg),
@@ -393,143 +492,244 @@ class AgentLoop:
                 messages.append(assistant_msg)
 
                 tool_calls = _extract_tool_calls(assistant_msg)
-                if not tool_calls:
-                    final_messages, cancelled = await self._finish(
+                paired_outcomes: list[tuple[str, ToolOutcome]] = []
+                if tool_calls:
+                    paired_outcomes = await self._execute_tool_calls(
                         messages=messages,
-                        stop_reason=assistant_msg.stop_reason or "end_turn",
-                        allow_cancel=True,
+                        tool_calls=tool_calls,
+                        tool_index=tool_index,
+                        signal=signal,
                     )
-                    if cancelled:
-                        # ``_finish(..., allow_cancel=True)`` returns the
-                        # updated history without emitting ``agent_end``.
-                        messages = final_messages
-                        continue
-                    return final_messages
-
-                # Execute tool calls sequentially.
-                result_blocks: list[ToolResultBlock] = []
-                budget_exhausted = False
-                for tc in tool_calls:
-                    if signal is not None and signal.is_set():
-                        await self._bus.emit(
-                            "agent_end",
-                            AgentEndEvent(messages=messages, stop_reason="aborted"),
-                        )
+                    if paired_outcomes is None:  # pragma: no cover — typing
+                        # _execute_tool_calls already terminated via signal.
                         return messages
-                    if (
-                        max_tool_calls is not None
-                        and tool_calls_used >= max_tool_calls
-                    ):
-                        budget_exhausted = True
-                        break
+                    tool_calls_used += len(paired_outcomes)
 
-                    tc_event = ToolCallEvent(
-                        tool_call_id=tc.id,
-                        tool_name=tc.name,
-                        args=dict(tc.arguments),  # mutable copy for handlers
+                action = await self._dispatch_decision(
+                    turn_index=turn_index,
+                    assistant_msg=assistant_msg,
+                    paired_outcomes=paired_outcomes,
+                )
+
+                if isinstance(action, Stop):
+                    return await self._finish_with_cause(messages, action.cause)
+                if isinstance(action, Inject):
+                    messages.extend(action.messages)
+                    continue
+                # Step → fall through to next turn
+
+            # Loop fell out without returning → exhausted max_turns.
+            return await self._terminate(
+                messages,
+                MaxTurnsExhausted(),
+                last_assistant=last_assistant,
+                turn_index=last_turn_index,
+            )
+
+        except asyncio.CancelledError:
+            # The cooperative-cancellation path inside _execute_tool_calls
+            # already emitted agent_end before re-raising; just propagate.
+            raise
+
+    async def _execute_tool_calls(
+        self,
+        *,
+        messages: list[AgentMessage],
+        tool_calls: list[ToolCallBlock],
+        tool_index: dict[str, Tool],
+        signal: asyncio.Event | None,
+    ) -> list[tuple[str, ToolOutcome]]:
+        """Run each ``tool_call`` sequentially, collecting paired outcomes.
+
+        Mutates ``messages`` to append a single :class:`ToolResultMessage`
+        containing every result block. If ``signal`` trips mid-flight or a
+        tool raises :class:`asyncio.CancelledError`, the loop emits an
+        ``agent_end`` with :class:`SignalAborted` and re-raises (for cancel)
+        or returns early.
+        """
+
+        result_blocks: list[ToolResultBlock] = []
+        paired: list[tuple[str, ToolOutcome]] = []
+        for tc in tool_calls:
+            if signal is not None and signal.is_set():
+                # Mid-flight abort: surface the cause and exit. We can't
+                # honour any in-progress outcomes; this is the same shape
+                # as the pre-rewrite behaviour.
+                await self._finish_with_cause(messages, SignalAborted())
+                # Caller falls through; we return what we have.
+                return paired
+
+            tc_event = ToolCallEvent(
+                tool_call_id=tc.id,
+                tool_name=tc.name,
+                args=dict(tc.arguments),  # mutable copy for handlers
+            )
+            call_returns = await self._bus.emit("tool_call", tc_event)
+            blocked = _collect_replacement(call_returns, "block")
+            outcome: ToolOutcome
+            if blocked:
+                reason = (
+                    _collect_replacement(call_returns, "reason")
+                    or "blocked by extension"
+                )
+                outcome = ToolContinue(
+                    result=ToolResult(
+                        content=[
+                            TextContent(
+                                type="text",
+                                text=f"Tool call blocked: {reason}",
+                            )
+                        ],
+                        is_error=True,
                     )
-                    call_returns = await self._bus.emit("tool_call", tc_event)
-                    blocked = _collect_replacement(call_returns, "block")
-                    if blocked:
-                        reason = (
-                            _collect_replacement(call_returns, "reason")
-                            or "blocked by extension"
-                        )
-                        result = ToolResult(
+                )
+            else:
+                tool = tool_index.get(tc.name)
+                if tool is None:
+                    outcome = ToolContinue(
+                        result=ToolResult(
                             content=[
                                 TextContent(
                                     type="text",
-                                    text=f"Tool call blocked: {reason}",
+                                    text=f"Unknown tool: {tc.name}",
                                 )
                             ],
                             is_error=True,
                         )
-                    else:
-                        tool = tool_index.get(tc.name)
-                        if tool is None:
-                            result = ToolResult(
+                    )
+                else:
+                    try:
+                        raw_out = await tool.execute(
+                            tc_event.args, signal=signal
+                        )
+                    except asyncio.CancelledError:
+                        # Cooperative cancellation: surface SignalAborted
+                        # and propagate so callers can clean up.
+                        await self._finish_with_cause(
+                            messages, SignalAborted()
+                        )
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        # Uniform exception → error-result conversion.
+                        outcome = ToolContinue(
+                            result=ToolResult(
                                 content=[
                                     TextContent(
                                         type="text",
-                                        text=f"Unknown tool: {tc.name}",
+                                        text=f"Tool execution error: {exc}",
                                     )
                                 ],
                                 is_error=True,
                             )
-                        else:
-                            try:
-                                result = await tool.execute(
-                                    tc_event.args, signal=signal
-                                )
-                            except asyncio.CancelledError:
-                                # Cooperative cancellation: surface "aborted"
-                                # and propagate so callers can clean up.
-                                await self._bus.emit(
-                                    "agent_end",
-                                    AgentEndEvent(
-                                        messages=messages, stop_reason="aborted"
-                                    ),
-                                )
-                                raise
-                            except Exception as exc:  # noqa: BLE001
-                                # Uniform exception → error-result conversion.
-                                result = ToolResult(
-                                    content=[
-                                        TextContent(
-                                            type="text",
-                                            text=f"Tool execution error: {exc}",
-                                        )
-                                    ],
-                                    is_error=True,
-                                )
-
-                    res_event = ToolResultEvent(
-                        tool_call_id=tc.id,
-                        tool_name=tc.name,
-                        result=result,
-                    )
-                    res_returns = await self._bus.emit("tool_result", res_event)
-                    replaced = _collect_tool_result_replacement(res_returns)
-                    final_result = replaced if replaced is not None else res_event.result
-
-                    result_blocks.append(
-                        ToolResultBlock(
-                            type="tool_result",
-                            tool_call_id=tc.id,
-                            content=list(final_result.content),
-                            is_error=final_result.is_error,
                         )
-                    )
-                    tool_calls_used += 1
+                    else:
+                        outcome = _normalize_tool_output(raw_out)
 
-                if result_blocks:
-                    messages.append(
-                        ToolResultMessage(
-                            role="tool_result",
-                            content=result_blocks,
-                            timestamp=_now(),
-                        )
-                    )
-                if budget_exhausted:
-                    final_messages, _ = await self._finish(
-                        messages=messages,
-                        stop_reason="max_tool_calls",
-                        allow_cancel=False,
-                    )
-                    return final_messages
-
-            # Loop fell out without returning → exhausted max_turns.
-            final_messages, _ = await self._finish(
-                messages=messages,
-                stop_reason="max_turns",
-                allow_cancel=False,
+            result = _outcome_result(outcome)
+            res_event = ToolResultEvent(
+                tool_call_id=tc.id,
+                tool_name=tc.name,
+                result=result,
             )
-            return final_messages
+            res_returns = await self._bus.emit("tool_result", res_event)
+            replaced = _collect_tool_result_replacement(res_returns)
+            final_result = replaced if replaced is not None else res_event.result
 
-        except asyncio.CancelledError:
-            # Already emitted agent_end above where we caught it; just
-            # propagate.
-            raise
+            # If the result was replaced, propagate the replacement into the
+            # outcome so downstream consumers see the same payload the loop
+            # records on the message list.
+            if replaced is not None:
+                outcome = (
+                    ToolTerminate(result=final_result, reason=outcome.reason)
+                    if isinstance(outcome, ToolTerminate)
+                    else ToolContinue(result=final_result)
+                )
+
+            result_blocks.append(
+                ToolResultBlock(
+                    type="tool_result",
+                    tool_call_id=tc.id,
+                    content=list(final_result.content),
+                    is_error=final_result.is_error,
+                )
+            )
+            paired.append((tc.name, outcome))
+
+        messages.append(
+            ToolResultMessage(
+                role="tool_result",
+                content=result_blocks,
+                timestamp=_now(),
+            )
+        )
+        return paired
+
+    async def _dispatch_decision(
+        self,
+        *,
+        turn_index: int,
+        assistant_msg: AssistantMessage,
+        paired_outcomes: list[tuple[str, ToolOutcome]],
+    ) -> LoopAction:
+        """Compute the default action, fire the hook, resolve overrides."""
+
+        default = _default_action_with_names(assistant_msg, paired_outcomes)
+        observation = TurnObservation(
+            turn_index=turn_index,
+            assistant_message=assistant_msg,
+            tool_outcomes=[out for _, out in paired_outcomes],
+            default_action=default,
+        )
+        returns = await self._bus.emit(
+            "decide_turn_action",
+            DecideTurnActionEvent(observation=observation),
+        )
+        return _resolve_action(default, returns)
+
+    async def _finish_with_cause(
+        self, messages: list[AgentMessage], cause: TerminationCause
+    ) -> list[AgentMessage]:
+        """Emit ``agent_end`` for ``cause`` and return ``messages`` unchanged.
+
+        Used by the in-loop terminal paths (``Stop`` from a decision or a
+        cancel mid-tool-execution). The kernel-imposed paths (signal /
+        max_turns) go through :meth:`_terminate` which also fires the
+        decision hook for observability symmetry.
+        """
+
+        await self._bus.emit(
+            "agent_end", AgentEndEvent(messages=messages, cause=cause)
+        )
+        return messages
+
+    async def _terminate(
+        self,
+        messages: list[AgentMessage],
+        cause: TerminationCause,
+        *,
+        last_assistant: AssistantMessage | None,
+        turn_index: int,
+    ) -> list[AgentMessage]:
+        """Kernel-imposed termination path.
+
+        Fires :class:`DecideTurnActionEvent` with ``Stop(cause)`` as the
+        default so observability sees every termination, then calls
+        :meth:`_finish_with_cause`. ``cause.final`` is True for every caller
+        of this helper, so any handler-supplied overrides are ignored —
+        we still surface them through the bus so observers can record them.
+        """
+
+        observation = TurnObservation(
+            turn_index=turn_index,
+            assistant_message=last_assistant,
+            tool_outcomes=[],
+            default_action=Stop(cause),
+        )
+        await self._bus.emit(
+            "decide_turn_action",
+            DecideTurnActionEvent(observation=observation),
+        )
+        return await self._finish_with_cause(messages, cause)
 
 
 __all__ = ["AgentLoop", "LoopConfig"]

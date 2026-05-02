@@ -44,6 +44,7 @@ from agentm.core.abi import (
     AgentEndEvent,
     AgentLoop,
     AgentMessage,
+    BudgetExhausted,
     EventBus,
     ImageContent,
     LoopConfig,
@@ -650,15 +651,15 @@ class AgentSession:
             return slash_handled
 
         # 1. Budget gate: if a previous turn tripped cost_budget_exceeded,
-        # short-circuit with a stop_reason='budget' agent_end and persist
-        # nothing. The flag stays latched until reset by an extension.
+        # short-circuit with a BudgetExhausted agent_end and persist nothing.
+        # The flag stays latched until reset by an extension.
         if self._budget_exceeded:
             messages = self._session_manager.build_session_context().messages
             await self._bus.emit(
                 "agent_end",
                 AgentEndEvent(
                     messages=messages,
-                    stop_reason="budget",
+                    cause=BudgetExhausted(detail="cost"),
                 ),
             )
             return messages
