@@ -59,7 +59,6 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/help": "Show key bindings and slash commands.",
     "/copy-last": "Copy the most recent assistant text block.",
 }
-_MAX_VISIBLE_TURNS = 40
 
 
 class _SessionLike(Protocol):
@@ -704,21 +703,8 @@ class AgentMApp(App[int]):
     async def _mount_turn(self, turn: TurnContainer) -> None:
         log = self.query_one(ConversationLog)
         await log.mount(turn)
-        await self._trim_visible_turns()
         self._needs_scroll_end = True
         log.scroll_end(animate=False)
-
-    async def _trim_visible_turns(self) -> None:
-        log = self.query_one(ConversationLog)
-        while len(log.children) > _MAX_VISIBLE_TURNS:
-            oldest = log.children[0]
-            await oldest.remove()
-            if not isinstance(oldest, TurnContainer):
-                continue
-            for turn_index, turn in list(self._root_turns.items()):
-                if turn is oldest:
-                    del self._root_turns[turn_index]
-                    break
 
     def _latest_turn(self) -> TurnContainer | None:
         if not self._root_turns:
