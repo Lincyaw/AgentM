@@ -494,15 +494,23 @@ class AgentLoop:
                 tool_calls = _extract_tool_calls(assistant_msg)
                 paired_outcomes: list[tuple[str, ToolOutcome]] = []
                 if tool_calls:
-                    paired_outcomes = await self._execute_tool_calls(
+                    raw_outcomes = await self._execute_tool_calls(
                         messages=messages,
                         tool_calls=tool_calls,
                         tool_index=tool_index,
                         signal=signal,
                     )
-                    if paired_outcomes is None:  # pragma: no cover — typing
-                        # _execute_tool_calls already terminated via signal.
-                        return messages
+                    if raw_outcomes is None:
+                        # Signal tripped mid-tool-execution. Route through
+                        # the standard kernel termination so decide_turn_action
+                        # and agent_end fire exactly once each.
+                        return await self._terminate(
+                            messages,
+                            SignalAborted(),
+                            last_assistant=last_assistant,
+                            turn_index=turn_index,
+                        )
+                    paired_outcomes = raw_outcomes
                     tool_calls_used += len(paired_outcomes)
 
                 action = await self._dispatch_decision(
@@ -527,8 +535,12 @@ class AgentLoop:
             )
 
         except asyncio.CancelledError:
-            # The cooperative-cancellation path inside _execute_tool_calls
-            # already emitted agent_end before re-raising; just propagate.
+            # Hard task cancellation (vs. cooperative ``signal`` abort).
+            # We do not emit ``agent_end`` here: awaiting in a cancelled
+            # task is unsafe (the next ``await`` re-raises CancelledError).
+            # Cooperative aborts go through ``_terminate(SignalAborted)``
+            # via the ``raw_outcomes is None`` branch above and preserve
+            # the decide_turn_action → agent_end pairing.
             raise
 
     async def _execute_tool_calls(
@@ -538,26 +550,27 @@ class AgentLoop:
         tool_calls: list[ToolCallBlock],
         tool_index: dict[str, Tool],
         signal: asyncio.Event | None,
-    ) -> list[tuple[str, ToolOutcome]]:
+    ) -> list[tuple[str, ToolOutcome]] | None:
         """Run each ``tool_call`` sequentially, collecting paired outcomes.
 
         Mutates ``messages`` to append a single :class:`ToolResultMessage`
-        containing every result block. If ``signal`` trips mid-flight or a
-        tool raises :class:`asyncio.CancelledError`, the loop emits an
-        ``agent_end`` with :class:`SignalAborted` and re-raises (for cancel)
-        or returns early.
+        containing every result block.
+
+        Returns ``None`` if ``signal`` trips mid-flight so the caller can
+        route the abort through :meth:`_terminate` (preserving the
+        decide_turn_action → agent_end pairing). If a tool raises
+        :class:`asyncio.CancelledError`, the exception propagates: the
+        agent task has been forcibly cancelled and emitting events from
+        a cancelled context is unsafe.
         """
 
         result_blocks: list[ToolResultBlock] = []
         paired: list[tuple[str, ToolOutcome]] = []
         for tc in tool_calls:
             if signal is not None and signal.is_set():
-                # Mid-flight abort: surface the cause and exit. We can't
-                # honour any in-progress outcomes; this is the same shape
-                # as the pre-rewrite behaviour.
-                await self._finish_with_cause(messages, SignalAborted())
-                # Caller falls through; we return what we have.
-                return paired
+                # Mid-flight cooperative abort: signal the caller via the
+                # ``None`` sentinel so it can run the standard termination.
+                return None
 
             tc_event = ToolCallEvent(
                 tool_call_id=tc.id,
@@ -603,11 +616,8 @@ class AgentLoop:
                             tc_event.args, signal=signal
                         )
                     except asyncio.CancelledError:
-                        # Cooperative cancellation: surface SignalAborted
-                        # and propagate so callers can clean up.
-                        await self._finish_with_cause(
-                            messages, SignalAborted()
-                        )
+                        # Hard cancellation: propagate without emitting
+                        # any events — see the docstring above.
                         raise
                     except Exception as exc:  # noqa: BLE001
                         # Uniform exception → error-result conversion.

@@ -9,6 +9,7 @@ end_turns) silently regresses for everyone.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -28,6 +29,7 @@ from agentm.core.abi import (
     Model,
     ModelEndTurn,
     ProviderProtocolViolation,
+    SignalAborted,
     Step,
     Stop,
     TextContent,
@@ -300,6 +302,78 @@ def test_resolve_action_stop_overrides_step_default_when_handler_asks() -> None:
     assert isinstance(only_stop, Stop)
     assert isinstance(only_stop.cause, ModelEndTurn)
     assert isinstance(inject_wins, Inject)
+
+
+@pytest.mark.asyncio
+async def test_signal_mid_tool_emits_agent_end_exactly_once() -> None:
+    """Cooperative signal abort between LLM turn and tool execution must
+    route through ``_terminate`` so ``agent_end`` and ``decide_turn_action``
+    each fire exactly once. Regression guard: a previous draft of the
+    sum-type rewrite double-emitted ``agent_end`` (once via
+    ``_finish_with_cause`` inside the tool loop, once via the next
+    iteration's ``_terminate``), which silently corrupts trajectory rollups
+    and the evolution-substrate indexer."""
+
+    stream = _ScriptedStream(
+        [
+            AssistantMessage(
+                role="assistant",
+                content=[
+                    ToolCallBlock(
+                        type="tool_call",
+                        id="t1",
+                        name="noop",
+                        arguments={},
+                    )
+                ],
+                timestamp=1.0,
+                stop_reason="tool_use",
+            )
+        ]
+    )
+    bus = EventBus()
+    signal = asyncio.Event()
+    decisions: list[Any] = []
+    end_causes: list[Any] = []
+
+    async def trip_signal_after_turn(_event: Any) -> None:
+        signal.set()
+
+    bus.on("turn_end", trip_signal_after_turn)
+    bus.on(
+        "decide_turn_action",
+        lambda e: decisions.append(e.observation.default_action),
+    )
+    bus.on("agent_end", lambda e: end_causes.append(e.cause))
+
+    async def _noop(_args: dict[str, Any]) -> ToolResult:
+        return ToolResult(content=[TextContent(type="text", text="ok")])
+
+    loop = AgentLoop(stream_fn=stream, bus=bus)
+    await loop.run(
+        messages=[text_message("start")],
+        model=_model(),
+        tools=[
+            FunctionTool(
+                name="noop",
+                description="No-op tool",
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                fn=_noop,
+            )
+        ],
+        signal=signal,
+    )
+
+    assert len(end_causes) == 1
+    assert isinstance(end_causes[0], SignalAborted)
+    assert len(decisions) == 1
+    default = decisions[0]
+    assert isinstance(default, Stop)
+    assert isinstance(default.cause, SignalAborted)
 
 
 def test_bare_tool_result_normalizes_to_tool_continue() -> None:

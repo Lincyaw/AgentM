@@ -182,6 +182,58 @@ def test_index_trace_creates_runs_symlink_without_source_or_manifest(tmp_path: P
     assert children[0].is_symlink()
 
 
+@pytest.mark.parametrize(
+    ("cause_payload", "expected_completion_rate"),
+    [
+        # ModelEndTurn — model voluntarily finished.
+        ({"final": False}, 1.0),
+        # ToolTerminated — terminal tool ran to completion (e.g. RCA's
+        # submit_final_report).
+        (
+            {
+                "final": False,
+                "tool_name": "submit_final_report",
+                "reason": "done",
+            },
+            1.0,
+        ),
+        # ProviderTruncated(kind=max_tokens) — fail-stop.
+        ({"final": False, "kind": "max_tokens"}, 0.0),
+        # ProviderTruncated(kind=error) — fail-stop.
+        ({"final": False, "kind": "error"}, 0.0),
+        # ProviderProtocolViolation — fail-stop.
+        ({"final": False, "detail": "tool_use without tool_calls"}, 0.0),
+        # MaxTurnsExhausted / SignalAborted — bare ``final=True``.
+        ({"final": True}, 0.0),
+        # BudgetExhausted — ``final=True`` with discriminating ``detail``.
+        ({"final": True, "detail": "cost"}, 0.0),
+    ],
+)
+def test_extract_stop_reason_handles_new_cause_shapes(
+    tmp_path: Path,
+    cause_payload: dict[str, Any],
+    expected_completion_rate: float,
+) -> None:
+    """Migration coverage: each serialized ``TerminationCause`` shape must
+    classify correctly. Without this guard a mixed-vintage trace store
+    (legacy ``stop_reason`` strings + new ``cause`` dicts) silently
+    miscounts ``completion_rate`` while CI stays green — and
+    completion_rate is the key evidence-driven-evolution signal."""
+
+    trace_path = _write_trace(
+        tmp_path,
+        "trace-cause",
+        [
+            _fingerprint_record({"tool_ls": SHA_TOOL_LS}),
+            _record("agent_end", {"cause": cause_payload}),
+        ],
+    )
+
+    index_trace(trace_path, root=tmp_path)
+    row = _first_metrics_row(tmp_path, "tool_ls", SHA_TOOL_LS)
+    assert row["metrics"]["task.completion_rate"] == expected_completion_rate
+
+
 def test_index_trace_skips_legacy_content_hash_fingerprints(tmp_path: Path) -> None:
     trace_path = _write_trace(
         tmp_path,
