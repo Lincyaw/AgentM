@@ -5,13 +5,16 @@ from __future__ import annotations
 import inspect
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agentm.core._internal.catalog import _layout
 from agentm.core._internal.catalog.hashing import compute_atom_hash
 from agentm.core.abi import EventBus
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
-from agentm.harness.resource_writer import GitBackedResourceWriter, WriteResult
+
+if TYPE_CHECKING:
+    from agentm.harness.resource_writer import GitBackedResourceWriter, WriteResult
 
 
 _INDEXER_SESSION_ID = "catalog-freeze"
@@ -28,6 +31,8 @@ def freeze_current(
         raise ValueError(
             f"manifest.name {manifest.name!r} does not match atom name {name!r}"
         )
+
+    from agentm.harness.resource_writer import GitBackedResourceWriter
 
     cwd_root = (root or Path.cwd()).resolve()
     atom_path = _resolve_atom_source_path(name, root=cwd_root)
@@ -80,11 +85,13 @@ def _resolve_atom_source_path(name: str, *, root: Path) -> Path:
 
 
 def _write_via_writer(
-    writer: GitBackedResourceWriter,
+    writer: "GitBackedResourceWriter",
     relative_path: Path,
     source: str,
-) -> WriteResult:
+) -> "WriteResult":
     import asyncio
+
+    from agentm.harness.resource_writer import WriteResult
 
     async def _write():
         return await writer.write(
