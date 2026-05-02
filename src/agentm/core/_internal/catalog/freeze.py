@@ -91,7 +91,6 @@ def _write_via_writer(
 ) -> "WriteResult":
     import asyncio
 
-    from agentm.harness.resource_writer import WriteResult
 
     async def _write():
         return await writer.write(

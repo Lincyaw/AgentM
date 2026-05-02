@@ -55,16 +55,18 @@ from agentm.harness.session_services import (
 
 
 def _register_rca_hypothesis_store() -> str:
-    """Register the rca scenario's tool_hypothesis_store as a synthetic
-    module and return its dotted path. Idempotent."""
+    """Register the RCA scenario's hypothesis tool module under a stable
+    synthetic path and return it. Idempotent."""
 
     import importlib.util
 
-    synthetic = "agentm._scenarios.rca.tool_hypothesis_store"
+    synthetic = "agentm._scenarios.rca.hypothesis_tools"
     if synthetic in sys.modules:
         return synthetic
     repo_root = Path(__file__).resolve().parents[2]
-    file_path = repo_root / "scenarios" / "rca" / "tool_hypothesis_store.py"
+    file_path = (
+        repo_root / "scenarios" / "rca" / "src" / "agentm_rca" / "tools" / "hypothesis_tools.py"
+    )
     spec = importlib.util.spec_from_file_location(synthetic, file_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -87,6 +89,7 @@ class _ScriptedProvider:
     def __init__(self, scripted: list[AssistantMessage]) -> None:
         self._scripted = scripted
         self.calls = 0
+        self.seen_messages: list[list[Any]] = []
 
     def __call__(
         self,
@@ -98,9 +101,10 @@ class _ScriptedProvider:
         signal: Any = None,
         thinking: str = "off",
     ) -> AsyncIterator[AssistantStreamEvent]:
-        del messages, model, tools, system, signal, thinking
+        del model, tools, system, signal, thinking
         index = self.calls
         self.calls += 1
+        self.seen_messages.append(list(messages))
         if index < len(self._scripted):
             return self._iter(self._scripted[index])
         return self._iter(
@@ -517,6 +521,105 @@ async def test_sub_agent_child_inherits_only_configured_extension_set(
     assert summary["tasks"][0]["error"] is None
 
     await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_reports_artifact_refs_in_task_status_and_end_notification(
+    tmp_path: Path,
+) -> None:
+    """Completed children expose artifact ids to polling callers and emit
+    the documented `<subagent_result>` block before the parent turn ends.
+
+    Bug this prevents: artifact handoff regressing back to summary-only
+    delivery even though the child wrote durable findings.
+    """
+
+    scripted = [
+        _tool_call_msg(
+            call_id="aw1",
+            name="artifact_write",
+            arguments={
+                "kind": "finding",
+                "title": "Worker Finding",
+                "body": "critical line\\nsecondary line",
+            },
+            ts=1.0,
+        ),
+        _text_msg("worker summary", ts=2.0),
+        _text_msg("parent draft", ts=3.0),
+        _text_msg("parent final", ts=4.0),
+    ]
+    provider = _ScriptedProvider(scripted)
+    provider_module = _install_provider_module(
+        "tests.integration._fake_composition_provider_artifacts", provider
+    )
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                (
+                    "agentm.extensions.builtin.sub_agent",
+                    {
+                        "inherit_extensions": ["artifact_store"],
+                        "available_inherited_extensions": {
+                            "artifact_store": (
+                                "agentm.extensions.builtin.artifact_store",
+                                {},
+                            )
+                        },
+                    },
+                )
+            ],
+            provider=(provider_module, {}),
+            resource_loader=InMemoryResourceLoader(),
+        )
+    )
+    try:
+        dispatch_tool = next(t for t in session.tools if t.name == "dispatch_agent")
+        dispatched = await dispatch_tool.execute(
+            {"purpose": "investigate", "prompt": "collect evidence"}
+        )
+        assert dispatched.is_error is False
+        task_id = str(dispatched.details["task_id"])
+
+        import asyncio as _asyncio
+
+        async def _wait_child_completion() -> None:
+            while True:
+                artifact_files = list(tmp_path.glob(".agentm/artifacts/*/*.meta.json"))
+                if provider.calls >= 2 and artifact_files:
+                    return None
+                await _asyncio.sleep(0)
+
+        await _asyncio.wait_for(_wait_child_completion(), timeout=2.0)
+
+        await session.prompt("wrap up")
+
+        notified_messages = provider.seen_messages[3]
+        last_user_message = notified_messages[-1]
+        assert getattr(last_user_message, "role", None) == "user"
+        notification_text = last_user_message.content[0].text
+        assert f"<subagent_result task_id={task_id} purpose=investigate>" in notification_text
+        assert "<summary>worker summary</summary>" in notification_text
+        assert "<artifacts>" in notification_text
+
+        check_tool = next(t for t in session.tools if t.name == "check_tasks")
+        payload = await check_tool.execute({})
+        details = payload.details
+        assert isinstance(details, dict)
+        tasks = details["tasks"]
+        assert len(tasks) == 1
+        task = tasks[0]
+        assert task["task_id"] == task_id
+        assert task["status"] == "completed"
+        assert task["final_text"] == "worker summary"
+        assert task["artifact_ids"] and task["artifact_ids"][0].startswith("art_")
+        assert (
+            f"<ref id={task['artifact_ids'][0]} kind=finding title=Worker Finding />"
+            in notification_text
+        )
+    finally:
+        await session.shutdown()
 
 
 # --- §6 acceptance reachability (smoke-only matrix) ------------------------
