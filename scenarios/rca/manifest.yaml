@@ -1,21 +1,15 @@
 name: rca
 description: Root-cause analysis over parquet observability data via DuckDB SQL.
 extensions:
-  # Orchestrator-side: registers SQL tools the lead investigator can drive
-  # directly (and that worker personas inherit).
-  - local: duckdb_sql
-    config:
-      # data_dir can be overridden via the AGENTM_RCA_DATA_DIR env var.
-      exclude:
-        - conclusion.parquet
-      row_limit: 200
-      token_limit: 5000
+  # Orchestrator-side: NO direct data tools. The lead investigator only
+  # plans, dispatches workers, tracks hypotheses, and finalizes. SQL
+  # tools live exclusively on worker sessions via ``inherit_extensions``
+  # below — this forces the orchestrator to delegate instead of spinning
+  # on ``query_sql`` until the turn budget runs out.
   - local: hypothesis_tools
   - module: agentm_rca.tools.finalize
   - module: agentm.extensions.builtin.artifact_store
-  - module: agentm.extensions.builtin.trajectory
-    config:
-      path: rca_trajectory.jsonl
+  - module: agentm.extensions.builtin.observability
 
   # Multi-agent wiring. ``orchestrator_setup`` (scenario-local) loads the
   # orchestrator system prompt, appends the available-personas block, and
@@ -27,10 +21,14 @@ extensions:
       inherit_extensions:
         - duckdb_sql
         - artifact_store
-        - trajectory
+        - observability
       available_inherited_extensions:
         duckdb_sql:
-          module: agentm._scenarios.rca.duckdb_sql
+          # Real importable path. The synthetic
+          # ``agentm._scenarios.rca.duckdb_sql`` name only exists when the
+          # orchestrator loads a ``local: duckdb_sql`` entry — and we
+          # deliberately do NOT, so workers must import the real module.
+          module: agentm_rca.tools.duckdb_sql
           config:
             exclude:
               - conclusion.parquet
@@ -39,7 +37,6 @@ extensions:
         artifact_store:
           module: agentm.extensions.builtin.artifact_store
           config: {}
-        trajectory:
-          module: agentm.extensions.builtin.trajectory
-          config:
-            path: rca_worker_trajectory.jsonl
+        observability:
+          module: agentm.extensions.builtin.observability
+          config: {}
