@@ -370,7 +370,7 @@ async def test_T8_many_turns_keep_scrollable_log(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         for turn_index in range(500):
             turn = TurnContainer(logical_turn=turn_index + 1)
-            app._root_turns[turn_index] = turn
+            app._root_turns[(0, turn_index)] = turn
             turn.text_buffer = f"turn {turn_index}"
             turn.assistant.set_text(turn.text_buffer)
             await app._mount_turn(turn)
@@ -400,6 +400,162 @@ async def test_T8_many_turns_keep_scrollable_log(tmp_path: Path) -> None:
         await pilot.press("pageup")
         await pilot.pause(0.05)
         assert log.scroll_y < scroll_bottom
+
+
+def _make_text_script(reply: str) -> PromptScript:
+    """Factory for a kernel-style prompt script that just streams ``reply``.
+
+    Each script emits its own ``llm_request_start`` / stream / ``llm_request_end``
+    sequence with ``turn_index=0`` — that's what the real kernel does on every
+    ``prompt()`` call (loop.py: ``for turn_index in range(max_turns)``). The
+    interesting thing this exercises is whether the TUI keeps the two prompts
+    in distinct ``TurnContainer``s or collapses them onto the same one.
+    """
+
+    async def _script(bus: EventBus, text: str) -> list[Any]:
+        del text
+        await bus.emit(
+            "llm_request_start",
+            LlmRequestStartEvent(
+                turn_index=0,
+                message_count=1,
+                tool_count=0,
+                system_chars=0,
+                model_id="fake-model",
+            ),
+        )
+        await bus.emit(
+            "stream_delta",
+            StreamDeltaEvent(turn_index=0, delta=TextDelta(text=reply)),
+        )
+        await bus.emit(
+            "stream_delta",
+            StreamDeltaEvent(
+                turn_index=0,
+                delta=MessageEnd(
+                    message=AssistantMessage(
+                        role="assistant",
+                        content=[TextContent(type="text", text=reply)],
+                        timestamp=1.0,
+                        stop_reason="end_turn",
+                        usage=Usage(input_tokens=1, output_tokens=1),
+                    )
+                ),
+            ),
+        )
+        await bus.emit(
+            "llm_request_end",
+            LlmRequestEndEvent(
+                turn_index=0, chunk_count=2, duration_ns=1_000_000, error=None
+            ),
+        )
+        return []
+
+    return _script
+
+
+@pytest.mark.asyncio
+async def test_T8b_two_prompts_render_distinct_turns(tmp_path: Path) -> None:
+    """Each user message must mount its own assistant TurnContainer.
+
+    Regression: ``turn_index`` resets to 0 on every ``prompt()`` call, so
+    keying ``_root_turns`` by raw ``turn_index`` collapses the second
+    prompt's response onto the first prompt's container — visually the new
+    assistant text and tool calls show up *above* the new user bubble.
+    Composite ``(prompt_epoch, turn_index)`` keys keep them separate.
+    """
+
+    session = _FakeSession([_make_text_script("first"), _make_text_script("second")])
+    app = _make_app(tmp_path, session)
+    async with app.run_test() as pilot:
+        await pilot.press("a", "enter")
+        await pilot.pause(0.2)
+        await pilot.press("b", "enter")
+        await pilot.pause(0.2)
+
+        assert session.prompts == ["a", "b"]
+        assert len(app._root_turns) == 2
+        epochs = sorted({epoch for epoch, _ in app._root_turns})
+        assert epochs == [1, 2]
+        first = app._root_turns[(1, 0)]
+        second = app._root_turns[(2, 0)]
+        assert first is not second
+        assert first.assistant.text == "first"
+        assert second.assistant.text == "second"
+        # The conversation log should hold both user bubbles AND both
+        # assistant turns. Anything fewer than 4 children means a turn
+        # got swallowed by the older one.
+        log = app.query_one("#conversation-log")
+        assert len(log.children) == 4
+
+
+@pytest.mark.asyncio
+async def test_T8c_turn_height_auto_no_overlap(tmp_path: Path) -> None:
+    """Two consecutive turns must occupy *disjoint* vertical space.
+
+    Regression: ``TurnContainer`` extends ``Vertical`` whose Textual default
+    is ``height: 1fr; overflow: hidden hidden`` — so absent an explicit
+    ``height: auto`` rule each turn tries to fill the viewport and clips
+    its overflow, causing successive turns to overlap visually and the
+    enclosing VerticalScroll to never overflow (so it cannot scroll). We
+    assert layout positions directly.
+    """
+
+    session = _FakeSession([_make_text_script("first"), _make_text_script("second")])
+    app = _make_app(tmp_path, session)
+    async with app.run_test() as pilot:
+        await pilot.press("a", "enter")
+        await pilot.pause(0.2)
+        await pilot.press("b", "enter")
+        await pilot.pause(0.2)
+
+        first = app._root_turns[(1, 0)]
+        second = app._root_turns[(2, 0)]
+        # ``region.y`` is the absolute screen-row of the widget's top edge;
+        # ``region.bottom`` is the row just past its last line. If the
+        # second turn starts before the first ends, they overlap.
+        assert second.region.y >= first.region.bottom, (
+            f"turns overlap: first={first.region}, second={second.region}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_T8d_pageup_pagedown_scroll_log_while_input_focused(
+    tmp_path: Path,
+) -> None:
+    """PgUp/PgDn must scroll the conversation log even when the prompt
+    input has focus. Otherwise the user — who never leaves the input —
+    has no way to look back at earlier turns. We push enough turns to
+    force overflow, send the keystrokes from the input, and check that
+    ``scroll_y`` actually moves."""
+
+    session = _FakeSession([])
+    app = _make_app(tmp_path, session)
+    async with app.run_test() as pilot:
+        # Mount enough tall turns to make the log overflow comfortably.
+        for turn_index in range(40):
+            turn = TurnContainer(logical_turn=turn_index + 1)
+            app._root_turns[(0, turn_index)] = turn
+            turn.text_buffer = "\n".join(f"line {i}" for i in range(5))
+            turn.assistant.set_text(turn.text_buffer)
+            await app._mount_turn(turn)
+        await pilot.pause(0.2)
+
+        log = app.query_one("#conversation-log")
+        log.scroll_end(animate=False)
+        await pilot.pause(0.05)
+        bottom = log.scroll_y
+        assert bottom > 0, "log did not overflow — turn .height must be auto"
+
+        # Focus the input, then press pageup. The keystroke must reach
+        # the log via PromptInput's forward path, not be swallowed by
+        # TextArea's own pageup handler.
+        prompt = app.query_one("#prompt-input")
+        prompt.focus()
+        await pilot.pause(0.05)
+        await pilot.press("pageup")
+        await pilot.pause(0.05)
+        assert log.scroll_y < bottom, "pageup from input did not scroll the log"
 
 
 @pytest.mark.asyncio

@@ -1,14 +1,18 @@
 /* ============================================================
- * AgentM Textual TUI — outside-in dock layout
+ * AgentM Textual TUI — Claude-Code-style minimal chrome.
  *   ┌───────────────────────────────────────────┐
- *   │ #status-header   (dock: top, h: 1)       │   model · turn · tokens · cost · phase
+ *   │ #status-header   (dock: top, h: 1, dim)  │   model · turn · tokens · cost · phase
  *   ├───────────────────────────────────────────┤
- *   │ #conversation-log (1fr)                   │   scrollable VerticalScroll
+ *   │ #conversation-log (1fr)                   │   plain text flow
  *   ├───────────────────────────────────────────┤
  *   │ #input-bar  (dock: bottom, h: auto)       │   PromptInput TextArea
- *   ├───────────────────────────────────────────┤
- *   │ Footer       (dock: bottom, h: 1)         │   key bindings hint
  *   └───────────────────────────────────────────┘
+ *
+ * Design: hierarchy comes from SYMBOLS (`> `, `●`, `⎿`) and COLOR,
+ * never from borders or block backgrounds. The conversation reads
+ * top-to-bottom like a chat log; widgets are visually invisible
+ * except for their text content.
+ *
  * Theming uses Textual's built-in theme system; do NOT hardcode
  * hex colors here — reference variables ($primary, $surface, etc.)
  * so theme changes flow through.
@@ -20,23 +24,25 @@ Screen {
 
 /* === top status header === */
 
+/* Single dim italic strip; no background bar so it visually
+ * recedes against the chat content. */
 #status-header {
     dock: top;
     height: 1;
-    background: $primary 60%;
-    color: $text;
-    padding: 0 1;
-    text-style: bold;
+    background: transparent;
+    color: $text-muted;
+    padding: 0 2;
+    text-style: italic;
     overflow: hidden hidden;
 }
 
-/* === bottom region: input + footer === */
+/* === bottom region: input bar === */
 
 #input-bar {
     dock: bottom;
     height: auto;
     padding: 0 1;
-    background: $surface;
+    background: transparent;
 }
 
 #prompt-input {
@@ -44,7 +50,7 @@ Screen {
     min-height: 3;
     max-height: 8;
     border: round $accent 50%;
-    background: $boost;
+    background: transparent;
     padding: 0 1;
 }
 
@@ -52,142 +58,105 @@ Screen {
     border: round $accent;
 }
 
-/* The Footer widget is yielded last, so it sits at the very bottom. */
-
-Footer {
-    background: $panel;
-    color: $text-muted;
-}
-
-FooterKey {
-    background: $panel;
-}
-
-FooterKey > .footer-key--key {
-    background: $primary;
-    color: $text;
-}
-
 /* === conversation log === */
 
 #conversation-log {
     height: 1fr;
-    padding: 1 2;
-    background: $surface;
+    padding: 0 2;
+    background: transparent;
     scrollbar-background: $surface;
     scrollbar-color: $primary 30%;
     scrollbar-color-hover: $primary 60%;
 }
 
-/* Common margin between turn-level blocks. */
+/* All turn-level blocks: spacing only, no chrome. ``height: auto``
+ * is critical — Vertical's default 1fr would make every turn try
+ * to fill the viewport, so successive turns overlap and the
+ * scroll never overflows. */
 .turn,
 .user-turn,
 .tool-call,
 .subagent {
     margin: 0 0 1 0;
     width: 100%;
+    height: auto;
+    background: transparent;
 }
 
-/* === user turn — right-side flush, blue gutter === */
+/* === user turn — `> {text}` blockquote, no chrome === */
 
 .user-turn {
-    border-left: thick $primary;
-    padding: 0 1;
-    background: $boost;
-    color: $text;
+    color: $text-muted;
+    padding: 0;
 }
 
-/* Injected user message (api.send_user_message) — yellow gutter so the
- * user can tell at a glance that this turn was synthesized by an
- * extension rather than typed. */
-
+/* Injected user message (api.send_user_message) — warning color
+ * so the user can tell at a glance that this turn was synthesized
+ * by an extension rather than typed. */
 .user-turn.injected {
-    border-left: thick $warning;
-    background: $warning 10%;
+    color: $warning;
 }
 
-.user-turn-label {
-    color: $primary;
-    text-style: bold;
-}
-
-/* === assistant turn === */
+/* === assistant turn — plain markdown, no label === */
 
 .turn {
-    padding: 0 0;
+    padding: 0;
 }
 
+/* Legacy ``● assistant`` label is no longer composed; the rule is
+ * retained but hidden so any external CSS-targeting test still
+ * resolves the class without producing a visible widget. */
 .assistant-label {
-    color: $accent;
-    text-style: bold;
-    margin: 0 0 1 0;
+    display: none;
 }
 
-/* === thinking block === */
+/* === thinking block — italic dim, inline === */
 
 .thinking {
+    color: $text-muted;
+    text-style: italic;
     margin: 0 0 1 0;
+    padding: 0;
+    height: auto;
 }
 
-.thinking > CollapsibleTitle {
-    color: $text-muted;
-    text-style: italic;
-}
-
-.thinking-body {
-    color: $text-muted;
-    text-style: italic;
-    padding: 0 1;
-}
-
-/* === tool call block — single gutter, no double border === */
+/* === tool call — `▼ name(args)  ✓ Nms` title, indented body === */
 
 .tool-call {
-    border-left: thick $warning;
-    padding: 0 1;
-    background: $surface;
-}
-
-.tool-call.failed {
-    border-left: thick $error;
+    padding: 0;
 }
 
 .tool-call > CollapsibleTitle {
-    color: $warning;
-    text-style: bold;
+    color: $accent;
+    background: transparent;
+    text-style: none;
 }
 
 .tool-call.failed > CollapsibleTitle {
     color: $error;
 }
 
-.tool-call:focus-within {
-    background: $boost;
+.tool-call:focus-within > CollapsibleTitle {
+    text-style: bold;
 }
 
+/* Body indented by 4 spaces so the `⎿  ` connector + content sit
+ * under the title text the way Claude Code renders tool output. */
 .tool-body {
     color: $text;
-    padding: 0 1;
+    padding: 0 0 0 4;
 }
 
-/* === subagent block — cyan gutter, no Rich Panel === */
+/* === subagent block — `● subagent(purpose)` + ⎿ indented body === */
 
 .subagent {
-    border-left: thick $accent;
-    padding: 0 1;
-    margin: 1 0;
-    background: $boost 50%;
+    padding: 0;
     layout: vertical;
-    height: auto;
-}
-
-.subagent.failed {
-    border-left: thick $error;
 }
 
 .subagent-title {
     color: $accent;
-    text-style: bold;
+    text-style: none;
 }
 
 .subagent.failed .subagent-title {
@@ -196,10 +165,11 @@ FooterKey > .footer-key--key {
 
 .subagent-body {
     color: $text;
-    padding: 0 0 0 1;
+    padding: 0 0 0 4;
 }
 
-/* === modal screens === */
+/* === modal screens — keep enough chrome to read against the
+ * otherwise borderless main view === */
 
 #command-palette,
 #help-screen,

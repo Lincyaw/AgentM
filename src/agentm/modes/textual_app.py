@@ -21,7 +21,7 @@ from textual.containers import Container, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import ModalScreen
-from textual.widgets import Collapsible, Footer, Input, OptionList, Static, TextArea
+from textual.widgets import Collapsible, Input, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from agentm.core.abi import (
@@ -227,27 +227,48 @@ class AssistantTextBlock(Static):
         self.update(Markdown(text or ""))
 
 
-class ThinkingBlock(Collapsible):
+class ThinkingBlock(Static):
+    """Inline italic-dim thinking preview, no Collapsible chrome.
+
+    The previous design wrapped the thinking buffer in a ``Collapsible``
+    so the user could fold it. Claude Code renders thinking as a quiet
+    italic-dim block inline before the response and just hides it once
+    the response is complete — that's what we do here. ``set_text``
+    drives both visibility and body content; ``collapse()`` hides the
+    block (called from ``handle_llm_end``) without losing ``self.text``.
+    """
+
     def __init__(self) -> None:
-        self.body = Static(classes="thinking-body")
-        super().__init__(self.body, title="thinking", collapsed=False, classes="thinking")
-        self.visible = False
+        super().__init__(classes="thinking")
         self.text = ""
+        self.display = False
 
     def set_text(self, text: str) -> None:
         self.text = text
         stripped = text.strip()
-        self.visible = bool(stripped)
-        self.body.update(Text(stripped, style="dim italic"))
+        if stripped:
+            self.display = True
+            self.update(Text(stripped, style="italic"))
+        else:
+            self.display = False
+            self.update("")
+
+    def collapse(self) -> None:
+        """Hide the block on response complete; ``self.text`` is preserved
+        so an external observer can still read what the model thought
+        about."""
+        self.display = False
 
 
 class ToolCallBlock(Collapsible):
-    """Tool call rendered as a Collapsible with a clean two-row body.
+    """Tool call rendered as a Collapsible — Claude-Code-style.
 
-    Title format: ``tool_name  ✓ 142ms`` — keep status with the name; args
-    live in the body where they can wrap. Previous design crammed
-    args-preview-truncated-to-48-chars into the title which was hard to
-    scan and broke alignment when args were long.
+    Title format: ``tool_name(args_summary)  ✓ 142ms``. ``args_summary``
+    is a short inline preview (single-arg → just the value; multi-arg →
+    ``key=val, key=val``) so even when collapsed the user sees what was
+    called. The body is indented 4 spaces (CSS ``.tool-body``) and its
+    sections are introduced by ``⎿  args`` / ``⎿  result`` connectors,
+    mirroring the tree-style Claude Code uses.
     """
 
     can_focus = True
@@ -256,7 +277,7 @@ class ToolCallBlock(Collapsible):
         self.tool_call_id = tool_call_id
         self.tool_name = tool_name
         self.body = Static(classes="tool-body")
-        super().__init__(self.body, title=f"{tool_name}  …  pending", collapsed=False)
+        super().__init__(self.body, title=f"{tool_name}(…)", collapsed=False)
         self.add_class("tool-call")
         self.result_text = ""
         self.args: dict[str, Any] = {}
@@ -268,9 +289,9 @@ class ToolCallBlock(Collapsible):
         self.collapsed = not self.collapsed
 
     def set_pending_args(self, args: dict[str, Any], args_preview: str) -> None:
-        del args_preview  # title no longer carries args; body does
+        del args_preview  # legacy param; title now derives from args directly
         self.args = dict(args)
-        self.title = f"{self.tool_name}  …  pending"
+        self.title = f"{self.tool_name}({_format_args_inline(self.args)})"
         self._render_body(None)
 
     def set_result(self, *, result: Any, duration_ms: int) -> None:
@@ -278,7 +299,10 @@ class ToolCallBlock(Collapsible):
         self.ok = not getattr(result, "is_error", False)
         self.result_text = _tool_result_text(result)
         status = "✓" if self.ok else "✗"
-        self.title = f"{self.tool_name}  {status} {duration_ms}ms"
+        self.title = (
+            f"{self.tool_name}({_format_args_inline(self.args)})"
+            f"  {status} {duration_ms}ms"
+        )
         self.collapsed = self.ok and _line_count(self.result_text) < 20
         self._render_body(result)
         if self.ok:
@@ -290,7 +314,7 @@ class ToolCallBlock(Collapsible):
         args_text = _format_full_args(self.args) if self.args else "{}"
         if result is None:
             renderable: Any = Group(
-                Text("args", style="bold yellow"),
+                Text("⎿  args", style="dim"),
                 Text(args_text),
             )
             self.body_kind = "text"
@@ -299,22 +323,21 @@ class ToolCallBlock(Collapsible):
             self.body_kind = type(result_renderable).__name__
             ok = not getattr(result, "is_error", False)
             renderable = Group(
-                Text("args", style="bold yellow"),
+                Text("⎿  args", style="dim"),
                 Text(args_text),
                 Text(""),
-                Text("result", style="bold green" if ok else "bold red"),
+                Text("⎿  result", style="dim green" if ok else "dim red"),
                 result_renderable,
             )
         self.body.update(renderable)
 
 
 class SubagentBlock(Vertical):
-    """Subagent panel rendered with native Textual widgets.
-
-    Replaces the prior ``rich.Panel(border_style="cyan")`` rendering — that
-    fought with the CSS ``.subagent { border-left: thick cyan }`` and
-    produced a doubled border. Now: the gutter comes from CSS only, the
-    title and body are plain widgets composed inside.
+    """Subagent panel — Claude-Code-style ``● subagent: <purpose>`` title
+    plus indented body. The body is left-padded by CSS so the lines sit
+    visually under the title's argument area, the same way ``ToolCallBlock``
+    indents its result. No left gutter / panel border; the visual cue
+    is the bullet + indent, nothing else.
     """
 
     def __init__(self, child_session_id: str, purpose: str) -> None:
@@ -323,7 +346,7 @@ class SubagentBlock(Vertical):
         self.purpose = purpose
         self.lines: list[str] = []
         self.failed = False
-        self.title_widget = Static(f"↳ {purpose}", classes="subagent-title")
+        self.title_widget = Static(f"● subagent: {purpose}", classes="subagent-title")
         self.body_widget = Static("", classes="subagent-body")
 
     def compose(self) -> ComposeResult:
@@ -351,33 +374,47 @@ class SubagentBlock(Vertical):
 
 
 class UserTurn(Static):
-    """Visual block for a user message in the conversation log.
+    """Visual block for a user message — Claude-Code-style ``> `` prefix.
+
+    Each line of the user input gets a bold ``> `` marker; multi-line
+    input keeps the marker per line so block quoting reads naturally.
+    No widget chrome — color comes from the ``.user-turn`` CSS class
+    so theme switches flow through.
 
     ``injected_from`` distinguishes a real keystroke-from-user message
     (None) from a synthetic one routed through
-    ``api.send_user_message`` from inside an extension. Both end up in
-    the model's message list, but the user should be able to *see* when
-    a turn was injected on their behalf — that's the difference between
-    "I asked for X" and "an atom asked for X on my behalf and now I'm
-    looking at the answer."
+    ``api.send_user_message`` from inside an extension. Injected turns
+    pick up ``.user-turn.injected`` (warning color) plus a small
+    ``↪ from <ext>`` trailer so the user can tell at a glance that
+    this turn was synthesized rather than typed.
     """
 
     def __init__(self, text: str, *, injected_from: str | None = None) -> None:
         css_class = "user-turn injected" if injected_from else "user-turn"
         super().__init__(classes=css_class)
-        label = (
-            f"**system → you** _(from `{injected_from}`)_"
-            if injected_from
-            else "**you**"
-        )
-        self.update(Markdown(f"{label}\n\n{text}"))
+        lines = text.splitlines() or [text]
+        rendered = Text()
+        for i, line in enumerate(lines):
+            if i:
+                rendered.append("\n")
+            rendered.append("> ", style="bold")
+            rendered.append(line)
+        if injected_from:
+            rendered.append(f"\n  ↪ from {injected_from}", style="italic")
+        self.update(rendered)
 
 
 class TurnContainer(Vertical):
+    """Container for one assistant turn — thinking + assistant text +
+    tool calls + subagent blocks. No leading ``● assistant`` label;
+    the chat reads as a flow where assistant content (no prefix) is
+    the default and user input is marked with ``> ``. Thinking sits
+    above the response in italic-dim, matching Claude Code's layout.
+    """
+
     def __init__(self, logical_turn: int) -> None:
         super().__init__(classes="turn")
         self.logical_turn = logical_turn
-        self.label = Static("● assistant", classes="assistant-label")
         self.thinking = ThinkingBlock()
         self.assistant = AssistantTextBlock()
         self.tools: dict[str, ToolCallBlock] = {}
@@ -386,7 +423,6 @@ class TurnContainer(Vertical):
         self.thinking_buffer = ""
 
     def compose(self) -> ComposeResult:
-        yield self.label
         yield self.thinking
         yield self.assistant
 
@@ -440,6 +476,18 @@ class PromptInput(TextArea):
             if handled:
                 event.prevent_default()
                 event.stop()
+            return
+        if key in {"pageup", "pagedown"}:
+            # TextArea would otherwise consume these to navigate within
+            # the (1-8 line) prompt, which is meaningless and traps the
+            # user — they expect PgUp/PgDn to scroll the conversation
+            # log. Forward to the app-level scroll actions.
+            event.prevent_default()
+            event.stop()
+            if key == "pageup":
+                app.action_scroll_page_up()
+            else:
+                app.action_scroll_page_down()
             return
         if event.character == "/" and not self.text and self.cursor_location == (0, 0):
             event.prevent_default()
@@ -634,7 +682,17 @@ class AgentMApp(App[int]):
         self._header: StatusHeader | None = None
         self._prompt_task: asyncio.Task[None] | None = None
         self._flush_timer: Any = None
-        self._root_turns: dict[int, TurnContainer] = {}
+        # ``turn_index`` from the kernel restarts at 0 on every ``prompt()``
+        # call (loop.py: ``for turn_index in range(max_turns)``). Keying
+        # purely by ``turn_index`` collides across user messages — the
+        # second prompt's turn_index=0 events would be routed back into the
+        # first prompt's TurnContainer, so the new assistant text and tool
+        # calls render above the new user bubble. The composite key
+        # ``(prompt_epoch, turn_index)`` keeps each user-prompt's turns in
+        # their own namespace; ``_prompt_epoch`` is bumped from
+        # ``submit_input`` and ``handle_api_send_user_message``.
+        self._prompt_epoch = 0
+        self._root_turns: dict[tuple[int, int], TurnContainer] = {}
         self._child_turns: dict[str, SubagentBlock] = {}
         self._tool_states: dict[str, ToolRenderState] = {}
         self._latest_usage: Usage | None = None
@@ -646,13 +704,15 @@ class AgentMApp(App[int]):
         self._needs_scroll_end = False
 
     def compose(self) -> ComposeResult:
-        # outside-in: status header docks top, footer + input bar dock
-        # bottom, conversation log fills the remaining 1fr middle.
+        # outside-in: status header docks top, input bar docks bottom,
+        # conversation log fills the remaining 1fr middle. The Textual
+        # ``Footer`` was previously yielded here to surface the binding
+        # legend, but it overlapped the prompt input on common terminal
+        # sizes and the same legend is reachable via ``/help``.
         yield StatusHeader(id="status-header")
         yield ConversationLog(id="conversation-log")
         with Container(id="input-bar"):
             yield PromptInput()
-        yield Footer()
 
     def on_mount(self) -> None:
         # Use Textual's built-in theme system instead of our custom
@@ -709,6 +769,11 @@ class AgentMApp(App[int]):
         self._history.append(text)
         self._history_index = None
         self._ctrl_c_armed_at = None
+        # Bump epoch BEFORE awaiting anything — once the prompt task fires
+        # the kernel will start emitting events with turn_index=0, and they
+        # must land in a fresh ``(epoch, 0)`` slot rather than the previous
+        # prompt's slot.
+        self._prompt_epoch += 1
         await self._append_user_turn(text)
         input_widget.clear()
         self.refresh_input_height()
@@ -875,6 +940,10 @@ class AgentMApp(App[int]):
         self._tool_states.clear()
         self._last_assistant_text = ""
         self._ctrl_c_armed_at = None
+        # No need to reset ``_prompt_epoch`` — its only purpose is to keep
+        # the dict keys unique across user prompts, and a monotonically
+        # growing counter does that whether or not the visual log is
+        # cleared.
 
     def action_open_palette_binding(self) -> None:
         self.open_command_palette(initial="")
@@ -910,12 +979,13 @@ class AgentMApp(App[int]):
             self._needs_scroll_end = False
 
     def _ensure_root_turn_sync(self, turn_index: int) -> TurnContainer:
-        turn = self._root_turns.get(turn_index)
+        key = (self._prompt_epoch, turn_index)
+        turn = self._root_turns.get(key)
         if turn is not None:
             return turn
         self._turn_counter += 1
         turn = TurnContainer(logical_turn=self._turn_counter)
-        self._root_turns[turn_index] = turn
+        self._root_turns[key] = turn
         self.run_worker(self._mount_turn(turn), exclusive=False)
         if self._header is not None:
             self._header.turn_number = self._turn_counter
@@ -930,11 +1000,13 @@ class AgentMApp(App[int]):
     def _latest_turn(self) -> TurnContainer | None:
         if not self._root_turns:
             return None
+        # Tuples sort lexicographically — newer epoch wins, and within the
+        # same epoch the higher turn_index wins. Both are what we want.
         return self._root_turns[max(self._root_turns)]
 
     def _latest_tool_block(self) -> ToolCallBlock | None:
-        for turn_index in sorted(self._root_turns, reverse=True):
-            turn = self._root_turns[turn_index]
+        for key in sorted(self._root_turns, reverse=True):
+            turn = self._root_turns[key]
             if turn.tools:
                 return next(reversed(turn.tools.values()))
         return None
@@ -975,7 +1047,6 @@ class AgentMApp(App[int]):
             return
         if isinstance(delta, ThinkingDelta):
             turn.thinking_buffer += delta.text
-            turn.thinking.visible = True
             self.set_phase("thinking")
             self._needs_scroll_end = True
             if self._child_turns:
@@ -1051,7 +1122,7 @@ class AgentMApp(App[int]):
         self.flush_stream_buffers()
         turn = self._latest_turn()
         if turn is not None and turn.thinking.text.strip():
-            turn.thinking.collapsed = True
+            turn.thinking.collapse()
         self._update_usage(self._latest_usage)
         self.set_phase("idle")
 
@@ -1296,6 +1367,29 @@ def _format_args_preview(args: dict[str, Any]) -> str:
 
 def _format_full_args(args: dict[str, Any]) -> str:
     return _dump_json(args, indent=2)
+
+
+def _format_args_inline(args: dict[str, Any]) -> str:
+    """Render args as a one-line preview to embed in a Collapsible title.
+
+    Single-arg → just the value (the keyword is implied by the tool name);
+    multi-arg → ``key=val, key=val`` with each value truncated. Empty args
+    render as ``…`` so the title always reads ``tool_name(…)`` rather than
+    ``tool_name()`` (which looks like a no-arg call).
+    """
+
+    if not args:
+        return "…"
+    if len(args) == 1:
+        return _truncate(_arg_value_str(next(iter(args.values()))), 64)
+    parts = [f"{k}={_truncate(_arg_value_str(v), 16)}" for k, v in args.items()]
+    return _truncate(", ".join(parts), 80)
+
+
+def _arg_value_str(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return _dump_json(value)
 
 
 def _truncate(text: str, limit: int) -> str:
