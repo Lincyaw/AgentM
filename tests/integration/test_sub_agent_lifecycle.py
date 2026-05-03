@@ -240,10 +240,8 @@ def _extract_dispatched_task_id(messages: list[Any]) -> str:
 def _extensions(
     *,
     resolver_module: str,
-    trajectory_path: Path | None = None,
-    trajectory_channels: list[str] | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
-    extensions: list[tuple[str, dict[str, Any]]] = [
+    return [
         (
             "agentm.extensions.builtin.sub_agent",
             {
@@ -253,17 +251,6 @@ def _extensions(
         ),
         (resolver_module, {}),
     ]
-    if trajectory_path is not None:
-        extensions.append(
-            (
-                "agentm.extensions.builtin.trajectory",
-                {
-                    "path": str(trajectory_path),
-                    "channels": trajectory_channels,
-                },
-            )
-        )
-    return extensions
 
 
 @pytest.mark.asyncio
@@ -345,7 +332,7 @@ async def test_wait_subagent_returns_terminal_row_and_consumes_it(
 
 
 @pytest.mark.asyncio
-async def test_running_only_second_cancel_auto_aborts_and_is_visible_in_trajectory(
+async def test_running_only_second_cancel_auto_aborts_and_surfaces_in_messages(
     tmp_path: Path,
 ) -> None:
     provider = _LifecycleProvider("auto_abort")
@@ -355,15 +342,10 @@ async def test_running_only_second_cancel_auto_aborts_and_is_visible_in_trajecto
     resolver_module = _install_resolver_module(
         "tests.integration._fake_subagent_lifecycle_abort_resolver"
     )
-    trajectory_path = tmp_path / "trajectory.jsonl"
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),
-            extensions=_extensions(
-                resolver_module=resolver_module,
-                trajectory_path=trajectory_path,
-                trajectory_channels=["agent_end"],
-            ),
+            extensions=_extensions(resolver_module=resolver_module),
             provider=(provider_module, {}),
             resource_loader=InMemoryResourceLoader(),
         )
@@ -388,11 +370,5 @@ async def test_running_only_second_cancel_auto_aborts_and_is_visible_in_trajecto
     assert any(
         "Task aborted before producing final text." in text for text in user_texts
     )
-
-    records = [json.loads(line) for line in trajectory_path.read_text(encoding="utf-8").splitlines()]
-    agent_end_events = [record for record in records if record["channel"] == "agent_end"]
-    assert agent_end_events
-    serialized_messages = json.dumps(agent_end_events[-1]["event"]["messages"])
-    assert "Task aborted before producing final text." in serialized_messages
 
     await session.shutdown()

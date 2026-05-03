@@ -48,7 +48,7 @@ _COMPLETED: Literal["completed"] = "completed"
 _ABORTED: Literal["aborted"] = "aborted"
 _ERROR: Literal["error"] = "error"
 _Status = Literal["running", "completed", "aborted", "error"]
-_DEFAULT_INHERIT_EXTENSIONS = ["permission", "dedup", "trajectory"]
+_DEFAULT_INHERIT_EXTENSIONS = ["permission", "dedup", "observability"]
 _SHUTDOWN_GRACE_SECONDS = 5.0
 
 MANIFEST = ExtensionManifest(

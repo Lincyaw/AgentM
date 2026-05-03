@@ -11,7 +11,11 @@ dependencies = [
     "pydantic>=2.11.0",
     "pyarrow>=23.0.1",
     "tiktoken>=0.12.0",
+    "rcabench-platform[sdk,llm-eval]>=0.4.22",
 ]
+
+[project.entry-points."llm_eval.agents"]
+agentm = "agentm_rca.eval.agent:AgentMAgent"
 
 [dependency-groups]
 dev = [
