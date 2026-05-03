@@ -92,6 +92,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         triggering_signal = _require_str(args.get("triggering_signal"))
         evidence = _require_str(args.get("evidence"))
         remediation = _require_str(args.get("remediation"))
+        causal_graph = args.get("causal_graph")
         missing = [
             name
             for name, value in (
@@ -102,6 +103,17 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             )
             if not value
         ]
+        cg_error = _validate_causal_graph(causal_graph)
+        if cg_error is not None:
+            return ToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=json.dumps({"error": cg_error}),
+                    )
+                ],
+                is_error=True,
+            )
         if missing:
             # Validation failure: stay in the loop so the model can retry.
             return ToolResult(
@@ -171,12 +183,58 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                         "type": "string",
                         "description": "Suggested fix or mitigation.",
                     },
+                    "causal_graph": {
+                        "type": "object",
+                        "description": (
+                            "Machine-readable RCA conclusion as a CausalGraph. "
+                            "``root_causes`` is the only field downstream "
+                            "evaluation cares about; populate it with one "
+                            "node per implicated service. ``component`` is "
+                            "the service name (e.g. 'ts-payment-service'). "
+                            "``nodes`` and ``edges`` are optional and may be "
+                            "empty arrays when no propagation graph is built."
+                        ),
+                        "properties": {
+                            "nodes": {
+                                "type": "array",
+                                "items": {"type": "object"},
+                                "description": (
+                                    "All nodes considered in the analysis "
+                                    "(may be empty)."
+                                ),
+                            },
+                            "edges": {
+                                "type": "array",
+                                "items": {"type": "object"},
+                                "description": (
+                                    "Causal edges source -> target (may be "
+                                    "empty)."
+                                ),
+                            },
+                            "root_causes": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "component": {"type": "string"},
+                                    },
+                                    "required": ["component"],
+                                },
+                                "description": (
+                                    "Nodes flagged as root cause(s). At "
+                                    "least one entry."
+                                ),
+                            },
+                        },
+                        "required": ["root_causes"],
+                    },
                 },
                 "required": [
                     "root_cause",
                     "triggering_signal",
                     "evidence",
                     "remediation",
+                    "causal_graph",
                 ],
                 "additionalProperties": False,
             },
@@ -214,6 +272,30 @@ def _require_str(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _validate_causal_graph(value: Any) -> str | None:
+    """Lightweight shape check for the ``causal_graph`` argument.
+
+    Mirrors the JSON schema's ``required`` constraints so a bad call gets a
+    structured error (and a retry) instead of crashing the loop. Returns an
+    error message string on failure, ``None`` on success.
+    """
+    if not isinstance(value, dict):
+        return "causal_graph must be an object"
+    root_causes = value.get("root_causes")
+    if not isinstance(root_causes, list) or not root_causes:
+        return "causal_graph.root_causes must be a non-empty list"
+    for idx, node in enumerate(root_causes):
+        if not isinstance(node, dict):
+            return f"causal_graph.root_causes[{idx}] must be an object"
+        component = node.get("component")
+        if not isinstance(component, str) or not component.strip():
+            return (
+                f"causal_graph.root_causes[{idx}].component "
+                "must be a non-empty string"
+            )
+    return None
 
 
 __all__ = ["MANIFEST", "install"]

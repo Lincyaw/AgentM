@@ -94,10 +94,22 @@ MANIFEST = ExtensionManifest(
             "include_mutation_diff": {"type": "boolean"},
             "strict_sync_handlers": {"type": "boolean"},
             "max_queue": {"type": "integer"},
+            "exclude_channels": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
         },
         "additionalProperties": False,
     },
 )
+
+
+# Channels whose per-emission spans add no diagnostic value over the
+# already-recorded summary events. ``stream_delta`` fires once per LLM
+# token chunk; assembled assistant messages arrive on ``turn_end``, so the
+# raw deltas are pure bloat for trace consumers. Anything in this set is
+# skipped from BOTH ``event.dispatch`` and ``handler.invoke`` records.
+_DEFAULT_EXCLUDE_CHANNELS: frozenset[str] = frozenset({"stream_delta"})
 
 
 def _new_id() -> str:
@@ -261,14 +273,22 @@ class _Observer(EventBusObserver):
         sink: _Sink,
         trace_id: str,
         include_handlers: bool,
+        exclude_channels: frozenset[str],
     ) -> None:
         self._sink = sink
         self._trace_id = trace_id
         self._include_handlers = include_handlers
-        self._stack: list[tuple[str, str, int]] = []
+        self._exclude_channels = exclude_channels
+        # Stack frame: (channel, span_id, start_ns, suppressed). When
+        # suppressed=True, on_emit_end skips the sink write and
+        # on_handler_done skips per-handler spans, but the frame still
+        # cycles through push/pop so parent-span bookkeeping stays consistent
+        # for non-suppressed siblings.
+        self._stack: list[tuple[str, str, int, bool]] = []
 
     def on_emit_start(self, channel: str, event: Any) -> None:
-        self._stack.append((channel, _new_id(), _now_ns()))
+        suppressed = channel in self._exclude_channels
+        self._stack.append((channel, _new_id(), _now_ns(), suppressed))
 
     def on_handler_done(
         self,
@@ -281,6 +301,8 @@ class _Observer(EventBusObserver):
         if not self._include_handlers or not self._stack:
             return
         parent = self._stack[-1]
+        if parent[3]:
+            return
         end_ns = _now_ns()
         owner = getattr(handler, _HANDLER_OWNER_ATTR, None) or current_installing_extension()
         self._sink.write(
@@ -311,15 +333,25 @@ class _Observer(EventBusObserver):
     def on_emit_end(self, channel: str, event: Any, results: list[Any]) -> None:
         if not self._stack:
             return
-        ch, span_id, start_ns = self._stack.pop()
+        ch, span_id, start_ns, suppressed = self._stack.pop()
+        if suppressed:
+            return
         end_ns = _now_ns()
+        # Walk back through the stack for the nearest non-suppressed
+        # ancestor — siblings emitted underneath a suppressed parent still
+        # link to the closest real span instead of orphaning.
+        parent_span_id: str | None = None
+        for ancestor in reversed(self._stack):
+            if not ancestor[3]:
+                parent_span_id = ancestor[1]
+                break
         self._sink.write(
             {
                 "schema": "otel/span/v0",
                 "kind": "event.dispatch",
                 "trace_id": self._trace_id,
                 "span_id": span_id,
-                "parent_span_id": self._stack[-1][1] if self._stack else None,
+                "parent_span_id": parent_span_id,
                 "name": f"emit:{ch}",
                 "start_time_unix_nano": start_ns,
                 "end_time_unix_nano": end_ns,
@@ -526,12 +558,16 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     include_diff = bool(config.get("include_mutation_diff", True))
     strict_sync = bool(config.get("strict_sync_handlers", False))
     max_queue = int(config.get("max_queue", 10_000))
+    user_excludes = config.get("exclude_channels")
+    exclude_channels = frozenset(_DEFAULT_EXCLUDE_CHANNELS) | (
+        frozenset(str(ch) for ch in user_excludes) if user_excludes else frozenset()
+    )
 
     if strict_sync:
         bus.set_strict_sync(True)
 
     sink = _Sink(file_path, max_queue=max_queue)
-    observer = _Observer(sink, trace_id, include_handlers)
+    observer = _Observer(sink, trace_id, include_handlers, exclude_channels)
     bus.set_observer(observer)
 
     # Wrap api.on for handler→extension attribution and (optional) mutation
