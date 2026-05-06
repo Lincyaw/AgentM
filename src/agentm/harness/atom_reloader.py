@@ -425,6 +425,16 @@ class AtomReloader:
         sys.modules.pop(atom.module_path, None)
         self._clear_module_bytecode(atom.file_path)
         importlib.invalidate_caches()
+        # Synthetic user atoms (loaded under ``_agentm_user_atom__<name>``)
+        # have no package finder — once popped from ``sys.modules`` a plain
+        # ``importlib.import_module`` cannot rediscover them. Re-establish
+        # the sys.modules entry from the on-disk file before delegating to
+        # ``_finish_install_sync``; ``load_extension`` will then hit the
+        # populated cache. Builtin atoms keep their normal import-finder
+        # path: they aren't synthetic, so this branch is skipped and
+        # ``import_module`` resolves them via ``sys.path`` as before.
+        if atom.module_path.startswith(self._AGENT_ATOM_MODULE_PREFIX):
+            self._import_synthetic_module(atom.module_path, atom.file_path)
         self._finish_install_sync(
             atom.module_path,
             self._api_factory(atom.module_path),

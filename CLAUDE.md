@@ -155,6 +155,30 @@ New tests outside this list require an explicit justification of which fail-stop
 - Type inheritance (`isinstance` checks)
 - Stub functions that only `raise NotImplementedError`
 
+### End-to-end testing methodology
+
+**E2E means: drive the agent with natural-language prompts and verify by inspecting the trajectory. Do not call SDK / harness internals to "shortcut" the verification.**
+
+The reason: AgentM's identity bugs (a tool the agent can't actually invoke, an atom that doesn't survive a session restart, a write that should have committed and didn't) only show up through the user-visible loop — `agentm` CLI in, trajectory out. SDK-level assertions (`assert "echo_shout" in session._tools`) bypass exactly the layers most likely to be wrong: the LLM tool list, the kernel dispatch index, the per-prompt tool-list snapshot. A passing SDK test next to a broken CLI experience is the failure mode this rule prevents.
+
+**The procedure:**
+
+1. Set up a sandbox cwd (a real git repo, not a worktree of the main checkout — `agentm` auto-commits and you don't want those commits landing on `main`).
+2. Run `uv run agentm --cwd <sandbox> "<natural-language prompt>"`. Phrase the prompt the way a real user would; do not name internal tools (`install_atom`, `unload_atom`) unless the test is specifically about their NL discoverability.
+3. Inspect the resulting trajectory at `<sandbox>/.agentm/observability/<trace>.jsonl`. The fields that matter:
+   - `name == "emit:tool_call"` → who was called and with what args
+   - `name == "emit:tool_result"` → exit text + `is_error` flag
+   - `name.startswith("install:")` → which atoms were loaded at boot (catches auto-discovery regressions)
+   - `name.startswith("emit:diagnostic")` → soft failures that didn't raise
+4. Cross-check on-disk state if the prompt was a write: `git log --oneline` for auto-commit, `<sandbox>/.agentm/atoms/` for installed atoms.
+
+**What "verify by trajectory" rules out:**
+- Calling `session._tools` / `session._apis` / `session._reloader` from a Python script. If the trajectory doesn't show it, it didn't happen for the user.
+- Asserting on `prompt()` return values from a stub provider in a unit test *as a substitute* for an e2e check. Stub-provider integration tests (like `test_install_atom_in_turn_n_is_dispatchable_in_turn_n_plus_one`) are valid as fail-stops, but they're not e2e — they don't catch LLM-prompt-format regressions, tool-description discoverability, or boot-time auto-discovery gaps.
+- Running the CLI and trusting its final-text summary. The agent's self-report of success is not evidence; the trajectory's `tool_result` `is_error=False` is.
+
+**When a real bug is found via trajectory, lock it down with a stub-provider integration test** so the regression is caught in CI without needing API keys. Trajectory inspection is for *finding* failures and confirming user-visible behavior; the integration test is what *prevents* recurrence.
+
 ## Slash Commands
 
 Project-specific commands are located in `.claude/commands/`:

@@ -497,6 +497,42 @@ class AgentSession:
                     continue
                 to_load.append((entry.module_path, {}))
 
+            # Pick up atoms previously dropped into ``<cwd>/.agentm/atoms/``
+            # by ``api.install_atom``. Without this branch a self-installed
+            # atom evaporates the moment its session ends, breaking the
+            # plug-and-play promise across process restarts. Discovery
+            # errors are downgraded to a diagnostic so a single broken
+            # user file never bricks bootstrap.
+            try:
+                user_atoms = discover_mod.discover_user_atoms(Path(config.cwd))
+            except Exception as exc:  # noqa: BLE001
+                await bus.emit(
+                    DiagnosticEvent.CHANNEL,
+                    DiagnosticEvent(
+                        level="error",
+                        source="auto_discovery",
+                        message=f"user atom discovery failed: {exc}",
+                    ),
+                )
+                user_atoms = {}
+            for entry in user_atoms.values():
+                if _atom_requires_unsupplied_config(entry.manifest, {}):
+                    missing = _missing_required_fields(entry.manifest, {})
+                    await bus.emit(
+                        DiagnosticEvent.CHANNEL,
+                        DiagnosticEvent(
+                            level="info",
+                            source="auto_discovery",
+                            message=(
+                                f"skipped user atom {entry.name}: requires "
+                                f"config keys {missing!r}; load via "
+                                f"--scenario or explicit extensions= list"
+                            ),
+                        ),
+                    )
+                    continue
+                to_load.append((entry.module_path, {}))
+
         # Load auxiliary extensions. A failure on any one atom is non-fatal:
         # emit a diagnostic and continue so the recovery floor (baseline
         # tools + provider) survives.

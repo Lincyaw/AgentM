@@ -657,3 +657,218 @@ async def test_install_then_unload_roundtrip_is_visible_to_running_session(
         assert "provider" in (provider_unload.error or "").lower()
     finally:
         await session.shutdown()
+
+
+_INSTALL_THEN_USE_STUB_PROVIDER = '''
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from typing import Any
+
+from agentm.core.abi import (
+    AssistantMessage,
+    MessageEnd,
+    Model,
+    TextContent,
+    ToolCallBlock,
+)
+from agentm.harness.extension import ProviderConfig
+
+
+_NEW_ATOM_SOURCE = """\\
+from __future__ import annotations
+
+from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.extensions import ExtensionManifest
+from agentm.harness.extension import ExtensionAPI
+
+MANIFEST = ExtensionManifest(
+    name="agent_written_shout",
+    description="Atom the agent wrote and installed mid-prompt.",
+    registers=("tool:agent_written_shout",),
+    tier=1,
+)
+
+
+def install(api: ExtensionAPI, config: dict[str, object]) -> None:
+    async def _exec(args: dict[str, object]) -> ToolResult:
+        text = str(args.get("text", ""))
+        return ToolResult(
+            content=[TextContent(type="text", text=text.upper())]
+        )
+
+    api.register_tool(
+        FunctionTool(
+            name="agent_written_shout",
+            description="Return text uppercased.",
+            parameters={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            fn=_exec,
+        )
+    )
+"""
+
+
+class _Stream:
+    """Three-turn stub: install_atom -> agent_written_shout -> end_turn.
+
+    Verifies the kernel loop rebuilds its dispatch index per turn so an
+    atom registered by ``install_atom`` in turn N becomes callable in
+    turn N+1 within the same ``session.prompt`` invocation.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(
+        self,
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        self.calls += 1
+        return self._iter(self.calls, tools)
+
+    async def _iter(self, call_no: int, tools: list[Any]) -> AsyncIterator[Any]:
+        if call_no == 1:
+            yield MessageEnd(message=AssistantMessage(
+                role="assistant",
+                content=[ToolCallBlock(
+                    type="tool_call",
+                    id="call-install",
+                    name="install_atom",
+                    arguments={
+                        "name": "agent_written_shout",
+                        "source": _NEW_ATOM_SOURCE,
+                        "rationale": "agent self-mod test",
+                    },
+                )],
+                timestamp=1.0,
+                stop_reason="tool_use",
+            ))
+        elif call_no == 2:
+            assert any(t.name == "agent_written_shout" for t in tools), (
+                "agent_written_shout missing from per-turn tool list — "
+                "the kernel snapshotted tools at run start instead of "
+                "passing the live registry"
+            )
+            yield MessageEnd(message=AssistantMessage(
+                role="assistant",
+                content=[ToolCallBlock(
+                    type="tool_call",
+                    id="call-shout",
+                    name="agent_written_shout",
+                    arguments={"text": "hello agentm"},
+                )],
+                timestamp=2.0,
+                stop_reason="tool_use",
+            ))
+        else:
+            yield MessageEnd(message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text="done")],
+                timestamp=3.0,
+                stop_reason="end_turn",
+            ))
+
+
+def install(api, config):
+    api.register_provider(
+        "install-then-use",
+        ProviderConfig(
+            stream_fn=_Stream(),
+            model=Model(
+                id="install-then-use",
+                provider="install-then-use",
+                context_window=4096,
+                max_output_tokens=512,
+            ),
+            name="install-then-use",
+        ),
+    )
+'''
+
+
+@pytest.mark.asyncio
+async def test_install_atom_in_turn_n_is_dispatchable_in_turn_n_plus_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Single-prompt plug-and-play: a stub LLM emits a ``tool_call`` for
+    ``install_atom`` in turn 1, then a ``tool_call`` for the brand-new
+    atom's tool in turn 2, all inside one ``session.prompt`` invocation.
+
+    Fail-stop protected: if the kernel loop builds its dispatch index
+    once at the start of ``run()`` (the pre-fix behavior in
+    ``core/abi/loop.py``), turn 2 dispatches "Unknown tool" and the
+    final tool_result for ``agent_written_shout`` carries
+    ``is_error=True`` with that message — which this test asserts
+    against. The bug it pins:  agent writes a self-mod, agent calls it
+    next turn, framework returns "Unknown tool" because tool_index was
+    snapshot-stale.
+    """
+
+    _init_repo(tmp_path)
+    _write_manifest(tmp_path, monkeypatch)
+    pkg = f"reloadpkg_{uuid.uuid4().hex[:8]}"
+    pkg_dir = tmp_path / pkg
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+    (pkg_dir / "provider.py").write_text(
+        _INSTALL_THEN_USE_STUB_PROVIDER, encoding="utf-8"
+    )
+    _git(tmp_path, "add", pkg)
+    _git(tmp_path, "commit", "-m", f"seed {pkg}", "--quiet")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[("agentm.extensions.builtin.tool_catalog", {})],
+            provider=(f"{pkg}.provider", {}),
+            resource_loader=InMemoryResourceLoader(),
+        )
+    )
+    try:
+        messages = await session.prompt("install agent_written_shout and call it")
+
+        # Both tool_results must be present and the second must succeed —
+        # i.e. the kernel found agent_written_shout in tool_index after
+        # the install_atom call in the prior turn.
+        tool_results = [
+            m for m in messages
+            if isinstance(m, ToolResultMessage)
+        ]
+        assert len(tool_results) >= 2, (
+            f"expected install + use tool_results, got {len(tool_results)}"
+        )
+
+        install_tr = next(
+            m for m in tool_results
+            if isinstance(m.content[0], ToolResultBlock)
+            and m.content[0].tool_call_id == "call-install"
+        )
+        shout_tr = next(
+            m for m in tool_results
+            if isinstance(m.content[0], ToolResultBlock)
+            and m.content[0].tool_call_id == "call-shout"
+        )
+        assert install_tr.content[0].is_error is False, (
+            f"install_atom failed: {_tool_result_text(install_tr)!r}"
+        )
+        assert shout_tr.content[0].is_error is False, (
+            "newly-installed tool was not dispatched in the same prompt — "
+            f"got: {_tool_result_text(shout_tr)!r}"
+        )
+        assert _tool_result_text(shout_tr) == "HELLO AGENTM"
+    finally:
+        await session.shutdown()
