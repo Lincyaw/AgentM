@@ -539,7 +539,7 @@ class _ExtensionAPIImpl:
         self._child_session_factory: ChildSessionFactory = (
             child_session_factory or _NoopChildSessionFactory()
         )
-        self._operations = operations or _default_local_operations()
+        self._operations = operations or _default_local_operations(cwd=cwd)
         self._skills = skills_service or default_skills_service()
         self._prompt_templates = (
             prompt_templates_service or default_prompt_templates_service()
@@ -777,8 +777,18 @@ class _ExtensionAPIImpl:
         return self._compaction
 
 
-def _default_local_operations() -> Operations:
+def _default_local_operations(cwd: str | None = None) -> Operations:
     """Build the default ``Operations`` bundle backed by local stdlib I/O.
+
+    ``cwd`` — when provided — anchors relative paths handed to the file ops
+    against the session's working directory rather than the process's. The
+    bash op already plumbs cwd through ``asyncio.create_subprocess_shell``,
+    so without this anchor relative paths in ``read``/``write``/``edit``/
+    ``find``/``grep`` resolve against whatever directory the operator
+    happened to launch ``agentm`` from, while ``bash`` resolves against
+    ``--cwd``. The split is invisible to the agent until it reads ``foo.py``
+    and gets ``[Errno 2] No such file`` next to a ``bash cat foo.py`` that
+    works — at which point the loop is unworkable.
 
     Imports the concrete impls lazily so the ``ExtensionAPI`` module itself
     does not pull in ``core._internal`` at import time (the harness is
@@ -791,7 +801,7 @@ def _default_local_operations() -> Operations:
         LocalFileOperations,
     )
 
-    file_ops: FileOperations = LocalFileOperations()
+    file_ops: FileOperations = LocalFileOperations(cwd=cwd)
     bash_ops: BashOperations = LocalBashOperations()
     return Operations(file=file_ops, bash=bash_ops)
 

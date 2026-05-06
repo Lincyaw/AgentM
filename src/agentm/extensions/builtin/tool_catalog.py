@@ -11,7 +11,13 @@ from typing import Any
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import AtomInfo, ExtensionAPI, ReloadResult
+from agentm.harness.extension import (
+    AtomInfo,
+    ExtensionAPI,
+    InstallAtomResult,
+    ReloadResult,
+    UnloadAtomResult,
+)
 from agentm.harness.resource_writer import WriteResult
 
 MANIFEST = ExtensionManifest(
@@ -192,6 +198,35 @@ _UNLOAD_ATOM_PARAMS = {
     "additionalProperties": False,
 }
 
+_RELOAD_ATOM_PARAMS = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "description": (
+                "Bare atom name (MANIFEST.name) to replace in the running "
+                "session. The atom must already be loaded."
+            ),
+        },
+        "source": {
+            "type": "string",
+            "description": (
+                "Full Python source that will replace the atom's current "
+                "implementation. Must define MANIFEST: ExtensionManifest "
+                "and install(api, config); §11 contract is enforced. "
+                "Reload is transactional: a failure rolls the session "
+                "back to the prior version with no observable change."
+            ),
+        },
+        "rationale": {
+            "type": "string",
+            "description": "Why this atom is being reloaded.",
+        },
+    },
+    "required": ["name", "source"],
+    "additionalProperties": False,
+}
+
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     raw_root = config.get("root")
@@ -357,6 +392,34 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return _json_error(payload)
         return _json_result(payload)
 
+    async def _reload_atom_tool(args: dict[str, Any]) -> ToolResult:
+        result = api.reload_atom(
+            str(args["name"]),
+            str(args["source"]),
+            rationale=(
+                str(args["rationale"]) if "rationale" in args else None
+            ),
+            agent_initiated=True,
+        )
+        payload = _serialize_result(result)
+        if not bool(payload.get("ok", False)):
+            return _json_error(payload)
+        return _json_result(payload)
+
+    async def _list_atoms_tool(args: dict[str, Any]) -> ToolResult:
+        atoms = api.list_atoms()
+        payload = [
+            {
+                "name": a.name,
+                "tier": a.tier,
+                "api_version": a.api_version,
+                "current_hash": a.current_hash,
+                "source_path": a.source_path,
+            }
+            for a in atoms
+        ]
+        return _json_result(payload)
+
     api.register_tool(
         FunctionTool(
             name="catalog_list_versions",
@@ -431,6 +494,43 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             ),
             parameters=_UNLOAD_ATOM_PARAMS,
             fn=_unload_atom_tool,
+        )
+    )
+    api.register_tool(
+        FunctionTool(
+            name="reload_atom",
+            description=(
+                "Replace a currently-loaded atom's source in the running "
+                "session. The reload is transactional: the new source is "
+                "validated against the §11 contract, the module is "
+                "re-executed, and ``install`` is re-invoked; on any failure "
+                "the prior version is restored and the session sees no "
+                "change. Use this — not the generic ``write`` or ``edit`` "
+                "tools — to evolve an atom's behavior, otherwise the "
+                "on-disk source drifts away from the live module. Returns "
+                "structured ReloadResult."
+            ),
+            parameters=_RELOAD_ATOM_PARAMS,
+            fn=_reload_atom_tool,
+        )
+    )
+    api.register_tool(
+        FunctionTool(
+            name="list_atoms",
+            description=(
+                "List every atom currently loaded in this running session "
+                "with its name, tier, api_version, current git hash (when "
+                "managed), and on-disk source path. The single source of "
+                "truth for what the agent can introspect about its own "
+                "extensions — scanning ``.agentm/atoms/`` only sees "
+                "agent-installed atoms and misses every builtin."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            fn=_list_atoms_tool,
         )
     )
 
@@ -592,7 +692,9 @@ def _now_iso() -> str:
 
 
 def _serialize_result(payload: Any) -> dict[str, Any]:
-    if isinstance(payload, (ReloadResult, WriteResult)):
+    if isinstance(
+        payload, (ReloadResult, WriteResult, InstallAtomResult, UnloadAtomResult)
+    ):
         return asdict(payload)
     if isinstance(payload, dict):
         return payload

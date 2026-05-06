@@ -375,7 +375,6 @@ class AgentLoop:
         if start_error is not None:
             raise start_error
 
-        tool_index = {t.name: t for t in tools}
         max_turns = self._config.max_turns
         max_tool_calls = self._config.max_tool_calls
         tool_calls_used = 0
@@ -385,6 +384,10 @@ class AgentLoop:
         try:
             for turn_index in range(max_turns):
                 last_turn_index = turn_index
+                # Rebuild dispatch index per turn so atoms registered mid-prompt
+                # via ``api.install_atom`` (or any other ``register_tool`` path)
+                # become callable on the very next turn within the same prompt.
+                tool_index = {t.name: t for t in tools}
                 if signal is not None and signal.is_set():
                     return await self._terminate(
                         messages,

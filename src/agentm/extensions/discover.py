@@ -16,13 +16,22 @@ Tests that mutate the catalog (rare) call :func:`reset_cache`.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import pkgutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 from agentm.extensions import ExtensionManifest
+
+USER_ATOM_MODULE_PREFIX = "_agentm_user_atom__"
+"""Synthetic module-name prefix shared with :class:`AtomReloader`. Atoms
+auto-discovered from ``<cwd>/.agentm/atoms/`` are imported under
+``_agentm_user_atom__<name>`` so a subsequent ``api.install_atom``,
+``reload_atom``, or ``unload_atom`` call sees the same module identity it
+would have synthesised itself."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,8 +122,87 @@ def discover_builtin() -> dict[str, BuiltinEntry]:
     return entries
 
 
+def discover_user_atoms(cwd: Path) -> dict[str, BuiltinEntry]:
+    """Return ``name → BuiltinEntry`` for every user-installed atom under
+    ``<cwd>/.agentm/atoms/<name>.py``.
+
+    These are atoms previously committed by ``api.install_atom`` (canonical
+    landing zone documented on ``tool_catalog.install_atom``). On a fresh
+    session they would otherwise be invisible — the framework loader only
+    walks ``agentm/extensions/builtin/`` — which breaks the plug-and-play
+    promise across process restarts. Auto-loading them here keeps the
+    catalog and the running session in sync without forcing the user to
+    re-execute ``install_atom`` every boot.
+
+    Returned entries use a synthetic module path ``_agentm_user_atom__<name>``
+    so they don't shadow real ``agentm.*`` packages and so reload/unload
+    paths in :class:`AtomReloader` can address the same module identity.
+
+    Errors:
+    - File-level :class:`SyntaxError` / :class:`ImportError` propagate so the
+      caller can decide whether to skip or fail loudly. The harness's
+      auto-discovery branch catches these and downgrades to a diagnostic.
+    - ``RuntimeError`` if the module declares no ``MANIFEST``, the manifest's
+      ``name`` disagrees with the file stem, or the file declares
+      ``tier >= 2`` (agent-installed atoms are tier-1 by contract — we
+      refuse to silently auto-load anything privileged).
+    """
+
+    atoms_dir = cwd / ".agentm" / "atoms"
+    if not atoms_dir.is_dir():
+        return {}
+
+    entries: dict[str, BuiltinEntry] = {}
+    for path in sorted(atoms_dir.glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        stem = path.stem
+        module_path = f"{USER_ATOM_MODULE_PREFIX}{stem}"
+        spec = importlib.util.spec_from_file_location(module_path, path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"could not build import spec for {path!s}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_path] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(module_path, None)
+            raise
+
+        manifest_obj: Any = getattr(module, "MANIFEST", None)
+        if not isinstance(manifest_obj, ExtensionManifest):
+            sys.modules.pop(module_path, None)
+            raise RuntimeError(
+                f"user atom {path!s} is missing a module-level "
+                f"MANIFEST: ExtensionManifest constant"
+            )
+        if manifest_obj.name != stem:
+            sys.modules.pop(module_path, None)
+            raise RuntimeError(
+                f"user atom {path!s} has MANIFEST.name="
+                f"{manifest_obj.name!r} which disagrees with file stem "
+                f"{stem!r}"
+            )
+        if manifest_obj.tier >= 2:
+            sys.modules.pop(module_path, None)
+            raise RuntimeError(
+                f"user atom {path!s} declares tier={manifest_obj.tier}; "
+                "auto-discovery refuses to load tier>=2 atoms — re-install "
+                "them explicitly through a scenario manifest if intended"
+            )
+        entries[stem] = BuiltinEntry(
+            name=stem,
+            module_path=module_path,
+            module=module,
+            manifest=manifest_obj,
+        )
+    return entries
+
+
 __all__ = [
     "BuiltinEntry",
+    "USER_ATOM_MODULE_PREFIX",
     "discover_builtin",
+    "discover_user_atoms",
     "reset_cache",
 ]
