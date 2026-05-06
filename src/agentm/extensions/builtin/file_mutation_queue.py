@@ -90,4 +90,4 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             wrapped_names.add(name)
         return None
 
-    api.on("agent_start", on_agent_start)
+    api.on(AgentStartEvent.CHANNEL, on_agent_start)

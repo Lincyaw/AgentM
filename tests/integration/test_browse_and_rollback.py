@@ -255,6 +255,76 @@ async def test_G6_tool_catalog_history_source_and_forceable_rollback(
 
 
 @pytest.mark.asyncio
+async def test_rollback_by_repo_relative_path_still_reloads_atom(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """rollback_resource(path=<repo-relative .py>) must go through reload_atom
+    (transactional), not plain writer.write — the tool's own schema promises
+    "atom name, repo-relative path, or absolute path" all work, and the
+    self-modifiable-architecture invariant is that atom rollbacks are
+    transactional. Regression for the path-form silently degrading to a
+    non-reloading writer.write call.
+    """
+    _init_repo(tmp_path)
+    session = await _build_session(
+        tmp_path,
+        monkeypatch,
+        atom_source=_tool_source("tool_demo", "v1"),
+    )
+    pkg = session._test_pkg  # type: ignore[attr-defined]
+    rel_path = f"{pkg}/tool_demo.py"
+
+    def _api():
+        return session._apis[f"{pkg}.tool_demo"]  # type: ignore[attr-defined]
+
+    try:
+        first_sha = _git(tmp_path, "log", "-n", "1", "--format=%H", "--", rel_path)
+        _api().reload_atom(
+            "tool_demo",
+            _tool_source("tool_demo", "v2"),
+            rationale="upgrade to v2",
+        )
+        assert _tool_result_text((await session.prompt("before"))[-2]) == "v2"
+
+        rollback_tool = next(t for t in session.tools if t.name == "rollback_resource")
+        result_rel = await rollback_tool.execute(
+            {
+                "path": rel_path,
+                "target_sha": first_sha,
+                "rationale": "undo via repo-relative path",
+            }
+        )
+        # The success criterion: result is the ReloadResult shape (has 'ok'),
+        # not the WriteResult shape — proving rollback dispatched through
+        # reload_atom rather than degrading to plain writer.write.
+        assert result_rel.is_error is False, result_rel.details
+        assert "ok" in result_rel.details and result_rel.details["ok"] is True
+        # And the live session uses the reloaded code on the next turn.
+        assert _tool_result_text((await session.prompt("after rel"))[-2]) == "v1"
+
+        _api().reload_atom(
+            "tool_demo",
+            _tool_source("tool_demo", "v2"),
+            rationale="re-upgrade",
+        )
+        assert _tool_result_text((await session.prompt("between"))[-2]) == "v2"
+        abs_path = str((tmp_path / rel_path).resolve())
+        result_abs = await rollback_tool.execute(
+            {
+                "path": abs_path,
+                "target_sha": first_sha,
+                "rationale": "undo via absolute path",
+            }
+        )
+        assert result_abs.is_error is False, result_abs.details
+        assert "ok" in result_abs.details and result_abs.details["ok"] is True
+        assert _tool_result_text((await session.prompt("after abs"))[-2]) == "v1"
+    finally:
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_G9_batch_write_still_coalesces_into_one_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

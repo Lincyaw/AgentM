@@ -27,6 +27,8 @@ MANIFEST = ExtensionManifest(
         "tool:get_source_at",
         "tool:list_history",
         "tool:rollback_resource",
+        "tool:install_atom",
+        "tool:unload_atom",
     ),
     config_schema={
         "type": "object",
@@ -131,6 +133,62 @@ _ROLLBACK_RESOURCE_PARAMS = {
         },
     },
     "required": ["path", "target_sha", "rationale"],
+    "additionalProperties": False,
+}
+
+_INSTALL_ATOM_PARAMS = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "description": (
+                "Atom name; must equal MANIFEST.name in the source and be a "
+                "valid Python identifier."
+            ),
+        },
+        "source": {
+            "type": "string",
+            "description": (
+                "Full Python source for the new atom. Must define "
+                "MANIFEST: ExtensionManifest and install(api, config). "
+                "Tier must be 1; agent-installed atoms cannot ship at tier 2."
+            ),
+        },
+        "config": {
+            "type": "object",
+            "description": "Config dict passed to install(api, config).",
+        },
+        "target_path": {
+            "type": "string",
+            "description": (
+                "Optional repo-relative or absolute path where the source is "
+                "written. When omitted the harness writes to "
+                ".agentm/atoms/<name>.py so the new atom stays isolated from "
+                "the framework's builtin tree."
+            ),
+        },
+        "rationale": {
+            "type": "string",
+            "description": "Why this atom is being installed.",
+        },
+    },
+    "required": ["name", "source"],
+    "additionalProperties": False,
+}
+
+_UNLOAD_ATOM_PARAMS = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "description": "Bare atom name (MANIFEST.name) to unload.",
+        },
+        "rationale": {
+            "type": "string",
+            "description": "Why this atom is being unloaded.",
+        },
+    },
+    "required": ["name"],
     "additionalProperties": False,
 }
 
@@ -268,6 +326,37 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         )
         return _json_result(result_payload)
 
+    async def _install_atom_tool(args: dict[str, Any]) -> ToolResult:
+        result = api.install_atom(
+            name=str(args["name"]),
+            source=str(args["source"]),
+            target_path=(
+                str(args["target_path"]) if "target_path" in args else None
+            ),
+            config=dict(args.get("config") or {}),
+            rationale=(
+                str(args["rationale"]) if "rationale" in args else None
+            ),
+            agent_initiated=True,
+        )
+        payload = _serialize_result(result)
+        if not bool(payload.get("ok", False)):
+            return _json_error(payload)
+        return _json_result(payload)
+
+    async def _unload_atom_tool(args: dict[str, Any]) -> ToolResult:
+        result = api.unload_atom(
+            str(args["name"]),
+            rationale=(
+                str(args["rationale"]) if "rationale" in args else None
+            ),
+            agent_initiated=True,
+        )
+        payload = _serialize_result(result)
+        if not bool(payload.get("ok", False)):
+            return _json_error(payload)
+        return _json_result(payload)
+
     api.register_tool(
         FunctionTool(
             name="catalog_list_versions",
@@ -319,6 +408,31 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             fn=_rollback_resource_tool,
         )
     )
+    api.register_tool(
+        FunctionTool(
+            name="install_atom",
+            description=(
+                "Install a brand-new atom into the running session from a "
+                "Python source string. The source must define MANIFEST and "
+                "install(api, config) and pass the §11 single-file contract. "
+                "Tier-2 atoms are refused. Returns structured InstallAtomResult."
+            ),
+            parameters=_INSTALL_ATOM_PARAMS,
+            fn=_install_atom_tool,
+        )
+    )
+    api.register_tool(
+        FunctionTool(
+            name="unload_atom",
+            description=(
+                "Remove a previously-installed atom from the running session. "
+                "On-disk source and git history are kept. Provider atoms and "
+                "constitution-path atoms are refused. Returns UnloadAtomResult."
+            ),
+            parameters=_UNLOAD_ATOM_PARAMS,
+            fn=_unload_atom_tool,
+        )
+    )
 
 
 class _ResolvedCatalogPath:
@@ -341,7 +455,8 @@ def _resolve_catalog_path(
     raw_path: str,
     root: Path,
 ) -> _ResolvedCatalogPath:
-    atom = _atom_by_name(api.list_atoms(), raw_path)
+    atoms = api.list_atoms()
+    atom = _atom_by_name(atoms, raw_path)
     if atom is not None and atom.source_path is not None:
         source_path = Path(atom.source_path).resolve()
         git_path = PurePosixPath(source_path.relative_to(root)).as_posix()
@@ -352,6 +467,11 @@ def _resolve_catalog_path(
             writer_path=str(source_path),
         )
 
+    # Path-form input: classify and try to map back to an atom so the
+    # rollback goes through reload_atom (transactional + emits
+    # ExtensionReloadEvent) instead of falling through to plain
+    # writer.write. The tool's own schema promises that
+    # "atom name, repo-relative path, or absolute path" all work.
     candidate = Path(raw_path)
     if candidate.is_absolute():
         resolved = candidate.resolve()
@@ -360,19 +480,28 @@ def _resolve_catalog_path(
         except ValueError as exc:
             raise ValueError(f"Path {raw_path!r} is outside repo root {root}") from exc
         git_path = PurePosixPath(relative).as_posix()
+        writer_path = str(resolved)
+    else:
+        resolved = (root / candidate).resolve()
+        git_path = PurePosixPath(candidate).as_posix()
+        writer_path = raw_path
+
+    matched = _atom_by_source_path(atoms, resolved)
+    if matched is not None:
         return _ResolvedCatalogPath(
-            atom_name=None,
+            atom_name=matched.name,
             display_path=raw_path,
             git_path=git_path,
-            writer_path=str(resolved),
+            writer_path=str(Path(matched.source_path).resolve())
+            if matched.source_path is not None
+            else writer_path,
         )
 
-    git_path = PurePosixPath(candidate).as_posix()
     return _ResolvedCatalogPath(
         atom_name=None,
         display_path=raw_path,
         git_path=git_path,
-        writer_path=raw_path,
+        writer_path=writer_path,
     )
 
 
@@ -380,6 +509,18 @@ def _atom_by_name(atoms: list[AtomInfo], name: str) -> AtomInfo | None:
     for atom in atoms:
         if atom.name == name:
             return atom
+    return None
+
+
+def _atom_by_source_path(atoms: list[AtomInfo], resolved: Path) -> AtomInfo | None:
+    for atom in atoms:
+        if atom.source_path is None:
+            continue
+        try:
+            if Path(atom.source_path).resolve() == resolved:
+                return atom
+        except OSError:
+            continue
     return None
 
 

@@ -60,6 +60,8 @@ from agentm.harness.events import (
     BeforeAgentStartEvent,
     ChildSessionEndEvent,
     ChildSessionStartEvent,
+    CommandDispatchedEvent,
+    CostBudgetExceededEvent,
     ExtensionInstallEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
@@ -188,13 +190,22 @@ def _atom_requires_unsupplied_config(
     constraints (``oneOf``, ``dependencies``, ...) are intentionally not
     interpreted — atoms with those are loaded and let to fail loudly.
     """
+    return bool(_missing_required_fields(manifest, supplied))
+
+
+def _missing_required_fields(
+    manifest: Any, supplied: dict[str, Any]
+) -> list[str]:
+    """List the ``required`` config keys absent from ``supplied``. Empty
+    when nothing is missing or no schema declares ``required``.
+    """
     schema = getattr(manifest, "config_schema", None)
     if not isinstance(schema, dict):
-        return False
+        return []
     required = schema.get("required")
     if not isinstance(required, list):
-        return False
-    return any(key not in supplied for key in required)
+        return []
+    return [str(key) for key in required if key not in supplied]
 
 
 # --- AgentSession -----------------------------------------------------------
@@ -395,7 +406,7 @@ class AgentSession:
             is_provider: bool = False,
         ) -> None:
             await bus.emit(
-                "extension_install",
+                ExtensionInstallEvent.CHANNEL,
                 ExtensionInstallEvent(
                     module_path=module_path, config=dict(ext_cfg), phase="start"
                 ),
@@ -407,7 +418,7 @@ class AgentSession:
                     await result
             except Exception as exc:
                 await bus.emit(
-                    "extension_install",
+                    ExtensionInstallEvent.CHANNEL,
                     ExtensionInstallEvent(
                         module_path=module_path,
                         config=dict(ext_cfg),
@@ -421,7 +432,7 @@ class AgentSession:
                 module_path, ext_cfg, is_provider=is_provider
             )
             await bus.emit(
-                "extension_install",
+                ExtensionInstallEvent.CHANNEL,
                 ExtensionInstallEvent(
                     module_path=module_path,
                     config=dict(ext_cfg),
@@ -450,7 +461,7 @@ class AgentSession:
                 to_load = load_scenario(config.scenario)
             except (ScenarioLoadError, Exception) as exc:  # noqa: BLE001
                 await bus.emit(
-                    "diagnostic",
+                    DiagnosticEvent.CHANNEL,
                     DiagnosticEvent(
                         level="error",
                         source="scenario_loader",
@@ -461,16 +472,30 @@ class AgentSession:
         else:
             # Auto-discovery loads every builtin atom with ``{}`` config.
             # Atoms whose ``MANIFEST.config_schema.required`` lists fields
-            # we cannot satisfy from an empty config are silently skipped
-            # — without this filter every such atom had to defensively
-            # ``return`` from inside its own ``install``. Centralising the
-            # skip here means an atom can assume its required keys are
-            # present once ``install`` runs.
-            to_load = [
-                (entry.module_path, {})
-                for entry in discover_mod.discover_builtin().values()
-                if not _atom_requires_unsupplied_config(entry.manifest, {})
-            ]
+            # we cannot satisfy from an empty config are skipped — without
+            # this filter every such atom had to defensively ``return``
+            # from inside its own ``install``. Centralising the skip here
+            # means an atom can assume its required keys are present once
+            # ``install`` runs. We surface every skip as an info-level
+            # diagnostic so users can tell why a documented atom is absent.
+            to_load = []
+            for entry in discover_mod.discover_builtin().values():
+                if _atom_requires_unsupplied_config(entry.manifest, {}):
+                    missing = _missing_required_fields(entry.manifest, {})
+                    await bus.emit(
+                        DiagnosticEvent.CHANNEL,
+                        DiagnosticEvent(
+                            level="info",
+                            source="auto_discovery",
+                            message=(
+                                f"skipped {entry.name}: requires config keys "
+                                f"{missing!r}; load via --scenario or "
+                                f"explicit extensions= list"
+                            ),
+                        ),
+                    )
+                    continue
+                to_load.append((entry.module_path, {}))
 
         # Load auxiliary extensions. A failure on any one atom is non-fatal:
         # emit a diagnostic and continue so the recovery floor (baseline
@@ -480,7 +505,7 @@ class AgentSession:
                 await _install_with_events(module_path, ext_cfg)
             except Exception as exc:  # noqa: BLE001
                 await bus.emit(
-                    "diagnostic",
+                    DiagnosticEvent.CHANNEL,
                     DiagnosticEvent(
                         level="error",
                         source="extension_loader",
@@ -553,14 +578,14 @@ class AgentSession:
         def _on_budget_exceeded(_: Any) -> None:
             instance._budget_exceeded = True
 
-        bus.on("cost_budget_exceeded", _on_budget_exceeded)
+        bus.on(CostBudgetExceededEvent.CHANNEL, _on_budget_exceeded)
 
         # Emit ``session_ready`` after every extension is loaded and the
         # active provider is picked. This is the only point where extensions
         # are guaranteed to see the final tool/command/model set; ``tool_filter``
         # and similar post-install scrubbers hook here.
         await bus.emit(
-            "session_ready",
+            SessionReadyEvent.CHANNEL,
             SessionReadyEvent(
                 cwd=config.cwd,
                 session_id=session_id,
@@ -580,7 +605,7 @@ class AgentSession:
         # ``sub_agent`` / ``trajectory`` extensions can roll up nested work.
         if config.parent_bus is not None:
             await config.parent_bus.emit(
-                "child_session_start",
+                ChildSessionStartEvent.CHANNEL,
                 ChildSessionStartEvent(
                     child_session_id=session_id,
                     parent_session_id=config.parent_session_id or "unknown",
@@ -656,7 +681,7 @@ class AgentSession:
         if self._budget_exceeded:
             messages = self._session_manager.build_session_context().messages
             await self._bus.emit(
-                "agent_end",
+                AgentEndEvent.CHANNEL,
                 AgentEndEvent(
                     messages=messages,
                     cause=BudgetExhausted(detail="cost"),
@@ -679,7 +704,7 @@ class AgentSession:
         messages = self._session_manager.build_session_context().messages
         system_prompt = self._build_system_prompt()
         before_returns = await self._bus.emit(
-            "before_agent_start",
+            BeforeAgentStartEvent.CHANNEL,
             BeforeAgentStartEvent(messages=messages, system=system_prompt),
         )
         replacement_system = _collect_system_replacement(before_returns)
@@ -750,9 +775,18 @@ class AgentSession:
         if cmd is not None:
             owner = self._command_owners.get(head)
             api = self._apis[owner] if owner is not None else next(iter(self._apis.values()))
-            result = cmd.handler(rest.strip(), api)
+            stripped_args = rest.strip()
+            result = cmd.handler(stripped_args, api)
             if inspect.isawaitable(result):
                 await result
+            await self._bus.emit(
+                CommandDispatchedEvent.CHANNEL,
+                CommandDispatchedEvent(
+                    name=head,
+                    args=stripped_args,
+                    owner=owner or "<unknown>",
+                ),
+            )
             return text, self._session_manager.get_messages()
 
         event = {"text": text}
@@ -806,14 +840,14 @@ class AgentSession:
         subscription. Extensions that need cleanup hook ``on('session_shutdown')``.
         """
 
-        await self._bus.emit("session_shutdown", SessionShutdownEvent(cwd=self._cwd))
+        await self._bus.emit(SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=self._cwd))
 
         # Notify the parent (if any) BEFORE clearing handlers so that an
         # extension subscribed on the parent bus can still observe the end
         # event with an accurate message count.
         if self._parent_bus is not None:
             await self._parent_bus.emit(
-                "child_session_end",
+                ChildSessionEndEvent.CHANNEL,
                 ChildSessionEndEvent(
                     child_session_id=self._session_id,
                     parent_session_id=self._parent_session_id or "unknown",

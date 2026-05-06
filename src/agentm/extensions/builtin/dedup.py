@@ -52,5 +52,5 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         recent.append(key)
         return None
 
-    api.on("agent_start", _reset)
-    api.on("tool_call", _on_tool_call)
+    api.on(AgentStartEvent.CHANNEL, _reset)
+    api.on(ToolCallEvent.CHANNEL, _on_tool_call)

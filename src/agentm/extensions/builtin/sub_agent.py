@@ -354,9 +354,9 @@ async def _shutdown_child_with_error(
     parent_session_id: str,
     error: str | None,
 ) -> None:
-    await child.bus.emit("session_shutdown", SessionShutdownEvent(cwd=child.cwd))
+    await child.bus.emit(SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=child.cwd))
     await parent_bus.emit(
-        "child_session_end",
+        ChildSessionEndEvent.CHANNEL,
         ChildSessionEndEvent(
             child_session_id=child.session_id,
             parent_session_id=parent_session_id,
@@ -831,9 +831,9 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         max_workers=int(config.get("max_workers", 4)),
     )
 
-    api.on("session_ready", manager.on_session_ready)
-    api.on("session_shutdown", manager.on_session_shutdown)
-    api.on("decide_turn_action", manager.decide_turn_action)
+    api.on(SessionReadyEvent.CHANNEL, manager.on_session_ready)
+    api.on(SessionShutdownEvent.CHANNEL, manager.on_session_shutdown)
+    api.on(DecideTurnActionEvent.CHANNEL, manager.decide_turn_action)
     api.register_tool(
         FunctionTool(
             name="dispatch_agent",

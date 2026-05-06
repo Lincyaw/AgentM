@@ -108,4 +108,4 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return None
         return {"extra_skills": list(skill_records)}
 
-    api.on("resources_discover", _contribute)
+    api.on(ResourcesDiscoverEvent.CHANNEL, _contribute)

@@ -77,7 +77,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return
         state["overflowed"] = True
         await api.events.emit(
-            "cost_budget_exceeded",
+            CostBudgetExceededEvent.CHANNEL,
             CostBudgetExceededEvent(
                 used=state["used"],
                 limit=limit,
@@ -99,5 +99,5 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         state["used"] += (usage.output_tokens / 1_000_000.0) * pricing[1]
         await _emit_if_needed()
 
-    api.on("before_send_to_llm", _before_send)
-    api.on("turn_end", _on_turn_end)
+    api.on(BeforeSendToLlmEvent.CHANNEL, _before_send)
+    api.on(TurnEndEvent.CHANNEL, _on_turn_end)

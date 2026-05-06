@@ -1278,8 +1278,8 @@ async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
     def _capture_extension_install(event: ExtensionInstallEvent) -> None:
         extensions[event.module_path] = event
 
-    unsub_register = bus.on("api_register", _capture_register)
-    unsub_install = bus.on("extension_install", _capture_extension_install)
+    unsub_register = bus.on(ApiRegisterEvent.CHANNEL, _capture_register)
+    unsub_install = bus.on(ExtensionInstallEvent.CHANNEL, _capture_extension_install)
 
     session_cfg = AgentSessionConfig(**{**config.__dict__, "bus": bus})
     try:
@@ -1305,18 +1305,18 @@ async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
     # overflow, and extension-injected user messages all happen after
     # create — these handlers carry the live state through.
 
-    bus.on("stream_delta", app.handle_stream_delta)
-    bus.on("tool_call", app.handle_tool_call)
-    bus.on("tool_result", app.handle_tool_result)
-    bus.on("llm_request_start", app.handle_llm_start)
-    bus.on("llm_request_end", app.handle_llm_end)
-    bus.on("child_session_start", app.handle_child_start)
-    bus.on("child_session_end", app.handle_child_end)
-    bus.on("extension_install", app.handle_extension_install)
-    bus.on("api_register", app.handle_api_register)
-    bus.on("extension_reload", app.handle_extension_reload)
-    bus.on("cost_budget_exceeded", app.handle_cost_budget_exceeded)
-    bus.on("api_send_user_message", app.handle_api_send_user_message)
+    bus.on(StreamDeltaEvent.CHANNEL, app.handle_stream_delta)
+    bus.on(ToolCallEvent.CHANNEL, app.handle_tool_call)
+    bus.on(ToolResultEvent.CHANNEL, app.handle_tool_result)
+    bus.on(LlmRequestStartEvent.CHANNEL, app.handle_llm_start)
+    bus.on(LlmRequestEndEvent.CHANNEL, app.handle_llm_end)
+    bus.on(ChildSessionStartEvent.CHANNEL, app.handle_child_start)
+    bus.on(ChildSessionEndEvent.CHANNEL, app.handle_child_end)
+    bus.on(ExtensionInstallEvent.CHANNEL, app.handle_extension_install)
+    bus.on(ApiRegisterEvent.CHANNEL, app.handle_api_register)
+    bus.on(ExtensionReloadEvent.CHANNEL, app.handle_extension_reload)
+    bus.on(CostBudgetExceededEvent.CHANNEL, app.handle_cost_budget_exceeded)
+    bus.on(ApiSendUserMessageEvent.CHANNEL, app.handle_api_send_user_message)
 
     result = await app.run_async()
     return 0 if result is None else int(result)

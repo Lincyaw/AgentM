@@ -54,7 +54,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             discovered_paths.append(str(Path.home() / ".claude" / "skills"))
             discovered_paths.append(str(Path(api.cwd) / ".claude" / "skills"))
         responses = await api.events.emit(
-            "resources_discover",
+            ResourcesDiscoverEvent.CHANNEL,
             ResourcesDiscoverEvent(cwd=api.cwd, reason="startup"),
         )
         contributed_skills: list[SkillRecord] = []
@@ -92,5 +92,5 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         event.system = updated
         return {"system": updated}
 
-    api.on("session_ready", _populate)
-    api.on("before_agent_start", _inject)
+    api.on(SessionReadyEvent.CHANNEL, _populate)
+    api.on(BeforeAgentStartEvent.CHANNEL, _inject)

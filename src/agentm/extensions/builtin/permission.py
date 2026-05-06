@@ -48,4 +48,4 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             }
         return None
 
-    api.on("tool_call", _on_tool_call)
+    api.on(ToolCallEvent.CHANNEL, _on_tool_call)

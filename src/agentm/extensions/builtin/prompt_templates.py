@@ -33,7 +33,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     async def _populate(_: SessionReadyEvent) -> None:
         responses = await api.events.emit(
-            "resources_discover",
+            ResourcesDiscoverEvent.CHANNEL,
             ResourcesDiscoverEvent(cwd=api.cwd, reason="startup"),
         )
         prompt_paths = list(configured_prompt_paths)
@@ -59,5 +59,5 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         if expanded is not None:
             event["text"] = expanded
 
-    api.on("session_ready", _populate)
+    api.on(SessionReadyEvent.CHANNEL, _populate)
     api.on("input", _on_input)

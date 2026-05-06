@@ -277,3 +277,383 @@ async def test_G6_reload_path_supports_rolling_back_to_prior_source(
         assert _tool_result_text(follow_up[-2]) == "v1"
     finally:
         await session.shutdown()
+
+
+_AGENT_WRITTEN_ATOM = '''
+from __future__ import annotations
+
+from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.extensions import ExtensionManifest
+from agentm.harness.extension import ExtensionAPI
+
+MANIFEST = ExtensionManifest(
+    name="echo_helper",
+    description="A tiny helper the agent installed at runtime.",
+    registers=("tool:echo_helper",),
+    tier=1,
+)
+
+
+def install(api: ExtensionAPI, config: dict[str, object]) -> None:
+    suffix = str(config.get("suffix", ""))
+
+    async def _execute(args: dict[str, object]) -> ToolResult:
+        text = f"{args.get('msg', '')}{suffix}"
+        return ToolResult(content=[TextContent(type="text", text=text)])
+
+    api.register_tool(
+        FunctionTool(
+            name="echo_helper",
+            description="echo helper installed at runtime",
+            parameters={
+                "type": "object",
+                "properties": {"msg": {"type": "string"}},
+                "additionalProperties": False,
+            },
+            fn=_execute,
+        )
+    )
+'''
+
+
+@pytest.mark.asyncio
+async def test_reload_preserves_handler_position_in_channel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reloading an atom must NOT silently rerank its handlers — without
+    this guarantee, every reload would append to the tail of each channel,
+    flipping last-non-None replacement winners. Two atoms subscribe to the
+    same channel; we verify dispatch order is invariant under reload of
+    the front-running atom.
+    """
+    _init_repo(tmp_path)
+    _write_manifest(tmp_path, monkeypatch)
+
+    pkg = f"reloadpkg_{uuid.uuid4().hex[:8]}"
+    pkg_dir = tmp_path / pkg
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+    (pkg_dir / "provider.py").write_text(_PROVIDER_SOURCE, encoding="utf-8")
+
+    front_source = '''
+from __future__ import annotations
+from agentm.extensions import ExtensionManifest
+from agentm.harness.extension import ExtensionAPI
+
+MANIFEST = ExtensionManifest(name="front", description="front", registers=())
+TAG = "front-v1"
+
+def install(api: ExtensionAPI, config: dict[str, object]) -> None:
+    def _handler(event):
+        event["log"].append(TAG)
+    api.on("ordering_probe", _handler)
+'''
+    back_source = '''
+from __future__ import annotations
+from agentm.extensions import ExtensionManifest
+from agentm.harness.extension import ExtensionAPI
+
+MANIFEST = ExtensionManifest(name="back", description="back", registers=())
+
+def install(api: ExtensionAPI, config: dict[str, object]) -> None:
+    def _handler(event):
+        event["log"].append("back")
+    api.on("ordering_probe", _handler)
+'''
+    (pkg_dir / "front.py").write_text(front_source, encoding="utf-8")
+    (pkg_dir / "back.py").write_text(back_source, encoding="utf-8")
+    _git(tmp_path, "add", pkg)
+    _git(tmp_path, "commit", "-m", f"seed {pkg}", "--quiet")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[(f"{pkg}.front", {}), (f"{pkg}.back", {})],
+            provider=(f"{pkg}.provider", {}),
+            resource_loader=InMemoryResourceLoader(),
+        )
+    )
+    try:
+        log: list[str] = []
+        await session.bus.emit("ordering_probe", {"log": log})
+        assert log == ["front-v1", "back"]
+
+        front_v2 = front_source.replace('TAG = "front-v1"', 'TAG = "front-v2"')
+        front_api = session._apis[f"{pkg}.front"]  # type: ignore[attr-defined]
+        result = front_api.reload_atom("front", front_v2, rationale="bump tag")
+        assert result.ok is True
+
+        log.clear()
+        await session.bus.emit("ordering_probe", {"log": log})
+        # Without position preservation, reload would have moved front to
+        # the tail and we'd see ["back", "front-v2"]. The fix keeps front
+        # in slot 0.
+        assert log == ["front-v2", "back"], log
+    finally:
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_handler_priority_orders_dispatch_across_install_and_reload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Handlers with declared ``BusPriority`` dispatch in tier order
+    regardless of install order, and a reload preserves both the tier and
+    the within-tier FIFO position.
+
+    Without this guarantee, atom dispatch order on a shared channel would
+    track filename / install order — fragile, and broken once already by
+    reload silently moving handlers to the tail of every channel.
+    """
+    _init_repo(tmp_path)
+    _write_manifest(tmp_path, monkeypatch)
+
+    pkg = f"reloadpkg_{uuid.uuid4().hex[:8]}"
+    pkg_dir = tmp_path / pkg
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+    (pkg_dir / "provider.py").write_text(_PROVIDER_SOURCE, encoding="utf-8")
+
+    pre_source = '''
+from __future__ import annotations
+from agentm.core.abi import BusPriority
+from agentm.extensions import ExtensionManifest
+from agentm.harness.extension import ExtensionAPI
+
+MANIFEST = ExtensionManifest(name="pre", description="pre", registers=())
+TAG = "pre"
+
+def install(api: ExtensionAPI, config: dict[str, object]) -> None:
+    def _handler(event):
+        event["log"].append(TAG)
+    api.on("ordering_probe", _handler, priority=BusPriority.PRE)
+'''
+    normal_source = '''
+from __future__ import annotations
+from agentm.extensions import ExtensionManifest
+from agentm.harness.extension import ExtensionAPI
+
+MANIFEST = ExtensionManifest(name="normal", description="normal", registers=())
+
+def install(api: ExtensionAPI, config: dict[str, object]) -> None:
+    def _handler(event):
+        event["log"].append("normal")
+    api.on("ordering_probe", _handler)
+'''
+    post_source = '''
+from __future__ import annotations
+from agentm.core.abi import BusPriority
+from agentm.extensions import ExtensionManifest
+from agentm.harness.extension import ExtensionAPI
+
+MANIFEST = ExtensionManifest(name="post", description="post", registers=())
+
+def install(api: ExtensionAPI, config: dict[str, object]) -> None:
+    def _handler(event):
+        event["log"].append("post")
+    api.on("ordering_probe", _handler, priority=BusPriority.POST)
+'''
+    (pkg_dir / "pre.py").write_text(pre_source, encoding="utf-8")
+    (pkg_dir / "normal.py").write_text(normal_source, encoding="utf-8")
+    (pkg_dir / "post.py").write_text(post_source, encoding="utf-8")
+    _git(tmp_path, "add", pkg)
+    _git(tmp_path, "commit", "-m", f"seed {pkg}", "--quiet")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+
+    # Install order is intentionally backwards (post first, then normal,
+    # then pre) to prove install order does not influence dispatch once
+    # priority is declared.
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                (f"{pkg}.post", {}),
+                (f"{pkg}.normal", {}),
+                (f"{pkg}.pre", {}),
+            ],
+            provider=(f"{pkg}.provider", {}),
+            resource_loader=InMemoryResourceLoader(),
+        )
+    )
+    try:
+        log: list[str] = []
+        await session.bus.emit("ordering_probe", {"log": log})
+        assert log == ["pre", "normal", "post"], log
+
+        # Reload pre, changing its marker. The new handler must land back
+        # in the PRE tier (not the tail of the channel).
+        pre_v2 = pre_source.replace('TAG = "pre"', 'TAG = "pre-v2"')
+        pre_api = session._apis[f"{pkg}.pre"]  # type: ignore[attr-defined]
+        result = pre_api.reload_atom("pre", pre_v2, rationale="bump pre tag")
+        assert result.ok is True
+
+        log.clear()
+        await session.bus.emit("ordering_probe", {"log": log})
+        assert log == ["pre-v2", "normal", "post"], log
+
+        # A fourth subscriber registers at POST after the existing post
+        # handler. Within-tier FIFO must place it after, not before.
+        def _post_2(event: object) -> None:
+            assert isinstance(event, dict)
+            event["log"].append("post-2")
+
+        from agentm.core.abi import BusPriority
+
+        session.bus.on("ordering_probe", _post_2, priority=BusPriority.POST)
+
+        log.clear()
+        await session.bus.emit("ordering_probe", {"log": log})
+        assert log == ["pre-v2", "normal", "post", "post-2"], log
+    finally:
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_before_install_atom_handler_can_veto(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cross-cutting policy can refuse a self-install via a
+    ``before_install_atom`` handler returning ``{"block": True, "reason":
+    ...}``. The harness returns ok=False with the reason; nothing is
+    written to disk. Symmetric for unload.
+    """
+    _init_repo(tmp_path)
+    session = await _build_session(
+        tmp_path,
+        monkeypatch,
+        atom_source=_tool_source("tool_demo", "v1"),
+    )
+    pkg = session._test_pkg  # type: ignore[attr-defined]
+    api = session._apis[f"{pkg}.tool_demo"]  # type: ignore[attr-defined]
+
+    def _veto_handler(event):
+        if event.name == "blocked_atom":
+            return {"block": True, "reason": "policy-rejects-blocked_atom"}
+        return None
+
+    session.bus.on("before_install_atom", _veto_handler)
+
+    blocked = api.install_atom(
+        name="blocked_atom",
+        source=_AGENT_WRITTEN_ATOM.replace("echo_helper", "blocked_atom"),
+    )
+    assert blocked.ok is False
+    assert "policy-rejects-blocked_atom" in (blocked.error or "")
+    # Disk wasn't touched: no file under .agentm/atoms/.
+    assert not (tmp_path / ".agentm" / "atoms" / "blocked_atom.py").exists()
+
+    # Sanity: a different name passes through to the install pipeline.
+    permitted = api.install_atom(
+        name="echo_helper",
+        source=_AGENT_WRITTEN_ATOM,
+    )
+    assert permitted.ok is True
+    api.unload_atom("echo_helper")
+
+    await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_install_then_unload_roundtrip_is_visible_to_running_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end plug-and-play: a running session installs a brand-new atom
+    written from an in-memory source string, exercises the tool that atom
+    registers, then unloads the atom and confirms the registration is gone.
+    Also asserts the two safety gates that, if broken, brick the loop:
+    refusing to unload the provider, and refusing to install at a
+    constitution path. Single test by design — protects the
+    install/unload fail-stop without padding out fine-grained cases.
+    """
+    from agentm.harness.events import ExtensionInstallEvent, ExtensionUnloadEvent
+
+    _init_repo(tmp_path)
+    session = await _build_session(
+        tmp_path,
+        monkeypatch,
+        atom_source=_tool_source("tool_demo", "v1"),
+    )
+    pkg = session._test_pkg  # type: ignore[attr-defined]
+    api = session._apis[f"{pkg}.tool_demo"]  # type: ignore[attr-defined]
+
+    install_events: list[ExtensionInstallEvent] = []
+    unload_events: list[ExtensionUnloadEvent] = []
+    session.bus.on("extension_install", install_events.append)
+    session.bus.on("extension_unload", unload_events.append)
+
+    try:
+        # 1. Agent installs a new atom from a source string.
+        install_result = api.install_atom(
+            name="echo_helper",
+            source=_AGENT_WRITTEN_ATOM,
+            config={"suffix": "!"},
+            rationale="agent self-install for echo capability",
+        )
+        assert install_result.ok is True, install_result.error
+        assert install_result.target_path is not None
+        assert Path(install_result.target_path).is_file()
+        assert install_result.new_hash is not None
+        assert any(
+            e.module_path == install_result.module_path and e.phase == "end"
+            and e.trigger == "agent"
+            for e in install_events
+        )
+
+        # 2. The newly installed tool is live on the session.
+        echo = next(t for t in session.tools if t.name == "echo_helper")
+        result = await echo.execute({"msg": "hello"})
+        assert result.is_error is False
+        assert result.content[0].text == "hello!"  # type: ignore[union-attr]
+
+        # 3. list_atoms reflects the new atom; api.install_atom rejects
+        #    a duplicate name and refuses constitution paths.
+        names = [a.name for a in api.list_atoms()]
+        assert "echo_helper" in names
+        dup = api.install_atom(name="echo_helper", source=_AGENT_WRITTEN_ATOM)
+        assert dup.ok is False and "already loaded" in (dup.error or "")
+        # The fixture's manifest puts core-manifest.yaml itself in the
+        # constitution; refusal there exercises the same gate as a real
+        # core/abi/** target would in production.
+        constitution_attempt = api.install_atom(
+            name="other_helper",
+            source=_AGENT_WRITTEN_ATOM.replace("echo_helper", "other_helper"),
+            target_path="core-manifest.yaml",
+        )
+        assert constitution_attempt.ok is False
+        assert "constitution" in (constitution_attempt.error or "").lower()
+
+        # 4. Agent unloads the atom; tool registration disappears, the atom's
+        #    captured ExtensionAPI becomes stale, and an unload event fires.
+        unload_result = api.unload_atom("echo_helper")
+        assert unload_result.ok is True
+        assert all(t.name != "echo_helper" for t in session.tools)
+        assert any(
+            e.name == "echo_helper" and e.trigger == "agent"
+            for e in unload_events
+        )
+
+        # 5. Provider can never be unloaded — would leave the loop without
+        #    a stream_fn. The atom_name for the provider in this fixture
+        #    is "rollbackpkg_*.provider" — find it via list_atoms.
+        provider_names = [
+            a.name for a in api.list_atoms()
+            if "provider" in a.name.lower()
+        ]
+        # Fall back: any module marked is_provider in the reloader registry.
+        loaded = session._reloader.loaded_by_name  # type: ignore[attr-defined]
+        provider_atom = next(
+            (a for a in loaded.values() if a.is_provider), None
+        )
+        assert provider_atom is not None, (provider_names, list(loaded))
+        provider_unload = api.unload_atom(provider_atom.name)
+        assert provider_unload.ok is False
+        assert "provider" in (provider_unload.error or "").lower()
+    finally:
+        await session.shutdown()

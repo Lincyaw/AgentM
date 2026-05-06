@@ -47,7 +47,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return
 
         before = BeforeCompactEvent(messages=messages, reason="auto_overflow")
-        await api.events.emit("before_compact", before)
+        await api.events.emit(BeforeCompactEvent.CHANNEL, before)
 
         original_messages = list(before.messages)
         compacted_messages, summary_text = _compact_messages(original_messages, keep_last)
@@ -76,7 +76,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         # persisted compaction entry instead of an ad-hoc synthetic message.
         messages[:] = api.session.get_messages()
         await api.events.emit(
-            "after_compact",
+            AfterCompactEvent.CHANNEL,
             AfterCompactEvent(
                 summary=summary_text,
                 kept_message_count=len(messages),
@@ -85,7 +85,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             ),
         )
 
-    api.on("before_send_to_llm", before_send_to_llm)
+    api.on(BeforeSendToLlmEvent.CHANNEL, before_send_to_llm)
 
 
 def _compact_messages(

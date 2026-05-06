@@ -129,8 +129,8 @@ async def _run(
         )
 
     bus = EventBus()
-    bus.on("diagnostic", _on_diagnostic)
-    bus.on("extension_install", _on_extension_install)
+    bus.on(DiagnosticEvent.CHANNEL, _on_diagnostic)
+    bus.on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
 
     provider_config: dict[str, str] = {"model": model}
     base_url = os.environ.get("ANTHROPIC_BASE_URL")
@@ -197,8 +197,8 @@ async def _run_interactive(
             err=True,
         )
 
-    bus.on("diagnostic", _on_diagnostic)
-    bus.on("extension_install", _on_extension_install)
+    bus.on(DiagnosticEvent.CHANNEL, _on_diagnostic)
+    bus.on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
 
     config = AgentSessionConfig(
         cwd=cwd,

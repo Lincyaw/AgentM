@@ -90,4 +90,4 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             details=event.result.details,
         )
 
-    api.on("tool_result", _on_tool_result)
+    api.on(ToolResultEvent.CHANNEL, _on_tool_result)

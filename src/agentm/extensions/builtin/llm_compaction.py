@@ -138,7 +138,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return
 
         before = BeforeCompactEvent(messages=event.messages, reason="llm_auto_overflow")
-        await api.events.emit("before_compact", before)
+        await api.events.emit(BeforeCompactEvent.CHANNEL, before)
 
         result = await api.compaction.compact(
             preparation,
@@ -163,7 +163,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         rebuilt_messages = api.session.get_messages()
         event.messages[:] = rebuilt_messages
         await api.events.emit(
-            "after_compact",
+            AfterCompactEvent.CHANNEL,
             AfterCompactEvent(
                 summary=result.summary,
                 kept_message_count=len(rebuilt_messages),
@@ -172,7 +172,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             ),
         )
 
-    api.on("before_send_to_llm", before_send_to_llm)
+    api.on(BeforeSendToLlmEvent.CHANNEL, before_send_to_llm)
 
 
 class _ProviderSummarizer:
