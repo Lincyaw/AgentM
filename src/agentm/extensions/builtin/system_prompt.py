@@ -35,4 +35,4 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         event.system = updated
         return {"system": updated}
 
-    api.on("before_agent_start", before_agent_start)
+    api.on(BeforeAgentStartEvent.CHANNEL, before_agent_start)

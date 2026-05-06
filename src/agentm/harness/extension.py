@@ -22,6 +22,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from agentm.core.abi import (
     AgentMessage,
+    BusPriority,
     EventBus,
     LoopConfig,
     Model,
@@ -75,6 +76,25 @@ class _SessionGateway(Protocol):
         rationale: str | None = None,
     ) -> "ReloadResult": ...
 
+    def install_atom(
+        self,
+        *,
+        name: str,
+        source: str,
+        target_path: str | None,
+        config: dict[str, Any] | None,
+        rationale: str | None,
+        agent_initiated: bool,
+    ) -> "InstallAtomResult": ...
+
+    def unload_atom(
+        self,
+        name: str,
+        *,
+        agent_initiated: bool = True,
+        rationale: str | None = None,
+    ) -> "UnloadAtomResult": ...
+
     def freeze_current(self, name: str) -> str: ...
 
     def list_atoms(self) -> list["AtomInfo"]: ...
@@ -93,6 +113,33 @@ class _NoopSessionGateway:
     ) -> "ReloadResult":
         del name, new_source, agent_initiated, rationale
         raise RuntimeError("reload_atom is unavailable on this ExtensionAPI instance")
+
+    def install_atom(
+        self,
+        *,
+        name: str,
+        source: str,
+        target_path: str | None,
+        config: dict[str, Any] | None,
+        rationale: str | None,
+        agent_initiated: bool,
+    ) -> "InstallAtomResult":
+        del name, source, target_path, config, rationale, agent_initiated
+        raise RuntimeError(
+            "install_atom is unavailable on this ExtensionAPI instance"
+        )
+
+    def unload_atom(
+        self,
+        name: str,
+        *,
+        agent_initiated: bool = True,
+        rationale: str | None = None,
+    ) -> "UnloadAtomResult":
+        del name, agent_initiated, rationale
+        raise RuntimeError(
+            "unload_atom is unavailable on this ExtensionAPI instance"
+        )
 
     def freeze_current(self, name: str) -> str:
         del name
@@ -177,6 +224,35 @@ class ReloadResult:
     new_hash: str | None
     error: str | None = None
     rolled_back: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class InstallAtomResult:
+    """Outcome of ``api.install_atom``. ``new_hash`` is the post-write git
+    SHA when the file landed under a managed path; ``None`` in advisory
+    mode. ``file_created`` distinguishes a brand-new file from overwriting
+    an existing one (the latter is rare but allowed for fixup cases).
+    """
+
+    ok: bool
+    name: str
+    module_path: str | None
+    target_path: str | None
+    new_hash: str | None
+    file_created: bool
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class UnloadAtomResult:
+    """Outcome of ``api.unload_atom``. The module bytes remain on disk
+    and in git history; only the running session forgets the atom.
+    """
+
+    ok: bool
+    name: str
+    module_path: str | None
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,7 +342,13 @@ class ExtensionAPI(Protocol):
     """
 
     # --- Event subscription -------------------------------------------------
-    def on(self, channel: str, handler: Handler) -> Unsubscribe: ...
+    def on(
+        self,
+        channel: str,
+        handler: Handler,
+        *,
+        priority: int = BusPriority.NORMAL,
+    ) -> Unsubscribe: ...
 
     # --- Registrations ------------------------------------------------------
     def register_tool(self, tool: Tool) -> None: ...
@@ -300,6 +382,63 @@ class ExtensionAPI(Protocol):
         agent_initiated: bool = True,
         rationale: str | None = None,
     ) -> ReloadResult: ...
+    def install_atom(
+        self,
+        *,
+        name: str,
+        source: str,
+        target_path: str | None = None,
+        config: dict[str, Any] | None = None,
+        rationale: str | None = None,
+        agent_initiated: bool = True,
+    ) -> InstallAtomResult:
+        """Install a brand-new atom into the running session.
+
+        ``name`` becomes the atom's ``MANIFEST.name`` (must agree); ``source``
+        is the full module text. ``target_path`` is filesystem path (relative
+        to ``cwd`` or absolute) where the source will be written through
+        ``ResourceWriter`` so it lands as a git commit. When omitted the
+        harness writes to ``<cwd>/.agentm/atoms/<name>.py`` so agent-installed
+        atoms are isolated from the framework's builtin tree.
+
+        Hard rejections (return ``ok=False`` with an explanatory ``error``):
+
+        - ``target_path`` is in the constitution
+        - an atom with ``name`` is already loaded
+        - the source fails the §11 single-file extension validator
+        - ``MANIFEST.tier == 2``: agent-installed atoms cannot ship at
+          tier 2; promotion requires human review (separate flow)
+
+        Successful installs emit ``ExtensionInstallEvent`` (phase=start/end)
+        with ``trigger="agent"`` (or ``"propose_change_approved"`` when the
+        request flows through the future approval gate). The atom appears
+        in ``api.list_atoms()`` immediately and its registrations are
+        active for the next bus event.
+        """
+        ...
+    def unload_atom(
+        self,
+        name: str,
+        *,
+        agent_initiated: bool = True,
+        rationale: str | None = None,
+    ) -> UnloadAtomResult:
+        """Remove an installed atom from the running session.
+
+        The on-disk file and git history are untouched; only the live
+        session forgets the atom. Reverse of ``install_atom``: removes
+        every handler/tool/command/renderer the atom registered, drops
+        its module from ``sys.modules``, marks its captured ``ExtensionAPI``
+        as stale, and fires ``ExtensionUnloadEvent``.
+
+        Refused (with ``ok=False``):
+
+        - ``name`` not loaded
+        - the atom is the active provider (would leave the loop without
+          ``stream_fn``)
+        - the atom's source is in the constitution layer
+        """
+        ...
     def freeze_current(self, name: str) -> str: ...
     def list_atoms(self) -> list[AtomInfo]: ...
     def is_constitution_path(self, path: str) -> bool: ...
@@ -427,9 +566,15 @@ class _ExtensionAPIImpl:
 
     # --- Event subscription ------------------------------------------------
 
-    def on(self, channel: str, handler: Handler) -> Unsubscribe:
+    def on(
+        self,
+        channel: str,
+        handler: Handler,
+        *,
+        priority: int = BusPriority.NORMAL,
+    ) -> Unsubscribe:
         self._assert_active()
-        return self._bus.on(channel, handler)
+        return self._bus.on(channel, handler, priority=priority)
 
     # --- Registrations ----------------------------------------------------
 
@@ -442,7 +587,7 @@ class _ExtensionAPIImpl:
         from agentm.harness.events import ApiRegisterEvent
 
         self._bus.emit_sync(
-            "api_register",
+            ApiRegisterEvent.CHANNEL,
             ApiRegisterEvent(
                 kind=kind,
                 name=name,
@@ -488,7 +633,7 @@ class _ExtensionAPIImpl:
 
         self._pending_user_messages.append(content)
         self._bus.emit_sync(
-            "api_send_user_message",
+            ApiSendUserMessageEvent.CHANNEL,
             ApiSendUserMessageEvent(
                 extension=current_installing_extension(), content=content
             ),
@@ -515,6 +660,40 @@ class _ExtensionAPIImpl:
         return self._gateway.reload_atom(
             name,
             new_source,
+            agent_initiated=agent_initiated,
+            rationale=rationale,
+        )
+
+    def install_atom(
+        self,
+        *,
+        name: str,
+        source: str,
+        target_path: str | None = None,
+        config: dict[str, Any] | None = None,
+        rationale: str | None = None,
+        agent_initiated: bool = True,
+    ) -> InstallAtomResult:
+        self._assert_active()
+        return self._gateway.install_atom(
+            name=name,
+            source=source,
+            target_path=target_path,
+            config=config,
+            rationale=rationale,
+            agent_initiated=agent_initiated,
+        )
+
+    def unload_atom(
+        self,
+        name: str,
+        *,
+        agent_initiated: bool = True,
+        rationale: str | None = None,
+    ) -> UnloadAtomResult:
+        self._assert_active()
+        return self._gateway.unload_atom(
+            name,
             agent_initiated=agent_initiated,
             rationale=rationale,
         )

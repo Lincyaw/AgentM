@@ -192,7 +192,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             payload["extra_skills"] = extra_skills
         return payload or None
 
-    api.on("resources_discover", _on_discover)
+    api.on(ResourcesDiscoverEvent.CHANNEL, _on_discover)
 
 
 __all__ = ["MANIFEST", "install"]

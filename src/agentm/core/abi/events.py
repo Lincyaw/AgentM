@@ -28,18 +28,39 @@ Dispatch contract:
 
 from __future__ import annotations
 
+import bisect
 import inspect
 import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Literal, Protocol, overload
+from typing import Any, ClassVar, Final, Literal, Protocol, overload
 
 from .messages import AgentMessage, AssistantMessage
 from .stream import Model
 from .tool import Tool, ToolOutcome, ToolResult
 
 logger = logging.getLogger(__name__)
+
+
+class BusPriority:
+    """Symbolic dispatch tiers for ``EventBus.on(priority=...)``.
+
+    Lower number runs earlier. Atoms declare their intended tier so the
+    dispatch order is decoupled from registration/install order. See
+    ``.claude/designs/handler-priority.md`` for the full contract.
+
+    - ``PRE`` — security gates, validation, decisions that must run first.
+    - ``NORMAL`` — default; business-logic atoms.
+    - ``POST`` — audit, tracing, observability; sees final state.
+
+    Numeric values between tiers are legal (e.g. ``priority=300``) but
+    discouraged in atom code; the symbolic constants are the supported door.
+    """
+
+    PRE: Final[int] = 100
+    NORMAL: Final[int] = 500
+    POST: Final[int] = 900
 
 
 # --- Event types ------------------------------------------------------------
@@ -177,6 +198,7 @@ class Inject(LoopAction):
 class AgentStartEvent(Event):
     """Emitted once at the start of ``AgentLoop.run``."""
 
+    CHANNEL: ClassVar[Literal["agent_start"]] = "agent_start"
     messages: list[AgentMessage]
 
 
@@ -190,6 +212,7 @@ class AgentEndEvent(Event):
     take ``type(cause).__name__``.
     """
 
+    CHANNEL: ClassVar[Literal["agent_end"]] = "agent_end"
     messages: list[AgentMessage]
     cause: TerminationCause
 
@@ -227,6 +250,7 @@ class DecideTurnActionEvent(Event):
        :class:`Stop` overrides ``Step``; else the default applies.
     """
 
+    CHANNEL: ClassVar[Literal["decide_turn_action"]] = "decide_turn_action"
     observation: TurnObservation
 
 
@@ -234,6 +258,7 @@ class DecideTurnActionEvent(Event):
 class TurnStartEvent(Event):
     """Emitted at the start of each loop turn (one LLM call)."""
 
+    CHANNEL: ClassVar[Literal["turn_start"]] = "turn_start"
     turn_index: int
 
 
@@ -241,6 +266,7 @@ class TurnStartEvent(Event):
 class TurnEndEvent(Event):
     """Emitted after a turn's assistant message is fully assembled."""
 
+    CHANNEL: ClassVar[Literal["turn_end"]] = "turn_end"
     turn_index: int
     message: AssistantMessage
 
@@ -257,6 +283,7 @@ class ToolCallEvent(Event):
     running the tool.
     """
 
+    CHANNEL: ClassVar[Literal["tool_call"]] = "tool_call"
     tool_call_id: str
     tool_name: str
     args: dict[str, Any]
@@ -271,6 +298,7 @@ class ToolResultEvent(Event):
     ``loop._collect_tool_result_replacement``).
     """
 
+    CHANNEL: ClassVar[Literal["tool_result"]] = "tool_result"
     tool_call_id: str
     tool_name: str
     result: ToolResult
@@ -292,6 +320,7 @@ class BeforeSendToLlmEvent(Event):
     exactly what is about to hit the wire.
     """
 
+    CHANNEL: ClassVar[Literal["before_send_to_llm"]] = "before_send_to_llm"
     messages: list[AgentMessage]
     model: Model
     tools: list[Tool]
@@ -302,6 +331,7 @@ class BeforeSendToLlmEvent(Event):
 class LlmRequestStartEvent(Event):
     """Emitted right before the loop drains ``stream_fn``."""
 
+    CHANNEL: ClassVar[Literal["llm_request_start"]] = "llm_request_start"
     turn_index: int
     message_count: int
     tool_count: int
@@ -315,6 +345,7 @@ class LlmRequestEndEvent(Event):
     error). ``error`` is ``repr(exc)`` on failure, ``None`` on success.
     """
 
+    CHANNEL: ClassVar[Literal["llm_request_end"]] = "llm_request_end"
     turn_index: int
     chunk_count: int
     duration_ns: int
@@ -335,6 +366,7 @@ class StreamDeltaEvent(Event):
     on the delta's type.
     """
 
+    CHANNEL: ClassVar[Literal["stream_delta"]] = "stream_delta"
     turn_index: int
     delta: Any  # AssistantStreamEvent — typed Any here to avoid pulling
     # the ``stream`` module into the events surface for everyone.
@@ -349,6 +381,7 @@ class ContextEvent(Event):
     ``list[AgentMessage]``; the last non-None replacement wins.
     """
 
+    CHANNEL: ClassVar[Literal["context"]] = "context"
     messages: list[AgentMessage]
 
 
@@ -361,6 +394,7 @@ class DiagnosticEvent(Event):
     and prints; only ``"error"`` level affects the exit code.
     """
 
+    CHANNEL: ClassVar[Literal["diagnostic"]] = "diagnostic"
     level: Literal["info", "warning", "error"]
     source: str
     message: str
@@ -397,13 +431,38 @@ class EventBusObserver(Protocol):
     ) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _Subscription:
+    """One handler registration with its dispatch-order key.
+
+    ``priority`` is the tier (lower runs earlier). ``seq`` is a monotonic
+    counter assigned at subscribe time so two same-priority handlers are
+    ordered by registration (FIFO within tier). Sorting is purely on
+    ``(priority, seq)``; ``handler`` is the payload the bus invokes.
+    """
+
+    priority: int
+    seq: int
+    handler: Handler
+
+
+def _sub_key(sub: _Subscription) -> tuple[int, int]:
+    return (sub.priority, sub.seq)
+
+
 @dataclass(slots=True)
 class EventBus:
     """Minimal channel-keyed pub/sub. See module docstring for the contract."""
 
-    _handlers: dict[str, list[Handler]] = field(default_factory=dict)
+    _handlers: dict[str, list[_Subscription]] = field(default_factory=dict)
+    # Per-channel handler-only list, regenerated lazily after any
+    # ``on``/``unsubscribe`` mutation. Avoids rebuilding ``[s.handler for s
+    # in subs]`` on every emit — load-bearing on hot channels like
+    # ``stream_delta`` (one emission per provider chunk).
+    _handler_cache: dict[str, list[Handler]] = field(default_factory=dict)
     _observer: EventBusObserver | None = None
     _strict_sync_handlers: bool = False
+    _next_seq: int = 0
 
     def set_observer(self, observer: EventBusObserver | None) -> None:
         """Install (or clear) a single observer. The bus invokes its hooks
@@ -432,6 +491,8 @@ class EventBus:
         channel: Literal["agent_start"],
         handler: Callable[[AgentStartEvent], Any]
         | Callable[[AgentStartEvent], Awaitable[Any]],
+        *,
+        priority: int = BusPriority.NORMAL,
     ) -> Callable[[], None]: ...
     @overload
     def on(
@@ -439,6 +500,8 @@ class EventBus:
         channel: Literal["agent_end"],
         handler: Callable[[AgentEndEvent], Any]
         | Callable[[AgentEndEvent], Awaitable[Any]],
+        *,
+        priority: int = BusPriority.NORMAL,
     ) -> Callable[[], None]: ...
     @overload
     def on(
@@ -446,6 +509,8 @@ class EventBus:
         channel: Literal["decide_turn_action"],
         handler: Callable[[DecideTurnActionEvent], Any]
         | Callable[[DecideTurnActionEvent], Awaitable[Any]],
+        *,
+        priority: int = BusPriority.NORMAL,
     ) -> Callable[[], None]: ...
     @overload
     def on(
@@ -453,6 +518,8 @@ class EventBus:
         channel: Literal["turn_start"],
         handler: Callable[[TurnStartEvent], Any]
         | Callable[[TurnStartEvent], Awaitable[Any]],
+        *,
+        priority: int = BusPriority.NORMAL,
     ) -> Callable[[], None]: ...
     @overload
     def on(
@@ -460,6 +527,8 @@ class EventBus:
         channel: Literal["turn_end"],
         handler: Callable[[TurnEndEvent], Any]
         | Callable[[TurnEndEvent], Awaitable[Any]],
+        *,
+        priority: int = BusPriority.NORMAL,
     ) -> Callable[[], None]: ...
     @overload
     def on(
@@ -467,6 +536,8 @@ class EventBus:
         channel: Literal["tool_call"],
         handler: Callable[[ToolCallEvent], Any]
         | Callable[[ToolCallEvent], Awaitable[Any]],
+        *,
+        priority: int = BusPriority.NORMAL,
     ) -> Callable[[], None]: ...
     @overload
     def on(
@@ -474,6 +545,8 @@ class EventBus:
         channel: Literal["tool_result"],
         handler: Callable[[ToolResultEvent], Any]
         | Callable[[ToolResultEvent], Awaitable[Any]],
+        *,
+        priority: int = BusPriority.NORMAL,
     ) -> Callable[[], None]: ...
     @overload
     def on(
@@ -481,6 +554,8 @@ class EventBus:
         channel: Literal["before_send_to_llm"],
         handler: Callable[[BeforeSendToLlmEvent], Any]
         | Callable[[BeforeSendToLlmEvent], Awaitable[Any]],
+        *,
+        priority: int = BusPriority.NORMAL,
     ) -> Callable[[], None]: ...
     @overload
     def on(
@@ -488,6 +563,8 @@ class EventBus:
         channel: Literal["context"],
         handler: Callable[[ContextEvent], Any]
         | Callable[[ContextEvent], Awaitable[Any]],
+        *,
+        priority: int = BusPriority.NORMAL,
     ) -> Callable[[], None]: ...
     @overload
     def on(
@@ -495,28 +572,81 @@ class EventBus:
         channel: Literal["stream_delta"],
         handler: Callable[[StreamDeltaEvent], Any]
         | Callable[[StreamDeltaEvent], Awaitable[Any]],
+        *,
+        priority: int = BusPriority.NORMAL,
     ) -> Callable[[], None]: ...
     @overload
-    def on(self, channel: str, handler: Handler) -> Callable[[], None]: ...
-    def on(self, channel: str, handler: Handler) -> Callable[[], None]:
+    def on(
+        self,
+        channel: str,
+        handler: Handler,
+        *,
+        priority: int = BusPriority.NORMAL,
+    ) -> Callable[[], None]: ...
+    def on(
+        self,
+        channel: str,
+        handler: Handler,
+        *,
+        priority: int = BusPriority.NORMAL,
+    ) -> Callable[[], None]:
         """Subscribe ``handler`` to ``channel``; return an unsubscribe fn.
 
         Calling the returned function removes this exact handler. Calling it
-        a second time is a no-op (idempotent).
+        a second time is a no-op (idempotent). ``priority`` selects the
+        dispatch tier — see :class:`BusPriority`. Within a tier, registration
+        order is preserved (FIFO).
         """
 
-        self._handlers.setdefault(channel, []).append(handler)
+        sub = _Subscription(priority=priority, seq=self._next_seq, handler=handler)
+        self._next_seq += 1
+        bisect.insort(
+            self._handlers.setdefault(channel, []),
+            sub,
+            key=_sub_key,
+        )
+        self._handler_cache.pop(channel, None)
 
         def unsubscribe() -> None:
             handlers = self._handlers.get(channel)
             if handlers is None:
                 return
-            try:
-                handlers.remove(handler)
-            except ValueError:
-                pass
+            for idx, existing in enumerate(handlers):
+                if existing.handler is handler:
+                    del handlers[idx]
+                    self._handler_cache.pop(channel, None)
+                    return
 
         return unsubscribe
+
+    def subscriptions_for(self, channel: str) -> list[_Subscription]:
+        """Return a fresh shallow copy of subscriptions on ``channel`` in
+        dispatch order. Used by harness internals (atom_reloader) that need
+        to inspect or rearrange the live order — e.g. for the reload-time
+        within-tier FIFO position-preservation pass. The returned list is a
+        copy; mutating it does not affect the bus.
+        """
+        return list(self._handlers.get(channel, ()))
+
+    def replace_subscriptions(
+        self, channel: str, subscriptions: list[_Subscription]
+    ) -> None:
+        """Replace the bus's subscription list for ``channel`` with the
+        caller-supplied list. Companion to :meth:`subscriptions_for` for
+        harness internals that need to splice handlers back in a specific
+        order. The list is stored by reference; do not mutate after handing
+        it over.
+        """
+        if subscriptions:
+            self._handlers[channel] = subscriptions
+        else:
+            self._handlers.pop(channel, None)
+        self._handler_cache.pop(channel, None)
+
+    def channels(self) -> list[str]:
+        """Return every channel name with at least one registered handler.
+        Order is dict-insertion (not stable across runs)."""
+        return list(self._handlers.keys())
 
     @overload
     async def emit(
@@ -566,10 +696,13 @@ class EventBus:
         the corresponding return slot holds ``None``.
         """
 
-        registered = self._handlers.get(channel)
-        if not registered and self._observer is None:
+        handlers = self._handler_cache.get(channel)
+        if handlers is None:
+            registered = self._handlers.get(channel)
+            handlers = [sub.handler for sub in (registered or ())]
+            self._handler_cache[channel] = handlers
+        if not handlers and self._observer is None:
             return []
-        handlers = list(registered or ())
         observer = self._observer
         self._safe_observe("on_emit_start", channel, event)
         results: list[Any] = []
@@ -616,10 +749,13 @@ class EventBus:
         which cannot ``await``) can still publish events on the bus without
         forcing the API surface async. Observer hooks fire normally.
         """
-        registered = self._handlers.get(channel)
-        if not registered and self._observer is None:
+        handlers = self._handler_cache.get(channel)
+        if handlers is None:
+            registered = self._handlers.get(channel)
+            handlers = [sub.handler for sub in (registered or ())]
+            self._handler_cache[channel] = handlers
+        if not handlers and self._observer is None:
             return []
-        handlers = list(registered or ())
         observer = self._observer
         self._safe_observe("on_emit_start", channel, event)
         results: list[Any] = []
@@ -677,6 +813,7 @@ __all__ = [
     "AgentStartEvent",
     "BeforeSendToLlmEvent",
     "BudgetExhausted",
+    "BusPriority",
     "ContextEvent",
     "DecideTurnActionEvent",
     "DiagnosticEvent",

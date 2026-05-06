@@ -435,7 +435,7 @@ class GitBackedResourceWriter:
 
         for _, _, relative_posix in managed_ops:
             await self._bus.emit(
-                "resource_write",
+                ResourceWriteEvent.CHANNEL,
                 ResourceWriteEvent(
                     path=relative_posix,
                     pre_sha=pre_sha,
@@ -494,7 +494,7 @@ class GitBackedResourceWriter:
             )
 
         await self._bus.emit(
-            "resource_write",
+            ResourceWriteEvent.CHANNEL,
             ResourceWriteEvent(
                 path=relative_posix,
                 pre_sha=pre_sha,

@@ -369,7 +369,7 @@ class AgentLoop:
 
         messages = list(messages)  # local copy; we won't mutate caller's list
         start_returns = await self._bus.emit(
-            "agent_start", AgentStartEvent(messages=messages)
+            AgentStartEvent.CHANNEL, AgentStartEvent(messages=messages)
         )
         start_error = _collect_error(start_returns)
         if start_error is not None:
@@ -403,11 +403,11 @@ class AgentLoop:
                         turn_index=turn_index,
                     )
 
-                await self._bus.emit("turn_start", TurnStartEvent(turn_index=turn_index))
+                await self._bus.emit(TurnStartEvent.CHANNEL, TurnStartEvent(turn_index=turn_index))
 
                 # context event — handlers may rewrite message list
                 ctx_event = ContextEvent(messages=messages)
-                ctx_returns = await self._bus.emit("context", ctx_event)
+                ctx_returns = await self._bus.emit(ContextEvent.CHANNEL, ctx_event)
                 replacement = _collect_context_messages(ctx_returns)
                 if replacement is not None:
                     messages = list(replacement)
@@ -423,13 +423,13 @@ class AgentLoop:
                     tools=tools,
                     system=system,
                 )
-                await self._bus.emit("before_send_to_llm", before_send_event)
+                await self._bus.emit(BeforeSendToLlmEvent.CHANNEL, before_send_event)
 
                 # Drain the LLM stream, emitting llm_request_start/end so
                 # observers (cost trackers, observability) see request
                 # boundaries without wrapping ``stream_fn`` themselves.
                 await self._bus.emit(
-                    "llm_request_start",
+                    LlmRequestStartEvent.CHANNEL,
                     LlmRequestStartEvent(
                         turn_index=turn_index,
                         message_count=len(messages),
@@ -456,13 +456,13 @@ class AgentLoop:
                         # it via ``turn_end``; this channel is purely
                         # additive and ignored by everyone else.
                         await self._bus.emit(
-                            "stream_delta",
+                            StreamDeltaEvent.CHANNEL,
                             StreamDeltaEvent(turn_index=turn_index, delta=ev),
                         )
                 except Exception as exc:
                     stream_error = repr(exc)
                     await self._bus.emit(
-                        "llm_request_end",
+                        LlmRequestEndEvent.CHANNEL,
                         LlmRequestEndEvent(
                             turn_index=turn_index,
                             chunk_count=len(stream_events),
@@ -472,7 +472,7 @@ class AgentLoop:
                     )
                     raise
                 await self._bus.emit(
-                    "llm_request_end",
+                    LlmRequestEndEvent.CHANNEL,
                     LlmRequestEndEvent(
                         turn_index=turn_index,
                         chunk_count=len(stream_events),
@@ -486,7 +486,7 @@ class AgentLoop:
                 )
                 last_assistant = assistant_msg
                 await self._bus.emit(
-                    "turn_end",
+                    TurnEndEvent.CHANNEL,
                     TurnEndEvent(turn_index=turn_index, message=assistant_msg),
                 )
                 messages.append(assistant_msg)
@@ -577,7 +577,7 @@ class AgentLoop:
                 tool_name=tc.name,
                 args=dict(tc.arguments),  # mutable copy for handlers
             )
-            call_returns = await self._bus.emit("tool_call", tc_event)
+            call_returns = await self._bus.emit(ToolCallEvent.CHANNEL, tc_event)
             blocked = _collect_replacement(call_returns, "block")
             outcome: ToolOutcome
             if blocked:
@@ -641,7 +641,7 @@ class AgentLoop:
                 tool_name=tc.name,
                 result=result,
             )
-            res_returns = await self._bus.emit("tool_result", res_event)
+            res_returns = await self._bus.emit(ToolResultEvent.CHANNEL, res_event)
             replaced = _collect_tool_result_replacement(res_returns)
             final_result = replaced if replaced is not None else res_event.result
 
@@ -691,7 +691,7 @@ class AgentLoop:
             default_action=default,
         )
         returns = await self._bus.emit(
-            "decide_turn_action",
+            DecideTurnActionEvent.CHANNEL,
             DecideTurnActionEvent(observation=observation),
         )
         return _resolve_action(default, returns)
@@ -708,7 +708,7 @@ class AgentLoop:
         """
 
         await self._bus.emit(
-            "agent_end", AgentEndEvent(messages=messages, cause=cause)
+            AgentEndEvent.CHANNEL, AgentEndEvent(messages=messages, cause=cause)
         )
         return messages
 
@@ -736,7 +736,7 @@ class AgentLoop:
             default_action=Stop(cause),
         )
         await self._bus.emit(
-            "decide_turn_action",
+            DecideTurnActionEvent.CHANNEL,
             DecideTurnActionEvent(observation=observation),
         )
         return await self._finish_with_cause(messages, cause)

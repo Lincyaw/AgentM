@@ -20,9 +20,12 @@ from pathlib import Path
 from typing import IO, Any
 
 from agentm.core.abi import (
+    BusPriority,
+    ContextEvent,
     EventBusObserver,
     LlmRequestEndEvent,
     LlmRequestStartEvent,
+    StreamDeltaEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnEndEvent,
@@ -34,6 +37,8 @@ from agentm.extensions.discover import discover_builtin
 from agentm.harness.events import (
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
+    BeforeAgentStartEvent,
+    BeforeCompactEvent,
     ExtensionInstallEvent,
     ExtensionReloadEvent,
     SessionReadyEvent,
@@ -54,11 +59,11 @@ logger = logging.getLogger(__name__)
 # of double-serializing every event on every handler invocation.
 _MUTABLE_CHANNELS = frozenset(
     {
-        "before_agent_start",
-        "context",
-        "tool_call",
-        "tool_result",
-        "before_compact",
+        BeforeAgentStartEvent.CHANNEL,
+        ContextEvent.CHANNEL,
+        ToolCallEvent.CHANNEL,
+        ToolResultEvent.CHANNEL,
+        BeforeCompactEvent.CHANNEL,
     }
 )
 
@@ -109,7 +114,7 @@ MANIFEST = ExtensionManifest(
 # token chunk; assembled assistant messages arrive on ``turn_end``, so the
 # raw deltas are pure bloat for trace consumers. Anything in this set is
 # skipped from BOTH ``event.dispatch`` and ``handler.invoke`` records.
-_DEFAULT_EXCLUDE_CHANNELS: frozenset[str] = frozenset({"stream_delta"})
+_DEFAULT_EXCLUDE_CHANNELS: frozenset[str] = frozenset({StreamDeltaEvent.CHANNEL})
 
 
 def _new_id() -> str:
@@ -575,7 +580,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # flows through the bus as a normal event.
     original_on = api.on
 
-    def _tracking_on(channel: str, handler: Handler):  # type: ignore[no-untyped-def]
+    def _tracking_on(  # type: ignore[no-untyped-def]
+        channel: str,
+        handler: Handler,
+        *,
+        priority: int = BusPriority.NORMAL,
+    ):
         ext = current_installing_extension()
         wrapped = (
             _wrap_handler_for_diff(handler, sink, trace_id, ext, channel)
@@ -586,7 +596,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             setattr(wrapped, _HANDLER_OWNER_ATTR, ext)
         except (AttributeError, TypeError):
             pass
-        return original_on(channel, wrapped)
+        return original_on(channel, wrapped, priority=priority)
 
     api.on = _tracking_on  # type: ignore[method-assign]
 
@@ -838,15 +848,15 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     # Use original_on so our own bookkeeping handlers don't get wrapped
     # for mutation diffing (they don't mutate events).
-    original_on("extension_install", _on_extension_install)
-    original_on("api_register", _on_api_register)
-    original_on("api_send_user_message", _on_api_send)
-    original_on("llm_request_start", _on_llm_start)
-    original_on("llm_request_end", _on_llm_end)
-    original_on("extension_reload", _on_extension_reload)
-    original_on("session_ready", _on_ready)
-    original_on("session_shutdown", _on_shutdown)
-    original_on("turn_start", aggregator.on_turn_start)
-    original_on("tool_call", aggregator.on_tool_call)
-    original_on("tool_result", aggregator.on_tool_result)
-    original_on("turn_end", aggregator.on_turn_end)
+    original_on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
+    original_on(ApiRegisterEvent.CHANNEL, _on_api_register)
+    original_on(ApiSendUserMessageEvent.CHANNEL, _on_api_send)
+    original_on(LlmRequestStartEvent.CHANNEL, _on_llm_start)
+    original_on(LlmRequestEndEvent.CHANNEL, _on_llm_end)
+    original_on(ExtensionReloadEvent.CHANNEL, _on_extension_reload)
+    original_on(SessionReadyEvent.CHANNEL, _on_ready)
+    original_on(SessionShutdownEvent.CHANNEL, _on_shutdown)
+    original_on(TurnStartEvent.CHANNEL, aggregator.on_turn_start)
+    original_on(ToolCallEvent.CHANNEL, aggregator.on_tool_call)
+    original_on(ToolResultEvent.CHANNEL, aggregator.on_tool_result)
+    original_on(TurnEndEvent.CHANNEL, aggregator.on_turn_end)
