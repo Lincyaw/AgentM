@@ -34,6 +34,8 @@ constitution:
 managed:
   globs:
     - src/agentm/extensions/builtin/**.py
+    - src/agentm/extensions/contrib/**.py
+    - .agentm/atoms/**.py
     - scenarios/**
     - skills/**
     - prompts/**

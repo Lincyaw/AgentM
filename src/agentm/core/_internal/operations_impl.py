@@ -12,24 +12,42 @@ from agentm.core.abi.operations import ExecResult
 
 
 class LocalFileOperations:
-    """Default filesystem implementation backed by local stdlib I/O."""
+    """Default filesystem implementation backed by local stdlib I/O.
+
+    ``cwd`` anchors relative paths to the session's working directory.
+    Without it, ``read("foo.py")`` resolves against the process cwd —
+    typically wherever the operator launched ``agentm`` from — which
+    diverges from the bash op's cwd handling and breaks any agent
+    reasoning about its own workspace. ``cwd=None`` keeps the legacy
+    "process cwd" behavior for tests and embedded uses that do not
+    supply one.
+    """
+
+    def __init__(self, cwd: str | None = None) -> None:
+        self._cwd = cwd
+
+    def _resolve(self, path: str) -> Path:
+        candidate = Path(path)
+        if candidate.is_absolute() or self._cwd is None:
+            return candidate
+        return Path(self._cwd) / candidate
 
     async def read_file(self, path: str) -> bytes:
-        return await asyncio.to_thread(Path(path).read_bytes)
+        return await asyncio.to_thread(self._resolve(path).read_bytes)
 
     async def write_file(self, path: str, content: bytes) -> None:
-        await asyncio.to_thread(Path(path).write_bytes, content)
+        await asyncio.to_thread(self._resolve(path).write_bytes, content)
 
     async def access(self, path: str) -> bool:
         def _access() -> bool:
-            target = Path(path)
+            target = self._resolve(path)
             return target.exists() and os.access(target, os.R_OK)
 
         return await asyncio.to_thread(_access)
 
     async def list_dir(self, path: str) -> list[str]:
         def _list_dir() -> list[str]:
-            return sorted(entry.name for entry in Path(path).iterdir())
+            return sorted(entry.name for entry in self._resolve(path).iterdir())
 
         return await asyncio.to_thread(_list_dir)
 
