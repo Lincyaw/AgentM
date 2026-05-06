@@ -54,6 +54,13 @@ concepts:
     plans: []
     tasks: []
 
+  handler_priority:
+    description: "Per-channel dispatch-order knob on api.on. Three symbolic tiers (BusPriority.PRE=100, NORMAL=500, POST=900) mapped to integers; numeric values legal but discouraged. EventBus._handlers upgrades to list[_Subscription{priority, seq, handler}], bisect.insort on (priority, seq). Existing 'last non-None wins' replacement semantics unchanged — dispatch order IS authority order under last-wins. Block/veto contracts (tool_call block, before_install/unload_atom veto) use first-refusal-wins, priority only controls who decides first. Backward compatible: api.on without priority lands at NORMAL, registration order within tier preserved. Reload-position-preservation (atom_reloader._capture/_restore) still in place as fallback for un-prioritized handlers; prioritized ones land in the right slot via bisect. No depends_on / before / after constraint graph in v0."
+    design: "designs/handler-priority.md"
+    related_concepts: [pluggable_architecture, agent_loop, self_modifiable_architecture, observability]
+    plans: []
+    tasks: []
+
   extension_as_scenario:
     description: "Pluggability model: a scenario is a *composition* of atomic extensions, expressed as data (YAML), not code. Atoms (one Python module, one responsibility) live in extensions/builtin/; scenario recipes live in extensions/scenarios/*.yaml. load_scenario(name) flattens a YAML to list[(module, config)] for AgentSession.create. Same mechanism for built-in and third-party scenarios — no privileged path. Legacy harness/scenarios/tools tree is deleted in Phase 2.5 single sweep. self_modifiable_architecture extends ExtensionManifest with api_version, affects, tier fields; evolution_substrate makes scenarios catalogable and queryable like atoms."
     design: "designs/extension-as-scenario.md"

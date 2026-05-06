@@ -35,3 +35,6 @@ eval-trajectories
 .agentm/
 trajectory.jsonl
 *_trajectory.jsonl
+
+# Subagent worktrees
+.claude/worktrees/

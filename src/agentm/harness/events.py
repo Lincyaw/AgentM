@@ -27,7 +27,7 @@ Layer purity: imports only stdlib + ``agentm.core.abi``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from agentm.core.abi import AgentMessage, Model
 
@@ -44,6 +44,7 @@ class BeforeAgentStartEvent:
     here (use ``context`` / ``before_send_to_llm`` for that).
     """
 
+    CHANNEL: ClassVar[Literal["before_agent_start"]] = "before_agent_start"
     messages: list[AgentMessage]
     system: str | None
 
@@ -56,6 +57,7 @@ class SessionShutdownEvent:
     resources without holding a reference to the session itself.
     """
 
+    CHANNEL: ClassVar[Literal["session_shutdown"]] = "session_shutdown"
     cwd: str
 
 
@@ -74,6 +76,7 @@ class BeforeCompactEvent:
     handler can adjust the in-flight buffer before compaction kicks off.
     """
 
+    CHANNEL: ClassVar[Literal["before_compact"]] = "before_compact"
     messages: list[AgentMessage]
     reason: str  # e.g. "auto_overflow", "manual", "scenario_request"
 
@@ -82,6 +85,7 @@ class BeforeCompactEvent:
 class AfterCompactEvent:
     """Fires after compaction is committed to the SessionManager."""
 
+    CHANNEL: ClassVar[Literal["after_compact"]] = "after_compact"
     summary: str
     kept_message_count: int
     discarded_message_count: int
@@ -92,6 +96,7 @@ class AfterCompactEvent:
 class ChildSessionStartEvent:
     """Fires on the parent bus when a child AgentSession is created."""
 
+    CHANNEL: ClassVar[Literal["child_session_start"]] = "child_session_start"
     child_session_id: str
     parent_session_id: str
     purpose: str  # e.g. "subagent:worker", caller-defined
@@ -101,6 +106,7 @@ class ChildSessionStartEvent:
 class ChildSessionEndEvent:
     """Fires on the parent bus when a child AgentSession terminates."""
 
+    CHANNEL: ClassVar[Literal["child_session_end"]] = "child_session_end"
     child_session_id: str
     parent_session_id: str
     final_message_count: int
@@ -118,6 +124,7 @@ class CostBudgetExceededEvent:
     exceptions cross handler boundaries.
     """
 
+    CHANNEL: ClassVar[Literal["cost_budget_exceeded"]] = "cost_budget_exceeded"
     used: float
     limit: float
     currency: str = "usd"
@@ -132,6 +139,7 @@ class PlanSubmittedEvent:
     correlate the submission to its persisted entry.
     """
 
+    CHANNEL: ClassVar[Literal["plan_submitted"]] = "plan_submitted"
     plan_id: str
     plan_text: str
 
@@ -146,6 +154,7 @@ class SessionReadyEvent:
     similar "post-install scrub" extensions hook here.
     """
 
+    CHANNEL: ClassVar[Literal["session_ready"]] = "session_ready"
     cwd: str
     session_id: str
     tool_names: tuple[str, ...]
@@ -162,22 +171,101 @@ class ExtensionInstallEvent:
     """Fires twice per ``load_extension`` call: ``"start"`` precedes
     ``install(api, config)``; ``"end"`` follows a successful return;
     ``"error"`` follows a thrown exception.
+
+    ``trigger`` distinguishes who initiated the install. ``"bootstrap"``
+    is the default for installs done by ``AgentSession.create`` from a
+    scenario or auto-discovery; the other values flow through
+    ``api.install_atom``. Subscribers (e.g. the TUI) use this to decide
+    whether to surface a "★ self-modify" toast.
     """
 
+    CHANNEL: ClassVar[Literal["extension_install"]] = "extension_install"
     module_path: str
     config: dict[str, Any]
     phase: Literal["start", "end", "error"]
     duration_ns: int = 0
     error: str | None = None
+    trigger: Literal[
+        "bootstrap", "agent", "human", "propose_change_approved"
+    ] = "bootstrap"
 
 
 @dataclass(frozen=True, slots=True)
 class ExtensionReloadEvent:
     """Fires after a transactional reload succeeds or hits rollback failure."""
 
+    CHANNEL: ClassVar[Literal["extension_reload"]] = "extension_reload"
     name: str
     old_hash: str | None
     new_hash: str
+    trigger: Literal["agent", "human", "propose_change_approved"]
+    tier: int
+    error: str | None = None
+
+
+@dataclass(slots=True)
+class BeforeInstallAtomEvent:
+    """Veto hook between internal safety gates and the on-disk write of
+    ``api.install_atom``. Handlers may return ``{"block": True, "reason":
+    "..."}`` to refuse — first truthy block wins. ``config`` is mutable
+    in place; ``source`` and ``name`` are read-only here.
+    """
+
+    CHANNEL: ClassVar[Literal["before_install_atom"]] = "before_install_atom"
+    name: str
+    module_path: str
+    target_path: str
+    source: str
+    config: dict[str, Any]
+    tier: int
+    trigger: Literal["agent", "human", "propose_change_approved"]
+
+
+@dataclass(slots=True)
+class BeforeUnloadAtomEvent:
+    """Veto hook before ``api.unload_atom`` removes an atom. Same contract
+    as :class:`BeforeInstallAtomEvent` — return ``{"block": True, "reason":
+    "..."}`` to refuse; first truthy block wins.
+    """
+
+    CHANNEL: ClassVar[Literal["before_unload_atom"]] = "before_unload_atom"
+    name: str
+    module_path: str
+    tier: int
+    trigger: Literal["agent", "human", "propose_change_approved"]
+
+
+@dataclass(frozen=True, slots=True)
+class CommandDispatchedEvent:
+    """Fires when ``AgentSession.prompt`` dispatches a slash-command to a
+    code-registered handler (i.e. a :class:`CommandSpec` in the session's
+    ``commands`` registry). Observation only; the dispatch has already
+    happened by the time this fires. Use ``input`` events instead if you
+    need to rewrite the text BEFORE dispatch.
+
+    ``args`` is the rest-of-line argument string passed to the command
+    handler. ``owner`` is the module path of the atom that registered the
+    command, mirroring the ``api_register`` attribution.
+    """
+
+    CHANNEL: ClassVar[Literal["command_dispatched"]] = "command_dispatched"
+    name: str
+    args: str
+    owner: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExtensionUnloadEvent:
+    """Fires after a successful unload of an installed atom.
+
+    Mirrors ``ExtensionReloadEvent`` so subscribers (TUI, observability)
+    can treat install/reload/unload as one family. Provider extensions
+    cannot be unloaded; constitution-path atoms cannot be unloaded.
+    """
+
+    CHANNEL: ClassVar[Literal["extension_unload"]] = "extension_unload"
+    name: str
+    module_path: str
     trigger: Literal["agent", "human", "propose_change_approved"]
     tier: int
     error: str | None = None
@@ -191,6 +279,7 @@ class ApiRegisterEvent:
     bodies. Lets subscribers see what each extension contributes.
     """
 
+    CHANNEL: ClassVar[Literal["api_register"]] = "api_register"
     kind: Literal["tool", "command", "provider", "renderer"]
     name: str
     extension: str
@@ -201,6 +290,7 @@ class ApiRegisterEvent:
 class ApiSendUserMessageEvent:
     """Fires when an extension calls ``api.send_user_message``."""
 
+    CHANNEL: ClassVar[Literal["api_send_user_message"]] = "api_send_user_message"
     extension: str
     content: Any
 
@@ -209,6 +299,7 @@ class ApiSendUserMessageEvent:
 class ResourcesDiscoverEvent:
     """Fires when an extension wants peers to contribute resource paths."""
 
+    CHANNEL: ClassVar[Literal["resources_discover"]] = "resources_discover"
     cwd: str
     reason: Literal["startup", "reload"]
 
@@ -217,6 +308,7 @@ class ResourcesDiscoverEvent:
 class ResourceWriteEvent:
     """Fires when a managed resource write lands as a git commit."""
 
+    CHANNEL: ClassVar[Literal["resource_write"]] = "resource_write"
     path: str
     pre_sha: str
     post_sha: str
@@ -233,8 +325,12 @@ __all__ = [
     "ChildSessionEndEvent",
     "ChildSessionStartEvent",
     "CostBudgetExceededEvent",
+    "BeforeInstallAtomEvent",
+    "BeforeUnloadAtomEvent",
+    "CommandDispatchedEvent",
     "ExtensionInstallEvent",
     "ExtensionReloadEvent",
+    "ExtensionUnloadEvent",
     "PlanSubmittedEvent",
     "ResourceWriteEvent",
     "ResourcesDiscoverEvent",

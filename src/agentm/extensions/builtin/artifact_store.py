@@ -344,8 +344,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     def _on_session_shutdown(_event: SessionShutdownEvent) -> None:
         _STORES_BY_SESSION.pop(api.session_id, None)
 
-    api.on("session_ready", store.on_session_ready)
-    api.on("session_shutdown", _on_session_shutdown)
+    api.on(SessionReadyEvent.CHANNEL, store.on_session_ready)
+    api.on(SessionShutdownEvent.CHANNEL, _on_session_shutdown)
     api.register_tool(
         FunctionTool(
             name="artifact_write",

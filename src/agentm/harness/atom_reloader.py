@@ -46,17 +46,26 @@ from typing import Any, Callable
 from agentm.core._internal.catalog import _layout
 from agentm.core._internal.catalog.hashing import compute_atom_hash
 from agentm.core._internal.catalog.manifest import is_constitution_path
-from agentm.core.abi import EventBus, Tool
+from agentm.core.abi import BusPriority, EventBus, Tool
 from agentm.extensions import ExtensionManifest
 from agentm.extensions import discover as discover_mod
 from agentm.extensions import validate as validate_mod
-from agentm.harness.events import ApiRegisterEvent, ExtensionReloadEvent
+from agentm.harness.events import (
+    ApiRegisterEvent,
+    BeforeInstallAtomEvent,
+    BeforeUnloadAtomEvent,
+    ExtensionInstallEvent,
+    ExtensionReloadEvent,
+    ExtensionUnloadEvent,
+)
 from agentm.harness.extension import (
     AtomInfo,
     CommandSpec,
+    InstallAtomResult,
     ProviderConfig,
     ReloadResult,
     Renderer,
+    UnloadAtomResult,
     _ExtensionAPIImpl,
     load_extension,
 )
@@ -132,7 +141,7 @@ class AtomReloader:
         self._command_owners: dict[str, str] = {}
         self._api_factory: Callable[[str], _ExtensionAPIImpl] | None = None
 
-        bus.on("api_register", self._track_registration)
+        bus.on(ApiRegisterEvent.CHANNEL, self._track_registration)
 
     # --- Lifecycle wiring --------------------------------------------------
 
@@ -172,12 +181,17 @@ class AtomReloader:
         """
         original_on = api.on
 
-        def tracked(channel: str, handler: Any) -> Any:
+        def tracked(
+            channel: str,
+            handler: Any,
+            *,
+            priority: int = BusPriority.NORMAL,
+        ) -> Any:
             try:
                 setattr(handler, "_agentm_obs_owner", owner)
             except (AttributeError, TypeError):
                 pass
-            unsub = original_on(channel, handler)
+            unsub = original_on(channel, handler, priority=priority)
             self._handlers_by_atom.setdefault(owner, []).append(unsub)
             return unsub
 
@@ -255,13 +269,39 @@ class AtomReloader:
     def _validate_reload_source(
         self, name: str, module_path: str, new_source: str
     ) -> ExtensionManifest | None:
-        with tempfile.TemporaryDirectory(
-            prefix=f"agentm-reload-{name}-"
-        ) as tmpdir:
+        manifest = self._validate_atom_source(
+            name,
+            module_path,
+            new_source,
+            tag="reload",
+            require_manifest=True,
+        )
+        return manifest
+
+    def _validate_atom_source(
+        self,
+        name: str,
+        module_path: str,
+        new_source: str,
+        *,
+        tag: str,
+        require_manifest: bool,
+    ) -> ExtensionManifest | None:
+        """Run the §11 contract validator on ``new_source`` in a throwaway
+        temp dir. Returns the parsed manifest (or ``None`` if the module did
+        not declare one and ``require_manifest`` is False). Raises on
+        signature/contract violations. ``tag`` distinguishes the temp-dir
+        prefix between reload and install for diagnostics.
+
+        Used by both ``reload_atom`` (the existing atom must keep its name)
+        and ``install_atom`` (a brand-new atom; manifest may be absent for
+        the §11 minimum, though contract validation still runs).
+        """
+        with tempfile.TemporaryDirectory(prefix=f"agentm-{tag}-{name}-") as tmpdir:
             src_path = Path(tmpdir) / f"{name}.py"
             src_path.write_text(new_source, encoding="utf-8")
             spec = importlib.util.spec_from_file_location(
-                f"_agentm_reload_validate_{name}_{uuid.uuid4().hex}",
+                f"_agentm_{tag}_validate_{name}_{uuid.uuid4().hex}",
                 src_path,
             )
             if spec is None or spec.loader is None:
@@ -275,8 +315,7 @@ class AtomReloader:
             positional = [
                 p
                 for p in sig.parameters.values()
-                if p.kind
-                in (
+                if p.kind in (
                     inspect.Parameter.POSITIONAL_ONLY,
                     inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 )
@@ -287,17 +326,20 @@ class AtomReloader:
                 )
 
             manifest = _module_manifest(module)
-            if manifest is None:
+            if manifest is None and require_manifest:
                 return None
-            if manifest.name != name:
+            if manifest is not None and manifest.name != name:
                 raise RuntimeError(
                     f"MANIFEST.name {manifest.name!r} does not match atom name {name!r}"
                 )
+            known = set(self._loaded_by_name)
+            if not require_manifest:
+                known = known | {name}
             issues = validate_mod.validate_extension_contract(
                 module_path=module_path,
                 module=module,
                 src_file=src_path,
-                known_extension_names=set(self._loaded_by_name),
+                known_extension_names=known,
             )
             blocking = [issue for issue in issues if issue.severity == "error"]
             if blocking:
@@ -372,6 +414,12 @@ class AtomReloader:
         previous_api = self._apis.get(atom.module_path)
         if previous_api is not None:
             previous_api.mark_stale()
+        # Capture per-channel rank BEFORE removal so reload can restore the
+        # atom to its original slot. Without this, every reload silently
+        # appends new handlers to the end of each channel's list, which
+        # changes the dispatch order and (under last-non-None-replacement
+        # semantics) flips which atom's voice wins.
+        positions = self._capture_handler_positions(atom.module_path)
         self._remove_handlers(atom.module_path)
         self._remove_registrations(atom.module_path)
         sys.modules.pop(atom.module_path, None)
@@ -388,7 +436,51 @@ class AtomReloader:
             is_provider=atom.is_provider,
         )
         self._apis[atom.module_path]._owner_name = atom.module_path
+        self._restore_handler_positions(atom.module_path, positions)
         discover_mod.reset_cache()
+
+    def _capture_handler_positions(self, owner: str) -> dict[str, int]:
+        """Record, per channel, the index of ``owner``'s first handler so a
+        reload can splice the new install back at the same within-tier slot.
+        Cross-tier ordering is already handled by :class:`BusPriority` via
+        ``bisect.insort``; this is the safety net for atoms that don't
+        declare a priority.
+        """
+        positions: dict[str, int] = {}
+        for channel in self._bus.channels():
+            for idx, sub in enumerate(self._bus.subscriptions_for(channel)):
+                if getattr(sub.handler, "_agentm_obs_owner", None) == owner:
+                    positions[channel] = idx
+                    break
+        return positions
+
+    def _restore_handler_positions(
+        self, owner: str, positions: dict[str, int]
+    ) -> None:
+        """Splice ``owner``'s freshly-registered subscriptions back to
+        ``positions[channel]``. Channels the new install didn't re-subscribe
+        to are skipped; channels added that had no prior anchor stay at the
+        tail.
+        """
+        for channel, anchor_idx in positions.items():
+            subs = self._bus.subscriptions_for(channel)
+            if not subs:
+                continue
+            owner_subs = [
+                sub for sub in subs
+                if getattr(sub.handler, "_agentm_obs_owner", None) == owner
+            ]
+            if not owner_subs:
+                continue
+            non_owner = [
+                sub for sub in subs
+                if getattr(sub.handler, "_agentm_obs_owner", None) != owner
+            ]
+            clamp = min(anchor_idx, len(non_owner))
+            self._bus.replace_subscriptions(
+                channel,
+                non_owner[:clamp] + owner_subs + non_owner[clamp:],
+            )
 
     def _restore_git_path(self, atom: LoadedAtom, pre_sha: str) -> None:
         if not isinstance(self._resource_writer, GitBackedResourceWriter):
@@ -499,7 +591,7 @@ class AtomReloader:
         try:
             self._activate_atom_install(atom)
             self._bus.emit_sync(
-                "extension_reload",
+                ExtensionReloadEvent.CHANNEL,
                 ExtensionReloadEvent(
                     name=name,
                     old_hash=old_hash,
@@ -535,7 +627,7 @@ class AtomReloader:
                 self._loaded_by_name.pop(atom.name, None)
                 self._apis.pop(atom.module_path, None)
                 self._bus.emit_sync(
-                    "extension_reload",
+                    ExtensionReloadEvent.CHANNEL,
                     ExtensionReloadEvent(
                         name=name,
                         old_hash=old_hash,
@@ -611,6 +703,398 @@ class AtomReloader:
     @staticmethod
     def is_constitution_path(path: str) -> bool:
         return is_constitution_path(path)
+
+    # --- Plug-and-play install / unload -----------------------------------
+    #
+    # ``reload_atom`` swaps an atom's source in place. ``install_atom`` adds
+    # a brand-new one at runtime, ``unload_atom`` removes it. The mechanism
+    # reuses the same building blocks: ResourceWriter for the on-disk write,
+    # ``_validate_reload_source``-equivalent for the §11 contract, the
+    # ``_remove_handlers``/``_remove_registrations``/``sys.modules.pop``
+    # cleanup that ``_activate_atom_install`` already does mid-reload.
+    #
+    # The agent-installed module never goes on ``sys.path``: instead we
+    # register it directly into ``sys.modules`` under a synthetic dotted
+    # name. That isolates agent-written code from the rest of the package
+    # (no accidental shadowing of builtin atoms) and lets us discard it
+    # cleanly on unload.
+
+    _AGENT_ATOM_MODULE_PREFIX = "_agentm_user_atom__"
+
+    def install_atom(
+        self,
+        *,
+        name: str,
+        source: str,
+        target_path: str | None,
+        config: dict[str, Any] | None,
+        rationale: str | None,
+        agent_initiated: bool,
+    ) -> InstallAtomResult:
+        if self._api_factory is None:
+            raise RuntimeError(
+                "AtomReloader.set_api_factory must be called before install_atom"
+            )
+        if not name or not name.isidentifier():
+            return InstallAtomResult(
+                ok=False,
+                name=name,
+                module_path=None,
+                target_path=None,
+                new_hash=None,
+                file_created=False,
+                error=f"invalid atom name {name!r}: must be a Python identifier",
+            )
+        if name in self._loaded_by_name:
+            return InstallAtomResult(
+                ok=False,
+                name=name,
+                module_path=None,
+                target_path=None,
+                new_hash=None,
+                file_created=False,
+                error=f"atom {name!r} is already loaded; use reload_atom to replace it",
+            )
+
+        ext_cfg = dict(config or {})
+        module_path = f"{self._AGENT_ATOM_MODULE_PREFIX}{name}"
+
+        target_file = self._resolve_install_target(name, target_path)
+        if is_constitution_path(str(target_file)):
+            return InstallAtomResult(
+                ok=False,
+                name=name,
+                module_path=None,
+                target_path=str(target_file),
+                new_hash=None,
+                file_created=False,
+                error=(
+                    f"refusing to install at constitution path {target_file}; "
+                    f"agent-installed atoms must live outside the constitution"
+                ),
+            )
+
+        try:
+            manifest = self._validate_install_source(name, module_path, source)
+        except Exception as exc:  # noqa: BLE001
+            return InstallAtomResult(
+                ok=False,
+                name=name,
+                module_path=module_path,
+                target_path=str(target_file),
+                new_hash=None,
+                file_created=False,
+                error=str(exc),
+            )
+
+        if manifest is not None and manifest.tier >= 2:
+            return InstallAtomResult(
+                ok=False,
+                name=name,
+                module_path=module_path,
+                target_path=str(target_file),
+                new_hash=None,
+                file_created=False,
+                error=(
+                    f"refusing to install tier-{manifest.tier} atom {name!r}: "
+                    f"agent-installed atoms must be tier 1 (promotion needs human review)"
+                ),
+            )
+
+        effective_tier = manifest.tier if manifest is not None else 1
+        trigger: Any = "agent" if agent_initiated else "human"
+        veto_reason = self._collect_block_veto(
+            BeforeInstallAtomEvent.CHANNEL,
+            BeforeInstallAtomEvent(
+                name=name,
+                module_path=module_path,
+                target_path=str(target_file),
+                source=source,
+                config=ext_cfg,
+                tier=effective_tier,
+                trigger=trigger,
+            ),
+        )
+        if veto_reason is not None:
+            return InstallAtomResult(
+                ok=False,
+                name=name,
+                module_path=module_path,
+                target_path=str(target_file),
+                new_hash=None,
+                file_created=False,
+                error=f"vetoed by policy: {veto_reason}",
+            )
+
+        file_existed = target_file.exists()
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        write_result = self._run_coro_sync(
+            self._resource_writer.write(
+                str(target_file),
+                source.encode("utf-8"),
+                rationale=rationale or f"install atom {name}",
+                author="agent" if agent_initiated else "human",
+            )
+        )
+        if write_result.error is not None:
+            return InstallAtomResult(
+                ok=False,
+                name=name,
+                module_path=module_path,
+                target_path=str(target_file),
+                new_hash=write_result.commit_sha_after,
+                file_created=False,
+                error=write_result.error,
+            )
+
+        new_hash = (
+            write_result.commit_sha_after
+            or self._advisory_hash(source)
+        )
+        effective_manifest = manifest or _default_manifest(name)
+
+        # Register the module bytes synthetically so load_extension's
+        # importlib.import_module call returns it.
+        try:
+            self._import_synthetic_module(module_path, target_file)
+        except Exception as exc:  # noqa: BLE001
+            self._cleanup_failed_install(target_file, file_existed, write_result)
+            return InstallAtomResult(
+                ok=False,
+                name=name,
+                module_path=module_path,
+                target_path=str(target_file),
+                new_hash=new_hash,
+                file_created=not file_existed,
+                error=f"import failed: {exc}",
+            )
+
+        self._bus.emit_sync(
+            ExtensionInstallEvent.CHANNEL,
+            ExtensionInstallEvent(
+                module_path=module_path,
+                config=dict(ext_cfg),
+                phase="start",
+                trigger=trigger,
+            ),
+        )
+
+        try:
+            api = self._api_factory(module_path)
+            self._finish_install_sync(module_path, api, ext_cfg)
+        except Exception as exc:  # noqa: BLE001
+            self._remove_handlers(module_path)
+            self._remove_registrations(module_path)
+            sys.modules.pop(module_path, None)
+            self._cleanup_failed_install(target_file, file_existed, write_result)
+            self._bus.emit_sync(
+                ExtensionInstallEvent.CHANNEL,
+                ExtensionInstallEvent(
+                    module_path=module_path,
+                    config=dict(ext_cfg),
+                    phase="error",
+                    error=repr(exc),
+                    trigger=trigger,
+                ),
+            )
+            return InstallAtomResult(
+                ok=False,
+                name=name,
+                module_path=module_path,
+                target_path=str(target_file),
+                new_hash=new_hash,
+                file_created=not file_existed,
+                error=f"install({module_path}) failed: {exc}",
+            )
+
+        # Bookkeeping: register as a loaded atom so reload_atom / unload_atom
+        # / list_atoms see it. record_loaded_atom imports the module again,
+        # but since it's already in sys.modules the import is a fast hit.
+        self.record_loaded_atom(module_path, ext_cfg, is_provider=False)
+        self._apis[module_path]._owner_name = module_path
+
+        self._bus.emit_sync(
+            ExtensionInstallEvent.CHANNEL,
+            ExtensionInstallEvent(
+                module_path=module_path,
+                config=dict(ext_cfg),
+                phase="end",
+                trigger=trigger,
+            ),
+        )
+
+        if effective_manifest.tier == 2:
+            logger.warning(
+                "tier-2 install proceeds in MVP for %s (no approval gate)",
+                name,
+            )
+
+        return InstallAtomResult(
+            ok=True,
+            name=name,
+            module_path=module_path,
+            target_path=str(target_file),
+            new_hash=new_hash,
+            file_created=not file_existed,
+        )
+
+    def unload_atom(
+        self,
+        name: str,
+        *,
+        agent_initiated: bool = True,
+        rationale: str | None = None,
+    ) -> UnloadAtomResult:
+        del rationale  # reserved for future audit log; unused for now
+        atom = self._loaded_by_name.get(name)
+        if atom is None:
+            return UnloadAtomResult(
+                ok=False,
+                name=name,
+                module_path=None,
+                error=f"unknown atom {name!r}",
+            )
+        if atom.is_provider:
+            return UnloadAtomResult(
+                ok=False,
+                name=name,
+                module_path=atom.module_path,
+                error=(
+                    f"refusing to unload provider {name!r}: leaves the loop "
+                    f"without a stream_fn"
+                ),
+            )
+        if is_constitution_path(str(atom.file_path)):
+            return UnloadAtomResult(
+                ok=False,
+                name=name,
+                module_path=atom.module_path,
+                error=(
+                    f"refusing to unload constitution-path atom {atom.file_path}"
+                ),
+            )
+
+        manifest = atom.manifest or _default_manifest(name)
+        trigger: Any = "agent" if agent_initiated else "human"
+        if manifest.tier == 2:
+            logger.warning(
+                "tier-2 unload proceeds in MVP for %s (no approval gate)",
+                name,
+            )
+
+        veto_reason = self._collect_block_veto(
+            BeforeUnloadAtomEvent.CHANNEL,
+            BeforeUnloadAtomEvent(
+                name=name,
+                module_path=atom.module_path,
+                tier=manifest.tier,
+                trigger=trigger,
+            ),
+        )
+        if veto_reason is not None:
+            return UnloadAtomResult(
+                ok=False,
+                name=name,
+                module_path=atom.module_path,
+                error=f"vetoed by policy: {veto_reason}",
+            )
+
+        previous_api = self._apis.get(atom.module_path)
+        if previous_api is not None:
+            previous_api.mark_stale()
+        self._remove_handlers(atom.module_path)
+        self._remove_registrations(atom.module_path)
+        sys.modules.pop(atom.module_path, None)
+        self._loaded_by_module.pop(atom.module_path, None)
+        self._loaded_by_name.pop(atom.name, None)
+        self._apis.pop(atom.module_path, None)
+
+        self._bus.emit_sync(
+            ExtensionUnloadEvent.CHANNEL,
+            ExtensionUnloadEvent(
+                name=name,
+                module_path=atom.module_path,
+                trigger=trigger,
+                tier=manifest.tier,
+            ),
+        )
+
+        return UnloadAtomResult(
+            ok=True,
+            name=name,
+            module_path=atom.module_path,
+        )
+
+    def _collect_block_veto(self, channel: str, event: Any) -> str | None:
+        """First-truthy ``{"block": True, "reason": "..."}`` from sync
+        handlers on ``channel``, else ``None``. Mirrors the ``tool_call``
+        block contract — first refusal wins; later handlers still run for
+        observability but cannot un-veto.
+        """
+        for value in self._bus.emit_sync(channel, event):
+            if isinstance(value, dict) and value.get("block"):
+                return str(value.get("reason") or "blocked")
+        return None
+
+    def _resolve_install_target(self, name: str, target_path: str | None) -> Path:
+        if target_path is None:
+            return (Path(self._cwd) / ".agentm" / "atoms" / f"{name}.py").resolve()
+        candidate = Path(target_path)
+        if not candidate.is_absolute():
+            candidate = Path(self._cwd) / candidate
+        return candidate.resolve()
+
+    def _validate_install_source(
+        self, name: str, module_path: str, new_source: str
+    ) -> ExtensionManifest | None:
+        return self._validate_atom_source(
+            name,
+            module_path,
+            new_source,
+            tag="install",
+            require_manifest=False,
+        )
+
+    @staticmethod
+    def _import_synthetic_module(module_path: str, file_path: Path) -> ModuleType:
+        spec = importlib.util.spec_from_file_location(module_path, file_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"could not build spec for {module_path!r}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_path] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(module_path, None)
+            raise
+        return module
+
+    def _cleanup_failed_install(
+        self,
+        target_file: Path,
+        file_existed: bool,
+        write_result: Any,
+    ) -> None:
+        # Best-effort: if we wrote a brand-new file but the install raised,
+        # roll the file back so the on-disk state matches the running session.
+        # For pre-existing files we restore via git when possible, else leave
+        # alone so the human can inspect.
+        if not file_existed:
+            try:
+                target_file.unlink()
+            except OSError:
+                pass
+            if (
+                isinstance(self._resource_writer, GitBackedResourceWriter)
+                and write_result.committed
+                and write_result.commit_sha_before is not None
+            ):
+                try:
+                    self._resource_writer._run_git_sync(  # type: ignore[attr-defined]
+                        ("reset", "--hard", write_result.commit_sha_before)
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
     def current_version_for_path(self, path: str) -> str | None:
         if isinstance(self._resource_writer, GitBackedResourceWriter):

@@ -135,7 +135,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         # this hook plugins under ``~/.claude/plugins/.../agents/`` would
         # never surface in the ``<available_agents>`` block.
         responses = await api.events.emit(
-            "resources_discover",
+            ResourcesDiscoverEvent.CHANNEL,
             ResourcesDiscoverEvent(cwd=api.cwd, reason="startup"),
         )
         for response in responses:
@@ -165,5 +165,5 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         event.system = updated
         return {"system": updated}
 
-    api.on("session_ready", _populate)
-    api.on("before_agent_start", _inject)
+    api.on(SessionReadyEvent.CHANNEL, _populate)
+    api.on(BeforeAgentStartEvent.CHANNEL, _inject)
