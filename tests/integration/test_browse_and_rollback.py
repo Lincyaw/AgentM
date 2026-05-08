@@ -169,7 +169,7 @@ async def _build_session(
             cwd=str(tmp_path),
             extensions=[
                 (f"{pkg}.tool_demo", {}),
-                ("agentm.extensions.builtin.tool_catalog", {}),
+                ("_agentm_contrib__tool_catalog", {}),
             ],
             provider=(f"{pkg}.provider", {}),
             resource_loader=InMemoryResourceLoader(),

@@ -1,0 +1,69 @@
+id: AFC-0026
+name: "Non-termination / endless loop"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: termination_fault
+  subclass: unbounded_loop
+  mechanism: |
+    Agent never stops on its own — emits indefinitely, repeats identical
+    or near-identical steps, refuses to commit to a final answer.
+    Combination of AEGIS FM-1.5 (no termination conditions) and FM-1.3
+    (add redundant steps): the loop guard is broken AND the agent has
+    a positive incentive to keep going. Three concrete sub-shapes the
+    AEGIS FM-1.3 prompt names: (a) endless repetition of identical
+    steps; (b) circular discussions without progress; (c) infinite
+    verification cycles where the agent keeps re-checking already-
+    verified claims. Distinct from AFC-0027: the agent doesn't *know*
+    it's looping, only the runtime budget stops it.
+
+activation:
+  required:
+    - "no hard step / time / token cap, OR cap is far above task's natural length"
+    - "agent's stop condition is self-judged"
+  amplifying:
+    - "ambiguous success criterion"
+    - "open-ended exploration tasks"
+    - "verification step has no progress check — agent can re-verify the same claim indefinitely (FM-1.3 circular-verification sub-shape)"
+  timescale: minutes_to_hours
+
+observable:
+  metrics:
+    - predicate: outcome.task.unbounded
+      direction: up
+      shape: monotonic_linear
+    - predicate: trajectory.step.looped
+      shape: spike
+  logs:
+    - pattern: "step N+k semantically identical to step N for k > 1"
+    - pattern: "agent emits 'let me think more' repeatedly without progress"
+    - pattern: "agent re-runs the same verification cycle without state advancing"
+  traces:
+    - pattern: "step similarity matrix shows long high-similarity ridges"
+  detection_difficulty: easy
+
+downstream_effects:
+  - predicate: system.budget.exhausted
+    confidence: high
+    delay: minutes_to_hours
+  - predicate: outcome.task.failed
+    confidence: high
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: self_initiated_termination
+  - has_component: open_ended_action_space
+
+evidence:
+  - source: "AEGIS (arXiv 2509.14295) Appendix E.2 FM-1.5 'Remove termination conditions'"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+  - source: "AEGIS (arXiv 2509.14295) Appendix E.2 FM-1.3 'Add redundant steps'"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import fnmatch
 import os
-from pathlib import PurePosixPath
 import shutil
 from typing import Any, Protocol
 
@@ -193,6 +191,7 @@ def _find_fallback(
         raise Exception("Operation aborted")
     results: list[str] = []
     ignore = _ignore_spec(root, [".git/", "node_modules/"])
+    match_spec = _compile_pattern(pattern)
     limit_hit = False
     for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=True):
         rel_dir = os.path.relpath(dirpath, root)
@@ -203,7 +202,7 @@ def _find_fallback(
             if ignore.match_file(rel_path) or ignore.match_file(rel_path + "/"):
                 continue
             kept_dirs.append(dirname)
-            if _matches(pattern, rel_path, dirname):
+            if match_spec.match_file(rel_path):
                 results.append(rel_path + "/")
                 if len(results) >= limit:
                     limit_hit = True
@@ -214,7 +213,7 @@ def _find_fallback(
             rel_path = f"{rel_dir_posix}/{filename}".strip("/")
             if ignore.match_file(rel_path):
                 continue
-            if _matches(pattern, rel_path, filename):
+            if match_spec.match_file(rel_path):
                 results.append(rel_path)
                 if len(results) >= limit:
                     limit_hit = True
@@ -222,17 +221,14 @@ def _find_fallback(
     return sorted(results), limit_hit
 
 
-def _matches(pattern: str, rel_path: str, name: str) -> bool:
-    if "/" not in pattern:
-        return fnmatch.fnmatch(name, pattern)
-    adjusted = pattern
-    if not pattern.startswith("/") and not pattern.startswith("**/") and pattern != "**":
-        adjusted = f"**/{pattern}"
-    return PurePosixPath(rel_path).match(adjusted.lstrip("/"))
+def _compile_pattern(pattern: str) -> pathspec.GitIgnoreSpec:
+    # Bare patterns (no slash) match basename anywhere in the tree.
+    expanded = pattern if "/" in pattern else f"**/{pattern}"
+    return pathspec.GitIgnoreSpec.from_lines([expanded.lstrip("/")])
 
 
 def _ignore_spec(root: str, extra: list[str]) -> pathspec.PathSpec:
-    return pathspec.PathSpec.from_lines("gitignore", load_gitignore_patterns(root, extra=extra))
+    return pathspec.GitIgnoreSpec.from_lines(load_gitignore_patterns(root, extra=extra))
 
 
 def _normalize_custom_paths(paths: list[str], root: str) -> list[str]:

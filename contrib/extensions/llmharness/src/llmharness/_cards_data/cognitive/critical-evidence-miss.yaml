@@ -1,0 +1,65 @@
+id: AFC-0030
+name: "Critical-evidence miss"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: cognitive_fault
+  subclass: evidence_missed
+  mechanism: |
+    Agent has the critical evidence in front of it (in the issue
+    report, tool trace, search result) but does not attend to it.
+    Distinct from AFC-0003 (item not in retrieved set): here the item
+    *was* retrieved / *is* in the visible context, but the agent's
+    reasoning skips over it. EAGER's RCLAgent 'Critical Trace Miss'
+    (53% of failures in that MAS) and Watson's `django-14238` case
+    study (agent ignores explicit `__subclasscheck__` hint) are both
+    instances.
+
+activation:
+  required:
+    - "the critical evidence is present in agent's input context"
+    - "agent's reasoning span does not reference it"
+  amplifying:
+    - "context is long; the critical span is buried"
+    - "salient distractor near the buried critical evidence"
+  timescale: seconds
+
+observable:
+  metrics:
+    - predicate: quality.observation.missed
+      direction: up
+      shape: spike
+  logs:
+    - pattern: "input context contains entity X; agent's reasoning never mentions X"
+  traces:
+    - pattern: "PromptExp / attribution shows critical token has near-zero attention/attribution"
+  detection_difficulty: silent
+
+downstream_effects:
+  - predicate: quality.plan.inefficient
+    confidence: high
+    delay: seconds
+  - predicate: outcome.task.failed
+    confidence: high
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: long_context_reasoning
+
+evidence:
+  - source: "EAGER (arXiv 2603.21522) Table 1: RCLAgent Critical Trace Miss 52.63%"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+  - source: "Watson (ASE 2025, arXiv 2411.03455) §IV-C case study django-14238"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+  - source: "AgentDiagnose (EMNLP demos.15) §3: 'observation reading' competency"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

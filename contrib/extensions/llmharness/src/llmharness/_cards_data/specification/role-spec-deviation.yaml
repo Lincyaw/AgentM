@@ -1,0 +1,55 @@
+id: AFC-0017
+name: "Role specification deviation"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: specification_fault
+  subclass: role_spec_deviation
+  mechanism: |
+    In a multi-agent system, an agent oversteps its assigned role and
+    acts on responsibilities that belong to another agent. E.g., a
+    'critic' agent starts producing solutions, or a 'coder' agent
+    starts evaluating product strategy. Distorts the orchestration
+    pattern the system was designed around.
+
+activation:
+  required:
+    - "multi-agent topology with explicit role definitions"
+    - "agent emits an action outside its role's allowed action set"
+  amplifying:
+    - "role descriptions are weak ('helpful assistant') vs strong ('only call tool X')"
+    - "task requires capability the agent's role doesn't grant"
+  timescale: seconds
+
+observable:
+  metrics:
+    - predicate: agent_state.role.deviated
+      direction: up
+      shape: step
+  logs:
+    - pattern: "agent X emits an action that should be issued by agent Y"
+  traces:
+    - pattern: "actor span violates declared role's action whitelist"
+  detection_difficulty: medium
+
+downstream_effects:
+  - predicate: coordination.peer.ignored
+    confidence: medium
+    delay: seconds
+  - predicate: outcome.task.failed
+    confidence: medium
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: multi_agent
+  - has_component: explicit_role_definitions
+
+evidence:
+  - source: "AEGIS (arXiv 2509.14295) Appendix E.2 FM-1.2 'Role specification deviation'"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

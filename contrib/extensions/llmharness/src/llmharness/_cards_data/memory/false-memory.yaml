@@ -1,0 +1,60 @@
+id: AFC-0002
+name: "False memory / fabricated recall"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: memory_fault
+  subclass: hallucinated_recall
+  mechanism: |
+    The agent recalls events, observations or tool results that never
+    happened — typically when prior context is incomplete and the model
+    fills the gap with plausible-but-fabricated content. Distinct from
+    over-simplification: the missing detail is *invented*, not just
+    elided. The fabricated memory then drives downstream planning as if
+    real.
+
+activation:
+  required:
+    - "context contains gaps the LLM is asked to reason over"
+    - "no retrieval grounding step before recall"
+  amplifying:
+    - "tasks with many entities to track (WebShop hallucinations 8/50 traj)"
+    - "low-temperature sampling can mask, high-temperature amplifies"
+  timescale: seconds
+
+observable:
+  metrics:
+    - predicate: agent_state.memory.fabricated
+      direction: up
+      shape: spike
+  logs:
+    - pattern: "agent statement attributes claim to a tool call / observation that is absent from history"
+  traces:
+    - pattern: "no upstream span produced the cited content"
+  detection_difficulty: silent
+
+downstream_effects:
+  - predicate: quality.plan.infeasible
+    confidence: high
+    delay: seconds
+  - predicate: outcome.task.failed
+    confidence: high
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: long_context_history
+  - has_component: free_form_reasoning_step
+
+evidence:
+  - source: "AgentDebug (arXiv 2509.25370) §A.2 Table 2: Memory.Hallucination (False Memory)"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+  - source: "AgentDebug Fig 12 WebShop: hallucination 8/50 traj — tied for largest memory failure mode"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

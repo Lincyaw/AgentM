@@ -1,0 +1,66 @@
+id: AFC-0034
+name: "Under-specified objective"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: specification_fault
+  subclass: objective_unactionable
+  mechanism: |
+    The task statement itself is exploratory or vague — no concrete
+    success criterion, no measurable target, no enumerated subgoals.
+    Distinct from AFC-0016 (agent abandons a clear spec) and AFC-0018
+    (agent drifts away from a clear goal): here the spec is broken at
+    issuance time, before the agent makes any decision. AgentDiagnose
+    Figure 4 case A: "Find the source code or model information for a
+    text analysis deep learning model and navigate through its related
+    models or academic papers" — exploratory verbs, no termination
+    criterion, no actionable target.
+
+activation:
+  required:
+    - "task statement contains exploratory verbs (find, explore, look at) without a stated success criterion"
+    - "no machine-checkable assertion the agent can use to know it is done"
+  amplifying:
+    - "long action horizon allowed (no externally bounded budget)"
+    - "rich tool environment that rewards open-ended exploration"
+  timescale: minutes_to_hours
+
+observable:
+  metrics:
+    - predicate: agent_state.goal.unactionable
+      direction: up
+      shape: step
+  logs:
+    - pattern: "task statement lacks a sentence containing 'return', 'output', 'fix', 'verify', or another concrete deliverable verb"
+    - pattern: "agent's first reasoning step asks 'what counts as success here?'"
+  traces:
+    - pattern: "no expected-output schema attached to the task; verifier rubric is absent"
+  detection_difficulty: easy
+
+downstream_effects:
+  - predicate: outcome.task.drifted
+    confidence: high
+    delay: minutes_to_hours
+  - predicate: quality.plan.inefficient
+    confidence: high
+    delay: seconds
+  - predicate: outcome.task.unbounded
+    confidence: medium
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: human_authored_task_input
+
+evidence:
+  - source: "AgentDiagnose (EMNLP 2025 demos.15) §3 'objective quality' competency + Appendix A 1-4 rubric"
+    type: paper
+    extracted_by: subagent_review
+    human_reviewed: true
+  - source: "AgentDiagnose Figure 4 case A: exploratory objective example"
+    type: paper
+    extracted_by: subagent_review
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

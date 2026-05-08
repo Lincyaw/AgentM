@@ -1,0 +1,77 @@
+id: AFC-0035
+name: "Defective generated artifact"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: action_fault
+  subclass: artifact_semantically_wrong
+  mechanism: |
+    The agent issues a syntactically and parametrically valid action
+    that successfully produces an artifact (code patch, edit, document,
+    SQL query) — but the artifact itself is semantically wrong on its
+    own merits. The plan was reasonable, the parameters were valid,
+    the file was edited at the right place; only when downstream
+    verification (test failure, lint failure, runtime error) runs does
+    the defect surface. EAGER's largest single bucket: 48.28% of
+    AutoGen-Code failures and 46.15% of SWE-Agent failures. Two
+    canonical subtypes:
+      - 'incorrect_code': functional logic wrong (algorithm flaw,
+        off-by-one, wrong API).
+      - 'edit_error': diff applies but mangles indentation, applies to
+        wrong hunk despite right file, or breaks unrelated code (26%
+        SWE-Agent — EAGER Table 1).
+    Distinct from AFC-0014 (Format Error: parser-rejected) and AFC-0015
+    (Parameter Error: wrong service/metric ID).
+
+activation:
+  required:
+    - "agent emits an action that produces a content artifact (code, patch, document, query)"
+    - "artifact passes the runtime's syntactic / parametric validation"
+    - "downstream test / verifier / consumer rejects the artifact"
+  amplifying:
+    - "tasks requiring multi-statement reasoning held in working context (math + coding)"
+    - "weak in-context tests / no test-driven loop"
+    - "diffs that span context boundaries (large patches)"
+  timescale: seconds
+
+observable:
+  metrics:
+    - predicate: trajectory.artifact.defective
+      direction: up
+      shape: spike
+  logs:
+    - pattern: "downstream test reports failure on artifact produced by valid-looking action"
+    - pattern: "patch hunk applied at wrong location despite agent referencing correct file"
+  traces:
+    - pattern: "tool_call span succeeded; subsequent verification span failed; no parser/parameter error in between"
+  detection_difficulty: silent
+
+downstream_effects:
+  - predicate: trajectory.step.repeated
+    confidence: high
+    delay: seconds
+  - predicate: outcome.task.failed
+    confidence: high
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: artifact_producing_tool
+  - has_component: downstream_verification_or_consumer
+
+evidence:
+  - source: "EAGER (arXiv 2603.21522) Table 1 — AutoGen-Code Incorrect Code 48.28%, SWE-Agent Incorrect Code 46.15%"
+    type: paper
+    extracted_by: subagent_review
+    human_reviewed: true
+  - source: "EAGER Table 1 — SWE-Agent Editing Error 25.64% (subsumed as edit_error subclass)"
+    type: paper
+    extracted_by: subagent_review
+    human_reviewed: true
+  - source: "AgenTracer (arXiv 2509.03312) Appendix B prompt-templates: code-mutation injection examples (return-shape, parameter swap, value-corruption) operationalize this card's failure surface"
+    type: paper
+    extracted_by: subagent_review
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

@@ -67,7 +67,7 @@ def _install_hypothesis_module() -> str:
     if _HYPOTHESIS_MODULE in sys.modules:
         return _HYPOTHESIS_MODULE
     repo_root = Path(__file__).resolve().parents[2]
-    file_path = repo_root / "scenarios" / "rca" / "src" / "agentm_rca" / "tools" / "hypothesis_tools.py"
+    file_path = repo_root / "contrib" / "scenarios" / "rca" / "src" / "agentm_rca" / "tools" / "hypothesis_tools.py"
     spec = importlib.util.spec_from_file_location(_HYPOTHESIS_MODULE, file_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

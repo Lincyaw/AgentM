@@ -19,13 +19,28 @@ from agentm.harness.session_manager import SessionManager
 
 @dataclass
 class AgentSessionConfig:
-    """Knobs handed to :func:`AgentSession.create`. Only ``cwd``, ``provider``
-    are required; everything else has a sane default for embedded use."""
+    """Knobs handed to :func:`AgentSession.create`. Only ``cwd`` is required.
+
+    ``provider`` may be ``None`` when this config is handed to
+    :meth:`ExtensionAPI.spawn_child_session`; the spawn factory then
+    automatically wires the ``inherit_provider`` builtin so the child re-uses
+    the parent's active :class:`ProviderConfig`. For root sessions, ``provider``
+    must resolve to a real provider tuple either directly here or via the
+    ``extensions`` list.
+    """
 
     cwd: str
-    provider: tuple[str, dict[str, Any]]
+    provider: tuple[str, dict[str, Any]] | None = None
     extensions: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     scenario: str | None = None
+    extra_extensions: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    """Atoms appended after the primary load step (auto-discover or scenario).
+
+    Used by ``--extension`` on the CLI to mount third-party atoms on top of
+    a base scenario or the default builtin discovery without forcing the
+    user to copy the entire base list into a custom manifest. Ignored when
+    ``no_extensions`` is set or when ``extensions`` is supplied explicitly
+    (in which case the caller already controls the full list)."""
     no_extensions: bool = False
     no_skills: bool = False
     no_prompt_templates: bool = False
