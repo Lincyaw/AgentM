@@ -38,9 +38,10 @@ build-backend = "uv_build"
 agentm = ["py.typed", "modes/*.tcss"]
 
 [tool.uv.workspace]
-# Explicitly list nested projects; other scenarios/* are pure manifests with
-# no pyproject.toml and must NOT be picked up as workspace members.
-members = ["scenarios/llmharness", "scenarios/rca"]
+# Explicitly list nested projects under contrib/. Other contrib/scenarios/*
+# entries are pure manifests with no pyproject.toml and must NOT be picked
+# up as workspace members.
+members = ["contrib/extensions/llmharness", "contrib/scenarios/rca"]
 
 [tool.pytest.ini_options]
 # UI tests exercise the Textual TUI; they pass but don't map to any
@@ -52,4 +53,4 @@ markers = [
 # Nested workspace projects own their own tests/ trees and pyproject. The
 # top-level pytest must not recurse into them — both define a ``tests``
 # package and the import paths collide.
-addopts = "-m 'not ui' --ignore=scenarios/llmharness --ignore=scenarios/rca"
+addopts = "-m 'not ui' --ignore=contrib/extensions/llmharness --ignore=contrib/scenarios/rca"

@@ -26,6 +26,12 @@ from typing import Any
 
 from agentm.extensions import ExtensionManifest
 
+CONTRIB_ATOM_MODULE_PREFIX = "_agentm_contrib__"
+"""Synthetic module-name prefix for atoms discovered under
+``<cwd>/contrib/extensions/<name>.py``. Distinct from the user-atom prefix
+so reload paths can tell research-line extras apart from agent-installed
+tier-1 atoms."""
+
 USER_ATOM_MODULE_PREFIX = "_agentm_user_atom__"
 """Synthetic module-name prefix shared with :class:`AtomReloader`. Atoms
 auto-discovered from ``<cwd>/.agentm/atoms/`` are imported under
@@ -122,33 +128,25 @@ def discover_builtin() -> dict[str, BuiltinEntry]:
     return entries
 
 
-def discover_user_atoms(cwd: Path) -> dict[str, BuiltinEntry]:
-    """Return ``name → BuiltinEntry`` for every user-installed atom under
-    ``<cwd>/.agentm/atoms/<name>.py``.
+def _discover_flat_atoms(
+    atoms_dir: Path, *, module_prefix: str, label: str
+) -> dict[str, BuiltinEntry]:
+    """Walk ``atoms_dir`` for top-level ``<name>.py`` files and return
+    ``name → BuiltinEntry``.
 
-    These are atoms previously committed by ``api.install_atom`` (canonical
-    landing zone documented on ``tool_catalog.install_atom``). On a fresh
-    session they would otherwise be invisible — the framework loader only
-    walks ``agentm/extensions/builtin/`` — which breaks the plug-and-play
-    promise across process restarts. Auto-loading them here keeps the
-    catalog and the running session in sync without forcing the user to
-    re-execute ``install_atom`` every boot.
-
-    Returned entries use a synthetic module path ``_agentm_user_atom__<name>``
-    so they don't shadow real ``agentm.*`` packages and so reload/unload
-    paths in :class:`AtomReloader` can address the same module identity.
+    Each file becomes a ``BuiltinEntry`` whose ``module_path`` is the
+    synthetic ``f"{module_prefix}{stem}"``, registered into ``sys.modules``
+    so reload paths can address it without re-executing.
 
     Errors:
-    - File-level :class:`SyntaxError` / :class:`ImportError` propagate so the
-      caller can decide whether to skip or fail loudly. The harness's
-      auto-discovery branch catches these and downgrades to a diagnostic.
-    - ``RuntimeError`` if the module declares no ``MANIFEST``, the manifest's
-      ``name`` disagrees with the file stem, or the file declares
-      ``tier >= 2`` (agent-installed atoms are tier-1 by contract — we
-      refuse to silently auto-load anything privileged).
+    - File-level :class:`SyntaxError` / :class:`ImportError` propagate so
+      the caller can decide whether to skip or fail loudly.
+    - ``RuntimeError`` if the module declares no ``MANIFEST``, the
+      manifest's ``name`` disagrees with the file stem, or the file
+      declares ``tier >= 2`` (auto-discovery refuses to silently load
+      anything privileged — re-install via a scenario manifest if intended).
     """
 
-    atoms_dir = cwd / ".agentm" / "atoms"
     if not atoms_dir.is_dir():
         return {}
 
@@ -157,36 +155,44 @@ def discover_user_atoms(cwd: Path) -> dict[str, BuiltinEntry]:
         if path.name.startswith("_"):
             continue
         stem = path.stem
-        module_path = f"{USER_ATOM_MODULE_PREFIX}{stem}"
-        spec = importlib.util.spec_from_file_location(module_path, path)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"could not build import spec for {path!s}")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_path] = module
-        try:
-            spec.loader.exec_module(module)
-        except Exception:
-            sys.modules.pop(module_path, None)
-            raise
+        module_path = f"{module_prefix}{stem}"
+        # Idempotent: a previous discovery (or explicit prime) may have
+        # already registered the synthetic module. Re-executing every call
+        # would reset module-level state and break callers that hold the
+        # original import.
+        existing = sys.modules.get(module_path)
+        if existing is not None:
+            module = existing
+        else:
+            spec = importlib.util.spec_from_file_location(module_path, path)
+            if spec is None or spec.loader is None:
+                raise RuntimeError(f"could not build import spec for {path!s}")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_path] = module
+            try:
+                spec.loader.exec_module(module)
+            except Exception:
+                sys.modules.pop(module_path, None)
+                raise
 
         manifest_obj: Any = getattr(module, "MANIFEST", None)
         if not isinstance(manifest_obj, ExtensionManifest):
             sys.modules.pop(module_path, None)
             raise RuntimeError(
-                f"user atom {path!s} is missing a module-level "
+                f"{label} {path!s} is missing a module-level "
                 f"MANIFEST: ExtensionManifest constant"
             )
         if manifest_obj.name != stem:
             sys.modules.pop(module_path, None)
             raise RuntimeError(
-                f"user atom {path!s} has MANIFEST.name="
+                f"{label} {path!s} has MANIFEST.name="
                 f"{manifest_obj.name!r} which disagrees with file stem "
                 f"{stem!r}"
             )
         if manifest_obj.tier >= 2:
             sys.modules.pop(module_path, None)
             raise RuntimeError(
-                f"user atom {path!s} declares tier={manifest_obj.tier}; "
+                f"{label} {path!s} declares tier={manifest_obj.tier}; "
                 "auto-discovery refuses to load tier>=2 atoms — re-install "
                 "them explicitly through a scenario manifest if intended"
             )
@@ -199,10 +205,62 @@ def discover_user_atoms(cwd: Path) -> dict[str, BuiltinEntry]:
     return entries
 
 
+def discover_user_atoms(cwd: Path) -> dict[str, BuiltinEntry]:
+    """Atoms previously committed by ``api.install_atom`` to
+    ``<cwd>/.agentm/atoms/<name>.py``. Auto-loaded so the catalog and the
+    running session stay in sync across process restarts without forcing
+    the user to re-execute ``install_atom`` every boot."""
+
+    return _discover_flat_atoms(
+        cwd / ".agentm" / "atoms",
+        module_prefix=USER_ATOM_MODULE_PREFIX,
+        label="user atom",
+    )
+
+
+def _agentm_repo_root() -> Path | None:
+    """Return the AgentM source-checkout root, or ``None`` when running
+    from a pip-installed wheel that does not ship ``contrib/``.
+
+    Resolved from ``agentm.__file__`` (``<root>/src/agentm/__init__.py``)
+    rather than from cwd because contrib atoms ship alongside the SDK,
+    not alongside whatever directory the user invoked the CLI from.
+    """
+
+    import agentm  # local import: avoid a top-level cycle
+
+    pkg_init = getattr(agentm, "__file__", None)
+    if not pkg_init:
+        return None
+    candidate = Path(pkg_init).resolve().parent.parent.parent
+    return candidate if (candidate / "contrib" / "extensions").is_dir() else None
+
+
+def discover_contrib_atoms() -> dict[str, BuiltinEntry]:
+    """Research-line / scenario-bound atoms shipped under
+    ``<agentm-repo>/contrib/extensions/<name>.py``. Auto-discovered like
+    builtins so the AgentM checkout's own contrib atoms are available
+    without forcing every scenario manifest to list them, while keeping
+    them physically out of the SDK ``src/agentm/extensions/builtin/``
+    tree. Returns ``{}`` when running from a pip-installed wheel that
+    does not include a ``contrib/`` directory."""
+
+    repo_root = _agentm_repo_root()
+    if repo_root is None:
+        return {}
+    return _discover_flat_atoms(
+        repo_root / "contrib" / "extensions",
+        module_prefix=CONTRIB_ATOM_MODULE_PREFIX,
+        label="contrib atom",
+    )
+
+
 __all__ = [
     "BuiltinEntry",
+    "CONTRIB_ATOM_MODULE_PREFIX",
     "USER_ATOM_MODULE_PREFIX",
     "discover_builtin",
+    "discover_contrib_atoms",
     "discover_user_atoms",
     "reset_cache",
 ]

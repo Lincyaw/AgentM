@@ -69,7 +69,7 @@ dev = [
 [[package]]
 name = "agentm-rca"
 version = "0.1.0"
-source = { editable = "scenarios/rca" }
+source = { editable = "contrib/scenarios/rca" }
 dependencies = [
     { name = "agentm" },
     { name = "duckdb" },
@@ -671,7 +671,7 @@ wheels = [
 [[package]]
 name = "llmharness"
 version = "0.1.0"
-source = { editable = "scenarios/llmharness" }
+source = { editable = "contrib/extensions/llmharness" }
 
 [package.optional-dependencies]
 dev = [

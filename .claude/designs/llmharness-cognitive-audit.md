@@ -195,7 +195,7 @@ the adapter writes `extractor_empty` so the failure is visible.
 ### 7.1 Module layout
 
 ```
-scenarios/llmharness/src/llmharness/
+contrib/extensions/llmharness/src/llmharness/
 ├── audit/
 │   ├── extractor/
 │   │   ├── prompt.py                 EXTRACTOR_SYSTEM_PROMPT

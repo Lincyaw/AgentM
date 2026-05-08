@@ -4,15 +4,12 @@ Claude Code plugin + Python package + AgentM extension providing async,
 non-blocking supervision for the main agent. Hook/event-driven turn stream +
 AgentM-backed drift detection.
 
-Lives at `<AgentM-root>/scenarios/llmharness/` as of 2026-05-07 (moved from
-its own repo). The single sibling scenario `harness_monitor` lives at
-`<AgentM-root>/scenarios/harness_monitor/` so `agentm --scenario harness_monitor`
-resolves it directly. (Originally split into `harness_summarizer` +
-`harness_drift_reasoner`; merged into one scenario on 2026-05-07 since the
-LLM provider path had no external consumers yet.)
+Lives at `<AgentM-root>/contrib/extensions/llmharness/`. Mounted onto a
+running agent via `agentm --extension llmharness.adapters.agentm`
+(repeatable; stacks on top of `--scenario` or auto-discovery).
 
 Downstream consumer: **rca-autorl** installs this package via path, e.g.
-`pip install -e <AgentM-root>/scenarios/llmharness` (no AgentM Python
+`pip install -e <AgentM-root>/contrib/extensions/llmharness` (no AgentM Python
 dependency required for that path).
 
 Design reference: see `README.md` and (in the rca-autorl repo)
@@ -75,7 +72,7 @@ Secondary: simpler code that maps clearly to a requirement > clever abstractions
 - **Python**: 3.10+, `src/` layout, type hints required on every function in `src/`. `mypy --strict` is the gate.
 - **Lint/format**: `ruff` (no black, no isort, no flake8 — single tool).
 - **Hook scripts**: every `scripts/*.sh` must `set -euo pipefail` at the top. No bashisms beyond what shellcheck accepts.
-- **AgentM scenario** `harness_monitor` lives as a sibling at `<AgentM-root>/scenarios/harness_monitor/`. Edit it in place; this directory holds infrastructure, not scenarios.
+- **AgentM mount point**: this package's adapter (`llmharness.adapters.agentm`) is loaded onto a session via `agentm --extension llmharness.adapters.agentm`. There is no scenario manifest under this directory — keep it as a Python package + extension only.
 - **No commits to main**: feature branches only. Use `gh` (HTTPS) for any GitHub operations — never ssh URLs.
 - **Schema stability**: `src/llmharness/schema.py` is a public contract for rca-autorl. Breaking changes require bumping `version` in `pyproject.toml` and a note in the requirement description.
 - **No silent failures in hooks**: hook scripts may fail-open (return 0) on unrecognized payloads, but only after `parse_hook_payload` returns `None` — never via blanket `try/except`.

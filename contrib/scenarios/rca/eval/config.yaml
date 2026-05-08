@@ -1,5 +1,5 @@
 # LLM eval config for the AgentM rca scenario.
-# Run with: uv run rca llm-eval run scenarios/rca/eval/config.yaml -a agentm -l 1
+# Run with: uv run rca llm-eval run contrib/scenarios/rca/eval/config.yaml -a agentm -l 1
 
 exp_id: "agentm-rca-smoke"
 agent_type: "agentm"

@@ -43,14 +43,25 @@ Fix all errors before considering the task complete. For `mypy` issues on dynami
 - **Python**: 3.12+ required
 - **Build backend**: `uv_build`
 
-## scenarios/ layout
+## contrib/ layout
 
-Each subdir is **either** a scenario (a `manifest.yaml` + optional local atoms; resolved by-name at `agentm run --scenario <name>`) **or** a sibling project that lives here for convenience. The loader (`src/agentm/extensions/loader.py`) only looks up scenarios by exact name, so non-scenario siblings are safe.
+Everything that is **not** SDK core lives under `contrib/`. SDK builtins still live under `src/agentm/extensions/builtin/` (auto-discovered); `contrib/` is for opt-in, separately-maintained extras.
 
-- `scenarios/<name>/manifest.yaml` — standard scenario form (e.g. `plan_mode`, `rca`, `trajectory_analysis`, `harness_monitor`)
-- `scenarios/llmharness/` — **nested project**, not a scenario. It is the llmharness Python package + Claude Code plugin + AgentM extension (moved here on 2026-05-07 from its own repo). Has its own `pyproject.toml`, `CLAUDE.md`, and dev-loop. Owns the `harness_monitor` scenario above as its consumer. See `scenarios/llmharness/CLAUDE.md` for its own conventions.
+```
+contrib/
+├── extensions/        # third-party-maintained atoms (workspace members)
+│   └── llmharness/    # cognitive-audit package: atoms + adapter + tests
+└── scenarios/         # scenario manifests (loader entry point)
+    ├── plan_mode/
+    ├── rca/           # also a workspace member (agentm_rca/)
+    └── trajectory_analysis/
+```
 
-Don't add scenario-loader logic that walks subdirs blindly — keep `scenarios/` open to nested projects.
+- `contrib/scenarios/<name>/manifest.yaml` — resolved by `agentm --scenario <name>`. The loader (`src/agentm/extensions/loader.py`) looks up `<cwd>/contrib/scenarios/<name>/manifest.yaml`.
+- `contrib/extensions/<name>.py` — flat-file research-line atoms (e.g. `tool_catalog`, `turn_reminder`). Auto-discovered alongside `src/agentm/extensions/builtin/` when running from a source checkout, registered under synthetic module names `_agentm_contrib__<name>`. Conceptually outside the SDK core but ships in-tree for development.
+- `contrib/extensions/<name>/` — Python packages whose `MANIFEST` makes them mountable as atoms (e.g. `llmharness`). Mounted via `agentm --extension <dotted.module.path>` (repeatable, stacks on top of `--scenario` or auto-discovery). Not a scenario — don't put `manifest.yaml` here.
+
+Don't add scenario-loader logic that walks subdirs blindly — keep the layout open to nested projects.
 
 ## Design Documentation System
 

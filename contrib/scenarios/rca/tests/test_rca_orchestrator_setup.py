@@ -6,11 +6,11 @@ from pathlib import Path
 
 
 def _load_module():
-    repo_root = Path(__file__).resolve().parents[3]
+    rca_root = Path(__file__).resolve().parents[1]
     module_name = "agentm._tests.rca_orchestrator_setup"
     if module_name in sys.modules:
         return sys.modules[module_name]
-    file_path = repo_root / "scenarios" / "rca" / "orchestrator_setup.py"
+    file_path = rca_root / "orchestrator_setup.py"
     spec = importlib.util.spec_from_file_location(module_name, file_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

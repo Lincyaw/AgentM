@@ -63,6 +63,47 @@ def _parse_tools(value: str | None) -> list[str] | None:
     return [t.strip() for t in value.split(",") if t.strip()]
 
 
+def _parse_extensions(values: list[str] | None) -> list[tuple[str, dict[str, Any]]]:
+    """Parse repeated ``--extension MODULE[:JSON]`` flags.
+
+    Each entry is either a bare dotted module path (config = {}) or
+    ``module.path:{"key":value}`` where the JSON object is parsed verbatim.
+    The first colon splits module from config so module paths themselves
+    cannot contain a colon (they are dotted Python imports — colons would
+    already be invalid).
+    """
+
+    if not values:
+        return []
+    import json
+
+    out: list[tuple[str, dict[str, Any]]] = []
+    for raw in values:
+        spec = raw.strip()
+        if not spec:
+            continue
+        if ":" in spec:
+            module, _, cfg_raw = spec.partition(":")
+            module = module.strip()
+            try:
+                cfg = json.loads(cfg_raw)
+            except json.JSONDecodeError as exc:
+                raise typer.BadParameter(
+                    f"--extension {raw!r}: config after ':' must be valid JSON ({exc})"
+                ) from exc
+            if not isinstance(cfg, dict):
+                raise typer.BadParameter(
+                    f"--extension {raw!r}: config must be a JSON object"
+                )
+        else:
+            module = spec
+            cfg = {}
+        if not module:
+            raise typer.BadParameter(f"--extension {raw!r}: module path is empty")
+        out.append((module, cfg))
+    return out
+
+
 _FALSY = {"0", "false", "no", "off", "n", "f"}
 
 
@@ -119,6 +160,7 @@ async def _run(
     *,
     prompt: str,
     scenario: str | None,
+    extra_extensions: list[tuple[str, dict[str, Any]]],
     no_extensions: bool,
     no_skills: bool,
     no_prompt_templates: bool,
@@ -159,6 +201,7 @@ async def _run(
         cwd=cwd,
         provider=_build_provider(provider, model),
         scenario=scenario,
+        extra_extensions=extra_extensions,
         no_extensions=no_extensions,
         no_skills=no_skills,
         no_prompt_templates=no_prompt_templates,
@@ -180,6 +223,7 @@ async def _run(
 async def _run_interactive(
     *,
     scenario: str | None,
+    extra_extensions: list[tuple[str, dict[str, Any]]],
     no_extensions: bool,
     no_skills: bool,
     no_prompt_templates: bool,
@@ -218,6 +262,7 @@ async def _run_interactive(
         cwd=cwd,
         provider=_build_provider(provider, model),
         scenario=scenario,
+        extra_extensions=extra_extensions,
         no_extensions=no_extensions,
         no_skills=no_skills,
         no_prompt_templates=no_prompt_templates,
@@ -243,8 +288,22 @@ def run_cmd(
             "--scenario",
             help=(
                 "Opt-in curated extension list. Bare name resolves under "
-                "<cwd>/scenarios/<name>/manifest.yaml. An absolute path is "
-                "also accepted. When unset, auto-discovers every builtin atom."
+                "<cwd>/contrib/scenarios/<name>/manifest.yaml. An absolute "
+                "path is also accepted. When unset, auto-discovers every "
+                "builtin atom."
+            ),
+        ),
+    ] = None,
+    extension: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--extension",
+            help=(
+                "Mount an extra atom on top of --scenario / auto-discovery. "
+                "Repeatable. Form: 'dotted.module.path' or "
+                "'dotted.module.path:{\"key\":\"value\"}' for inline JSON "
+                "config. Example: --extension llmharness.adapters.agentm "
+                "--extension some.atom:'{\"k\":3}'."
             ),
         ),
     ] = None,
@@ -321,10 +380,13 @@ def run_cmd(
 ) -> None:
     """Send a single prompt and print the agent's final text."""
 
+    extra_extensions = _parse_extensions(extension)
+
     if interactive:
         rc = asyncio.run(
             _run_interactive(
                 scenario=scenario,
+                extra_extensions=extra_extensions,
                 no_extensions=no_extensions,
                 no_skills=no_skills,
                 no_prompt_templates=no_prompt_templates,
@@ -344,6 +406,7 @@ def run_cmd(
         _run(
             prompt=prompt,
             scenario=scenario,
+            extra_extensions=extra_extensions,
             no_extensions=no_extensions,
             no_skills=no_skills,
             no_prompt_templates=no_prompt_templates,
