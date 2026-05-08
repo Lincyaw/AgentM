@@ -488,11 +488,15 @@ class AgentLoop:
                     stream_events, fallback_timestamp=_now()
                 )
                 last_assistant = assistant_msg
+                messages.append(assistant_msg)
                 await self._bus.emit(
                     TurnEndEvent.CHANNEL,
-                    TurnEndEvent(turn_index=turn_index, message=assistant_msg),
+                    TurnEndEvent(
+                        turn_index=turn_index,
+                        message=assistant_msg,
+                        messages=tuple(messages),
+                    ),
                 )
-                messages.append(assistant_msg)
 
                 tool_calls = _extract_tool_calls(assistant_msg)
                 paired_outcomes: list[tuple[str, ToolOutcome]] = []

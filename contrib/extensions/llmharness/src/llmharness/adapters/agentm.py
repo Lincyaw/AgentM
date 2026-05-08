@@ -186,11 +186,15 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     async def _on_turn_end(event: TurnEndEvent) -> None:
         nonlocal turn_count, pending
-        del event
 
         turn_count += 1
         branch = api.session.get_branch()
-        messages = api.session.get_messages()
+        # Use the event's live snapshot, not ``api.session.get_messages()``
+        # — the kernel persists messages to the SessionManager only after
+        # ``prompt()`` returns, so a mid-loop session-view read is stale
+        # (returns just the initial user message). The event carries the
+        # authoritative trajectory up through this turn's assistant_msg.
+        messages = list(event.messages)
         state = _scan_branch(branch, recent_verdicts_n=_DEFAULT_RECENT_VERDICTS)
 
         # --- Phase 1: extractor (always) ---
