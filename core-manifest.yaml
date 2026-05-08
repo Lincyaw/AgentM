@@ -54,7 +54,7 @@ extension_api:
 
 reload:
   # Atoms in tier_2 require explicit `propose_change` decision to reload.
-  # cc_agents lives under extensions/contrib/ and is opt-in; scenarios that
+  # cc_agents lives under contrib/extensions/cc/ and is opt-in; scenarios that
   # load it can re-list it in their own manifest's reload.tier_2_atoms.
   tier_2_atoms:
     - permission

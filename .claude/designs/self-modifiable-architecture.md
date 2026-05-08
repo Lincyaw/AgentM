@@ -153,7 +153,7 @@ extension_api:
 
 reload:
   # Atoms in tier_2 require explicit `propose_change` decision to reload.
-  # cc_agents lives under extensions/contrib/ (opt-in); scenarios that load
+  # cc_agents lives under contrib/extensions/cc/ (opt-in); scenarios that load
   # it can re-list it in their own scenario manifest's reload.tier_2_atoms.
   tier_2_atoms:
     - permission
@@ -319,7 +319,7 @@ Atoms whose worst-case bug breaks safety, cost, or trust boundaries. Validator r
 | `tool_filter` | Re-enabling a deny-listed tool is the canonical failure mode |
 | `llm_compaction` | Affects context fidelity; bad strategies amplify silently |
 
-Contrib atoms (e.g. `cc_agents` under `extensions/contrib/`) declare their own
+Contrib atoms (e.g. `cc_agents` under `contrib/extensions/cc/`) declare their own
 tier; scenarios opting in are responsible for re-listing them in the scenario
 manifest's `reload.tier_2_atoms`.
 
