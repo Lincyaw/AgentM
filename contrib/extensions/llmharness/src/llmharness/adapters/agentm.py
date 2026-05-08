@@ -238,7 +238,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         if verdict.drift and verdict.reminder and verdict.type is not None:
             pending = Reminder(
                 type=verdict.type,
-                confidence=verdict.confidence,
                 text=verdict.reminder,
             )
 
@@ -492,7 +491,13 @@ async def _run_auditor(
             api, _AUDIT_ERROR_ENTRY, {"reason": f"malformed: {reason}"}
         ),
     )
-    return raw.to_verdict() if raw is not None else None
+    if raw is None:
+        return None
+    try:
+        return raw.to_verdict()
+    except AuditorOutputError as exc:
+        _record_failure(api, _AUDIT_ERROR_ENTRY, {"reason": f"malformed: {exc}"})
+        return None
 
 
 def _find_terminal_tool_arguments(

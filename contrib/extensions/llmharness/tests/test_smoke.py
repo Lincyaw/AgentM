@@ -28,7 +28,7 @@ def test_package_surface() -> None:
 def test_reminder_is_typed_payload() -> None:
     """Reminder survived the file-store removal as a typed in-memory payload."""
 
-    r = Reminder(type=DriftType.TASK_DRIFT, confidence=0.9, text="refocus")
+    r = Reminder(type=DriftType.TASK_DRIFT, text="refocus")
     assert r.text == "refocus"
 
 
@@ -39,8 +39,8 @@ def test_verdict_round_trip() -> None:
     v = Verdict(
         drift=True,
         type=DriftType.STUCK_LOOP,
-        confidence=0.7,
         reminder="break the loop",
+        matched_event_ids=[3, 7],
         cited_cards=["AFC-0010"],
     )
     restored = Verdict.from_dict(v.to_dict())

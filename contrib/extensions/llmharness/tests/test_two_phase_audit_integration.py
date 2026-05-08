@@ -429,9 +429,109 @@ def test_submit_verdict_schema_enforces_drift_true_requires_type() -> None:
     if_drift = if_clause.get("properties", {}).get("drift", {})
     assert if_drift.get("const") is True
 
-    # ``then`` requires ``type``.
+    # ``then`` requires ``type``, ``reminder``, and ``matched_event_ids``
+    # — protects the live failure observed 2026-05-08 where
+    # ``drift=true`` shipped with ``reminder.message`` (wrong key) and
+    # empty ``matched_event_ids`` got silently dropped to ``reminder=""``
+    # in the persisted verdict. Tightening here means the provider edge
+    # rejects the call before the LLM even returns.
     then_required = then_clause.get("required", [])
-    assert "type" in then_required
+    for field_name in ("type", "reminder", "matched_event_ids"):
+        assert field_name in then_required, (
+            f"submit_verdict 'then' clause must require {field_name!r} "
+            f"when drift=true; got {then_required}"
+        )
+
+    then_props = then_clause.get("properties", {})
+    reminder_then = then_props.get("reminder", {})
+    assert reminder_then.get("type") == "object"
+    assert "text" in reminder_then.get("required", []), (
+        "submit_verdict reminder must require a 'text' field when "
+        "drift=true — without it providers accepted reminders under "
+        "arbitrary keys (message/body/...) and the adapter silently "
+        "dropped them."
+    )
+    matched_then = then_props.get("matched_event_ids", {})
+    assert matched_then.get("minItems") == 1
+
+
+def test_submit_verdict_tool_rejects_drift_true_without_reminder_text() -> None:
+    """Auditor child loop must let the LLM retry on a malformed verdict.
+
+    Disaster guarded: the live 2026-05-08 incident where the auditor
+    submitted ``drift=true`` with ``reminder.message`` (wrong key) and
+    no ``matched_event_ids``. The schema's ``if/then`` is the first
+    line of defense, but providers vary in how strictly they enforce
+    it; the tool must validate again and return an ``is_error``
+    ``ToolResult`` so the child loop continues, the LLM sees the error
+    text, and retries — instead of ``ToolTerminate``-ing the child
+    loop and shipping a silent ``reminder=""`` verdict.
+    """
+
+    from agentm.core.abi import FunctionTool, ToolContinue, ToolResult
+    from agentm.harness.session import AgentSession
+
+    # The tool function isn't directly exposed; spin up a tiny session
+    # that has only the submit_verdict tool installed and inspect the
+    # registered FunctionTool's fn.
+    captured: list[FunctionTool] = []
+
+    class _Capture:
+        def register_tool(self, tool: FunctionTool) -> None:
+            captured.append(tool)
+
+        @property
+        def cwd(self) -> str:
+            return "/tmp"
+
+    from llmharness.audit.auditor.submit_tool import install as _submit_install
+
+    _submit_install(_Capture(), {})  # type: ignore[arg-type]
+    assert len(captured) == 1
+    submit = captured[0]
+
+    import asyncio
+
+    async def _drive() -> tuple[Any, Any]:
+        # Bad: drift=true but reminder uses 'message' key + no matched ids.
+        bad = await submit.fn(
+            {
+                "verdict": {
+                    "drift": True,
+                    "type": "task_drift",
+                    "reminder": {"message": "you are off-track"},
+                }
+            }
+        )
+        # Good: drift=false; tool should ToolTerminate normally.
+        good = await submit.fn(
+            {
+                "verdict": {
+                    "drift": False,
+                    "type": None,
+                }
+            }
+        )
+        return bad, good
+
+    bad, good = asyncio.run(_drive())
+
+    # Bad call: continues the loop with an is_error ToolResult so the
+    # auditor LLM gets another chance.
+    assert isinstance(bad, ToolResult), (
+        f"malformed submit_verdict must return a bare ToolResult, got {type(bad).__name__}"
+    )
+    assert bad.is_error is True
+    body = "".join(
+        block.text for block in bad.content if hasattr(block, "text")
+    )
+    assert "submit_verdict rejected" in body
+    assert "Reissue submit_verdict" in body
+
+    # Good call: terminates the child loop normally.
+    from agentm.core.abi import ToolTerminate
+    assert isinstance(good, ToolTerminate)
+    del AgentSession, ToolContinue  # silence unused-import lint
 
 
 def test_compose_factories_are_importable_and_callable() -> None:

@@ -30,6 +30,7 @@ from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
 from .._enum_schema import DRIFT_TYPE_VALUES
+from .output import AuditorOutputError, RawVerdictOutput
 
 MANIFEST = ExtensionManifest(
     name="auditor_submit_tool",
@@ -73,9 +74,32 @@ _VERDICT_SCHEMA: dict[str, Any] = {
         "reminder": {
             "type": ["object", "null"],
             "description": (
-                "Structured advisory payload to inject on the next user "
-                "prompt, or null when drift=false. Do NOT prepend "
-                "'[harness] ' — the adapter handles that."
+                "Advisory payload to inject on the next user prompt. Null "
+                "when drift=false. When drift=true, MUST be an object with "
+                "a non-empty ``text`` field — that exact string is what the "
+                "main agent will see. Do NOT prepend '[harness] '; the "
+                "adapter handles that."
+            ),
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "The verbatim advisory the main agent will read on "
+                        "its next turn. Be specific about what to do next."
+                    ),
+                },
+            },
+            "additionalProperties": False,
+        },
+        "matched_event_ids": {
+            "type": ["array", "null"],
+            "items": {"type": "integer"},
+            "description": (
+                "IDs of the audit graph events that materially supported "
+                "the drift call. Required (non-empty) when drift=true so "
+                "the finding is traceable; null or omitted when "
+                "drift=false."
             ),
         },
         "cited_cards": {
@@ -96,20 +120,34 @@ _VERDICT_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["drift"],
-    # Closes V0's "drift=true with type=null silently dropped" bug at the
-    # provider edge. With this clause, the provider-side schema validator
-    # rejects the call before it reaches the adapter — a non-conforming
-    # auditor surfaces as audit_no_call rather than a silent no-op.
+    # Closes V0's "drift=true with type=null silently dropped" bug AND the
+    # follow-on "reminder shaped wrong / matched_event_ids missing" gap at
+    # the provider edge. With this clause, a non-conforming auditor
+    # surfaces as a tool-side error (the agent retries) or audit_no_call
+    # (visible failure) rather than a silent no-op.
     "if": {
         "properties": {"drift": {"const": True}},
         "required": ["drift"],
     },
     "then": {
-        "required": ["type"],
+        "required": ["type", "reminder", "matched_event_ids"],
         "properties": {
             "type": {
                 "type": "string",
                 "enum": [v for v in DRIFT_TYPE_VALUES if v is not None],
+            },
+            "reminder": {
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                    "text": {"type": "string", "minLength": 1},
+                },
+                "additionalProperties": False,
+            },
+            "matched_event_ids": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "minItems": 1,
             },
         },
     },
@@ -137,8 +175,30 @@ _SUBMIT_VERDICT_DESCRIPTION = (
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config  # no knobs in V1
 
-    async def _submit(args: dict[str, Any]) -> ToolTerminate:
-        del args  # adapter reads args off the ToolCallBlock; no echo needed
+    async def _submit(args: dict[str, Any]) -> ToolTerminate | ToolResult:
+        # Run the adapter-side coercion here so a malformed payload becomes
+        # a visible tool-result error inside the auditor child loop. The
+        # LLM sees the error message and gets another turn to retry; only
+        # on a well-shaped payload do we ToolTerminate the child loop.
+        # Without this, providers that strip the if/then clause let bad
+        # payloads through and the adapter has to fall back to recording
+        # an audit_error entry without giving the auditor a chance to
+        # correct itself.
+        try:
+            RawVerdictOutput.from_dict(args).to_verdict()
+        except AuditorOutputError as exc:
+            return ToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=(
+                            f"submit_verdict rejected: {exc}. "
+                            "Reissue submit_verdict with a corrected payload."
+                        ),
+                    )
+                ],
+                is_error=True,
+            )
         return ToolTerminate(
             result=ToolResult(
                 content=[TextContent(type="text", text="verdict submitted")]

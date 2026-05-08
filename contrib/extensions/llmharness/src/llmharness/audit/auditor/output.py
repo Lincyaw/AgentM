@@ -57,6 +57,7 @@ class RawVerdictOutput:
     drift: bool
     type: DriftType | None
     reminder: dict[str, Any] | None
+    matched_event_ids: list[int] | None
     cited_cards: list[str] | None
     downstream_reaction: str | None
 
@@ -135,22 +136,38 @@ class RawVerdictOutput:
                 "submit_verdict.verdict.downstream_reaction must be string or null"
             )
 
+        matched_raw = verdict_raw.get("matched_event_ids")
+        matched: list[int] | None
+        if matched_raw is None:
+            matched = None
+        elif isinstance(matched_raw, list) and all(
+            isinstance(x, int) and not isinstance(x, bool) for x in matched_raw
+        ):
+            matched = list(matched_raw)
+        else:
+            raise AuditorOutputError(
+                "submit_verdict.verdict.matched_event_ids must be a list of "
+                "integers or null"
+            )
+
         return cls(
             drift=drift_raw,
             type=drift_type,
             reminder=reminder,
+            matched_event_ids=matched,
             cited_cards=_coerce_str_list_or_none(verdict_raw.get("cited_cards")),
             downstream_reaction=downstream,
         )
 
-    def to_verdict(self) -> Verdict | None:
+    def to_verdict(self) -> Verdict:
         """Materialize a :class:`Verdict` for the adapter.
 
-        Returns ``None`` when the payload encoded a silent verdict
-        (``drift=false``) — the adapter writes a verdict entry but does
-        not arm a pending reminder. Returns a populated :class:`Verdict`
-        when ``drift=true``; the reminder body is extracted from the
-        ``reminder`` dict's ``text`` / ``body`` field if present.
+        Returns a silent verdict (``drift=false``) when the payload said
+        so. Returns a populated drift verdict when ``drift=true`` —
+        ``reminder.text`` and ``matched_event_ids`` are required (raises
+        :class:`AuditorOutputError` otherwise) so a drift call cannot
+        ship without the advisory the main agent will see or the event
+        ids that justify it.
         """
 
         if not self.drift:
@@ -162,15 +179,23 @@ class RawVerdictOutput:
                 downstream_reaction=self.downstream_reaction,
             )
 
-        # Phase-2 reminder is structured (object) rather than free string;
-        # we accept either ``text`` or ``body`` as the rendered advisory.
-        reminder_text = ""
-        if self.reminder is not None:
-            for key in ("text", "body"):
-                value = self.reminder.get(key)
-                if isinstance(value, str) and value:
-                    reminder_text = value
-                    break
+        if self.reminder is None:
+            raise AuditorOutputError(
+                "submit_verdict.verdict.reminder is null but drift=true; "
+                "reminder must be an object with a non-empty 'text' field"
+            )
+        reminder_text_raw = self.reminder.get("text")
+        if not isinstance(reminder_text_raw, str) or not reminder_text_raw.strip():
+            raise AuditorOutputError(
+                "submit_verdict.verdict.reminder.text must be a non-empty "
+                "string when drift=true"
+            )
+
+        if not self.matched_event_ids:
+            raise AuditorOutputError(
+                "submit_verdict.verdict.matched_event_ids must be a "
+                "non-empty list of event ids when drift=true"
+            )
 
         # ``self.type`` is guaranteed non-None when drift=True (from_dict
         # raises otherwise); assert for the type checker.
@@ -178,7 +203,8 @@ class RawVerdictOutput:
         return Verdict(
             drift=True,
             type=self.type,
-            reminder=reminder_text,
+            reminder=reminder_text_raw,
+            matched_event_ids=list(self.matched_event_ids),
             cited_cards=list(self.cited_cards or []),
             downstream_reaction=self.downstream_reaction,
         )

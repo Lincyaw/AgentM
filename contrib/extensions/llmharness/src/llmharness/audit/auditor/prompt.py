@@ -138,8 +138,15 @@ last and exactly once.
      enum values (non-null). When ``drift=false``, ``null``. The
      provider-side schema enforces this — a ``drift=true`` call
      with ``type=null`` will be rejected.
-   - ``reminder``: object with the advisory body, or ``null``
-     when ``drift=false``. Do NOT prepend "[harness] ".
+   - ``reminder``: when ``drift=true``, MUST be an object
+     ``{"text": "<advisory>"}`` with a non-empty ``text`` —
+     that exact string is what the main agent will read on its
+     next turn. ``null`` when ``drift=false``. Do NOT prepend
+     "[harness] ".
+   - ``matched_event_ids``: when ``drift=true``, MUST be a
+     non-empty array of integer event ids from the supplied
+     ``graph`` that materially supported the drift call.
+     ``null`` (or omitted) when ``drift=false``.
    - ``cited_cards``: array of AFC ids you consulted and found
      materially relevant. ``null`` when no card was decisive.
    - ``downstream_reaction``: free-text note about whether the

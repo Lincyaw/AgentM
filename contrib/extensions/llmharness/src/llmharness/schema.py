@@ -64,7 +64,6 @@ class Verdict:
 
     drift: bool
     type: DriftType | None = None
-    confidence: float = 0.0
     reminder: str = ""
     matched_event_ids: list[int] = field(default_factory=list)
     cited_cards: list[str] = field(default_factory=list)
@@ -74,7 +73,6 @@ class Verdict:
         return {
             "drift": self.drift,
             "type": self.type.value if self.type is not None else None,
-            "confidence": self.confidence,
             "reminder": self.reminder,
             "matched_event_ids": list(self.matched_event_ids),
             "cited_cards": list(self.cited_cards),
@@ -87,7 +85,6 @@ class Verdict:
         return cls(
             drift=bool(data.get("drift", False)),
             type=DriftType(type_str) if type_str else None,
-            confidence=float(data.get("confidence", 0.0)),
             reminder=str(data.get("reminder", "")),
             matched_event_ids=list(data.get("matched_event_ids") or []),
             cited_cards=list(data.get("cited_cards") or []),
@@ -100,5 +97,4 @@ class Reminder:
     """A pending reminder waiting to be injected on the next user prompt."""
 
     type: DriftType
-    confidence: float
     text: str
