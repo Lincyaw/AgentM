@@ -1,15 +1,12 @@
 [project]
 name = "llmharness"
 version = "0.1.0"
-description = "LLM-as-harness for Claude Code: async, non-blocking process supervision via PostToolUse + UserPromptSubmit hooks; AgentM-backed event summarizer and drift reasoner."
+description = "LLM-as-harness: cognitive-audit AgentM extension that supervises a running main agent via TurnEndEvent → child diagnostic session → BeforeAgentStart reminder injection."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "rca-autorl" }]
-dependencies = ["typer>=0.12"]
-
-[project.scripts]
-llmharness = "llmharness.__main__:main"
+dependencies = []
 
 [project.optional-dependencies]
 dev = [
@@ -65,6 +62,14 @@ no_implicit_optional = true
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+# ``agentm`` is the parent workspace package — not installed into the nested
+# project's dev env on its own, but loaded transparently by uv when this
+# package runs as a workspace member. Treat its imports as untyped so
+# ``mypy`` on this nested project alone stays clean.
+[[tool.mypy.overrides]]
+module = "agentm.*"
+ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------
 # Tests: pytest

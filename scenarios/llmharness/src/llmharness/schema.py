@@ -1,17 +1,17 @@
-"""Dataclasses for harness turns, events, verdicts, and reminders."""
+"""Typed payloads for the cognitive-audit pipeline.
+
+These dataclasses describe the verdict / event / reminder shapes the audit
+child session emits and the adapter consumes. Persistence lives on the
+session entry tree (``api.session.append_entry``); this module is just
+the typed contract between the audit prompt schema, the parser
+(``audit.RawAuditOutput``), and the adapter.
+"""
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
-
-
-class TurnRole(str, Enum):
-    USER = "user"
-    ASSISTANT = "assistant"
-    TOOL = "tool"
 
 
 class EventKind(str, Enum):
@@ -29,32 +29,6 @@ class DriftType(str, Enum):
     EVIDENCE_IGNORED = "evidence_ignored"
     PREMATURE_CONCLUSION = "premature_conclusion"
     STUCK_LOOP = "stuck_loop"
-
-
-@dataclass(frozen=True)
-class Turn:
-    """One transcript turn as ingested from a hook payload."""
-
-    index: int
-    role: TurnRole
-    content: str = ""
-    tool_name: str | None = None
-    tool_args: dict[str, Any] | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        d = asdict(self)
-        d["role"] = self.role.value
-        return d
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Turn:
-        return cls(
-            index=int(data["index"]),
-            role=TurnRole(data["role"]),
-            content=data.get("content", "") or "",
-            tool_name=data.get("tool_name"),
-            tool_args=data.get("tool_args"),
-        )
 
 
 @dataclass(frozen=True)
@@ -85,23 +59,7 @@ class Event:
 
 @dataclass(frozen=True)
 class Verdict:
-    """Drift detector output. drift=False means stay silent.
-
-    Cognitive-audit V0 additions (additive, opt-in — see
-    ``.claude/designs/llmharness-cognitive-audit.md`` §6.2):
-
-    - ``cited_cards``: AFC IDs the audit chose to cite for the verdict.
-      Empty for rule-based detector output.
-    - ``downstream_reaction``: free-text note populated by the *next*
-      audit firing describing whether the prior reminder was heeded.
-      ``None`` until the next firing observes the agent's response.
-
-    Both fields are kept at the END of the dataclass so existing
-    positional or keyword constructions in
-    ``detector.py`` / ``agentm_bridge.py`` / ``worker.py`` continue
-    to produce semantically identical objects with default-empty
-    values.
-    """
+    """Drift detector output. ``drift=False`` means stay silent."""
 
     drift: bool
     type: DriftType | None = None
@@ -140,35 +98,6 @@ class Verdict:
 class Reminder:
     """A pending reminder waiting to be injected on the next user prompt."""
 
-    session_id: str
     type: DriftType
     confidence: float
     text: str
-    created_at_event_id: int
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "session_id": self.session_id,
-            "type": self.type.value,
-            "confidence": self.confidence,
-            "text": self.text,
-            "created_at_event_id": self.created_at_event_id,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Reminder:
-        return cls(
-            session_id=str(data["session_id"]),
-            type=DriftType(data["type"]),
-            confidence=float(data["confidence"]),
-            text=str(data["text"]),
-            created_at_event_id=int(data["created_at_event_id"]),
-        )
-
-
-def dumps_jsonl(records: list[dict[str, Any]]) -> str:
-    return "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
-
-
-def loads_jsonl(text: str) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in text.splitlines() if line.strip()]

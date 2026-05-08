@@ -1,6 +1,0 @@
-{
-  "name": "llmharness",
-  "version": "0.1.0",
-  "description": "LLM-as-harness: async, non-blocking process supervision for the main agent. PostToolUse/Stop hooks fold transcript turns into an event stream; a worker calls AgentM (commercial model first, distilled 8B later) to detect drift and inject a one-line reminder via UserPromptSubmit.",
-  "author": "rca-autorl"
-}

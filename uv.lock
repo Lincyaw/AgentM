@@ -672,9 +672,6 @@ wheels = [
 name = "llmharness"
 version = "0.1.0"
 source = { editable = "scenarios/llmharness" }
-dependencies = [
-    { name = "typer" },
-]
 
 [package.optional-dependencies]
 dev = [
@@ -688,7 +685,6 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "typer", specifier = ">=0.12" },
 ]
 provides-extras = ["dev"]
 
