@@ -1,23 +1,10 @@
 """Builtin ``inherit_provider`` atom: re-publish a parent's active provider.
 
 Wired automatically by :func:`AgentSession._spawn_child_session` when a
-caller passes ``AgentSessionConfig(provider=None)`` — the spawn factory
-injects ``provider=("agentm.extensions.builtin.inherit_provider",
-{"provider": <parent_ProviderConfig>})`` so the child loads this module
-as its provider extension and ``install()`` re-registers the parent's
-:class:`ProviderConfig` verbatim. No re-authentication, no second LLM
-gateway handshake.
-
-Before this atom existed, every spawning extension (the ``sub_agent``
-builtin, the ``llmharness.adapters.agentm`` adapter) hand-rolled the
-same trick — synthesizing ``provider=(__name__, {"_bridge_provider":
-provider})`` and adding a marker-detecting branch to its own ``install``.
-Three implementations of one idea is two too many; this atom is the
-canonical home.
-
-This atom never installs handlers — it does exactly one thing,
-synchronously, on install: re-register the supplied provider. No
-``api.on(...)``, no tool registrations, no event subscriptions.
+caller passes ``AgentSessionConfig(provider=None)``: the spawn factory
+injects this module as the child's provider extension and ``install()``
+re-registers the parent's :class:`ProviderConfig` verbatim — no
+re-authentication, no second LLM gateway handshake.
 """
 
 from __future__ import annotations

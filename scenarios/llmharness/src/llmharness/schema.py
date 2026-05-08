@@ -3,8 +3,9 @@
 These dataclasses describe the verdict / event / reminder shapes the audit
 child session emits and the adapter consumes. Persistence lives on the
 session entry tree (``api.session.append_entry``); this module is just
-the typed contract between the audit prompt schema, the parser
-(``audit.RawAuditOutput``), and the adapter.
+the typed contract between the audit prompt schemas, the phase parsers
+(``audit.extractor.RawExtractorOutput`` /
+``audit.auditor.RawVerdictOutput``), and the adapter.
 """
 
 from __future__ import annotations

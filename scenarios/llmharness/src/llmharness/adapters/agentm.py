@@ -1,69 +1,22 @@
-"""Adapter: AgentM bus events ↔ llmharness cognitive-audit pipeline.
+"""Adapter: AgentM bus -> two-phase cognitive audit.
 
-V0 realization of ``.claude/designs/llmharness-cognitive-audit.md`` §4.5.
-The adapter wires two harness events into the audit pipeline:
-
-- :class:`agentm.core.abi.TurnEndEvent` — fires after every assistant turn.
-  Pulls the full conversation via ``api.session.get_messages()``, spawns a
-  child AgentM session whose extension list comes from
-  :func:`llmharness.audit.compose_extensions`, drives the child to completion,
-  parses the trailing JSON via :class:`llmharness.audit.RawAuditOutput`,
-  appends the verdict + extracted events to the session entry tree via
-  ``api.session.append_entry``, and on drift caches a single pending Reminder
-  in adapter-local state.
-- :class:`agentm.harness.events.BeforeAgentStartEvent` — fires at the top of
-  every ``AgentSession.prompt``. Consumes the pending reminder (if any) and
-  *appends* its text to ``event.system`` in place with the configured
-  ``reminder_prefix`` (default ``"\\n\\n[harness] "``).
-
-V0 design decisions (do NOT modify here without revisiting §4.5):
-
-- Trigger is **every** ``TurnEndEvent`` — no throttling. The diagnostic
-  agent stays silent on healthy trajectories.
-- Injection is **system-prompt mutation**, not ``api.send_user_message``.
-  Quieter, advisor-shaped, aligned with the soft-tone authority constraints
-  in design §2.
-
-Persistence:
-
-All audit state lives on the session entry tree, not on disk. Verdicts and
-audit events are appended via ``api.session.append_entry`` under the entry
-types ``llmharness.verdict`` / ``llmharness.audit_event`` and read back by
-filtering ``api.session.get_branch()``. The pending reminder is held in a
-single closure slot — at most one reminder ever queues per session, by
-design (§5.3).
-
-Plug-and-play config knobs (all optional):
-
-- ``K_history_events`` (int, default ``50``) — tail length of prior audit
-  events fed back as ``prior_events`` to the child.
-- ``N_recent_alerts`` (int, default ``5``) — number of recent verdicts fed
-  back as ``recent_alerts`` (§5.2 step 1).
-- ``child_purpose`` (str, default ``"cognitive_audit"``) — surfaced on
-  ``ChildSessionStartEvent`` for observability/cost rollups.
-- ``reminder_prefix`` (str, default ``"\\n\\n[harness] "``) — what gets
-  prepended to the reminder body during ``BeforeAgentStartEvent`` injection.
-- ``prompt_override`` (str, optional) — replace the default audit system
-  prompt. Forwarded to :func:`llmharness.audit.compose_extensions`.
-- ``cards_tools_config`` (dict | ``None``, default ``{}``) — config for the
-  ``llmharness.atoms.cards_tools`` extension. ``null`` drops AFC retrieval.
-- ``observability_config`` (dict | ``None``, default ``{}``) — config for the
-  ``agentm.extensions.builtin.observability`` extension. ``null`` drops it.
+See `.claude/designs/llmharness-two-phase-audit.md` for the full design.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, TypeVar
 
 from agentm.core.abi import TurnEndEvent
 from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
-    TextContent,
     ToolCallBlock,
     ToolResultMessage,
-    UserMessage,
 )
 from agentm.core.abi.session import SessionEntry
 from agentm.extensions import ExtensionManifest
@@ -71,15 +24,26 @@ from agentm.harness.events import BeforeAgentStartEvent
 from agentm.harness.extension import ExtensionAPI
 from agentm.harness.session_config import AgentSessionConfig
 
-from ..audit import RawAuditOutput, compose_extensions
-from ..audit.submit_tool import SUBMIT_AUDIT_TOOL_NAME
+from ..audit.auditor import (
+    SUBMIT_VERDICT_TOOL_NAME,
+    AuditorOutputError,
+    RawVerdictOutput,
+    compose_auditor_extensions,
+)
+from ..audit.extractor import (
+    SUBMIT_EVENTS_TOOL_NAME,
+    ExtractorOutputError,
+    RawExtractorOutput,
+    compose_extractor_extensions,
+)
 from ..schema import Event, Reminder, Verdict
 
 MANIFEST = ExtensionManifest(
     name="agentm",
     description=(
-        "Cognitive-audit adapter: spawn diagnostic child session on TurnEndEvent "
-        "and inject pending reminders on BeforeAgentStartEvent."
+        "Two-phase cognitive-audit adapter: per-turn extractor (Phase 1) and "
+        "every-k-turns graph auditor (Phase 2); injects pending reminders on "
+        "BeforeAgentStartEvent."
     ),
     registers=(
         "event:turn_end",
@@ -88,15 +52,13 @@ MANIFEST = ExtensionManifest(
     config_schema={
         "type": "object",
         "properties": {
-            "K_history_events": {"type": "integer", "minimum": 0},
-            "N_recent_alerts": {"type": "integer", "minimum": 0},
-            "child_purpose": {"type": "string"},
-            "reminder_prefix": {"type": "string"},
-            "prompt_override": {"type": "string"},
+            "audit_interval_turns": {"type": "integer", "minimum": 1},
+            "prompt_override_extractor": {"type": "string"},
+            "prompt_override_auditor": {"type": "string"},
             "cards_tools_config": {"type": ["object", "null"]},
             "observability_config": {"type": ["object", "null"]},
         },
-        "additionalProperties": True,
+        "additionalProperties": False,
     },
     affects=(
         "event:turn_end",
@@ -107,222 +69,445 @@ MANIFEST = ExtensionManifest(
 )
 
 
-_DEFAULT_K_HISTORY_EVENTS = 50
-_DEFAULT_N_RECENT_ALERTS = 5
-_DEFAULT_CHILD_PURPOSE = "cognitive_audit"
-_DEFAULT_REMINDER_PREFIX = "\n\n[harness] "
+_DEFAULT_AUDIT_INTERVAL_TURNS = 3
+_DEFAULT_RECENT_VERDICTS = 5
+_RECENT_GRAPH_SLICE_FOR_EXTRACTOR = 20
+_REMINDER_PREFIX = "\n\n[harness] "
 
-# Entry types used on the session tree. Namespaced so consumers querying
-# the tree can filter unambiguously.
-_VERDICT_ENTRY_TYPE = "llmharness.verdict"
 _AUDIT_EVENT_ENTRY_TYPE = "llmharness.audit_event"
+_VERDICT_ENTRY_TYPE = "llmharness.verdict"
+_EXTRACTOR_CURSOR_ENTRY_TYPE = "llmharness.extractor_cursor"
+
+_EXTRACTOR_NO_CALL_ENTRY = "llmharness.extractor_no_call"
+_EXTRACTOR_ERROR_ENTRY = "llmharness.extractor_error"
+_EXTRACTOR_EMPTY_ENTRY = "llmharness.extractor_empty"
+_AUDIT_NO_CALL_ENTRY = "llmharness.audit_no_call"
+_AUDIT_ERROR_ENTRY = "llmharness.audit_error"
 
 
-def _entries_of_type(branch: list[SessionEntry], type_: str) -> list[SessionEntry]:
-    return [e for e in branch if e.type == type_]
+# --- branch state -----------------------------------------------------------
 
 
-def _read_prior_events(api: ExtensionAPI, k: int) -> list[Event]:
-    if k <= 0:
-        return []
-    branch = api.session.get_branch()
-    entries = _entries_of_type(branch, _AUDIT_EVENT_ENTRY_TYPE)[-k:]
-    return [Event.from_dict(e.payload) for e in entries]
+@dataclass(frozen=True)
+class _BranchState:
+    """Snapshot of audit-relevant entries pulled from a single branch walk."""
+
+    cursor_last_turn_index: int
+    graph: list[Event]
+    recent_verdicts: list[dict[str, Any]]
 
 
-def _read_recent_verdicts(api: ExtensionAPI, n: int) -> list[Verdict]:
-    if n <= 0:
-        return []
-    branch = api.session.get_branch()
-    entries = _entries_of_type(branch, _VERDICT_ENTRY_TYPE)[-n:]
-    return [Verdict.from_dict(e.payload) for e in entries]
+def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _BranchState:
+    """Single-pass extraction of cursor + graph + recent verdicts."""
+    cursor_last_turn_index = -1
+    graph: list[Event] = []
+    verdicts: list[dict[str, Any]] = []
+
+    for entry in branch:
+        payload = entry.payload
+        if not isinstance(payload, dict):
+            continue
+        if entry.type == _AUDIT_EVENT_ENTRY_TYPE:
+            try:
+                graph.append(Event.from_dict(payload))
+            except (KeyError, ValueError, TypeError):
+                continue
+        elif entry.type == _VERDICT_ENTRY_TYPE:
+            verdicts.append(payload)
+        elif entry.type == _EXTRACTOR_CURSOR_ENTRY_TYPE:
+            raw = payload.get("last_turn_index")
+            if isinstance(raw, int) and not isinstance(raw, bool):
+                cursor_last_turn_index = raw
+
+    return _BranchState(
+        cursor_last_turn_index=cursor_last_turn_index,
+        graph=graph,
+        recent_verdicts=verdicts[-recent_verdicts_n:] if recent_verdicts_n > 0 else [],
+    )
+
+
+# --- failure recording ------------------------------------------------------
+
+
+def _record_failure(
+    api: ExtensionAPI, entry_type: str, payload: dict[str, Any]
+) -> None:
+    """Single chokepoint for typed failure entries. Append-only; never raises."""
+    api.session.append_entry(entry_type, payload)
+
+
+def _window_is_non_trivial(messages_slice: list[AgentMessage]) -> bool:
+    """True iff the slice contains any AssistantMessage or ToolResultMessage.
+
+    A pure user-only window does NOT count as non-trivial — extractor is not
+    expected to produce events from user messages alone, so an empty events
+    array on such a window is normal, not a failure (design §4).
+    """
+    return any(
+        isinstance(msg, (AssistantMessage, ToolResultMessage)) for msg in messages_slice
+    )
+
+
+# --- install ----------------------------------------------------------------
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    k_history = int(config.get("K_history_events", _DEFAULT_K_HISTORY_EVENTS))
-    n_alerts = int(config.get("N_recent_alerts", _DEFAULT_N_RECENT_ALERTS))
-    child_purpose = str(config.get("child_purpose", _DEFAULT_CHILD_PURPOSE))
-    reminder_prefix = str(config.get("reminder_prefix", _DEFAULT_REMINDER_PREFIX))
+    k = int(config.get("audit_interval_turns", _DEFAULT_AUDIT_INTERVAL_TURNS))
+    if k < 1:
+        k = _DEFAULT_AUDIT_INTERVAL_TURNS
 
-    cards_cfg = config.get("cards_tools_config", {})
-    obs_cfg = config.get("observability_config", {})
-    prompt_override = config.get("prompt_override")
-    child_extensions = compose_extensions(
-        prompt_override=prompt_override if isinstance(prompt_override, str) else None,
-        cards_tools_config=cards_cfg if isinstance(cards_cfg, dict) else None,
-        observability_config=obs_cfg if isinstance(obs_cfg, dict) else None,
+    cards_cfg_raw = config.get("cards_tools_config", {})
+    obs_cfg_raw = config.get("observability_config", {})
+    cards_cfg = cards_cfg_raw if isinstance(cards_cfg_raw, dict) else None
+    obs_cfg = obs_cfg_raw if isinstance(obs_cfg_raw, dict) else None
+
+    prompt_extractor_raw = config.get("prompt_override_extractor")
+    prompt_auditor_raw = config.get("prompt_override_auditor")
+    prompt_extractor = (
+        prompt_extractor_raw if isinstance(prompt_extractor_raw, str) else None
+    )
+    prompt_auditor = (
+        prompt_auditor_raw if isinstance(prompt_auditor_raw, str) else None
     )
 
-    # Single-slot pending reminder, scoped to this session. List used as a
-    # mutable closure cell for type-checker friendliness; len ≤ 1 by design.
-    pending: list[Reminder] = []
+    extractor_extensions = compose_extractor_extensions(
+        prompt_override=prompt_extractor,
+        cards_tools_config=cards_cfg,
+        observability_config=obs_cfg,
+    )
+    auditor_extensions = compose_auditor_extensions(
+        prompt_override=prompt_auditor,
+        cards_tools_config=cards_cfg,
+        observability_config=obs_cfg,
+    )
+
+    turn_count = 0
+    pending: Reminder | None = None
 
     async def _on_turn_end(event: TurnEndEvent) -> None:
-        del event  # full conversation pulled from session.get_messages() below
+        nonlocal turn_count, pending
+        del event
 
-        full_messages = api.session.get_messages()
-        prior_events = _read_prior_events(api, k_history)
-        recent_alerts = [v.to_dict() for v in _read_recent_verdicts(api, n_alerts)]
+        turn_count += 1
+        branch = api.session.get_branch()
+        messages = api.session.get_messages()
+        state = _scan_branch(branch, recent_verdicts_n=_DEFAULT_RECENT_VERDICTS)
 
-        payload = {
-            "trajectory": _serialize_for_audit_prompt(full_messages),
-            "prior_events": [e.to_dict() for e in prior_events],
-            "recent_alerts": recent_alerts,
-        }
-
-        # provider=None → spawn_child_session auto-wires the
-        # inherit_provider builtin so the child re-uses the parent's
-        # active ProviderConfig. Same pattern as sub_agent.
-        child_config = AgentSessionConfig(
-            cwd=api.cwd,
-            provider=None,
-            extensions=child_extensions,
-            purpose=child_purpose,
+        # --- Phase 1: extractor (always) ---
+        new_events = await _run_extractor(
+            api=api,
+            extractor_extensions=extractor_extensions,
+            messages=messages,
+            cursor_last_turn_index=state.cursor_last_turn_index,
+            recent_graph_slice=state.graph[-_RECENT_GRAPH_SLICE_FOR_EXTRACTOR:],
+            next_event_id=_next_event_id(state.graph),
         )
-        try:
-            child = await api.spawn_child_session(child_config)
-        except Exception:
-            # Audit is best-effort — never let a diagnostic failure crash the
-            # main agent's turn end.
-            return
+        if new_events is None:
+            return  # typed failure already recorded; cursor stays put
 
-        try:
-            messages = await child.prompt(json.dumps(payload, ensure_ascii=False))
-        except Exception:
-            await _safe_shutdown(child)
-            return
-
-        events, verdict = _audit_output_from_messages(messages, prior_events)
-        await _safe_shutdown(child)
-
-        for ev in events:
+        for ev in new_events:
             api.session.append_entry(_AUDIT_EVENT_ENTRY_TYPE, ev.to_dict())
+
+        api.session.append_entry(
+            _EXTRACTOR_CURSOR_ENTRY_TYPE,
+            {
+                "last_turn_index": len(messages) - 1,
+                "extraction_run_id": uuid.uuid4().hex,
+            },
+        )
+
+        # --- Phase 2: auditor (every k turns) ---
+        if (turn_count % k) != 0:
+            return
+
+        verdict = await _run_auditor(
+            api=api,
+            auditor_extensions=auditor_extensions,
+            graph_events=state.graph + new_events,
+            recent_verdicts=state.recent_verdicts,
+        )
+        if verdict is None:
+            return
+
         api.session.append_entry(_VERDICT_ENTRY_TYPE, verdict.to_dict())
 
-        # Reminder gating: must be drift, must have body, must have a
-        # parseable type. Dropping a reminder when ``verdict.type is None``
-        # surfaces LLM-side schema violations instead of papering over them
-        # with a default ``TASK_DRIFT`` (which would poison §5.2 step 9
-        # same-type suppression on next firing).
         if verdict.drift and verdict.reminder and verdict.type is not None:
-            pending[:] = [
-                Reminder(
-                    type=verdict.type,
-                    confidence=verdict.confidence,
-                    text=verdict.reminder,
-                )
-            ]
+            pending = Reminder(
+                type=verdict.type,
+                confidence=verdict.confidence,
+                text=verdict.reminder,
+            )
 
     def _on_before_agent_start(event: BeforeAgentStartEvent) -> None:
-        if not pending:
+        nonlocal pending
+        if pending is None:
             return
-        reminder = pending.pop()
+        reminder, pending = pending, None
         existing = event.system or ""
-        event.system = existing + reminder_prefix + reminder.text
+        event.system = existing + _REMINDER_PREFIX + reminder.text
 
     api.on(TurnEndEvent.CHANNEL, _on_turn_end)
     api.on(BeforeAgentStartEvent.CHANNEL, _on_before_agent_start)
 
 
-def _audit_output_from_messages(
-    messages: list[AgentMessage], prior_events: list[Event]
-) -> tuple[list[Event], Verdict]:
-    """Pull (new events, verdict) off the audit child's ``submit_audit`` tool call.
+def _next_event_id(prior_events: list[Event]) -> int:
+    return max((e.id for e in prior_events), default=-1) + 1
 
-    The audit child terminates by calling ``submit_audit(events=..., verdict=...)``.
-    The kernel records the call as a :class:`ToolCallBlock` on the final
-    assistant message; we walk newest-first looking for that block and read
-    its ``arguments`` dict directly — already structured, schema-validated
-    by the LLM provider's tool-use surface. Falls back to ``([], silent
-    verdict)`` when no submit_audit call is found (V0 default: stay quiet
-    per design §2).
+
+# --- trajectory slicing -----------------------------------------------------
+
+
+def _slice_new_turns(
+    messages: list[AgentMessage], cursor_last_turn_index: int
+) -> list[dict[str, Any]]:
+    """Slice ``messages[cursor + 1 :]`` into a payload the extractor can consume.
+
+    Keeps thinking blocks; tool-result content stays structured (list of inner
+    blocks rather than a flattened string) so the extractor can distinguish
+    error vs success and inspect tool extras (design §7.4).
     """
+    start = max(cursor_last_turn_index + 1, 0)
+    out: list[dict[str, Any]] = []
+    for i, msg in enumerate(messages[start:], start=start):
+        serialized = _serialize_message_for_extractor(msg, index=i)
+        if serialized is not None:
+            out.append(serialized)
+    return out
 
-    next_id = max((e.id for e in prior_events), default=-1) + 1
+
+def _serialize_message_for_extractor(
+    msg: AgentMessage, *, index: int
+) -> dict[str, Any] | None:
+    """Best-effort dict view of one message.
+
+    Walks blocks via duck-typing on public attrs so the serializer survives
+    SDK additions (new content-block kinds) without code changes here.
+    Unknown blocks fall through to a generic ``{type, repr}`` form rather than
+    being silently dropped — visibility over precision.
+    """
+    content = getattr(msg, "content", None)
+    if not isinstance(content, list):
+        return None
+
+    blocks = [b for b in (_serialize_block(blk) for blk in content) if b is not None]
+    if not blocks:
+        return None
+    return {
+        "index": index,
+        "role": getattr(msg, "role", "unknown"),
+        "content": blocks,
+    }
+
+
+def _serialize_block(block: Any) -> dict[str, Any] | None:
+    """Serialize one content block; preserves thinking + tool-result structure."""
+    text = getattr(block, "text", None)
+    if isinstance(text, str) and text:
+        block_type = getattr(block, "type", None)
+        return {"type": block_type if isinstance(block_type, str) and block_type else "text", "text": text}
+
+    name = getattr(block, "name", None)
+    arguments = getattr(block, "arguments", None)
+    if isinstance(name, str) and isinstance(arguments, dict):
+        return {
+            "type": "tool_call",
+            "id": getattr(block, "id", None),
+            "name": name,
+            "arguments": dict(arguments),
+        }
+
+    tool_call_id = getattr(block, "tool_call_id", None)
+    inner_content = getattr(block, "content", None)
+    if isinstance(tool_call_id, str) and isinstance(inner_content, list):
+        inner_blocks: list[dict[str, Any]] = []
+        for inner in inner_content:
+            inner_text = getattr(inner, "text", None)
+            if isinstance(inner_text, str):
+                inner_blocks.append({"type": "text", "text": inner_text})
+            else:
+                inner_blocks.append(
+                    {
+                        "type": getattr(inner, "type", inner.__class__.__name__),
+                        "repr": repr(inner),
+                    }
+                )
+        return {
+            "type": "tool_result",
+            "tool_call_id": tool_call_id,
+            "content": inner_blocks,
+            "is_error": bool(getattr(block, "is_error", False)),
+        }
+
+    return {"type": getattr(block, "type", block.__class__.__name__), "repr": repr(block)}
+
+
+# --- phase runner -----------------------------------------------------------
+
+
+_T = TypeVar("_T")
+
+
+async def _run_phase(
+    *,
+    api: ExtensionAPI,
+    extensions: list[tuple[str, dict[str, Any]]],
+    purpose: str,
+    payload: dict[str, Any],
+    terminal_tool: str,
+    coerce: Callable[[dict[str, Any]], _T],
+    coerce_error: type[Exception],
+    on_spawn_or_prompt_error: Callable[[str], None],
+    on_no_call: Callable[[], None],
+    on_malformed: Callable[[str], None],
+) -> _T | None:
+    """Spawn child, drive to terminal_tool, coerce, return result.
+
+    Failure paths invoke the supplied callbacks (which write typed failure
+    entries) and return None. The driver in ``_on_turn_end`` short-circuits
+    on None without poisoning cursor / graph / pending state.
+    """
+    child_config = AgentSessionConfig(
+        cwd=api.cwd,
+        provider=None,
+        extensions=extensions,
+        purpose=purpose,
+    )
+    try:
+        child = await api.spawn_child_session(child_config)
+    except Exception as exc:
+        on_spawn_or_prompt_error(str(exc))
+        return None
+
+    try:
+        messages = await child.prompt(json.dumps(payload, ensure_ascii=False, default=str))
+    except Exception as exc:
+        on_spawn_or_prompt_error(str(exc))
+        await _safe_shutdown(child)
+        return None
+
+    await _safe_shutdown(child)
+
+    arguments = _find_terminal_tool_arguments(messages, terminal_tool)
+    if arguments is None:
+        on_no_call()
+        return None
+
+    try:
+        return coerce(arguments)
+    except coerce_error as exc:
+        on_malformed(str(exc))
+        return None
+
+
+async def _run_extractor(
+    *,
+    api: ExtensionAPI,
+    extractor_extensions: list[tuple[str, dict[str, Any]]],
+    messages: list[AgentMessage],
+    cursor_last_turn_index: int,
+    recent_graph_slice: list[Event],
+    next_event_id: int,
+) -> list[Event] | None:
+    new_turn_window = _slice_new_turns(messages, cursor_last_turn_index)
+    if not new_turn_window:
+        return []  # nothing to extract; clean no-op
+
+    window_lo = max(cursor_last_turn_index + 1, 0)
+    window_hi = len(messages) - 1
+    window = [window_lo, window_hi]
+    raw_window_slice = messages[window_lo:]
+
+    payload = {
+        "new_turns": new_turn_window,
+        "recent_graph": [e.to_dict() for e in recent_graph_slice],
+    }
+
+    parsed = await _run_phase(
+        api=api,
+        extensions=extractor_extensions,
+        purpose="cognitive_audit_extractor",
+        payload=payload,
+        terminal_tool=SUBMIT_EVENTS_TOOL_NAME,
+        coerce=RawExtractorOutput.from_dict,
+        coerce_error=ExtractorOutputError,
+        on_spawn_or_prompt_error=lambda reason: _record_failure(
+            api, _EXTRACTOR_ERROR_ENTRY, {"reason": reason, "turn_window": window}
+        ),
+        on_no_call=lambda: _record_failure(
+            api,
+            _EXTRACTOR_NO_CALL_ENTRY,
+            {
+                "reason": f"child returned without calling {SUBMIT_EVENTS_TOOL_NAME}",
+                "turn_window": window,
+            },
+        ),
+        on_malformed=lambda reason: _record_failure(
+            api,
+            _EXTRACTOR_ERROR_ENTRY,
+            {"reason": f"malformed: {reason}", "turn_window": window},
+        ),
+    )
+    if parsed is None:
+        return None
+
+    events = parsed.to_events(next_id=next_event_id)
+    if not events and _window_is_non_trivial(raw_window_slice):
+        _record_failure(api, _EXTRACTOR_EMPTY_ENTRY, {"turn_window": window})
+        return None
+    return events
+
+
+async def _run_auditor(
+    *,
+    api: ExtensionAPI,
+    auditor_extensions: list[tuple[str, dict[str, Any]]],
+    graph_events: list[Event],
+    recent_verdicts: list[dict[str, Any]],
+) -> Verdict | None:
+    payload = {
+        "graph": [e.to_dict() for e in graph_events],
+        "recent_verdicts": list(recent_verdicts),
+    }
+    raw = await _run_phase(
+        api=api,
+        extensions=auditor_extensions,
+        purpose="cognitive_audit_auditor",
+        payload=payload,
+        terminal_tool=SUBMIT_VERDICT_TOOL_NAME,
+        coerce=RawVerdictOutput.from_dict,
+        coerce_error=AuditorOutputError,
+        on_spawn_or_prompt_error=lambda reason: _record_failure(
+            api, _AUDIT_ERROR_ENTRY, {"reason": reason}
+        ),
+        on_no_call=lambda: _record_failure(
+            api,
+            _AUDIT_NO_CALL_ENTRY,
+            {"reason": f"child returned without calling {SUBMIT_VERDICT_TOOL_NAME}"},
+        ),
+        on_malformed=lambda reason: _record_failure(
+            api, _AUDIT_ERROR_ENTRY, {"reason": f"malformed: {reason}"}
+        ),
+    )
+    return raw.to_verdict() if raw is not None else None
+
+
+def _find_terminal_tool_arguments(
+    messages: list[AgentMessage], tool_name: str
+) -> dict[str, Any] | None:
     for msg in reversed(messages):
         if not isinstance(msg, AssistantMessage):
             continue
         for block in reversed(msg.content):
-            if not isinstance(block, ToolCallBlock):
-                continue
-            if block.name != SUBMIT_AUDIT_TOOL_NAME:
-                continue
-            parsed = RawAuditOutput.from_dict(block.arguments)
-            if parsed is None:
-                return [], Verdict(drift=False)
-            return parsed.to_events(next_id=next_id), parsed.to_verdict()
-    return [], Verdict(drift=False)
-
-
-def _serialize_for_audit_prompt(
-    messages: list[AgentMessage],
-) -> list[dict[str, Any]]:
-    """Serialize a full conversation history for the audit child.
-
-    Audit-specific shape (design §3.3 + §5.2):
-    - Each entry carries an ``index`` so verdict ``source_turns`` can cite
-      trajectory positions.
-    - Thinking and image blocks are dropped — audit operates on emitted
-      pure-text moves only.
-    - Tool-result content is flattened to a single text string; the audit
-      prompt does not analyze structured tool extras.
-
-    No SDK serializer fits this shape; the closest (``SessionManager._serialize_payload``)
-    is private and produces a different (storage-oriented) layout.
-    """
-
-    out: list[dict[str, Any]] = []
-    for i, msg in enumerate(messages):
-        blocks: list[dict[str, Any]] = []
-        if isinstance(msg, UserMessage):
-            blocks = [
-                {"type": "text", "text": b.text}
-                for b in msg.content
-                if isinstance(b, TextContent) and b.text
-            ]
-        elif isinstance(msg, AssistantMessage):
-            for b in msg.content:
-                if isinstance(b, TextContent) and b.text:
-                    blocks.append({"type": "text", "text": b.text})
-                elif isinstance(b, ToolCallBlock):
-                    blocks.append(
-                        {
-                            "type": "tool_call",
-                            "id": b.id,
-                            "name": b.name,
-                            "arguments": dict(b.arguments),
-                        }
-                    )
-        elif isinstance(msg, ToolResultMessage):
-            for tr in msg.content:
-                text_parts = [
-                    inner.text
-                    for inner in tr.content
-                    if isinstance(inner, TextContent)
-                ]
-                blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_call_id": tr.tool_call_id,
-                        "content": "\n".join(text_parts),
-                        "is_error": tr.is_error,
-                    }
-                )
-        else:
-            continue
-        if blocks:
-            out.append({"index": i, "role": msg.role, "content": blocks})
-    return out
+            if isinstance(block, ToolCallBlock) and block.name == tool_name:
+                return dict(block.arguments)
+    return None
 
 
 async def _safe_shutdown(child: Any) -> None:
-    shutdown = getattr(child, "shutdown", None)
-    if shutdown is None:
-        return
+    # Best-effort: audit pipeline must not crash the parent; child may already
+    # be torn down by parent shutdown in some race conditions.
     try:
-        result = shutdown()
-        if hasattr(result, "__await__"):
-            await result
+        await child.shutdown()
     except Exception:
         return
 

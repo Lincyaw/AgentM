@@ -362,8 +362,7 @@ class AgentSession:
             cannot impersonate a different parent. When ``child_config.provider``
             is ``None`` we auto-wire the ``inherit_provider`` builtin so the
             child re-uses the parent's active :class:`ProviderConfig` without
-            re-authenticating — the canonical replacement for the historical
-            ad-hoc ``_bridge_provider`` tuple trick. Returns the constructed
+            re-authenticating. Returns the constructed
             child; lifecycle events are emitted by ``AgentSession.create``
             via the existing ``parent_bus`` plumbing.
             """

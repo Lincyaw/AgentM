@@ -46,79 +46,147 @@ requirements:
     depends_on: [REQ-001]
 
   - id: REQ-017
-    title: AgentM adapter — TurnEnd trigger + BeforeAgentStart inject
+    title: AgentM adapter — single-pass TurnEnd cognitive audit (SUPERSEDED)
     description: |
-      V0 cognitive-audit adapter for AgentM-on-AgentM
-      (design: .claude/designs/llmharness-cognitive-audit.md §4.5,
-      single-file extension contract: extension-as-scenario.md §11).
-      Module-level ``MANIFEST: ExtensionManifest`` (tier 1, api_version 1)
-      declares two event subscriptions; ``install(api, config)`` registers
-      them via ``api.on(...)``.
+      Superseded 2026-05-08 by REQ-019 (two-phase orchestrator). The V0
+      adapter spawned one child per TurnEndEvent that did extraction +
+      verdict in a single pass and parsed trailing JSON via
+      ``RawAuditOutput``. Replaced by the two-phase rewrite of
+      ``adapters/agentm.py`` that runs Phase 1 (extractor) every turn and
+      Phase 2 (auditor) every k turns. Pointer: design
+      ``.claude/designs/llmharness-two-phase-audit.md`` §2, §6, §7.1.
+    priority: P0
+    status: deprecated
+    code: []
+    tests: []
+    depends_on: [REQ-001, REQ-016, REQ-018]
 
-      On every ``TurnEndEvent.CHANNEL``, the adapter pulls the full
-      conversation via ``api.session.get_messages()``, reads prior audit
-      events and recent verdicts back from the session entry tree
-      (``api.session.get_branch()`` filtered by entry type), spawns a child
-      AgentM session via ``api.spawn_child_session(AgentSessionConfig(
-      extensions=compose_extensions(...), provider=bridge_provider, ...))``,
-      drives ``child.prompt(json_payload)`` to completion, parses the
-      trailing JSON via ``RawAuditOutput``, appends events + verdict to the
-      session tree via ``api.session.append_entry``, and on ``drift &&
-      reminder && type is not None`` caches a single pending Reminder in
-      adapter-local closure state.
+  - id: REQ-018
+    title: audit/ flat subpackage — single-pass diagnostic engine (SUPERSEDED)
+    description: |
+      Superseded 2026-05-08 by REQ-020 (extractor) + REQ-021 (auditor).
+      The V0 flat layout (``audit/prompt.py``, ``audit/submit_tool.py``,
+      ``audit/output.py``, ``audit/extensions.py``) and its
+      ``compose_extensions`` / ``AUDIT_SYSTEM_PROMPT`` /
+      ``SUBMIT_AUDIT_TOOL_NAME`` / ``RawAuditOutput`` symbols were deleted
+      in the hard-cut migration to the two-phase split (extractor +
+      auditor disjoint subpackages). Pointer: design
+      ``.claude/designs/llmharness-two-phase-audit.md`` §3, §7.1, §11.
+    priority: P0
+    status: deprecated
+    code: []
+    tests: []
+    depends_on: [REQ-001, REQ-016]
 
-      On ``BeforeAgentStartEvent.CHANNEL``, the adapter pops the pending
-      reminder (if any) and *appends* its text to ``event.system`` in place
-      with the configurable ``reminder_prefix`` (default ``\n\n[harness] ``).
-      No reminder ⇒ no mutation. No throttling — design §5.1 mandates
-      trigger on every TurnEndEvent.
+  # ---------------------------------------------------------------------------
+  # V1 two-phase cognitive-audit pipeline (P0 — replaces REQ-017 / REQ-018)
+  # Design: .claude/designs/llmharness-two-phase-audit.md
 
-      Plug-and-play config knobs (all optional): ``K_history_events``,
-      ``N_recent_alerts``, ``child_purpose``, ``reminder_prefix``,
-      ``prompt_override``, ``cards_tools_config``, ``observability_config``.
+  - id: REQ-019
+    title: Two-phase orchestrator — adapter rewrite (extractor + auditor)
+    description: |
+      ``adapters/agentm.py`` rewritten for the two-phase split (design
+      ``llmharness-two-phase-audit.md`` §2, §6). Single TurnEndEvent
+      handler dispatches Phase 1 every turn and Phase 2 every k turns
+      (default ``audit_interval_turns=3``). Phase 1 spawns a child whose
+      extensions come from ``compose_extractor_extensions``, slices the
+      new turns since ``llmharness.extractor_cursor``, persists each
+      submitted event as an ``llmharness.audit_event`` entry, and updates
+      the cursor. Phase 2 spawns a child whose extensions come from
+      ``compose_auditor_extensions``, feeds the event graph + recent
+      verdicts (NOT the raw trajectory), and persists the resulting
+      ``Verdict`` plus a single pending Reminder in adapter closure state.
+      ``BeforeAgentStartEvent`` injection unchanged from REQ-017's design.
     priority: P0
     status: implemented
     code: [src/llmharness/adapters/agentm.py]
     tests: [tests/test_smoke.py]
-    depends_on: [REQ-001, REQ-016, REQ-018]
+    depends_on: [REQ-001, REQ-016, REQ-020, REQ-021, REQ-022, REQ-023]
 
-  - id: REQ-018
-    title: audit/ subpackage — diagnostic engine as Python (no scenario YAML)
+  - id: REQ-020
+    title: Phase 1 extractor subpackage — per-turn event extraction
     description: |
-      The cognitive-audit diagnostic agent's prompt + extension list ships
-      as a Python subpackage at ``src/llmharness/audit/``. Public surface:
-
-      - ``audit.AUDIT_SYSTEM_PROMPT`` — the full system prompt body as a
-        module-level string. Encodes the two-stage audit flow; step 10
-        instructs the agent to terminate by calling ``submit_audit``.
-      - ``audit.compose_extensions(prompt_override=, cards_tools_config=,
-        observability_config=)`` — factory returning the canonical tuple
-        list ``[(observability, {}), (cards_tools, {}), (submit_tool, {}),
-        (system_prompt, {prompt: AUDIT_SYSTEM_PROMPT})]``. Pass ``None``
-        for ``cards_tools_config`` / ``observability_config`` to drop those;
-        ``submit_tool`` is mandatory.
-      - ``audit.submit_tool`` — §11 extension that registers the
-        ``submit_audit`` terminal tool. Its ``parameters`` JSON Schema
-        carries the events + verdict shape; the LLM provider validates
-        each call against it. Returning ``ToolTerminate`` ends the audit
-        loop the moment the tool fires.
-      - ``audit.RawAuditOutput`` / ``audit.RawAuditEvent`` — typed coercion
-        of the ``submit_audit`` arguments dict into Verdict + Event.
-
-      The adapter (REQ-017) drives the child via ``AgentSessionConfig(
-      extensions=audit.compose_extensions(...))`` — no ``scenario=``
-      argument, no YAML lookup, no cross-directory indirection.
+      ``audit/extractor/`` subpackage (design §3.1, §4, §7.1). Public
+      surface: ``EXTRACTOR_SYSTEM_PROMPT``, ``compose_extractor_extensions``,
+      ``RawExtractorOutput`` (with ``ExtractorOutputError``),
+      ``SUBMIT_EVENTS_TOOL_NAME``. The terminal tool ``submit_events``
+      forces structured Event output; thinking blocks are kept this time
+      so causal/ref reasoning can rely on them. Stateless: the adapter
+      slices new turns and passes them in.
     priority: P0
     status: implemented
     code:
-      - src/llmharness/audit/__init__.py
-      - src/llmharness/audit/prompt.py
-      - src/llmharness/audit/extensions.py
-      - src/llmharness/audit/output.py
-      - src/llmharness/audit/submit_tool.py
-      - src/llmharness/atoms/cards_tools.py
-    tests: [tests/test_smoke.py]
-    depends_on: [REQ-001, REQ-016]
+      - src/llmharness/audit/extractor/__init__.py
+      - src/llmharness/audit/extractor/prompt.py
+      - src/llmharness/audit/extractor/extensions.py
+      - src/llmharness/audit/extractor/output.py
+      - src/llmharness/audit/extractor/submit_tool.py
+    depends_on: [REQ-001, REQ-016, REQ-023]
+
+  - id: REQ-021
+    title: Phase 2 auditor subpackage — every-k-turn graph audit
+    description: |
+      ``audit/auditor/`` subpackage (design §3.2, §5, §7.1). Public
+      surface: ``AUDITOR_SYSTEM_PROMPT``, ``compose_auditor_extensions``,
+      ``RawVerdictOutput`` (with ``AuditorOutputError``),
+      ``SUBMIT_VERDICT_TOOL_NAME``. Auditor consumes the event graph +
+      recent verdicts (graph form ``Event.to_dict``), NOT the raw
+      trajectory — Phase 1 already condensed that. ``submit_verdict``
+      JSON Schema enforces ``drift=true ⇒ type required`` via if/then at
+      the provider edge instead of silently dropped by the adapter.
+    priority: P0
+    status: implemented
+    code:
+      - src/llmharness/audit/auditor/__init__.py
+      - src/llmharness/audit/auditor/prompt.py
+      - src/llmharness/audit/auditor/extensions.py
+      - src/llmharness/audit/auditor/output.py
+      - src/llmharness/audit/auditor/submit_tool.py
+    depends_on: [REQ-001, REQ-016, REQ-023]
+
+  - id: REQ-022
+    title: Typed failure entries — outage vs clean trajectory distinguishable
+    description: |
+      Design §6.3, §8. V0's silent ``([], Verdict(drift=False))`` fallback
+      is replaced by typed failure entries written to the session tree:
+      ``extractor_no_call`` / ``extractor_error`` / ``extractor_empty``
+      for Phase 1, ``audit_no_call`` / ``audit_error`` for Phase 2. The
+      orchestrator (REQ-019) catches each failure mode and persists the
+      typed entry so downstream graph queries can tell outage from a
+      genuinely clean trajectory.
+    priority: P0
+    status: implemented
+    code: [src/llmharness/adapters/agentm.py]
+    depends_on: [REQ-001, REQ-020, REQ-021]
+
+  - id: REQ-023
+    title: Schema enum-parity helper — single source of truth for kinds/drifts
+    description: |
+      Design §7.2. ``audit/_enum_schema.py`` derives the JSON-Schema
+      ``enum`` arrays for ``EventKind`` / ``DriftType`` directly from the
+      enum classes, so the extractor's ``submit_events`` schema and the
+      auditor's ``submit_verdict`` schema cannot drift away from
+      ``schema.py``. Replaces V0's hand-listed copies in
+      ``audit/submit_tool.py``.
+    priority: P0
+    status: implemented
+    code: [src/llmharness/audit/_enum_schema.py]
+    depends_on: [REQ-001]
+
+  - id: REQ-024
+    title: V1 fail-stop integration test — 4-turn k=3 stub-provider trajectory
+    description: |
+      Design §10. Single integration test pinned to a 4-turn k=3 dialog
+      that asserts Phase 1 fires 4× and Phase 2 fires 1× at turn 3, with
+      the expected entry-tree shape (``llmharness.audit_event`` count,
+      ``llmharness.extractor_cursor`` final value, single ``Verdict``).
+      Owned by task 07; placeholder so the index already names the
+      requirement that the V1 fail-stop discharges.
+    priority: P0
+    status: pending
+    code: []
+    tests: []
+    depends_on: [REQ-019, REQ-020, REQ-021, REQ-022]
 
   # ---------------------------------------------------------------------------
   # Removed in the 2026-05-08 SDK-native cleanup. Kept here for traceability;
@@ -237,7 +305,9 @@ requirements:
     description: |
       Originally a ``<AgentM-root>/scenarios/harness_monitor/manifest.yaml``
       that the subprocess bridge resolved by name. Deleted 2026-05-08 in
-      favor of programmatic composition (``llmharness.audit.compose_extensions``).
+      favor of programmatic composition (``llmharness.audit.extractor.compose_extractor_extensions``
+      + ``llmharness.audit.auditor.compose_auditor_extensions``; V0
+      ``compose_extensions`` deleted 2026-05-08).
     priority: P0
     status: deprecated
     code: []
