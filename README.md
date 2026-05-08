@@ -114,12 +114,17 @@ verifiable.
 | Observability| `observability`, `trajectory` |
 | Misc         | `sub_agent`, `file_mutation_queue` |
 
-### Contrib atoms (`src/agentm/extensions/contrib/`)
+### Contrib atoms (`contrib/extensions/`)
 
-Opt-in adapters for third-party tools. NOT auto-discovered: scenarios
-load them explicitly via `available_inherited_extensions`.
+Flat-file `*.py` atoms at the top level (e.g. `tool_catalog`,
+`turn_reminder`) are auto-discovered alongside builtins under the
+synthetic module prefix `_agentm_contrib__<name>`. Subdirectories
+(e.g. `cc/`) hold opt-in `tier=2` atoms that auto-discovery
+deliberately skips; scenarios load them explicitly via
+`available_inherited_extensions`.
 
-- `cc_agents`, `cc_commands`, `cc_plugins` — Claude Code compatibility
+- `cc_agents`, `cc_commands`, `cc_plugins` (under `contrib/extensions/cc/`)
+  — Claude Code compatibility
   (read `~/.claude/{agents,commands,plugins}` and surface them through
   the generic `resources_discover` event).
 

@@ -3,7 +3,7 @@ confidence: fact
 description: 'DuckDB query guide for RCA: ground rules (column quoting, duration units,
   delta pattern), common pitfalls, and index of signal-specific recipe collections
   for traces, logs, metrics, and cross-signal correlation.'
-name: Diagnostic SQL Cookbook
+name: diagnose-sql
 tags:
 - sql
 - duckdb
@@ -29,10 +29,10 @@ An anomaly only exists if the delta between the two periods is significant.
 
 | Skill path | Signal | Use when |
 |------------|--------|----------|
-| [[skill/diagnose-sql/traces]] | Traces | Building topology, latency delta, error rates, span drill-down |
-| [[skill/diagnose-sql/logs]] | Logs | Error scanning, pattern grouping, keyword search, log-trace joins |
-| [[skill/diagnose-sql/metrics]] | Metrics | Resource health scan (MANDATORY per service), JVM, DB pools, network |
-| [[skill/diagnose-sql/correlation]] | Cross-signal | Choosing entry signal, cause vs victim, cross-signal reasoning |
+| `traces.md` | Traces | Building topology, latency delta, error rates, span drill-down |
+| `logs.md` | Logs | Error scanning, pattern grouping, keyword search, log-trace joins |
+| `metrics.md` | Metrics | Resource health scan (MANDATORY per service), JVM, DB pools, network |
+| `correlation.md` | Cross-signal | Choosing entry signal, cause vs victim, cross-signal reasoning |
 
 **IMPORTANT**: This index provides ground rules only. The sub-skills contain actual SQL recipes
 with correct column names, JOIN patterns, and standard filters. **Load the sub-skill matching
@@ -40,10 +40,12 @@ your primary signal BEFORE writing your first query for that signal type.** Ad-h
 consulting the recipes is the #1 cause of measurement errors.
 
 **No signal has priority.** Traces, logs, and metrics are equal investigative channels.
-Which to start with depends on what lead you have — see [[skill/diagnose-sql/correlation]]
-for guidance on choosing your entry signal.
+Which to start with depends on what lead you have — see `correlation.md` (in this skill
+directory) for guidance on choosing your entry signal.
 
-Load with: `vault_read(path="skill/diagnose-sql/traces")` (or `/metrics`, `/logs`, `/correlation`)
+The signal-specific recipes are sibling files under the same skill directory:
+`traces.md`, `metrics.md`, `logs.md`, `correlation.md`. The skill loader injects them
+alongside this entry, so you can reference them directly without a vault lookup.
 
 ## Ground Rules
 

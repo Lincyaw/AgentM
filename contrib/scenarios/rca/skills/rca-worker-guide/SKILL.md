@@ -3,7 +3,7 @@ confidence: fact
 description: 'Shared operational guide for RCA worker agents (scout, deep_analyze,
   verify): data sources, tooling quickstart, service profile protocol, tool discipline,
   and anomaly definition.'
-name: RCA Worker Guide
+name: rca-worker-guide
 tags:
 - rca
 - worker
@@ -26,7 +26,7 @@ Each period has logs, traces, and metrics. An anomaly only exists if there is a 
 ## Tooling Quickstart
 
 1. Call `describe_tables` to see all available tables and columns.
-2. Call `vault_read` with path `skill/diagnose-sql` to get query rules (column quoting, duration units, correct column names) and a recipe index. **Skipping this causes query errors.**
+2. Read the `diagnose-sql` skill (loaded alongside this guide) for query rules (column quoting, duration units, correct column names) and the per-signal recipes — the entry SKILL.md plus the same-directory `traces.md` / `metrics.md` / `logs.md` / `correlation.md` references. **Skipping this causes query errors.**
 3. Tables come in pairs: `abnormal_*` (incident) and `normal_*` (baseline).
 4. Write SQL via `query_sql`. Always include LIMIT.
 5. The `think` tool is always available for structured reasoning between queries.
