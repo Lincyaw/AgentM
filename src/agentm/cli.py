@@ -29,9 +29,13 @@ def _load_dotenv() -> None:
     """Load ``KEY=value`` pairs from the nearest ``.env`` walking up from cwd.
 
     Existing env vars win — explicit ``KEY=... agentm`` invocations still
-    override file values. Quoted values get unwrapped (``"x"`` → ``x``).
-    Lines starting with ``#`` and blank lines are ignored. No interpolation,
-    no exports, no shell semantics — keep it boring.
+    override file values. Quoted values get unwrapped (``"x"`` → ``x``) and
+    anything after the closing quote is dropped, so ``KEY="x"  # note`` is
+    parsed as ``x``. For unquoted values an inline comment introduced by
+    whitespace + ``#`` (matches POSIX shell convention) terminates the value;
+    bare ``#`` glued to the value is preserved. Full-line comments and blank
+    lines are ignored. No interpolation, no exports, no shell semantics —
+    keep it boring.
     """
     cur = Path.cwd().resolve()
     for candidate in (cur, *cur.parents):
@@ -55,10 +59,17 @@ def _load_dotenv() -> None:
             continue
         key = key.strip()
         value = value.strip()
-        if (len(value) >= 2) and (
-            (value[0] == value[-1] == '"') or (value[0] == value[-1] == "'")
-        ):
-            value = value[1:-1]
+        if value and value[0] in ('"', "'"):
+            quote = value[0]
+            end = value.find(quote, 1)
+            if end != -1:
+                value = value[1:end]
+        else:
+            # Strip inline comment introduced by whitespace + '#'.
+            for i, ch in enumerate(value):
+                if ch == "#" and (i == 0 or value[i - 1] in " \t"):
+                    value = value[:i].rstrip()
+                    break
         if key and key not in os.environ:
             os.environ[key] = value
 
