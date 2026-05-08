@@ -1,7 +1,7 @@
 ---
 name: scout
 description: First-responder. Produce a complete observability map of services on the call chain — multi-dimensional measurements (latency, error, volume, resources) for every service. Data only, no conclusions.
-tools: list_tables, query_sql
+tools: list_tables, query_sql, read
 input_schema:
   required: [objective, scope_services, output_format]
   optional: [prior_findings, hypothesis_under_test]
