@@ -497,6 +497,26 @@ class _TurnAggregator:
             for block in event.message.content
             if isinstance(block, ToolCallBlock)
         ]
+        attributes: dict[str, Any] = {
+            "turn_index": event.turn_index,
+            "duration_ns": end_ns - self._turn_start_ns,
+            "tool_calls": tool_calls,
+            "tool_call_count": len(tool_calls),
+            # Errors from the prior turn's tool-execution phase,
+            # which run between turn_end[N-1] and turn_start[N].
+            "tool_error_count": self._previous_tool_errors,
+            "stop_reason": event.message.stop_reason,
+            "content_block_types": [
+                getattr(c, "type", type(c).__name__)
+                for c in event.message.content
+            ],
+        }
+        usage = getattr(event.message, "usage", None)
+        if usage is not None:
+            attributes["input_tokens"] = usage.input_tokens
+            attributes["output_tokens"] = usage.output_tokens
+            attributes["cache_read"] = usage.cache_read
+            attributes["cache_write"] = usage.cache_write
         self._sink.write(
             {
                 "schema": "otel/span/v0",
@@ -506,20 +526,7 @@ class _TurnAggregator:
                 "name": f"turn:{event.turn_index}",
                 "start_time_unix_nano": self._turn_start_ns,
                 "end_time_unix_nano": end_ns,
-                "attributes": {
-                    "turn_index": event.turn_index,
-                    "duration_ns": end_ns - self._turn_start_ns,
-                    "tool_calls": tool_calls,
-                    "tool_call_count": len(tool_calls),
-                    # Errors from the prior turn's tool-execution phase,
-                    # which run between turn_end[N-1] and turn_start[N].
-                    "tool_error_count": self._previous_tool_errors,
-                    "stop_reason": event.message.stop_reason,
-                    "content_block_types": [
-                        getattr(c, "type", type(c).__name__)
-                        for c in event.message.content
-                    ],
-                },
+                "attributes": attributes,
                 "status": {"code": "OK"},
             }
         )

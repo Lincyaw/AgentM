@@ -39,6 +39,8 @@ for _candidate in (_cur, *_cur.parents):
 def _print_final(final_messages: list) -> None:
     text_blocks: list[str] = []
     tool_calls = 0
+    in_tok = out_tok = cache_r = cache_w = 0
+    assistant_turns = 0
     for msg in final_messages:
         if isinstance(msg, AssistantMessage):
             for block in msg.content:
@@ -46,6 +48,13 @@ def _print_final(final_messages: list) -> None:
                     text_blocks.append(block.text)
                 elif isinstance(block, ToolCallBlock):
                     tool_calls += 1
+            usage = getattr(msg, "usage", None)
+            if usage is not None:
+                in_tok += usage.input_tokens
+                out_tok += usage.output_tokens
+                cache_r += usage.cache_read
+                cache_w += usage.cache_write
+                assistant_turns += 1
 
     typer.echo("\n" + "=" * 60)
     typer.echo("AGENT FINAL OUTPUT")
@@ -53,6 +62,12 @@ def _print_final(final_messages: list) -> None:
     typer.echo("\n\n".join(text_blocks) if text_blocks else "<no text output>")
     typer.echo("=" * 60)
     typer.echo(f"messages={len(final_messages)} tool_calls={tool_calls}")
+    if assistant_turns:
+        typer.echo(
+            f"tokens: in={in_tok} out={out_tok} "
+            f"cache_r={cache_r} cache_w={cache_w} "
+            f"(over {assistant_turns} turn{'s' if assistant_turns != 1 else ''})"
+        )
 
 
 def _parse_tools(value: str | None) -> list[str] | None:
@@ -156,6 +171,37 @@ def _build_provider(provider: str, model: str) -> tuple[str, dict[str, Any]]:
     )
 
 
+def _resolve_session_manager(
+    *,
+    cwd: str,
+    resume: str | None,
+    continue_recent: bool,
+) -> Any:
+    """Build a SessionManager honouring ``--resume`` / ``--continue``.
+
+    ``resume`` may be either a session id (hex) or a path to a ``.jsonl``
+    log; ids are resolved against the default session dir for ``cwd``.
+    """
+
+    from agentm.harness.session_manager import SessionManager
+
+    if resume:
+        candidate = Path(resume)
+        if candidate.is_file():
+            return SessionManager.open(candidate, cwd_override=cwd)
+        session_dir = SessionManager.default_session_dir(cwd)
+        matches = sorted(session_dir.glob(f"*_{resume}.jsonl"))
+        if not matches:
+            raise typer.BadParameter(
+                f"--resume {resume!r}: no session file found "
+                f"(looked under {session_dir} and as a path)"
+            )
+        return SessionManager.open(matches[0], cwd_override=cwd)
+    if continue_recent:
+        return SessionManager.continue_recent(cwd=cwd)
+    return SessionManager.create(cwd=cwd)
+
+
 async def _run(
     *,
     prompt: str,
@@ -169,9 +215,10 @@ async def _run(
     model: str,
     cwd: str,
     quiet: bool,
+    resume: str | None,
+    continue_recent: bool,
 ) -> int:
     from agentm.harness import AgentSession, AgentSessionConfig
-    from agentm.harness.session_manager import SessionManager
 
     error_seen = False
 
@@ -198,9 +245,12 @@ async def _run(
     bus.on(DiagnosticEvent.CHANNEL, _on_diagnostic)
     bus.on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
 
-    session_manager = SessionManager.create(cwd=cwd)
+    session_manager = _resolve_session_manager(
+        cwd=cwd, resume=resume, continue_recent=continue_recent
+    )
     if not quiet and session_manager.session_file is not None:
         typer.echo(f"INFO: session log: {session_manager.session_file}", err=True)
+        typer.echo(f"INFO: session id: {session_manager.get_session_id()}", err=True)
 
     config = AgentSessionConfig(
         cwd=cwd,
@@ -223,6 +273,11 @@ async def _run(
 
     if not quiet:
         _print_final(final)
+        sid = session_manager.get_session_id()
+        if sid:
+            typer.echo(
+                f"session_id={sid}  (resume with: agentm --resume {sid} \"<prompt>\")"
+            )
     return 1 if error_seen else 0
 
 
@@ -388,6 +443,29 @@ def run_cmd(
             help="Open the Textual multi-turn TUI instead of running a single prompt.",
         ),
     ] = False,
+    resume: Annotated[
+        str | None,
+        typer.Option(
+            "--resume",
+            help=(
+                "Resume an existing session. Accepts a session id (hex, as "
+                "printed at the end of a previous run) or an explicit path "
+                "to a .jsonl session log. The new --prompt is appended to "
+                "that session's history, enabling multi-turn from the CLI."
+            ),
+        ),
+    ] = None,
+    continue_recent: Annotated[
+        bool,
+        typer.Option(
+            "--continue",
+            help=(
+                "Resume the most recent session for the current --cwd. "
+                "Convenient shortcut for --resume <id> when you just ran "
+                "agentm in this directory."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Send a single prompt and print the agent's final text."""
 
@@ -426,6 +504,8 @@ def run_cmd(
             model=model,
             cwd=cwd,
             quiet=quiet,
+            resume=resume,
+            continue_recent=continue_recent,
         )
     )
     raise typer.Exit(code=rc)
