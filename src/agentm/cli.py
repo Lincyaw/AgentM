@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -93,6 +93,58 @@ def _parse_tools(value: str | None) -> list[str] | None:
     return [t.strip() for t in value.split(",") if t.strip()]
 
 
+_FALSY = {"0", "false", "no", "off", "n", "f"}
+
+
+def _env_bool(name: str, *, default: bool) -> bool:
+    """Parse a tristate env var as bool. Unset → ``default``. Truthy unless
+    the value matches a small set of conventional falsy strings.
+    """
+
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in _FALSY
+
+
+def _build_provider(provider: str, model: str) -> tuple[str, dict[str, Any]]:
+    """Map ``--provider`` + ``--model`` into ``(module_path, config_dict)``.
+
+    Each branch reads its own env-var conventions so users can pick provider
+    without re-typing endpoint config on every invocation:
+
+    - ``anthropic`` (default): respects ``ANTHROPIC_BASE_URL``.
+    - ``openai``: respects ``OPENAI_BASE_URL``, ``WARPGATE_TICKET`` (folded
+      into ``default_query={"warpgate-ticket": ...}`` for self-signed
+      Warpgate gateways), and ``OPENAI_VERIFY_SSL`` (default ``true``;
+      set ``false``/``0``/``no``/``off`` to skip cert verification when
+      hitting a self-signed proxy).
+    """
+
+    if provider == "anthropic":
+        cfg: dict[str, Any] = {"model": model}
+        base_url = os.environ.get("ANTHROPIC_BASE_URL")
+        if base_url:
+            cfg["base_url"] = base_url
+        return ("agentm.llm.anthropic", cfg)
+
+    if provider == "openai":
+        cfg = {"model": model}
+        base_url = os.environ.get("OPENAI_BASE_URL")
+        if base_url:
+            cfg["base_url"] = base_url
+        ticket = os.environ.get("WARPGATE_TICKET")
+        if ticket:
+            cfg["default_query"] = {"warpgate-ticket": ticket}
+        if not _env_bool("OPENAI_VERIFY_SSL", default=True):
+            cfg["verify_ssl"] = False
+        return ("agentm.llm.openai", cfg)
+
+    raise typer.BadParameter(
+        f"unknown --provider {provider!r}; expected 'anthropic' or 'openai'"
+    )
+
+
 async def _run(
     *,
     prompt: str,
@@ -101,6 +153,7 @@ async def _run(
     no_skills: bool,
     no_prompt_templates: bool,
     tool_allowlist: list[str] | None,
+    provider: str,
     model: str,
     cwd: str,
     quiet: bool,
@@ -132,14 +185,9 @@ async def _run(
     bus.on(DiagnosticEvent.CHANNEL, _on_diagnostic)
     bus.on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
 
-    provider_config: dict[str, str] = {"model": model}
-    base_url = os.environ.get("ANTHROPIC_BASE_URL")
-    if base_url:
-        provider_config["base_url"] = base_url
-
     config = AgentSessionConfig(
         cwd=cwd,
-        provider=("agentm.llm.anthropic", provider_config),
+        provider=_build_provider(provider, model),
         scenario=scenario,
         no_extensions=no_extensions,
         no_skills=no_skills,
@@ -166,6 +214,7 @@ async def _run_interactive(
     no_skills: bool,
     no_prompt_templates: bool,
     tool_allowlist: list[str] | None,
+    provider: str,
     model: str,
     cwd: str,
 ) -> int:
@@ -173,11 +222,6 @@ async def _run_interactive(
 
     from agentm.harness import AgentSessionConfig
     from agentm.modes.textual_app import run as run_textual_tui
-
-    provider_config: dict[str, str] = {"model": model}
-    base_url = os.environ.get("ANTHROPIC_BASE_URL")
-    if base_url:
-        provider_config["base_url"] = base_url
 
     bus = EventBus()
 
@@ -202,7 +246,7 @@ async def _run_interactive(
 
     config = AgentSessionConfig(
         cwd=cwd,
-        provider=("agentm.llm.anthropic", provider_config),
+        provider=_build_provider(provider, model),
         scenario=scenario,
         no_extensions=no_extensions,
         no_skills=no_skills,
@@ -262,11 +306,27 @@ def run_cmd(
             help="Comma-separated allowlist applied to atom-registered tools.",
         ),
     ] = None,
+    provider: Annotated[
+        str,
+        typer.Option(
+            "--provider",
+            help=(
+                "LLM provider to register: 'anthropic' (default; respects "
+                "ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY) or 'openai' (respects "
+                "OPENAI_BASE_URL/OPENAI_API_KEY plus WARPGATE_TICKET and "
+                "OPENAI_VERIFY_SSL for self-signed gateways like Warpgate)."
+            ),
+        ),
+    ] = os.environ.get("AGENTM_PROVIDER", "anthropic"),
     model: Annotated[
         str,
         typer.Option(
             "--model",
-            help="Model id passed to the Anthropic-compatible provider.",
+            help=(
+                "Model id passed to the active provider. Default fits the "
+                "anthropic provider; override when --provider openai (e.g. "
+                "'gpt-4o', 'Kimi-K2', 'deepseek-chat')."
+            ),
         ),
     ] = os.environ.get("AGENTM_MODEL", "claude-sonnet-4-6"),
     cwd: Annotated[
@@ -299,6 +359,7 @@ def run_cmd(
                 no_skills=no_skills,
                 no_prompt_templates=no_prompt_templates,
                 tool_allowlist=_parse_tools(tools),
+                provider=provider,
                 model=model,
                 cwd=cwd,
             )
@@ -317,6 +378,7 @@ def run_cmd(
             no_skills=no_skills,
             no_prompt_templates=no_prompt_templates,
             tool_allowlist=_parse_tools(tools),
+            provider=provider,
             model=model,
             cwd=cwd,
             quiet=quiet,
