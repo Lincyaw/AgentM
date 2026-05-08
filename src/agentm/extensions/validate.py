@@ -67,7 +67,7 @@ _FORBIDDEN_PREFIXES: tuple[tuple[str, str], ...] = (
         "atom-to-atom coupling forbidden — depend via events / api only",
     ),
     (
-        "agentm.extensions.contrib.",
+        "_agentm_contrib__",
         "contrib atoms must stay decoupled from each other — depend via "
         "events / api only",
     ),

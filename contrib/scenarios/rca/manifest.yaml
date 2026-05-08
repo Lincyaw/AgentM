@@ -22,6 +22,13 @@ extensions:
         - duckdb_sql
         - artifact_store
         - observability
+        # Worker-only skills: ``worker_skills`` publishes the
+        # ``contrib/scenarios/rca/skills/`` directory via
+        # ``ResourcesDiscoverEvent``; ``skill_loader`` (builtin) reads
+        # that hook and injects the diagnose-sql / rca-worker-guide
+        # SKILL.md content into the worker system prompt.
+        - worker_skills
+        - skill_loader
       available_inherited_extensions:
         duckdb_sql:
           # Real importable path. The synthetic
@@ -40,3 +47,11 @@ extensions:
         observability:
           module: agentm.extensions.builtin.observability
           config: {}
+        worker_skills:
+          module: agentm_rca.worker_skills
+          config: {}
+        skill_loader:
+          module: agentm.extensions.builtin.skill_loader
+          config:
+            include_defaults: false
+            inherit_claude: false
