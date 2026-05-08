@@ -45,6 +45,20 @@ def load_scenario(name_or_path: str) -> list[tuple[str, dict[str, Any]]]:
     under its synthetic name before this function returns.
     """
 
+    extensions, _meta = load_scenario_with_meta(name_or_path)
+    return extensions
+
+
+def load_scenario_with_meta(
+    name_or_path: str,
+) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]]:
+    """Like :func:`load_scenario`, but also returns top-level scenario
+    metadata (``task_class`` and friends). Per-task-evolution scenarios
+    declare ``task_class`` at manifest top level; the harness threads it
+    onto :class:`AgentSessionConfig.task_class` so observability can
+    populate ``session.fingerprint.task_meta``.
+    """
+
     candidate = Path(name_or_path)
     if candidate.is_absolute():
         manifest_path = (
@@ -63,7 +77,17 @@ def load_scenario(name_or_path: str) -> list[tuple[str, dict[str, Any]]]:
             ),
         )
 
-    return _load_from_path(manifest_path)
+    extensions = _load_from_path(manifest_path)
+    try:
+        payload = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        payload = None
+    meta: dict[str, Any] = {}
+    if isinstance(payload, dict):
+        for key in ("task_class", "promotion"):
+            if key in payload:
+                meta[key] = payload[key]
+    return extensions, meta
 
 
 def _load_from_path(path: Path) -> list[tuple[str, dict[str, Any]]]:
@@ -326,4 +350,4 @@ def _entry_error(index: int, detail: str) -> str:
     return f"extensions[{index}] {detail}"
 
 
-__all__ = ["ScenarioLoadError", "load_scenario"]
+__all__ = ["ScenarioLoadError", "load_scenario", "load_scenario_with_meta"]

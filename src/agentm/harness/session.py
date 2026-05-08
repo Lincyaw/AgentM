@@ -35,6 +35,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import shutil
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -234,6 +236,7 @@ class AgentSession:
         parent_bus: EventBus | None,
         parent_session_id: str | None,
         purpose: str,
+        eval_sandbox: Path | None = None,
     ) -> None:
         self._cwd = cwd
         self._bus = bus
@@ -257,6 +260,11 @@ class AgentSession:
         # channel; checked at the top of ``prompt`` so the next turn
         # short-circuits cleanly with stop_reason="budget".
         self._budget_exceeded: bool = False
+        # Per-session sandbox for ``atom_source_overrides`` (per-task-evolution
+        # loop §6.3). Populated by ``AgentSession.create`` when the config
+        # supplies overrides; cleaned up on ``shutdown``. ``None`` for
+        # ordinary sessions — no filesystem cost.
+        self._eval_sandbox: Path | None = eval_sandbox
 
     # --- Compatibility aliases (legacy attribute access) ------------------
     # Tests and a few internal callers used to read these dicts off the
@@ -488,11 +496,11 @@ class AgentSession:
         elif config.scenario is not None:
             from agentm.extensions.loader import (
                 ScenarioLoadError,
-                load_scenario,
+                load_scenario_with_meta,
             )
 
             try:
-                to_load = load_scenario(config.scenario)
+                to_load, scenario_meta = load_scenario_with_meta(config.scenario)
             except (ScenarioLoadError, Exception) as exc:  # noqa: BLE001
                 await bus.emit(
                     DiagnosticEvent.CHANNEL,
@@ -503,6 +511,15 @@ class AgentSession:
                     ),
                 )
                 to_load = []
+                scenario_meta = {}
+            # Adopt scenario-declared ``task_class`` unless the caller
+            # explicitly set one on AgentSessionConfig (caller wins —
+            # ``tool_eval_run`` overrides for child sessions).
+            if (
+                config.task_class is None
+                and isinstance(scenario_meta.get("task_class"), str)
+            ):
+                config.task_class = scenario_meta["task_class"]
         else:
             # Auto-discovery loads every builtin atom with ``{}`` config.
             # Atoms whose ``MANIFEST.config_schema.required`` lists fields
@@ -677,6 +694,65 @@ class AgentSession:
         for msg in config.initial_messages:
             session_manager.append_message(msg)
 
+        # Apply ``atom_source_overrides`` BEFORE building the AgentSession
+        # façade so the running atoms reflect the overridden source by the
+        # time the loop is invoked. We redirect each atom's ``file_path`` to
+        # a per-session sandbox dir under ``.agentm/eval-sandbox/<id>/`` so
+        # ResourceWriter classifies the path as ``unmanaged`` (no git
+        # mutation, no working-tree change). The sandbox is cleaned up on
+        # ``AgentSession.shutdown``.
+        eval_sandbox: Path | None = None
+        if config.atom_source_overrides:
+            eval_sandbox = (
+                Path(config.cwd) / ".agentm" / "eval-sandbox" / session_id
+            ).resolve()
+            eval_sandbox.mkdir(parents=True, exist_ok=True)
+            for atom_name, new_source in config.atom_source_overrides.items():
+                atom = reloader.loaded_by_name.get(atom_name)
+                if atom is None:
+                    await bus.emit(
+                        DiagnosticEvent.CHANNEL,
+                        DiagnosticEvent(
+                            level="error",
+                            source="atom_source_overrides",
+                            message=(
+                                f"override target {atom_name!r} is not loaded; "
+                                f"skipping override"
+                            ),
+                        ),
+                    )
+                    continue
+                sandbox_path = eval_sandbox / f"{atom_name}.py"
+                sandbox_path.write_text(new_source, encoding="utf-8")
+                # Redirect the atom's file_path so reload_atom routes its
+                # write to the sandbox (path_class=unmanaged → no git).
+                atom.file_path = sandbox_path.resolve()
+                # Also update the loaded module's ``__file__`` so future
+                # reloads pick up the right source.
+                loaded_mod = sys.modules.get(atom.module_path)
+                if loaded_mod is not None:
+                    try:
+                        loaded_mod.__file__ = str(sandbox_path)
+                    except (AttributeError, TypeError):
+                        pass
+                result = reloader.reload_atom(
+                    atom_name,
+                    new_source,
+                    agent_initiated=False,
+                    rationale="atom_source_override (eval sandbox)",
+                )
+                if not result.ok:
+                    await bus.emit(
+                        DiagnosticEvent.CHANNEL,
+                        DiagnosticEvent(
+                            level="error",
+                            source="atom_source_overrides",
+                            message=(
+                                f"override of {atom_name!r} failed: {result.error}"
+                            ),
+                        ),
+                    )
+
         instance = cls(
             cwd=config.cwd,
             bus=bus,
@@ -695,6 +771,7 @@ class AgentSession:
             parent_bus=config.parent_bus,
             parent_session_id=config.parent_session_id,
             purpose=config.purpose,
+            eval_sandbox=eval_sandbox,
         )
 
         # Latch budget-exceeded once subscribed extensions emit it. The flag
@@ -724,6 +801,9 @@ class AgentSession:
                 root_session_id=config.root_session_id or session_id,
                 task_id=config.task_id,
                 persona=config.persona,
+                task_class=config.task_class,
+                eval_run_id=config.eval_run_id,
+                eval_task_id=config.eval_task_id,
             ),
         )
 
@@ -997,6 +1077,19 @@ class AgentSession:
                 index_trace(trace_path)
         except Exception as exc:
             logger.warning("agentm catalog indexer post-shutdown failed: %r", exc)
+
+        # Tear down the eval sandbox dir if this session created one for
+        # ``atom_source_overrides``. Best-effort: any failure is logged but
+        # never raised (shutdown must not error on stale FS state).
+        if self._eval_sandbox is not None:
+            try:
+                shutil.rmtree(self._eval_sandbox, ignore_errors=True)
+            except Exception as exc:  # noqa: BLE001 - shutdown best-effort
+                logger.warning(
+                    "failed to clean eval sandbox %s: %r",
+                    self._eval_sandbox,
+                    exc,
+                )
 
     # --- Helpers ----------------------------------------------------------
 

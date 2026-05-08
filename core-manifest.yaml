@@ -28,6 +28,9 @@ constitution:
     - src/agentm/cli.py
     # Catalog data — write-protected against agent edits
     - .agentm/catalog/**
+    # Decision log — only tool_propose_change may append, mediated.
+    # See .claude/designs/per-task-evolution-loop.md §7.
+    - .agentm/decisions/**
     # The manifest itself — self-referential lock
     - core-manifest.yaml
 

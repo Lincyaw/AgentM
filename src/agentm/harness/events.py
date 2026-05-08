@@ -164,6 +164,13 @@ class SessionReadyEvent:
     root_session_id: str
     task_id: str | None = None
     persona: str | None = None
+    # Per-task-evolution loop fields (see per-task-evolution-loop.md §4).
+    # ``task_class`` ties this session's trace to a tunable task family;
+    # ``eval_run_id`` and ``eval_task_id`` are populated only on eval-run
+    # child sessions spawned by ``tool_eval_run``.
+    task_class: str | None = None
+    eval_run_id: str | None = None
+    eval_task_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
