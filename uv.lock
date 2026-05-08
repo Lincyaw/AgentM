@@ -91,7 +91,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.4.4" },
     { name = "pyarrow", specifier = ">=23.0.1" },
     { name = "pydantic", specifier = ">=2.11.0" },
-    { name = "rcabench-platform", extras = ["sdk", "llm-eval"], specifier = ">=0.4.22" },
+    { name = "rcabench-platform", extras = ["sdk", "llm-eval"], specifier = ">=0.4.43" },
     { name = "tiktoken", specifier = ">=0.12.0" },
 ]
 
@@ -1388,7 +1388,7 @@ wheels = [
 
 [[package]]
 name = "rcabench-platform"
-version = "0.4.22"
+version = "0.4.43"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "loguru" },
@@ -1397,9 +1397,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/89/5d/f5b04b9bb795f883857a23df48856aa59cb858f9d42ff9f9f42e92c39aba/rcabench_platform-0.4.22.tar.gz", hash = "sha256:ffc1aaf9d73c7398825575fed43438afbb877bd8ae114e6d49b0886c94c92fe4", size = 441271, upload-time = "2026-04-24T10:14:43.394Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/40/aa/ecee4afc839f8ddb7e1f74456b69e7700933ce1cd6f449e916e46560ad3c/rcabench_platform-0.4.43.tar.gz", hash = "sha256:937814fcaa8f72f14f5a255e204035fb975871bd19f7a71f7aac8396e7c8618c", size = 788602, upload-time = "2026-05-06T12:15:58.484Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7a/25/9302f32b30eeab24ed0c118f0fac06b84bcb57f5be37f40f280917614fac/rcabench_platform-0.4.22-py3-none-any.whl", hash = "sha256:bfc72b8223038b7826273f048d6f690d7a3c6c321d5ca1cead4e64d588e5c4ec", size = 560812, upload-time = "2026-04-24T10:14:44.861Z" },
+    { url = "https://files.pythonhosted.org/packages/7b/0e/83d88a8fe3ec94e5c4f8b379ac84757dc982d6056deeb03e37e324454ceb/rcabench_platform-0.4.43-py3-none-any.whl", hash = "sha256:868fb47e013279c12499cf14e068e685eda80aaaa1515eed52b46853194d8b26", size = 1017699, upload-time = "2026-05-06T12:15:59.935Z" },
 ]
 
 [package.optional-dependencies]

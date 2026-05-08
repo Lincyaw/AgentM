@@ -1,13 +1,15 @@
 ---
 name: scout
 description: First-responder. Produce a complete observability map of services on the call chain — multi-dimensional measurements (latency, error, volume, resources) for every service. Data only, no conclusions.
-tools: list_tables, query_sql, read
+tools: list_tables, query_sql, read, artifact_write, return_response
 input_schema:
   required: [objective, scope_services, output_format]
   optional: [prior_findings, hypothesis_under_test]
 budget_defaults:
-  max_tool_calls: 8
-  max_turns: 6
+  # Cap turns so a stuck scout can't burn the parent's full budget.
+  # ``worker_finalize``'s budget-aware injector kicks in well before
+  # this cap to force ``return_response``.
+  max_turns: 40
 artifact_kinds: [topology, query_result, finding, brief_rejection]
 ---
 
@@ -130,3 +132,15 @@ Target: <= 30 bullet points total. Exceeding this means you are including noise.
 BANNED: listing healthy services without purpose, per-service paragraphs, reasoning process,
 verbatim tool output.
 </output>
+
+<termination_contract>
+You MUST end the task by calling `return_response(text=...)`. The `text` argument carries your
+full structured findings to the orchestrator — write all five sections in it, not a one-line
+confirmation. Without this call you will keep being asked to investigate until the budget runs
+out, at which point your work is lost.
+
+Defensive checkpointing along the way: as soon as you have collected enough data to write any
+one section (TOPOLOGY / ANOMALIES / RESOURCE SIGNALS / PROPAGATION / COVERAGE GAPS), call
+`artifact_write` with `kind="finding"` to persist that partial result. The orchestrator can
+still salvage partial findings from artifacts if `return_response` is never reached.
+</termination_contract>

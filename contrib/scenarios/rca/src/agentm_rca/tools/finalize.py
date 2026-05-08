@@ -131,15 +131,26 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 is_error=True,
             )
         state.submitted = True
+        # The tool is the canonical submission point: serialize the
+        # validated payload here so downstream readers (the eval adapter)
+        # consume a single authoritative artifact instead of snooping the
+        # raw model args. The result text doubles as the trajectory
+        # record and as the wire payload — keep it strict JSON so the
+        # adapter can ``json.loads`` without heuristics.
+        submission = {
+            "status": "accepted",
+            "root_cause": root_cause,
+            "triggering_signal": triggering_signal,
+            "evidence": evidence,
+            "remediation": remediation,
+            "causal_graph": causal_graph,
+        }
         return ToolTerminate(
             result=ToolResult(
                 content=[
                     TextContent(
                         type="text",
-                        text=(
-                            "Final report accepted. The investigation is "
-                            "complete."
-                        ),
+                        text=json.dumps(submission, ensure_ascii=False),
                     )
                 ]
             ),

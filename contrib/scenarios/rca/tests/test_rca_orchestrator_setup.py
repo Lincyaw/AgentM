@@ -29,7 +29,7 @@ def test_persona_metadata_parser_surfaces_input_schema_and_budget_defaults() -> 
         "scope_services",
         "output_format",
     ]
-    assert scout["budget_defaults"] == {"max_tool_calls": 8, "max_turns": 6}
+    assert scout["budget_defaults"] == {"max_turns": 40}
     assert "brief_rejection" in scout["artifact_kinds"]
 
     block = module._format_available_agents_block(personas)
