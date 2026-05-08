@@ -1,0 +1,55 @@
+id: AFC-0007
+name: "Causal misattribution"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: reflection_fault
+  subclass: cause_misassigned
+  mechanism: |
+    Agent correctly notices that a recent step failed, but blames the
+    wrong cause — e.g., attributes a 500 to a missing parameter when
+    the real cause is an upstream auth failure. The corrective action
+    therefore fixes a non-issue, while the real root cause persists and
+    keeps producing failures.
+
+activation:
+  required:
+    - "agent enters a 'why did this fail?' reflection step"
+    - "the error signal alone is not sufficient to disambiguate root vs symptom"
+  amplifying:
+    - "long dependency chain between root and observed failure"
+    - "missing structured error metadata (only NL message returned)"
+  timescale: seconds
+
+observable:
+  metrics:
+    - predicate: quality.cause.misattributed
+      direction: up
+      shape: spike
+  logs:
+    - pattern: "agent's reflection sentence assigns blame to step T-1 when failure originated at step T-K"
+  traces:
+    - pattern: "subsequent corrective action targets wrong span"
+  detection_difficulty: silent
+
+downstream_effects:
+  - predicate: trajectory.step.repeated
+    confidence: high
+    delay: seconds
+  - predicate: outcome.task.failed.amplified
+    confidence: medium
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: error_recovery_loop
+  - has_component: multi_step_dependency
+
+evidence:
+  - source: "AgentDebug (arXiv 2509.25370) §A.2 Table 2: Reflection.Causal Misattribution"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

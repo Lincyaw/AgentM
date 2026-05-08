@@ -833,7 +833,7 @@ async def test_install_atom_in_turn_n_is_dispatchable_in_turn_n_plus_one(
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),
-            extensions=[("agentm.extensions.builtin.tool_catalog", {})],
+            extensions=[("_agentm_contrib__tool_catalog", {})],
             provider=(f"{pkg}.provider", {}),
             resource_loader=InMemoryResourceLoader(),
         )

@@ -1,0 +1,67 @@
+id: AFC-0019
+name: "Repeated handled work"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: coordination_fault
+  subclass: handoff_lost
+  mechanism: |
+    Agent restarts a conversation or task that was already handled,
+    discarding accumulated work. Two manifestations:
+      - Multi-agent: receiving agent in a chain doesn't realize the
+        predecessor already completed step X and redoes it (lossy
+        handoff).
+      - Single-agent self-restart: agent re-derives its own earlier
+        finalized work — AEGIS evaluation example: "re-writes a piece
+        of code that was already finalized and approved."
+    Both are caught by the same observable pattern (two non-adjacent
+    spans target the same subgoal). Distinct from AFC-0026 (endless
+    loop): looping is sub-step-level repetition; this card is
+    subgoal-level redo after handoff or self-restart.
+
+activation:
+  required:
+    - "completed subgoal state exists in the trajectory"
+    - "agent (same or downstream) re-attempts that same subgoal"
+  amplifying:
+    - "multi-agent handoff with lossy summary message"
+    - "no shared blackboard / persistent state"
+    - "single-agent: aggressive context truncation between turns"
+  timescale: seconds
+
+observable:
+  metrics:
+    - predicate: trajectory.step.repeated
+      direction: up
+      shape: spike
+  logs:
+    - pattern: "downstream agent re-executes a subtask already completed upstream"
+  traces:
+    - pattern: "two non-adjacent spans target identical subgoal"
+  detection_difficulty: medium
+
+downstream_effects:
+  - predicate: outcome.task.budget_exhausted
+    confidence: high
+    delay: minutes_to_hours
+  - predicate: outcome.task.failed
+    confidence: medium
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: multi_step_loop
+  # Either multi_agent + handoff_protocol, or single_agent + multi_turn — both exhibit the pattern.
+
+evidence:
+  - source: "AEGIS (arXiv 2509.14295) Appendix E.2 FM-2.1 'Repeat handled tasks'"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+  - source: "AEGIS evaluation prompt p.31: single-agent example 're-writes a piece of code that was already finalized and approved'"
+    type: paper
+    extracted_by: subagent_review
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

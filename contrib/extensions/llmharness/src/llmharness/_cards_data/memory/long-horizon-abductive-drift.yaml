@@ -1,0 +1,80 @@
+id: AFC-0040
+name: "Long-horizon abductive context drift"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: memory_fault
+  subclass: long_horizon_drift
+  mechanism: |
+    In a long single-agent abductive trajectory, the agent loses track
+    of the cumulative reasoning state and begins (a) re-invoking tools
+    whose results were already retrieved earlier in the same session,
+    or (b) re-proposing hypotheses that earlier evidence already
+    falsified. Distinct from AFC-0019 (repeated handled work): AFC-0019
+    is *inter-agent* (peer A redoes what peer B already did);
+    AFC-0040 is *intra-agent* in long-context single-agent abduction.
+    Distinct from AFC-0001 (memory over-simplification): the prior
+    content has not been summarized away — it still exists in context,
+    but the agent attends to recent text and behaves as if the earlier
+    refutation had not happened. GoS example: agent queries database
+    latency at turn 10, ignoring that the same query at turn 3 had
+    already ruled out database issues. GoS reports this as 41.32% of
+    pooled baseline failures vs. 9.70% of GoS failures — i.e. an
+    explicit external memory structure (typed causal graph in GoS,
+    or any equivalent persistent belief state) substantially suppresses
+    the failure mode without changing the underlying LLM.
+
+activation:
+  required:
+    - "long-horizon trajectory with many tool-call turns over the same investigation"
+    - "tool result or hypothesis-refutation already established earlier in the session"
+    - "agent's later step contradicts or duplicates that earlier outcome"
+  amplifying:
+    - "growing context window past attention sweet-spot"
+    - "no structured external memory of refuted hypotheses or already-queried signals"
+  timescale: minutes_to_hours
+
+observable:
+  metrics:
+    - predicate: trajectory.tool_call.repeated
+      direction: up
+      shape: step
+    - predicate: agent_state.hypothesis.revived_after_refutation
+      direction: up
+      shape: spike
+  logs:
+    - pattern: "later tool call has identical (or semantically equivalent) parameters to an earlier one in the same session"
+    - pattern: "later reasoning re-states a hypothesis that earlier evidence-marked as refuted"
+  traces:
+    - pattern: "no edge / link between the earlier refutation span and the later revival span"
+  detection_difficulty: medium
+
+downstream_effects:
+  - predicate: outcome.task.budget_exhausted
+    confidence: high
+    delay: minutes_to_hours
+  - predicate: outcome.task.failed
+    confidence: medium
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: long_context_history
+  - has_component: multi_step_loop
+
+evidence:
+  - source: "GoS (ICML 2026, arXiv 2603.21250) §error analysis: 'Context Drift' — 41.32% of baselines vs. 9.70% of GoS"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+  - source: "GoS §1 cites Liu et al. lost-in-the-middle as the underlying mechanism for long-horizon attention failure"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+  - source: "Cross-ref AFC-0019 (multi-agent repeated work) and AFC-0001 (over-simplification)"
+    type: cross_ref
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

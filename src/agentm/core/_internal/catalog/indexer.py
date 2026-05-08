@@ -7,14 +7,15 @@ layers and is not derivable from raw observability.
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
+
+import typer
 
 from agentm.core._internal.catalog import _layout
 
@@ -357,32 +358,32 @@ def rebuild_catalog(*, root: Path, observability: Path) -> tuple[int, int, int, 
     return (n_traces, n_atoms, n_warnings, failures)
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="AgentM catalog indexer")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+app = typer.Typer(add_completion=False)
 
-    rebuild = subparsers.add_parser(
-        "rebuild",
-        help="re-derive catalog metrics from raw observability traces",
+
+@app.command()
+def rebuild(
+    root: Annotated[Path, typer.Option(help="Project root.")] = Path.cwd(),
+    observability: Annotated[
+        Path, typer.Option(help="Observability directory.")
+    ] = Path(".agentm") / "observability",
+) -> None:
+    """Re-derive catalog metrics from raw observability traces."""
+    resolved_root = root.expanduser().resolve()
+    resolved_obs = observability.resolve()
+    n_traces, n_atoms, n_warnings, failures = rebuild_catalog(
+        root=resolved_root, observability=resolved_obs
     )
-    rebuild.add_argument("--root", type=Path, default=Path.cwd())
-    rebuild.add_argument("--observability", type=Path, default=Path(".agentm") / "observability")
-    return parser
+    typer.echo(f"n_traces={n_traces} n_atoms_attributed={n_atoms} n_warnings={n_warnings}")
+    raise typer.Exit(code=1 if failures else 0)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-    if args.command != "rebuild":
-        parser.error(f"unknown command: {args.command}")
-
-    root = Path(args.root).expanduser().resolve()
-    observability = args.observability.resolve()
-    n_traces, n_atoms, n_warnings, failures = rebuild_catalog(root=root, observability=observability)
-    print(
-        f"n_traces={n_traces} n_atoms_attributed={n_atoms} n_warnings={n_warnings}"
-    )
-    return 1 if failures else 0
+    try:
+        app(args=argv, standalone_mode=False)
+    except typer.Exit as exc:
+        return int(exc.exit_code)
+    return 0
 
 
 if __name__ == "__main__":

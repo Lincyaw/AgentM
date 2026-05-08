@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import fnmatch
 import json
 import os
-from pathlib import PurePosixPath
 import re
 import shutil
 from typing import Any, Protocol
@@ -220,7 +218,7 @@ async def _list_search_files(
     walk_files = getattr(ops, "walk_files", None)
     if callable(walk_files):
         return sorted(await walk_files(root, glob=glob))
-    ignore = pathspec.PathSpec.from_lines("gitignore", load_gitignore_patterns(root, extra=[".git/"]))
+    ignore = pathspec.GitIgnoreSpec.from_lines(load_gitignore_patterns(root, extra=[".git/"]))
     return await asyncio.to_thread(_walk_files, root, glob, ignore)
 
 
@@ -259,6 +257,7 @@ async def _render(
 
 
 def _walk_files(root: str, glob: str | None, ignore: pathspec.PathSpec) -> list[str]:
+    glob_spec = _compile_glob(glob) if glob else None
     files: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=True):
         rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
@@ -266,7 +265,7 @@ def _walk_files(root: str, glob: str | None, ignore: pathspec.PathSpec) -> list[
         dirnames[:] = [name for name in dirnames if not _ignored(ignore, rel_dir, name)]
         for filename in filenames:
             rel_path = f"{rel_dir}/{filename}".strip("/")
-            if ignore.match_file(rel_path) or (glob and not _glob_matches(glob, rel_path, filename)):
+            if ignore.match_file(rel_path) or (glob_spec is not None and not glob_spec.match_file(rel_path)):
                 continue
             files.append(os.path.join(dirpath, filename))
     return sorted(files)
@@ -277,11 +276,10 @@ def _ignored(spec: pathspec.PathSpec, rel_dir: str, name: str) -> bool:
     return spec.match_file(rel_path) or spec.match_file(rel_path + "/")
 
 
-def _glob_matches(glob: str, rel_path: str, name: str) -> bool:
-    if "/" not in glob:
-        return fnmatch.fnmatch(name, glob)
-    adjusted = glob if glob.startswith("**/") or glob.startswith("/") else f"**/{glob}"
-    return PurePosixPath(rel_path).match(adjusted.lstrip("/"))
+def _compile_glob(glob: str) -> pathspec.GitIgnoreSpec:
+    # Bare patterns (no slash) match basename anywhere in the tree.
+    pattern = glob if "/" in glob else f"**/{glob}"
+    return pathspec.GitIgnoreSpec.from_lines([pattern.lstrip("/")])
 
 
 def _split_lines(text: str) -> list[str]:

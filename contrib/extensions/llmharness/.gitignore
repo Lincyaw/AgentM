@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# uv
+.uv-cache/
+
+# Tooling
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Harness runtime state (when this repo is itself a harness target)
+.harness/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

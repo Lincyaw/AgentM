@@ -14,6 +14,7 @@ resolution-markers = [
 members = [
     "agentm",
     "agentm-rca",
+    "llmharness",
 ]
 
 [[package]]
@@ -24,6 +25,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "openai" },
     { name = "pathspec" },
+    { name = "python-dotenv" },
     { name = "python-frontmatter" },
     { name = "pyyaml" },
     { name = "textual" },
@@ -46,6 +48,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.86.0" },
     { name = "openai", specifier = ">=1.50.0" },
     { name = "pathspec", specifier = ">=1.0.4" },
+    { name = "python-dotenv", specifier = ">=1.0" },
     { name = "python-frontmatter", specifier = ">=1.1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "textual", specifier = ">=0.85" },
@@ -66,7 +69,7 @@ dev = [
 [[package]]
 name = "agentm-rca"
 version = "0.1.0"
-source = { editable = "scenarios/rca" }
+source = { editable = "contrib/scenarios/rca" }
 dependencies = [
     { name = "agentm" },
     { name = "duckdb" },
@@ -664,6 +667,26 @@ sdist = { url = "https://files.pythonhosted.org/packages/2e/c9/06ea13676ef354f0a
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b4/de/88b3be5c31b22333b3ca2f6ff1de4e863d8fe45aaea7485f591970ec1d3e/linkify_it_py-2.1.0-py3-none-any.whl", hash = "sha256:0d252c1594ecba2ecedc444053db5d3a9b7ec1b0dd929c8f1d74dce89f86c05e", size = 19878, upload-time = "2026-03-01T07:48:46.098Z" },
 ]
+
+[[package]]
+name = "llmharness"
+version = "0.1.0"
+source = { editable = "contrib/extensions/llmharness" }
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "loguru"

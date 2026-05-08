@@ -359,7 +359,10 @@ class AgentSession:
 
             Parent ``bus`` and ``session_id`` are injected here; any value
             the caller put on those fields is overwritten so an extension
-            cannot impersonate a different parent. Returns the constructed
+            cannot impersonate a different parent. When ``child_config.provider``
+            is ``None`` we auto-wire the ``inherit_provider`` builtin so the
+            child re-uses the parent's active :class:`ProviderConfig` without
+            re-authenticating. Returns the constructed
             child; lifecycle events are emitted by ``AgentSession.create``
             via the existing ``parent_bus`` plumbing.
             """
@@ -373,6 +376,19 @@ class AgentSession:
             spec.parent_bus = bus
             spec.parent_session_id = session_id
             spec.root_session_id = config.root_session_id or session_id
+            if spec.provider is None:
+                parent_provider = _provider_getter()
+                if parent_provider is None:
+                    raise RuntimeError(
+                        "spawn_child_session: AgentSessionConfig.provider is "
+                        "None but the parent session has no active provider "
+                        "to inherit. Either set child_config.provider "
+                        "explicitly or ensure the parent has registered one."
+                    )
+                spec.provider = (
+                    "agentm.extensions.builtin.inherit_provider",
+                    {"provider": parent_provider},
+                )
             return await cls.create(spec)
 
         def _make_api(owner: str) -> _ExtensionAPIImpl:
@@ -441,6 +457,24 @@ class AgentSession:
                 ),
             )
 
+        # Prime contrib-atom discovery early so synthetic module names like
+        # ``_agentm_contrib__tool_catalog`` are resolvable through every
+        # branch below (including explicit extensions= lists and scenario
+        # manifests that reference them by synthetic name). Idempotent —
+        # repeated calls reuse already-registered sys.modules entries.
+        if not config.no_extensions:
+            try:
+                discover_mod.discover_contrib_atoms()
+            except Exception as exc:  # noqa: BLE001
+                await bus.emit(
+                    DiagnosticEvent.CHANNEL,
+                    DiagnosticEvent(
+                        level="error",
+                        source="auto_discovery",
+                        message=f"contrib atom discovery failed: {exc}",
+                    ),
+                )
+
         # Determine the auxiliary extension list. Precedence:
         #   no_extensions  → []
         #   explicit list  → as supplied
@@ -497,6 +531,43 @@ class AgentSession:
                     continue
                 to_load.append((entry.module_path, {}))
 
+            # Pick up research-line / scenario-bound atoms shipped under
+            # ``<cwd>/contrib/extensions/<name>.py``. They are physically
+            # outside the SDK ``builtin/`` tree but are auto-loaded when
+            # the AgentM repo's contrib/ is present, so users don't have
+            # to enumerate them in every scenario manifest. Discovery
+            # errors are downgraded to a diagnostic so a single broken
+            # contrib file never bricks bootstrap.
+            try:
+                contrib_atoms = discover_mod.discover_contrib_atoms()
+            except Exception as exc:  # noqa: BLE001
+                await bus.emit(
+                    DiagnosticEvent.CHANNEL,
+                    DiagnosticEvent(
+                        level="error",
+                        source="auto_discovery",
+                        message=f"contrib atom discovery failed: {exc}",
+                    ),
+                )
+                contrib_atoms = {}
+            for entry in contrib_atoms.values():
+                if _atom_requires_unsupplied_config(entry.manifest, {}):
+                    missing = _missing_required_fields(entry.manifest, {})
+                    await bus.emit(
+                        DiagnosticEvent.CHANNEL,
+                        DiagnosticEvent(
+                            level="info",
+                            source="auto_discovery",
+                            message=(
+                                f"skipped contrib atom {entry.name}: requires "
+                                f"config keys {missing!r}; load via "
+                                f"--scenario or explicit extensions= list"
+                            ),
+                        ),
+                    )
+                    continue
+                to_load.append((entry.module_path, {}))
+
             # Pick up atoms previously dropped into ``<cwd>/.agentm/atoms/``
             # by ``api.install_atom``. Without this branch a self-installed
             # atom evaporates the moment its session ends, breaking the
@@ -533,6 +604,16 @@ class AgentSession:
                     continue
                 to_load.append((entry.module_path, {}))
 
+        # Append --extension / extra_extensions on top of the base list.
+        # No-op when extensions= was supplied explicitly (caller already
+        # controls the full list) or when --no-extensions disabled loading.
+        if (
+            not config.no_extensions
+            and not config.extensions
+            and config.extra_extensions
+        ):
+            to_load.extend(config.extra_extensions)
+
         # Load auxiliary extensions. A failure on any one atom is non-fatal:
         # emit a diagnostic and continue so the recovery floor (baseline
         # tools + provider) survives.
@@ -552,6 +633,15 @@ class AgentSession:
         # Load the provider extension. After it returns, we expect it to have
         # registered a ProviderConfig. Provider failure is the one fatal
         # case — without a stream_fn the loop cannot run.
+        if config.provider is None:
+            raise ExtensionLoadError(
+                "<provider>",
+                RuntimeError(
+                    "AgentSessionConfig.provider is None. Root sessions must "
+                    "specify a provider explicitly; only spawn_child_session "
+                    "auto-fills None with the inherit_provider builtin."
+                ),
+            )
         provider_path, provider_cfg = config.provider
         await _install_with_events(provider_path, provider_cfg, is_provider=True)
 

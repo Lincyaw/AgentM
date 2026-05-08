@@ -1,0 +1,56 @@
+id: AFC-0021
+name: "Information withholding"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: coordination_fault
+  subclass: information_withheld
+  mechanism: |
+    Agent has discovered information critical to a peer's next decision
+    but does not share it. Decision is locally rational ("not asked",
+    "not relevant to my role") but globally costly. AEGIS catalogs as
+    a covert variant of FM-2.4. Especially insidious because the
+    receiving agent has no signal that critical context exists upstream.
+
+activation:
+  required:
+    - "agent A holds information that materially changes agent B's optimal action"
+    - "agent A does not transmit it in the next handoff"
+  amplifying:
+    - "narrow per-agent prompts that don't request 'share anything relevant'"
+    - "competitive / role-protective system prompts"
+  timescale: seconds
+
+observable:
+  metrics:
+    - predicate: coordination.message.withheld
+      direction: up
+      shape: spike
+  logs:
+    - pattern: "peer asks a question whose answer is in agent A's prior reasoning"
+    - pattern: "agent A's reasoning span contains entities never mentioned in handoff message"
+  traces:
+    - pattern: "set difference between A's discovered facts and A's outgoing message is non-empty"
+  detection_difficulty: silent
+
+downstream_effects:
+  - predicate: agent_state.memory.not_retrieved
+    confidence: high
+    delay: seconds
+  - predicate: outcome.task.failed
+    confidence: medium
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: multi_agent
+  - has_component: handoff_protocol
+
+evidence:
+  - source: "AEGIS (arXiv 2509.14295) Appendix E.2 FM-2.4 'Withhold information' (covert variant)"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

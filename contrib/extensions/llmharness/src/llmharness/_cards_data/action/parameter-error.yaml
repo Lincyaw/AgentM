@@ -1,0 +1,59 @@
+id: AFC-0015
+name: "Action parameter error"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: action_fault
+  subclass: action_invalid_param
+  mechanism: |
+    The action shape is valid but the parameters are wrong: out-of-range
+    value, malformed time window, wrong service identifier, swapped
+    argument positions. EAGER's RCLAgent 'Metrics Query Error' (42% of
+    failures in that MAS) is a domain-specific instance: agent issues
+    a metrics query against the wrong service / metric / time window.
+
+activation:
+  required:
+    - "tool accepts the action's syntactic shape"
+    - "tool returns a semantic error or wrong-domain result"
+  amplifying:
+    - "tools with many similar parameters (service names, metric IDs)"
+    - "ambiguous task statement that doesn't pin down parameter values"
+  timescale: sub_second
+
+observable:
+  metrics:
+    - predicate: trajectory.action.invalid_param
+      direction: up
+      shape: spike
+  logs:
+    - pattern: "tool returns 'no such metric' / 'service not found' / 'invalid time range'"
+  traces:
+    - pattern: "tool_call args differ from task statement on a key field"
+  detection_difficulty: medium
+
+downstream_effects:
+  - predicate: trajectory.step.repeated
+    confidence: high
+    delay: seconds
+  - predicate: outcome.task.failed
+    confidence: medium
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: tool_use
+  - has_component: structured_action_protocol
+
+evidence:
+  - source: "AgentDebug (arXiv 2509.25370) §A.2 Table 2: Action.Parameter Error"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+  - source: "EAGER (arXiv 2603.21522) Table 1: RCLAgent Metrics Query Error 42.11%"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

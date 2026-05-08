@@ -549,7 +549,11 @@ class _ChildTaskManager:
             if isinstance(tools, list) and tools:
                 persona_tool_allowlist = [str(t) for t in tools]
             persona_budget = _coerce_budget(persona.get("budget_defaults"))
-        provider = _get_active_provider(self._api)
+        # Validate parent has an active provider; the child config below
+        # passes provider=None and lets spawn_child_session auto-wire the
+        # inherit_provider builtin. We still pre-check here so the error
+        # surfaces before the slot-reservation bookkeeping below.
+        _get_active_provider(self._api)
         task_id = uuid.uuid4().hex
         parent_loop_config = self._api.session.get_loop_config()
         child_loop_config, applied_budget = _resolve_child_loop_config(
@@ -576,10 +580,13 @@ class _ChildTaskManager:
                 )
             self._reserved_slots += 1
 
+        # provider=None → spawn_child_session auto-wires the
+        # inherit_provider builtin so the child re-uses the parent's
+        # active ProviderConfig without re-authenticating.
         child_config = AgentSessionConfig(
             cwd=self._api.cwd,
             extensions=persona_extensions + child_extensions + inherited_extensions,
-            provider=(__name__, {"_bridge_provider": provider}),
+            provider=None,
             loop_config=child_loop_config,
             task_id=task_id,
             persona=persona_name,
@@ -803,11 +810,6 @@ class _ChildTaskManager:
 
 
 async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    bridge_provider = config.get("_bridge_provider")
-    if isinstance(bridge_provider, ProviderConfig):
-        api.register_provider(bridge_provider.name, bridge_provider)
-        return
-
     inherit_extensions = list(
         config.get("inherit_extensions", _DEFAULT_INHERIT_EXTENSIONS)
     )

@@ -282,6 +282,11 @@ class SessionManager:
         else:
             self.new_session(parent_session=parent_session)
 
+    @property
+    def session_file(self) -> Path | None:
+        """Path to the on-disk JSONL log when ``persist=True``; ``None`` otherwise."""
+        return self._session_file
+
     # ------------------------------------------------------------------
     # Lifecycle / persistence
     # ------------------------------------------------------------------

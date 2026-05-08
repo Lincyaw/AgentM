@@ -1,0 +1,37 @@
+# LLM eval config for the AgentM rca scenario.
+# Run with: uv run rca llm-eval run contrib/scenarios/rca/eval/config.yaml -a agentm -l 1
+
+exp_id: "agentm-rca-smoke"
+agent_type: "agentm"
+model_name: "K2.6"
+
+data:
+  # Must match a registered processer name (case-insensitive) so the
+  # framework picks RCABenchProcesser, which sets meta["path"] from the
+  # source-path resolver. Any other value falls back to the default
+  # processer and the runner skips samples with "missing data_dir".
+  dataset: "RCABench"
+  type: "single"
+  question_field: "question"
+  gt_field: "answer"
+  tags: ["openrca2-lite"]
+
+# Dataset layout: each sample lives at <source_path>/<source>/ (parquet
+# files + causal_graph.json + injection.json). Override the default
+# ".../converted" suffix.
+source_path: "/home/ddq/AoyangSpace/dataset/rca"
+source_path_pattern: "{source_path}/{source}"
+
+concurrency: 1
+judge_concurrency: 1
+
+# RCABench's judge processor is purely structural (CausalGraph diff +
+# service-name match) — it never calls the judge model. We still have to
+# fill out a syntactically valid block so config validation passes; the
+# Anthropic-compatible Kimi endpoint configured in .env is fine even
+# though it will not be hit on this benchmark.
+judge_model:
+  model_provider:
+    type: "chat.completions"
+    model: "K2.6"
+    api_format: "anthropic"
