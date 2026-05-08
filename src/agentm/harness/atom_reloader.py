@@ -433,7 +433,15 @@ class AtomReloader:
         # populated cache. Builtin atoms keep their normal import-finder
         # path: they aren't synthetic, so this branch is skipped and
         # ``import_module`` resolves them via ``sys.path`` as before.
-        if atom.module_path.startswith(self._AGENT_ATOM_MODULE_PREFIX):
+        if atom.module_path.startswith(
+            self._AGENT_ATOM_MODULE_PREFIX
+        ) or atom.module_path.startswith("agentm._scenarios."):
+            # Scenario-local atoms (loaded by the loader under
+            # ``agentm._scenarios.<scenario>.<stem>``) are also synthetic
+            # and have no normal import finder; rebuild the sys.modules
+            # entry from the on-disk file (which may now point at the
+            # eval-sandbox tempdir) before delegating to
+            # ``_finish_install_sync``.
             self._import_synthetic_module(atom.module_path, atom.file_path)
         self._finish_install_sync(
             atom.module_path,
@@ -694,7 +702,7 @@ class AtomReloader:
             self._loaded_by_name.values(), key=lambda item: item.name
         ):
             current_hash = self.current_version_for_path(str(atom.file_path))
-            if current_hash is None and atom.file_path.exists():
+            if current_hash is None and atom.file_path.is_file():
                 current_hash = self._advisory_hash(
                     atom.file_path.read_text(encoding="utf-8")
                 )
