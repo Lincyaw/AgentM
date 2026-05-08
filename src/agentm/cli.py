@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from dotenv import load_dotenv
 
 from agentm.core.abi.events import DiagnosticEvent, EventBus
 from agentm.core.abi.messages import (
@@ -25,56 +26,14 @@ from agentm.core.abi.messages import (
 from agentm.harness.events import ExtensionInstallEvent
 
 
-def _load_dotenv() -> None:
-    """Load ``KEY=value`` pairs from the nearest ``.env`` walking up from cwd.
-
-    Existing env vars win — explicit ``KEY=... agentm`` invocations still
-    override file values. Quoted values get unwrapped (``"x"`` → ``x``) and
-    anything after the closing quote is dropped, so ``KEY="x"  # note`` is
-    parsed as ``x``. For unquoted values an inline comment introduced by
-    whitespace + ``#`` (matches POSIX shell convention) terminates the value;
-    bare ``#`` glued to the value is preserved. Full-line comments and blank
-    lines are ignored. No interpolation, no exports, no shell semantics —
-    keep it boring.
-    """
-    cur = Path.cwd().resolve()
-    for candidate in (cur, *cur.parents):
-        env_path = candidate / ".env"
-        if env_path.is_file():
-            break
-    else:
-        return
-    try:
-        text = env_path.read_text(encoding="utf-8")
-    except OSError:
-        return
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export "):].lstrip()
-        key, sep, value = line.partition("=")
-        if not sep:
-            continue
-        key = key.strip()
-        value = value.strip()
-        if value and value[0] in ('"', "'"):
-            quote = value[0]
-            end = value.find(quote, 1)
-            if end != -1:
-                value = value[1:end]
-        else:
-            # Strip inline comment introduced by whitespace + '#'.
-            for i, ch in enumerate(value):
-                if ch == "#" and (i == 0 or value[i - 1] in " \t"):
-                    value = value[:i].rstrip()
-                    break
-        if key and key not in os.environ:
-            os.environ[key] = value
-
-
-_load_dotenv()
+# Walk up from cwd to find the nearest .env. Existing env vars win
+# (override=False), so explicit ``KEY=... agentm`` still beats file values.
+_cur = Path.cwd().resolve()
+for _candidate in (_cur, *_cur.parents):
+    _env_path = _candidate / ".env"
+    if _env_path.is_file():
+        load_dotenv(_env_path, override=False)
+        break
 
 
 def _print_final(final_messages: list) -> None:

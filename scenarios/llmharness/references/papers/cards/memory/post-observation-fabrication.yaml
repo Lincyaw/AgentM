@@ -1,0 +1,74 @@
+id: AFC-0039
+name: "Post-observation evidence fabrication"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: memory_fault
+  subclass: hallucinated_observation
+  mechanism: |
+    Immediately after a tool call returns, the agent writes a reasoning
+    statement asserting the presence of specific observational details
+    that are absent from (or contradictory to) the actual return value.
+    Distinct from AFC-0002 (false memory): AFC-0002 fills *long-context*
+    gaps with plausible content; this card targets *just-returned*
+    output that the agent re-reports incorrectly to keep the current
+    hypothesis alive. The fabrication is motivated — it occurs when the
+    real observation would refute the working hypothesis. GoS example:
+    log file is normal, but agent claims it contains a specific
+    'Connection Refused' entry to defend a 'Database Connection Failure'
+    hypothesis. GoS empirically eliminates this pattern (0% of GoS
+    failures vs. 22.22% of baseline failures) by forcing causal-graph
+    nodes to be derivable from raw tool returns — i.e. structural
+    grounding constraints suppress the failure mode at the architecture
+    level rather than per-prompt.
+
+activation:
+  required:
+    - "agent has a stated working hypothesis"
+    - "tool call has just returned content that does not support that hypothesis"
+    - "agent's next reasoning step asserts an observation absent from the actual return"
+  amplifying:
+    - "free-form reasoning text inserted between observation and next action"
+    - "no structural constraint forcing reasoning to cite tool-output spans"
+  timescale: seconds
+
+observable:
+  metrics:
+    - predicate: trajectory.observation.fabricated
+      direction: up
+      shape: spike
+  logs:
+    - pattern: "agent quote of tool output does not appear verbatim or paraphrasable in the actual return payload"
+  traces:
+    - pattern: "diff between asserted observation and actual tool_result span is non-empty in semantically loaded direction"
+  detection_difficulty: silent
+
+downstream_effects:
+  - predicate: agent_state.hypothesis.persisted_after_refutation
+    confidence: high
+    delay: seconds
+  - predicate: outcome.task.failed
+    confidence: high
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: tool_call_loop
+  - has_component: free_form_reasoning_step
+
+evidence:
+  - source: "GoS (ICML 2026, arXiv 2603.21250) §error analysis: 'Evidence Fabrication' — 22.22% of pooled baseline failures, 0% of GoS failures"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+  - source: "GoS appendix case study (left panel of Figure: case-study-error): SingleAgentCoT hallucinates 'localized marrow edema' to defend 'vertebral osteomyelitis' against negative MRI"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+  - source: "Cross-ref AFC-0002 (false-memory): same hallucination class, different position in trajectory"
+    type: cross_ref
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

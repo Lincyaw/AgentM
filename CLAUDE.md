@@ -43,6 +43,15 @@ Fix all errors before considering the task complete. For `mypy` issues on dynami
 - **Python**: 3.12+ required
 - **Build backend**: `uv_build`
 
+## scenarios/ layout
+
+Each subdir is **either** a scenario (a `manifest.yaml` + optional local atoms; resolved by-name at `agentm run --scenario <name>`) **or** a sibling project that lives here for convenience. The loader (`src/agentm/extensions/loader.py`) only looks up scenarios by exact name, so non-scenario siblings are safe.
+
+- `scenarios/<name>/manifest.yaml` — standard scenario form (e.g. `plan_mode`, `rca`, `trajectory_analysis`, `harness_monitor`)
+- `scenarios/llmharness/` — **nested project**, not a scenario. It is the llmharness Python package + Claude Code plugin + AgentM extension (moved here on 2026-05-07 from its own repo). Has its own `pyproject.toml`, `CLAUDE.md`, and dev-loop. Owns the `harness_monitor` scenario above as its consumer. See `scenarios/llmharness/CLAUDE.md` for its own conventions.
+
+Don't add scenario-loader logic that walks subdirs blindly — keep `scenarios/` open to nested projects.
+
 ## Design Documentation System
 
 All design documents are stored in the `.claude/` directory. A `.claude/index.yaml` file maintains the conceptual index and relationships between concepts.

@@ -1,0 +1,328 @@
+project:
+  name: llmharness
+  description: |
+    Claude Code plugin + Python package providing async, non-blocking process
+    supervision for the main agent. Hook-driven event stream + AgentM-backed
+    drift detection. Library shape — rca-autorl will import this as the
+    canonical event-stream + trace store for PRM training.
+
+requirements:
+  # ---------------------------------------------------------------------------
+  # Core data model + storage (P0 — load-bearing for all downstream consumers)
+
+  - id: REQ-001
+    title: Event/Turn/Verdict schema
+    description: |
+      Closed-enum types for event kinds and drift types; serializable Turn,
+      Event, Verdict, Reminder dataclasses. Stable on-disk JSON shape — every
+      consumer (worker, AgentM bridge, rca-autorl PRM) depends on this.
+    priority: P0
+    status: implemented
+    code: [src/llmharness/schema.py]
+    tests: []
+
+  - id: REQ-002
+    title: HarnessStore file protocol
+    description: |
+      Append-only inbox/events JSONL, single-shot pending_reminders JSON,
+      cursor with last_turn_index + last_reminder_at_index. Per-session
+      flock so cron worker and long-lived daemon can coexist.
+    priority: P0
+    status: implemented
+    code: [src/llmharness/store.py]
+    tests: []
+    depends_on: [REQ-001]
+
+  - id: REQ-003
+    title: Claude Code hook payload adapter
+    description: |
+      Parse PostToolUse/Stop/UserPromptSubmit hook stdin, derive session_id
+      and transcript_path, fold transcript into stable-indexed Turns, compute
+      delta against existing inbox.
+    priority: P0
+    status: implemented
+    code: [src/llmharness/adapters/claude_code.py]
+    tests: []
+    depends_on: [REQ-001]
+
+  # ---------------------------------------------------------------------------
+  # Worker pipeline
+
+  - id: REQ-004
+    title: Rule-based summarizer (turns → events)
+    description: |
+      Dependency-free fallback for Call A. Classifies assistant turns into
+      task/hypothesis/evidence/decision/action/reflection/conclusion using
+      keyword markers. Used when LLMHARNESS_PROVIDER=rule.
+    priority: P0
+    status: implemented
+    code: [src/llmharness/summarizer.py]
+    tests: []
+    depends_on: [REQ-001]
+
+  - id: REQ-005
+    title: Rule-based drift detector (events → verdict)
+    description: |
+      Dependency-free fallback for Call B. Implements the four drift types
+      (task_drift, evidence_ignored, premature_conclusion, stuck_loop)
+      against an event stream.
+    priority: P0
+    status: implemented
+    code: [src/llmharness/detector.py]
+    tests: []
+    depends_on: [REQ-001]
+
+  - id: REQ-006
+    title: Worker tick — provider dispatch + reminder rate limit
+    description: |
+      One tick = read inbox delta → summarize → detect → maybe write reminder.
+      Dispatches to rule or AgentM provider via LLMHARNESS_PROVIDER. Enforces
+      ≤1 reminder per N turns (default N=5). Atomic via per-session flock.
+    priority: P0
+    status: implemented
+    code: [src/llmharness/worker.py]
+    tests: [tests/test_smoke.py]
+    depends_on: [REQ-002, REQ-004, REQ-005]
+
+  - id: REQ-007
+    title: AgentM subprocess bridge (DORMANT)
+    description: |
+      Shell out to the `agentm` CLI with a single JSON payload; parse trailing
+      JSON via `RawAuditOutput`. Single entry point `monitor_via_agentm`
+      returns (events, verdict). Optional distillation dump per tick.
+
+      DORMANT in V0: the 2026-05-08 cognitive-audit refactor moved the
+      diagnostic agent's prompt + extension list into `llmharness.audit`
+      (Python). The default `harness_monitor` scenario YAML it relied on
+      was deleted. `monitor_via_agentm` now requires `LLMHARNESS_AGENTM_SCENARIO`
+      env var pointing at a caller-supplied scenario; raises a clear
+      `AgentMError` with migration guidance when unset. Recommended path
+      for AgentM-on-AgentM: switch to the in-process REQ-017 adapter.
+    priority: P0
+    status: implemented
+    code: [src/llmharness/agentm_bridge.py]
+    tests: []
+    depends_on: [REQ-001]
+
+  - id: REQ-008
+    title: CLI entry — ingest / tick / inject
+    description: |
+      `python -m llmharness {ingest,tick,inject}` subcommands. ingest/inject
+      accept --from-hook to read Claude Code hook payload from stdin. Used
+      by hook scripts and the worker daemon.
+    priority: P0
+    status: implemented
+    code: [src/llmharness/__main__.py]
+    tests: []
+    depends_on: [REQ-002, REQ-003, REQ-006]
+
+  # ---------------------------------------------------------------------------
+  # Plugin distribution + scenarios
+
+  - id: REQ-009
+    title: Claude Code plugin manifest + hooks
+    description: |
+      `.claude-plugin/plugin.json` and `hooks/hooks.json` wiring PostToolUse +
+      Stop → ingest_hook.sh, UserPromptSubmit → inject_hook.sh, all paths via
+      ${CLAUDE_PLUGIN_ROOT}.
+    priority: P0
+    status: implemented
+    code:
+      - .claude-plugin/plugin.json
+      - hooks/hooks.json
+      - scripts/ingest_hook.sh
+      - scripts/inject_hook.sh
+    tests: []
+    depends_on: [REQ-008]
+
+  - id: REQ-010
+    title: Worker daemon installer
+    description: |
+      `scripts/install.sh` starts a polling worker (5s tick) and tracks PID
+      under .harness/worker.pid. `scripts/tick_worker.sh` does one pass per
+      session inbox.
+    priority: P1
+    status: implemented
+    code:
+      - scripts/install.sh
+      - scripts/tick_worker.sh
+    tests: []
+    depends_on: [REQ-008]
+
+  - id: REQ-011
+    title: AgentM scenario manifest (DEPRECATED — superseded by REQ-018)
+    description: |
+      Originally a `<AgentM-root>/scenarios/harness_monitor/manifest.yaml`
+      that the subprocess bridge (REQ-007) and earlier prototypes resolved
+      by name. Deleted 2026-05-08 in favor of programmatic composition
+      (`llmharness.audit.compose_extensions`) — see REQ-018. The diagnostic
+      agent's system prompt and extension list now live as Python in
+      `src/llmharness/audit/` so the V0 cognitive-audit feature ships as a
+      single Python package with no cross-directory scenario indirection.
+      Kept here for traceability; downstream consumers should depend on
+      REQ-018 instead.
+    priority: P0
+    status: deprecated
+    code: []
+    tests: []
+    depends_on: [REQ-018]
+
+  # ---------------------------------------------------------------------------
+  # Future work
+
+  - id: REQ-012
+    title: Monitor tick throttling
+    description: |
+      Skip the harness_monitor call entirely when the new-turn delta is below
+      a threshold or contains no semantic markers (no decision/conclusion-ish
+      content). Saves API cost during long evidence-gathering streaks.
+    priority: P1
+    status: pending
+    code: []
+    tests: []
+    depends_on: [REQ-006]
+
+  - id: REQ-013
+    title: Test coverage for store/claude_code/worker
+    description: |
+      Beyond the smoke test: unit tests for HarnessStore round-trips,
+      transcript-delta computation, AgentM bridge JSON extraction, and the
+      reminder rate-limit invariant.
+    priority: P1
+    status: pending
+    code: []
+    tests: []
+    depends_on: [REQ-002, REQ-003, REQ-006, REQ-007]
+
+  - id: REQ-014
+    title: rca-autorl re-import path
+    description: |
+      Once llmharness stabilizes, rca-autorl drops its in-tree
+      src/autorl/observability/harness/ and depends on llmharness as a local
+      path package. Schema/store stay source-of-truth here.
+    priority: P1
+    status: pending
+    code: []
+    tests: []
+    depends_on: [REQ-001, REQ-002]
+
+  - id: REQ-015
+    title: Verdict cited_cards / downstream_reaction (cognitive audit)
+    description: |
+      Two opt-in additive fields on Verdict for the cognitive-audit V0
+      pipeline (design: .claude/designs/llmharness-cognitive-audit.md §6.2).
+      `cited_cards: list[str]` records AFC IDs the audit chose to cite;
+      `downstream_reaction: str | None` is populated by the next audit
+      firing's self-monitor judgment. Both default to empty/None so
+      existing P0 consumers (detector, agentm_bridge, worker) keep
+      producing semantically identical Verdicts. No version bump per
+      design §6.3 (additive only). Tests deferred to a later phase.
+    priority: P0
+    status: implemented
+    code: [src/llmharness/schema.py]
+    depends_on: [REQ-001]
+
+  - id: REQ-016
+    title: cards.py loader + cards_list/cards_get tools + axis_hint
+    description: |
+      Module exposing the 42 AFC cards as searchable tools to the
+      cognitive-audit diagnostic agent (design: .claude/designs/llmharness-cognitive-audit.md §4.4).
+      `cards_list()` returns one CardSummary per YAML on disk (id,
+      name, axis_hint, one_line_mechanism). `cards_get(card_id)`
+      returns the full CardFull payload; raises KeyError on unknown id.
+      `_AXIS_HINT: dict[str, int | None]` is curated in Python code,
+      NOT a YAML field — preserves the rca-autorl public contract on
+      cards. Lazy load (no import-time I/O); cache after first call;
+      `LLMHARNESS_CARDS_ROOT` env override supported. Coverage: all 42
+      cards across memory/reflection/planning/action/specification/inter_agent/verification/termination/cognitive/system_level/.
+      Distribution: axis 1 = 13, axis 2 = 14, axis 3 = 13, None = 2
+      (AFC-0032 / AFC-0033 — pure infra failures with no cognitive
+      content). Tests deferred to a later phase.
+    priority: P0
+    status: implemented
+    code: [src/llmharness/cards.py]
+    depends_on: [REQ-001]
+
+  - id: REQ-017
+    title: AgentM adapter — TurnEnd trigger + BeforeAgentStart inject
+    description: |
+      V0 cognitive-audit adapter for AgentM-on-AgentM
+      (design: .claude/designs/llmharness-cognitive-audit.md §4.5,
+      single-file extension contract: extension-as-scenario.md §11).
+      Module-level `MANIFEST: ExtensionManifest` (tier 1, api_version
+      1) declares two event subscriptions; `install(api, config)`
+      registers them via `api.on(...)`.
+
+      On every `TurnEndEvent.CHANNEL`, the adapter pulls the full
+      conversation via `api.session.get_messages()`, builds the
+      two-stage audit payload (`trajectory` + `prior_events` capped
+      at K + `recent_alerts` of last N verdicts), composes the child
+      session's `extensions` list via `llmharness.audit.compose_extensions(...)`,
+      spawns a child AgentM session via `api.spawn_child_session(
+      AgentSessionConfig(extensions=..., provider=bridge_provider, ...))`,
+      drives `child.prompt(json_payload)` to completion, parses the
+      trailing JSON via `RawAuditOutput`, persists events + verdict
+      via `HarnessStore`, and on `drift && reminder && type is not None`
+      writes a single pending Reminder.
+
+      On `BeforeAgentStartEvent.CHANNEL`, the adapter pops one pending
+      reminder and *appends* its text to `event.system` in place with
+      the configurable `reminder_prefix` (default `\n\n[harness] `).
+      No reminder ⇒ no mutation. No throttling — design §5.1 mandates
+      trigger on every TurnEndEvent.
+
+      Plug-and-play config knobs (all optional): `root`, `K_history_events`,
+      `N_recent_alerts`, `child_purpose`, `reminder_prefix`,
+      `audit_extensions` (full child-session extensions override),
+      `prompt_override`, `cards_tools_config`, `observability_config`.
+      Tests deferred to a later phase.
+    priority: P0
+    status: implemented
+    code: [src/llmharness/adapters/agentm.py]
+    depends_on: [REQ-001, REQ-002, REQ-015, REQ-016, REQ-018]
+
+  - id: REQ-018
+    title: audit/ subpackage — diagnostic engine as Python (no scenario YAML)
+    description: |
+      The cognitive-audit diagnostic agent's prompt + extension list
+      now ships as a Python subpackage at `src/llmharness/audit/`,
+      replacing the deleted `scenarios/harness_monitor/manifest.yaml`
+      (REQ-011). Public surface:
+
+      - `audit.AUDIT_SYSTEM_PROMPT` — the full system prompt body
+        as a module-level string constant. Encodes the two-stage
+        audit flow: stage A extracts events from raw trajectory;
+        stage B runs three-axis analysis (backward continuity,
+        forward fulfillment, content correctness) with cards-as-tools
+        retrieval, silence gate, same-type suppression. Output schema
+        (step 10) is what `RawAuditOutput.from_dict` parses — they
+        move together.
+      - `audit.compose_extensions(prompt_override=, cards_tools_config=,
+        observability_config=)` — factory returning the canonical
+        `[(observability, {}), (cards_tools, {}), (system_prompt,
+        {prompt: AUDIT_SYSTEM_PROMPT})]` list with knob-level
+        customization. Pass `None` for cards_tools_config or
+        observability_config to drop those extensions entirely.
+      - `audit.RawAuditOutput` / `audit.RawAuditEvent` — typed parser
+        for the diagnostic agent's emitted JSON, shared between the
+        in-process adapter (REQ-017) and the dormant subprocess
+        bridge (REQ-007).
+      - `audit.extract_json` — trailing-JSON extractor (fenced
+        ```json blocks first, then last balanced `{...}`).
+
+      The adapter (REQ-017) drives the child session via
+      `AgentSessionConfig(extensions=audit.compose_extensions(...))` —
+      no `scenario=` argument, no YAML lookup, no cross-directory
+      indirection. Anyone wanting fully custom audit logic can pass
+      `audit_extensions=[...]` to override the entire composition.
+      Tests deferred to a later phase.
+    priority: P0
+    status: implemented
+    code:
+      - src/llmharness/audit/__init__.py
+      - src/llmharness/audit/prompt.py
+      - src/llmharness/audit/extensions.py
+      - src/llmharness/audit/output.py
+      - src/llmharness/audit/json_extract.py
+      - src/llmharness/atoms/cards_tools.py
+    depends_on: [REQ-001, REQ-016]

@@ -1,0 +1,55 @@
+id: AFC-0024
+name: "Incorrect verification"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: verification_fault
+  subclass: verification_incorrect_pass
+  mechanism: |
+    Agent runs a verification step but it approves output that is
+    actually wrong. The verifier is too permissive (rubber-stamps any
+    plausible answer), uses the wrong oracle, or evaluates against a
+    paraphrase of the question rather than the original. Worst case
+    of the two verification faults because the agent now actively
+    believes the task is done.
+
+activation:
+  required:
+    - "agent runs an explicit verification / self-eval step"
+    - "verifier outputs 'pass' on incorrect work"
+  amplifying:
+    - "verifier shares the same model as the actor (no independent oracle)"
+    - "verification rubric is itself ambiguous"
+  timescale: seconds
+
+observable:
+  metrics:
+    - predicate: quality.verification.incorrect_pass
+      direction: up
+      shape: spike
+  logs:
+    - pattern: "verifier emits 'looks good' on output that fails downstream / human eval"
+  traces:
+    - pattern: "self-eval span returns success but ground-truth check returns failure"
+  detection_difficulty: silent
+
+downstream_effects:
+  - predicate: outcome.task.terminated_early
+    confidence: high
+    delay: seconds
+  - predicate: outcome.task.failed
+    confidence: high
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: self_verification_step
+
+evidence:
+  - source: "AEGIS (arXiv 2509.14295) Appendix E.2 FM-3.3 'Incorrect Verification'"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

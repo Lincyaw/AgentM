@@ -1,0 +1,68 @@
+id: AFC-0037
+name: "Sibling-source contradiction unresolved"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: verification_fault
+  subclass: source_conflict_ignored
+  mechanism: |
+    Agent cites two upstream sources (tool outputs, peer agents,
+    retrieved documents) that contradict each other on a fact relevant
+    to the synthesis step — and proceeds without resolving the
+    contradiction. Distinct from AFC-0007 (Causal misattribution: agent
+    blames the wrong cause after a failure) and AFC-0030 (Critical-
+    evidence miss: agent never attended to the evidence): here both
+    sources are attended, the contradiction is *visible in the
+    Information Dependency Graph* (GraphTracer §3.2 conflict indicator
+    c_ij = 1 on sibling edges sharing a common descendant), and yet
+    the agent silently chooses one or averages the two. Common in
+    multi-turn deep search where multiple retrieval calls return
+    inconsistent claims about the same entity.
+
+activation:
+  required:
+    - "two or more upstream nodes feed into a downstream synthesis step"
+    - "the upstream nodes contain inconsistent claims about a shared entity"
+    - "the agent's synthesis step does not flag, query, or arbitrate the conflict"
+  amplifying:
+    - "deep search / multi-retrieval workflows"
+    - "lack of explicit verification subroutine"
+    - "conflicting sources have similar surface confidence (e.g., two web results)"
+  timescale: seconds
+
+observable:
+  metrics:
+    - predicate: quality.source.conflict_unresolved
+      direction: up
+      shape: spike
+  logs:
+    - pattern: "agent statement uses claim A, but earlier turn cited claim B contradicting A; no arbitration step in between"
+  traces:
+    - pattern: "IDG conflict indicator c_ij = 1 on edges (v_i, v_d), (v_j, v_d); synthesis span at v_d does not reference the conflict"
+  detection_difficulty: silent
+
+downstream_effects:
+  - predicate: agent_state.observation.fabricated
+    confidence: medium
+    delay: seconds
+  - predicate: outcome.task.failed
+    confidence: high
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: multi_source_retrieval_or_multi_agent
+  - has_component: synthesis_step_over_dependencies
+
+evidence:
+  - source: "GraphTracer (arXiv 2510.10581) §3.2 Eq. 8 conflict indicator c_ij; §4.4 conflict-injection perturbation"
+    type: paper
+    extracted_by: subagent_review
+    human_reviewed: true
+  - source: "GraphTracer §1 worked example: 'outdated data retrieved at step 2 ... contradictions detected only at step 18' (delayed conflict surfacing)"
+    type: paper
+    extracted_by: subagent_review
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false
