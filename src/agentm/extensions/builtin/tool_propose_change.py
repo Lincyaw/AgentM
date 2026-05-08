@@ -130,9 +130,18 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         decision = str(args["decision"])
 
         # Look up the loaded atom's tier — drives the tier-2 deferral gate.
+        # Cross-session case: tuner runs in its own session and does NOT load
+        # the target_scenario's atoms. Fall back to a filesystem scan under
+        # the scenario root so we can still resolve tier + source path.
         loaded = _find_atom_info(api, target_atom)
+        atom_in_session = loaded is not None
+        if loaded is None and target_scenario:
+            loaded = _find_atom_on_disk(cwd, target_scenario, target_atom)
         if loaded is None:
-            return _error(f"unknown atom {target_atom!r}")
+            return _error(
+                f"unknown atom {target_atom!r}: not in current session and "
+                f"no matching MANIFEST under contrib/scenarios/{target_scenario}/"
+            )
         tier = int(loaded.get("tier", 1) or 1)
 
         # Tier-2 gate: refuse to auto-activate. Decision record still written
@@ -207,15 +216,30 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     f"proposed={gate_outcome.get('proposed_score')}"
                 )
 
-        # Apply the change. ``rollback`` and ``exploratory`` skip the gate
-        # but still go through reload_atom for atomicity.
-        reload_result = api.reload_atom(
-            target_atom,
-            new_source,
-            agent_initiated=True,
-            rationale=rationale,
-        )
-        if not reload_result.ok:
+        # Apply the change.
+        # In-session: reload_atom is the transactional path (validate, swap
+        # sys.modules, rerun install, rollback on failure).
+        # Cross-session (tuner mutating production atom it doesn't load):
+        # reload_atom can't run; instead write through ResourceWriter so the
+        # change commits to git — the next production session loads the new
+        # version on startup. This matches the design's "git log IS the
+        # activation history".
+        if atom_in_session:
+            reload_result = api.reload_atom(
+                target_atom,
+                new_source,
+                agent_initiated=True,
+                rationale=rationale,
+            )
+            ok = reload_result.ok
+            old_hash = reload_result.old_hash
+            new_hash = reload_result.new_hash
+            error = reload_result.error
+        else:
+            ok, old_hash, new_hash, error = _write_cross_session(
+                api, loaded["source_path"], new_source, rationale
+            )
+        if not ok:
             decisions_path = _decisions_path(cwd, target_scenario)
             record = {
                 "at": time.time(),
@@ -228,11 +252,11 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "baseline_run": baseline_id,
                     "proposed_run": proposed_id,
                 },
-                "error": reload_result.error,
+                "error": error,
                 "by": "tool_propose_change",
             }
             _append_decision_record(decisions_path, record)
-            return _error(f"reload failed: {reload_result.error}")
+            return _error(f"reload failed: {error}")
 
         decisions_path = _decisions_path(cwd, target_scenario)
         record = {
@@ -241,8 +265,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "scenario": target_scenario,
             "atom": target_atom,
             "tier": tier,
-            "from_sha": reload_result.old_hash,
-            "to_sha": reload_result.new_hash,
+            "atom_in_session": atom_in_session,
+            "from_sha": old_hash,
+            "to_sha": new_hash,
             "rationale": rationale,
             "exploratory": decision == "exploratory",
             "evidence": {
@@ -259,8 +284,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "ok": True,
                     "tier_blocked": False,
                     "status": decision,
-                    "old_hash": reload_result.old_hash,
-                    "new_hash": reload_result.new_hash,
+                    "old_hash": old_hash,
+                    "new_hash": new_hash,
                     "decision_path": str(decisions_path),
                     "gate": gate_outcome,
                 },
@@ -295,6 +320,115 @@ def _find_atom_info(api: ExtensionAPI, name: str) -> dict[str, Any] | None:
                 "source_path": getattr(info, "source_path", None),
             }
     return None
+
+
+def _find_atom_on_disk(
+    cwd: Path, scenario: str, atom_name: str
+) -> dict[str, Any] | None:
+    """Cross-session resolution: walk the scenario tree for a .py whose
+    declared MANIFEST.name matches ``atom_name``. Used when the tuner
+    proposes a change to an atom that lives under the production scenario
+    and is therefore not loaded in the tuner's own session.
+    """
+    import ast
+
+    scenario_root = cwd / "contrib" / "scenarios" / scenario
+    if not scenario_root.is_dir():
+        return None
+    for py in scenario_root.rglob("*.py"):
+        if py.name.startswith("_") or "/eval/" in py.as_posix() or "/tuner/" in py.as_posix():
+            continue
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        for node in tree.body:
+            if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+                continue
+            target = node.targets[0]
+            if not (isinstance(target, ast.Name) and target.id == "MANIFEST"):
+                continue
+            for kw in getattr(node.value, "keywords", []) or []:
+                if kw.arg == "name" and isinstance(kw.value, ast.Constant):
+                    if kw.value.value == atom_name:
+                        tier = 1
+                        for kw2 in getattr(node.value, "keywords", []) or []:
+                            if (
+                                kw2.arg == "tier"
+                                and isinstance(kw2.value, ast.Constant)
+                                and isinstance(kw2.value.value, (int, str))
+                            ):
+                                tier = int(kw2.value.value)
+                        return {
+                            "name": atom_name,
+                            "tier": tier,
+                            "current_hash": None,
+                            "source_path": str(py.resolve()),
+                        }
+    return None
+
+
+def _write_cross_session(
+    api: ExtensionAPI,
+    source_path: str | None,
+    new_source: str,
+    rationale: str,
+) -> tuple[bool, str | None, str | None, str | None]:
+    """Write ``new_source`` to ``source_path`` via the resource writer the
+    api exposes (or a fallback file write). Returns (ok, old_hash, new_hash,
+    error). ``old_hash`` and ``new_hash`` are best-effort: when running on
+    git-backed cwd the harness commits the write and the post-image SHA is
+    discoverable via ``git log -1 --format=%H -- <path>``.
+    """
+    import hashlib
+    import subprocess
+
+    if not source_path:
+        return False, None, None, "missing source_path"
+    p = Path(source_path)
+    try:
+        old_bytes = p.read_bytes() if p.is_file() else b""
+        old_hash = hashlib.sha256(old_bytes).hexdigest()[:12] if old_bytes else None
+
+        # Prefer ResourceWriter via api if exposed; else direct write.
+        write_async = getattr(api, "resource_writer_write", None)
+        if callable(write_async):  # pragma: no cover - opt-in writer surface
+            import asyncio
+
+            asyncio.get_event_loop().run_until_complete(
+                write_async(str(p), new_source.encode("utf-8"), rationale=rationale)
+            )
+        else:
+            p.write_text(new_source, encoding="utf-8")
+            cwd = p.parent
+            try:
+                subprocess.run(
+                    ["git", "add", str(p)], cwd=cwd, check=False, capture_output=True
+                )
+                subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        "user.email=agent@agentm",
+                        "-c",
+                        "user.name=tool_propose_change",
+                        "commit",
+                        "-m",
+                        f"propose_change: {rationale}",
+                        "--",
+                        str(p),
+                    ],
+                    cwd=cwd,
+                    check=False,
+                    capture_output=True,
+                )
+            except FileNotFoundError:
+                pass
+
+        new_hash = hashlib.sha256(new_source.encode("utf-8")).hexdigest()[:12]
+        return True, old_hash, new_hash, None
+    except Exception as exc:  # noqa: BLE001
+        return False, None, None, str(exc)
 
 
 def _decisions_path(cwd: Path, scenario: str) -> Path:

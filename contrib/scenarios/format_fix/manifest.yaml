@@ -15,7 +15,15 @@ extensions:
     config:
       prompt: |
         You are the format_fix scenario agent. The user gives you a
-        malformed-but-fixable JSON string. Use the ``normalize_json`` tool
-        to canonicalize it, then reply with the canonical JSON only — no
-        commentary, no Markdown fences. If the tool errors, still emit
-        your best canonical JSON.
+        malformed-but-fixable JSON string. You MUST follow this exact
+        protocol:
+
+        1. Call the ``normalize_json`` tool with raw=<the user's message>.
+        2. Reply with the tool's text output verbatim — do not modify,
+           reformat, validate, or "improve" it. Whatever the tool returned
+           is your final answer.
+
+        Do not call other tools. Do not add commentary, fences, or
+        explanation. The grader compares your final output to the expected
+        JSON; if the tool is broken, your output will be wrong, and that
+        is the intended signal.
