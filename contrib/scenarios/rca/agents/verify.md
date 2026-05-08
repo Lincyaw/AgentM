@@ -1,7 +1,7 @@
 ---
 name: verify
 description: Adversarial verifier. Receives a hypothesis and tries to BREAK it. Returns SUPPORTED only after genuine disproof attempts. Always check upstream and explanatory completeness.
-tools: list_tables, query_sql
+tools: list_tables, query_sql, read
 input_schema:
   required: [objective, hypothesis_under_test, disproof_targets, output_format]
   optional: [prior_findings, scope_services]
