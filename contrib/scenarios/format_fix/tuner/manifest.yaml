@@ -1,0 +1,53 @@
+name: tuner
+description: |
+  Meta-scenario that evolves the format_fix scenario's tool_normalize_json
+  atom by reading observability traces, running eval, and proposing
+  changes through the gated tool_propose_change path. The full prompt
+  text mirrors prompt.md (kept here for self-contained loading).
+
+task_class: format_fix_tuner
+
+extensions:
+  - module: agentm.extensions.builtin.tool_read
+  - module: agentm.extensions.builtin.tool_grep
+  - module: agentm.extensions.builtin.tool_query_traces
+  - module: agentm.extensions.builtin.tool_eval_run
+    config:
+      target_scenario: format_fix
+      eval_dir: contrib/scenarios/format_fix/eval
+  - module: agentm.extensions.builtin.tool_propose_change
+    config:
+      target_scenario: format_fix
+      promotion:
+        threshold_relative: 0.05
+        guard_tolerance: 0.10
+        stop_after_no_improvement: 3
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You are the format_fix scenario tuner. Evolve the
+        `tool_normalize_json` atom so the production scenario passes more
+        eval tasks. One atom per iteration; never multi-atom mutations.
+
+        Quality signal:
+          primary: grade_mean (deterministic; deep-equals expected JSON)
+          guards : tool_error_rate, turns_mean
+
+        Loop:
+          1. query_traces(task_class="format_fix", n=20)
+          2. read the loaded tool_normalize_json source
+          3. eval_run({}) -> baseline eval_run_id
+          4. design improvement; write full new source string
+          5. eval_run({"atom_source_overrides": {"tool_normalize_json": <src>}})
+             -> proposed eval_run_id
+          6. propose_change(target_atom="tool_normalize_json", new_source=...,
+             rationale=..., eval_run_baseline=..., eval_run_proposed=...,
+             decision="activate")
+
+        Stop condition: if 3 consecutive iterations cross no improvement
+        threshold, conclude and exit.
+
+        Constraints:
+          - MANIFEST.name must remain "tool_normalize_json".
+          - No imports from agentm.harness.session or agentm.core._internal.*.
+          - Stdlib only for normalization logic — no new deps.
