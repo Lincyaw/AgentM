@@ -1,7 +1,7 @@
 """V1 fail-stop integration test for the two-phase cognitive audit.
 
 This is the **single fail-stop** for the V1 two-phase audit per
-``.claude/designs/llmharness-two-phase-audit.md`` §11 and the AgentM
+``.claude/designs/llmharness-cognitive-audit.md`` §11 and the AgentM
 top-level CLAUDE.md "Core test positions" rule. It replaces the V0
 schema-pinning smoke tests deleted in the 2026-05-08 hard cut.
 

@@ -9,7 +9,7 @@ concepts:
     description: "First-principles pluggable architecture inspired by pi-mono (badlogic/pi-mono). Three-layer package boundary (agentm-llm / agentm-core / agentm-harness / agentm-modes). Five pluggability axes as Protocol ports: StreamFn (LLM), Tool+Operations (env), SessionManager (state), ResourceLoader (project context), EventBus+ExtensionAPI (policy). Built-in features become default extensions. Reference index to pi-mono source paths."
     design: "designs/pluggable-architecture.md"
     related_concepts: [agent_loop, extension_as_scenario, operations_ports, observability, self_modifiable_architecture, evolution_substrate, git_backed_versioning, textual_tui]
-    plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
+    plans: []
     tasks: []
 
   agent_loop:
@@ -65,66 +65,56 @@ concepts:
     description: "Pluggability model: a scenario is a *composition* of atomic extensions, expressed as data (YAML), not code. Atoms (one Python module, one responsibility) live in extensions/builtin/; scenario recipes live in extensions/scenarios/*.yaml. load_scenario(name) flattens a YAML to list[(module, config)] for AgentSession.create. Same mechanism for built-in and third-party scenarios — no privileged path. Legacy harness/scenarios/tools tree is deleted in Phase 2.5 single sweep. self_modifiable_architecture extends ExtensionManifest with api_version, affects, tier fields; evolution_substrate makes scenarios catalogable and queryable like atoms."
     design: "designs/extension-as-scenario.md"
     related_concepts: [pluggable_architecture, operations_ports, single_file_extension_contract, self_modifiable_architecture, evolution_substrate]
-    plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
-    tasks:
-      - "tasks/2026-04-30-phase2-group-0b.md"
-      - "tasks/2026-04-30-phase2-group-0c.md"
-      - "tasks/2026-04-30-phase2-group-A0.md"
-      - "tasks/2026-04-30-phase2-group-A.md"
-      - "tasks/2026-04-30-phase2-group-B.md"
-      - "tasks/2026-04-30-phase2-group-C.md"
-      - "tasks/2026-04-30-phase2-group-D1.md"
-      - "tasks/2026-04-30-phase2-group-D2.md"
-      - "tasks/2026-04-30-legacy-cleanup.md"
+    plans: []
+    tasks: []
 
   single_file_extension_contract:
     description: "§11 hard rule: one new built-in extension = one new .py file under extensions/builtin/<name>.py with module-level MANIFEST: ExtensionManifest plus install(api, config). Auto-discovery (extensions.discover) and a mechanical validator (extensions.validate, 8 checks keyed to design §11.4) gate the catalog. Designed so future agent self-edits have a tiny, verifiable surface — atom-to-atom imports forbidden, harness.session import forbidden, allow-listed imports only. Phase 2.0c scaffolding landed; A/B/C/D1 atoms must conform. self_modifiable_architecture grows the manifest with api_version (integer ABI + grace window), affects (declared metric surface for catalog), tier (1 free / 2 reviewable). Validator gains api_version compatibility check and constitution-path rejection."
     design: "designs/extension-as-scenario.md#11-single-file-self-contained-extension-contract"
     related_concepts: [extension_as_scenario, pluggable_architecture, self_modifiable_architecture, evolution_substrate]
-    plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
-    tasks: ["tasks/2026-04-30-phase2-group-0c.md"]
+    plans: []
+    tasks: []
 
   operations_ports:
     description: "FileOperations / BashOperations Protocols in src/agentm/core/abi/operations.py + LocalFileOperations / LocalBashOperations defaults in src/agentm/core/_internal/operations_impl.py. The environment boundary that lets tool atoms (tool_read, tool_bash, tool_edit, tool_write) run unchanged whether targeting local FS or remote (SSH, sandbox). Acceptance scenario 2 of pluggable-architecture.md depends on this port."
     design: "designs/extension-as-scenario.md#10b6"
     related_concepts: [pluggable_architecture, extension_as_scenario]
-    plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
-    tasks:
-      - "tasks/2026-04-30-phase2-group-A0.md"
+    plans: []
+    tasks: []
 
   skills:
     description: "Filesystem-discovered SKILL.md files (YAML frontmatter + body) advertised in the system prompt as a compact <available_skills> XML index; LLM loads any specific skill on demand via the `read` tool. Implements progressive disclosure. Pi-mono port of core/skills.ts. Includes core/_internal/skills.py (loader + validator + diagnostics), core/lib/frontmatter.py (in-house parser, promoted from resource_loader._split_frontmatter), and extensions/builtin/skill_loader.py atom that injects the index via before_agent_start."
     design: "designs/skills.md"
     related_concepts: [prompt_templates, pluggable_architecture, extension_as_scenario, search_tools]
-    plans: ["plans/2026-05-01-pi-mono-migration.md"]
+    plans: []
     tasks: []
 
   prompt_templates:
     description: "Filesystem-discovered markdown templates with YAML frontmatter. /<name> args expansion with bash-style placeholders ($1, $@, $ARGUMENTS, ${@:N:L}). Pi-mono port of core/prompt-templates.ts. Includes core/_internal/prompt_templates.py (parser + substituter + loader) and extensions/builtin/prompt_templates.py atom (input-event handler that expands before agent loop runs). Code-registered slash commands win over templates on name collision; non-matching /-prefixed text falls through verbatim."
     design: "designs/prompt-templates.md"
     related_concepts: [skills, extension_as_scenario, pluggable_architecture]
-    plans: ["plans/2026-05-01-pi-mono-migration.md"]
+    plans: []
     tasks: []
 
   search_tools:
     description: "Three new tool atoms — tool_grep, tool_find, tool_ls — backed by ripgrep/fd with stdlib+pathspec fallback, .gitignore-aware, deterministic byte/line truncation. Each tool exposes its own Operations Protocol (GrepOperations/FindOperations/LsOperations) for SSH/sandbox swap, mirroring core/abi/operations.py. Adds shared core/lib/text_truncate.py and core/lib/path_utils.py modules. Pi-mono port of tools/{grep,find,ls,truncate,path-utils}.ts."
     design: "designs/search-tools.md"
     related_concepts: [edit_diff, tool_event_narrowing, extension_as_scenario, operations_ports, pluggable_architecture]
-    plans: ["plans/2026-05-01-pi-mono-migration.md"]
+    plans: []
     tasks: []
 
   edit_diff:
     description: "Pure-function module core/lib/edit_diff.py owning the edit-application algorithm: line-ending detection/restoration, UTF-8 BOM handling, NFKC + smart-quote/dash/space fuzzy normalization, and multi-edit application pipeline (Edit{old,new} sequences). Pi-mono port of tools/edit-diff.ts. Consumed by the upgraded tool_edit atom in Tier 2."
     design: "designs/edit-diff.md"
     related_concepts: [search_tools, tool_event_narrowing, extension_as_scenario, operations_ports]
-    plans: ["plans/2026-05-01-pi-mono-migration.md"]
+    plans: []
     tasks: []
 
   tool_event_narrowing:
     description: "Per-tool typed event subclasses (BashToolCallEvent, ReadToolCallEvent, GrepToolCallEvent, ...) + isinstance-based TypeGuard helpers (is_bash_tool_call, ...) replacing the single ToolCallEvent with stringly-typed tool_name. Recommends Python match-statement dispatch as the idiomatic style. Custom user tools fall through to the base ToolCallEvent. Pi-mono port of the typed-event/type-guard pattern from extensions/types.ts:740-940. Coordinated single-PR migration across all atoms that branch on tool_name."
     design: "designs/tool-event-narrowing.md"
     related_concepts: [search_tools, edit_diff, pluggable_architecture, extension_as_scenario]
-    plans: ["plans/2026-05-01-pi-mono-migration.md"]
+    plans: []
     tasks: []
 
   sub_agent_lifecycle:
@@ -149,30 +139,11 @@ concepts:
     tasks: []
 
   cognitive_audit:
-    description: "Soft NL advisor that supervises a running main agent for semantic-level (T3+T4) drift, sourced from the 42-card AFC corpus at scenarios/llmharness/references/papers/cards/. Three-axis thought-graph audit, all running as pure LLM judgment over trajectory-internal material: (1) backward continuity — for each new node, judge whether it has a coherent ancestor relationship in context; orphans flag continuity break (covers AFC-0019/0022/0028/0029/0030/0012/0013/0026/0037, ~10 cards); (2) forward fulfillment — for each declared intent (task, subgoal, hypothesis), judge whether the forward window contains an action chain that addresses it; budget O(intent_nodes) (covers AFC-0016/0018/0023/0025/0009 + ~6 cards); (3) content correctness — hyperedge / hypernode check over groups of nodes for internal consistency, goal alignment, reasonability, hallucination — purely trajectory-internal, NO external evidence retrieval (covers AFC-0001/0007/0024/0036/0003/0020/0002/0008/0039). Coverage: full T3+T4 semantic tier; T1+T2 owned by P0 detector.py rule layer. Authority constraints (load-bearing): advisor not controller, NL reminder only, never mutate trajectory/plan/tools/model; default silent; signal-to-noise > coverage (reminder fatigue is the dominant failure mode). Silence gate (route B): emit only when audit can articulate a concrete reason; AFC card citation is optional but encouraged via cited_cards field; no numeric confidence threshold. Same-type suppression: structural pre-filter (axis or cited_cards overlap) → LLM judgment over recent_alerts whether new finding is duplicate or re-drift. Self-monitor: each audit firing's prompt receives recent alerts with downstream_reaction; if main agent has not been heeding recent reminders, audit emits silent verdict and skips three-axis check entirely (auto-silencing without N/K thresholds). Cards as tools (NOT static prompt): cards_list returns all 42 summaries with axis_hint (curated in src/llmharness/cards.py code, NOT a YAML schema field — preserves rca-autorl public contract); cards_get(id) returns full card YAML; diagnostic agent's retrieval choices become observable training signal. Edge type vocabulary REJECTED: real edges are not enumerable cleanly, multi-labeled, subjective; raw LLM coherence judgment replaces preset labels. General principle (saved as feedback memory): for fields capturing subjective dimensions (relationships, status, classifications), use free-text + LLM-decided, never preset enums. Agent-agnostic adapter pattern: TrajectoryAdapter (pull_new_turns / session_id) + ReminderInjector (inject) + AuditTrigger (should_audit). V0 ships AgentM adapter only — TurnEndEvent trigger (no throttling), spawn_child_session for isolation + auto observability capture, BeforeAgentStartEvent.system mutation for injection (quieter than send_user_message). Claude Code stays on existing P0 rule-based detector; migration to three-axis audit is V1+. Reminder format: half-structured `[harness] {free text}` prefix + free-form body. Persistence: store.py file-based JSONL is source of truth (gains opt-in Verdict.cited_cards, Verdict.downstream_reaction free-text fields — both nullable, both follow no-preset-enum rule); AgentM observability auto-captures child session reasoning for free; training-data export script joins them by session_id + verdict timestamp (V1 task, V0 writes zero new persistence code). Existing Event(id, kind, refs, source_turns) stays untyped — refs is plain list[int], no edge_types field. Training data shape (graph_snapshot, alert_emitted, downstream_reaction) emerges as side effect of V0 operation; supports plugin description's 'commercial model first, distilled 8B later' commitment. Rejected alternatives (with why): GoS-FSM-only (loses 6 content cards per cards/GRAPH-FSM-MAPPING.md), per-step-rationale-only (no forward window), hard intent lifecycle enum (brittle), preset edge-type vocabulary (subjective, multi-labeled, incomplete), external evidence verification for axis 3 (mistakenly framed; user clarified axis 3 is trajectory-internal), diagnostic agent as decision-maker (one wrong audit pulls main agent off-task). Open: pre-filter to amortize child-session cost (V1), cross-session memory (V1+), reminder-usefulness evaluation (separate eval design). Predecessor research: 10 papers → cards/INDEX.md / cards/FAILURE-PATTERNS-SYNTHESIS.md / cards/DETECTION-FEASIBILITY.md / cards/GRAPH-FSM-MAPPING.md."
+    description: "Two-phase audit pipeline supervising a running main agent for semantic-level drift. Phase 1 (Extractor) runs per TurnEndEvent: a stateless child session reads the new-turn slice (including thinking blocks) plus a recent-graph slice for refs resolution and submits new Event records via submit_events; state lives on the parent session entry tree under llmharness.audit_event entries plus an llmharness.extractor_cursor pointer that records last_turn_index. Phase 2 (Auditor) runs every k turns (default 3, configurable via audit_interval_turns): a stateless child session sees the event graph + recent verdicts (not the raw trajectory) and submits a Verdict + optional Reminder via submit_verdict. Failure modes are visible — extractor_no_call / extractor_error / extractor_empty / audit_no_call / audit_error entries replace silent no-drift fallbacks. Event graph is append-only; invalidation carried as free-text relation in new event's summary + refs pointing at superseded id (per feedback_no_preset_subjective_labels.md). JSON-Schema enums for EventKind/DriftType derived from the enum classes; drift=true ⇒ type required enforced at the provider edge via if/then. Public contract preserved: schema.py Event/Verdict/Reminder/EventKind/DriftType + cards.py + cards_tools atom + inherit_provider builtin + BeforeAgentStartEvent injection. AFC card corpus at scenarios/llmharness/references/papers/cards/ (42 cards) is the LLM judge's reference material, exposed via the cards_tools atom (cards_list / cards_get) — not a static prompt."
     design: "designs/llmharness-cognitive-audit.md"
-    related_concepts: [extension_as_scenario, observability, sub_agent_lifecycle, self_modifiable_architecture, pluggable_architecture, agent_team, two_phase_audit]
-    plans: ["plans/2026-05-08-llmharness-cognitive-audit-v0.md"]
-    tasks:
-      - "tasks/2026-05-08-cognitive-audit-01-schema.md"
-      - "tasks/2026-05-08-cognitive-audit-02-cards-module.md"
-      - "tasks/2026-05-08-cognitive-audit-03-agentm-adapter.md"
-      - "tasks/2026-05-08-cognitive-audit-04-scenario-manifest.md"
-      - "tasks/2026-05-08-cognitive-audit-06-integration.md"
-
-  two_phase_audit:
-    description: "V1 redesign of cognitive_audit that splits the single per-TurnEndEvent child session into two phases with disjoint inputs and failure modes. Phase 1 (Extractor): per-turn incremental, stateless child spawned with the full new-turn slice (including thinking blocks, kept this time) plus a recent-graph slice for refs resolution; terminal tool submit_events; state lives entirely in the parent session entry tree under llmharness.audit_event entries plus an llmharness.extractor_cursor pointer that records last_turn_index so each firing only sees turns since the previous extraction. No rules layer — pure LLM extraction (option B from design discussion). Phase 2 (Auditor): every k turns (default k=3, configurable as audit_interval_turns), stateless child sees the event graph + recent verdicts, NOT the raw trajectory; terminal tool submit_verdict; optional fetch_turn drill-down tool gated by config flag, off in V1. Single TurnEndEvent handler dispatches both: always run_phase_1; if turn_count % k == 0 also run_phase_2. Failure semantics fixed: V0's silent ([], Verdict(drift=False)) fallback split into typed failure entries (extractor_no_call / extractor_error / extractor_empty / audit_no_call / audit_error) so outage and clean-trajectory become distinguishable in the entry stream — direct fix for V0's biggest data-quality bug. Event graph rules: append-only (immutable events, the chosen mutability mode); invalidation/refinement carried as free-text relation in new event's summary plus refs pointing at superseded id (per feedback_no_preset_subjective_labels.md, no edge-type enum); V1 query API stays branch-walk filtering, no typed ReadonlySession.events_of_kind helper until a second consumer exists. Token cost change: O(N²) → roughly O(N) for extraction + O(graph_size) per audit firing every k turns; auditor input shifts from full trajectory to graph form (Event.to_dict). Schema parity fix: JSON-Schema enums for EventKind/DriftType derived from the enum classes (single source of truth) instead of V0's hand-listed copies. drift=true ⇒ type required enforced via JSON Schema if/then at the provider edge instead of silently dropped by adapter. Public contract preserved: schema.py Event/Verdict/Reminder/EventKind/DriftType unchanged so rca-autorl break-free; cards.py + cards_tools atom + inherit_provider builtin + BeforeAgentStartEvent injection all unchanged. Module split: audit/extractor/{prompt,submit_tool,extensions,output}.py + audit/auditor/{prompt,submit_tool,extensions,output}.py replace V0's flat audit/ layout; compose_extensions splits into compose_extractor_extensions / compose_auditor_extensions. Hard cut migration (no parallel track): V0 audit/ files deleted, V0 smoke tests rewritten, single new stub-provider integration test pinned to a 4-turn k=3 dialog asserting Phase 1 fires 4× and Phase 2 fires 1× at turn 3 with expected entry tree shape — that test becomes the V1 fail-stop. Rejected for V1: long-running extractor daemon (option A; needs SDK long-lived-child + stream primitives), graph-pattern triggers between k-windows (needs graph schema to stabilize first), typed ref edges (V1 keeps refs:list[int] + free-text relation in summary), cross-session graph reuse, fetch_turn tool (defer until measured need)."
-    design: "designs/llmharness-two-phase-audit.md"
-    related_concepts: [cognitive_audit, observability, sub_agent_lifecycle, extension_as_scenario, pluggable_architecture]
-    plans: ["plans/2026-05-08-llmharness-two-phase-audit.md"]
-    tasks:
-      - "tasks/2026-05-08-two-phase-audit-01-enum-schema.md"
-      - "tasks/2026-05-08-two-phase-audit-02-extractor-module.md"
-      - "tasks/2026-05-08-two-phase-audit-03-auditor-module.md"
-      - "tasks/2026-05-08-two-phase-audit-04-adapter-rewrite.md"
-      - "tasks/2026-05-08-two-phase-audit-05-failure-entries.md"
-      - "tasks/2026-05-08-two-phase-audit-06-v0-dismantle.md"
-      - "tasks/2026-05-08-two-phase-audit-07-integration-test.md"
+    related_concepts: [extension_as_scenario, observability, sub_agent_lifecycle, self_modifiable_architecture, pluggable_architecture, agent_team]
+    plans: []
+    tasks: []
 
   # === HISTORICAL ===
   # Pre-v2 architecture. Code deleted in Phase 2.5 (2026-04-30).
@@ -183,7 +154,7 @@ concepts:
     description: "[HISTORICAL — superseded by extension_as_scenario; code deleted in Phase 2.5] SDK semantic consistency refactoring: unified Tool type (@tool decorator, no StructuredTool), Scenario protocol (setup() -> ScenarioWiring), single ScenarioRegistry (replaces 4 global registries), dead code removal, langchain boundary convergence (HumanMessage/StructuredTool removed from SDK internals)."
     design: "designs/historical/sdk-consistency.md"
     related_concepts: [agent_harness, system_architecture, scenario_protocol, middleware_system]
-    plans: ["plans/2026-03-15-library-antipattern-fixes.md"]
+    plans: []
     tasks: []
 
   agent_harness:
@@ -220,24 +191,15 @@ concepts:
     description: "Pure Python multi-agent orchestration system. SimpleAgentLoop-based ReAct cycle, AgentRuntime for worker management, WorkerLoopFactory for config-driven worker creation, build_agent_system() single canonical builder, Scenario protocol for domain logic, Middleware protocol (3 hooks) for cross-cutting concerns. Config-driven design, trajectory recording, monitoring, and failure recovery."
     design: "designs/historical/system-design-overview.md"
     related_concepts: [agent_harness, orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner, scenario_protocol, middleware_system, storage_backend, trajectory_analysis]
-    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-08-stub-implementation.md"]
-    tasks:
-      - "tasks/2026-03-08-design-audit-findings.md"
-      - "tasks/2026-03-08-impl-builder.md"
-      - "tasks/2026-03-08-impl-config-loader.md"
-      - "tasks/2026-03-08-impl-config-validator-phase-manager.md"
-      - "tasks/2026-03-08-impl-orchestrator-agent.md"
-      - "tasks/2026-03-08-impl-orchestrator-tools.md"
-      - "tasks/2026-03-08-impl-prompt-tool-registry.md"
-      - "tasks/2026-03-08-impl-task-manager.md"
-      - "tasks/2026-03-08-snapshot-tests.md"
+    plans: []
+    tasks: []
 
   orchestrator:
     status: historical
     description: "SimpleAgentLoop-based orchestrator with DynamicContextMiddleware for state injection. Dispatches workers via AgentRuntime. Monitors/injects/aborts via dispatch_agent/check_tasks/inject_instruction/abort_task tools. RCA scenario uses HypothesisStore for hypothesis reasoning."
     design: "designs/historical/orchestrator.md"
     related_concepts: [system_architecture, sub_agent, trajectory_system, memory_system, execution_runner]
-    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-09-compression-recall-memory.md"]
+    plans: []
     tasks: []
 
   sub_agent:
@@ -245,16 +207,15 @@ concepts:
     description: "Worker agents built by WorkerLoopFactory as SimpleAgentLoop instances. Config-driven tools/prompts, middleware stack (budget, compression, dedup, trajectory). Data-only constraint in RCA mode. Launched as asyncio.Tasks by AgentRuntime."
     design: "designs/historical/sub-agent.md"
     related_concepts: [system_architecture, orchestrator, configuration_system, execution_runner, service_profile]
-    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
-    tasks:
-      - "tasks/2026-03-08-impl-hooks-sub-agent.md"
+    plans: []
+    tasks: []
 
   generic_state_wrapper:
     status: historical
     description: "[HISTORICAL — superseded by extension_as_scenario (scenario = YAML composition of atoms); code deleted in Phase 2.5] Scenario Protocol architecture: Scenario protocol (setup() -> ScenarioWiring), SetupContext (platform resources), ScenarioRegistry (register/discover), build_agent_system() 4-phase pipeline integration. 3 built-in scenarios: RCA (hypothesis_driven), trajectory_analysis, general_purpose."
     design: "designs/historical/generic-state-wrapper.md"
     related_concepts: [agent_harness, orchestrator, configuration_system, memory_system, scenario_protocol, middleware_system, builder]
-    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-09-compression-recall-memory.md"]
+    plans: []
     tasks: []
     tests:
       - file: "tests/unit/test_generic_sdk.py"
@@ -266,7 +227,7 @@ concepts:
     design: "designs/historical/orchestrator.md"
     related_concepts: [orchestrator, trajectory_system, memory_vault, trajectory_analysis]
     related_designs: ["designs/historical/trajectory-analysis.md"]
-    plans: ["plans/2026-03-09-compression-recall-memory.md"]
+    plans: []
     tasks: []
 
   trajectory_analysis:
@@ -274,21 +235,15 @@ concepts:
     description: "Skill-driven trajectory analysis scenario. Agent Skills spec (SKILL.md + references/ + examples/) in vault under skill/trajectory-analysis/. Three-tier progressive disclosure: catalog → SKILL.md → references/. Model-driven or config-driven skill activation. Uses generic state via Scenario protocol, two phases (analyze → synthesize)."
     design: "designs/historical/trajectory-analysis.md"
     related_concepts: [system_architecture, memory_system, memory_vault, scenario_protocol, configuration_system]
-    plans: ["plans/2026-03-24-trajectory-analysis.md"]
-    tasks:
-      - "tasks/2026-03-24-ta-state-strategy.md"
-      - "tasks/2026-03-24-ta-schemas-registry.md"
-      - "tasks/2026-03-24-ta-config.md"
-      - "tasks/2026-03-24-ta-vault-skills.md"
-      - "tasks/2026-03-24-ta-integration.md"
-      - "tasks/2026-03-24-ta-tests.md"
+    plans: []
+    tasks: []
 
   configuration_system:
     status: historical
     description: "Config system: system.yaml (global), tools/*.yaml (reusable tool defs), scenarios/<name>/ (scenario.yaml + prompts/*.j2). Pydantic schema validation + cross-reference validation at startup. Environment variable substitution"
     design: "designs/historical/system-design-overview.md"
     related_concepts: [system_architecture, sub_agent, orchestrator]
-    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
+    plans: []
     tasks: []
     tests:
       - file: "tests/unit/test_config_validation.py"
@@ -361,7 +316,7 @@ concepts:
     status: historical
     description: "build_agent_system() — single canonical 4-phase builder (platform resources -> worker infra -> orch tools -> orch loop). Scenario-driven, no legacy wrappers. Factory closure DI for tools, trajectory wiring."
     related_concepts: [system_architecture, orchestrator, sub_agent, trajectory, configuration_system, scenario_protocol, middleware_system, storage_backend]
-    plans: ["plans/2026-03-09-compression-recall-memory.md"]
+    plans: []
     tasks: []
 
   scenario_protocol:
@@ -377,9 +332,7 @@ concepts:
     description: "[HISTORICAL — replaced by EventBus + atomic extensions; code deleted in Phase 2.5] Middleware protocol with 3 hooks: on_llm_start, on_llm_end, on_tool_call. Chain pattern for composing multiple middlewares. Concrete implementations: DynamicContextMiddleware, LoopDetectionMiddleware, CompressionMiddleware, BudgetMiddleware, DedupMiddleware, SkillMiddleware, TrajectoryMiddleware, PermissionMiddleware, MemoryMiddleware, plus loop-resilience additions (ToolResultBudgetMiddleware, SystemReminderMiddleware, MicroCompactMiddleware, CostBudgetMiddleware). All middleware code is in harness/middleware.py."
     related_concepts: [agent_harness, builder, sub_agent, tool_dedup, loop_resilience]
     plans: []
-    tasks:
-      - "tasks/2026-03-08-impl-compression.md"
-      - "tasks/2026-03-08-impl-notebook.md"
+    tasks: []
     tests:
       - file: "tests/unit/test_generic_sdk.py"
         covers:
@@ -400,16 +353,8 @@ concepts:
     description: "Markdown + YAML frontmatter persistent knowledge vault with SQLite-backed three-layer index (structural, link graph, FTS5 + sqlite-vec). Replaces JSON-based KnowledgeStore. [[wikilink]] bidirectional linking, atomic write flow, vault_edit with 4 incremental edit primitives (replace_string, set_frontmatter, replace_section, append_section), rebuildable index."
     design: "designs/historical/memory-vault.md"
     related_concepts: [memory_system, agent_harness, storage_backend, configuration_system]
-    plans: ["plans/2026-03-16-memory-vault.md"]
-    tasks:
-      - "tasks/2026-03-16-vault-parser.md"
-      - "tasks/2026-03-16-vault-schema.md"
-      - "tasks/2026-03-16-vault-store.md"
-      - "tasks/2026-03-16-vault-search.md"
-      - "tasks/2026-03-16-vault-graph.md"
-      - "tasks/2026-03-16-vault-tools.md"
-      - "tasks/2026-03-16-vault-migration.md"
-      - "tasks/2026-03-16-vault-integration.md"
+    plans: []
+    tasks: []
 
   tool_dedup:
     status: historical
@@ -503,11 +448,5 @@ concepts:
     description: "Automated investigation quality checks (linter/sanitizer) for the RCA orchestrator. Two-layer design: CodeSanitizer (deterministic store/sequence checks) + CriticSanitizer (LLM-based semantic judgment). Detects exploration gaps (E1-E4), confirmation failures (C1-C4), judgment errors (J1-J4), process violations (P1-P3). Injects findings into orchestrator message stream. Hard-gates finalize on critical violations."
     design: "designs/historical/investigation-sanitizer.md"
     related_concepts: [orchestrator, middleware_system, scenario_protocol, loop_resilience, trajectory_judger, service_profile]
-    plans: ["plans/2026-04-02-investigation-sanitizer.md"]
-    tasks:
-      - "tasks/2026-04-02-investigation-tracker.md"
-      - "tasks/2026-04-02-code-sanitizer.md"
-      - "tasks/2026-04-02-critic-sanitizer.md"
-      - "tasks/2026-04-02-sanitizer-middleware.md"
-      - "tasks/2026-04-02-sanitizer-config-wiring.md"
-      - "tasks/2026-04-02-sanitizer-e2e.md"
+    plans: []
+    tasks: []

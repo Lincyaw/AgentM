@@ -1,6 +1,6 @@
 """Adapter: AgentM bus -> two-phase cognitive audit.
 
-See `.claude/designs/llmharness-two-phase-audit.md` for the full design.
+See `.claude/designs/llmharness-cognitive-audit.md` for the full design.
 """
 
 from __future__ import annotations

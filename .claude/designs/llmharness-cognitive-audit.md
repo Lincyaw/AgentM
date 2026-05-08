@@ -1,573 +1,294 @@
-# Cognitive Audit for llmharness — agent-agnostic supervisory advisor
+# Cognitive Audit for llmharness
 
-**Status:** active design (V0 not yet implemented)
+**Status:** active design
 **Owners:** llmharness scenario
 **Last reviewed:** 2026-05-08
-**Predecessor research:** `scenarios/llmharness/references/papers/cards/` (42 AFC cards),
-`cards/DETECTION-FEASIBILITY.md` (T1–T4 tier classification),
-`cards/GRAPH-FSM-MAPPING.md` (GoS state-machine analysis)
+
+A two-phase audit pipeline that supervises a running main agent for
+semantic-level drift. Phase 1 extracts a typed event graph from each
+new turn; Phase 2 judges drift over the graph every `k` turns and
+emits an optional reminder back into the trajectory.
 
 ---
 
-## 1. Motivation
+## 1. Goals
 
-`scenarios/llmharness/` already ships a P0 supervisory loop: PostToolUse / Stop
-hooks fold transcript turns into an event log; `summarizer.py` extracts a
-small set of `Event` records via regex; `detector.py` runs four hand-coded
-rules (`stuck_loop`, `premature_conclusion`, `evidence_ignored`,
-`task_drift`); a single-line NL reminder gets injected on UserPromptSubmit.
-
-Two pressures push beyond P0:
-
-1. **Coverage ceiling for rules.** `cards/DETECTION-FEASIBILITY.md`
-   classifies the surveyed failure patterns into four tiers. T1 (pure
-   rule) and T2 (structural) are reachable by rules. T3 (hybrid) and T4
-   (pure semantic) — ~20 cards in total — are not. Patterns like *task
-   specification deviation*, *goal drift*, *causal misattribution*,
-   *over-simplified memory*, *unfaithful CoT*, *incorrect verification*
-   require reading what the agent *meant*, not just what it emitted.
-
-2. **Long-term distillation target.** The plugin description points at
-   "commercial model first, distilled 8B later". A distilled small
-   model needs training data of shape `(input trajectory, audit
-   reasoning, verdict, downstream reaction)`. That data must be a
-   side effect of normal V0 operation — no second pipeline.
-
-This document specifies the semantic-judgment layer — the **cognitive
-audit** — including its conceptual model, agent-agnostic interface,
-V0 realization, and data flow into a future training pipeline.
+- **Incremental extraction.** Each `TurnEndEvent` only re-reads the
+  new turns since the last firing — cost is roughly O(N) over the
+  session, not O(N²).
+- **Disjoint inputs per phase.** The extractor sees the trajectory
+  (including thinking blocks); the auditor sees only the structured
+  graph plus recent verdicts. Each consumer's prompt carries only
+  what it needs.
+- **Visible failure modes.** Spawn errors, no-call exits, and empty
+  submissions are recorded as distinct entry types instead of
+  collapsing to a silent "no drift" verdict.
+- **Reusable mid-product.** The event graph is a first-class artifact
+  on the session entry tree — readable by downstream training,
+  forensics, and dashboards without re-deriving from raw turns.
 
 ---
 
-## 2. Role and authority
+## 2. Two phases
 
-The audit is a **soft NL advisor**, not a controller. The following
-constraints are load-bearing — every later section assumes them.
+### Phase 1 — Extractor (per `TurnEndEvent`, incremental)
 
-| Dimension | Constraint |
-|---|---|
-| Range | Only T3+T4 (semantic-judgment) failures. T1+T2 are owned by a separate rule layer (currently P0's `detector.py`). |
-| Output | Natural-language reminder injected into the main agent's next-prompt context. Never a control signal. |
-| Authority | Main agent retains full decision authority. It MAY act on the reminder, MAY ignore it. The audit MAY NOT mutate trajectory, plan, tool list, or model. |
-| Tone | Low coercion. Phrasing is observational ("you might consider"); never imperative. |
-| Default | Silent. A non-anomalous trajectory produces zero reminders. |
-| Suppression | Same-type reminders are suppressed across firings unless the audit judges that the previously addressed anomaly has *re-drifted* (LLM judgment, not a state machine). |
-| Cards as RAG | The 42 AFC cards are a *reference vocabulary*, retrieved on demand by the audit through tool calls. They are not enumerated card-by-card and run as a checklist. |
+Input: the new turn(s) since the last extractor firing **plus** the
+recent slice of the existing event graph (for `refs` resolution).
+Output: a list of new `Event` records, ref-linked to prior events
+and stamped with monotonic ids.
 
-The single most consequential implication: the audit's failure mode is
-**reminder fatigue**, not **wrong decision**. A noisy advisor that
-emits useless reminders will be ignored entirely. The design therefore
-optimizes for **signal-to-noise over coverage** — better to miss real
-drift than to break trust.
+- Stateless child AgentM session spawned per `TurnEndEvent`.
+- State (the event graph) lives entirely in the parent session's
+  entry tree under `llmharness.audit_event` entries. Each firing
+  reads the tail and appends.
+- Terminal tool: `submit_events(events=[...])` → `ToolTerminate`.
+- The extractor receives **everything** from the new turns,
+  including thinking blocks, tool calls, and tool results.
+- Failure of the extractor is **not silent** — see §4.
 
----
+### Phase 2 — Auditor (every `k` turns over the graph)
 
-## 3. Three-axis audit model
+Input: the event graph (full, or a configured tail) **plus** recent
+verdicts. Notably **not** the raw trajectory — auditor reads
+structured events, not free text.
 
-The audit views a trajectory as a **thought graph**: nodes are agent
-cognitive moves (plan, observe, tool_call, hypothesis, conclusion,
-reflection); edges are logical relationships between moves. Defects show
-up as breaks. Three independent axes detect three different kinds:
+Output: a `Verdict` plus optional `Reminder`.
 
-### 3.1 Axis 1 — Backward continuity (local-edge check)
-
-Every node in a healthy graph has a *reason to exist*: it responds to a
-failure, elaborates a plan, consults evidence, corrects a prior step.
-A node whose connection to its ancestors cannot be made coherent —
-given the trajectory context — is an orphan, signaling a continuity
-break.
-
-**Operationalization:** pure LLM judgment over each new node + its
-ancestors. No pre-defined edge-type vocabulary; the LLM judges
-coherence directly. (Why no vocabulary: §3.4.)
-
-**Cards covered:** AFC-0019 / 0022 / 0028 / 0029 / 0030 / 0012 / 0013 /
-0026 / 0037 (~10 cards).
-
-### 3.2 Axis 2 — Forward fulfillment (local-window check)
-
-The agent declares *intents* throughout a trajectory: the original
-task, mid-trajectory subgoals, hypotheses to verify. Each intent
-should be addressed by some downstream action chain within a finite
-forward window. A stranded intent — declared then dropped — is an
-alert candidate.
-
-**Operationalization:** LLM judgment per declared-intent node. Where
-to check is structurally determined (the forward window since
-declaration); whether fulfillment occurred is the LLM call. This
-collapses the audit budget from O(turns × cards) to O(intent_nodes).
-
-**Cards covered:** AFC-0016 / 0018 / 0023 / 0025 / 0009 + others
-(~6 cards).
-
-### 3.3 Axis 3 — Content correctness (hyperedge / hypernode check)
-
-Even with no broken edges and no stranded intents, a trajectory may
-still be wrong. The check operates over **groups of nodes** that are
-not necessarily directly connected — what the user called
-"超点 / 超边". Examples:
-
-- **Internal consistency**: do reflections at distant points contradict
-  each other?
-- **Goal alignment**: does the action set as a whole still serve the
-  original task?
-- **Reasonability**: does the current move make sense in the broad
-  context, even if local edges look fine?
-- **Hallucination**: are there fabricated evidence claims, false
-  memories, or post-observation rewrites?
-
-**Operationalization:** LLM judgment over **trajectory-internal**
-material only (original task + events + raw turns when needed). No
-external evidence retrieval, no fact-checking against the world — the
-audit cares about coherence within what's already been said.
-
-**Cards covered:** AFC-0001 / 0007 / 0024 / 0036 / 0003 / 0020 / 0002 /
-0008 / 0039 (~6+ cards).
-
-### 3.4 Why this shape — alternatives rejected
-
-| Considered | Why rejected |
-|---|---|
-| GoS state-machine only (arXiv 2603.21250) | The belief-state graph is "what the agent believes and why", missing patterns that live in "what the agent did and why". `cards/GRAPH-FSM-MAPPING.md`: 6 of 20 T3+T4 cards resist FSM reduction. |
-| Per-step rationale audit only | No forward window for stranded intents; no graph backbone for orphan detection. |
-| Hard-enumerated intent lifecycle states (`declared → pending → fulfilled`) | Brittle: non-binary fulfillment ("addressed but sloppy") doesn't fit any state. User: `人手举的状态不一定可靠`. Replaced by free-text LLM annotations per firing. |
-| Preset edge-type vocabulary (10 labels) for axis 1 | Real edges are not enumerable cleanly: many fit none of the labels, many fit multiple. Labels become scaffolding the LLM has to wedge into rather than express its judgment. Replaced by raw LLM coherence judgment. |
-| External evidence verification for axis 3 | Mistakenly framed earlier as "fact-checking the world". The user clarified axis 3 is internal: consistency / goal alignment / hallucination — all material is already in the trajectory. No retrieval infrastructure needed. |
-| Diagnostic agent as decision-maker | A wrong audit issuing a control signal pulls the main agent off-task with no defense. Advisor + ignore-able-by-design is the working mitigation for "audit is sometimes wrong". |
+- Triggered on `TurnEndEvent` when `(turn_count % k) == 0`.
+  Default `k = 3`; configurable via `audit_interval_turns`.
+- Stateless child session, like Phase 1.
+- Terminal tool: `submit_verdict(verdict={...})` → `ToolTerminate`.
+- Failure modes recorded as distinct entries (§4).
 
 ---
 
-## 4. Architecture — agent-agnostic adapter pattern
+## 3. Triggering
 
-The audit is structured so the main agent can be **any** agent that
-emits a stream of turns and accepts an injected NL reminder. V0
-realizes both sides as AgentM, but layer boundaries are designed so
-swapping in another main-agent type requires only a new adapter.
-
-### 4.1 Layers
+Single `TurnEndEvent` handler, two phase invocations:
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                     Main Agent (any kind)                    │
-│            emits turns ─────────► accepts reminders          │
-└────────────┬─────────────────────────────────────▲───────────┘
-             │                                     │
-             ▼                                     │
-┌──────────────────────────────────────────────────────────────┐
-│         Adapter layer  (one impl per main-agent kind)        │
-│   TrajectoryAdapter   ReminderInjector   AuditTrigger        │
-└────────────┬─────────────────────────────────────▲───────────┘
-             ▼                                     │
-┌──────────────────────────────────────────────────────────────┐
-│          Core layer  (agent-agnostic)                        │
-│   schema.py  Turn / Event / Verdict / Reminder               │
-│   store      Persists turns / events / verdicts / alerts     │
-└────────────┬─────────────────────────────────────────────────┘
-             │
-             ▼
-┌──────────────────────────────────────────────────────────────┐
-│         Diagnostic engine (AgentM scenario as child session) │
-│   Three-axis audit + card retrieval tools                    │
-└──────────────────────────────────────────────────────────────┘
+on TurnEndEvent:
+    await run_phase_1()                      # always
+    if (turn_count % k) == 0:
+        await run_phase_2()                   # graph-level audit
 ```
 
-### 4.2 Adapter interfaces
-
-```python
-class TrajectoryAdapter(Protocol):
-    def session_id(self) -> str: ...
-    def pull_new_turns(self) -> list[Turn]: ...
-
-class ReminderInjector(Protocol):
-    def inject(self, reminder: Reminder) -> None: ...
-
-class AuditTrigger(Protocol):
-    def should_audit(self) -> bool: ...
-```
-
-`TrajectoryAdapter` and `ReminderInjector` are typically the same
-adapter object. `AuditTrigger` is externally injected so each adapter
-can own its trigger semantics: hook-driven for Claude Code,
-bus-event-driven for AgentM.
-
-### 4.3 V0 scope: AgentM-on-AgentM only
-
-| Adapter | V0 status |
-|---|---|
-| **AgentM** | New. Subscribes to `TurnEndEvent`; spawns child session per turn end; injects reminders via `BeforeAgentStartEvent.system` mutation. |
-| **Claude Code** | **Stays on existing P0 rule-based detector.** Migration to the three-axis audit is V1+. Rationale: AgentM-on-AgentM is the cleanest path to validate that the three-axis audit actually works (observability auto-captures, child session isolation is native, no cross-process glue), so V0 invests there. |
-
-### 4.4 Cards as tools (not as static prompt)
-
-The 42 AFC cards live as YAML at `scenarios/llmharness/references/papers/cards/`.
-The diagnostic child session **does not** receive them as prompt
-content. Instead it gets two tools:
-
-```python
-def cards_list() -> list[CardSummary]:
-    """Return every card's (id, name, axis_hint, one_line_mechanism).
-    No parameters. Total ~2000 tokens for ~42 cards. Audit calls at
-    most once per firing."""
-
-def cards_get(card_id: str) -> CardFull:
-    """Fetch one card's full YAML content (mechanism / activation /
-    observable / downstream_effects / evidence). Audit calls when a
-    summary looks promising and it wants to verify or cite."""
-```
-
-`axis_hint` is a curated annotation living in `cards.py` (a Python
-dict mapping `card_id -> axis ∈ {1, 2, 3, "?"}`), **not** a YAML
-schema field. This keeps the rca-autorl public contract intact and
-lets the three-axis partition evolve cheaply.
-
-Why tools instead of prompt-prepended text:
-- Audit prompt stays small.
-- Agent's *retrieval choices* become observable — high-quality
-  training signal for the future 8B model.
-- Card YAMLs remain single-source-of-truth; no preprocessing step.
-- Adding a new card does not change the prompt — only the YAML and a
-  one-line `_AXIS_HINT` entry in `cards.py` are needed.
-
-### 4.5 V0 realization sketch (AgentM adapter)
-
-Surface verified against AgentM 2026-05-08 (`scenarios/llmharness/src/llmharness/adapters/agentm.py`).
-The diagnostic agent's prompt + extension list ships as a Python
-subpackage (`llmharness.audit`); there is **no `scenarios/harness_monitor/`
-directory**. The adapter composes the child session's extensions list in
-Python and hands it to `AgentSessionConfig` directly.
-
-```python
-# llmharness/adapters/agentm.py — sketch
-from .. import audit
-from ..audit import RawAuditOutput
-
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    store = HarnessStore(api.cwd / ".harness")
-    child_extensions = audit.compose_extensions(
-        prompt_override     = config.get("prompt_override"),
-        cards_tools_config  = config.get("cards_tools_config", {}),
-        observability_config= config.get("observability_config", {}),
-    )
-    reminder_prefix = config.get("reminder_prefix", "\n\n[harness] ")
-
-    @api.on(TurnEndEvent.CHANNEL)
-    async def on_turn_end(event: TurnEndEvent) -> None:
-        # Two-stage audit input: full conversation + running event log
-        # + recent verdicts. Stage A extracts events; stage B does
-        # three-axis analysis. Child must see the user prompt, not
-        # just event.message.
-        full_messages = api.session.get_messages()  # list[AgentMessage]
-        prior_events = store.read_events(api.session_id)[-K:]
-        payload = json.dumps({
-            "trajectory":     _messages_to_dicts(full_messages),
-            "prior_events":   [e.to_dict() for e in prior_events],
-            "recent_alerts":  [v.to_dict() for v in store.recent_verdicts(
-                                 api.session_id, n=N)],
-        })
-
-        child = await api.spawn_child_session(AgentSessionConfig(
-            extensions=child_extensions,
-            provider=(__name__, {"_bridge_provider": api.provider}),
-        ))
-        messages = await child.prompt(payload)
-        # Parse into typed RawAuditOutput.
-        events, verdict = _audit_output_from_messages(messages, prior_events)
-        store.append_events(api.session_id, events)
-        store.append_verdict(api.session_id, verdict)
-        if verdict.drift and verdict.reminder and verdict.type is not None:
-            store.write_reminder(_reminder_from(verdict, api.session_id))
-
-    @api.on(BeforeAgentStartEvent.CHANNEL)
-    def inject_pending(event: BeforeAgentStartEvent) -> None:
-        pending = store.pop_reminder(api.session_id)
-        if pending is not None:
-            event.system = (event.system or "") + reminder_prefix + pending.text
-```
-
-Surface facts confirmed against AgentM source:
-
-- `AgentSessionConfig.extensions: list[tuple[str, dict[str, Any]]]` is
-  a first-class field. Resolution precedence in `AgentSession.create`:
-  `no_extensions → []`, then `explicit extensions=`, then
-  `scenario=name → load_scenario(...)`. So passing `extensions=...`
-  bypasses the YAML-lookup path entirely. **V0 takes this branch.**
-- `api.session.get_messages()` returns `list[AgentMessage]` — the
-  full discriminated union of `UserMessage` / `AssistantMessage` /
-  `ToolResultMessage`. Use `isinstance` dispatch in the serializer.
-  The latest `event.message` is already in this list by the time
-  `TurnEndEvent` fires; do NOT also append `event.message` separately.
-- `api.spawn_child_session(AgentSessionConfig)` returns an
-  `AgentSession`. Drive via `child.prompt(json_payload)` which
-  returns `list[AgentMessage]`; parse the **trailing JSON** from the
-  last assistant message via `audit.extract_json` + `RawAuditOutput`.
-- The bridge-provider trick — `provider=(__name__, {"_bridge_provider":
-  api.provider})` — has the child load THIS adapter as its provider
-  extension; the `install()` top branch detects `_bridge_provider`,
-  re-publishes the parent's `ProviderConfig`, and returns without
-  registering handlers. Avoids re-authenticating the LLM gateway AND
-  prevents recursive audit spawn. The structural defense also relies
-  on `audit.compose_extensions` not inserting this adapter into the
-  child's extensions list — by construction, it never does.
-- `BeforeAgentStartEvent` is a `@dataclass(slots=True)` (mutable);
-  `event.system: str | None` is the documented mutation surface.
-- Store root defaults to `.harness/`. Override via `root` config key.
-
-Three V0 design choices baked into this sketch:
-
-- **Trigger = every `TurnEndEvent`.** No throttling. The audit itself
-  is responsible for staying silent on healthy trajectories.
-- **Isolation = `spawn_child_session`.** Diagnostic agent runs in its
-  own AgentM session. Three reasons: clean third-person perspective;
-  AgentM observability automatically captures the child's full
-  reasoning into its own trace file (§7); authority isolation.
-- **Composition = Python, not YAML.** The diagnostic agent's prompt
-  body and extension list live in `llmharness.audit` as Python.
-  Replacing audit logic is a Python edit, not a YAML edit — and the
-  output-schema contract (`AUDIT_SYSTEM_PROMPT` step 10 ↔
-  `RawAuditOutput.from_dict`) becomes co-located, not split across
-  two files in two directories.
+`turn_count` is the count of `TurnEndEvent` firings observed in
+the session, not the absolute message count. The auditor sees a
+graph that has at least `k` new turns of events extracted onto it.
 
 ---
 
-## 5. Trigger and audit flow
+## 4. Persistence layout
 
-### 5.1 Trigger
+All state lives on the session entry tree (no new file artifacts).
+Entry types (namespaced):
 
-Every `TurnEndEvent` on the AgentM bus. No threshold, no per-N-batch.
-
-### 5.2 Audit flow inside the child session
-
-```
-inputs:  new_turns, history_events_tail, recent_alerts (with downstream_reaction)
-         + tools: cards_list, cards_get
-
-1. self_monitor:
-     read recent_alerts and their downstream_reaction;
-     judge "are my recent reminders being heeded?"
-     if NO → emit Verdict(has_drift=False, reason="self_silenced: ...")
-              and exit. No three-axis check.
-
-2. fold new_turns into the running thought graph (events list).
-
-3. axis 1 (backward continuity):
-     for each new node, judge whether it has a coherent ancestor
-     relationship in context. Flag orphans.
-
-4. axis 2 (forward fulfillment):
-     for each open intent node, judge whether the forward window
-     contains an action chain that addresses it.
-
-5. axis 3 (content correctness):
-     for verification / conclusion / summary nodes and for cross-cutting
-     groups (all-evidence-vs-task, parallel reflections), judge
-     consistency / goal alignment / reasonability / hallucination.
-
-6. if anomalies were found:
-     consult cards_list / cards_get if helpful;
-     synthesize one best Verdict with NL reason
-     (and optional cited_cards list).
-
-7. silence gates (route B): emit only if able to articulate a
-     concrete reason. Card citation is optional but encouraged.
-
-8. same-type suppression:
-     8a. structural pre-filter: if the current finding overlaps the
-         most recent alert by axis or cited_cards, hand off to 8b.
-     8b. LLM judgment over recent_alerts: is this a re-drift after
-         the previous alert was addressed, or a duplicate of an
-         unresolved one? Suppress duplicates; emit on re-drift.
-
-9. emit final Verdict.
-```
-
-### 5.3 Reminder format
-
-Half-structured with a fixed prefix, free-text body:
-
-```
-[harness] {audit's natural-language observation + reflection prompt}
-```
-
-The prefix tells the main agent the source is the supervisory layer;
-the body is whatever the audit's LLM produced. Tone convention is
-observational, not prescriptive.
-
-### 5.4 Cost shape
-
-One child session per main-agent turn. For a 50-turn task: 50
-diagnostic LLM calls (plus internal `cards_get` calls when the audit
-drills in). For research scale, acceptable. Production-scale
-optimization (a structural pre-filter that skips obviously-silent
-turn-ends) is V1.
-
----
-
-## 6. Schema
-
-### 6.1 Existing schema is already a thought graph
-
-```python
-class EventKind(str, Enum):
-    TASK = "task"
-    HYPOTHESIS = "hypothesis"
-    EVIDENCE = "evidence"
-    DECISION = "decision"
-    ACTION = "action"
-    REFLECTION = "reflection"
-    CONCLUSION = "conclusion"
-
-@dataclass(frozen=True)
-class Event:
-    id: int
-    kind: EventKind
-    summary: str
-    refs: list[int]            # incoming edges (untyped — stays untyped)
-    source_turns: list[int]
-```
-
-`refs` stays a plain `list[int]`. No edge-type vocabulary. Axis 1
-operates by free-form LLM judgment; structuring edge types into the
-schema would (a) violate the principle "free text > preset enum for
-subjective dimensions", (b) require breaking the rca-autorl public
-contract on `schema.py`.
-
-### 6.2 V0 additions
-
-Two opt-in fields on `Verdict`:
-
-| Field | Type | Purpose |
+| Entry type | Producer | Payload |
 |---|---|---|
-| `cited_cards` | `list[str]` (default `[]`) | Which AFC IDs the audit chose to cite. Optional — not all reminders cite. Drives the future training-data pipeline's card-retrieval signal. |
-| `downstream_reaction` | `str \| None` (default `None`) | Free-text note populated by the *next* audit firing: "did the main agent address the prior reminder?" Drives both the self-monitor mechanism (§5.2 step 1) and the training-data tuple (§8). |
+| `llmharness.audit_event` | Phase 1 success | `Event.to_dict()` |
+| `llmharness.extractor_cursor` | Phase 1 (every firing) | `{"last_turn_index": int, "extraction_run_id": str}` |
+| `llmharness.extractor_no_call` | Phase 1 failure | `{"reason": str, "turn_window": [a, b]}` |
+| `llmharness.extractor_error` | Phase 1 failure | `{"reason": str, "turn_window": [a, b]}` |
+| `llmharness.extractor_empty` | Phase 1 (zero-event submit on non-trivial window) | `{"turn_window": [a, b]}` |
+| `llmharness.verdict` | Phase 2 success | `Verdict.to_dict()` |
+| `llmharness.audit_no_call` | Phase 2 failure | `{"reason": str}` |
+| `llmharness.audit_error` | Phase 2 failure | `{"reason": str}` |
 
-Both fields are nullable / default-empty so no existing P0 consumer
-breaks. Both follow the "free-text not enum" rule (cf. memory:
-`feedback_no_preset_subjective_labels`).
+The `extractor_cursor` entry is the explicit "what's the last turn
+we extracted from" pointer. Phase 1 reads it on entry, computes
+`new_turns = messages[cursor.last_turn_index + 1 :]`, runs the LLM,
+appends new events, and writes a fresh cursor.
 
-### 6.3 Schema stability
+Failure entries do not poison the graph (auditor filters them), but
+they make outage visible. Operators reading a session's entry stream
+can tell at a glance whether the audit pipeline stayed alive:
 
-`scenarios/llmharness/CLAUDE.md` makes `schema.py` a public contract
-for rca-autorl. Both V0 additions are additive and opt-in; no version
-bump required. If future fields turn out to need a non-additive
-change, version bump per the same convention.
-
----
-
-## 7. Persistence and observability
-
-V0 writes **no new persistence code**. Two pre-existing channels do
-all the work:
-
-1. **`store.py`** — file-based JSONL (P0, already shipping). Owns:
-   raw turns (`inbox/`), extracted events (`events/`), cursor state,
-   pending reminders, and (V0 addition) verdicts with their
-   `cited_cards` / `downstream_reaction` fields. Source of truth.
-   Agent-portable — works for any adapter.
-
-2. **AgentM observability** — auto-captures the diagnostic child
-   session's full trajectory (its prompt, every `cards_get` call,
-   the Verdict-producing completion) into
-   `.agentm/observability/<child_id>.jsonl`. Zero adapter code.
-
-The two share no record-id today and don't need to. When a future
-training-data export script runs (V1), it joins them by main session
-id + verdict timestamp. That script is the only new code; it does
-not exist in V0.
+| Scenario | Behavior |
+|---|---|
+| Child spawn raises | `extractor_error` / `audit_error` entry |
+| Child runs but never calls submit | `extractor_no_call` / `audit_no_call` entry |
+| Child submits empty events on real new turns | `extractor_empty` entry |
+| Child submits parsed verdict drift=false | normal no-drift verdict |
+| Child submits drift=true with type=null | provider-side schema rejects it (if/then) → no submit possible → `audit_no_call` |
 
 ---
 
-## 8. Training data (V1 export)
+## 5. Event graph rules
 
-The architecture produces training data as a side effect. Each audit
-firing yields a tuple:
+### 5.1 Immutability
+
+Event entries are **append-only**. No `update_event`, no in-place
+mutation.
+
+### 5.2 Invalidation via refs
+
+When a later event materially contradicts or refines an earlier
+one, the new event's `refs` list points at the earlier event's id.
+The relation is described in free-form `summary` text (per
+`feedback_no_preset_subjective_labels.md`, no edge-type enum).
+Readers needing structured edges can extract them from summaries
+with a small classifier.
+
+### 5.3 Graph queries
+
+Querying the graph is a branch-walk:
+
+```python
+branch = api.session.get_branch()
+events = [Event.from_dict(e.payload) for e in branch
+          if e.type == "llmharness.audit_event"]
+```
+
+No typed query API on `ReadonlySession` — promote
+`events_referencing(id)` / `events_of_kind(kind)` to the SDK only
+when a second consumer needs them.
+
+---
+
+## 6. Tool-call schemas
+
+### 6.1 `submit_events`
+
+```python
+{
+    "type": "object",
+    "properties": {
+        "events": {
+            "type": "array",
+            "items": {
+                # kind enum derived from EventKind (see §7.2)
+            },
+        },
+    },
+    "required": ["events"],
+    "additionalProperties": False,
+}
+```
+
+`events` MAY be empty. If empty for a non-trivial new-turn window,
+the adapter writes `extractor_empty` so the failure is visible.
+
+### 6.2 `submit_verdict`
+
+```python
+{
+    "type": "object",
+    "properties": {
+        "verdict": {
+            # drift / type relation expressed via JSON Schema if/then so
+            # "drift=true ⇒ type required" is enforced at the provider edge,
+            # not silently dropped by the adapter.
+            # type / kind enums generated from DriftType / EventKind.
+        },
+    },
+    "required": ["verdict"],
+    "additionalProperties": False,
+}
+```
+
+---
+
+## 7. Implementation notes
+
+### 7.1 Module layout
 
 ```
-(graph_snapshot, alert_emitted, downstream_reaction)
+scenarios/llmharness/src/llmharness/
+├── audit/
+│   ├── extractor/
+│   │   ├── prompt.py                 EXTRACTOR_SYSTEM_PROMPT
+│   │   ├── submit_tool.py            submit_events terminal tool
+│   │   ├── extensions.py             compose_extractor_extensions()
+│   │   └── output.py                 RawExtractorOutput coercion
+│   ├── auditor/
+│   │   ├── prompt.py                 AUDITOR_SYSTEM_PROMPT (graph-only)
+│   │   ├── submit_tool.py            submit_verdict terminal tool
+│   │   ├── extensions.py             compose_auditor_extensions()
+│   │   └── output.py                 RawVerdictOutput coercion
+│   ├── _compose.py                   shared extension-list composer
+│   ├── _enum_schema.py               EVENT_KIND_VALUES / DRIFT_TYPE_VALUES
+│   └── __init__.py
+├── adapters/
+│   └── agentm.py                     orchestrates Phase 1 + Phase 2
+└── ...
 ```
 
-- `graph_snapshot` — events at audit time + the child session's
-  prompt + every `cards_get` call (recoverable by joining
-  store.py with child observability).
-- `alert_emitted` — the Verdict in store.py (`text`, `cited_cards`)
-  plus the diagnostic reasoning trace in observability.
-- `downstream_reaction` — populated by the next audit firing's
-  self-monitor judgment (§5.2 step 1), persisted on the Verdict.
+### 7.2 Schema parity
 
-This is exactly the shape needed to distill an 8B-class diagnostic
-model. V0 emits it; the export and training pipeline is V1.
+JSON-Schema enums for `EventKind` / `DriftType` are derived from
+the enum classes — single source of truth:
 
----
+```python
+EVENT_KIND_VALUES = [k.value for k in EventKind]
+DRIFT_TYPE_VALUES = [t.value for t in DriftType] + [None]
+```
 
-## 9. Companion artifacts
+### 7.3 Adapter
 
-Living artifacts under `scenarios/llmharness/references/papers/`:
+```python
+async def _on_turn_end(event):
+    nonlocal turn_count, pending
+    turn_count += 1
 
-| Path | Role |
-|---|---|
-| `cards/README.md` | The 42 AFC cards index, vocabulary fork from chaoschain. |
-| `cards/<class>/<id>.yaml` | Per-card schema-formal description. |
-| `cards/DETECTION-FEASIBILITY.md` | Tier classification driving §1's "T3+T4 = 20 cards" claim. |
-| `cards/GRAPH-FSM-MAPPING.md` | Maps T3+T4 onto a GoS-style state machine; §3.4 cites the 6 cards that resist reduction. |
+    branch = api.session.get_branch()
+    new_events = await _run_extractor(api, branch, extractor_extensions)
 
-Living artifacts under `scenarios/llmharness/src/llmharness/`:
+    if (turn_count % k) == 0:
+        verdict = await _run_auditor(
+            api, branch + new_events, auditor_extensions
+        )
+        if verdict and verdict.drift and verdict.reminder and verdict.type:
+            pending = Reminder(...)
+```
 
-| Path | Role in V0 |
-|---|---|
-| `schema.py` | Stable contract; gains `Verdict.cited_cards`, `Verdict.downstream_reaction` (both opt-in). |
-| `summarizer.py` | P0 rule-based regex; subsumed by the diagnostic child session in V0 (the child session itself does turns→events). May be retired. |
-| `detector.py` | P0 four hand-coded rules; remains for the Claude Code adapter (§4.3). |
-| `store.py` | File-based persistence, source of truth. No schema change for V0 beyond §6.2. |
-| `cards.py` (new) | Loads `references/papers/cards/<class>/*.yaml`; exposes `cards_list` / `cards_get` as AgentM tools; carries the curated `axis_hint` mapping. |
-| `adapters/agentm.py` (new) | The V0 adapter described in §4.5. |
-| `adapters/claude_code.py` (move from `claude_code.py`) | P0 adapter; unchanged behavior in V0. |
-| `audit/` (new subpackage) | Diagnostic engine packaged as Python: `prompt.py` (`AUDIT_SYSTEM_PROMPT`), `extensions.py` (`compose_extensions`), `output.py` (`RawAuditOutput`), `json_extract.py` (trailing-JSON parser). Replaces the deleted `scenarios/harness_monitor/`. |
+`_run_extractor` and `_run_auditor` each spawn their own child
+session with the right `compose_*_extensions()` list. Both share
+the `provider=None` + `inherit_provider` auto-wire pattern.
 
----
+### 7.4 Trajectory serialization
 
-## 10. Open questions
-
-- **Pre-filter to amortize child-session cost.** V0 fires per
-  `TurnEndEvent`; many turns are obvious continuations where no new
-  drift signal is possible. A cheap structural pre-filter could
-  short-circuit silent turns without invoking the LLM. Deferred to
-  V1, after V0 measures actual cost.
-- **Cross-session memory for the diagnostic agent.** Today each
-  main session is independent. A diagnostic that remembered "I have
-  warned this agent twice about over-simplification, it never
-  listened" could be more useful, but enabling cross-session memory
-  needs separate design work. Out of scope for V0.
-- **Reminder-usefulness evaluation.** V0 emits training data
-  including `downstream_reaction`, which is the raw input for an
-  evaluation harness. The evaluation design itself belongs in a
-  separate document.
+`_serialize_new_turns_for_extractor` slices
+`messages[cursor.last_turn_index + 1 :]` and keeps thinking blocks
+plus structured tool-result content. The auditor receives no
+trajectory serialization — it sees the graph in `Event.to_dict()`
+form plus recent verdicts.
 
 ---
 
-## 11. Out of scope
+## 8. Public contract (unchanged)
 
-- Hard control over the main agent (no compact / abort / interrupt;
-  always advisor-shaped).
-- Detection of T1/T2 (rule-solvable) failures (owned by P0 rule layer).
-- Replacing the AFC card corpus with the thought graph (cards remain
-  a reference vocabulary; the graph is a runtime structure).
-- Production-scale cost optimization.
-- Self-modification of the diagnostic agent's own atoms during a run.
-- External-world fact verification for axis 3 (axis 3 is
-  trajectory-internal only).
+- `schema.py`: `Event`, `Verdict`, `Reminder`, `EventKind`,
+  `DriftType` — stable for rca-autorl.
+- `cards.py` and the AFC card YAMLs ship as package data.
+- `cards_tools` atom — both extractor and auditor can load it.
+- `inherit_provider` builtin — both phase children rely on it.
+- `BeforeAgentStartEvent.system` injection for reminders.
 
 ---
 
-## 12. Cross-references
+## 9. Deferred
 
-- `designs/extension-as-scenario.md` — the AgentM atom + scenario
-  model the AgentM adapter rides on.
-- `designs/observability.md` — the AgentM observability stream that
-  captures diagnostic child-session traces.
-- `designs/sub-agent-lifecycle.md` — child-session lifecycle.
-- `designs/self-modifiable-architecture.md` — establishes the
-  `api.spawn_child_session` boundary.
-- `scenarios/llmharness/CLAUDE.md` — schema-stability constraint
-  for rca-autorl.
-- `scenarios/llmharness/references/papers/cards/` — the AFC corpus.
-- Memory: `feedback_no_preset_subjective_labels.md` — general
-  principle that shaped the schema decisions in §6.
+1. **Auditor `fetch_turn` tool.** Drill back into raw turns when
+   the graph is ambiguous. Defer until measurement shows it's
+   needed.
+2. **Graph-pattern triggers.** Cheap heuristics that fire the
+   auditor mid-`k`-window. Needs the graph schema to stabilize.
+3. **Cross-session graph reuse.** Each session's graph is
+   isolated; joining across sessions for the same task / agent
+   profile is future work.
+4. **Long-running extractor session.** Today's stateless per-turn
+   spawn could become a streaming daemon once AgentM gains
+   long-lived child + stream primitives.
+5. **Ref edge typing.** A small classifier that materializes
+   typed edges from free-text `summary` relations.
+
+---
+
+## 10. References
+
+- [observability.md](observability.md) — training-data join works
+  on the same `<trace>.jsonl`.
+- [pluggable-architecture.md](pluggable-architecture.md) — the
+  `inherit_provider` builtin path used by both child sessions.

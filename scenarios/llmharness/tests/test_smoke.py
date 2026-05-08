@@ -2,7 +2,7 @@
 
 V0 ``compose_extensions`` / ``RawAuditOutput`` / ``AUDIT_SYSTEM_PROMPT`` /
 ``SUBMIT_AUDIT_TOOL_NAME`` shape tests were deleted in the 2026-05-08 hard
-cut to V1 (design ``llmharness-two-phase-audit.md`` §7.1, §11). The V1
+cut to V1 (design ``llmharness-cognitive-audit.md`` §7.1, §11). The V1
 fail-stop integration test is owned by task 07; this file deliberately
 keeps only the public-contract assertions that V1 must preserve so
 downstream ``rca-autorl`` does not break.

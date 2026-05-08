@@ -30,7 +30,7 @@ requirements:
     title: cards.py loader + cards_list/cards_get tools + axis_hint
     description: |
       Module exposing the 42 AFC cards as searchable tools to the
-      cognitive-audit diagnostic agent (design: .claude/designs/llmharness-cognitive-audit.md §4.4).
+      cognitive-audit diagnostic agent (design: .claude/designs/llmharness-cognitive-audit.md §2).
       ``cards_list()`` returns one CardSummary per YAML on disk (id, name,
       axis_hint, one_line_mechanism). ``cards_get(card_id)`` returns the
       full CardFull payload; raises KeyError on unknown id. ``_AXIS_HINT``
@@ -54,7 +54,7 @@ requirements:
       ``RawAuditOutput``. Replaced by the two-phase rewrite of
       ``adapters/agentm.py`` that runs Phase 1 (extractor) every turn and
       Phase 2 (auditor) every k turns. Pointer: design
-      ``.claude/designs/llmharness-two-phase-audit.md`` §2, §6, §7.1.
+      ``.claude/designs/llmharness-cognitive-audit.md`` §2, §6, §7.1.
     priority: P0
     status: deprecated
     code: []
@@ -71,7 +71,7 @@ requirements:
       ``SUBMIT_AUDIT_TOOL_NAME`` / ``RawAuditOutput`` symbols were deleted
       in the hard-cut migration to the two-phase split (extractor +
       auditor disjoint subpackages). Pointer: design
-      ``.claude/designs/llmharness-two-phase-audit.md`` §3, §7.1, §11.
+      ``.claude/designs/llmharness-cognitive-audit.md`` §2, §7.1.
     priority: P0
     status: deprecated
     code: []
@@ -80,13 +80,13 @@ requirements:
 
   # ---------------------------------------------------------------------------
   # V1 two-phase cognitive-audit pipeline (P0 — replaces REQ-017 / REQ-018)
-  # Design: .claude/designs/llmharness-two-phase-audit.md
+  # Design: .claude/designs/llmharness-cognitive-audit.md
 
   - id: REQ-019
     title: Two-phase orchestrator — adapter rewrite (extractor + auditor)
     description: |
       ``adapters/agentm.py`` rewritten for the two-phase split (design
-      ``llmharness-two-phase-audit.md`` §2, §6). Single TurnEndEvent
+      ``llmharness-cognitive-audit.md`` §2, §6). Single TurnEndEvent
       handler dispatches Phase 1 every turn and Phase 2 every k turns
       (default ``audit_interval_turns=3``). Phase 1 spawns a child whose
       extensions come from ``compose_extractor_extensions``, slices the
@@ -106,7 +106,7 @@ requirements:
   - id: REQ-020
     title: Phase 1 extractor subpackage — per-turn event extraction
     description: |
-      ``audit/extractor/`` subpackage (design §3.1, §4, §7.1). Public
+      ``audit/extractor/`` subpackage (design §2, §4, §7.1). Public
       surface: ``EXTRACTOR_SYSTEM_PROMPT``, ``compose_extractor_extensions``,
       ``RawExtractorOutput`` (with ``ExtractorOutputError``),
       ``SUBMIT_EVENTS_TOOL_NAME``. The terminal tool ``submit_events``
@@ -126,7 +126,7 @@ requirements:
   - id: REQ-021
     title: Phase 2 auditor subpackage — every-k-turn graph audit
     description: |
-      ``audit/auditor/`` subpackage (design §3.2, §5, §7.1). Public
+      ``audit/auditor/`` subpackage (design §2, §5, §7.1). Public
       surface: ``AUDITOR_SYSTEM_PROMPT``, ``compose_auditor_extensions``,
       ``RawVerdictOutput`` (with ``AuditorOutputError``),
       ``SUBMIT_VERDICT_TOOL_NAME``. Auditor consumes the event graph +
@@ -147,7 +147,7 @@ requirements:
   - id: REQ-022
     title: Typed failure entries — outage vs clean trajectory distinguishable
     description: |
-      Design §6.3, §8. V0's silent ``([], Verdict(drift=False))`` fallback
+      Design §4. V0's silent ``([], Verdict(drift=False))`` fallback
       is replaced by typed failure entries written to the session tree:
       ``extractor_no_call`` / ``extractor_error`` / ``extractor_empty``
       for Phase 1, ``audit_no_call`` / ``audit_error`` for Phase 2. The
@@ -176,7 +176,7 @@ requirements:
   - id: REQ-024
     title: V1 fail-stop integration test — 4-turn k=3 stub-provider trajectory
     description: |
-      Design §10. Single integration test pinned to a 4-turn k=3 dialog
+      Design §2, §4. Single integration test pinned to a 4-turn k=3 dialog
       that asserts Phase 1 fires 4× and Phase 2 fires 1× at turn 3, with
       the expected entry-tree shape (``llmharness.audit_event`` count,
       ``llmharness.extractor_cursor`` final value, single ``Verdict``).
@@ -349,7 +349,7 @@ requirements:
     title: Verdict cited_cards / downstream_reaction (cognitive audit)
     description: |
       Two opt-in additive fields on Verdict for the cognitive-audit
-      pipeline (design: .claude/designs/llmharness-cognitive-audit.md §6.2).
+      pipeline (design: .claude/designs/llmharness-cognitive-audit.md §6).
       ``cited_cards: list[str]`` records AFC IDs the audit chose to cite;
       ``downstream_reaction: str | None`` is populated by the next audit
       firing's self-monitor judgment. Both default to empty/None.
