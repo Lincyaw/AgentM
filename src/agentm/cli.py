@@ -171,6 +171,7 @@ async def _run(
     quiet: bool,
 ) -> int:
     from agentm.harness import AgentSession, AgentSessionConfig
+    from agentm.harness.session_manager import SessionManager
 
     error_seen = False
 
@@ -197,6 +198,10 @@ async def _run(
     bus.on(DiagnosticEvent.CHANNEL, _on_diagnostic)
     bus.on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
 
+    session_manager = SessionManager.create(cwd=cwd)
+    if not quiet and session_manager.session_file is not None:
+        typer.echo(f"INFO: session log: {session_manager.session_file}", err=True)
+
     config = AgentSessionConfig(
         cwd=cwd,
         provider=_build_provider(provider, model),
@@ -206,6 +211,7 @@ async def _run(
         no_skills=no_skills,
         no_prompt_templates=no_prompt_templates,
         tool_allowlist=tool_allowlist,
+        session_manager=session_manager,
         bus=bus,
     )
 
@@ -235,9 +241,13 @@ async def _run_interactive(
     """Build a session config and hand off to the Textual TUI runner."""
 
     from agentm.harness import AgentSessionConfig
+    from agentm.harness.session_manager import SessionManager
     from agentm.modes.textual_app import run as run_textual_tui
 
     bus = EventBus()
+    session_manager = SessionManager.create(cwd=cwd)
+    if session_manager.session_file is not None:
+        typer.echo(f"INFO: session log: {session_manager.session_file}", err=True)
 
     def _on_diagnostic(event: DiagnosticEvent) -> None:
         prefix = {
@@ -267,6 +277,7 @@ async def _run_interactive(
         no_skills=no_skills,
         no_prompt_templates=no_prompt_templates,
         tool_allowlist=tool_allowlist,
+        session_manager=session_manager,
         bus=bus,
     )
     return await run_textual_tui(config)
