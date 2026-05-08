@@ -14,5 +14,5 @@ shopt -s nullglob
 for f in "$INBOX_DIR"/*.jsonl; do
   sid="$(basename "$f" .jsonl)"
   PYTHONPATH="${PKG_SRC}${PYTHONPATH:+:$PYTHONPATH}" \
-    "$PYTHON" -m llmharness --root "$ROOT" tick --session "$sid" || true
+    "$PYTHON" -m llmharness tick --root "$ROOT" --session "$sid" || true
 done

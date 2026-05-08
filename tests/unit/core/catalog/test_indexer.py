@@ -270,7 +270,6 @@ def test_cli_rebuild_returns_zero_on_clean_run(tmp_path: Path) -> None:
             sys.executable,
             "-m",
             "agentm.core._internal.catalog.indexer",
-            "rebuild",
             "--root",
             str(tmp_path),
             "--observability",

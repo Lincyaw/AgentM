@@ -25,6 +25,7 @@ from .store import HarnessStore
 from .worker import tick as run_tick
 
 _DEFAULT_ROOT = ".harness"
+_ROOT_OPT = typer.Option(help=f"Harness storage root (default: {_DEFAULT_ROOT})")
 
 app = typer.Typer(
     name="llmharness",
@@ -32,17 +33,6 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
-
-
-@app.callback()
-def _root(
-    ctx: typer.Context,
-    root: Annotated[
-        str,
-        typer.Option(help=f"Harness storage root (default: {_DEFAULT_ROOT})"),
-    ] = _DEFAULT_ROOT,
-) -> None:
-    ctx.obj = {"root": root}
 
 
 def _read_payload(arg: str) -> dict[str, Any]:
@@ -55,7 +45,7 @@ def _read_payload(arg: str) -> dict[str, Any]:
 
 @app.command()
 def ingest(
-    ctx: typer.Context,
+    root: Annotated[str, _ROOT_OPT] = _DEFAULT_ROOT,
     session: Annotated[
         str | None,
         typer.Option(help="Session id. Required for --input mode; auto-detected for --from-hook."),
@@ -77,7 +67,7 @@ def ingest(
     ] = False,
 ) -> None:
     """Append a transcript delta to the inbox."""
-    store = HarnessStore(ctx.obj["root"])
+    store = HarnessStore(root)
     if from_hook:
         hook = parse_hook_payload(sys.stdin.read())
         if hook is None:
@@ -106,8 +96,8 @@ def ingest(
 
 @app.command()
 def tick(
-    ctx: typer.Context,
     session: Annotated[str, typer.Option(help="Session id.")],
+    root: Annotated[str, _ROOT_OPT] = _DEFAULT_ROOT,
     confidence: Annotated[float, typer.Option(help="Drift confidence threshold.")] = 0.6,
     min_reminder_gap: Annotated[
         int,
@@ -115,7 +105,7 @@ def tick(
     ] = 5,
 ) -> None:
     """Run one summarize+detect pass for a session."""
-    store = HarnessStore(ctx.obj["root"])
+    store = HarnessStore(root)
     result = run_tick(
         store,
         session,
@@ -135,7 +125,7 @@ def tick(
 
 @app.command()
 def inject(
-    ctx: typer.Context,
+    root: Annotated[str, _ROOT_OPT] = _DEFAULT_ROOT,
     session: Annotated[
         str | None,
         typer.Option(help="Session id. Required for direct mode; auto-detected for --from-hook."),
@@ -146,7 +136,7 @@ def inject(
     ] = False,
 ) -> None:
     """Print and consume any pending reminder for a session."""
-    store = HarnessStore(ctx.obj["root"])
+    store = HarnessStore(root)
     sid = session
     if from_hook:
         payload = parse_hook_payload(sys.stdin.read())

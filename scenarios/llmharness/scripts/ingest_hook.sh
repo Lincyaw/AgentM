@@ -7,4 +7,4 @@ PYTHON="${LLMHARNESS_PYTHON:-python3}"
 PKG_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../src" && pwd)"
 
 PYTHONPATH="${PKG_SRC}${PYTHONPATH:+:$PYTHONPATH}" \
-  "$PYTHON" -m llmharness --root "$ROOT" ingest --from-hook >/dev/null
+  "$PYTHON" -m llmharness ingest --root "$ROOT" --from-hook >/dev/null
