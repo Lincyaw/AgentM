@@ -33,6 +33,11 @@ extensions:
         - worker_skills
         - skill_loader
         - tool_read
+        # ``worker_finalize`` registers ``return_response`` — the only
+        # sanctioned worker-termination tool. Without it, workers loop
+        # on query_sql until their budget runs out and ``final_text``
+        # comes back null to the orchestrator.
+        - worker_finalize
       available_inherited_extensions:
         duckdb_sql:
           # Real importable path. The synthetic
@@ -61,4 +66,7 @@ extensions:
             inherit_claude: false
         tool_read:
           module: agentm.extensions.builtin.tool_read
+          config: {}
+        worker_finalize:
+          module: agentm_rca.tools.worker_finalize
           config: {}

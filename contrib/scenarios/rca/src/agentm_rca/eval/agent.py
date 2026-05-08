@@ -7,10 +7,12 @@ invoked via ``rca llm-eval run --agent agentm``. Bridges the
 
 Two pieces of glue do the work:
 
-* The orchestrator's ``submit_final_report`` tool grew a required
-  ``causal_graph`` field in :mod:`agentm_rca.tools.finalize`. The adapter
-  subscribes to ``tool_call`` on the session bus and snatches the argument
-  the moment the model emits it.
+* The orchestrator's ``submit_final_report`` tool in
+  :mod:`agentm_rca.tools.finalize` validates the structured ``causal_graph``
+  field and emits a JSON-serialized submission as its tool result. The
+  adapter subscribes to ``tool_result`` on the session bus and reads that
+  authoritative payload — never the unvalidated ``tool_call`` args. A
+  failed validation re-runs the model without polluting captured state.
 * The session's final message list is walked once after ``prompt`` returns
   and translated into a ``rcabench-platform`` :class:`Trajectory`. The
   system prompt is captured separately from the first
@@ -97,8 +99,9 @@ class AgentMAgent(BaseAgent):
         from agentm.core.abi import (
             BeforeSendToLlmEvent,
             EventBus,
-            ToolCallEvent,
+            ToolResultEvent,
         )
+        from agentm.core.abi.messages import TextContent as _TextContent
         from agentm.core.abi.loop import LoopConfig
         from agentm.harness import AgentSession, AgentSessionConfig
 
@@ -107,22 +110,30 @@ class AgentMAgent(BaseAgent):
         os.environ["AGENTM_RCA_DATA_DIR"] = data_dir
 
         captured: dict[str, Any] = {
-            "causal_graph": None,
+            "submission": None,
             "system_prompt": "",
         }
 
-        def _on_tool_call(event: ToolCallEvent) -> None:
+        def _on_tool_result(event: ToolResultEvent) -> None:
             if event.tool_name != "submit_final_report":
                 return
-            cg = event.args.get("causal_graph")
-            if cg is None:
+            if event.result.is_error:
                 return
-            captured["causal_graph"] = cg
+            text = "".join(
+                block.text
+                for block in event.result.content
+                if isinstance(block, _TextContent)
+            )
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                return
+            captured["submission"] = payload
             if ctx is not None:
                 ctx.emit(
                     {
                         "type": "progress",
-                        "message": "submit_final_report received",
+                        "message": "submit_final_report accepted",
                     }
                 )
 
@@ -131,7 +142,7 @@ class AgentMAgent(BaseAgent):
                 captured["system_prompt"] = event.system
 
         bus = EventBus()
-        bus.on("tool_call", _on_tool_call)
+        bus.on("tool_result", _on_tool_result)
         bus.on("before_send_to_llm", _on_before_llm)
 
         provider_config: dict[str, str] = {"model": self._model}
@@ -155,12 +166,12 @@ class AgentMAgent(BaseAgent):
         finally:
             await session.shutdown()
 
-        cg = captured["causal_graph"]
-        if cg is None:
+        submission = captured["submission"]
+        if submission is None:
+            cg: Any = None
             response = json.dumps(_EMPTY_CAUSAL_GRAPH)
-        elif isinstance(cg, str):
-            response = cg
         else:
+            cg = submission.get("causal_graph")
             response = json.dumps(cg, ensure_ascii=False)
 
         trajectory = _build_trajectory(
@@ -176,7 +187,8 @@ class AgentMAgent(BaseAgent):
                 "model": self._model,
                 "scenario": self._scenario,
                 "max_turns": max_turns,
-                "submit_final_report_seen": cg is not None,
+                "submit_final_report_seen": submission is not None,
+                "submission": submission,
             },
         )
 
