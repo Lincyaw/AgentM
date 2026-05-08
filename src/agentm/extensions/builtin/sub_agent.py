@@ -122,11 +122,27 @@ class _ChildAborted(RuntimeError):
 
 
 def _final_assistant_text(messages: list[Any] | None) -> str | None:
-    """Pull the last assistant text block out of a child session's final
-    messages. Returns ``None`` while the child is still running or produced
-    no text output."""
+    """Pull the worker's terminal response text out of its final messages.
+
+    Resolution order:
+
+    1. The arguments of the most recent ``return_response`` tool call —
+       the sanctioned termination tool installed by scenarios that need
+       guaranteed worker output. Workers that take this path end on a
+       tool_use turn with no assistant text, so the text-only fallback
+       below would otherwise return ``None``.
+    2. The most recent assistant message that contains text blocks —
+       this preserves the legacy contract for scenarios where workers
+       end with prose.
+
+    Returns ``None`` while the child is still running or produced no
+    output the parent can use.
+    """
     if not messages:
         return None
+    response = _extract_return_response_text(messages)
+    if response is not None:
+        return response
     for msg in reversed(messages):
         role = getattr(msg, "role", None) or (
             msg.get("role") if isinstance(msg, dict) else None
@@ -152,6 +168,41 @@ def _final_assistant_text(messages: list[Any] | None) -> str | None:
                 chunks.append(text)
         if chunks:
             return "\n".join(chunks)
+    return None
+
+
+def _extract_return_response_text(messages: list[Any]) -> str | None:
+    """Walk back through messages to find the last ``return_response``
+    tool call and return its ``text`` argument."""
+    for msg in reversed(messages):
+        role = getattr(msg, "role", None) or (
+            msg.get("role") if isinstance(msg, dict) else None
+        )
+        if role != "assistant":
+            continue
+        content = getattr(msg, "content", None) or (
+            msg.get("content") if isinstance(msg, dict) else None
+        )
+        if not isinstance(content, list):
+            continue
+        for block in reversed(content):
+            block_type = getattr(block, "type", None) or (
+                block.get("type") if isinstance(block, dict) else None
+            )
+            if block_type != "tool_call":
+                continue
+            name = getattr(block, "name", None) or (
+                block.get("name") if isinstance(block, dict) else None
+            )
+            if name != "return_response":
+                continue
+            args = getattr(block, "arguments", None) or (
+                block.get("arguments") if isinstance(block, dict) else None
+            )
+            if isinstance(args, dict):
+                text = args.get("text")
+                if isinstance(text, str) and text.strip():
+                    return text
     return None
 
 
@@ -304,6 +355,36 @@ def _resolve_inherited_extensions(
             continue
         resolved.append(_normalize_extension_spec(raw_spec))
     return resolved
+
+
+def _persona_prompt_with_budget(
+    *,
+    body: str,
+    applied_budget: dict[str, int],
+) -> str:
+    """Wrap the persona body with budget context so the worker sees its
+    runway. The model has no other channel for this information — without
+    it, the model burns through tool calls until force-stopped, never
+    submitting a response."""
+    if not applied_budget:
+        return body
+    parts = []
+    if "max_turns" in applied_budget:
+        parts.append(f"- max_turns: {applied_budget['max_turns']}")
+    if "max_tool_calls" in applied_budget:
+        parts.append(f"- max_tool_calls: {applied_budget['max_tool_calls']}")
+    if not parts:
+        return body
+    block = (
+        "<budget>\n"
+        "Hard limits enforced by the harness — exceeding either ends the "
+        "task with no chance to summarize:\n"
+        + "\n".join(parts)
+        + "\nPace yourself: leave at least one turn and one tool call to "
+        "submit your response (e.g. via `return_response`).\n"
+        "</budget>"
+    )
+    return f"{body}\n\n{block}" if body else block
 
 
 def _coerce_budget(raw: Any) -> dict[str, int]:
@@ -525,6 +606,7 @@ class _ChildTaskManager:
         persona_tool_allowlist: list[str] | None = None
         persona_budget: dict[str, int] = {}
         persona_name: str | None = None
+        persona: dict[str, Any] | None = None
         if isinstance(subagent_type, str) and subagent_type.strip():
             persona_name = subagent_type.strip()
             persona = await self._resolve_subagent(persona_name)
@@ -539,12 +621,6 @@ class _ChildTaskManager:
                     },
                     is_error=True,
                 )
-            persona_extensions.append(
-                (
-                    "agentm.extensions.builtin.system_prompt",
-                    {"prompt": persona["body"]},
-                )
-            )
             tools = persona.get("tools")
             if isinstance(tools, list) and tools:
                 persona_tool_allowlist = [str(t) for t in tools]
@@ -561,6 +637,22 @@ class _ChildTaskManager:
             persona_budget=persona_budget,
             dispatch_budget=dispatch_budget,
         )
+        if persona is not None:
+            # Tell the worker how much runway it has so it can pace itself.
+            # Without this, models tend to over-investigate and end up
+            # force-stopped on budget exhaustion before submitting a
+            # response.
+            persona_extensions.append(
+                (
+                    "agentm.extensions.builtin.system_prompt",
+                    {
+                        "prompt": _persona_prompt_with_budget(
+                            body=persona["body"],
+                            applied_budget=applied_budget,
+                        ),
+                    },
+                )
+            )
 
         async with self._registry_lock:
             running_children = sum(

@@ -1,13 +1,16 @@
 ---
 name: deep_analyze
 description: Forensic investigator. Traces the causal mechanism behind a specific anomalous chain — answers WHY, not just WHAT. Distinguishes cause from victim from link-level fault.
-tools: list_tables, query_sql, read
+tools: list_tables, query_sql, read, artifact_write, return_response
 input_schema:
   required: [objective, scope_services, anomaly_chain, output_format]
   optional: [prior_findings, hypothesis_under_test]
 budget_defaults:
-  max_tool_calls: 16
-  max_turns: 10
+  # Tight max_turns — empirically deep_analyze keeps querying for the
+  # full parent budget (128) without ever calling return_response.
+  # ``worker_finalize``'s budget-aware injector forces the call before
+  # this cap hits.
+  max_turns: 48
 artifact_kinds: [query_result, finding, trace, brief_rejection]
 ---
 
@@ -124,3 +127,12 @@ Not: "CPU increased 6.5x" (which metric? container? JVM? pod limit?)
 BANNED: listing metrics without causal linkage, reasoning process, verbatim tool output,
 repeating scout findings without adding depth.
 </output>
+
+<termination_contract>
+You MUST end the task by calling `return_response(text=...)`. The `text` argument carries your
+full causal-chain analysis — `findings` section, every step, every quantified claim. Without
+this call you keep being asked to investigate until the budget runs out and your work is lost.
+
+Defensive checkpointing along the way: each time you confirm one step in the causal chain,
+call `artifact_write` with `kind="finding"` to persist it.
+</termination_contract>

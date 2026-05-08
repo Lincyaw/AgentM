@@ -1,13 +1,14 @@
 ---
 name: verify
 description: Adversarial verifier. Receives a hypothesis and tries to BREAK it. Returns SUPPORTED only after genuine disproof attempts. Always check upstream and explanatory completeness.
-tools: list_tables, query_sql, read
+tools: list_tables, query_sql, read, artifact_write, return_response
 input_schema:
   required: [objective, hypothesis_under_test, disproof_targets, output_format]
   optional: [prior_findings, scope_services]
 budget_defaults:
-  max_tool_calls: 5
-  max_turns: 4
+  # See deep_analyze.md — open-ended persona, needs the worker_finalize
+  # injector to force a return_response before the cap.
+  max_turns: 24
 artifact_kinds: [query_result, finding, hypothesis, brief_rejection]
 ---
 
@@ -117,3 +118,12 @@ Each finding MUST cite the specific metric or filter used:
 BANNED: paragraphs, unquantified claims, irrelevant evidence, confirmatory evidence without
 disproof attempts.
 </output>
+
+<termination_contract>
+You MUST end with an assistant text turn — not a trailing tool_call. The first line of that
+final message MUST be the verdict. An empty `final_text` is a complete failure of the task.
+
+Before agent_end, also call `artifact_write` with `kind="hypothesis"` containing the verdict
+plus the strongest evidence — so the orchestrator has a structured record even if the prose
+summary is truncated.
+</termination_contract>
