@@ -71,7 +71,8 @@ from agentm.harness.events import BeforeAgentStartEvent
 from agentm.harness.extension import ExtensionAPI, ProviderConfig
 from agentm.harness.session_config import AgentSessionConfig
 
-from ..audit import RawAuditOutput, compose_extensions, extract_json
+from ..audit import RawAuditOutput, compose_extensions
+from ..audit.submit_tool import SUBMIT_AUDIT_TOOL_NAME
 from ..schema import Event, Reminder, Verdict
 
 MANIFEST = ExtensionManifest(
@@ -140,10 +141,6 @@ def _read_recent_verdicts(api: ExtensionAPI, n: int) -> list[Verdict]:
     branch = api.session.get_branch()
     entries = _entries_of_type(branch, _VERDICT_ENTRY_TYPE)[-n:]
     return [Verdict.from_dict(e.payload) for e in entries]
-
-
-def _assistant_text(message: AssistantMessage) -> str:
-    return "\n".join(b.text for b in message.content if isinstance(b, TextContent))
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
@@ -258,28 +255,30 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 def _audit_output_from_messages(
     messages: list[AgentMessage], prior_events: list[Event]
 ) -> tuple[list[Event], Verdict]:
-    """Parse the audit child's final assistant text into (new events, verdict).
+    """Pull (new events, verdict) off the audit child's ``submit_audit`` tool call.
 
-    Walks newest-first looking for the latest :class:`AssistantMessage` whose
-    text contains a parseable JSON block matching :class:`RawAuditOutput`.
-    Falls back to ``([], silent verdict)`` when nothing parses — V0 default
-    is "stay quiet" (design §2).
+    The audit child terminates by calling ``submit_audit(events=..., verdict=...)``.
+    The kernel records the call as a :class:`ToolCallBlock` on the final
+    assistant message; we walk newest-first looking for that block and read
+    its ``arguments`` dict directly — already structured, schema-validated
+    by the LLM provider's tool-use surface. Falls back to ``([], silent
+    verdict)`` when no submit_audit call is found (V0 default: stay quiet
+    per design §2).
     """
 
     next_id = max((e.id for e in prior_events), default=-1) + 1
     for msg in reversed(messages):
         if not isinstance(msg, AssistantMessage):
             continue
-        text = _assistant_text(msg)
-        if not text:
-            continue
-        data = extract_json(text)
-        if not isinstance(data, dict):
-            break
-        parsed = RawAuditOutput.from_dict(data)
-        if parsed is None:
-            break
-        return parsed.to_events(next_id=next_id), parsed.to_verdict()
+        for block in reversed(msg.content):
+            if not isinstance(block, ToolCallBlock):
+                continue
+            if block.name != SUBMIT_AUDIT_TOOL_NAME:
+                continue
+            parsed = RawAuditOutput.from_dict(block.arguments)
+            if parsed is None:
+                return [], Verdict(drift=False)
+            return parsed.to_events(next_id=next_id), parsed.to_verdict()
     return [], Verdict(drift=False)
 
 

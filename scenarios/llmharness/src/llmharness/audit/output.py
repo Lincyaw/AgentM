@@ -1,17 +1,16 @@
-"""Typed view of the cognitive-audit diagnostic agent's emit JSON.
+"""Typed coercion of the ``submit_audit`` tool-call arguments.
 
-Both consumers of the audit — the in-process V0 adapter
-(:mod:`llmharness.adapters.agentm`, REQ-017) and the dormant P0
-subprocess bridge (:mod:`llmharness.agentm_bridge`, REQ-007) — feed a
-JSON payload through the LLM and parse a single
-``{"events": [...], "verdict": {...}}`` reply back. Sharing the parser
-here keeps the schema a one-file edit instead of a search-and-replace
-across two consumers, and gives both a real type-checked surface
-(no ``dict.get``-chain soup at the JSON boundary).
+The diagnostic agent terminates its loop by calling ``submit_audit(events=...,
+verdict=...)``. The kernel records that call as a :class:`ToolCallBlock` whose
+``arguments`` is a ``dict[str, Any]`` already validated against the JSON Schema
+declared in :mod:`llmharness.audit.submit_tool`. This module gives the adapter
+a typed view over that dict — the same ``{"events": [...], "verdict": {...}}``
+shape, defensively coerced into Python dataclasses so downstream code never
+sees ``Any``.
 
-The schema this parser accepts is documented in
-:data:`llmharness.audit.AUDIT_SYSTEM_PROMPT` step 10 — that prompt and
-this dataclass MUST move together.
+The schema this parser accepts is documented in :data:`llmharness.audit.AUDIT_SYSTEM_PROMPT`
+step 10 and pinned by ``submit_tool.SUBMIT_AUDIT_PARAMETERS`` — those three
+locations MUST move together.
 """
 
 from __future__ import annotations

@@ -89,16 +89,21 @@ requirements:
       as a Python subpackage at ``src/llmharness/audit/``. Public surface:
 
       - ``audit.AUDIT_SYSTEM_PROMPT`` — the full system prompt body as a
-        module-level string. Encodes the two-stage audit flow.
+        module-level string. Encodes the two-stage audit flow; step 10
+        instructs the agent to terminate by calling ``submit_audit``.
       - ``audit.compose_extensions(prompt_override=, cards_tools_config=,
         observability_config=)`` — factory returning the canonical tuple
-        list ``[(observability, {}), (cards_tools, {}), (system_prompt,
-        {prompt: AUDIT_SYSTEM_PROMPT})]``. Pass ``None`` for
-        ``cards_tools_config`` or ``observability_config`` to drop those.
-      - ``audit.RawAuditOutput`` / ``audit.RawAuditEvent`` — typed parser
-        for the diagnostic agent's emitted JSON.
-      - ``audit.extract_json`` — trailing-JSON extractor (fenced ``json``
-        blocks first, then last balanced ``{...}``).
+        list ``[(observability, {}), (cards_tools, {}), (submit_tool, {}),
+        (system_prompt, {prompt: AUDIT_SYSTEM_PROMPT})]``. Pass ``None``
+        for ``cards_tools_config`` / ``observability_config`` to drop those;
+        ``submit_tool`` is mandatory.
+      - ``audit.submit_tool`` — §11 extension that registers the
+        ``submit_audit`` terminal tool. Its ``parameters`` JSON Schema
+        carries the events + verdict shape; the LLM provider validates
+        each call against it. Returning ``ToolTerminate`` ends the audit
+        loop the moment the tool fires.
+      - ``audit.RawAuditOutput`` / ``audit.RawAuditEvent`` — typed coercion
+        of the ``submit_audit`` arguments dict into Verdict + Event.
 
       The adapter (REQ-017) drives the child via ``AgentSessionConfig(
       extensions=audit.compose_extensions(...))`` — no ``scenario=``
@@ -110,7 +115,7 @@ requirements:
       - src/llmharness/audit/prompt.py
       - src/llmharness/audit/extensions.py
       - src/llmharness/audit/output.py
-      - src/llmharness/audit/json_extract.py
+      - src/llmharness/audit/submit_tool.py
       - src/llmharness/atoms/cards_tools.py
     tests: [tests/test_smoke.py]
     depends_on: [REQ-001, REQ-016]

@@ -182,57 +182,31 @@ Treat ``prior_events`` UNION stage-A events as your working graph.
    or a re-drift after the prior alert was addressed. Suppress
    duplicates (emit silent verdict). Emit only on re-drift.
 
-10. **Emit**. Output a SINGLE JSON object on its own as the
-    trailing assistant message — a fenced ```json code block is
-    recommended. The object has TWO top-level keys, ``events``
-    and ``verdict``:
+10. **Submit**. Call the ``submit_audit`` tool EXACTLY ONCE
+    as your final action. The tool's parameters carry your
+    structured output; calling it ends the audit loop. Do
+    NOT emit JSON in trailing text — only the tool call is
+    read. Tool signature:
 
-    ```
-    {
-      "events":  [<EventDict>...],
-      "verdict": <VerdictDict>
-    }
-    ```
+    ``submit_audit(events: <Event>[], verdict: <Verdict>)``
 
     ``events`` (always include, may be empty)
       Array of NEW events you produced in stage A. Empty
       array ``[]`` is fine if you self-silenced or if the
       trajectory contained no new semantically meaningful
-      moves. Each entry is an ``EventDict``:
+      moves. Each entry is an Event:
 
-      ```
-      {
-        "kind":         "task" | "hypothesis" | "evidence" |
-                        "decision" | "action" | "reflection" |
-                        "conclusion",
-        "summary":      "<one short sentence>",
-        "source_turns": [<trajectory index>, ...],
-        "refs":         [<prior event id>, ...]
-      }
-      ```
+      - ``kind``: one of ``"task" | "hypothesis" | "evidence"
+        | "decision" | "action" | "reflection" | "conclusion"``
+      - ``summary``: one short sentence
+      - ``source_turns``: trajectory indices (array of int)
+      - ``refs``: prior event ids (array of int)
 
       Do NOT include ``id`` — it is auto-assigned by the
       adapter so the running event log keeps a monotonic
-      sequence. ``kind`` MUST be one of the seven values
-      above; anything else is dropped.
+      sequence.
 
-    ``verdict`` (always include) — a ``VerdictDict``:
-
-      ```
-      {
-        "drift":               true | false,
-        "type":                "task_drift"
-                             | "evidence_ignored"
-                             | "premature_conclusion"
-                             | "stuck_loop"
-                             | null,
-        "confidence":          <float in [0, 1]>,
-        "reminder":            "<free-text body>" | "",
-        "matched_event_ids":   [<event id>, ...],
-        "cited_cards":         ["AFC-0001", ...],
-        "downstream_reaction": "<free text>" | null
-      }
-      ```
+    ``verdict`` (always include) — a Verdict object:
 
       Field rules:
       - ``drift``: bool. ``false`` = stay silent (default).

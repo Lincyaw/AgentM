@@ -13,7 +13,10 @@ Default composition:
 2. ``llmharness.atoms.cards_tools`` — exposes the 42 AFC failure cards
    as ``cards_list`` / ``cards_get`` tools (design §4.4 — cards as tools,
    not as static prompt content).
-3. ``agentm.extensions.builtin.system_prompt`` — installs the audit body
+3. ``llmharness.audit.submit_tool`` — registers ``submit_audit``, the
+   terminal tool that carries the diagnostic agent's structured output.
+   Always loaded; the audit prompt instructs the agent to call it.
+4. ``agentm.extensions.builtin.system_prompt`` — installs the audit body
    from :data:`llmharness.audit.AUDIT_SYSTEM_PROMPT` (or the caller's
    override) so the diagnostic agent knows what to do.
 
@@ -35,6 +38,7 @@ from .prompt import AUDIT_SYSTEM_PROMPT
 _OBSERVABILITY_MODULE = "agentm.extensions.builtin.observability"
 _SYSTEM_PROMPT_MODULE = "agentm.extensions.builtin.system_prompt"
 _CARDS_TOOLS_MODULE = "llmharness.atoms.cards_tools"
+_SUBMIT_TOOL_MODULE = "llmharness.audit.submit_tool"
 
 # Sentinel for "caller did not specify". Lets us distinguish "default —
 # include with empty config" from "explicit None — drop entirely". A bare
@@ -64,6 +68,8 @@ def compose_extensions(
     cards_cfg = {} if cards_tools_config is _UNSET else cards_tools_config
     if cards_cfg is not None:
         out.append((_CARDS_TOOLS_MODULE, dict(cards_cfg)))
+
+    out.append((_SUBMIT_TOOL_MODULE, {}))
 
     out.append(
         (

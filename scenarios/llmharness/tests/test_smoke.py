@@ -7,7 +7,10 @@ from llmharness.audit import (
     AUDIT_SYSTEM_PROMPT,
     RawAuditOutput,
     compose_extensions,
-    extract_json,
+)
+from llmharness.audit.submit_tool import (
+    SUBMIT_AUDIT_PARAMETERS,
+    SUBMIT_AUDIT_TOOL_NAME,
 )
 
 
@@ -21,27 +24,51 @@ def test_package_surface() -> None:
 
 
 def test_compose_extensions_default_shape() -> None:
-    """The default audit child uses observability + cards_tools + system_prompt
-    in declaration order, with the canonical AUDIT_SYSTEM_PROMPT injected."""
+    """The default audit child loads observability + cards_tools + submit_tool
+    + system_prompt in declaration order, with AUDIT_SYSTEM_PROMPT injected.
+    submit_tool is mandatory — the audit terminates by calling submit_audit."""
 
     exts = compose_extensions()
     modules = [m for m, _ in exts]
     assert modules == [
         "agentm.extensions.builtin.observability",
         "llmharness.atoms.cards_tools",
+        "llmharness.audit.submit_tool",
         "agentm.extensions.builtin.system_prompt",
     ]
-    sys_prompt_cfg = exts[2][1]
+    sys_prompt_cfg = exts[-1][1]
     assert sys_prompt_cfg["prompt"] is AUDIT_SYSTEM_PROMPT
 
 
-def test_compose_extensions_drops_optional_when_none() -> None:
-    """Passing ``None`` for cards_tools_config / observability_config drops
-    those entries entirely — system_prompt always survives."""
+def test_compose_extensions_keeps_submit_tool_when_optional_dropped() -> None:
+    """Passing ``None`` drops cards_tools / observability but submit_tool
+    and system_prompt always survive — without submit_audit the audit loop
+    has no termination signal and no structured output channel."""
 
     exts = compose_extensions(cards_tools_config=None, observability_config=None)
     modules = [m for m, _ in exts]
-    assert modules == ["agentm.extensions.builtin.system_prompt"]
+    assert modules == [
+        "llmharness.audit.submit_tool",
+        "agentm.extensions.builtin.system_prompt",
+    ]
+
+
+def test_submit_audit_schema_matches_verdict_payload() -> None:
+    """The submit_audit tool's JSON Schema must accept the exact payload
+    shape RawAuditOutput.from_dict expects, otherwise the LLM provider's
+    schema validation rejects valid audit submissions."""
+
+    assert SUBMIT_AUDIT_TOOL_NAME == "submit_audit"
+    assert SUBMIT_AUDIT_PARAMETERS["required"] == ["events", "verdict"]
+    verdict_props = SUBMIT_AUDIT_PARAMETERS["properties"]["verdict"]["properties"]
+    assert verdict_props["drift"]["type"] == "boolean"
+    # ``type`` field uses an enum that includes None — the LLM may legitimately
+    # set null when drift=false.
+    assert None in verdict_props["type"]["enum"]
+    event_kinds = SUBMIT_AUDIT_PARAMETERS["properties"]["events"]["items"][
+        "properties"
+    ]["kind"]["enum"]
+    assert set(event_kinds) == {k.value for k in EventKind}
 
 
 def test_audit_output_round_trip() -> None:
@@ -72,15 +99,6 @@ def test_audit_output_round_trip() -> None:
     assert verdict.drift is True
     assert verdict.type is DriftType.TASK_DRIFT
     assert verdict.cited_cards == ["AFC-0001"]
-
-
-def test_extract_json_prefers_fenced_block() -> None:
-    """When the assistant emits prose then a fenced ```json block, the
-    extractor picks the fenced block."""
-
-    text = 'thinking out loud...\n```json\n{"drift": false}\n```\n'
-    data = extract_json(text)
-    assert data == {"drift": False}
 
 
 def test_reminder_is_typed_payload() -> None:
