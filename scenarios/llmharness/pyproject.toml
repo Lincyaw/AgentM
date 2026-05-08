@@ -20,6 +20,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
+# AFC card YAMLs live at src/llmharness/_cards_data/; hatch's default
+# behaviour ships every file under the listed package directory, so the
+# corpus is reachable via importlib.resources after pip install.
 packages = ["src/llmharness"]
 
 # ---------------------------------------------------------------------------

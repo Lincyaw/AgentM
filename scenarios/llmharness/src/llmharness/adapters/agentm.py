@@ -68,7 +68,7 @@ from agentm.core.abi.messages import (
 from agentm.core.abi.session import SessionEntry
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import BeforeAgentStartEvent
-from agentm.harness.extension import ExtensionAPI, ProviderConfig
+from agentm.harness.extension import ExtensionAPI
 from agentm.harness.session_config import AgentSessionConfig
 
 from ..audit import RawAuditOutput, compose_extensions
@@ -117,11 +117,6 @@ _DEFAULT_REMINDER_PREFIX = "\n\n[harness] "
 _VERDICT_ENTRY_TYPE = "llmharness.verdict"
 _AUDIT_EVENT_ENTRY_TYPE = "llmharness.audit_event"
 
-# Marker config key the bridge-provider branch keys on. Internal contract
-# between this adapter and itself when it loads as a child provider; users
-# should never set it.
-_BRIDGE_PROVIDER_KEY = "_bridge_provider"
-
 
 def _entries_of_type(branch: list[SessionEntry], type_: str) -> list[SessionEntry]:
     return [e for e in branch if e.type == type_]
@@ -144,18 +139,6 @@ def _read_recent_verdicts(api: ExtensionAPI, n: int) -> list[Verdict]:
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    # Bridge-provider branch: when this module is loaded as a child session's
-    # provider extension (via ``provider=(__name__, {"_bridge_provider":
-    # parent_provider})``), re-publish the parent's ProviderConfig and return.
-    # Mirrors ``agentm.extensions.builtin.sub_agent``. The child must NOT
-    # re-register turn-end / before-start handlers — that would recurse
-    # infinitely. The compose_extensions() default never includes this module,
-    # so the only path here is the deliberate one below.
-    bridge_provider = config.get(_BRIDGE_PROVIDER_KEY)
-    if isinstance(bridge_provider, ProviderConfig):
-        api.register_provider(bridge_provider.name, bridge_provider)
-        return
-
     k_history = int(config.get("K_history_events", _DEFAULT_K_HISTORY_EVENTS))
     n_alerts = int(config.get("N_recent_alerts", _DEFAULT_N_RECENT_ALERTS))
     child_purpose = str(config.get("child_purpose", _DEFAULT_CHILD_PURPOSE))
@@ -174,15 +157,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # mutable closure cell for type-checker friendliness; len ≤ 1 by design.
     pending: list[Reminder] = []
 
-    def _child_provider() -> tuple[str, dict[str, Any]]:
-        provider = api.provider
-        if provider is None:
-            raise RuntimeError(
-                "agentm cognitive-audit adapter: no active provider on parent "
-                "session; cannot spawn diagnostic child."
-            )
-        return (__name__, {_BRIDGE_PROVIDER_KEY: provider})
-
     async def _on_turn_end(event: TurnEndEvent) -> None:
         del event  # full conversation pulled from session.get_messages() below
 
@@ -191,19 +165,17 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         recent_alerts = [v.to_dict() for v in _read_recent_verdicts(api, n_alerts)]
 
         payload = {
-            "trajectory": _messages_to_dicts(full_messages),
+            "trajectory": _serialize_for_audit_prompt(full_messages),
             "prior_events": [e.to_dict() for e in prior_events],
             "recent_alerts": recent_alerts,
         }
 
-        try:
-            child_provider = _child_provider()
-        except RuntimeError:
-            return
-
+        # provider=None → spawn_child_session auto-wires the
+        # inherit_provider builtin so the child re-uses the parent's
+        # active ProviderConfig. Same pattern as sub_agent.
         child_config = AgentSessionConfig(
             cwd=api.cwd,
-            provider=child_provider,
+            provider=None,
             extensions=child_extensions,
             purpose=child_purpose,
         )
@@ -282,71 +254,64 @@ def _audit_output_from_messages(
     return [], Verdict(drift=False)
 
 
-def _messages_to_dicts(messages: list[AgentMessage]) -> list[dict[str, Any]]:
+def _serialize_for_audit_prompt(
+    messages: list[AgentMessage],
+) -> list[dict[str, Any]]:
     """Serialize a full conversation history for the audit child.
 
-    ``isinstance`` dispatch over the kernel's message dataclasses preserves
-    role + content semantics. Drops thinking and image blocks — the audit
-    operates on pure-text trajectory material (design §3.3). Each message
-    carries an ``index`` so the audit can reference specific positions in
-    its ``source_turns`` field.
+    Audit-specific shape (design §3.3 + §5.2):
+    - Each entry carries an ``index`` so verdict ``source_turns`` can cite
+      trajectory positions.
+    - Thinking and image blocks are dropped — audit operates on emitted
+      pure-text moves only.
+    - Tool-result content is flattened to a single text string; the audit
+      prompt does not analyze structured tool extras.
+
+    No SDK serializer fits this shape; the closest (``SessionManager._serialize_payload``)
+    is private and produces a different (storage-oriented) layout.
     """
 
     out: list[dict[str, Any]] = []
     for i, msg in enumerate(messages):
+        blocks: list[dict[str, Any]] = []
         if isinstance(msg, UserMessage):
-            blocks = _serialize_user(msg)
+            blocks = [
+                {"type": "text", "text": b.text}
+                for b in msg.content
+                if isinstance(b, TextContent) and b.text
+            ]
         elif isinstance(msg, AssistantMessage):
-            blocks = _serialize_assistant(msg)
+            for b in msg.content:
+                if isinstance(b, TextContent) and b.text:
+                    blocks.append({"type": "text", "text": b.text})
+                elif isinstance(b, ToolCallBlock):
+                    blocks.append(
+                        {
+                            "type": "tool_call",
+                            "id": b.id,
+                            "name": b.name,
+                            "arguments": dict(b.arguments),
+                        }
+                    )
         elif isinstance(msg, ToolResultMessage):
-            blocks = _serialize_tool_result(msg)
+            for tr in msg.content:
+                text_parts = [
+                    inner.text
+                    for inner in tr.content
+                    if isinstance(inner, TextContent)
+                ]
+                blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_call_id": tr.tool_call_id,
+                        "content": "\n".join(text_parts),
+                        "is_error": tr.is_error,
+                    }
+                )
         else:
             continue
         if blocks:
             out.append({"index": i, "role": msg.role, "content": blocks})
-    return out
-
-
-def _serialize_user(msg: UserMessage) -> list[dict[str, Any]]:
-    return [
-        {"type": "text", "text": b.text}
-        for b in msg.content
-        if isinstance(b, TextContent) and b.text
-    ]
-
-
-def _serialize_assistant(msg: AssistantMessage) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for b in msg.content:
-        if isinstance(b, TextContent):
-            if b.text:
-                out.append({"type": "text", "text": b.text})
-        elif isinstance(b, ToolCallBlock):
-            out.append(
-                {
-                    "type": "tool_call",
-                    "id": b.id,
-                    "name": b.name,
-                    "arguments": dict(b.arguments),
-                }
-            )
-    return out
-
-
-def _serialize_tool_result(msg: ToolResultMessage) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for b in msg.content:
-        text_parts = [
-            inner.text for inner in b.content if isinstance(inner, TextContent)
-        ]
-        out.append(
-            {
-                "type": "tool_result",
-                "tool_call_id": b.tool_call_id,
-                "content": "\n".join(text_parts),
-                "is_error": b.is_error,
-            }
-        )
     return out
 
 

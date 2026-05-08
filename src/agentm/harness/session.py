@@ -359,7 +359,11 @@ class AgentSession:
 
             Parent ``bus`` and ``session_id`` are injected here; any value
             the caller put on those fields is overwritten so an extension
-            cannot impersonate a different parent. Returns the constructed
+            cannot impersonate a different parent. When ``child_config.provider``
+            is ``None`` we auto-wire the ``inherit_provider`` builtin so the
+            child re-uses the parent's active :class:`ProviderConfig` without
+            re-authenticating — the canonical replacement for the historical
+            ad-hoc ``_bridge_provider`` tuple trick. Returns the constructed
             child; lifecycle events are emitted by ``AgentSession.create``
             via the existing ``parent_bus`` plumbing.
             """
@@ -373,6 +377,19 @@ class AgentSession:
             spec.parent_bus = bus
             spec.parent_session_id = session_id
             spec.root_session_id = config.root_session_id or session_id
+            if spec.provider is None:
+                parent_provider = _provider_getter()
+                if parent_provider is None:
+                    raise RuntimeError(
+                        "spawn_child_session: AgentSessionConfig.provider is "
+                        "None but the parent session has no active provider "
+                        "to inherit. Either set child_config.provider "
+                        "explicitly or ensure the parent has registered one."
+                    )
+                spec.provider = (
+                    "agentm.extensions.builtin.inherit_provider",
+                    {"provider": parent_provider},
+                )
             return await cls.create(spec)
 
         def _make_api(owner: str) -> _ExtensionAPIImpl:
@@ -552,6 +569,15 @@ class AgentSession:
         # Load the provider extension. After it returns, we expect it to have
         # registered a ProviderConfig. Provider failure is the one fatal
         # case — without a stream_fn the loop cannot run.
+        if config.provider is None:
+            raise ExtensionLoadError(
+                "<provider>",
+                RuntimeError(
+                    "AgentSessionConfig.provider is None. Root sessions must "
+                    "specify a provider explicitly; only spawn_child_session "
+                    "auto-fills None with the inherit_provider builtin."
+                ),
+            )
         provider_path, provider_cfg = config.provider
         await _install_with_events(provider_path, provider_cfg, is_provider=True)
 

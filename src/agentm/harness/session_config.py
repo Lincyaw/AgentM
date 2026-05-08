@@ -19,11 +19,18 @@ from agentm.harness.session_manager import SessionManager
 
 @dataclass
 class AgentSessionConfig:
-    """Knobs handed to :func:`AgentSession.create`. Only ``cwd``, ``provider``
-    are required; everything else has a sane default for embedded use."""
+    """Knobs handed to :func:`AgentSession.create`. Only ``cwd`` is required.
+
+    ``provider`` may be ``None`` when this config is handed to
+    :meth:`ExtensionAPI.spawn_child_session`; the spawn factory then
+    automatically wires the ``inherit_provider`` builtin so the child re-uses
+    the parent's active :class:`ProviderConfig`. For root sessions, ``provider``
+    must resolve to a real provider tuple either directly here or via the
+    ``extensions`` list.
+    """
 
     cwd: str
-    provider: tuple[str, dict[str, Any]]
+    provider: tuple[str, dict[str, Any]] | None = None
     extensions: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     scenario: str | None = None
     no_extensions: bool = False

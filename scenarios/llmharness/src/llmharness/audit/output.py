@@ -30,15 +30,11 @@ from ..schema import DriftType, Event, EventKind, Verdict
 def _coerce_int_list(raw: Any) -> list[int]:
     if not isinstance(raw, list):
         return []
-    out: list[int] = []
-    for item in raw:
-        if isinstance(item, bool):
-            continue
-        if isinstance(item, int):
-            out.append(item)
-        elif isinstance(item, str) and item.lstrip("-").isdigit():
-            out.append(int(item))
-    return out
+    # Drop bools (which are int subclasses in Python) and any non-int entries.
+    # The submit_audit JSON Schema declares integer items, so anything else
+    # is a provider-side schema violation — surface it as a missing entry,
+    # don't auto-convert digit strings.
+    return [item for item in raw if isinstance(item, int) and not isinstance(item, bool)]
 
 
 def _coerce_str_list(raw: Any) -> list[str]:
@@ -48,11 +44,12 @@ def _coerce_str_list(raw: Any) -> list[str]:
 
 
 def _coerce_float(raw: Any) -> float:
-    if isinstance(raw, bool):
+    # bools are int subclasses but the schema declares a number — reject.
+    # confidence is optional in the schema (default 0.0); missing or wrong
+    # type → 0.0 rather than raising, since audit is best-effort.
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         return 0.0
-    if isinstance(raw, (int, float)):
-        return float(raw)
-    return 0.0
+    return float(raw)
 
 
 # ---------------------------------------------------------------------------

@@ -1,22 +1,24 @@
 """AFC card loader exposed as the diagnostic agent's `cards_list` /
 `cards_get` tools.
 
-Cards live as YAML at ``scenarios/llmharness/references/papers/cards/<class>/*.yaml``
-and are the *reference vocabulary* the cognitive-audit child session draws on
-when articulating drift findings. The audit does not receive the cards as
-prompt content; it retrieves them on demand through the two functions below
-(see design §4.4).
+Cards live as YAML at ``src/llmharness/_cards_data/<class>/*.yaml`` —
+**inside** the package so the wheel ships them and ``importlib.resources``
+can resolve them after both editable and non-editable installs. They are
+the *reference vocabulary* the cognitive-audit child session draws on
+when articulating drift findings. The audit does not receive the cards
+as prompt content; it retrieves them on demand through the two functions
+below (see design §4.4).
 
 Two design rules are load-bearing for this module:
 
 1. ``axis_hint`` lives in **Python code** (`_AXIS_HINT`), not in the YAML
-   schema. The YAML files are a public contract for the rca-autorl
-   downstream consumer; adding a field there would couple the three-axis
-   audit partition to that contract. See design §4.4 / §6.3.
+   schema. The YAML files are a public contract for downstream consumers;
+   adding a field there would couple the three-axis audit partition to
+   that contract. See design §4.4 / §6.3.
 
 2. YAML loading is **lazy** — ``cards_list()`` performs no I/O at import
-   time. The first call walks the cards root and caches the result.
-   This keeps imports cheap and lets test fixtures override
+   time. ``functools.lru_cache`` memoizes the first call. This keeps
+   imports cheap and lets test fixtures override
    ``LLMHARNESS_CARDS_ROOT`` before the first call.
 """
 
@@ -24,6 +26,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from functools import lru_cache
+from importlib import resources
+from importlib.abc import Traversable
 from pathlib import Path
 from typing import Any
 
@@ -154,24 +159,23 @@ class CardFull:
 # Loader internals
 # ---------------------------------------------------------------------------
 
-# From src/llmharness/cards.py the scenario root is two parents up:
-#   parents[0] = src/llmharness/
-#   parents[1] = src/
-#   parents[2] = scenarios/llmharness/   <- target
-_DEFAULT_CARDS_ROOT = (
-    Path(__file__).resolve().parents[2] / "references" / "papers" / "cards"
-)
+_PACKAGE_CARDS_DIR = "_cards_data"
 _MECHANISM_TRUNC = 140
-_CACHE: dict[str, CardFull] | None = None
-_SUMMARY_CACHE: list[CardSummary] | None = None
 
 
-def _resolve_cards_root() -> Path:
-    """Resolve the cards root, honoring the ``LLMHARNESS_CARDS_ROOT`` env var."""
+def _resolve_cards_root() -> Traversable:
+    """Resolve the cards root, honoring ``LLMHARNESS_CARDS_ROOT``.
+
+    Default is ``importlib.resources.files("llmharness") / "_cards_data"``
+    so the wheel ships the YAML and lookups work after ``pip install``
+    (editable or not). The env override is for tests that need a
+    fixture-supplied corpus.
+    """
+
     override = os.environ.get("LLMHARNESS_CARDS_ROOT")
     if override:
         return Path(override).expanduser().resolve()
-    return _DEFAULT_CARDS_ROOT
+    return resources.files("llmharness").joinpath(_PACKAGE_CARDS_DIR)
 
 
 def _one_line(mechanism: str) -> str:
@@ -203,11 +207,45 @@ def _coerce_sequence(value: Any) -> tuple[dict[str, Any], ...]:
     return tuple(item for item in value if isinstance(item, dict))
 
 
-def _load_card(path: Path) -> CardFull | None:
+def _read_text(node: Traversable | Path) -> str:
+    """Read text from either a real ``Path`` or an ``importlib.resources``
+    ``Traversable``. Both expose ``read_text``, but ``Traversable``'s
+    return type is unstubbed so we cast to ``str`` here.
+    """
+    text: Any = node.read_text(encoding="utf-8")
+    return str(text)
+
+
+def _iter_yaml_files(root: Traversable | Path) -> list[tuple[str, Traversable | Path]]:
+    """Walk one-level-deep subdirs for ``*.yaml`` files. Returns
+    ``[(display_name, node)]`` sorted by display_name for deterministic load
+    order. Works uniformly on filesystem ``Path`` and packaged ``Traversable``.
+    """
+    out: list[tuple[str, Traversable | Path]] = []
+    if isinstance(root, Path):
+        if not root.exists():
+            return out
+        for path in sorted(root.rglob("*.yaml")):
+            out.append((str(path), path))
+        return out
+    # Traversable: iterdir is the only walk primitive; structure is one level
+    # of category subdirs each containing AFC-*.yaml.
+    if not root.is_dir():
+        return out
+    for entry in sorted(root.iterdir(), key=lambda e: e.name):
+        if entry.is_dir():
+            for leaf in sorted(entry.iterdir(), key=lambda e: e.name):
+                if leaf.is_file() and leaf.name.endswith(".yaml"):
+                    out.append((f"{entry.name}/{leaf.name}", leaf))
+        elif entry.is_file() and entry.name.endswith(".yaml"):
+            out.append((entry.name, entry))
+    return out
+
+
+def _load_card(display_name: str, node: Traversable | Path) -> CardFull | None:
     """Parse one YAML file. Returns None for non-card YAMLs (id missing or
     not starting with ``AFC-``)."""
-    with path.open("r", encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh)
+    raw = yaml.safe_load(_read_text(node))
     if not isinstance(raw, dict):
         return None
     card_id = raw.get("id")
@@ -220,7 +258,7 @@ def _load_card(path: Path) -> CardFull | None:
     mechanism = mechanism_raw if isinstance(mechanism_raw, str) else str(mechanism_raw)
     if card_id not in _AXIS_HINT:
         raise KeyError(
-            f"Card {card_id} (file {path}) has no entry in _AXIS_HINT. "
+            f"Card {card_id} (file {display_name}) has no entry in _AXIS_HINT. "
             "Update llmharness.cards._AXIS_HINT before adding new cards."
         )
     return CardFull(
@@ -235,27 +273,22 @@ def _load_card(path: Path) -> CardFull | None:
     )
 
 
+@lru_cache(maxsize=1)
 def _load_all() -> dict[str, CardFull]:
     """Walk the cards root once and cache every card by id."""
-    global _CACHE
-    if _CACHE is not None:
-        return _CACHE
     root = _resolve_cards_root()
     by_id: dict[str, CardFull] = {}
-    if not root.exists():
-        _CACHE = by_id
-        return _CACHE
-    for path in sorted(root.rglob("*.yaml")):
-        card = _load_card(path)
+    for display_name, node in _iter_yaml_files(root):
+        card = _load_card(display_name, node)
         if card is None:
             continue
         if card.id in by_id:
             raise ValueError(
-                f"Duplicate card id {card.id}: {path} collides with an earlier file."
+                f"Duplicate card id {card.id}: {display_name} collides "
+                "with an earlier file."
             )
         by_id[card.id] = card
-    _CACHE = by_id
-    return _CACHE
+    return by_id
 
 
 # ---------------------------------------------------------------------------
@@ -263,28 +296,28 @@ def _load_all() -> dict[str, CardFull]:
 # ---------------------------------------------------------------------------
 
 
-def cards_list() -> list[CardSummary]:
-    """Return one ``CardSummary`` per AFC card in the corpus.
-
-    Result is cached after the first call. The audit child session calls this
-    at most once per firing to scan available cards before deciding whether
-    to drill into specific ones via ``cards_get``.
-    """
-    global _SUMMARY_CACHE
-    if _SUMMARY_CACHE is not None:
-        return list(_SUMMARY_CACHE)
-    cards = _load_all()
-    summaries = [
+@lru_cache(maxsize=1)
+def _summaries() -> tuple[CardSummary, ...]:
+    return tuple(
         CardSummary(
             id=card.id,
             name=card.name,
             axis_hint=card.axis_hint,
             one_line_mechanism=_one_line(card.mechanism),
         )
-        for card in sorted(cards.values(), key=lambda c: c.id)
-    ]
-    _SUMMARY_CACHE = summaries
-    return list(summaries)
+        for card in sorted(_load_all().values(), key=lambda c: c.id)
+    )
+
+
+def cards_list() -> list[CardSummary]:
+    """Return one ``CardSummary`` per AFC card in the corpus.
+
+    Result is cached (via ``lru_cache``) after the first call. The audit
+    child session calls this at most once per firing to scan available
+    cards before deciding whether to drill into specific ones via
+    ``cards_get``.
+    """
+    return list(_summaries())
 
 
 def cards_get(card_id: str) -> CardFull:
