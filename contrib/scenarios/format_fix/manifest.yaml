@@ -9,6 +9,7 @@ description: |
 task_class: format_fix
 
 extensions:
+  - module: agentm.extensions.builtin.observability
   - local: tool_normalize_json
   - module: agentm.extensions.builtin.system_prompt
     config:
