@@ -26,9 +26,13 @@ extensions:
         # ``contrib/scenarios/rca/skills/`` directory via
         # ``ResourcesDiscoverEvent``; ``skill_loader`` (builtin) reads
         # that hook and injects the diagnose-sql / rca-worker-guide
-        # SKILL.md content into the worker system prompt.
+        # SKILL.md content into the worker system prompt. ``tool_read``
+        # lets workers drill into the skill body files (correlation.md,
+        # traces.md, ...) — without it the worker only sees the skill
+        # description, not the recipes.
         - worker_skills
         - skill_loader
+        - tool_read
       available_inherited_extensions:
         duckdb_sql:
           # Real importable path. The synthetic
@@ -55,3 +59,6 @@ extensions:
           config:
             include_defaults: false
             inherit_claude: false
+        tool_read:
+          module: agentm.extensions.builtin.tool_read
+          config: {}

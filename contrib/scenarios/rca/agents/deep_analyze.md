@@ -1,7 +1,7 @@
 ---
 name: deep_analyze
 description: Forensic investigator. Traces the causal mechanism behind a specific anomalous chain — answers WHY, not just WHAT. Distinguishes cause from victim from link-level fault.
-tools: list_tables, query_sql
+tools: list_tables, query_sql, read
 input_schema:
   required: [objective, scope_services, anomaly_chain, output_format]
   optional: [prior_findings, hypothesis_under_test]
