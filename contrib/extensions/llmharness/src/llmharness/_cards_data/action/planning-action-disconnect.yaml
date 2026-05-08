@@ -1,0 +1,63 @@
+id: AFC-0013
+name: "Planning–action disconnect"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: action_fault
+  subclass: plan_action_mismatch
+  mechanism: |
+    The agent states a plan or intent, then takes an action that does
+    not implement it. Two concrete shapes:
+      - 'Local' disconnect: the immediate reasoning span and the next
+        action span disagree on object/target ("I will edit file A" →
+        edits file B).
+      - 'Cross-step' temporal self-inconsistency: agent at step N
+        contradicts its own statement at step M < N without new
+        evidence in between (AEGIS FM-2.6 evaluation example: "in step
+        2 agent says 'option A is best', but in step 4 says 'option A
+        is a bad choice' without new information").
+    Often surfaces in fast-thinking models where the action sampling
+    drifts from the chain-of-thought premise; or in long trajectories
+    where the agent loses track of its own prior commitments.
+
+activation:
+  required:
+    - "agent emits both a reasoning trace and a downstream action"
+  amplifying:
+    - "fast-thinking decoding (no enforced consistency check)"
+    - "action space allows multiple plausible options"
+  timescale: sub_second
+
+observable:
+  metrics:
+    - predicate: trajectory.action.disconnected
+      direction: up
+      shape: spike
+  logs:
+    - pattern: "reasoning sentence and action argument disagree on object/target"
+    - pattern: "step N reasoning contradicts step M reasoning (M < N) without new evidence in between (FM-2.6 cross-step shape)"
+  traces:
+    - pattern: "reasoning span and action span have inconsistent entity references"
+  detection_difficulty: silent
+
+downstream_effects:
+  - predicate: outcome.task.failed
+    confidence: high
+    delay: seconds
+
+system_requirements:
+  - has_component: cot_then_action_pattern
+
+evidence:
+  - source: "AgentDebug (arXiv 2509.25370) §A.2 Table 2: Action.Planning–Action Disconnect"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+  - source: "AEGIS (arXiv 2509.14295) Appendix E.2 FM-2.6 'Inconsistent reasoning'"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

@@ -15,7 +15,7 @@ Path resolution:
 
 - An absolute path argument loads that file directly (or its
   ``manifest.yaml`` if a directory).
-- A bare name resolves to ``<cwd>/scenarios/<name>/manifest.yaml``.
+- A bare name resolves to ``<cwd>/contrib/scenarios/<name>/manifest.yaml``.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def load_scenario(name_or_path: str) -> list[tuple[str, dict[str, Any]]]:
         )
     else:
         manifest_path = (
-            Path(os.getcwd()) / "scenarios" / name_or_path / "manifest.yaml"
+            Path(os.getcwd()) / "contrib" / "scenarios" / name_or_path / "manifest.yaml"
         )
 
     if not manifest_path.is_file():

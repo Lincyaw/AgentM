@@ -1,0 +1,55 @@
+id: AFC-0008
+name: "Reflection hallucination"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: reflection_fault
+  subclass: hallucinated_outcome
+  mechanism: |
+    During a reflection / self-critique step, the agent reasons about
+    events or outcomes that never actually occurred — e.g., "Earlier I
+    tried tool X and it failed" when no such tool call exists in the
+    trajectory. Distinct from AFC-0002 (false memory in input recall):
+    the fabrication happens *inside* the explicit reflection step and
+    poisons the corrective plan it produces.
+
+activation:
+  required:
+    - "agent runs a reflection step that summarizes prior actions"
+    - "the reflection prompt asks the agent to list 'mistakes made'"
+  amplifying:
+    - "low-quality reflection prompt that doesn't ground in trajectory"
+    - "long horizon, lossy summary input"
+  timescale: seconds
+
+observable:
+  metrics:
+    - predicate: agent_state.reflection.fabricated
+      direction: up
+      shape: spike
+  logs:
+    - pattern: "reflection cites action / outcome with no matching trajectory span"
+  traces:
+    - pattern: "self-critique span has no upstream tool_call/tool_result match"
+  detection_difficulty: silent
+
+downstream_effects:
+  - predicate: quality.plan.inefficient
+    confidence: high
+    delay: seconds
+  - predicate: outcome.task.failed
+    confidence: medium
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: self_reflection_step
+
+evidence:
+  - source: "AgentDebug (arXiv 2509.25370) §A.2 Table 2: Reflection.Hallucination"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

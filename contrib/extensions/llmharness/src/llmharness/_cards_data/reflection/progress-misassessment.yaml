@@ -1,0 +1,59 @@
+id: AFC-0005
+name: "Progress misassessment"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: reflection_fault
+  subclass: progress_misjudged
+  mechanism: |
+    The agent evaluates how far it is from the goal incorrectly:
+    over-optimistic ("task done" when subgoals remain), over-pessimistic
+    (giving up while still recoverable), or completion-missed (already
+    succeeded but doesn't recognize it). Subsequent decisions optimize
+    against the wrong remaining-distance estimate.
+
+activation:
+  required:
+    - "agent runs a self-assessment step on subgoal completion"
+    - "objective signal (completion test, environmental feedback) is noisy or absent"
+  amplifying:
+    - "long horizon (typical mid-trajectory step 5-15)"
+    - "task with implicit completion criteria"
+  timescale: seconds
+
+observable:
+  metrics:
+    - predicate: quality.progress.misjudged
+      direction: up
+      shape: spike
+  logs:
+    - pattern: "'I have completed the task' followed by environment indicating subgoal still pending"
+    - pattern: "'I cannot proceed' when valid actions exist"
+  traces:
+    - pattern: "self-eval step's predicted completion mismatches ground truth"
+  detection_difficulty: silent
+
+downstream_effects:
+  - predicate: outcome.task.terminated_early
+    confidence: high
+    delay: seconds
+  - predicate: trajectory.step.repeated
+    confidence: medium
+    delay: seconds
+
+system_requirements:
+  - has_component: self_reflection_step
+
+evidence:
+  - source: "AgentDebug (arXiv 2509.25370) §A.2 Table 2: Reflection.Progress Misassessment"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+  - source: "AgentDebug Fig 3: progress-misjudge = 20/200 trajectories (largest reflection mode)"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

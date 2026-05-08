@@ -1,0 +1,62 @@
+id: AFC-0004
+name: "Conversation history wipe"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: memory_fault
+  subclass: context_dropped
+  mechanism: |
+    The agent acts as if it has no prior context — recent turns are
+    ignored or forcibly removed before the next decision. Distinct from
+    AFC-0003 (retrieval missed an existing item): here the *whole prior
+    context* is dropped from the working set. AEGIS uses this as an
+    injectable failure mode (FM-1.4) by rewriting the agent's input to
+    "WIPE the agent's memory completely".
+
+activation:
+  required:
+    - "agent's working context is reset / truncated / forcibly cleared"
+    - "task requires multi-turn state continuity"
+  amplifying:
+    - "system prompt that emphasizes 'fresh start each turn'"
+    - "very long context that triggered aggressive truncation"
+  timescale: seconds
+
+observable:
+  metrics:
+    - predicate: agent_state.context.wiped
+      direction: up
+      shape: step
+    - predicate: trajectory.step.repeated
+      shape: bursty
+  logs:
+    - pattern: "agent re-asks a question whose answer was given two turns ago"
+    - pattern: "agent restates the task definition mid-trajectory"
+  traces:
+    - pattern: "input prompt to LLM contains only the latest turn, history truncated"
+  detection_difficulty: easy
+
+downstream_effects:
+  - predicate: trajectory.step.repeated
+    confidence: high
+    delay: seconds
+  - predicate: outcome.task.failed
+    confidence: high
+    delay: minutes_to_hours
+
+system_requirements:
+  - has_component: stateful_multi_turn_loop
+
+evidence:
+  - source: "AEGIS (arXiv 2509.14295) Appendix E.2 FM-1.4 'Remove conversation history'"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+  - source: "AEGIS Table 2: EM-1.4 = 1,654 instances in synthesized data"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

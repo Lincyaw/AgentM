@@ -43,6 +43,26 @@ Fix all errors before considering the task complete. For `mypy` issues on dynami
 - **Python**: 3.12+ required
 - **Build backend**: `uv_build`
 
+## contrib/ layout
+
+Everything that is **not** SDK core lives under `contrib/`. SDK builtins still live under `src/agentm/extensions/builtin/` (auto-discovered); `contrib/` is for opt-in, separately-maintained extras.
+
+```
+contrib/
+├── extensions/        # third-party-maintained atoms (workspace members)
+│   └── llmharness/    # cognitive-audit package: atoms + adapter + tests
+└── scenarios/         # scenario manifests (loader entry point)
+    ├── plan_mode/
+    ├── rca/           # also a workspace member (agentm_rca/)
+    └── trajectory_analysis/
+```
+
+- `contrib/scenarios/<name>/manifest.yaml` — resolved by `agentm --scenario <name>`. The loader (`src/agentm/extensions/loader.py`) looks up `<cwd>/contrib/scenarios/<name>/manifest.yaml`.
+- `contrib/extensions/<name>.py` — flat-file research-line atoms (e.g. `tool_catalog`, `turn_reminder`). Auto-discovered alongside `src/agentm/extensions/builtin/` when running from a source checkout, registered under synthetic module names `_agentm_contrib__<name>`. Conceptually outside the SDK core but ships in-tree for development.
+- `contrib/extensions/<name>/` — Python packages whose `MANIFEST` makes them mountable as atoms (e.g. `llmharness`). Mounted via `agentm --extension <dotted.module.path>` (repeatable, stacks on top of `--scenario` or auto-discovery). Not a scenario — don't put `manifest.yaml` here.
+
+Don't add scenario-loader logic that walks subdirs blindly — keep the layout open to nested projects.
+
 ## Design Documentation System
 
 All design documents are stored in the `.claude/` directory. A `.claude/index.yaml` file maintains the conceptual index and relationships between concepts.

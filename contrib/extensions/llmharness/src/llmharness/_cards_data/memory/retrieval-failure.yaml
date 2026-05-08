@@ -1,0 +1,62 @@
+id: AFC-0003
+name: "Memory retrieval failure"
+schema_version: 1
+last_reviewed: "2026-05-07"
+
+defect:
+  class: memory_fault
+  subclass: retrieval_miss
+  mechanism: |
+    Relevant context exists in the agent's accessible memory store but
+    is not retrieved when needed. Distinct from over-simplification (the
+    detail was thrown away) and false memory (no detail existed): the
+    detail is on disk, but the retrieval step misses it. Often a vector
+    similarity / keyword query that under-recalls.
+
+activation:
+  required:
+    - "agent uses an explicit retrieval step against past observations / tools / RAG"
+    - "the relevant item exists in the indexed store"
+    - "current query under-ranks it"
+  amplifying:
+    - "weak embedding model (EAGER §2.2: BGE-M3 Recall@10 = 22% paraphrase retrieval)"
+    - "paraphrastic query / observation"
+  timescale: seconds
+
+observable:
+  metrics:
+    - predicate: agent_state.memory.not_retrieved
+      direction: up
+      shape: spike
+    - predicate: quality.observation.misread
+      shape: bursty
+  logs:
+    - pattern: "retrieval returns top-k that does not contain the ground-truth-relevant item"
+  traces:
+    - pattern: "agent later asks for or fabricates info already present in indexed memory"
+  detection_difficulty: medium
+
+downstream_effects:
+  - predicate: agent_state.memory.fabricated
+    confidence: medium
+    delay: seconds
+  - predicate: quality.plan.inefficient
+    confidence: medium
+    delay: seconds
+
+system_requirements:
+  - has_component: retrieval_or_RAG
+  - has_component: persistent_memory_store
+
+evidence:
+  - source: "AgentDebug (arXiv 2509.25370) §A.2 Table 2: Memory.Retrieval Failure"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+  - source: "EAGER (arXiv 2603.21522) §2.2 — off-the-shelf embeddings recall@10 13-22% on paraphrases"
+    type: paper
+    extracted_by: subagent_synthesis
+    human_reviewed: true
+
+reproducibility:
+  confirmed_in_chaos: false

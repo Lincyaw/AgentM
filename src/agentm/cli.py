@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from dotenv import load_dotenv
 
 from agentm.core.abi.events import DiagnosticEvent, EventBus
 from agentm.core.abi.messages import (
@@ -25,56 +26,14 @@ from agentm.core.abi.messages import (
 from agentm.harness.events import ExtensionInstallEvent
 
 
-def _load_dotenv() -> None:
-    """Load ``KEY=value`` pairs from the nearest ``.env`` walking up from cwd.
-
-    Existing env vars win — explicit ``KEY=... agentm`` invocations still
-    override file values. Quoted values get unwrapped (``"x"`` → ``x``) and
-    anything after the closing quote is dropped, so ``KEY="x"  # note`` is
-    parsed as ``x``. For unquoted values an inline comment introduced by
-    whitespace + ``#`` (matches POSIX shell convention) terminates the value;
-    bare ``#`` glued to the value is preserved. Full-line comments and blank
-    lines are ignored. No interpolation, no exports, no shell semantics —
-    keep it boring.
-    """
-    cur = Path.cwd().resolve()
-    for candidate in (cur, *cur.parents):
-        env_path = candidate / ".env"
-        if env_path.is_file():
-            break
-    else:
-        return
-    try:
-        text = env_path.read_text(encoding="utf-8")
-    except OSError:
-        return
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export "):].lstrip()
-        key, sep, value = line.partition("=")
-        if not sep:
-            continue
-        key = key.strip()
-        value = value.strip()
-        if value and value[0] in ('"', "'"):
-            quote = value[0]
-            end = value.find(quote, 1)
-            if end != -1:
-                value = value[1:end]
-        else:
-            # Strip inline comment introduced by whitespace + '#'.
-            for i, ch in enumerate(value):
-                if ch == "#" and (i == 0 or value[i - 1] in " \t"):
-                    value = value[:i].rstrip()
-                    break
-        if key and key not in os.environ:
-            os.environ[key] = value
-
-
-_load_dotenv()
+# Walk up from cwd to find the nearest .env. Existing env vars win
+# (override=False), so explicit ``KEY=... agentm`` still beats file values.
+_cur = Path.cwd().resolve()
+for _candidate in (_cur, *_cur.parents):
+    _env_path = _candidate / ".env"
+    if _env_path.is_file():
+        load_dotenv(_env_path, override=False)
+        break
 
 
 def _print_final(final_messages: list) -> None:
@@ -102,6 +61,47 @@ def _parse_tools(value: str | None) -> list[str] | None:
     if value == "":
         return []
     return [t.strip() for t in value.split(",") if t.strip()]
+
+
+def _parse_extensions(values: list[str] | None) -> list[tuple[str, dict[str, Any]]]:
+    """Parse repeated ``--extension MODULE[:JSON]`` flags.
+
+    Each entry is either a bare dotted module path (config = {}) or
+    ``module.path:{"key":value}`` where the JSON object is parsed verbatim.
+    The first colon splits module from config so module paths themselves
+    cannot contain a colon (they are dotted Python imports — colons would
+    already be invalid).
+    """
+
+    if not values:
+        return []
+    import json
+
+    out: list[tuple[str, dict[str, Any]]] = []
+    for raw in values:
+        spec = raw.strip()
+        if not spec:
+            continue
+        if ":" in spec:
+            module, _, cfg_raw = spec.partition(":")
+            module = module.strip()
+            try:
+                cfg = json.loads(cfg_raw)
+            except json.JSONDecodeError as exc:
+                raise typer.BadParameter(
+                    f"--extension {raw!r}: config after ':' must be valid JSON ({exc})"
+                ) from exc
+            if not isinstance(cfg, dict):
+                raise typer.BadParameter(
+                    f"--extension {raw!r}: config must be a JSON object"
+                )
+        else:
+            module = spec
+            cfg = {}
+        if not module:
+            raise typer.BadParameter(f"--extension {raw!r}: module path is empty")
+        out.append((module, cfg))
+    return out
 
 
 _FALSY = {"0", "false", "no", "off", "n", "f"}
@@ -160,6 +160,7 @@ async def _run(
     *,
     prompt: str,
     scenario: str | None,
+    extra_extensions: list[tuple[str, dict[str, Any]]],
     no_extensions: bool,
     no_skills: bool,
     no_prompt_templates: bool,
@@ -170,6 +171,7 @@ async def _run(
     quiet: bool,
 ) -> int:
     from agentm.harness import AgentSession, AgentSessionConfig
+    from agentm.harness.session_manager import SessionManager
 
     error_seen = False
 
@@ -196,14 +198,20 @@ async def _run(
     bus.on(DiagnosticEvent.CHANNEL, _on_diagnostic)
     bus.on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
 
+    session_manager = SessionManager.create(cwd=cwd)
+    if not quiet and session_manager.session_file is not None:
+        typer.echo(f"INFO: session log: {session_manager.session_file}", err=True)
+
     config = AgentSessionConfig(
         cwd=cwd,
         provider=_build_provider(provider, model),
         scenario=scenario,
+        extra_extensions=extra_extensions,
         no_extensions=no_extensions,
         no_skills=no_skills,
         no_prompt_templates=no_prompt_templates,
         tool_allowlist=tool_allowlist,
+        session_manager=session_manager,
         bus=bus,
     )
 
@@ -221,6 +229,7 @@ async def _run(
 async def _run_interactive(
     *,
     scenario: str | None,
+    extra_extensions: list[tuple[str, dict[str, Any]]],
     no_extensions: bool,
     no_skills: bool,
     no_prompt_templates: bool,
@@ -232,9 +241,13 @@ async def _run_interactive(
     """Build a session config and hand off to the Textual TUI runner."""
 
     from agentm.harness import AgentSessionConfig
+    from agentm.harness.session_manager import SessionManager
     from agentm.modes.textual_app import run as run_textual_tui
 
     bus = EventBus()
+    session_manager = SessionManager.create(cwd=cwd)
+    if session_manager.session_file is not None:
+        typer.echo(f"INFO: session log: {session_manager.session_file}", err=True)
 
     def _on_diagnostic(event: DiagnosticEvent) -> None:
         prefix = {
@@ -259,10 +272,12 @@ async def _run_interactive(
         cwd=cwd,
         provider=_build_provider(provider, model),
         scenario=scenario,
+        extra_extensions=extra_extensions,
         no_extensions=no_extensions,
         no_skills=no_skills,
         no_prompt_templates=no_prompt_templates,
         tool_allowlist=tool_allowlist,
+        session_manager=session_manager,
         bus=bus,
     )
     return await run_textual_tui(config)
@@ -284,8 +299,22 @@ def run_cmd(
             "--scenario",
             help=(
                 "Opt-in curated extension list. Bare name resolves under "
-                "<cwd>/scenarios/<name>/manifest.yaml. An absolute path is "
-                "also accepted. When unset, auto-discovers every builtin atom."
+                "<cwd>/contrib/scenarios/<name>/manifest.yaml. An absolute "
+                "path is also accepted. When unset, auto-discovers every "
+                "builtin atom."
+            ),
+        ),
+    ] = None,
+    extension: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--extension",
+            help=(
+                "Mount an extra atom on top of --scenario / auto-discovery. "
+                "Repeatable. Form: 'dotted.module.path' or "
+                "'dotted.module.path:{\"key\":\"value\"}' for inline JSON "
+                "config. Example: --extension llmharness.adapters.agentm "
+                "--extension some.atom:'{\"k\":3}'."
             ),
         ),
     ] = None,
@@ -362,10 +391,13 @@ def run_cmd(
 ) -> None:
     """Send a single prompt and print the agent's final text."""
 
+    extra_extensions = _parse_extensions(extension)
+
     if interactive:
         rc = asyncio.run(
             _run_interactive(
                 scenario=scenario,
+                extra_extensions=extra_extensions,
                 no_extensions=no_extensions,
                 no_skills=no_skills,
                 no_prompt_templates=no_prompt_templates,
@@ -385,6 +417,7 @@ def run_cmd(
         _run(
             prompt=prompt,
             scenario=scenario,
+            extra_extensions=extra_extensions,
             no_extensions=no_extensions,
             no_skills=no_skills,
             no_prompt_templates=no_prompt_templates,

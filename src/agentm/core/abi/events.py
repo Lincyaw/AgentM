@@ -264,11 +264,21 @@ class TurnStartEvent(Event):
 
 @dataclass(slots=True, frozen=True)
 class TurnEndEvent(Event):
-    """Emitted after a turn's assistant message is fully assembled."""
+    """Emitted after a turn's assistant message is fully assembled.
+
+    ``messages`` is the full live trajectory snapshot **including** the
+    just-emitted ``message`` and every prior turn's tool calls / tool
+    results. Consumers that need to slice "what was new this turn" do so
+    against this snapshot rather than ``api.session.get_messages()``,
+    which only reflects entries the kernel has persisted to the
+    SessionManager — the kernel persists in one batch after ``prompt()``
+    returns, so mid-loop reads of the session view are stale.
+    """
 
     CHANNEL: ClassVar[Literal["turn_end"]] = "turn_end"
     turn_index: int
     message: AssistantMessage
+    messages: tuple[AgentMessage, ...] = ()
 
 
 @dataclass(slots=True)
