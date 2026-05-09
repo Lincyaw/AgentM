@@ -17,7 +17,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from agentm.core.abi import AgentMessage
+from agentm.core.abi import AgentMessage, Tool
 from agentm.core.abi.compaction import (
     CompactionResult,
     CompactionSettings,
@@ -100,10 +100,19 @@ class PromptTemplatesService(Protocol):
         templates: list[PromptTemplateRecord],
     ) -> str | None: ...
 
+    # In-memory prompt registry (issue #76). Atoms register named prompt
+    # bodies at install time; engine code retrieves them by name. Decoupled
+    # from the on-disk slash-command template flow above so kernel callers
+    # don't have to coordinate filesystem state.
+    def register_prompt(self, name: str, body: str) -> None: ...
+
+    def get_prompt(self, name: str) -> str | None: ...
+
 
 class _DefaultPromptTemplatesService:
     def __init__(self, layout: ProjectLayout | None = None) -> None:
         self._layout = layout
+        self._registry: dict[str, str] = {}
 
     def load_prompt_templates(
         self,
@@ -140,6 +149,12 @@ class _DefaultPromptTemplatesService:
         )
 
         return _impl(text, templates)
+
+    def register_prompt(self, name: str, body: str) -> None:
+        self._registry[name] = body
+
+    def get_prompt(self, name: str) -> str | None:
+        return self._registry.get(name)
 
 
 # --- Catalog service -------------------------------------------------------
@@ -310,6 +325,7 @@ class CompactionService(Protocol):
         path_entries: list[Any],
         settings: CompactionSettings,
         current_messages: list[AgentMessage] | None = None,
+        tools: list[Tool] | None = None,
     ) -> Any | None: ...
 
     async def compact(
@@ -318,6 +334,7 @@ class CompactionService(Protocol):
         summarizer: Summarizer,
         summarization_prompt: str,
         custom_instructions: str | None = None,
+        prompts: Any | None = None,
     ) -> CompactionResult: ...
 
 
@@ -346,12 +363,13 @@ class _DefaultCompactionService:
         path_entries: list[Any],
         settings: CompactionSettings,
         current_messages: list[AgentMessage] | None = None,
+        tools: list[Tool] | None = None,
     ) -> Any | None:
         from agentm.core._internal.compaction import (
             prepare_compaction as _impl,
         )
 
-        return _impl(path_entries, settings, current_messages)
+        return _impl(path_entries, settings, current_messages, tools)
 
     async def compact(
         self,
@@ -359,11 +377,16 @@ class _DefaultCompactionService:
         summarizer: Summarizer,
         summarization_prompt: str,
         custom_instructions: str | None = None,
+        prompts: Any | None = None,
     ) -> CompactionResult:
         from agentm.core._internal.compaction import compact as _impl
 
         return await _impl(
-            preparation, summarizer, summarization_prompt, custom_instructions
+            preparation,
+            summarizer,
+            summarization_prompt,
+            custom_instructions,
+            prompts,
         )
 
 
