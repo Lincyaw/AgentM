@@ -159,6 +159,31 @@ requirements:
     depends_on:
       - REQ-086-atom-rework-infra
 
+  - id: REQ-088-builtin-atom-hygiene
+    title: Builtin atom requires, schema, and diagnostic hygiene
+    description: >
+      Builtin atoms must declare peer dependencies through MANIFEST.requires,
+      expose magic runtime constants through config_schema defaults, warn on
+      ignored peer response keys or unpriced cost providers, and fail fast when
+      scenario or session extension dependencies are absent.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/extensions/builtin
+      - path: src/agentm/extensions/validate.py
+      - path: src/agentm/extensions/loader.py
+      - path: src/agentm/harness/session_factory.py
+      - path: contrib/scenarios/rca/manifest.yaml
+    tests:
+      - path: tests/unit/extensions/test_extension_contract.py
+      - path: tests/unit/extensions/test_issue_88_hygiene.py
+    docs:
+      - path: .claude/designs/extension-as-scenario.md
+      - path: .claude/tasks/2026-05-09-issue-88-builtin-atom-hygiene.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
   - id: REQ-100-cc-extension-package
     title: Claude Code compatibility atoms share a package boundary
     description: >

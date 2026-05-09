@@ -145,7 +145,12 @@ async def test_cost_budget_veto_emits_budget_exhausted_agent_end(
             AgentSessionConfig(
                 cwd=str(tmp_path),
                 provider=(module_name, {}),
-                extensions=[("agentm.extensions.builtin.cost_budget", {"limit": 0})],
+                extensions=[
+                    (
+                        "agentm.extensions.builtin.cost_budget",
+                        {"limit": 0, "pricing": {"fake": (1.0, 1.0)}},
+                    )
+                ],
             )
         )
         session.bus.on(AgentEndEvent.CHANNEL, lambda event: causes.append(event.cause))

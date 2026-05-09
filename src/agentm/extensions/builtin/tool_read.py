@@ -21,6 +21,7 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": True,
     },
+    requires=(),  # Leaf tool atom: consumes Operations via ExtensionAPI.
 )
 
 _PARAMETERS: Final = {

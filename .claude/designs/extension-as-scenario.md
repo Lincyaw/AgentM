@@ -644,6 +644,8 @@ class ExtensionManifest:
 
 `registers` is a tag list, not a free-form string: tags follow `<kind>:<id>` where `<kind>` ∈ `{tool, event, command, provider, renderer}`. The validator parses these and uses them to detect ordering/conflict issues.
 
+Scenario/session loading topologically sorts manifest-bearing extensions by `requires` before installation and fails fast when a declared dependency is absent. Built-in atoms with no peer dependency still spell `requires=()` with an inline rationale so the absence is auditable.
+
 ### 11.3 Auto-discovery
 
 `agentm.extensions.discover.discover_builtin() -> dict[str, BuiltinEntry]` walks `extensions/builtin/`, imports each module, and returns a name → entry map. Used by:
@@ -665,7 +667,8 @@ Discovery is **memoized per process** so production loads pay the directory walk
 6. Every tag in `MANIFEST.registers` parses as `<kind>:<id>` with a known kind.
 7. `MANIFEST.requires` and `MANIFEST.conflicts` reference names that exist (or are documented forward references for not-yet-landed atoms).
 8. If `config_schema` is set, it is a syntactically valid JSON-Schema dict.
-9. AST hygiene rejects private ExtensionAPI reflection, ExtensionAPI attribute
+9. Peer atom names referenced as string literals in code must appear in `MANIFEST.requires`.
+10. AST hygiene rejects private ExtensionAPI reflection, ExtensionAPI attribute
    overwrites, mutable module-level dict/list/set globals without `Final`,
    f-string dynamic imports under `agentm.*`, and `isinstance` downcasts to
    concrete harness service classes. Atoms must consume harness capabilities
