@@ -11,20 +11,36 @@ mutations.
   text deep-equals the expected JSON, else 0.0)
 - **guards**: `tool_error_rate`, `turns_mean`
 
+## Round-robin module selection (B-5)
+
+Before designing a mutation, call
+`query_module_feedback(target_scenario="format_fix", n=20)` and bias your
+target choice toward the module the grader most-frequently fingered. If
+the same module has been chosen on the last two iterations and didn't
+improve, **force a different module** even when the feedback distribution
+still points at it — the iteration without progress signals you are stuck
+in a local optimum on that module.
+
+For format_fix today the only loaded module is `tool_normalize_json`, so
+the round-robin collapses to a single bucket; the discipline matters as
+soon as a second mutable module joins the scenario.
+
 ## Loop
 
 1. `query_traces(task_class="format_fix", n=20)` — recent production
    traces, if any. Useful for spotting failure patterns.
-2. `read` the loaded `tool_normalize_json` atom source. Identify why
+2. `query_module_feedback(target_scenario="format_fix", n=20)` —
+   identify the candidate target module per the round-robin rule above.
+3. `read` the loaded `tool_normalize_json` atom source. Identify why
    the current implementation fails on tasks like nested objects or
    unicode.
-3. `eval_run({})` — establish the **baseline** eval score under the
+4. `eval_run({})` — establish the **baseline** eval score under the
    current fingerprint. Capture `eval_run_id`.
-4. Design a focused improvement to `tool_normalize_json`. Write the
+5. Design a focused improvement to `tool_normalize_json`. Write the
    full new source as a single Python file string.
-5. `eval_run({"atom_source_overrides": {"tool_normalize_json": <source>}})`
+6. `eval_run({"atom_source_overrides": {"tool_normalize_json": <source>}})`
    — get the **proposed** eval score. Capture `eval_run_id`.
-6. If proposed primary_score - baseline primary_score >= 5% **AND** all
+7. If proposed primary_score - baseline primary_score >= 5% **AND** all
    guard metrics within ±10%, call `propose_change(target={"kind":
    "atom_source", "path": "tool_normalize_json.py", "new_content":
    <source>, "target_atom": "tool_normalize_json"}, rationale=...,

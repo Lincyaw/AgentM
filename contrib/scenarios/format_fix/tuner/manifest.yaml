@@ -11,6 +11,9 @@ extensions:
   - module: agentm.extensions.builtin.tool_read
   - module: agentm.extensions.builtin.tool_grep
   - module: agentm.extensions.builtin.tool_query_traces
+  - module: agentm.extensions.builtin.tool_query_module_feedback
+    config:
+      default_scenario: format_fix
   - module: agentm.extensions.builtin.tool_eval_run
     config:
       target_scenario: format_fix
