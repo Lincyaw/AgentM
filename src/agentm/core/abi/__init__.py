@@ -53,6 +53,7 @@ from .events import (
 )
 from .loop import AgentLoop, LoopConfig
 from .provider import ProviderResolver
+from .session_store import SessionState, SessionStore
 from .messages import (
     AgentMessage,
     AssistantContent,
@@ -103,6 +104,9 @@ __all__ = [
     "LoopConfig",
     # provider
     "ProviderResolver",
+    # session store
+    "SessionState",
+    "SessionStore",
     # messages
     "AgentMessage",
     "AssistantContent",
