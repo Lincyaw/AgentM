@@ -249,14 +249,17 @@ async def test_propose_change_rejects_without_evidence(tmp_path: Path) -> None:
         assert result.is_error is True
         assert "evidence missing" in result.content[0].text
 
-        # Phase-2 ChangeSpec kinds reserved — must reject with
-        # not_yet_implemented (forward-compat MVP guard).
+        # B-3: scenario_compose remains explicitly out of scope and must
+        # still reject with not_yet_implemented. Other Phase-2 kinds
+        # (system_prompt / manifest_field / manifest_extensions) are now
+        # validator-dispatched and exercised in
+        # test_changespec_kinds.py / test_pareto_inclusion.py.
         result2 = await propose.execute(
             {
                 "target": {
-                    "kind": "system_prompt",
-                    "path": "system_prompt.md",
-                    "new_content": "you are a helpful agent",
+                    "kind": "scenario_compose",
+                    "path": "manifest.yaml",
+                    "new_content": "name: anything",
                     "target_atom": None,
                 },
                 "rationale": "test reserved kind",
