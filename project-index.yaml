@@ -493,3 +493,29 @@ requirements:
       - path: .claude/tasks/2026-05-09-issue-97-shared-rendering.md
     depends_on:
       - REQ-086-atom-rework-infra
+
+  - id: REQ-099-presenter-seams
+    title: CLI and Textual presenters expose public seams
+    description: >
+      CLI and Textual presenters must import harness capabilities through the
+      public harness surface, route CLI final output through an injected TextIO
+      stream, allow Textual callers to inject theme, CSS path, and key bindings,
+      surface recoverable theme and clipboard failures visibly, and remove the
+      legacy args_preview tool-call plumbing.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/cli.py
+      - path: src/agentm/modes/textual_app.py
+      - path: src/agentm/harness/__init__.py
+    tests:
+      - path: tests/unit/test_cli_pluggable_boundaries.py
+      - path: tests/unit/test_presenter_injection_seams.py
+      - path: tests/integration/test_textual_tui.py
+    docs:
+      - path: .claude/designs/textual-tui.md
+      - path: .claude/tasks/2026-05-09-issue-99-presenter-seams.md
+    depends_on:
+      - REQ-096-cli-provider-session-seams
+      - REQ-098-textual-tui-registries

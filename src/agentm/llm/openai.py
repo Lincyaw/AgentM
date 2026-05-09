@@ -91,14 +91,12 @@ def _is_openai_retryable(exc: BaseException) -> bool:
     # APIConnectionError / APITimeoutError surface read-timeouts and
     # half-dead TCP — without retry these propagate up and waste the
     # whole rollout. Treat them like 429s.
-    return isinstance(
-        exc,
-        (
-            openai.RateLimitError,
-            openai.APIConnectionError,
-            openai.APITimeoutError,
-        ),
+    retryable_types = tuple(
+        err_type
+        for name in ("RateLimitError", "APIConnectionError", "APITimeoutError")
+        if isinstance((err_type := getattr(openai, name, None)), type)
     )
+    return bool(retryable_types) and isinstance(exc, retryable_types)
 
 
 def _default_httpx_client(*, verify: bool) -> Any:

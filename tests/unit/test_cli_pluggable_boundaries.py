@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 from agentm.ai import ProviderDescriptor, ProviderRegistry
-from agentm.cli import _build_session_config
-from agentm.core.abi import EventBus
+from agentm.cli import _build_session_config, run
+from agentm.core.abi import AssistantMessage, EventBus, TextContent
 from agentm.harness.session_manager import SessionManager
 
 
@@ -106,3 +107,65 @@ def test_cli_continue_uses_injected_session_store_without_disk_lookup() -> None:
     assert store.created_cwds == []
     assert state is store.recent_state
     assert config.session_manager is store.recent_state
+
+
+def test_cli_run_writes_final_output_to_injected_stream(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    class _FakeModel:
+        provider = "fake"
+
+    class _FakeSession:
+        model = _FakeModel()
+
+        async def prompt(self, prompt: str) -> list[AssistantMessage]:
+            assert prompt == "hello"
+            return [
+                AssistantMessage(
+                    role="assistant",
+                    content=[TextContent(type="text", text="streamed answer")],
+                    timestamp=1.0,
+                    stop_reason="end_turn",
+                )
+            ]
+
+        def get_service(self, name: str) -> None:
+            assert name == "cost_query"
+            return None
+
+        async def shutdown(self) -> None:
+            return None
+
+    async def _fake_create(config: Any) -> _FakeSession:
+        assert config.cwd == str(tmp_path)
+        return _FakeSession()
+
+    import agentm.harness
+
+    monkeypatch.setattr(agentm.harness.AgentSession, "create", _fake_create)
+    output = StringIO()
+
+    rc = __import__("asyncio").run(
+        run(
+            prompt="hello",
+            scenario=None,
+            extra_extensions=[],
+            no_extensions=True,
+            no_skills=True,
+            no_prompt_templates=True,
+            tool_allowlist=None,
+            provider="anthropic",
+            model="fake-model",
+            cwd=str(tmp_path),
+            quiet=False,
+            resume=None,
+            continue_recent=False,
+            output=output,
+        )
+    )
+
+    text = output.getvalue()
+    assert rc == 0
+    assert "AGENT FINAL OUTPUT" in text
+    assert "streamed answer" in text
+    assert "session_id=" in text
