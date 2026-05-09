@@ -20,11 +20,7 @@ from dotenv import load_dotenv
 from agentm.ai import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
 from agentm.core.abi.events import DiagnosticEvent, EventBus
 from agentm.core.abi.session_store import SessionState, SessionStore
-from agentm.core.abi.messages import (
-    AssistantMessage,
-    TextContent,
-    ToolCallBlock,
-)
+from agentm.core.lib.render import final_summary
 from agentm.harness.events import ExtensionInstallEvent
 
 
@@ -38,39 +34,30 @@ for _candidate in (_cur, *_cur.parents):
         break
 
 
-def _print_final(final_messages: list) -> None:
-    text_blocks: list[str] = []
-    tool_calls = 0
-    in_tok = out_tok = cache_r = cache_w = 0
-    assistant_turns = 0
-    for msg in final_messages:
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
-                if isinstance(block, TextContent):
-                    text_blocks.append(block.text)
-                elif isinstance(block, ToolCallBlock):
-                    tool_calls += 1
-            usage = getattr(msg, "usage", None)
-            if usage is not None:
-                in_tok += usage.input_tokens
-                out_tok += usage.output_tokens
-                cache_r += usage.cache_read
-                cache_w += usage.cache_write
-                assistant_turns += 1
-
+def _print_final(
+    final_messages: list[Any],
+    *,
+    cost_service: Any | None = None,
+    provider: str | None = None,
+) -> None:
+    report = final_summary(final_messages)
     typer.echo("\n" + "=" * 60)
     typer.echo("AGENT FINAL OUTPUT")
     typer.echo("=" * 60)
-    typer.echo("\n\n".join(text_blocks) if text_blocks else "<no text output>")
+    typer.echo(report.text if report.text else "<no text output>")
     typer.echo("=" * 60)
-    typer.echo(f"messages={len(final_messages)} tool_calls={tool_calls}")
-    if assistant_turns:
+    typer.echo(f"messages={report.message_count} tool_calls={report.tool_calls}")
+    usage = report.usage
+    if usage.assistant_turns:
+        estimate = getattr(cost_service, "estimate", None)
+        cost = estimate(usage, provider=provider) if callable(estimate) else None
+        suffix = f" cost={cost.currency} {cost.amount:.6f}" if cost is not None else ""
+        turns = "turn" if usage.assistant_turns == 1 else "turns"
         typer.echo(
-            f"tokens: in={in_tok} out={out_tok} "
-            f"cache_r={cache_r} cache_w={cache_w} "
-            f"(over {assistant_turns} turn{'s' if assistant_turns != 1 else ''})"
+            f"tokens: in={usage.input_tokens} out={usage.output_tokens} "
+            f"cache_r={usage.cache_read} cache_w={usage.cache_write} "
+            f"(over {usage.assistant_turns} {turns}){suffix}"
         )
-
 
 def _parse_tools(value: str | None) -> list[str] | None:
     if value is None:
@@ -280,11 +267,14 @@ async def _run(
     session = await AgentSession.create(config)
     try:
         final = await session.prompt(prompt)
+        cost_service = session.get_service("cost_query")
+        provider_name = session.model.provider if session.model is not None else None
+        if not quiet:
+            _print_final(final, cost_service=cost_service, provider=provider_name)
     finally:
         await session.shutdown()
 
     if not quiet:
-        _print_final(final)
         sid = session_manager.get_session_id()
         if sid:
             typer.echo(

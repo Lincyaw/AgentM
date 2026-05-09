@@ -37,6 +37,7 @@ FILE_OP_METADATA_KEY = "file_op"
 FILE_OP_READ = "read"
 FILE_OP_WRITE = "write"
 FILE_OP_EDIT = "edit"
+TOOL_RESULT_FORMAT_METADATA_KEY = "result_format"
 
 
 @dataclass(slots=True)
@@ -133,6 +134,7 @@ __all__ = [
     "FILE_OP_METADATA_KEY",
     "FILE_OP_READ",
     "FILE_OP_WRITE",
+    "TOOL_RESULT_FORMAT_METADATA_KEY",
     "Tool",
     "ToolContinue",
     "ToolOutcome",
