@@ -77,6 +77,7 @@ class StreamFn(Protocol):
 - Default implementations live in `agentm-llm` per provider; provider-internal stream assembly is shared by `agentm.llm._common.StreamAccumulator`, so new providers supply only event mapping plus a `ToolSpecAdapter`.
 - Tool-call argument parse failures stay observable as typed stream/bus events (`ToolCallArgsParseError`) while preserving the kernel invariant that `ToolCallBlock.arguments` is a parsed dict.
 - Extensions register additional providers via `register_provider(name, ProviderConfig)`. The harness chooses the active registration through the `ProviderResolver` port; the default `LastRegisteredWins` resolver preserves insertion-order behavior.
+- Presenter-side provider selection goes through `ProviderRegistry.build(provider, config)`: descriptors own CLI extension module paths, default model ids, aliases, and ambient env-var conventions, so adding a provider descriptor does not require editing CLI branches.
 - **Crucial**: `StreamFn` is the only point that touches a real LLM API. The agent loop has zero hard-coded provider knowledge.
 
 **Reference**: pi-mono `packages/agent/src/types.ts:18-26` (`StreamFn` type), `packages/coding-agent/src/core/extensions/types.ts:1212-1245` (`registerProvider` API with `streamSimple` override).
@@ -160,6 +161,7 @@ class SessionManager(Protocol):
 - `payload: Any` (or extensible `details` field per entry type) lets extensions persist structured data without forking the format.
 - Branching, forking, compaction, navigation are **operations on the entry tree**, not separate features.
 - Default impl writes to `~/.agentm/sessions/`; SDK callers can pass `InMemorySessionManager` or `SqliteSessionManager`.
+- Presenters depend on `SessionStore` (`open`, `most_recent`, `create`) rather than globbing JSONL files directly. `JsonlSessionStore` wraps the current `SessionManager` format, while tests and future backends can provide in-memory, sqlite, or remote implementations without changing CLI/TUI construction.
 
 **Reference**: `packages/coding-agent/src/core/session-manager.ts:30-90` (entry types with `parentId`), `:60-78` (`CompactionEntry.details: T` for extension data), `1425` lines total — but the format is what matters, not the implementation size.
 
