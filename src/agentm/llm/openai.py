@@ -88,13 +88,34 @@ def _is_openai_retryable(exc: BaseException) -> bool:
         import openai
     except ImportError:  # pragma: no cover - SDK dependency is optional here
         return False
-    return isinstance(exc, openai.RateLimitError)
+    # APIConnectionError / APITimeoutError surface read-timeouts and
+    # half-dead TCP — without retry these propagate up and waste the
+    # whole rollout. Treat them like 429s.
+    return isinstance(
+        exc,
+        (
+            openai.RateLimitError,
+            openai.APIConnectionError,
+            openai.APITimeoutError,
+        ),
+    )
 
 
 def _default_httpx_client(*, verify: bool) -> Any:
     import httpx
 
-    return httpx.AsyncClient(verify=verify)
+    # Without explicit read timeout, a half-dead TCP connection (server
+    # crash, LB drops idle conn, NAT entry expired) leaves the request
+    # hanging forever — the retry layer never fires because no exception
+    # is raised. Force a finite read timeout so hangs surface as errors
+    # and fall into _create_with_retry.
+    timeout = httpx.Timeout(
+        connect=30.0,
+        read=180.0,
+        write=60.0,
+        pool=30.0,
+    )
+    return httpx.AsyncClient(verify=verify, timeout=timeout)
 
 
 # --- Model registry ---------------------------------------------------------
