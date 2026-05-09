@@ -1,4 +1,38 @@
 requirements:
+  - id: REQ-085-session-policy-extraction
+    title: AgentSession policy extraction and typed runtime boundary
+    description: >
+      AgentSession must stay a thin harness façade by moving prompt policy into
+      atoms, making provider selection explicit through a resolver port,
+      replacing boundary type checks with published Protocol calls, collapsing
+      repeated atom discovery, bundling construction runtime dependencies, and
+      preserving fork isolation through copied entry payloads.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/harness/session.py
+      - path: src/agentm/harness/session_factory.py
+      - path: src/agentm/harness/session_helpers.py
+      - path: src/agentm/harness/session_runtime.py
+      - path: src/agentm/harness/session_config.py
+      - path: src/agentm/harness/provider_resolver.py
+      - path: src/agentm/harness/atom_reloader.py
+      - path: src/agentm/harness/session_manager.py
+      - path: src/agentm/core/abi/provider.py
+      - path: src/agentm/extensions/builtin/cost_budget.py
+      - path: src/agentm/extensions/builtin/slash_commands.py
+    tests:
+      - path: tests/unit/harness/test_session_refactor.py
+      - path: tests/unit/core/catalog/test_indexer.py
+      - path: tests/unit/extensions/test_extension_contract.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-85-session-refactor.md
+    depends_on:
+      - REQ-079-atom-reloader-fail-stop
+      - REQ-086-atom-rework-infra
+
   - id: REQ-086-atom-rework-infra
     title: Atom rework infrastructure surface and validator hardening
     description: >
