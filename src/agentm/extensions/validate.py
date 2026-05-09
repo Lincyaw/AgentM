@@ -21,8 +21,8 @@ Checks (numbered to match design §11.4):
    ``[current - grace, current]`` window (self-modifiable-architecture §4).
 10. ``MANIFEST.tier`` agrees with ``core-manifest.yaml::reload.tier_2_atoms``.
 11. AST hygiene rules reject private API reflection, ExtensionAPI mutation,
-    mutable globals, dynamic ``agentm.*`` imports, and concrete harness-service
-    downcasts.
+    mutable globals, dynamic ``agentm.*`` imports, concrete harness-service
+    downcasts, and undeclared peer-name string references.
 """
 
 from __future__ import annotations
@@ -451,9 +451,100 @@ def _dynamic_import_target(node: ast.Call) -> str | None:
     return None
 
 
-def validate_atom_file(path: str | Path, *, module_path: str = "<atom>") -> list[ValidationIssue]:
+def _manifest_requires_from_tree(tree: ast.Module) -> set[str]:
+    for node in tree.body:
+        value: ast.AST | None = None
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "MANIFEST"
+            for target in node.targets
+        ):
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and (
+            isinstance(node.target, ast.Name) and node.target.id == "MANIFEST"
+        ):
+            value = node.value
+        if not isinstance(value, ast.Call):
+            continue
+        for keyword in value.keywords:
+            if keyword.arg == "requires":
+                return {
+                    item.value
+                    for item in ast.walk(keyword.value)
+                    if isinstance(item, ast.Constant) and isinstance(item.value, str)
+                }
+    return set()
+
+
+def _check_peer_literal_requires(
+    module_path: str,
+    src_file: Path,
+    *,
+    known_extension_names: set[str],
+    manifest_requires: set[str] | None = None,
+    own_name: str | None = None,
+) -> list[ValidationIssue]:
+    try:
+        tree = ast.parse(src_file.read_text(encoding="utf-8"), type_comments=True)
+    except (OSError, SyntaxError) as exc:  # pragma: no cover — defensive
+        return [
+            ValidationIssue(
+                module_path=module_path,
+                rule="11.4.D4-peer-requires-parse",
+                message=f"could not parse {src_file}: {exc}",
+            )
+        ]
+
+    own = own_name or module_path.rpartition(".")[2]
+    requires = manifest_requires if manifest_requires is not None else _manifest_requires_from_tree(tree)
+    peers = known_extension_names - {own}
+    referenced: set[str] = set()
+
+    class _Visitor(ast.NodeVisitor):
+        def visit_Assign(self, node: ast.Assign) -> None:
+            if any(isinstance(target, ast.Name) and target.id == "MANIFEST" for target in node.targets):
+                return
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            if isinstance(node.target, ast.Name) and node.target.id == "MANIFEST":
+                return
+            self.generic_visit(node)
+
+        def visit_Constant(self, node: ast.Constant) -> None:
+            if isinstance(node.value, str) and node.value in peers:
+                referenced.add(node.value)
+
+    _Visitor().visit(tree)
+    return [
+        ValidationIssue(
+            module_path=module_path,
+            rule="11.4.D4-peer-requires",
+            message=(
+                f"string literal references peer atom {name!r} but "
+                "MANIFEST.requires does not declare it"
+            ),
+        )
+        for name in sorted(referenced - requires)
+    ]
+
+
+def validate_atom_file(
+    path: str | Path,
+    *,
+    module_path: str = "<atom>",
+    known_extension_names: set[str] | None = None,
+) -> list[ValidationIssue]:
     src_file = Path(path)
-    return [*_check_imports(module_path, src_file), *_check_ast_rules(module_path, src_file)]
+    known = known_extension_names if known_extension_names is not None else set(discover_builtin())
+    return [
+        *_check_imports(module_path, src_file),
+        *_check_ast_rules(module_path, src_file),
+        *_check_peer_literal_requires(
+            module_path,
+            src_file,
+            known_extension_names=known,
+        ),
+    ]
 
 
 def _classify_import(
@@ -525,6 +616,15 @@ def validate_extension_contract(
     if src_file is not None:
         issues.extend(_check_imports(module_path, src_file))
         issues.extend(_check_ast_rules(module_path, src_file))
+        issues.extend(
+            _check_peer_literal_requires(
+                module_path,
+                src_file,
+                known_extension_names=known_extension_names,
+                manifest_requires=set(resolved_manifest.requires),
+                own_name=name,
+            )
+        )
 
     for tag in resolved_manifest.registers:
         try:

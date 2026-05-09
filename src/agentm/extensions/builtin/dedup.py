@@ -25,6 +25,7 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": True,
     },
+    requires=(),  # Leaf atom: observes tool calls without requiring tool atoms.
 )
 
 

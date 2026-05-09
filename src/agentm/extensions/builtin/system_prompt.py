@@ -21,6 +21,7 @@ MANIFEST = ExtensionManifest(
         "required": ["prompt"],
         "additionalProperties": False,
     },
+    requires=(),  # Leaf atom: prepends configured prompt text only.
 )
 
 

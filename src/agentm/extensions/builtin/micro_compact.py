@@ -23,11 +23,12 @@ MANIFEST = ExtensionManifest(
     config_schema={
         "type": "object",
         "properties": {
-            "threshold_pct": {"type": "number", "minimum": 0.0},
-            "keep_last": {"type": "integer", "minimum": 1},
+            "threshold_pct": {"type": "number", "minimum": 0.0, "default": 0.85},
+            "keep_last": {"type": "integer", "minimum": 1, "default": 8},
         },
         "additionalProperties": False,
     },
+    requires=(),  # Leaf atom: consumes session/compaction services only.
 )
 
 

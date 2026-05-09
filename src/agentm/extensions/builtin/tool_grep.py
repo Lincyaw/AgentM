@@ -23,6 +23,7 @@ MANIFEST = ExtensionManifest(
     description="Register the grep tool backed by rg or stdlib fallback.",
     registers=("tool:grep",),
     config_schema={"type": "object", "properties": {"ops": {"type": "object"}}, "additionalProperties": True},
+    requires=(),  # Leaf tool atom: consumes Operations via ExtensionAPI.
 )
 
 _PARAMETERS: Final = {

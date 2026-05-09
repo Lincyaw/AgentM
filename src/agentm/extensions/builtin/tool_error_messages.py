@@ -33,6 +33,7 @@ MANIFEST = ExtensionManifest(
     ),
     registers=("event:tool_error",),
     config_schema=None,
+    requires=(),  # Leaf atom: formats tool_error events only.
 )
 
 

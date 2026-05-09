@@ -375,3 +375,29 @@ def test_D6_local_class_isinstance_allowed(tmp_path: Path) -> None:
     )
 
     assert not any(issue.rule == "11.4.D6-harness-service-downcast" for issue in issues)
+
+
+def test_D4_peer_literal_requires_manifest_entry(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'from agentm.extensions import ExtensionManifest\n'
+        'MANIFEST = ExtensionManifest(name="synthetic", description="", registers=())\n'
+        'def install(api, config):\n'
+        '    return "system_prompt"\n',
+    )
+
+    assert any(issue.rule == "11.4.D4-peer-requires" for issue in issues)
+
+
+def test_D4_declared_peer_literal_allowed(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'from agentm.extensions import ExtensionManifest\n'
+        'MANIFEST = ExtensionManifest(\n'
+        '    name="synthetic", description="", registers=(), requires=("system_prompt",)\n'
+        ')\n'
+        'def install(api, config):\n'
+        '    return "system_prompt"\n',
+    )
+
+    assert not any(issue.rule == "11.4.D4-peer-requires" for issue in issues)
