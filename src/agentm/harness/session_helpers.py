@@ -4,13 +4,33 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from agentm.core.abi import AgentMessage, EventBus, LoopConfig, TerminationCause
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.harness.extension import ExtensionLoadError, ProviderConfig, ReadonlySession
 from agentm.harness.session_manager import SessionEntry, SessionManager
+
+
+@dataclass(frozen=True, slots=True)
+class AtomSource:
+    """Auto-discovery source description.
+
+    Folds the previously-triplicated builtin/contrib/user iteration
+    in ``session_factory._resolve_extensions`` into a single loop. Each
+    source pairs a human-readable ``label`` (used in diagnostic
+    messages and as the ``source`` field on ``DiagnosticEvent``) with
+    a zero-arg ``discover`` callable returning a manifest dict, and an
+    optional ``skip_label`` prefix used to format "skipped …" messages
+    when an entry's manifest demands config the auto-discovery path
+    cannot supply.
+    """
+
+    label: str
+    discover: Callable[[], dict[str, Any]]
+    skip_label: str = ""
 
 
 class SessionView:
@@ -92,37 +112,56 @@ async def _iter_auto_discovered_atoms(
     discover: Callable[[], dict[str, Any]],
     skip_label: str,
 ) -> list[tuple[str, dict[str, Any]]]:
-    try:
-        discovered = discover()
-    except Exception as exc:  # noqa: BLE001
-        await bus.emit(
-            DiagnosticEvent.CHANNEL,
-            DiagnosticEvent(
-                level="error",
-                source="auto_discovery",
-                message=f"{source} atom discovery failed: {exc}",
-            ),
-        )
-        return []
+    """Discover one source's atoms; emit diagnostics for failures and
+    config-incomplete entries. Kept as a thin shim over
+    :func:`collect_auto_discovered_atoms` for backward compatibility.
+    """
+    return await collect_auto_discovered_atoms(
+        bus=bus,
+        sources=(AtomSource(label=source, discover=discover, skip_label=skip_label),),
+    )
 
+
+async def collect_auto_discovered_atoms(
+    *,
+    bus: EventBus,
+    sources: Iterable[AtomSource],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Run every source's discovery callable and collect the loadable
+    atoms in order. Each source is independent: a failure in one only
+    skips its own entries while still running the rest.
+    """
     selected: list[tuple[str, dict[str, Any]]] = []
-    for entry in discovered.values():
-        if atom_requires_unsupplied_config(entry.manifest, {}):
-            missing = missing_required_fields(entry.manifest, {})
+    for source in sources:
+        try:
+            discovered = source.discover()
+        except Exception as exc:  # noqa: BLE001
             await bus.emit(
                 DiagnosticEvent.CHANNEL,
                 DiagnosticEvent(
-                    level="info",
+                    level="error",
                     source="auto_discovery",
-                    message=(
-                        f"skipped {skip_label}{entry.name}: requires "
-                        f"config keys {missing!r}; load via --scenario "
-                        "or explicit extensions= list"
-                    ),
+                    message=f"{source.label} atom discovery failed: {exc}",
                 ),
             )
             continue
-        selected.append((entry.module_path, {}))
+        for entry in discovered.values():
+            if atom_requires_unsupplied_config(entry.manifest, {}):
+                missing = missing_required_fields(entry.manifest, {})
+                await bus.emit(
+                    DiagnosticEvent.CHANNEL,
+                    DiagnosticEvent(
+                        level="info",
+                        source="auto_discovery",
+                        message=(
+                            f"skipped {source.skip_label}{entry.name}: requires "
+                            f"config keys {missing!r}; load via --scenario "
+                            "or explicit extensions= list"
+                        ),
+                    ),
+                )
+                continue
+            selected.append((entry.module_path, {}))
     return selected
 
 

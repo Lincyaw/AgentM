@@ -749,10 +749,32 @@ def install(api: Any, config: dict[str, Any]) -> None:
         model_kwargs["max_output_tokens"] = int(config["max_output_tokens"])
     model = _build_model(model_id, **model_kwargs)
 
-    name = config.get("name") or "openai"
+    raw_name = config.get("name")
+    base_url = config.get("base_url")
+    if raw_name is None:
+        if _is_non_canonical_base_url(base_url):
+            raise DuplicateProviderError(
+                "agentm.llm.openai.install: config['name'] is required when "
+                f"base_url={base_url!r} is set to a non-canonical "
+                "OpenAI-compatible endpoint. Multiple custom endpoints "
+                "default to the bare 'openai' registry name and would "
+                "silently overwrite each other. Pass an explicit "
+                "config['name'] (e.g. 'doubao', 'litellm', 'deepseek')."
+            )
+        name = "openai"
+    else:
+        name = raw_name
     if not isinstance(name, str) or not name:
         raise ValueError(
             "agentm.llm.openai.install: config['name'] must be a non-empty string."
+        )
+
+    existing = getattr(api, "_providers", None)
+    if isinstance(existing, dict) and name in existing:
+        raise DuplicateProviderError(
+            f"agentm.llm.openai.install: provider name {name!r} is already "
+            "registered in this session. Choose a unique config['name'] for "
+            "each OpenAI-compatible endpoint."
         )
 
     api.register_provider(
@@ -761,4 +783,39 @@ def install(api: Any, config: dict[str, Any]) -> None:
     )
 
 
-__all__ = ["OpenAIStreamFn", "install"]
+# Canonical OpenAI base URLs — anything else is treated as a custom endpoint
+# (LiteLLM, DeepSeek, Doubao, vLLM, Ollama, ...). When ``name`` is omitted for
+# such an endpoint the provider would otherwise silently register under the
+# default key ``"openai"`` and overwrite an earlier custom registration.
+_CANONICAL_OPENAI_BASE_URLS: frozenset[str] = frozenset(
+    {
+        "https://api.openai.com/v1",
+        "https://api.openai.com/v1/",
+        "https://api.openai.com",
+        "https://api.openai.com/",
+    }
+)
+
+
+def _is_non_canonical_base_url(base_url: object) -> bool:
+    if base_url is None:
+        return False
+    if not isinstance(base_url, str) or not base_url.strip():
+        return False
+    return base_url.rstrip("/") not in {url.rstrip("/") for url in _CANONICAL_OPENAI_BASE_URLS}
+
+
+class DuplicateProviderError(ValueError):
+    """Raised when an OpenAI-compatible provider would shadow an existing one.
+
+    Two situations trigger this:
+
+    * ``config['base_url']`` points at a non-canonical (custom) OpenAI-compatible
+      endpoint and ``config['name']`` was not supplied — the install would
+      otherwise default to the bare ``"openai"`` registry key and silently
+      collide with another custom endpoint registered in the same session.
+    * The session already has a provider registered under the requested name.
+    """
+
+
+__all__ = ["DuplicateProviderError", "OpenAIStreamFn", "install"]
