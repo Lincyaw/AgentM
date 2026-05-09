@@ -499,7 +499,9 @@ class PromptInput(TextArea):
 _ModalResultT = TypeVar("_ModalResultT")
 
 
-class _DismissibleModal(ModalScreen[_ModalResultT | None], Generic[_ModalResultT]):
+class _DismissibleModal(
+    ModalScreen[_ModalResultT | None], Generic[_ModalResultT]
+):
     """Modal screen base that closes on ``Esc``.
 
     The cancel action is identical for all three modals we ship; pulling
@@ -528,9 +530,7 @@ class CommandPaletteScreen(_DismissibleModal[str]):
 
     def compose(self) -> ComposeResult:
         with Container(id="command-palette"):
-            yield Input(
-                value=self._initial, placeholder="Filter commands", id="command-filter"
-            )
+            yield Input(value=self._initial, placeholder="Filter commands", id="command-filter")
             yield OptionList(id="command-options")
 
     def on_mount(self) -> None:
@@ -570,17 +570,14 @@ class CommandPaletteScreen(_DismissibleModal[str]):
             self._filtered = [
                 command
                 for command in self._commands
-                if needle in command.name.lower()
-                or needle in command.description.lower()
+                if needle in command.name.lower() or needle in command.description.lower()
             ]
         else:
             self._filtered = list(self._commands)
         options = self.query_one("#command-options", OptionList)
         options.clear_options()
         for command in self._filtered:
-            options.add_option(
-                Option(f"{command.name} — {command.description}", id=command.name)
-            )
+            options.add_option(Option(f"{command.name} — {command.description}", id=command.name))
         if options.option_count:
             options.highlighted = 0
 
@@ -588,9 +585,7 @@ class CommandPaletteScreen(_DismissibleModal[str]):
 class HelpScreen(_DismissibleModal[None]):
     def __init__(self, commands: list[SlashCommandEntry]) -> None:
         super().__init__()
-        command_lines = "\n".join(
-            f"- `{entry.name}` — {entry.description}" for entry in commands
-        )
+        command_lines = "\n".join(f"- `{entry.name}` — {entry.description}" for entry in commands)
         self._markdown = Markdown(
             "# Help\n\n"
             "## Keys\n"
@@ -679,9 +674,7 @@ class AgentMApp(App[int]):
         # launch. Live updates from reload / runtime registration mutate
         # the same dicts via the bus handlers.
         self._extensions: dict[str, ExtensionInstallEvent] = dict(extensions or {})
-        self._tools: dict[str, ToolEntry] = {
-            entry.name: entry for entry in (tools or [])
-        }
+        self._tools: dict[str, ToolEntry] = {entry.name: entry for entry in (tools or [])}
         self._budget_state: CostBudgetExceededEvent | None = None
         # Cached on first mount via on_mount; before then it stays None
         # and registry counters live only in the snapshot dicts above.
@@ -749,7 +742,9 @@ class AgentMApp(App[int]):
                 loaded += 1
             elif ev.phase == "error":
                 failed += 1
-        self._header.set_registry(loaded=loaded, failed=failed, tools=len(self._tools))
+        self._header.set_registry(
+            loaded=loaded, failed=failed, tools=len(self._tools)
+        )
 
     async def on_unmount(self) -> None:
         if self._flush_timer is not None:
@@ -812,14 +807,10 @@ class AgentMApp(App[int]):
         if self._history_index is None:
             self._history_index = len(self._history) - 1 if direction < 0 else 0
         else:
-            self._history_index = max(
-                0, min(len(self._history) - 1, self._history_index + direction)
-            )
+            self._history_index = max(0, min(len(self._history) - 1, self._history_index + direction))
         prompt = self.query_one(PromptInput)
         prompt.load_text(self._history[self._history_index])
-        prompt.move_cursor(
-            (len(prompt.document.lines) - 1, len(prompt.document.lines[-1]))
-        )
+        prompt.move_cursor((len(prompt.document.lines) - 1, len(prompt.document.lines[-1])))
         self.refresh_input_height()
         return True
 
@@ -838,17 +829,13 @@ class AgentMApp(App[int]):
             self._copy_last_assistant_text()
             return True
         if lowered == "/extensions":
-            self.push_screen(
-                InfoModal("Extensions", _build_extensions_table(self._extensions))
-            )
+            self.push_screen(InfoModal("Extensions", _build_extensions_table(self._extensions)))
             return True
         if lowered == "/tools":
             self.push_screen(InfoModal("Tools", _build_tools_table(self._tools)))
             return True
         if lowered == "/budget":
-            self.push_screen(
-                InfoModal("Budget", _build_budget_panel(self._budget_state))
-            )
+            self.push_screen(InfoModal("Budget", _build_budget_panel(self._budget_state)))
             return True
         return False
 
@@ -863,9 +850,7 @@ class AgentMApp(App[int]):
         except Exception:  # noqa: BLE001
             pass
         try:
-            payload = base64.b64encode(
-                self._last_assistant_text.encode("utf-8")
-            ).decode("ascii")
+            payload = base64.b64encode(self._last_assistant_text.encode("utf-8")).decode("ascii")
             sys.stdout.write(f"\033]52;c;{payload}\a")
             sys.stdout.flush()
         except Exception:  # noqa: BLE001
@@ -1033,9 +1018,10 @@ class AgentMApp(App[int]):
         status.tokens_out = usage.output_tokens
         model = self._session.model
         pricing = getattr(model, "metadata", {}).get("pricing", (0.0, 0.0))
-        status.cost_usd = (usage.input_tokens / 1_000_000.0) * pricing[0] + (
-            usage.output_tokens / 1_000_000.0
-        ) * pricing[1]
+        status.cost_usd = (
+            (usage.input_tokens / 1_000_000.0) * pricing[0]
+            + (usage.output_tokens / 1_000_000.0) * pricing[1]
+        )
 
     def _render_child_delta(self, delta: Any) -> None:
         if not self._child_turns:
@@ -1091,9 +1077,7 @@ class AgentMApp(App[int]):
             return
         state = self._tool_states.get(event.tool_call_id)
         if state is None:
-            state = ToolRenderState(
-                tool_name=event.tool_name, start_ns=time.perf_counter_ns()
-            )
+            state = ToolRenderState(tool_name=event.tool_name, start_ns=time.perf_counter_ns())
             self._tool_states[event.tool_call_id] = state
         state.args = dict(event.args)
         self.set_phase("tool")
@@ -1112,9 +1096,7 @@ class AgentMApp(App[int]):
         state = self._tool_states.get(event.tool_call_id)
         duration_ms = 0
         if state is not None:
-            duration_ms = max(
-                0, int((time.perf_counter_ns() - state.start_ns) / 1_000_000)
-            )
+            duration_ms = max(0, int((time.perf_counter_ns() - state.start_ns) / 1_000_000))
 
         async def _apply() -> None:
             block = await turn.ensure_tool(event.tool_call_id, event.tool_name)
@@ -1242,7 +1224,9 @@ class AgentMApp(App[int]):
         a user-typed one; rendering it with a distinct gutter is the
         only signal the user has that they did not, in fact, type it."""
 
-        text = event.content if isinstance(event.content, str) else repr(event.content)
+        text = (
+            event.content if isinstance(event.content, str) else repr(event.content)
+        )
 
         async def _mount() -> None:
             log = self.query_one(ConversationLog)
