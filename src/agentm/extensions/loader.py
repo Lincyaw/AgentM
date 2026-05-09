@@ -300,14 +300,32 @@ def _ensure_scenario_import_roots(scenario_dir: Path) -> None:
     Tests and local dev runs load manifests straight from the repo checkout
     without first installing each scenario package, so the loader needs to
     surface that source root on ``sys.path`` before validating imports.
+
+    Manifests may also reference ``contrib.extensions.<name>`` (per the
+    CLAUDE.md layout: nested packages under ``<root>/contrib/extensions/``).
+    Entry-point scripts run with ``sys.path[0]`` pointing at the venv
+    bin dir, not the project root, so ``import contrib`` raises
+    ``ModuleNotFoundError`` and the whole manifest load fails — silently
+    leaving the session with zero tools. Detect the canonical
+    ``<root>/contrib/scenarios/<name>/`` layout and add ``<root>`` so
+    those references resolve.
     """
 
     src_root = scenario_dir / "src"
-    if not src_root.is_dir():
-        return
-    src_str = str(src_root)
-    if src_str not in sys.path:
-        sys.path.insert(0, src_str)
+    if src_root.is_dir():
+        src_str = str(src_root)
+        if src_str not in sys.path:
+            sys.path.insert(0, src_str)
+
+    parents = scenario_dir.parents
+    if (
+        len(parents) >= 2
+        and parents[0].name == "scenarios"
+        and parents[1].name == "contrib"
+    ):
+        project_root = str(parents[2])
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
 
 
 def _register_local(
