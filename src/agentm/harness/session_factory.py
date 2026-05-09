@@ -36,9 +36,10 @@ from agentm.harness.session_config import (
     default_child_provider_factory,
 )
 from agentm.harness.session_helpers import (
+    AtomSource,
     SessionView,
+    collect_auto_discovered_atoms,
     ensure_floor_atom,
-    _iter_auto_discovered_atoms,
     resolve_provider_config,
 )
 from agentm.harness.session_manager import InMemorySessionManager, SessionManager
@@ -395,30 +396,26 @@ async def _resolve_extensions(
         ensure_floor_atom(to_load, compaction_prompts_module)
         ensure_floor_atom(to_load, slash_commands_module)
     else:
-        to_load = []
-        to_load.extend(
-            await _iter_auto_discovered_atoms(
-                bus=bus,
-                source="builtin",
-                discover=discover_mod.discover_builtin,
-                skip_label="",
-            )
-        )
-        to_load.extend(
-            await _iter_auto_discovered_atoms(
-                bus=bus,
-                source="contrib",
-                discover=discover_mod.discover_contrib_atoms,
-                skip_label="contrib atom ",
-            )
-        )
-        to_load.extend(
-            await _iter_auto_discovered_atoms(
-                bus=bus,
-                source="user",
-                discover=lambda: discover_mod.discover_user_atoms(Path(config.cwd)),
-                skip_label="user atom ",
-            )
+        to_load = await collect_auto_discovered_atoms(
+            bus=bus,
+            sources=(
+                AtomSource(
+                    label="builtin",
+                    discover=discover_mod.discover_builtin,
+                ),
+                AtomSource(
+                    label="contrib",
+                    discover=discover_mod.discover_contrib_atoms,
+                    skip_label="contrib atom ",
+                ),
+                AtomSource(
+                    label="user",
+                    discover=lambda: discover_mod.discover_user_atoms(
+                        Path(config.cwd)
+                    ),
+                    skip_label="user atom ",
+                ),
+            ),
         )
         ensure_floor_atom(to_load, system_prompt_module)
         for index, (module_path, _cfg) in enumerate(to_load):
