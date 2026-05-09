@@ -73,38 +73,42 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     async def _load(args: dict[str, Any]) -> ToolResult:
         path = str(args["path"])
+        # Narrow: ``read_file`` raises ``OSError`` on missing/permission,
+        # ``_parse_jsonl`` raises ``json.JSONDecodeError`` /
+        # ``UnicodeDecodeError`` on malformed payloads. Anything else
+        # propagates.
         try:
             events = _parse_jsonl(await file_ops.read_file(path))
-            loaded[path] = events
-            current_path[0] = path
-            return _json_result(
-                {"path": path, "event_count": len(events), "loaded": True}
-            )
-        except Exception as exc:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             return _error(f"Failed to load trajectory {path!r}: {exc}")
+        loaded[path] = events
+        current_path[0] = path
+        return _json_result(
+            {"path": path, "event_count": len(events), "loaded": True}
+        )
 
     async def _summarize(args: dict[str, Any]) -> ToolResult:
         try:
             path, events = _resolve_loaded(loaded, current_path[0], args.get("path"))
-            channels = Counter(str(item.get("channel", "unknown")) for item in events)
-            return _json_result(
-                {
-                    "path": path,
-                    "event_count": len(events),
-                    "channels": dict(sorted(channels.items())),
-                }
-            )
-        except Exception as exc:
+        except ValueError as exc:
             return _error(f"Failed to summarize trajectory: {exc}")
+        channels = Counter(str(item.get("channel", "unknown")) for item in events)
+        return _json_result(
+            {
+                "path": path,
+                "event_count": len(events),
+                "channels": dict(sorted(channels.items())),
+            }
+        )
 
     async def _find(args: dict[str, Any]) -> ToolResult:
         predicate = str(args["predicate"])
         try:
             _path, events = _resolve_loaded(loaded, current_path[0], args.get("path"))
-            matches = [event for event in events if _matches(event, predicate)]
-            return _json_result(matches)
-        except Exception as exc:
+        except ValueError as exc:
             return _error(f"Failed to find trajectory event: {exc}")
+        matches = [event for event in events if _matches(event, predicate)]
+        return _json_result(matches)
 
     async def _compare(args: dict[str, Any]) -> ToolResult:
         try:
