@@ -1,7 +1,7 @@
 """Scenario-local extension: load the single-investigator prompt.
 
 Mirrors :mod:`agentm_rca.orchestrator_setup` but without sub-agent
-machinery — there is no ``<available_agents>`` block, no
+machinery — there is no sub-agent availability block, no
 ``resolve_subagent`` handler, no persona discovery. Just the prompt
 plus the rcabench-platform agent contract block.
 """
@@ -37,7 +37,7 @@ MANIFEST = ExtensionManifest(
 
 def _load_agent_contract_block() -> str:
     try:
-        from rcabench_platform.v3.sdk.evaluation.v2 import (
+        from rcabench_platform.v3.sdk.evaluation.v2 import (  # type: ignore[import-not-found]
             get_agent_contract_prompt,
         )
     except ImportError:

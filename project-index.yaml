@@ -133,3 +133,38 @@ requirements:
     depends_on:
       - REQ-086-atom-rework-infra
 
+  - id: REQ-100-cc-extension-package
+    title: Claude Code compatibility atoms share a package boundary
+    description: >
+      The Claude Code compatibility atoms must be mounted explicitly as the
+      `contrib.extensions.cc` package, with agents, commands, and plugins as
+      tier-2 single-file atoms. Markdown frontmatter parsing for command skill
+      records is shared inside the package, plugin command discovery flows
+      through the typed ResourcesDiscoverEvent contract instead of an
+      extra_skills workaround, and sub-agent availability XML rendering is
+      centralized in core.lib for reuse by RCA.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: contrib/extensions/cc/__init__.py
+      - path: contrib/extensions/cc/_md_skills.py
+      - path: contrib/extensions/cc/agents.py
+      - path: contrib/extensions/cc/commands.py
+      - path: contrib/extensions/cc/plugins.py
+      - path: src/agentm/core/lib/available_agents.py
+      - path: src/agentm/core/lib/__init__.py
+      - path: contrib/scenarios/rca/orchestrator_setup.py
+      - path: contrib/scenarios/rca/prompts/orchestrator.md
+      - path: contrib/scenarios/rca_single/setup.py
+      - path: pyproject.toml
+    tests:
+      - path: tests/unit/contrib/test_cc_extension_package.py
+      - path: contrib/scenarios/rca/tests/test_rca_orchestrator_setup.py
+    docs:
+      - path: .claude/designs/extension-as-scenario.md
+      - path: .claude/designs/self-modifiable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-100-cc-package.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
