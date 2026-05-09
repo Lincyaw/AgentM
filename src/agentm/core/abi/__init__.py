@@ -54,6 +54,7 @@ from .events import (
 from .loop import AgentLoop, LoopConfig
 from .provider import ProviderResolver
 from .retry import RetryPolicy
+from .session_store import SessionState, SessionStore
 from .messages import (
     AgentMessage,
     AssistantContent,
@@ -106,6 +107,9 @@ __all__ = [
     "ProviderResolver",
     # retry
     "RetryPolicy",
+    # session store
+    "SessionState",
+    "SessionStore",
     # messages
     "AgentMessage",
     "AssistantContent",
