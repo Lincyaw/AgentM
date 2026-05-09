@@ -11,6 +11,7 @@ signal in CI / pytest.
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -263,3 +264,74 @@ def test_tier_1_atom_listed_in_manifest_warns(
         f"listed in core_manifest.tier_2_atoms but declares tier!=2; "
         f"got: {[(i.rule, i.message) for i in issues]}"
     )
+
+
+def _validate_source(tmp_path: Path, source: str) -> list[ValidationIssue]:
+    path = tmp_path / "atom.py"
+    path.write_text(source, encoding="utf-8")
+    from agentm.extensions.validate import validate_atom_file
+
+    return validate_atom_file(path, module_path="agentm.extensions.builtin.synthetic")
+
+
+def test_D1_private_api_getattr_rejected(tmp_path: Path) -> None:
+    issues = _validate_source(tmp_path, 'def install(api, config):\n    getattr(api, "_observer")\n')
+
+    assert any(issue.rule == "11.4.D1-private-api-reflection" for issue in issues)
+
+
+def test_D1_other_object_private_getattr_allowed(tmp_path: Path) -> None:
+    issues = _validate_source(tmp_path, 'def install(api, config):\n    getattr(other_obj, "_x")\n')
+
+    assert not any(issue.rule == "11.4.D1-private-api-reflection" for issue in issues)
+
+
+def test_D1_private_api_events_getattr_rejected(tmp_path: Path) -> None:
+    issues = _validate_source(tmp_path, 'def install(api, config):\n    getattr(api.events, "_observer")\n')
+
+    assert any(issue.rule == "11.4.D1-private-api-reflection" for issue in issues)
+
+
+def test_D2_api_attribute_assignment_rejected(tmp_path: Path) -> None:
+    issues = _validate_source(tmp_path, 'def install(api, config):\n    api.on = something\n')
+
+    assert any(issue.rule == "11.4.D2-api-attribute-overwrite" for issue in issues)
+
+
+def test_D2_non_api_attribute_assignment_allowed(tmp_path: Path) -> None:
+    issues = _validate_source(tmp_path, 'def install(api, config):\n    local_var.on = something\n')
+
+    assert not any(issue.rule == "11.4.D2-api-attribute-overwrite" for issue in issues)
+
+
+def test_D3_mutable_global_without_final_rejected(tmp_path: Path) -> None:
+    issues = _validate_source(tmp_path, '_GLOBAL: dict[str, Any] = {}\n')
+
+    assert any(issue.rule == "11.4.D3-mutable-global" for issue in issues)
+
+
+def test_D3_mutable_global_with_final_allowed(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'from typing import Final\n_GLOBAL: Final[dict[str, Any]] = {}\n',
+    )
+
+    assert not any(issue.rule == "11.4.D3-mutable-global" for issue in issues)
+
+
+def test_D5_agentm_fstring_dynamic_import_rejected(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'import importlib\ndef install(api, config):\n    importlib.import_module(f"agentm.{name}")\n',
+    )
+
+    assert any(issue.rule == "11.4.D5-dynamic-agentm-import" for issue in issues)
+
+
+def test_D5_unrelated_fstring_dynamic_import_allowed(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'import importlib\ndef install(api, config):\n    importlib.import_module(f"unrelated.{name}")\n',
+    )
+
+    assert not any(issue.rule == "11.4.D5-dynamic-agentm-import" for issue in issues)

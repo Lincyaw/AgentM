@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 from agentm.core.abi import TextContent, Tool, ToolResult
 from agentm.core.lib.path_utils import resolve_to_cwd
@@ -24,7 +24,7 @@ MANIFEST = ExtensionManifest(
     },
 )
 
-_PARAMETERS = {
+_PARAMETERS: Final = {
     "type": "object",
     "properties": {
         "path": {"type": "string", "default": "."},

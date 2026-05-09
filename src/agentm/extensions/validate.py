@@ -219,7 +219,7 @@ def _check_imports(
 
     issues: list[ValidationIssue] = []
     try:
-        tree = ast.parse(src_file.read_text(encoding="utf-8"))
+        tree = ast.parse(src_file.read_text(encoding="utf-8"), type_comments=True)
     except (OSError, SyntaxError) as exc:  # pragma: no cover — defensive
         return [
             ValidationIssue(
@@ -252,6 +252,143 @@ def _check_imports(
     return issues
 
 
+def _check_ast_rules(module_path: str, src_file: Path) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    try:
+        tree = ast.parse(src_file.read_text(encoding="utf-8"), type_comments=True)
+    except (OSError, SyntaxError) as exc:  # pragma: no cover — defensive
+        return [
+            ValidationIssue(
+                module_path=module_path,
+                rule="11.4.ast-parse",
+                message=f"could not parse {src_file}: {exc}",
+            )
+        ]
+
+    ignored_lines = {ignore.lineno for ignore in tree.type_ignores}
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _is_private_api_getattr(node):
+            issues.append(
+                ValidationIssue(
+                    module_path=module_path,
+                    rule="11.4.D1-private-api-reflection",
+                    message="getattr(api, '_*') and getattr(api.events, '_*') are forbidden",
+                )
+            )
+        if isinstance(node, ast.Call) and _is_agentm_fstring_import(node):
+            issues.append(
+                ValidationIssue(
+                    module_path=module_path,
+                    rule="11.4.D5-dynamic-agentm-import",
+                    message="dynamic f-string imports under 'agentm.' are forbidden",
+                )
+            )
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if target.lineno not in ignored_lines and _is_api_attribute_target(target):
+                    issues.append(
+                        ValidationIssue(
+                            module_path=module_path,
+                            rule="11.4.D2-api-attribute-overwrite",
+                            message="atoms must not overwrite ExtensionAPI attributes",
+                        )
+                    )
+        elif (
+            isinstance(node, (ast.AnnAssign, ast.AugAssign))
+            and node.target.lineno not in ignored_lines
+            and _is_api_attribute_target(node.target)
+        ):
+            issues.append(
+                ValidationIssue(
+                    module_path=module_path,
+                    rule="11.4.D2-api-attribute-overwrite",
+                    message="atoms must not overwrite ExtensionAPI attributes",
+                )
+            )
+
+    for node in tree.body:
+        if _is_unfinalized_mutable_global(node):
+            issues.append(
+                ValidationIssue(
+                    module_path=module_path,
+                    rule="11.4.D3-mutable-global",
+                    message="module-level dict/list/set globals must be annotated Final",
+                )
+            )
+    return issues
+
+
+def _is_private_api_getattr(node: ast.Call) -> bool:
+    if not isinstance(node.func, ast.Name) or node.func.id != "getattr" or len(node.args) < 2:
+        return False
+    target, attr = node.args[0], node.args[1]
+    if not (
+        isinstance(attr, ast.Constant)
+        and isinstance(attr.value, str)
+        and attr.value.startswith("_")
+    ):
+        return False
+    if isinstance(target, ast.Name) and target.id == "api":
+        return True
+    return (
+        isinstance(target, ast.Attribute)
+        and target.attr == "events"
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "api"
+    )
+
+
+def _is_api_attribute_target(target: ast.expr) -> bool:
+    return (
+        isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "api"
+    )
+
+
+def _is_agentm_fstring_import(node: ast.Call) -> bool:
+    func = node.func
+    is_dynamic_import = False
+    if isinstance(func, ast.Attribute) and func.attr == "import_module":
+        is_dynamic_import = True
+    elif isinstance(func, ast.Name) and func.id in {"import_module", "__import__"}:
+        is_dynamic_import = True
+    if not is_dynamic_import or not node.args:
+        return False
+    first = node.args[0]
+    if not isinstance(first, ast.JoinedStr) or not first.values:
+        return False
+    prefix = first.values[0]
+    return (
+        isinstance(prefix, ast.Constant)
+        and isinstance(prefix.value, str)
+        and prefix.value.startswith("agentm.")
+    )
+
+
+def _is_unfinalized_mutable_global(node: ast.stmt) -> bool:
+    if isinstance(node, ast.AnnAssign):
+        return _is_mutable_literal(node.value) and not _annotation_is_final(node.annotation)
+    if isinstance(node, ast.Assign):
+        return _is_mutable_literal(node.value)
+    return False
+
+
+def _is_mutable_literal(node: ast.expr | None) -> bool:
+    return isinstance(node, (ast.Dict, ast.List, ast.Set))
+
+
+def _annotation_is_final(node: ast.expr) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == "Final"
+    if isinstance(node, ast.Attribute):
+        return node.attr == "Final"
+    if isinstance(node, ast.Subscript):
+        return _annotation_is_final(node.value)
+    return False
+
+
 def _dynamic_import_target(node: ast.Call) -> str | None:
     """Return the constant module name passed to ``importlib.import_module``
     or ``__import__``, or ``None`` if the call is unrelated or non-constant."""
@@ -269,6 +406,11 @@ def _dynamic_import_target(node: ast.Call) -> str | None:
     if isinstance(first, ast.Constant) and isinstance(first.value, str):
         return first.value
     return None
+
+
+def validate_atom_file(path: str | Path, *, module_path: str = "<atom>") -> list[ValidationIssue]:
+    src_file = Path(path)
+    return [*_check_imports(module_path, src_file), *_check_ast_rules(module_path, src_file)]
 
 
 def _classify_import(
@@ -339,6 +481,7 @@ def validate_extension_contract(
 
     if src_file is not None:
         issues.extend(_check_imports(module_path, src_file))
+        issues.extend(_check_ast_rules(module_path, src_file))
 
     for tag in resolved_manifest.registers:
         try:
@@ -468,6 +611,7 @@ def validate_extension_contract(
 
 __all__ = [
     "ValidationIssue",
+    "validate_atom_file",
     "validate_extension_contract",
     "validate_builtin",
 ]
