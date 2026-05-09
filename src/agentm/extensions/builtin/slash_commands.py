@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
+from agentm.core.abi import BusPriority
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import CommandDispatchedEvent
 from agentm.harness.extension import ExtensionAPI
@@ -78,4 +79,4 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         event["handled_messages"] = messages
         return {"handled": True, "messages": messages}
 
-    api.on("input", _on_input)
+    api.on("input", _on_input, priority=BusPriority.PRE)
