@@ -300,7 +300,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 f"harness compose-graph reload; out of scope for Phase 2 "
                 f"(design §11)"
             )
-        validator = _load_validator(kind)
+        validator = _load_validator(kind, cwd=cwd)
         if validator is None:
             return _error(
                 f"not_yet_implemented: no validator registered for "
@@ -1124,27 +1124,40 @@ def _apply_deployment_gate(
     }
 
 
-def _load_validator(kind: str) -> Any:
+def _load_validator(kind: str, cwd: Path | None = None) -> Any:
     """Load the per-kind validator from
     ``contrib/extensions/changespec_validators/<kind>.py`` and return its
     ``validate`` callable. Returns ``None`` when no module is registered.
 
-    The validators live under ``contrib/`` (not ``src/agentm/``) because
-    they encode scenario-shape policy, not core mechanism. Importing them
-    from this builtin atom is acceptable: validators are not atoms (no
-    MANIFEST), so the §11 "no atom-to-atom imports" rule does not apply.
+    Validators live under ``contrib/`` (not ``src/agentm/``) because they
+    encode scenario-shape policy, not core mechanism. They are not atoms
+    (no MANIFEST), so the §11 contract does not apply. We load by file
+    path rather than ``importlib.import_module`` because ``contrib`` is
+    not a regular Python package on ``sys.path`` when ``agentm`` is
+    invoked as a console script — only when run via ``python -c`` from
+    the repo root.
     """
-    import importlib
+    import importlib.util
 
     safe_kind = kind.strip().lower()
     if not safe_kind.replace("_", "").isalnum():
         return None
-    module_name = (
-        f"contrib.extensions.changespec_validators.{safe_kind}"
-    )
+    rel = Path("contrib") / "extensions" / "changespec_validators" / f"{safe_kind}.py"
+    candidates: list[Path] = []
+    if cwd is not None:
+        candidates.append(cwd / rel)
+    candidates.append(Path(__file__).resolve().parents[4] / rel)
+    file_path: Path | None = next((p for p in candidates if p.is_file()), None)
+    if file_path is None:
+        return None
+    module_name = f"_agentm_changespec_validator__{safe_kind}"
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
     try:
-        module = importlib.import_module(module_name)
-    except ImportError:
+        spec.loader.exec_module(module)
+    except Exception:
         return None
     fn = getattr(module, "validate", None)
     return fn if callable(fn) else None
