@@ -393,6 +393,15 @@ class AgentLoop:
         self._bus = bus
         self._config = config if config is not None else LoopConfig()
 
+    def set_stream_fn(self, fn: StreamFn) -> None:
+        """Replace the active provider for subsequent turns.
+
+        This is the only supported way to swap LLM providers mid-session;
+        callers must not mutate the kernel's private stream state directly.
+        """
+
+        self._stream_fn = fn
+
     async def run(
         self,
         *,
