@@ -475,6 +475,9 @@ class EventBusObserver(Protocol):
     ) -> None: ...
 
 
+ObserverRegistration = ObserverCallback | EventBusObserver
+
+
 @dataclass(frozen=True, slots=True)
 class _Subscription:
     """One handler registration with its dispatch-order key.
@@ -505,7 +508,7 @@ class EventBus:
     # ``stream_delta`` (one emission per provider chunk).
     _handler_cache: dict[str, list[Handler]] = field(default_factory=dict)
     _observer: EventBusObserver | None = None
-    _observer_callbacks: list[ObserverCallback] = field(default_factory=list)
+    _observer_callbacks: list[ObserverRegistration] = field(default_factory=list)
     _strict_sync_handlers: bool = False
     _next_seq: int = 0
 
@@ -516,8 +519,8 @@ class EventBus:
         """
         self._observer = observer
 
-    def add_observer(self, callback: ObserverCallback) -> Callable[[], None]:
-        """Observe every emit start and return an idempotent unsubscribe fn."""
+    def add_observer(self, callback: ObserverRegistration) -> Callable[[], None]:
+        """Observe every emit and return an idempotent unsubscribe fn."""
 
         self._observer_callbacks.append(callback)
 
@@ -759,14 +762,18 @@ class EventBus:
             registered = self._handlers.get(channel)
             handlers = [sub.handler for sub in (registered or ())]
             self._handler_cache[channel] = handlers
-        if not handlers and self._observer is None and not self._observer_callbacks:
-            return []
+        observer_callbacks = tuple(self._observer_callbacks)
         observer = self._observer
+        observe_handlers = observer is not None or any(
+            not callable(callback) for callback in observer_callbacks
+        )
+        if not handlers and observer is None and not observer_callbacks:
+            return []
         self._safe_observe("on_emit_start", channel, event)
         results: list[Any] = []
         for h in handlers:
             err: BaseException | None = None
-            start_ns = time.perf_counter_ns() if observer is not None else 0
+            start_ns = time.perf_counter_ns() if observe_handlers else 0
             try:
                 value = h(event)
                 if inspect.isawaitable(value):
@@ -777,7 +784,7 @@ class EventBus:
                 )
                 err = exc
                 value = None
-            if observer is not None:
+            if observe_handlers:
                 self._safe_observe(
                     "on_handler_done",
                     channel,
@@ -791,13 +798,19 @@ class EventBus:
         return results
 
     def _safe_observe(self, method: str, *args: Any) -> None:
-        if method == "on_emit_start":
-            channel, event = args[0], args[1]
-            for callback in tuple(self._observer_callbacks):
-                try:
-                    callback(channel, event)
-                except Exception:
+        for callback in tuple(self._observer_callbacks):
+            try:
+                if callable(callback):
+                    if method == "on_emit_start":
+                        channel, event = args[0], args[1]
+                        callback(channel, event)
+                    continue
+                getattr(callback, method)(*args)
+            except Exception:
+                if callable(callback):
                     logger.exception("EventBus observer callback raised; suppressing.")
+                else:
+                    logger.exception("EventBus observer.%s raised; suppressing.", method)
         observer = self._observer
         if observer is None:
             return
@@ -819,15 +832,19 @@ class EventBus:
             registered = self._handlers.get(channel)
             handlers = [sub.handler for sub in (registered or ())]
             self._handler_cache[channel] = handlers
-        if not handlers and self._observer is None and not self._observer_callbacks:
-            return []
+        observer_callbacks = tuple(self._observer_callbacks)
         observer = self._observer
+        observe_handlers = observer is not None or any(
+            not callable(callback) for callback in observer_callbacks
+        )
+        if not handlers and observer is None and not observer_callbacks:
+            return []
         self._safe_observe("on_emit_start", channel, event)
         results: list[Any] = []
         async_violation: tuple[str, Any] | None = None
         for h in handlers:
             err: BaseException | None = None
-            start_ns = time.perf_counter_ns() if observer is not None else 0
+            start_ns = time.perf_counter_ns() if observe_handlers else 0
             try:
                 value = h(event)
                 if inspect.isawaitable(value):
@@ -848,7 +865,7 @@ class EventBus:
                 )
                 err = exc
                 value = None
-            if observer is not None:
+            if observe_handlers:
                 self._safe_observe(
                     "on_handler_done",
                     channel,
@@ -885,6 +902,7 @@ __all__ = [
     "Event",
     "EventBus",
     "EventBusObserver",
+    "ObserverRegistration",
     "Handler",
     "ObserverCallback",
     "Inject",
