@@ -1,4 +1,30 @@
 requirements:
+  - id: REQ-093-llm-provider-stream-common
+    title: Shared LLM provider stream accumulator and tool spec adapters
+    description: >
+      Anthropic and OpenAI-compatible providers must share stream assembly,
+      tool-argument JSON encoding, tool-call argument parse-error signaling,
+      and real timestamp stamping while keeping provider-specific code limited
+      to event mapping and vendor tool-spec adaptation. Anthropic tool-result
+      message packing must remain a single linear pass.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/llm/_common.py
+      - path: src/agentm/llm/anthropic.py
+      - path: src/agentm/llm/openai.py
+      - path: src/agentm/core/abi/stream.py
+      - path: src/agentm/core/abi/loop.py
+      - path: src/agentm/core/abi/__init__.py
+    tests:
+      - path: tests/unit/core/abi/test_tool_arg_parse_error.py
+      - path: tests/unit/llm/test_common_stream_accumulator.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-93-llm-stream-common.md
+    depends_on: []
+
   - id: REQ-085-session-policy-extraction
     title: AgentSession policy extraction and typed runtime boundary
     description: >
@@ -133,7 +159,6 @@ requirements:
     depends_on:
       - REQ-086-atom-rework-infra
 
-
   - id: REQ-089-file-tool-io-seams
     title: File tool atoms use documented read and write seams
     description: >
@@ -167,3 +192,53 @@ requirements:
       - path: .claude/tasks/2026-05-09-issue-89-file-tool-io-seams.md
     depends_on:
       - REQ-086-atom-rework-infra
+
+  - id: REQ-101-tool-catalog-split
+    title: Tool catalog browse/mutate atom split
+    description: >
+      The contrib tool catalog must expose read-only history browsing separately
+      from mutating self-modification tools so plan-mode scenarios can mount
+      catalog introspection without enabling rollback, install, unload, or reload
+      mutation. The browse and mutate atoms must declare accurate registers lists.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: contrib/extensions/tool_catalog/__init__.py
+      - path: contrib/extensions/tool_catalog/_paths.py
+      - path: contrib/extensions/tool_catalog/_git_log.py
+      - path: contrib/extensions/tool_catalog/browse.py
+      - path: contrib/extensions/tool_catalog/mutate.py
+      - path: contrib/scenarios/plan_mode/manifest.yaml
+      - path: pyproject.toml
+    tests:
+      - path: tests/integration/test_browse_and_rollback.py
+      - path: tests/integration/test_reload_via_writer.py
+    docs:
+      - path: .claude/designs/git-backed-versioning.md
+      - path: README.md
+      - path: .claude/tasks/2026-05-09-issue-101-tool-catalog-split.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
+  - id: REQ-094-ai-provider-descriptor-registry
+    title: AI provider descriptors are the registry source of truth
+    description: >
+      The AI provider boundary must keep provider ids, API routing metadata,
+      aliases, and environment-key precedence in ProviderDescriptor records so
+      adding a provider does not require parallel Literal and env-var edits.
+      Environment API key resolution must support injected mappings for tests,
+      and runtime provider registration must use one validating wrapper with
+      shared canonical API checks for stream methods.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/ai/types.py
+      - path: src/agentm/ai/env_api_keys.py
+      - path: src/agentm/ai/api_registry.py
+      - path: src/agentm/ai/__init__.py
+    tests:
+      - path: tests/ai/test_provider_registry.py
+    docs: []
+    depends_on: []

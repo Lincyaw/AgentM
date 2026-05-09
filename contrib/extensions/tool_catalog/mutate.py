@@ -1,18 +1,15 @@
-"""Git-backed catalog browser and rollback tools for the agent."""
+"""Self-modification tools for the git-backed tool catalog package."""
 
 from __future__ import annotations
 
 import json
-import subprocess
 from dataclasses import asdict
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import (
-    AtomInfo,
     ExtensionAPI,
     InstallAtomResult,
     ReloadResult,
@@ -20,21 +17,16 @@ from agentm.harness.extension import (
 )
 from agentm.harness.resource_writer import WriteResult
 
+from ._paths import catalog_root, resolve_catalog_path
+
 MANIFEST = ExtensionManifest(
-    name="tool_catalog",
-    description=(
-        "Browse git-backed resource history, inspect manifests/source at prior "
-        "commits, and roll managed resources back to an earlier version."
-    ),
+    name="tool_catalog_mutate",
+    description="Mutate managed resources and live atoms through audited catalog tools.",
     registers=(
-        "tool:catalog_list_versions",
-        "tool:catalog_get_manifest",
-        "tool:catalog_runs_for",
-        "tool:get_source_at",
-        "tool:list_history",
         "tool:rollback_resource",
         "tool:install_atom",
         "tool:unload_atom",
+        "tool:reload_atom",
     ),
     config_schema={
         "type": "object",
@@ -46,78 +38,7 @@ MANIFEST = ExtensionManifest(
     tier=1,
 )
 
-_LIST_VERSIONS_PARAMS = {
-    "type": "object",
-    "properties": {
-        "atom": {
-            "type": "string",
-            "description": "Atom name or repo-relative path.",
-        }
-    },
-    "required": ["atom"],
-    "additionalProperties": False,
-}
-
-_GET_MANIFEST_PARAMS = {
-    "type": "object",
-    "properties": {
-        "atom": {"type": "string"},
-        "version": {
-            "type": "string",
-            "description": "Git commit SHA.",
-        },
-    },
-    "required": ["atom", "version"],
-    "additionalProperties": False,
-}
-
-_RUNS_FOR_PARAMS = {
-    "type": "object",
-    "properties": {
-        "fingerprint": {
-            "description": "Exact atom-set fingerprint mapping or 'atom@version' string.",
-            "oneOf": [{"type": "object"}, {"type": "string"}],
-        }
-    },
-    "required": ["fingerprint"],
-    "additionalProperties": False,
-}
-
-_GET_SOURCE_AT_PARAMS = {
-    "type": "object",
-    "properties": {
-        "path": {
-            "type": "string",
-            "description": "Atom name, repo-relative path, or absolute path inside the repo.",
-        },
-        "sha": {
-            "type": "string",
-            "description": "Git commit SHA to read from.",
-        },
-    },
-    "required": ["path", "sha"],
-    "additionalProperties": False,
-}
-
-_LIST_HISTORY_PARAMS = {
-    "type": "object",
-    "properties": {
-        "path": {
-            "type": "string",
-            "description": "Atom name, repo-relative path, or absolute path inside the repo.",
-        },
-        "limit": {
-            "type": "integer",
-            "minimum": 1,
-            "default": 20,
-            "description": "Maximum number of commits to return, newest first.",
-        },
-    },
-    "required": ["path"],
-    "additionalProperties": False,
-}
-
-_ROLLBACK_RESOURCE_PARAMS = {
+_ROLLBACK_RESOURCE_PARAMS: Final = {
     "type": "object",
     "properties": {
         "path": {
@@ -142,7 +63,7 @@ _ROLLBACK_RESOURCE_PARAMS = {
     "additionalProperties": False,
 }
 
-_INSTALL_ATOM_PARAMS = {
+_INSTALL_ATOM_PARAMS: Final = {
     "type": "object",
     "properties": {
         "name": {
@@ -182,7 +103,7 @@ _INSTALL_ATOM_PARAMS = {
     "additionalProperties": False,
 }
 
-_UNLOAD_ATOM_PARAMS = {
+_UNLOAD_ATOM_PARAMS: Final = {
     "type": "object",
     "properties": {
         "name": {
@@ -198,7 +119,7 @@ _UNLOAD_ATOM_PARAMS = {
     "additionalProperties": False,
 }
 
-_RELOAD_ATOM_PARAMS = {
+_RELOAD_ATOM_PARAMS: Final = {
     "type": "object",
     "properties": {
         "name": {
@@ -213,7 +134,7 @@ _RELOAD_ATOM_PARAMS = {
             "description": (
                 "Full Python source that will replace the atom's current "
                 "implementation. Must define MANIFEST: ExtensionManifest "
-                "and install(api, config); §11 contract is enforced. "
+                "and install(api, config); section 11 contract is enforced. "
                 "Reload is transactional: a failure rolls the session "
                 "back to the prior version with no observable change."
             ),
@@ -229,56 +150,10 @@ _RELOAD_ATOM_PARAMS = {
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    raw_root = config.get("root")
-    if raw_root is None:
-        root = Path(api.cwd)
-    else:
-        root = Path(str(raw_root))
-        if not root.is_absolute():
-            root = Path(api.cwd) / root
-    root = root.resolve()
-
-    async def _list_versions_tool(args: dict[str, Any]) -> ToolResult:
-        versions = api.catalog.list_versions(str(args["atom"]), root)
-        return _json_result(versions)
-
-    async def _get_manifest_tool(args: dict[str, Any]) -> ToolResult:
-        atom = str(args["atom"])
-        version = str(args["version"])
-        try:
-            return _json_result(api.catalog.get_manifest_at(atom, version, root))
-        except Exception as exc:
-            return _error(
-                f"Failed to load manifest for {atom}@{version}: {exc}"
-            )
-
-    async def _runs_for_tool(args: dict[str, Any]) -> ToolResult:
-        try:
-            trace_ids = api.catalog.runs_for(args["fingerprint"], root)
-            return _json_result(trace_ids)
-        except Exception as exc:
-            return _error(f"Failed to resolve catalog runs: {exc}")
-
-    async def _get_source_at_tool(args: dict[str, Any]) -> ToolResult:
-        resolved = _resolve_catalog_path(api, str(args["path"]), root)
-        sha = str(args["sha"])
-        try:
-            source = api.catalog.get_source_at(resolved.git_path, sha, root)
-            return _json_result(source.decode("utf-8"))
-        except Exception as exc:
-            return _error(f"Failed to load source for {resolved.git_path}@{sha}: {exc}")
-
-    async def _list_history_tool(args: dict[str, Any]) -> ToolResult:
-        resolved = _resolve_catalog_path(api, str(args["path"]), root)
-        limit = int(args.get("limit", 20))
-        try:
-            history = _list_history(resolved.git_path, limit=limit, root=root)
-            return _json_result(history)
-        except Exception as exc:
-            return _error(f"Failed to list history for {resolved.git_path}: {exc}")
+    root = catalog_root(api, config)
 
     async def _rollback_resource_tool(args: dict[str, Any]) -> ToolResult:
-        resolved = _resolve_catalog_path(api, str(args["path"]), root)
+        resolved = resolve_catalog_path(api, str(args["path"]), root)
         target_sha = str(args["target_sha"])
         rationale = str(args["rationale"])
         force = bool(args.get("force", False))
@@ -318,7 +193,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         try:
             source_bytes = api.catalog.get_source_at(resolved.git_path, target_sha, root)
         except Exception as exc:
-            return _error(f"Failed to load rollback source for {resolved.git_path}@{target_sha}: {exc}")
+            return _error(
+                f"Failed to load rollback source for {resolved.git_path}@{target_sha}: {exc}"
+            )
 
         rollback_rationale = f"rollback to {target_sha[:8]}: {rationale}"
         try:
@@ -365,13 +242,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         result = api.install_atom(
             name=str(args["name"]),
             source=str(args["source"]),
-            target_path=(
-                str(args["target_path"]) if "target_path" in args else None
-            ),
+            target_path=(str(args["target_path"]) if "target_path" in args else None),
             config=dict(args.get("config") or {}),
-            rationale=(
-                str(args["rationale"]) if "rationale" in args else None
-            ),
+            rationale=(str(args["rationale"]) if "rationale" in args else None),
             agent_initiated=True,
         )
         payload = _serialize_result(result)
@@ -382,9 +255,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     async def _unload_atom_tool(args: dict[str, Any]) -> ToolResult:
         result = api.unload_atom(
             str(args["name"]),
-            rationale=(
-                str(args["rationale"]) if "rationale" in args else None
-            ),
+            rationale=(str(args["rationale"]) if "rationale" in args else None),
             agent_initiated=True,
         )
         payload = _serialize_result(result)
@@ -396,9 +267,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         result = api.reload_atom(
             str(args["name"]),
             str(args["source"]),
-            rationale=(
-                str(args["rationale"]) if "rationale" in args else None
-            ),
+            rationale=(str(args["rationale"]) if "rationale" in args else None),
             agent_initiated=True,
         )
         payload = _serialize_result(result)
@@ -406,60 +275,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return _json_error(payload)
         return _json_result(payload)
 
-    async def _list_atoms_tool(args: dict[str, Any]) -> ToolResult:
-        atoms = api.list_atoms()
-        payload = [
-            {
-                "name": a.name,
-                "tier": a.tier,
-                "api_version": a.api_version,
-                "current_hash": a.current_hash,
-                "source_path": a.source_path,
-            }
-            for a in atoms
-        ]
-        return _json_result(payload)
-
-    api.register_tool(
-        FunctionTool(
-            name="catalog_list_versions",
-            description="List known git versions for one managed atom or path.",
-            parameters=_LIST_VERSIONS_PARAMS,
-            fn=_list_versions_tool,
-        )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="catalog_get_manifest",
-            description="AST-parse the historical MANIFEST payload for one atom at a commit.",
-            parameters=_GET_MANIFEST_PARAMS,
-            fn=_get_manifest_tool,
-        )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="catalog_runs_for",
-            description="List trace ids recorded for an exact atom-set fingerprint.",
-            parameters=_RUNS_FOR_PARAMS,
-            fn=_runs_for_tool,
-        )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="get_source_at",
-            description="Return UTF-8 source text for a managed path at an arbitrary git SHA.",
-            parameters=_GET_SOURCE_AT_PARAMS,
-            fn=_get_source_at_tool,
-        )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="list_history",
-            description="Return recent git history entries {sha, author, timestamp, message} for one managed path.",
-            parameters=_LIST_HISTORY_PARAMS,
-            fn=_list_history_tool,
-        )
-    )
     api.register_tool(
         FunctionTool(
             name="rollback_resource",
@@ -477,7 +292,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             description=(
                 "Install a brand-new atom into the running session from a "
                 "Python source string. The source must define MANIFEST and "
-                "install(api, config) and pass the §11 single-file contract. "
+                "install(api, config) and pass the section 11 single-file contract. "
                 "Tier-2 atoms are refused. Returns structured InstallAtomResult."
             ),
             parameters=_INSTALL_ATOM_PARAMS,
@@ -502,11 +317,11 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             description=(
                 "Replace a currently-loaded atom's source in the running "
                 "session. The reload is transactional: the new source is "
-                "validated against the §11 contract, the module is "
+                "validated against the section 11 contract, the module is "
                 "re-executed, and ``install`` is re-invoked; on any failure "
                 "the prior version is restored and the session sees no "
-                "change. Use this — not the generic ``write`` or ``edit`` "
-                "tools — to evolve an atom's behavior, otherwise the "
+                "change. Use this -- not the generic ``write`` or ``edit`` "
+                "tools -- to evolve an atom's behavior, otherwise the "
                 "on-disk source drifts away from the live module. Returns "
                 "structured ReloadResult."
             ),
@@ -514,149 +329,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             fn=_reload_atom_tool,
         )
     )
-    api.register_tool(
-        FunctionTool(
-            name="list_atoms",
-            description=(
-                "List every atom currently loaded in this running session "
-                "with its name, tier, api_version, current git hash (when "
-                "managed), and on-disk source path. The single source of "
-                "truth for what the agent can introspect about its own "
-                "extensions — scanning ``.agentm/atoms/`` only sees "
-                "agent-installed atoms and misses every builtin."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False,
-            },
-            fn=_list_atoms_tool,
-        )
-    )
-
-
-class _ResolvedCatalogPath:
-    def __init__(
-        self,
-        *,
-        atom_name: str | None,
-        display_path: str,
-        git_path: str,
-        writer_path: str,
-    ) -> None:
-        self.atom_name = atom_name
-        self.display_path = display_path
-        self.git_path = git_path
-        self.writer_path = writer_path
-
-
-def _resolve_catalog_path(
-    api: ExtensionAPI,
-    raw_path: str,
-    root: Path,
-) -> _ResolvedCatalogPath:
-    atoms = api.list_atoms()
-    atom = _atom_by_name(atoms, raw_path)
-    if atom is not None and atom.source_path is not None:
-        source_path = Path(atom.source_path).resolve()
-        git_path = PurePosixPath(source_path.relative_to(root)).as_posix()
-        return _ResolvedCatalogPath(
-            atom_name=atom.name,
-            display_path=raw_path,
-            git_path=git_path,
-            writer_path=str(source_path),
-        )
-
-    # Path-form input: classify and try to map back to an atom so the
-    # rollback goes through reload_atom (transactional + emits
-    # ExtensionReloadEvent) instead of falling through to plain
-    # writer.write. The tool's own schema promises that
-    # "atom name, repo-relative path, or absolute path" all work.
-    candidate = Path(raw_path)
-    if candidate.is_absolute():
-        resolved = candidate.resolve()
-        try:
-            relative = resolved.relative_to(root)
-        except ValueError as exc:
-            raise ValueError(f"Path {raw_path!r} is outside repo root {root}") from exc
-        git_path = PurePosixPath(relative).as_posix()
-        writer_path = str(resolved)
-    else:
-        resolved = (root / candidate).resolve()
-        git_path = PurePosixPath(candidate).as_posix()
-        writer_path = raw_path
-
-    matched = _atom_by_source_path(atoms, resolved)
-    if matched is not None:
-        return _ResolvedCatalogPath(
-            atom_name=matched.name,
-            display_path=raw_path,
-            git_path=git_path,
-            writer_path=str(Path(matched.source_path).resolve())
-            if matched.source_path is not None
-            else writer_path,
-        )
-
-    return _ResolvedCatalogPath(
-        atom_name=None,
-        display_path=raw_path,
-        git_path=git_path,
-        writer_path=writer_path,
-    )
-
-
-def _atom_by_name(atoms: list[AtomInfo], name: str) -> AtomInfo | None:
-    for atom in atoms:
-        if atom.name == name:
-            return atom
-    return None
-
-
-def _atom_by_source_path(atoms: list[AtomInfo], resolved: Path) -> AtomInfo | None:
-    for atom in atoms:
-        if atom.source_path is None:
-            continue
-        try:
-            if Path(atom.source_path).resolve() == resolved:
-                return atom
-        except OSError:
-            continue
-    return None
-
-
-def _list_history(path: str, *, limit: int, root: Path) -> list[dict[str, str]]:
-    completed = subprocess.run(
-        [
-            "git",
-            "log",
-            "--format=%H%x00%an%x00%aI%x00%s",
-            "-n",
-            str(limit),
-            "--",
-            path,
-        ],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        stderr = completed.stderr.strip() or completed.stdout.strip() or "<no output>"
-        raise RuntimeError(stderr)
-    out: list[dict[str, str]] = []
-    for line in completed.stdout.splitlines():
-        if not line:
-            continue
-        sha, author, timestamp, message = line.split("\x00", 3)
-        out.append(
-            {
-                "sha": sha,
-                "author": author,
-                "timestamp": timestamp,
-                "message": message,
-            }
-        )
-    return out
 
 
 def _regression_decision(
@@ -664,7 +336,7 @@ def _regression_decision(
     atom_name: str | None,
     target_sha: str,
     *,
-    root: Path,
+    root: Any,
 ) -> dict[str, Any] | None:
     if atom_name is None:
         return None
@@ -680,7 +352,7 @@ def _append_decision(
     target_sha: str,
     record: dict[str, Any],
     *,
-    root: Path,
+    root: Any,
 ) -> None:
     if atom_name is None:
         return
