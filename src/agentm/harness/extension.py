@@ -128,9 +128,7 @@ class _NoopSessionGateway:
         agent_initiated: bool,
     ) -> "InstallAtomResult":
         del name, source, target_path, config, rationale, agent_initiated
-        raise RuntimeError(
-            "install_atom is unavailable on this ExtensionAPI instance"
-        )
+        raise RuntimeError("install_atom is unavailable on this ExtensionAPI instance")
 
     def unload_atom(
         self,
@@ -140,13 +138,13 @@ class _NoopSessionGateway:
         rationale: str | None = None,
     ) -> "UnloadAtomResult":
         del name, agent_initiated, rationale
-        raise RuntimeError(
-            "unload_atom is unavailable on this ExtensionAPI instance"
-        )
+        raise RuntimeError("unload_atom is unavailable on this ExtensionAPI instance")
 
     def freeze_current(self, name: str) -> str:
         del name
-        raise RuntimeError("freeze_current is unavailable on this ExtensionAPI instance")
+        raise RuntimeError(
+            "freeze_current is unavailable on this ExtensionAPI instance"
+        )
 
     def list_atoms(self) -> list["AtomInfo"]:
         return []
@@ -281,6 +279,7 @@ class AtomInfo:
     tier: int
     api_version: int
     source_path: str | None = None
+    config: dict[str, Any] | None = None
 
 
 # --- Errors ----------------------------------------------------------------
@@ -380,7 +379,9 @@ class ExtensionAPI(Protocol):
 
     # --- Actions ------------------------------------------------------------
     def send_user_message(self, content: str | list[Any]) -> None: ...
-    async def spawn_child_session(self, config: Any | None = None, **kwargs: Any) -> Any:
+    async def spawn_child_session(
+        self, config: Any | None = None, **kwargs: Any
+    ) -> Any:
         """Create a nested ``AgentSession`` rooted at this one.
 
         ``config`` is an ``AgentSessionConfig`` (typed ``Any`` here to avoid
@@ -394,6 +395,7 @@ class ExtensionAPI(Protocol):
         bypass the §11.4.5 import contract.
         """
         ...
+
     def set_service(self, name: str, obj: Any) -> None: ...
     def get_service(self, name: str) -> Any | None: ...
     def reload_atom(
@@ -438,6 +440,7 @@ class ExtensionAPI(Protocol):
         active for the next bus event.
         """
         ...
+
     def unload_atom(
         self,
         name: str,
@@ -461,6 +464,7 @@ class ExtensionAPI(Protocol):
         - the atom's source is in the constitution layer
         """
         ...
+
     def freeze_current(self, name: str) -> str: ...
     def list_atoms(self) -> list[AtomInfo]: ...
     def is_constitution_path(self, path: str) -> bool: ...
@@ -482,6 +486,7 @@ class ExtensionAPI(Protocol):
         ``file_mutation_queue``) rely on this contract.
         """
         ...
+
     @property
     def session(self) -> ReadonlySession: ...
     @property
@@ -502,6 +507,7 @@ class ExtensionAPI(Protocol):
         atoms at runtime; there is intentionally no ``register_operations`` API.
         """
         ...
+
     def get_project_layout(self) -> ProjectLayout: ...
     @property
     def skills(self) -> SkillsService: ...
@@ -571,12 +577,10 @@ class _ExtensionAPIImpl:
             child_session_factory or _NoopChildSessionFactory()
         )
         self._operations = operations or _default_local_operations(cwd=cwd)
-        self._project_layout: ProjectLayout = (
-            project_layout or default_project_layout(cwd)
+        self._project_layout: ProjectLayout = project_layout or default_project_layout(
+            cwd
         )
-        self._skills = skills_service or default_skills_service(
-            self._project_layout
-        )
+        self._skills = skills_service or default_skills_service(self._project_layout)
         self._prompt_templates = (
             prompt_templates_service
             or default_prompt_templates_service(self._project_layout)
@@ -653,9 +657,7 @@ class _ExtensionAPIImpl:
         self._providers[name] = config
         self._emit_register("provider", name, config)
 
-    def register_message_renderer(
-        self, custom_type: str, renderer: Renderer
-    ) -> None:
+    def register_message_renderer(self, custom_type: str, renderer: Renderer) -> None:
         self._assert_active()
         self._renderers[custom_type] = renderer
         self._emit_register("renderer", custom_type, renderer)
@@ -681,7 +683,9 @@ class _ExtensionAPIImpl:
             ),
         )
 
-    async def spawn_child_session(self, config: Any | None = None, **kwargs: Any) -> Any:
+    async def spawn_child_session(
+        self, config: Any | None = None, **kwargs: Any
+    ) -> Any:
         """Spawn a child session via the harness-injected factory.
 
         See ``ExtensionAPI.spawn_child_session`` for the contract; the
@@ -899,9 +903,7 @@ def load_extension(
     if install is None or not callable(install):
         raise ExtensionLoadError(
             module_path,
-            AttributeError(
-                f"module {module_path!r} has no callable 'install' symbol"
-            ),
+            AttributeError(f"module {module_path!r} has no callable 'install' symbol"),
         )
 
     token = _INSTALLING_EXTENSION.set(module_path)
