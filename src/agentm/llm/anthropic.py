@@ -9,9 +9,7 @@ extension mechanism described in ``.claude/designs/extension-as-scenario.md``
 Boundaries:
 
 * The kernel layer (``agentm.core.abi``) is the only AgentM dependency
-  imported at module import time. The harness layer is **not** imported here;
-  ``ProviderConfig`` is resolved lazily inside :func:`install` so this module
-  remains usable in isolation (e.g. notebook embedding, harness-less tests).
+  imported at module import time. The harness layer is **not** imported here.
 * Streaming is delegated to the official ``anthropic`` Python SDK
   (:class:`anthropic.AsyncAnthropic`); we never reimplement HTTP/SSE.
 
@@ -47,6 +45,7 @@ from agentm.core.abi.messages import (
     Usage,
     UserMessage,
 )
+from agentm.core.abi.provider import ProviderConfig, ProviderManifest
 from agentm.core.abi.retry import RetryPolicy
 from agentm.core.abi.termination import (
     Aborted,
@@ -74,6 +73,29 @@ if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from anthropic import AsyncAnthropic
 
 logger = logging.getLogger(__name__)
+
+
+MANIFEST = ProviderManifest(
+    name="anthropic",
+    description="Register an Anthropic Messages API LLM stream provider.",
+    registers=("provider:anthropic",),
+    config_schema={
+        "type": "object",
+        "properties": {
+            "model": {"type": "string", "minLength": 1},
+            "api_key": {"type": "string"},
+            "base_url": {"type": "string"},
+            "context_window": {"type": "integer", "minimum": 1},
+            "max_output_tokens": {"type": "integer", "minimum": 1},
+            "thinking_budgets": {
+                "type": "object",
+                "additionalProperties": {"type": "integer", "minimum": 1},
+            },
+        },
+        "required": ["model"],
+        "additionalProperties": True,
+    },
+)
 
 
 def _is_anthropic_retryable(exc: BaseException) -> bool:
@@ -121,13 +143,6 @@ def _build_model(
         context_window=context_window,
         max_output_tokens=max_output_tokens,
     )
-
-
-_THINKING_BUDGETS: dict[str, int] = {
-    "low": 1_024,
-    "medium": 4_096,
-    "high": 16_384,
-}
 
 
 # --- Message / tool serialization ------------------------------------------
@@ -335,9 +350,21 @@ class AnthropicStreamFn:
 
     api_key: str | None = None
     base_url: str | None = None
+    thinking_budgets: Mapping[str, int] | None = None
     retry_policy: RetryPolicy | None = None
     client: AsyncAnthropic | None = None
     clock: Callable[[], float] = time.time
+
+    def __post_init__(self) -> None:
+        budgets = {"low": 1_024, "medium": 4_096, "high": 16_384}
+        if self.thinking_budgets is not None:
+            budgets.update(
+                {
+                    str(key): int(value)
+                    for key, value in self.thinking_budgets.items()
+                }
+            )
+        self.thinking_budgets = budgets
 
     def _get_client(self) -> AsyncAnthropic:
         if self.client is not None:
@@ -393,9 +420,10 @@ class AnthropicStreamFn:
         if tools:
             body["tools"] = _to_anthropic_tools(tools)
         if thinking != "off":
+            assert self.thinking_budgets is not None
             body["thinking"] = {
                 "type": "enabled",
-                "budget_tokens": _THINKING_BUDGETS[thinking],
+                "budget_tokens": self.thinking_budgets[thinking],
             }
 
         state = _StreamState()
@@ -584,9 +612,6 @@ def install(api: Any, config: dict[str, Any]) -> None:
     ``config["base_url"]``, then registers the resulting ``AnthropicStreamFn``
     on the given :class:`ExtensionAPI` under the name ``"anthropic"``.
 
-    ``ProviderConfig`` is imported from :mod:`agentm.harness.extension`
-    lazily so that this module can be loaded without the harness present
-    (e.g. embedded SDK use cases or kernel-only tests).
     """
 
     model_id = config.get("model")
@@ -601,6 +626,7 @@ def install(api: Any, config: dict[str, Any]) -> None:
     stream_fn = AnthropicStreamFn(
         api_key=api_key,
         base_url=base_url,
+        thinking_budgets=config.get("thinking_budgets"),
         retry_policy=api.get_service("retry_policy"),
     )
     # Optional model-spec overrides; defaults handled in ``_build_model``.
@@ -611,15 +637,10 @@ def install(api: Any, config: dict[str, Any]) -> None:
         model_kwargs["max_output_tokens"] = int(config["max_output_tokens"])
     model = _build_model(model_id, **model_kwargs)
 
-    # Lazy import: ``ProviderConfig`` is defined in the harness layer that is
-    # being implemented in parallel; this keeps the LLM module independent
-    # for kernel-only consumers.
-    from agentm.harness.extension import ProviderConfig  # noqa: PLC0415
-
     api.register_provider(
         "anthropic",
         ProviderConfig(stream_fn=stream_fn, model=model, name="anthropic"),
     )
 
 
-__all__ = ["AnthropicStreamFn", "install"]
+__all__ = ["AnthropicStreamFn", "MANIFEST", "install"]
