@@ -115,6 +115,35 @@ def _load_personas() -> dict[str, dict[str, Any]]:
     return personas
 
 
+def _load_agent_contract_block() -> str:
+    """Splice the rcabench-platform agent contract into the system prompt.
+
+    This is the same prompt used by ThinkDepthAI's RCA synthesizer — it
+    pins the ``service`` vocabulary to "strings present in the data",
+    enumerates the canonical ``fault_kind`` values, and lists the
+    synthetic generators that must NOT be reported as services. Without
+    this block the orchestrator invents service names like
+    ``mysql-database`` when ground truth is ``mysql``.
+    """
+    try:
+        from rcabench_platform.v3.sdk.evaluation.v2 import (
+            get_agent_contract_prompt,
+        )
+    except ImportError:
+        return ""
+    body = str(get_agent_contract_prompt()).strip()
+    if not body:
+        return ""
+    return (
+        "<agent_contract>\n"
+        "The shape and vocabulary below are enforced by `submit_final_report`.\n"
+        "Match `service` and `fault_kind` exactly; evidence SQL must be "
+        "runnable on the case dir.\n\n"
+        f"{body}\n"
+        "</agent_contract>"
+    )
+
+
 def _format_available_agents_block(personas: dict[str, dict[str, Any]]) -> str:
     if not personas:
         return ""
@@ -161,10 +190,9 @@ async def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
             prompt = _PROMPT_PATH.read_text(encoding="utf-8").strip()
         personas = _load_personas()
         available_agents = _format_available_agents_block(personas)
-        if prompt and available_agents:
-            cached_system = f"{prompt}\n\n{available_agents}"
-        else:
-            cached_system = prompt or available_agents
+        contract_block = _load_agent_contract_block()
+        sections = [s for s in (prompt, available_agents, contract_block) if s]
+        cached_system = "\n\n".join(sections)
 
     def _inject_prompt(event: BeforeAgentStartEvent) -> dict[str, str] | None:
         if not cached_system:

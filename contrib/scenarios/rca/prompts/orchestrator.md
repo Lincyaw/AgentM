@@ -212,15 +212,22 @@ hypotheses yet.
 6. **Repeat** until confirmed and all `<root_cause_depth>` checks pass.
 
 **Termination:**
-When confirmed AND all `<root_cause_depth>` checks pass, call `submit_final_report` with:
-- `root_cause` — service / component identified as the root cause
-- `triggering_signal` — which metric / span / log line first deviated
-- `evidence` — citations of the SQL queries or worker findings that support the conclusion
-- `remediation` — suggested fix or mitigation
-- `causal_graph` — machine-readable RCA conclusion. At minimum populate
-  `root_causes` with one entry per implicated service:
-  `{"nodes": [], "edges": [], "root_causes": [{"component": "ts-payment-service"}]}`.
-  `nodes` and `edges` may be empty when no propagation graph is built.
+When confirmed AND all `<root_cause_depth>` checks pass, call `submit_final_report` with
+the **rcabench-platform agent contract** payload — see the `<agent_contract>` block at the
+end of this system prompt for the authoritative schema, `fault_kind` enum, and field
+rules. Summary of what you must produce:
+
+- `root_causes[]` — one entry per distinct fault. Each entry has:
+  - `service` — must be a string that **literally appears in the data** (run
+    `query_sql` via a worker if you need to confirm; do NOT invent names like
+    `mysql-database` when the actual service_name is `mysql`). Synthetic generators
+    (`loadgenerator`, `locust`, `wrk2`, `dsb-wrk2`, `k6`) are NOT services.
+  - `fault_kind` — exactly one of the enum values listed in the contract.
+  - `evidence[]` — at least one DuckDB SQL + claim that backs the assertion.
+- `propagation[]` — directed edges FROM the failing service TOWARD the user-visible
+  alarm tier (NOT the request-call direction). Each edge needs evidence too.
+
+If multiple distinct faults exist, list them all in `root_causes` — do not collapse.
 A wrong root cause is worse than a slow investigation. `submit_final_report` is the ONLY
 sanctioned termination action — see `<termination_protocol>` at the top.
 </workflow>

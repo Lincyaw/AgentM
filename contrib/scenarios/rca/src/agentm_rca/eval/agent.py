@@ -8,11 +8,13 @@ invoked via ``rca llm-eval run --agent agentm``. Bridges the
 Two pieces of glue do the work:
 
 * The orchestrator's ``submit_final_report`` tool in
-  :mod:`agentm_rca.tools.finalize` validates the structured ``causal_graph``
-  field and emits a JSON-serialized submission as its tool result. The
-  adapter subscribes to ``tool_result`` on the session bus and reads that
-  authoritative payload — never the unvalidated ``tool_call`` args. A
-  failed validation re-runs the model without polluting captured state.
+  :mod:`agentm_rca.tools.finalize` validates against the rcabench-platform
+  ``AgentRCAOutput`` contract and emits the model's
+  ``model_dump_json(by_alias=True)`` as its tool result. The adapter
+  subscribes to ``tool_result`` on the session bus and parses that
+  authoritative payload via :meth:`AgentRCAOutput.parse_str` — never the
+  unvalidated ``tool_call`` args. A failed validation re-runs the model
+  without polluting captured state.
 * The session's final message list is walked once after ``prompt`` returns
   and translated into a ``rcabench-platform`` :class:`Trajectory`. The
   system prompt is captured separately from the first
@@ -45,11 +47,53 @@ _DEFAULT_MODEL = "claude-sonnet-4-6"
 # reached. Bump the default and let the framework's ``--max-steps`` (or
 # ``--ak max_turns=N``) override.
 _DEFAULT_MAX_TURNS = 128
-_EMPTY_CAUSAL_GRAPH: dict[str, list[Any]] = {
-    "nodes": [],
-    "edges": [],
+# Empty AgentRCAOutput-shaped fallback when the orchestrator never reaches
+# ``submit_final_report``. Keeps the wire shape consistent with successful
+# runs so the platform's parsers don't choke.
+_EMPTY_AGENT_RCA_OUTPUT: dict[str, list[Any]] = {
     "root_causes": [],
+    "propagation": [],
 }
+
+
+def _env_bool(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"false", "0", "no", "off", ""}
+
+
+def _build_provider(
+    provider: str, model: str
+) -> tuple[str, dict[str, Any]]:
+    """Same env-var convention as ``agentm.cli._build_provider``.
+
+    Duplicated here (rather than imported) because the eval adapter is
+    discovered via ``llm_eval.agents`` entry point and must not assume
+    the CLI module has been imported.
+    """
+    if provider == "anthropic":
+        cfg: dict[str, Any] = {"model": model}
+        base_url = os.environ.get("ANTHROPIC_BASE_URL")
+        if base_url:
+            cfg["base_url"] = base_url
+        return ("agentm.llm.anthropic", cfg)
+
+    if provider == "openai":
+        cfg = {"model": model}
+        base_url = os.environ.get("OPENAI_BASE_URL")
+        if base_url:
+            cfg["base_url"] = base_url
+        ticket = os.environ.get("WARPGATE_TICKET")
+        if ticket:
+            cfg["default_query"] = {"warpgate-ticket": ticket}
+        if not _env_bool("OPENAI_VERIFY_SSL", default=True):
+            cfg["verify_ssl"] = False
+        return ("agentm.llm.openai", cfg)
+
+    raise ValueError(
+        f"unknown provider {provider!r}; expected 'anthropic' or 'openai'"
+    )
 
 
 def _coerce_max_turns(value: Any, fallback: int) -> int:
@@ -70,6 +114,7 @@ class AgentMAgent(BaseAgent):
         *,
         scenario: str = "rca",
         model: str | None = None,
+        provider: str | None = None,
         exp_id: str | None = None,
         max_turns: Any = None,
         **_extra: Any,
@@ -80,6 +125,11 @@ class AgentMAgent(BaseAgent):
         # ``--ak`` values arrive as strings, so coerce explicitly.
         self._scenario = scenario
         self._model = model or os.environ.get("AGENTM_MODEL", _DEFAULT_MODEL)
+        self._provider = (
+            provider
+            or os.environ.get("AGENTM_PROVIDER")
+            or "anthropic"
+        )
         self._exp_id = exp_id
         self._max_turns = _coerce_max_turns(max_turns, _DEFAULT_MAX_TURNS)
 
@@ -104,6 +154,7 @@ class AgentMAgent(BaseAgent):
         from agentm.core.abi.messages import TextContent as _TextContent
         from agentm.core.abi.loop import LoopConfig
         from agentm.harness import AgentSession, AgentSessionConfig
+        from rcabench_platform.v3.sdk.evaluation.v2 import AgentRCAOutput
 
         ctx: RunContext | None = kwargs.get("ctx")
         max_turns = _coerce_max_turns(kwargs.get("max_steps"), self._max_turns)
@@ -125,10 +176,11 @@ class AgentMAgent(BaseAgent):
                 if isinstance(block, _TextContent)
             )
             try:
-                payload = json.loads(text)
-            except json.JSONDecodeError:
+                output = AgentRCAOutput.parse_str(text)
+            except Exception:
+                # Tool returned a non-conforming payload; treat as missing.
                 return
-            captured["submission"] = payload
+            captured["submission"] = output
             if ctx is not None:
                 ctx.emit(
                     {
@@ -145,14 +197,20 @@ class AgentMAgent(BaseAgent):
         bus.on("tool_result", _on_tool_result)
         bus.on("before_send_to_llm", _on_before_llm)
 
-        provider_config: dict[str, str] = {"model": self._model}
-        base_url = os.environ.get("ANTHROPIC_BASE_URL")
-        if base_url:
-            provider_config["base_url"] = base_url
+        # Mirror ``agentm.cli._build_provider`` so the eval adapter honors
+        # the same ``AGENTM_PROVIDER`` / ``OPENAI_*`` / ``ANTHROPIC_*``
+        # convention as ``uv run agentm``. Previously we always pinned
+        # the anthropic provider, which silently routed Doubao-Seed
+        # requests through whatever ``ANTHROPIC_BASE_URL`` happened to
+        # point at (e.g. the Kimi anthropic-compat gateway) instead of
+        # the intended ``OPENAI_BASE_URL`` LiteLLM endpoint.
+        provider_module, provider_config = _build_provider(
+            self._provider, self._model
+        )
 
         config = AgentSessionConfig(
             cwd=os.getcwd(),
-            provider=("agentm.llm.anthropic", provider_config),
+            provider=(provider_module, provider_config),
             scenario=self._scenario,
             bus=bus,
             loop_config=LoopConfig(max_turns=max_turns),
@@ -166,13 +224,15 @@ class AgentMAgent(BaseAgent):
         finally:
             await session.shutdown()
 
-        submission = captured["submission"]
+        submission: AgentRCAOutput | None = captured["submission"]
         if submission is None:
-            cg: Any = None
-            response = json.dumps(_EMPTY_CAUSAL_GRAPH)
+            response = json.dumps(_EMPTY_AGENT_RCA_OUTPUT)
+            submission_dump: Any = None
         else:
-            cg = submission.get("causal_graph")
-            response = json.dumps(cg, ensure_ascii=False)
+            response = submission.model_dump_json(by_alias=True)
+            submission_dump = submission.model_dump(
+                mode="json", by_alias=True
+            )
 
         trajectory = _build_trajectory(
             agent_name=f"agentm:{self._scenario}",
@@ -188,7 +248,7 @@ class AgentMAgent(BaseAgent):
                 "scenario": self._scenario,
                 "max_turns": max_turns,
                 "submit_final_report_seen": submission is not None,
-                "submission": submission,
+                "submission": submission_dump,
             },
         )
 
