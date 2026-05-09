@@ -232,7 +232,10 @@ def _detect_sql_quoting_issue(task: dict[str, Any]) -> str | None:
             continue
         if task_id not in body:
             continue
-        if "Binder Error" in body and "Referenced table \\\"attr\\\"" in body:
+        # The trace body is JSON-encoded twice (tool result text is itself
+        # JSON, then wrapped in the event JSON), so escape forms vary; match
+        # the two substrings independently rather than a fully escaped phrase.
+        if "Binder Error" in body and "Referenced table" in body and "attr" in body:
             return (
                 "First SQL hit a DuckDB Binder Error on an unquoted attr.* "
                 "column; agent self-corrected on retry. Adding schema-quoting "
