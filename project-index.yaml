@@ -24,11 +24,13 @@ requirements:
       - path: src/agentm/extensions/builtin/slash_commands.py
     tests:
       - path: tests/unit/harness/test_session_refactor.py
+      - path: tests/integration/test_cli_slash_commands.py
       - path: tests/unit/core/catalog/test_indexer.py
       - path: tests/unit/extensions/test_extension_contract.py
     docs:
       - path: .claude/designs/pluggable-architecture.md
       - path: .claude/tasks/2026-05-09-issue-85-session-refactor.md
+      - path: .claude/tasks/2026-05-09-issue-85-review-follow-up.md
     depends_on:
       - REQ-079-atom-reloader-fail-stop
       - REQ-086-atom-rework-infra
