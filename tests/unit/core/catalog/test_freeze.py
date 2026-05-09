@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from agentm.core._internal.catalog import freeze_current, list_atoms
-from agentm.core._internal.catalog._layout import atom_runs_dir, atom_version_dir
 from agentm.core._internal.catalog.manifest import reload_manifest
+from agentm.harness.catalog import freeze_current, list_atoms
+from agentm.harness.catalog._layout import atom_runs_dir, atom_version_dir
 from agentm.extensions import ExtensionManifest
 
 

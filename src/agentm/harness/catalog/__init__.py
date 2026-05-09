@@ -1,0 +1,108 @@
+"""Harness-side catalog operations: filesystem + discovery orchestration.
+
+Pure kernel functions (hashing, manifest parsing, browse) live in
+``agentm.core._internal.catalog`` and remain available there. This package
+collects everything that touches the filesystem, walks discovery, or
+otherwise enacts project-layout policy on top of the constitution layer.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from agentm.core.abi.project_layout import ProjectLayout
+from agentm.harness.catalog import _layout
+from agentm.harness.catalog.freeze import freeze_current, source_path_for_hash
+from agentm.harness.catalog.indexer import (
+    IndexerResult,
+    index_trace,
+    rebuild_catalog,
+)
+from agentm.harness.catalog.migrate import migrate_catalog_v2
+
+
+def list_atoms(*, root: Path | None = None) -> list[dict[str, Any]]:
+    """List atoms currently materialized under the catalog root.
+
+    Walks ``<root>/.agentm/catalog/atoms/`` and consults
+    ``discover_builtin`` for tier/api_version metadata.
+    """
+
+    # Imported lazily so importing this package never walks the extensions
+    # tree at import time.
+    from agentm.extensions.discover import discover_builtin
+
+    atoms_root = _layout.atoms_dir(root=root)
+    if not atoms_root.exists():
+        return []
+
+    builtin = discover_builtin()
+    atoms: list[dict[str, Any]] = []
+    for atom_dir in sorted(path for path in atoms_root.iterdir() if path.is_dir()):
+        versions = [
+            child.name
+            for child in atom_dir.iterdir()
+            if child.is_dir() and not child.name.startswith(_layout.LEGACY_PREFIX)
+        ]
+        if not versions:
+            continue
+        manifest = builtin.get(atom_dir.name)
+        atoms.append(
+            {
+                "name": atom_dir.name,
+                "current_hash": sorted(versions)[-1],
+                "tier": None if manifest is None else manifest.manifest.tier,
+                "api_version": (
+                    None if manifest is None else manifest.manifest.api_version
+                ),
+            }
+        )
+    return atoms
+
+
+@dataclass(frozen=True, slots=True)
+class DefaultProjectLayout:
+    """Default :class:`ProjectLayout` — mirrors today's ``<cwd>/.agentm/...``.
+
+    A single value object derived from ``cwd``. Constructing one does not
+    touch the filesystem; callers ``mkdir`` lazily as they write.
+    """
+
+    cwd: Path
+
+    def catalog_root(self) -> Path:
+        return self.cwd / ".agentm" / "catalog"
+
+    def skills_dirs(self) -> list[Path]:
+        return [self.cwd / ".agentm" / "skills"]
+
+    def artifacts_root(self, session_id: str) -> Path:
+        return self.cwd / ".agentm" / "artifacts" / session_id
+
+    def prompts_dirs(self) -> list[Path]:
+        return [self.cwd / ".agentm" / "prompts"]
+
+    def observability_root(self) -> Path:
+        return self.cwd / ".agentm" / "observability"
+
+
+def default_project_layout(cwd: str | Path) -> ProjectLayout:
+    """Build the default :class:`ProjectLayout` for a given workspace."""
+
+    return DefaultProjectLayout(cwd=Path(cwd))
+
+
+__all__ = [
+    "DefaultProjectLayout",
+    "IndexerResult",
+    "ProjectLayout",
+    "default_project_layout",
+    "freeze_current",
+    "index_trace",
+    "list_atoms",
+    "migrate_catalog_v2",
+    "rebuild_catalog",
+    "source_path_for_hash",
+]

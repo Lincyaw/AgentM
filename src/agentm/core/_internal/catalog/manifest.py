@@ -1,11 +1,17 @@
 """Constitution boundary parser.
 
-Loads ``core-manifest.yaml`` from the repo root and exposes
-``is_constitution_path`` — the predicate self-mod APIs route through to
-decide whether a path is on the constitution side of the boundary.
+Loads ``core-manifest.yaml`` and exposes :func:`is_constitution_path` —
+the predicate self-mod APIs route through to decide whether a path is on
+the constitution side of the boundary.
 
-Layer purity: this module imports only stdlib + ``yaml``. It does not
-import from ``agentm.harness.*`` or ``agentm.extensions.*``.
+Layer purity: this module imports only stdlib + ``yaml``. It does **not**
+touch the filesystem at import time and does not reach into the
+extensions / harness packages.
+
+Path resolution policy lives in the harness. The harness sets
+:data:`_MANIFEST_PATH` (typically to ``<cwd>/core-manifest.yaml``) before
+the predicate is consulted. Tests monkeypatch the same module attribute
+and call :func:`reload_manifest` to repoint the loader at a temp file.
 """
 
 from __future__ import annotations
@@ -17,15 +23,15 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-# Default repo root: this file lives at
-# src/agentm/core/_internal/catalog/manifest.py, so five ``parents`` hops get
-# us to the checkout root. Tests may monkeypatch ``_MANIFEST_PATH`` to repoint
-# the boundary to a temp repo; path normalization follows that root.
-_DEFAULT_REPO_ROOT: Path = Path(__file__).resolve().parents[5]
+# Test/harness seam — initially ``None`` so importing this module never
+# touches the filesystem. Callers (typically the harness during session
+# start-up, or tests via monkeypatch) assign a concrete path before any
+# constitution-boundary check runs.
+_MANIFEST_PATH: Path | None = None
 
-# Test seam — tests monkeypatch this attribute then call ``reload_manifest()``
-# to repoint the loader at a temp file.
-_MANIFEST_PATH: Path = _DEFAULT_REPO_ROOT / "core-manifest.yaml"
+
+class CoreManifestPathUnsetError(RuntimeError):
+    """Raised when manifest helpers run before a manifest path is configured."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,13 +44,31 @@ class CoreManifest:
     managed_globs: tuple[str, ...] = ()
 
 
-def load_core_manifest() -> CoreManifest:
-    return _load_cached(_MANIFEST_PATH)
+def load_core_manifest(manifest_path: Path | None = None) -> CoreManifest:
+    """Load the manifest from ``manifest_path`` or the configured seam.
+
+    Passing ``manifest_path`` explicitly is preferred — the harness owns
+    the policy of where ``core-manifest.yaml`` lives. The fall-back to
+    :data:`_MANIFEST_PATH` exists so existing test seams (monkeypatching
+    the module attribute) keep working without sprinkling explicit paths
+    through every caller.
+    """
+
+    path = manifest_path if manifest_path is not None else _MANIFEST_PATH
+    if path is None:
+        raise CoreManifestPathUnsetError(
+            "core-manifest.yaml path not configured: assign "
+            "agentm.core._internal.catalog.manifest._MANIFEST_PATH or pass "
+            "manifest_path explicitly."
+        )
+    return _load_cached(path)
 
 
-def reload_manifest() -> CoreManifest:
+def reload_manifest(manifest_path: Path | None = None) -> CoreManifest:
+    """Drop the cache and reload (optionally against a new path)."""
+
     _load_cached.cache_clear()
-    return _load_cached(_MANIFEST_PATH)
+    return load_core_manifest(manifest_path)
 
 
 def is_constitution_path(path: str) -> bool:
@@ -96,6 +120,9 @@ def _load_cached(manifest_path: Path) -> CoreManifest:
 
 def _normalize_to_repo_relative(path: str) -> str:
     candidate = Path(path)
+    if _MANIFEST_PATH is None:
+        # No repo root configured — best-effort relative normalization.
+        return PurePosixPath(candidate).as_posix()
     repo_root = _MANIFEST_PATH.resolve().parent
     if candidate.is_absolute():
         try:
@@ -146,8 +173,23 @@ def _compile_glob(pattern: str) -> re.Pattern[str]:
     return re.compile("".join(parts))
 
 
+def configure_manifest_path(manifest_path: Path) -> None:
+    """Convenience setter for the harness/CLI startup path.
+
+    Equivalent to assigning :data:`_MANIFEST_PATH` and calling
+    :func:`reload_manifest`. Provided so harness code does not need to
+    touch a private-named attribute.
+    """
+
+    global _MANIFEST_PATH
+    _MANIFEST_PATH = Path(manifest_path)
+    reload_manifest()
+
+
 __all__ = [
     "CoreManifest",
+    "CoreManifestPathUnsetError",
+    "configure_manifest_path",
     "is_constitution_path",
     "load_core_manifest",
     "matches_manifest_glob",
