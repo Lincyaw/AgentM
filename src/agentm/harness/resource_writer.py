@@ -23,6 +23,7 @@ from agentm.core.abi.resource import (
     WriterAuthor,
 )
 from agentm.core._internal.catalog.manifest import (
+    CoreManifestPathUnsetError,
     is_constitution_path,
     load_core_manifest,
     matches_manifest_glob,
@@ -93,6 +94,9 @@ class _BatchImpl(BatchHandle):
 
 
 class _NoopResourceWriter:
+    async def read(self, path: str) -> bytes:
+        return await asyncio.to_thread(Path(path).read_bytes)
+
     async def write(
         self,
         path: str,
@@ -213,6 +217,9 @@ class GitBackedResourceWriter:
             f"--work-tree={self._cwd}",
         )
         self._initial_snapshot_needed = True
+
+    async def read(self, path: str) -> bytes:
+        return await asyncio.to_thread(self._resolve_path(path).read_bytes)
 
     async def write(
         self,
@@ -373,8 +380,12 @@ class GitBackedResourceWriter:
         )
 
     def classify(self, path: str) -> PathClass:
-        if is_constitution_path(path):
-            return "constitution"
+        try:
+            if is_constitution_path(path):
+                return "constitution"
+            managed_globs = load_core_manifest().managed_globs
+        except CoreManifestPathUnsetError:
+            managed_globs = ()
 
         resolved = self._resolve_path(path)
         try:
@@ -383,7 +394,6 @@ class GitBackedResourceWriter:
             return "unmanaged"
 
         rel_posix = PurePosixPath(relative).as_posix()
-        managed_globs = load_core_manifest().managed_globs
         if any(matches_manifest_glob(pattern, rel_posix) for pattern in managed_globs):
             return "managed"
         return "unmanaged"
