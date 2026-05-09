@@ -8,7 +8,8 @@ Backs `REQ-086-atom-rework-infra` in `project-index.yaml`.
 
 - Add pure ExtensionAPI/core surfaces for C-2/C-3 atom rework follow-ups.
 - Harden the §11 validator with AST checks for private harness reflection,
-  ExtensionAPI mutation, mutable module globals, and dynamic `agentm.*` imports.
+  ExtensionAPI mutation, mutable module globals, dynamic `agentm.*` imports,
+  and concrete harness-service downcasts.
 - Keep current builtin atoms passing by marking intentional module-level
   constant dictionaries/lists as `Final`; do not migrate atom behavior yet.
 
