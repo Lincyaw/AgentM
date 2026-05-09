@@ -448,6 +448,7 @@ class DiagnosticEvent(Event):
 
 # A handler may be sync or async; it returns anything (the bus collects).
 Handler = Callable[[Any], Any] | Callable[[Any], Awaitable[Any]]
+ObserverCallback = Callable[[str, Any], None]
 
 
 class EventBusObserver(Protocol):
@@ -504,6 +505,7 @@ class EventBus:
     # ``stream_delta`` (one emission per provider chunk).
     _handler_cache: dict[str, list[Handler]] = field(default_factory=dict)
     _observer: EventBusObserver | None = None
+    _observer_callbacks: list[ObserverCallback] = field(default_factory=list)
     _strict_sync_handlers: bool = False
     _next_seq: int = 0
 
@@ -513,6 +515,19 @@ class EventBus:
         Only one observer at a time — second call replaces the first.
         """
         self._observer = observer
+
+    def add_observer(self, callback: ObserverCallback) -> Callable[[], None]:
+        """Observe every emit start and return an idempotent unsubscribe fn."""
+
+        self._observer_callbacks.append(callback)
+
+        def unsubscribe() -> None:
+            try:
+                self._observer_callbacks.remove(callback)
+            except ValueError:
+                return
+
+        return unsubscribe
 
     def set_strict_sync(self, strict: bool) -> None:
         """If True, ``emit_sync`` raises ``RuntimeError`` when it encounters
@@ -744,7 +759,7 @@ class EventBus:
             registered = self._handlers.get(channel)
             handlers = [sub.handler for sub in (registered or ())]
             self._handler_cache[channel] = handlers
-        if not handlers and self._observer is None:
+        if not handlers and self._observer is None and not self._observer_callbacks:
             return []
         observer = self._observer
         self._safe_observe("on_emit_start", channel, event)
@@ -776,6 +791,13 @@ class EventBus:
         return results
 
     def _safe_observe(self, method: str, *args: Any) -> None:
+        if method == "on_emit_start":
+            channel, event = args[0], args[1]
+            for callback in tuple(self._observer_callbacks):
+                try:
+                    callback(channel, event)
+                except Exception:
+                    logger.exception("EventBus observer callback raised; suppressing.")
         observer = self._observer
         if observer is None:
             return
@@ -797,7 +819,7 @@ class EventBus:
             registered = self._handlers.get(channel)
             handlers = [sub.handler for sub in (registered or ())]
             self._handler_cache[channel] = handlers
-        if not handlers and self._observer is None:
+        if not handlers and self._observer is None and not self._observer_callbacks:
             return []
         observer = self._observer
         self._safe_observe("on_emit_start", channel, event)
@@ -864,6 +886,7 @@ __all__ = [
     "EventBus",
     "EventBusObserver",
     "Handler",
+    "ObserverCallback",
     "Inject",
     "LlmRequestEndEvent",
     "LlmRequestStartEvent",

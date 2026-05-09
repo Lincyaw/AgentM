@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 import pathspec
 
@@ -26,7 +26,7 @@ MANIFEST = ExtensionManifest(
     },
 )
 
-_PARAMETERS = {
+_PARAMETERS: Final = {
     "type": "object",
     "properties": {
         "pattern": {"type": "string"},

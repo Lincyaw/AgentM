@@ -7,7 +7,7 @@ import json
 import os
 import re
 import shutil
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 import pathspec
 
@@ -25,7 +25,7 @@ MANIFEST = ExtensionManifest(
     config_schema={"type": "object", "properties": {"ops": {"type": "object"}}, "additionalProperties": True},
 )
 
-_PARAMETERS = {
+_PARAMETERS: Final = {
     "type": "object",
     "properties": {
         "pattern": {"type": "string"},

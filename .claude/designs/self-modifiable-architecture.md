@@ -339,6 +339,21 @@ Added to `harness.extension.ExtensionAPI` (constitution layer; methods themselve
 class ExtensionAPI(Protocol):
     # ... existing methods ...
 
+    def add_observer(self, callback: ObserverCallback) -> Unsubscribe:
+        ...
+
+    async def spawn_child_session(self, config: AgentSessionConfig | dict[str, Any]) -> Any:
+        ...
+
+    def set_service(self, name: str, obj: Any) -> None:
+        ...
+
+    def get_service(self, name: str) -> Any | None:
+        ...
+
+    def get_resource_writer(self) -> ResourceWriter:
+        ...
+
     def reload_atom(
         self,
         name: str,
