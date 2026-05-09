@@ -36,7 +36,39 @@ def test_persona_metadata_parser_surfaces_input_schema_and_budget_defaults() -> 
     block = module.available_agents_block(personas, include_input_schema=True)
     assert "<available_agents>" in block
     assert '<input_schema advisory="true">' in block
-    assert (
-        "objective, current_conclusion, supporting_evidence, output_format"
-        in block
+    assert "objective, current_conclusion, supporting_evidence, output_format" in block
+
+
+def test_resolve_handler_accepts_typed_subagent_event() -> None:
+    import asyncio
+
+    from agentm.harness.events import ResolveSubagentEvent, SessionReadyEvent
+
+    module = _load_module()
+    handlers = {}
+
+    class _Api:
+        def on(self, channel, handler):
+            handlers[channel] = handler
+
+    asyncio.run(module.install(_Api(), {}))
+    asyncio.run(
+        handlers[SessionReadyEvent.CHANNEL](
+            SessionReadyEvent(
+                cwd=str(Path.cwd()),
+                session_id="s",
+                tool_names=(),
+                command_names=(),
+                extension_module_paths=(),
+                model=None,
+                root_session_id="s",
+            )
+        )
     )
+
+    resolved = handlers[ResolveSubagentEvent.CHANNEL](
+        ResolveSubagentEvent(name="critic")
+    )
+
+    assert resolved["body"]
+    assert resolved["budget_defaults"] == {"max_turns": 12}

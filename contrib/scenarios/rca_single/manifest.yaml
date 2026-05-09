@@ -11,8 +11,6 @@ extensions:
     config:
       exclude:
         - conclusion.parquet
-      row_limit: 200
-      token_limit: 5000
   - module: agentm_rca.tools.hypothesis_tools
   - module: agentm_rca.tools.finalize
 
@@ -32,7 +30,8 @@ extensions:
   # to missing observability or artifact tooling.
   - module: agentm.extensions.builtin.artifact_store
   - module: agentm.extensions.builtin.observability
+  - module: contrib.extensions.rcabench_contract
 
-  # Scenario-local prompt loader. Splices investigator.md + the
-  # rcabench-platform agent contract into the system prompt.
+  # Scenario-local prompt loader. Splices investigator.md into the system prompt;
+  # the shared rcabench_contract atom appends the vendor contract block.
   - local: setup

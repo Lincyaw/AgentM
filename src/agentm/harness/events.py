@@ -167,6 +167,19 @@ class SessionReadyEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolveSubagentEvent:
+    """Request persona metadata for a named sub-agent type.
+
+    The ``sub_agent`` atom emits this typed channel before spawning a child
+    session. Scenario atoms may return a mapping with ``body``, ``tools``,
+    ``input_schema``, ``budget_defaults``, and ``artifact_kinds`` entries.
+    """
+
+    CHANNEL: ClassVar[Literal["resolve_subagent"]] = "resolve_subagent"
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
 class ExtensionInstallEvent:
     """Fires twice per ``load_extension`` call: ``"start"`` precedes
     ``install(api, config)``; ``"end"`` follows a successful return;
@@ -185,9 +198,9 @@ class ExtensionInstallEvent:
     phase: Literal["start", "end", "error"]
     duration_ns: int = 0
     error: str | None = None
-    trigger: Literal[
-        "bootstrap", "agent", "human", "propose_change_approved"
-    ] = "bootstrap"
+    trigger: Literal["bootstrap", "agent", "human", "propose_change_approved"] = (
+        "bootstrap"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +347,7 @@ __all__ = [
     "PlanSubmittedEvent",
     "ResourceWriteEvent",
     "ResourcesDiscoverEvent",
+    "ResolveSubagentEvent",
     "SessionReadyEvent",
     "SessionShutdownEvent",
 ]

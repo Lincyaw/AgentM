@@ -708,3 +708,13 @@ async def test_v2_smoke():
 ```
 
 If this test passes, Phase 1 is done. Phase 2 can start.
+
+### 11.6 RCA contract atom and loud optional-vendor failure
+
+RCA scenario prompts consume the official rcabench-platform agent contract via
+`contrib.extensions.rcabench_contract`, not scenario-local helper functions.
+The atom owns vendor loading and `before_agent_start` injection for both
+multi-agent and single-agent RCA manifests. If the optional vendor package is
+missing, the atom emits a warning `DiagnosticEvent` and injects an explicit
+`<contract status="unavailable" ... />` placeholder instead of silently omitting
+the contract block.

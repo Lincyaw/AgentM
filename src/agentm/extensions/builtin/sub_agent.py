@@ -38,6 +38,7 @@ from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
 from agentm.harness.events import (
     ChildSessionEndEvent,
+    ResolveSubagentEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
 )
@@ -87,7 +88,9 @@ MANIFEST = ExtensionManifest(
                     "Resolution map the parent supplies to translate inherited "
                     "names into concrete extension specs. Each value is either "
                     "a ``[module_path, config_dict]`` pair or "
-                    "``{'module': str, 'config': dict}``. Parents must populate "
+                    "``{'module': str, 'config': dict}``. When config is omitted "
+                    "or empty for an inherited parent atom, the child inherits "
+                    "that parent atom's resolved config by manifest name. Parents must populate "
                     "this for every name in ``inherit_extensions``; otherwise "
                     "inheritance silently fails — which is why this atom now "
                     "fast-fails on missing keys."
@@ -349,13 +352,21 @@ def _coerce_extension_specs(raw_specs: Any) -> list[tuple[str, dict[str, Any]]]:
 def _resolve_inherited_extensions(
     names: list[str],
     available: dict[str, Any],
+    loaded_by_name: dict[str, dict[str, Any]],
 ) -> list[tuple[str, dict[str, Any]]]:
     resolved: list[tuple[str, dict[str, Any]]] = []
     for name in names:
         raw_spec = available.get(name)
         if raw_spec is None:
             continue
-        resolved.append(_normalize_extension_spec(raw_spec))
+        module_path, config = _normalize_extension_spec(raw_spec)
+        if config:
+            resolved.append((module_path, config))
+            continue
+        loaded = loaded_by_name.get(name)
+        if loaded is not None:
+            config = dict(loaded)
+        resolved.append((module_path, config))
     return resolved
 
 
@@ -437,7 +448,9 @@ async def _shutdown_child_with_error(
     parent_session_id: str,
     error: str | None,
 ) -> None:
-    await child.bus.emit(SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=child.cwd))
+    await child.bus.emit(
+        SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=child.cwd)
+    )
     await parent_bus.emit(
         ChildSessionEndEvent.CHANNEL,
         ChildSessionEndEvent(
@@ -499,7 +512,7 @@ class _ChildTaskManager:
 
     async def _resolve_subagent(self, name: str) -> dict[str, Any] | None:
         responses = await self._api.events.emit(
-            "resolve_subagent", {"name": name}
+            ResolveSubagentEvent.CHANNEL, ResolveSubagentEvent(name=name)
         )
         for response in responses:
             if isinstance(response, dict) and isinstance(response.get("body"), str):
@@ -605,6 +618,10 @@ class _ChildTaskManager:
         inherited_extensions = _resolve_inherited_extensions(
             self._inherit_extensions,
             self._available_inherited,
+            {
+                atom.name: dict(getattr(atom, "config", None) or {})
+                for atom in self._api.list_atoms()
+            },
         )
         persona_extensions: list[tuple[str, dict[str, Any]]] = []
         persona_tool_allowlist: list[str] | None = None
@@ -660,9 +677,7 @@ class _ChildTaskManager:
 
         async with self._registry_lock:
             running_children = sum(
-                1
-                for child in self._registry.values()
-                if child.status == _RUNNING
+                1 for child in self._registry.values() if child.status == _RUNNING
             )
             if running_children + self._reserved_slots >= self._max_workers:
                 return _tool_result(
@@ -876,9 +891,7 @@ class _ChildTaskManager:
             aborted = await self._abort_running_states(running)
             if not aborted:
                 return None
-            return Inject(
-                messages=[_notification_message(pending=aborted, running=[])]
-            )
+            return Inject(messages=[_notification_message(pending=aborted, running=[])])
 
         message = _notification_message(pending=pending, running=running)
         return Inject(messages=[message])

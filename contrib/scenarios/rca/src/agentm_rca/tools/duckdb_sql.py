@@ -16,7 +16,7 @@ Configuration::
       config:
         data_dir: /path/to/converted     # required; or AGENTM_RCA_DATA_DIR
         exclude: [conclusion.parquet]    # optional, hides ground truth
-        row_limit: 200                   # optional default LIMIT (200)
+        row_limit: 200                   # optional default LIMIT
         token_limit: 5000                # optional response token cap
 """
 
@@ -58,8 +58,8 @@ _WRITE_KEYWORDS = re.compile(
     r"PRAGMA|EXPORT|IMPORT|INSTALL|LOAD|CALL|SET)\b",
     re.IGNORECASE,
 )
-_DEFAULT_TOKEN_LIMIT = 5000
-_DEFAULT_ROW_LIMIT = 200
+_DEFAULT_TOKEN_LIMIT = 5000  # rationale: fits RCA result rows in a compact tool turn.
+_DEFAULT_ROW_LIMIT = 200  # rationale: enough rows for patterns without flooding context.
 
 
 def _serialize(obj: Any) -> Any:
