@@ -35,6 +35,12 @@ from typing import Any
 import pytest
 import yaml
 
+# Per CLAUDE.md "Testing philosophy": this entire file is wiring (manifest-
+# load / atoms-install / yaml-parse) — none of these gate a fail-stop
+# position. Mark the whole module ``smoke`` so iteration on fail-stop
+# coverage can filter it out with ``pytest -m 'not smoke'``.
+pytestmark = pytest.mark.smoke
+
 # Lock the tests to the worktree root so manifest path resolution + the
 # grader's CWD-relative .agentm/observability lookup both line up.
 _REPO_ROOT = Path(__file__).resolve().parents[2]

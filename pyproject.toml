@@ -51,6 +51,7 @@ markers = [
     "ui: tests for the Textual TUI rendering layer",
     "slow: tests that may run for many minutes (real-LLM E2E)",
     "requires_api_key: tests that hit a real LLM provider; skipped without env",
+    "smoke: wiring/happy-path tests (manifest-load, atoms-install, yaml-parse) that don't gate on a fail-stop position; included by default, filter out with `-m 'not smoke'`",
 ]
 # Nested workspace projects own their own tests/ trees and pyproject. The
 # top-level pytest must not recurse into them — both define a ``tests``

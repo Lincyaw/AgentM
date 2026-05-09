@@ -536,6 +536,7 @@ async def test_atom_source_override_leaves_tree_clean(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_end_to_end_loop_activates_known_good_replacement(
     tmp_path: Path,
