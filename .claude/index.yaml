@@ -97,11 +97,11 @@ concepts:
     tasks: []
 
   search_tools:
-    description: "Three new tool atoms — tool_grep, tool_find, tool_ls — backed by ripgrep/fd with stdlib+pathspec fallback, .gitignore-aware, deterministic byte/line truncation. Each tool exposes its own Operations Protocol (GrepOperations/FindOperations/LsOperations) for SSH/sandbox swap, mirroring core/abi/operations.py. Adds shared core/lib/text_truncate.py and core/lib/path_utils.py modules. Pi-mono port of tools/{grep,find,ls,truncate,path-utils}.ts."
+    description: "Three new tool atoms — tool_grep, tool_find, tool_ls — implemented with stdlib+pathspec behind the shared FileOperations read seam, .gitignore-aware where search semantics require it, with deterministic byte/line truncation. The tools do not expose bespoke per-tool operations protocols; SSH/sandbox/in-memory scenarios swap FileOperations, matching issue #89 Option C. Adds shared core/lib/text_truncate.py and core/lib/path_utils.py modules. Pi-mono-inspired port of tools/{grep,find,ls,truncate,path-utils}.ts."
     design: "designs/search-tools.md"
     related_concepts: [edit_diff, tool_event_narrowing, extension_as_scenario, operations_ports, pluggable_architecture]
     plans: []
-    tasks: []
+    tasks: [tasks/2026-05-09-issue-89-file-tool-io-seams.md]
 
   edit_diff:
     description: "Pure-function module core/lib/edit_diff.py owning the edit-application algorithm: line-ending detection/restoration, UTF-8 BOM handling, NFKC + smart-quote/dash/space fuzzy normalization, and multi-edit application pipeline (Edit{old,new} sequences). Pi-mono port of tools/edit-diff.ts. Consumed by the upgraded tool_edit atom in Tier 2."
