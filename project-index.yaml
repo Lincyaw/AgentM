@@ -163,6 +163,7 @@ requirements:
     docs:
       - path: .claude/designs/pluggable-architecture.md
       - path: .claude/designs/extension-as-scenario.md
+      - path: .claude/designs/search-tools.md
       - path: .claude/tasks/2026-05-09-issue-89-file-tool-io-seams.md
     depends_on:
       - REQ-086-atom-rework-infra
