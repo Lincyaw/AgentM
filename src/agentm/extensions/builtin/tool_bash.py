@@ -11,6 +11,8 @@ from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
 
+_DEFAULT_TIMEOUT_SECONDS: Final[float] = 120.0
+
 MANIFEST = ExtensionManifest(
     name="tool_bash",
     description="Register the bash tool backed by BashOperations.",
@@ -19,7 +21,11 @@ MANIFEST = ExtensionManifest(
         "type": "object",
         "properties": {
             "bash_ops": {"type": "object"},
-            "default_timeout": {"type": "number", "minimum": 0, "default": 120.0},
+            "default_timeout": {
+                "type": "number",
+                "minimum": 0,
+                "default": _DEFAULT_TIMEOUT_SECONDS,
+            },
         },
         "additionalProperties": True,
     },
@@ -39,7 +45,7 @@ _PARAMETERS: Final[dict[str, Any]] = {
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     bash_ops = _coerce_bash_ops(api, config.get("bash_ops"))
-    default_timeout = float(config.get("default_timeout", 120.0))
+    default_timeout = float(config.get("default_timeout", _DEFAULT_TIMEOUT_SECONDS))
 
     parameters = {
         **_PARAMETERS,

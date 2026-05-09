@@ -10,14 +10,16 @@ from typing import Any, Awaitable, Callable, Protocol
 class OAuthCredentials:
     """Persisted credentials for an OAuth provider session.
 
-    ``expires`` is an absolute unix timestamp in milliseconds (matches
-    pi-mono). Additional provider-specific fields (e.g. ``account_id``)
-    can be stashed in ``extra``.
+    ``expires_at_ms`` is an absolute unix timestamp in **milliseconds**
+    (mirrors pi-mono's JS-native ``Date.now()`` units; the explicit ``_ms``
+    suffix prevents the second/millisecond ambiguity that caused issue #123
+    E14). Additional provider-specific fields (e.g. ``account_id``) can be
+    stashed in ``extra``.
     """
 
     refresh: str
     access: str
-    expires: int
+    expires_at_ms: int
     extra: dict[str, Any] = field(default_factory=dict)
 
 
