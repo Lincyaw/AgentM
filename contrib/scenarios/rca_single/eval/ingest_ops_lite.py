@@ -14,16 +14,30 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from rcabench_platform.v3.sdk.llm_eval.db import DatasetSample
-from rcabench_platform.v3.sdk.llm_eval.utils.sqlmodel_utils import SQLModelUtils
-from sqlmodel import select
-
-
 DATASET_NAME = "ops-lite"
 CASES_DIR = Path("datasets/ops-lite/cases").resolve()
 
 
 def main() -> None:
+    # Optional deps are imported lazily so the surrounding rca_single
+    # scenario stays importable for tooling that walks the contrib tree on
+    # machines where rcabench-platform / sqlmodel are absent. Surface a
+    # single actionable SystemExit instead of a bare ``ImportError`` at
+    # module load.
+    try:
+        from rcabench_platform.v3.sdk.llm_eval.db import DatasetSample
+        from rcabench_platform.v3.sdk.llm_eval.utils.sqlmodel_utils import (
+            SQLModelUtils,
+        )
+        from sqlmodel import select
+    except ImportError as exc:
+        raise SystemExit(
+            "ingest_ops_lite.py needs the rcabench-platform + sqlmodel "
+            "packages installed. Run this script from a venv where "
+            "`uv run rca llm-eval` works (typically the rca-autorl "
+            f"workspace). Original error: {exc}"
+        ) from exc
+
     if not CASES_DIR.is_dir():
         raise SystemExit(f"missing dataset dir: {CASES_DIR}")
 
