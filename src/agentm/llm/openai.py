@@ -393,6 +393,14 @@ class OpenAIStreamFn:
         self.client = _AsyncOpenAI(**kwargs)
         return self.client
 
+    @staticmethod
+    def _is_rate_limit(exc: BaseException) -> bool:
+        # Match by class name (avoids hard import dep) and HTTP 429 text.
+        if exc.__class__.__name__ == "RateLimitError":
+            return True
+        msg = str(exc)
+        return "429" in msg or "Rate limit" in msg or "rate limit" in msg
+
     def __call__(
         self,
         *,
@@ -443,7 +451,7 @@ class OpenAIStreamFn:
         state = _StreamState()
         aborted = False
 
-        stream = await client.chat.completions.create(**body)
+        stream = await _create_with_retry(client, body, signal)
         try:
             async for chunk in stream:
                 if signal is not None and signal.is_set():
@@ -485,6 +493,49 @@ class OpenAIStreamFn:
             state.stop_reason = "aborted"
 
         yield MessageEnd(message=_assemble_message(state))
+
+
+_RATE_LIMIT_MAX_ATTEMPTS = int(os.environ.get("AGENTM_RATE_LIMIT_MAX_ATTEMPTS", "8"))
+_RATE_LIMIT_BASE_DELAY = float(os.environ.get("AGENTM_RATE_LIMIT_BASE_DELAY", "5.0"))
+_RATE_LIMIT_MAX_DELAY = float(os.environ.get("AGENTM_RATE_LIMIT_MAX_DELAY", "60.0"))
+
+
+async def _create_with_retry(
+    client: Any,
+    body: dict[str, Any],
+    signal: asyncio.Event | None,
+) -> Any:
+    """Call ``chat.completions.create`` with backoff on 429 RateLimitError.
+
+    Configurable via ``AGENTM_RATE_LIMIT_MAX_ATTEMPTS`` /
+    ``AGENTM_RATE_LIMIT_BASE_DELAY`` / ``AGENTM_RATE_LIMIT_MAX_DELAY``. Retry
+    is bounded and aborts immediately if ``signal`` is set.
+    """
+    attempt = 0
+    delay = _RATE_LIMIT_BASE_DELAY
+    while True:
+        try:
+            return await client.chat.completions.create(**body)
+        except Exception as exc:
+            if not OpenAIStreamFn._is_rate_limit(exc):
+                raise
+            attempt += 1
+            if attempt >= _RATE_LIMIT_MAX_ATTEMPTS:
+                logger.warning(
+                    "openai: rate-limit retry exhausted after %d attempts",
+                    attempt,
+                )
+                raise
+            if signal is not None and signal.is_set():
+                raise
+            logger.warning(
+                "openai: 429 rate-limited (attempt %d/%d); sleeping %.1fs",
+                attempt,
+                _RATE_LIMIT_MAX_ATTEMPTS,
+                delay,
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, _RATE_LIMIT_MAX_DELAY)
 
 
 async def _translate_chunk(
