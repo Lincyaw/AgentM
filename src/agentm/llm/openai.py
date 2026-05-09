@@ -11,8 +11,7 @@ extension mechanism described in ``.claude/designs/extension-as-scenario.md``
 Boundaries:
 
 * The kernel layer (``agentm.core.abi``) is the only AgentM dependency
-  imported at module import time. The harness layer is **not** imported here;
-  ``ProviderConfig`` is resolved lazily inside :func:`install`.
+  imported at module import time. The harness layer is **not** imported here.
 * Streaming is delegated to the official ``openai`` Python SDK
   (:class:`openai.AsyncOpenAI`); we never reimplement HTTP/SSE.
 
@@ -36,9 +35,9 @@ import base64
 import logging
 import os
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from agentm.core.abi.messages import (
     AgentMessage,
@@ -52,7 +51,8 @@ from agentm.core.abi.messages import (
     Usage,
     UserMessage,
 )
-from agentm.core.abi.events import DiagnosticEvent
+from agentm.core.abi.events import DiagnosticEvent, EventBus
+from agentm.core.abi.provider import ProviderConfig
 from agentm.core.abi.retry import RetryPolicy
 from agentm.core.abi.termination import (
     Aborted,
@@ -160,18 +160,22 @@ def _encode_user_content(
     return parts
 
 
-def _encode_assistant_message(msg: AssistantMessage) -> dict[str, Any]:
+def _encode_assistant_message(
+    msg: AssistantMessage,
+    *,
+    thinking_round_trip: Literal["drop", "system_note", "raise"] = "drop",
+    on_drop: Callable[[], None] | None = None,
+) -> list[dict[str, Any]]:
     """Encode an assistant turn as a single OpenAI assistant message.
 
     Text blocks concatenate into ``content``; ``ToolCallBlock``s flatten
-    into a ``tool_calls`` array. ``ThinkingBlock``s are dropped — the chat
-    completions protocol has no slot for them; reasoning that the model
-    streams back as ``reasoning_content`` is not echoed in subsequent
-    turns. (For round-tripping reasoning, callers should use the OpenAI
-    Responses API, which is out of scope for this provider.)
+    into a ``tool_calls`` array. ``ThinkingBlock`` handling is controlled by
+    ``thinking_round_trip`` because chat completions has no native slot for
+    assistant reasoning.
     """
 
     text_parts: list[str] = []
+    thinking_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     for block in msg.content:
         if isinstance(block, TextContent):
@@ -188,8 +192,17 @@ def _encode_assistant_message(msg: AssistantMessage) -> dict[str, Any]:
                 }
             )
         elif isinstance(block, ThinkingBlock):
-            # Intentionally dropped — see docstring.
-            continue
+            if thinking_round_trip == "raise":
+                raise ValueError(
+                    "OpenAIStreamFn cannot encode ThinkingBlock content with "
+                    "thinking_round_trip='raise'."
+                )
+            if thinking_round_trip == "system_note":
+                thinking_parts.append(block.text)
+            else:
+                if on_drop is not None:
+                    on_drop()
+                continue
         else:  # pragma: no cover
             raise TypeError(f"unexpected assistant content type: {type(block)!r}")
     out: dict[str, Any] = {"role": "assistant"}
@@ -201,7 +214,13 @@ def _encode_assistant_message(msg: AssistantMessage) -> dict[str, Any]:
         out["content"] = ""
     if tool_calls:
         out["tool_calls"] = tool_calls
-    return out
+    if thinking_parts:
+        note = {
+            "role": "system",
+            "content": "Previous assistant reasoning: " + "\n".join(thinking_parts),
+        }
+        return [note, out]
+    return [out]
 
 
 def _encode_tool_result_block(block: ToolResultBlock) -> dict[str, Any]:
@@ -224,6 +243,8 @@ def _to_openai_messages(
     messages: list[AgentMessage],
     *,
     system: str | None,
+    thinking_round_trip: Literal["drop", "system_note", "raise"] = "drop",
+    on_thinking_drop: Callable[[], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert kernel messages to the OpenAI Chat Completions request shape.
 
@@ -241,7 +262,13 @@ def _to_openai_messages(
                 {"role": "user", "content": _encode_user_content(list(msg.content))}
             )
         elif isinstance(msg, AssistantMessage):
-            out.append(_encode_assistant_message(msg))
+            out.extend(
+                _encode_assistant_message(
+                    msg,
+                    thinking_round_trip=thinking_round_trip,
+                    on_drop=on_thinking_drop,
+                )
+            )
         elif isinstance(msg, ToolResultMessage):
             for block in msg.content:
                 out.append(_encode_tool_result_block(block))
@@ -373,6 +400,33 @@ class OpenAIStreamFn:
     httpx_client_factory: Callable[..., Any] | None = None
     client: AsyncOpenAI | None = None
     clock: Callable[[], float] = time.time
+    thinking_round_trip: Literal["drop", "system_note", "raise"] = "drop"
+    events: EventBus | None = None
+    _reported_thinking_drop: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        if self.thinking_round_trip not in {"drop", "system_note", "raise"}:
+            raise ValueError(
+                "OpenAIStreamFn thinking_round_trip must be one of "
+                "'drop', 'system_note', or 'raise'."
+            )
+
+    def _emit_thinking_drop_diagnostic(self) -> None:
+        if self.events is None or self._reported_thinking_drop:
+            return
+        self._reported_thinking_drop = True
+        self.events.emit_sync(
+            DiagnosticEvent.CHANNEL,
+            DiagnosticEvent(
+                level="info",
+                source="openai",
+                message=(
+                    "OpenAI provider dropped assistant ThinkingBlock content; "
+                    "set thinking_round_trip='system_note' or 'raise' to "
+                    "change this behavior."
+                ),
+            ),
+        )
 
     def _get_client(self) -> AsyncOpenAI:
         if self.client is not None:
@@ -434,7 +488,12 @@ class OpenAIStreamFn:
         body: dict[str, Any] = {
             "model": model.id,
             "max_tokens": model.max_output_tokens,
-            "messages": _to_openai_messages(messages, system=system),
+            "messages": _to_openai_messages(
+                messages,
+                system=system,
+                thinking_round_trip=self.thinking_round_trip,
+                on_thinking_drop=self._emit_thinking_drop_diagnostic,
+            ),
             "stream": True,
             # Without this the upstream usage block is null on streaming.
             "stream_options": {"include_usage": True},
@@ -629,9 +688,6 @@ def install(api: Any, config: dict[str, Any]) -> None:
     defaults to ``"openai"``; override when registering multiple
     OpenAI-compatible providers in the same session).
 
-    ``ProviderConfig`` is imported from :mod:`agentm.harness.extension`
-    lazily so that this module can be loaded without the harness present
-    (e.g. embedded SDK use cases or kernel-only tests).
     """
 
     model_id = config.get("model")
@@ -663,6 +719,8 @@ def install(api: Any, config: dict[str, Any]) -> None:
         default_headers=config.get("default_headers"),
         verify_ssl=verify_ssl,
         retry_policy=retry_policy,
+        thinking_round_trip=config.get("thinking_round_trip", "drop"),
+        events=getattr(api, "events", None),
     )
 
     model_kwargs: dict[str, int] = {}
@@ -677,10 +735,6 @@ def install(api: Any, config: dict[str, Any]) -> None:
         raise ValueError(
             "agentm.llm.openai.install: config['name'] must be a non-empty string."
         )
-
-    # Lazy import: ``ProviderConfig`` is defined in the harness layer; keep
-    # this module independent for kernel-only consumers.
-    from agentm.harness.extension import ProviderConfig  # noqa: PLC0415
 
     api.register_provider(
         name,
