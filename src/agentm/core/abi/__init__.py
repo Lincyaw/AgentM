@@ -52,6 +52,7 @@ from .events import (
     TurnStartEvent,
 )
 from .loop import AgentLoop, LoopConfig
+from .presenter import PHASE_GLYPHS, Phase
 from .provider import ProviderConfig, ProviderManifest, ProviderResolver
 from .retry import RetryPolicy
 from .services import CostBreakdown, CostQueryService
@@ -104,6 +105,9 @@ __all__ = [
     # loop
     "AgentLoop",
     "LoopConfig",
+    # presenter view contract
+    "PHASE_GLYPHS",
+    "Phase",
     # provider
     "ProviderConfig",
     "ProviderManifest",
