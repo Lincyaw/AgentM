@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from agentm.core.abi import TextContent
+from agentm.core.abi.session import ENTRY_TYPE_MESSAGE
 from agentm.harness.session import AgentSession
 from agentm.harness.session_cwd import assert_session_cwd_exists
 from agentm.harness.session_manager import SessionManager
@@ -100,7 +101,7 @@ class AgentSessionRuntime:
         if position == "at":
             target_leaf_id = selected_entry.id
         else:
-            if selected_entry.type != "message":
+            if selected_entry.type != ENTRY_TYPE_MESSAGE:
                 raise ValueError("Invalid entry ID for forking")
             message = selected_entry.payload
             if getattr(message, "role", None) != "user":
