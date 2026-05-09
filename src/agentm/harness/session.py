@@ -268,8 +268,8 @@ class AgentSession:
         return self._reloader.loaded_by_name
 
     @property
-    def _command_owners(self) -> dict[str, str]:
-        return self._reloader.command_owners
+    def _owners_by_kind(self) -> dict[str, dict[str, str]]:
+        return self._reloader.owners_by_kind
 
     # --- Construction -----------------------------------------------------
 
@@ -950,7 +950,7 @@ class AgentSession:
             return text, None
         cmd = self._commands.get(head)
         if cmd is not None:
-            owner = self._command_owners.get(head)
+            owner = self._owners_by_kind.setdefault("command", {}).get(head)
             api = self._apis[owner] if owner is not None else next(iter(self._apis.values()))
             stripped_args = rest.strip()
             result = cmd.handler(stripped_args, api)
@@ -1033,6 +1033,7 @@ class AgentSession:
                 ),
             )
 
+        self._reloader.shutdown()
         self._bus.clear()
 
         try:
