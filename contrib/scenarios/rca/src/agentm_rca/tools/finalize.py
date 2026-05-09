@@ -1,30 +1,29 @@
 """Termination protocol for the RCA orchestrator.
 
-Complements the sub-agent lifecycle floor shipped in #57: that floor injects
-unread child findings on ``decide_turn_action`` so background work isn't lost,
-but it does not stop the orchestrator from declaring the investigation over
-once every child is read. We still observed the model digest a long scout
-report, write a prose summary, and emit ``end_turn`` without producing the
-final RCA deliverable.
+The orchestrator submits its final answer via ``submit_final_report``. The
+schema is the **official rcabench-platform agent contract**
+(:class:`rcabench_platform.v3.sdk.evaluation.v2.AgentRCAOutput`):
 
-This extension layers a stricter policy on top:
+* ``root_causes[]`` — each carries ``service`` (must match a string present
+  in the data), ``fault_kind`` (one of the platform's enum values), and
+  ``evidence[]`` (DuckDB SQL + natural-language claim).
+* ``propagation[]`` — directed edges from upstream failing service toward
+  user-facing tier, each with evidence.
 
-  * Registers ``submit_final_report``: the only sanctioned termination tool.
-    A successful call returns :class:`ToolTerminate` so the loop's default
-    action becomes ``Stop(ToolTerminated(...))`` and the orchestrator exits
-    cleanly. The report payload reaches downstream observers via the
-    ``tool_call`` / ``tool_result`` channels, so we deliberately do not stash
-    a duplicate copy here.
-  * Subscribes to ``decide_turn_action``: while ``submitted`` is still false
-    AND the kernel default is a voluntary :class:`ModelEndTurn`, returns
-    :class:`Inject` carrying a continuation user message that pushes the
-    model back into investigation. Coexists cleanly with sub_agent's own
-    handler (multiple ``Inject`` returns concatenate in registration order).
+We validate by handing the raw tool args to :class:`AgentRCAOutput` —
+``service`` vocabulary alignment is enforced in the prompt (see
+``orchestrator_setup.install`` which splices in
+``get_agent_contract_prompt()``); shape correctness is enforced by Pydantic
+here. A failed validation returns ``is_error=True`` so the model can retry;
+a successful validation returns :class:`ToolTerminate` so the loop exits
+cleanly.
 
-Safety net: the loop's ``max_turns`` cap still applies. ``MaxTurnsExhausted``
-has ``final=True`` so any ``Inject`` we return is ignored — a model that
-refuses to call the tool eventually exits with that cause rather than
-spinning forever.
+A ``decide_turn_action`` handler keeps the orchestrator from voluntarily
+ending its turn before submitting: while ``submitted`` is still false AND
+the kernel default is :class:`ModelEndTurn`, we inject a continuation
+instruction that pushes the model back into investigation. The
+``max_turns`` cap remains the ultimate safety net (its
+:class:`MaxTurnsExhausted` is ``final=True`` so our ``Inject`` is ignored).
 """
 
 from __future__ import annotations
@@ -82,48 +81,45 @@ class _State:
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+    # Imported lazily so ``import agentm_rca.tools.finalize`` does not
+    # require rcabench-platform at module-load time (e.g. for static
+    # analysis or tooling without the SDK installed).
+    from rcabench_platform.v3.sdk.evaluation.v2 import AgentRCAOutput
+
     state = _State()
     instruction = str(
         config.get("continuation_instruction") or _DEFAULT_INSTRUCTION
     )
 
     async def _submit(args: dict[str, Any]) -> ToolResult | ToolTerminate:
-        root_cause = _require_str(args.get("root_cause"))
-        triggering_signal = _require_str(args.get("triggering_signal"))
-        evidence = _require_str(args.get("evidence"))
-        remediation = _require_str(args.get("remediation"))
-        causal_graph = args.get("causal_graph")
-        missing = [
-            name
-            for name, value in (
-                ("root_cause", root_cause),
-                ("triggering_signal", triggering_signal),
-                ("evidence", evidence),
-                ("remediation", remediation),
-            )
-            if not value
-        ]
-        cg_error = _validate_causal_graph(causal_graph)
-        if cg_error is not None:
-            return ToolResult(
-                content=[
-                    TextContent(
-                        type="text",
-                        text=json.dumps({"error": cg_error}),
-                    )
-                ],
-                is_error=True,
-            )
-        if missing:
-            # Validation failure: stay in the loop so the model can retry.
+        try:
+            output = AgentRCAOutput.model_validate(args)
+        except Exception as exc:  # pydantic ValidationError + anything weird
             return ToolResult(
                 content=[
                     TextContent(
                         type="text",
                         text=json.dumps(
                             {
-                                "error": "missing required fields",
-                                "missing": missing,
+                                "error": "agent_contract_validation_failed",
+                                "detail": str(exc),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                ],
+                is_error=True,
+            )
+        if not output.root_causes:
+            return ToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {
+                                "error": "root_causes must be non-empty — "
+                                "submit at least one RootCauseClaim with "
+                                "service + fault_kind + >=1 evidence."
                             }
                         ),
                     )
@@ -131,26 +127,16 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 is_error=True,
             )
         state.submitted = True
-        # The tool is the canonical submission point: serialize the
-        # validated payload here so downstream readers (the eval adapter)
-        # consume a single authoritative artifact instead of snooping the
-        # raw model args. The result text doubles as the trajectory
-        # record and as the wire payload — keep it strict JSON so the
-        # adapter can ``json.loads`` without heuristics.
-        submission = {
-            "status": "accepted",
-            "root_cause": root_cause,
-            "triggering_signal": triggering_signal,
-            "evidence": evidence,
-            "remediation": remediation,
-            "causal_graph": causal_graph,
-        }
+        # Serialize via the model so the wire payload is always
+        # contract-conformant (alias ``from`` survives, enums become their
+        # string values). Eval adapter calls ``AgentRCAOutput.parse_str``
+        # on this exact text.
         return ToolTerminate(
             result=ToolResult(
                 content=[
                     TextContent(
                         type="text",
-                        text=json.dumps(submission, ensure_ascii=False),
+                        text=output.model_dump_json(by_alias=True),
                     )
                 ]
             ),
@@ -161,94 +147,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         FunctionTool(
             name="submit_final_report",
             description=(
-                "Submit the final root-cause analysis report. This is the "
-                "only way to terminate the investigation. Until you call "
-                "this tool, ending your turn without a tool_call will be "
-                "rejected and you will be asked to keep investigating."
+                "Submit the final root-cause analysis as the official "
+                "rcabench-platform AgentRCAOutput. This is the only "
+                "sanctioned way to terminate. Service names must match "
+                "strings present in the data; fault_kind must be one of "
+                "the enum values listed in the agent contract above."
             ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "root_cause": {
-                        "type": "string",
-                        "description": (
-                            "Service or component identified as the root "
-                            "cause."
-                        ),
-                    },
-                    "triggering_signal": {
-                        "type": "string",
-                        "description": (
-                            "First metric, span, or log line that "
-                            "deviated from baseline."
-                        ),
-                    },
-                    "evidence": {
-                        "type": "string",
-                        "description": (
-                            "Citations of the SQL queries or worker "
-                            "findings that support the conclusion."
-                        ),
-                    },
-                    "remediation": {
-                        "type": "string",
-                        "description": "Suggested fix or mitigation.",
-                    },
-                    "causal_graph": {
-                        "type": "object",
-                        "description": (
-                            "Machine-readable RCA conclusion as a CausalGraph. "
-                            "``root_causes`` is the only field downstream "
-                            "evaluation cares about; populate it with one "
-                            "node per implicated service. ``component`` is "
-                            "the service name (e.g. 'ts-payment-service'). "
-                            "``nodes`` and ``edges`` are optional and may be "
-                            "empty arrays when no propagation graph is built."
-                        ),
-                        "properties": {
-                            "nodes": {
-                                "type": "array",
-                                "items": {"type": "object"},
-                                "description": (
-                                    "All nodes considered in the analysis "
-                                    "(may be empty)."
-                                ),
-                            },
-                            "edges": {
-                                "type": "array",
-                                "items": {"type": "object"},
-                                "description": (
-                                    "Causal edges source -> target (may be "
-                                    "empty)."
-                                ),
-                            },
-                            "root_causes": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "component": {"type": "string"},
-                                    },
-                                    "required": ["component"],
-                                },
-                                "description": (
-                                    "Nodes flagged as root cause(s). At "
-                                    "least one entry."
-                                ),
-                            },
-                        },
-                        "required": ["root_causes"],
-                    },
-                },
-                "required": [
-                    "root_cause",
-                    "triggering_signal",
-                    "evidence",
-                    "remediation",
-                    "causal_graph",
-                ],
-                "additionalProperties": False,
-            },
+            parameters=_AGENT_RCA_OUTPUT_SCHEMA,
             fn=_submit,
         )
     )
@@ -279,34 +184,122 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     api.on("decide_turn_action", _on_decide_turn_action)
 
 
-def _require_str(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
+# Inlined (no $defs / $ref) JSON schema mirroring AgentRCAOutput, so any
+# LLM tool-call backend that doesn't resolve refs still works. Kept
+# manually in sync with the upstream Pydantic models — Pydantic remains
+# the source of truth at validation time, this is just the wire schema
+# the model sees.
+_EVIDENCE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "kind": {
+            "type": "string",
+            "enum": ["metric", "trace", "log"],
+        },
+        "sql": {
+            "type": "string",
+            "description": (
+                "DuckDB SQL the platform can re-execute against the case "
+                "parquets to verify the claim."
+            ),
+        },
+        "claim": {
+            "type": "string",
+            "description": (
+                "<=20-word natural-language assertion the SQL rows back."
+            ),
+        },
+    },
+    "required": ["kind", "sql", "claim"],
+}
 
+_FAULT_KIND_ENUM: list[str] = [
+    "pod_failure",
+    "pod_unavailable",
+    "network_delay",
+    "network_loss",
+    "network_partition",
+    "network_corrupt",
+    "network_duplicate",
+    "network_bandwidth_limit",
+    "http_aborted",
+    "http_slow",
+    "http_payload_modified",
+    "http_response_status_modified",
+    "cpu_stress",
+    "jvm_thread_cpu_stress",
+    "mem_stress",
+    "jvm_heap_stress",
+    "jvm_gc_pressure",
+    "jvm_method_exception",
+    "jvm_jdbc_exception",
+    "jvm_method_latency",
+    "jvm_jdbc_latency",
+    "jvm_method_mutated",
+    "dns_resolution_failed",
+    "dns_resolution_wrong",
+    "clock_skew",
+    "unknown",
+]
 
-def _validate_causal_graph(value: Any) -> str | None:
-    """Lightweight shape check for the ``causal_graph`` argument.
-
-    Mirrors the JSON schema's ``required`` constraints so a bad call gets a
-    structured error (and a retry) instead of crashing the loop. Returns an
-    error message string on failure, ``None`` on success.
-    """
-    if not isinstance(value, dict):
-        return "causal_graph must be an object"
-    root_causes = value.get("root_causes")
-    if not isinstance(root_causes, list) or not root_causes:
-        return "causal_graph.root_causes must be a non-empty list"
-    for idx, node in enumerate(root_causes):
-        if not isinstance(node, dict):
-            return f"causal_graph.root_causes[{idx}] must be an object"
-        component = node.get("component")
-        if not isinstance(component, str) or not component.strip():
-            return (
-                f"causal_graph.root_causes[{idx}].component "
-                "must be a non-empty string"
-            )
-    return None
+_AGENT_RCA_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "root_causes": {
+            "type": "array",
+            "minItems": 1,
+            "description": (
+                "One entry per distinct root cause. Do NOT collapse "
+                "multiple distinct faults into a single entry."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "description": (
+                            "Canonical service_name as it appears in the "
+                            "data — must match strings present in the "
+                            "parquets / views; do not invent."
+                        ),
+                    },
+                    "fault_kind": {
+                        "type": "string",
+                        "enum": _FAULT_KIND_ENUM,
+                    },
+                    "evidence": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": _EVIDENCE_SCHEMA,
+                    },
+                },
+                "required": ["service", "fault_kind", "evidence"],
+            },
+        },
+        "propagation": {
+            "type": "array",
+            "description": (
+                "Fault-impact chain edges — FROM the failing service "
+                "TOWARD the user-visible alarm tier. Not the request-call "
+                "direction. Synthetic generators (loadgenerator, locust, "
+                "wrk2, dsb-wrk2, k6) are NOT services."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "from": {"type": "string"},
+                    "to": {"type": "string"},
+                    "evidence": {
+                        "type": "array",
+                        "items": _EVIDENCE_SCHEMA,
+                    },
+                },
+                "required": ["from", "to"],
+            },
+        },
+    },
+    "required": ["root_causes"],
+}
 
 
 __all__ = ["MANIFEST", "install"]
