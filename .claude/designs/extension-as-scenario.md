@@ -134,6 +134,7 @@ Keep this small. Every method earns its keep. Reference: pi-mono `extensions/typ
 class ExtensionAPI(Protocol):
     # --- Event subscription (typed overloads per channel) ---
     def on(self, channel: str, handler: Handler) -> Unsubscribe: ...
+    def add_observer(self, callback: ObserverCallback) -> Unsubscribe: ...
 
     # --- Registrations ---
     def register_tool(self, tool: Tool) -> None: ...
@@ -143,7 +144,10 @@ class ExtensionAPI(Protocol):
 
     # --- Actions ---
     def send_user_message(self, content: str | list[Content]) -> None: ...
-    def append_entry(self, custom_type: str, payload: Any) -> None: ...
+    async def spawn_child_session(self, config: AgentSessionConfig | dict[str, Any]) -> Any: ...
+    def set_service(self, name: str, obj: Any) -> None: ...
+    def get_service(self, name: str) -> Any | None: ...
+    def get_resource_writer(self) -> ResourceWriter: ...
 
     # --- Read-only context (lazy properties; cwd/model/session may change) ---
     @property
@@ -155,6 +159,12 @@ class ExtensionAPI(Protocol):
     @property
     def events(self) -> EventBus: ...   # for cross-extension communication
 ```
+
+`add_observer` is the typed surface for passive event-bus observation; atoms
+must not patch `EventBus` internals. `spawn_child_session` accepts the legacy
+dataclass or a kwargs mapping so atoms do not import harness internals.
+`set_service` / `get_service` provide a per-session registry for atom-owned
+state that should not live in module globals.
 
 **Deferred (add when first extension needs them)**: shortcuts/keybindings, UI primitives (select/confirm/input), flag registration, theme management, status/footer/widget injection. These are TUI concerns; we'll add them when the interactive mode lands.
 
@@ -276,10 +286,10 @@ Each is one Python module with `install(api, config)` doing **one thing**. The a
 
 | Module | Registers | Notes |
 |---|---|---|
-| `extensions.builtin.tool_read` | `read` | Delegates to `FileOperations` from config |
+| `extensions.builtin.tool_read` | `read` | Delegates to `FileOperations` from config / `api.get_operations().file` |
 | `extensions.builtin.tool_bash` | `bash` | Delegates to `BashOperations` from config |
-| `extensions.builtin.tool_edit` | `edit` | Delegates to `FileOperations` |
-| `extensions.builtin.tool_write` | `write` | Delegates to `FileOperations` |
+| `extensions.builtin.tool_edit` | `edit` | Delegates exclusively to `ResourceWriter` |
+| `extensions.builtin.tool_write` | `write` | Delegates exclusively to `ResourceWriter` |
 | `extensions.builtin.tool_hypothesis_store` | `add_hypothesis`, `update_hypothesis`, `list_hypotheses` | Owns an in-memory store; persists via `api.session.append_entry("hypothesis", …)` |
 | `extensions.builtin.tool_trajectory_loader` | `load_trajectory`, `summarize_trajectory`, `find_event`, `compare_trajectories` | Reads JSONL trajectory files |
 | `extensions.builtin.tool_submit_plan` | `submit_plan` | Appends a `plan` SessionEntry; emits `plan_submitted` event |
@@ -511,8 +521,9 @@ To honour `pluggable-architecture.md` §3.2 (acceptance scenario 2 — bash over
 # src/agentm/core/abi/operations.py  — Protocols (atom + harness import)
 class FileOperations(Protocol):
     async def read_file(self, path: str) -> bytes: ...
-    async def write_file(self, path: str, content: bytes) -> None: ...
-    async def access(self, path: str) -> None: ...
+    async def access(self, path: str) -> bool: ...
+    async def is_dir(self, path: str) -> bool: ...
+    async def list_dir(self, path: str) -> list[str]: ...
 
 class BashOperations(Protocol):
     async def exec(self, cmd: str, *, cwd: str, timeout: float | None = None,
@@ -521,11 +532,17 @@ class BashOperations(Protocol):
                    signal: asyncio.Event | None = None) -> ExecResult: ...
 
 # src/agentm/core/_internal/operations_impl.py — default impls
-class LocalFileOperations: ...     # stdlib-backed
+class LocalFileOperations: ...     # stdlib-backed read environment
 class LocalBashOperations: ...     # asyncio.subprocess-backed
 ```
 
-Tool atoms (`tool_read` / `tool_bash` / `tool_edit` / `tool_write`) accept the Operations objects via their config dict — `config["file_ops"]`, defaulting to `LocalFileOperations()`. Swapping to SSH = passing a different impl in the scenario YAML, no code fork.
+Tool atoms use a deliberate hybrid seam: read-only file tools (`tool_read` /
+`tool_grep` / `tool_find` / `tool_ls`) accept `config["file_ops"]` and
+default to `api.get_operations().file`; write tools (`tool_write` / `tool_edit`)
+use `api.get_resource_writer()` exclusively so managed-resource versioning and
+constitution-path rejection remain the single mutation chokepoint. Swapping read
+transport = pass a different `FileOperations`; redirecting or auditing writes =
+replace `ResourceWriter`.
 
 This is delivered by **Phase 2 Group A0** before Group D1 so the tool atoms can be built against the ports from day one.
 
@@ -600,7 +617,7 @@ The §10b.7 method is reachable as `api.session.append_entry(...)`, **not** `api
 
 ### 11.1 Hard rules
 
-1. **One file, one extension.** A new built-in extension is a single Python file at `src/agentm/extensions/builtin/<name>.py`. **No subpackages**, no helper modules. If the file would exceed ~300 LoC, the responsibility is too broad — split it into two extensions instead.
+1. **One file, one extension.** A new built-in extension is a single Python file at `src/agentm/extensions/builtin/<name>.py`. **No subpackages**, no helper modules. If the file would exceed ~300 LoC, the responsibility is too broad — split it into two extensions instead. Opt-in contrib packages may group multiple single-file atoms under `contrib/extensions/<package>/` when mounted explicitly with `--extension`; package-internal helper modules are allowed only for shared install-time parsing/rendering, and each public atom file still exports its own `MANIFEST` + `install`.
 2. **Module-level `MANIFEST`.** Every built-in extension exports a module-level constant `MANIFEST: ExtensionManifest` (frozen dataclass; defined in `agentm.extensions`). This is the *only* way an extension declares what it is. No magic comments, no plugin entry-point files.
 3. **`install(api, config)` is the only callable surface.** Internal helpers may exist as module-private functions (`_underscore_prefixed`); they are never imported by other modules.
 4. **Allowed imports** (enforced by validator):
@@ -627,6 +644,8 @@ class ExtensionManifest:
 
 `registers` is a tag list, not a free-form string: tags follow `<kind>:<id>` where `<kind>` ∈ `{tool, event, command, provider, renderer}`. The validator parses these and uses them to detect ordering/conflict issues.
 
+Scenario/session loading topologically sorts manifest-bearing extensions by `requires` before installation and fails fast when a declared dependency is absent. Built-in atoms with no peer dependency still spell `requires=()` with an inline rationale so the absence is auditable.
+
 ### 11.3 Auto-discovery
 
 `agentm.extensions.discover.discover_builtin() -> dict[str, BuiltinEntry]` walks `extensions/builtin/`, imports each module, and returns a name → entry map. Used by:
@@ -634,7 +653,7 @@ class ExtensionManifest:
 - The validator (§11.4).
 - Future tooling: an agent listing "what atoms exist" reads this map; nothing else.
 
-Discovery is **memoized per process** so production loads pay the directory walk once.
+Discovery is **memoized per process** so production loads pay the directory walk once. Flat-file contrib discovery intentionally scans only `contrib/extensions/*.py`; privileged contrib packages such as `contrib.extensions.cc` are loaded only by explicit module path and are not auto-discovered from their package directory.
 
 ### 11.4 Validator
 
@@ -648,6 +667,12 @@ Discovery is **memoized per process** so production loads pay the directory walk
 6. Every tag in `MANIFEST.registers` parses as `<kind>:<id>` with a known kind.
 7. `MANIFEST.requires` and `MANIFEST.conflicts` reference names that exist (or are documented forward references for not-yet-landed atoms).
 8. If `config_schema` is set, it is a syntactically valid JSON-Schema dict.
+9. Peer atom names referenced as string literals in code must appear in `MANIFEST.requires`.
+10. AST hygiene rejects private ExtensionAPI reflection, ExtensionAPI attribute
+   overwrites, mutable module-level dict/list/set globals without `Final`,
+   f-string dynamic imports under `agentm.*`, and `isinstance` downcasts to
+   concrete harness service classes. Atoms must consume harness capabilities
+   through ExtensionAPI and Protocol methods.
 
 Test integration: `tests/unit/extensions/test_extension_contract.py` calls `validate_builtin()` and fails the suite on any issue. **This is the gate every new extension PR must pass mechanically — an agent self-editing an extension knows it broke the contract before any human reads the diff.**
 
@@ -683,3 +708,13 @@ async def test_v2_smoke():
 ```
 
 If this test passes, Phase 1 is done. Phase 2 can start.
+
+### 11.6 RCA contract atom and loud optional-vendor failure
+
+RCA scenario prompts consume the official rcabench-platform agent contract via
+`contrib.extensions.rcabench_contract`, not scenario-local helper functions.
+The atom owns vendor loading and `before_agent_start` injection for both
+multi-agent and single-agent RCA manifests. If the optional vendor package is
+missing, the atom emits a warning `DiagnosticEvent` and injects an explicit
+`<contract status="unavailable" ... />` placeholder instead of silently omitting
+the contract block.

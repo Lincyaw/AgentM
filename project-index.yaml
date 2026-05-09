@@ -1,0 +1,584 @@
+requirements:
+
+  - id: REQ-095-provider-wire-policy-leaks
+    title: Provider wire policy knobs stay explicit at the core ABI boundary
+    description: >
+      LLM provider wire modules must expose provider-specific thinking and
+      reasoning round-trip policy as constructor/config options, emit diagnostics
+      when OpenAI-compatible chat completions drops assistant reasoning, and
+      depend on ProviderConfig only through agentm.core.abi rather than the
+      harness layer.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/provider.py
+      - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/harness/extension.py
+      - path: src/agentm/llm/anthropic.py
+      - path: src/agentm/llm/openai.py
+    tests:
+      - path: tests/unit/llm/test_retry_policy.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-95-wire-policy-leaks.md
+    depends_on:
+      - REQ-093-llm-provider-stream-common
+
+  - id: REQ-093-llm-provider-stream-common
+    title: Shared LLM provider stream accumulator and tool spec adapters
+    description: >
+      Anthropic and OpenAI-compatible providers must share stream assembly,
+      tool-argument JSON encoding, tool-call argument parse-error signaling,
+      and real timestamp stamping while keeping provider-specific code limited
+      to event mapping and vendor tool-spec adaptation. Anthropic tool-result
+      message packing must remain a single linear pass.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/llm/_common.py
+      - path: src/agentm/llm/anthropic.py
+      - path: src/agentm/llm/openai.py
+      - path: src/agentm/core/abi/stream.py
+      - path: src/agentm/core/abi/loop.py
+      - path: src/agentm/core/abi/__init__.py
+    tests:
+      - path: tests/unit/core/abi/test_tool_arg_parse_error.py
+      - path: tests/unit/llm/test_common_stream_accumulator.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-93-llm-stream-common.md
+    depends_on: []
+
+  - id: REQ-085-session-policy-extraction
+    title: AgentSession policy extraction and typed runtime boundary
+    description: >
+      AgentSession must stay a thin harness façade by moving prompt policy into
+      atoms, making provider selection explicit through a resolver port,
+      replacing boundary type checks with published Protocol calls, collapsing
+      repeated atom discovery, bundling construction runtime dependencies, and
+      preserving fork isolation through copied entry payloads.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/harness/session.py
+      - path: src/agentm/harness/session_factory.py
+      - path: src/agentm/harness/session_helpers.py
+      - path: src/agentm/harness/session_runtime.py
+      - path: src/agentm/harness/session_config.py
+      - path: src/agentm/harness/command_dispatcher.py
+      - path: src/agentm/harness/provider_resolver.py
+      - path: src/agentm/harness/atom_reloader.py
+      - path: src/agentm/harness/session_manager.py
+      - path: src/agentm/core/abi/provider.py
+      - path: src/agentm/extensions/builtin/cost_budget.py
+      - path: src/agentm/extensions/builtin/slash_commands.py
+    tests:
+      - path: tests/unit/harness/test_session_refactor.py
+      - path: tests/integration/test_cli_slash_commands.py
+      - path: tests/unit/core/catalog/test_indexer.py
+      - path: tests/unit/extensions/test_extension_contract.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-85-session-refactor.md
+      - path: .claude/tasks/2026-05-09-issue-85-review-follow-up.md
+    depends_on:
+      - REQ-079-atom-reloader-fail-stop
+      - REQ-086-atom-rework-infra
+
+  - id: REQ-086-atom-rework-infra
+    title: Atom rework infrastructure surface and validator hardening
+    description: >
+      ExtensionAPI and core.lib must expose additive surfaces needed by the
+      upcoming atom rework: typed event observation, kwargs-based child session
+      spawning, per-session service registration, resource writer version
+      lookup, and shared JSON serialization. The atom validator must reject
+      private API reflection, ExtensionAPI attribute overwrites, mutable module
+      globals without Final, f-string dynamic imports under agentm.*, and
+      concrete harness-service downcasts.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/events.py
+      - path: src/agentm/core/abi/resource.py
+      - path: src/agentm/core/lib/serialization.py
+      - path: src/agentm/core/lib/__init__.py
+      - path: src/agentm/harness/extension.py
+      - path: src/agentm/harness/resource_writer.py
+      - path: src/agentm/harness/session.py
+      - path: src/agentm/extensions/validate.py
+      - path: src/agentm/extensions/builtin/inherit_provider.py
+    tests:
+      - path: tests/unit/extensions/test_observability.py
+      - path: tests/unit/harness/test_extension_api_infra.py
+      - path: tests/unit/core/lib/test_serialization.py
+      - path: tests/unit/extensions/test_extension_contract.py
+      - path: tests/integration/test_resource_writer.py
+    docs:
+      - path: .claude/designs/extension-as-scenario.md
+      - path: .claude/designs/self-modifiable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-86-atom-rework-infra.md
+    depends_on: []
+
+  - id: REQ-079-atom-reloader-fail-stop
+    title: Atom reloader fail-stop hardening
+    description: >
+      Atom reload must preserve the previous live atom state when rollback also
+      fails, use native async reload/install/freeze boundaries, unregister
+      reloader-owned bus subscriptions during session shutdown, and track atom
+      registration ownership uniformly by kind.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/harness/atom_reloader.py
+      - path: src/agentm/harness/session.py
+    tests:
+      - path: tests/unit/harness/test_transactional_reload.py
+    docs:
+      - path: .claude/designs/self-modifiable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-79-atom-reloader-hardening.md
+    depends_on: []
+
+  - id: REQ-087-builtin-atoms-extension-api
+    title: Builtin atoms consume ExtensionAPI C-1 capabilities
+    description: >
+      The observability, sub_agent, artifact_store, micro_compact, and
+      llm_compaction atoms must consume the additive C-1 ExtensionAPI/core.lib
+      surfaces instead of private bus mutation, harness config construction,
+      writer type checks, module-level service registries, hard-coded builtin
+      module paths, or local JSON serialization ladders. The sub_agent atom
+      remains a single file for this round; revisit splitting only at or above
+      1500 lines.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/events.py
+      - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/harness/extension.py
+      - path: src/agentm/harness/atom_reloader.py
+      - path: src/agentm/extensions/builtin/observability.py
+      - path: src/agentm/extensions/builtin/sub_agent.py
+      - path: src/agentm/extensions/builtin/artifact_store.py
+      - path: src/agentm/extensions/builtin/micro_compact.py
+      - path: src/agentm/extensions/builtin/llm_compaction.py
+      - path: contrib/scenarios/rca/src/agentm_rca/tools/hypothesis_tools.py
+    tests:
+      - path: tests/integration/test_artifact_store.py
+      - path: tests/unit/extensions/test_compaction_atoms.py
+      - path: tests/integration/test_observability_cli.py
+      - path: tests/integration/test_sub_agent_budgets.py
+      - path: tests/integration/test_sub_agent_lifecycle.py
+      - path: tests/unit/extensions/test_extension_contract.py
+      - path: tests/unit/harness/test_extension_api_infra.py
+      - path: tests/unit/extensions/test_observability.py
+      - path: tests/unit/harness/test_transactional_reload.py
+    docs:
+      - path: .claude/designs/observability.md
+      - path: .claude/designs/sub-agent-lifecycle.md
+      - path: .claude/designs/artifact-system.md
+      - path: .claude/tasks/2026-05-09-issue-87-builtin-atoms-extension-api.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
+  - id: REQ-088-builtin-atom-hygiene
+    title: Builtin atom requires, schema, and diagnostic hygiene
+    description: >
+      Builtin atoms must declare peer dependencies through MANIFEST.requires,
+      expose magic runtime constants through config_schema defaults, warn on
+      ignored peer response keys or unpriced cost providers, and fail fast when
+      scenario or session extension dependencies are absent.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/extensions/builtin
+      - path: src/agentm/extensions/validate.py
+      - path: src/agentm/extensions/loader.py
+      - path: src/agentm/harness/session_factory.py
+      - path: contrib/scenarios/rca/manifest.yaml
+    tests:
+      - path: tests/unit/extensions/test_extension_contract.py
+      - path: tests/unit/extensions/test_issue_88_hygiene.py
+    docs:
+      - path: .claude/designs/extension-as-scenario.md
+      - path: .claude/tasks/2026-05-09-issue-88-builtin-atom-hygiene.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
+  - id: REQ-100-cc-extension-package
+    title: Claude Code compatibility atoms share a package boundary
+    description: >
+      The Claude Code compatibility atoms must be mounted explicitly as the
+      `contrib.extensions.cc` package, with agents, commands, and plugins as
+      tier-2 single-file atoms. Markdown frontmatter parsing for command skill
+      records is shared inside the package, plugin command discovery flows
+      through the typed ResourcesDiscoverEvent contract instead of an
+      extra_skills workaround, and sub-agent availability XML rendering is
+      centralized in core.lib for reuse by RCA.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: contrib/extensions/cc/__init__.py
+      - path: contrib/extensions/cc/_md_skills.py
+      - path: contrib/extensions/cc/agents.py
+      - path: contrib/extensions/cc/commands.py
+      - path: contrib/extensions/cc/plugins.py
+      - path: src/agentm/core/lib/available_agents.py
+      - path: src/agentm/core/lib/__init__.py
+      - path: contrib/scenarios/rca/orchestrator_setup.py
+      - path: contrib/scenarios/rca/prompts/orchestrator.md
+      - path: contrib/scenarios/rca_single/setup.py
+      - path: pyproject.toml
+    tests:
+      - path: tests/unit/contrib/test_cc_extension_package.py
+      - path: tests/integration/test_cc_extension_cli.py
+      - path: contrib/scenarios/rca/tests/test_rca_orchestrator_setup.py
+    docs:
+      - path: CHANGELOG.md
+      - path: README.md
+      - path: core-manifest.yaml
+      - path: .claude/designs/extension-as-scenario.md
+      - path: .claude/designs/self-modifiable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-100-cc-package.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
+
+  - id: REQ-102-rca-scenario-cleanup
+    title: RCA scenario shared contract and inherited extension hygiene
+    description: >
+      RCA scenarios must share one rcabench contract atom, emit a visible
+      warning plus explicit unavailable contract placeholder when the vendor
+      contract module is absent, use typed event channel constants for RCA
+      prompt/persona wiring, inherit sub-agent extension config by manifest
+      name, and mount real RCA tool atoms directly so wrapper atoms do not hide
+      installed tool registers.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: contrib/extensions/rcabench_contract/__init__.py
+      - path: contrib/scenarios/rca/orchestrator_setup.py
+      - path: contrib/scenarios/rca/manifest.yaml
+      - path: contrib/scenarios/rca_single/setup.py
+      - path: contrib/scenarios/rca_single/manifest.yaml
+      - path: contrib/scenarios/rca/src/agentm_rca/tools/duckdb_sql.py
+      - path: contrib/scenarios/rca/src/agentm_rca/tools/hypothesis_tools.py
+      - path: src/agentm/extensions/builtin/sub_agent.py
+      - path: src/agentm/harness/atom_reloader.py
+      - path: src/agentm/harness/events.py
+      - path: src/agentm/harness/extension.py
+    tests:
+      - path: tests/unit/extensions/test_issue_102_rca_cleanup.py
+      - path: tests/integration/test_issue_102_rca_cli.py
+      - path: contrib/scenarios/rca/tests/test_rca_orchestrator_setup.py
+      - path: tests/integration/test_sub_agent_lifecycle.py
+      - path: tests/integration/test_sub_agent_budgets.py
+    docs:
+      - path: .claude/designs/extension-as-scenario.md
+      - path: .claude/designs/sub-agent-lifecycle.md
+      - path: .claude/tasks/2026-05-09-issue-102-rca-cleanup.md
+    depends_on:
+      - REQ-087-builtin-atoms-extension-api
+
+  - id: REQ-089-file-tool-io-seams
+    title: File tool atoms use documented read and write seams
+    description: >
+      Builtin file tool atoms must use the documented hybrid IO seam: read-only
+      tools consume FileOperations through ExtensionAPI operations, while write
+      tools consume ResourceWriter exclusively so scenario overrides and managed
+      resource protections intercept all file mutations consistently.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/operations.py
+      - path: src/agentm/core/abi/resource.py
+      - path: src/agentm/core/_internal/operations_impl.py
+      - path: src/agentm/harness/resource_writer.py
+      - path: src/agentm/extensions/builtin/tool_read.py
+      - path: src/agentm/extensions/builtin/tool_write.py
+      - path: src/agentm/extensions/builtin/tool_edit.py
+      - path: src/agentm/extensions/builtin/tool_grep.py
+      - path: src/agentm/extensions/builtin/tool_find.py
+      - path: src/agentm/extensions/builtin/tool_ls.py
+    tests:
+      - path: tests/unit/extensions/test_file_tool_io_seams.py
+      - path: tests/integration/test_file_tool_cli.py
+      - path: tests/unit/extensions/test_extension_contract.py
+      - path: tests/integration/test_cli_slash_commands.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/designs/extension-as-scenario.md
+      - path: .claude/designs/search-tools.md
+      - path: .claude/tasks/2026-05-09-issue-89-file-tool-io-seams.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
+  - id: REQ-101-tool-catalog-split
+    title: Tool catalog browse/mutate atom split
+    description: >
+      The contrib tool catalog must expose read-only history browsing separately
+      from mutating self-modification tools so plan-mode scenarios can mount
+      catalog introspection without enabling rollback, install, unload, or reload
+      mutation. The browse and mutate atoms must declare accurate registers lists.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: contrib/extensions/tool_catalog/__init__.py
+      - path: contrib/extensions/tool_catalog/_paths.py
+      - path: contrib/extensions/tool_catalog/_git_log.py
+      - path: contrib/extensions/tool_catalog/browse.py
+      - path: contrib/extensions/tool_catalog/mutate.py
+      - path: contrib/scenarios/plan_mode/manifest.yaml
+      - path: pyproject.toml
+    tests:
+      - path: tests/integration/test_browse_and_rollback.py
+      - path: tests/integration/test_reload_via_writer.py
+    docs:
+      - path: .claude/designs/git-backed-versioning.md
+      - path: README.md
+      - path: .claude/tasks/2026-05-09-issue-101-tool-catalog-split.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
+  - id: REQ-094-ai-provider-descriptor-registry
+    title: AI provider descriptors are the registry source of truth
+    description: >
+      The AI provider boundary must keep provider ids, API routing metadata,
+      aliases, and environment-key precedence in ProviderDescriptor records so
+      adding a provider does not require parallel Literal and env-var edits.
+      Environment API key resolution must support injected mappings for tests,
+      and runtime provider registration must use one validating wrapper with
+      shared canonical API checks for stream methods.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/ai/types.py
+      - path: src/agentm/ai/env_api_keys.py
+      - path: src/agentm/ai/api_registry.py
+      - path: src/agentm/ai/__init__.py
+    tests:
+      - path: tests/ai/test_provider_registry.py
+    docs: []
+    depends_on: []
+
+  - id: REQ-092-retry-transport-policy
+    title: Retry and transport policy are pluggable provider services
+    description: >
+      LLM provider retry behavior must be supplied through a core RetryPolicy
+      port and a builtin retry_policy atom instead of provider-local module
+      globals, string-sniffed rate-limit checks, or OpenAI-only wire retries.
+      OpenAI and Anthropic providers must accept injected retry policies with
+      provider-typed retry predicates, and security-relevant transport overrides
+      such as verify_ssl=False must emit visible diagnostics at composition time.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/retry.py
+      - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/extensions/builtin/retry_policy.py
+      - path: src/agentm/llm/openai.py
+      - path: src/agentm/llm/anthropic.py
+    tests:
+      - path: tests/unit/llm/test_retry_policy.py
+      - path: tests/integration/test_observability_cli.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-92-retry-policy.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+      - REQ-093-llm-provider-stream-common
+
+  - id: REQ-096-cli-provider-session-seams
+    title: CLI presenter consumes provider registry and session-store ports
+    description: >
+      CLI and TUI presenter construction must not encode the provider universe
+      or JSONL session lookup format inline. Provider extension specs and
+      defaults come from ProviderRegistry descriptors, CLI resume/continue
+      flows consume the SessionStore protocol with JsonlSessionStore as the
+      default implementation, shared diagnostic/session-config helpers remove
+      duplicated presenter wiring, and Textual must clone AgentSessionConfig
+      through a public with_bus helper instead of reflecting on __dict__.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/cli.py
+      - path: src/agentm/ai/types.py
+      - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/core/abi/session_store.py
+      - path: src/agentm/harness/session_manager.py
+      - path: src/agentm/harness/session_config.py
+      - path: src/agentm/modes/textual_app.py
+    tests:
+      - path: tests/unit/test_cli_pluggable_boundaries.py
+      - path: tests/ai/test_provider_registry.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-96-cli-provider-session-seams.md
+    depends_on:
+      - REQ-094-ai-provider-descriptor-registry
+
+  - id: REQ-098-textual-tui-registries
+    title: Textual TUI registries and monotone turn identity
+    description: >
+      The Textual presenter must consume single-source registries and typed
+      event metadata instead of hardcoded command lists, event ladders,
+      self-modification trigger strings, phase strings, and prompt-local turn
+      epochs. The kernel must emit a monotone turn_id across a session so
+      presenters can key streamed root turns without collisions when
+      turn_index resets per prompt.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/modes/textual_app.py
+      - path: src/agentm/core/abi/events.py
+      - path: src/agentm/core/abi/loop.py
+      - path: src/agentm/harness/events.py
+      - path: src/agentm/harness/atom_reloader.py
+      - path: src/agentm/extensions/builtin/observability.py
+    tests:
+      - path: tests/integration/test_textual_tui.py
+      - path: tests/unit/core/abi/test_turn_id.py
+    docs:
+      - path: .claude/designs/textual-tui.md
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-98-textual-tui-registries.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
+  - id: REQ-097-shared-presenter-rendering
+    title: CLI and TUI consume shared headless render helpers
+    description: >
+      CLI and Textual presenters must render assistant text, tool results,
+      final token summaries, and optional cost estimates through shared core.lib
+      helpers and ExtensionAPI services instead of duplicate block walks,
+      atom-private pricing imports, or tool-name-specific diff heuristics.
+      Tool result formatting must be declared as tool metadata or registered via
+      a tool renderer service hook, and missing cost services must degrade to a
+      token-only summary.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/lib/render.py
+      - path: src/agentm/core/abi/services.py
+      - path: src/agentm/core/abi/tool.py
+      - path: src/agentm/harness/extension.py
+      - path: src/agentm/harness/session.py
+      - path: src/agentm/harness/session_factory.py
+      - path: src/agentm/harness/session_runtime.py
+      - path: src/agentm/cli.py
+      - path: src/agentm/modes/textual_app.py
+      - path: src/agentm/extensions/builtin/cost_budget.py
+      - path: src/agentm/extensions/builtin/tool_edit.py
+    tests:
+      - path: tests/unit/core/lib/test_render.py
+      - path: tests/unit/extensions/test_issue_88_hygiene.py
+      - path: tests/integration/test_textual_tui.py
+      - path: tests/unit/core/catalog/test_indexer.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-97-shared-rendering.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
+  - id: REQ-099-presenter-seams
+    title: CLI and Textual presenters expose public seams
+    description: >
+      CLI and Textual presenters must import harness capabilities through the
+      public harness surface, route CLI final output through an injected TextIO
+      stream, allow Textual callers to inject theme, CSS path, and key bindings,
+      surface recoverable theme and clipboard failures visibly, and remove the
+      legacy args_preview tool-call plumbing.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/cli.py
+      - path: src/agentm/modes/textual_app.py
+      - path: src/agentm/harness/__init__.py
+    tests:
+      - path: tests/unit/test_cli_pluggable_boundaries.py
+      - path: tests/unit/test_presenter_injection_seams.py
+      - path: tests/integration/test_textual_tui.py
+    docs:
+      - path: .claude/designs/textual-tui.md
+      - path: .claude/tasks/2026-05-09-issue-99-presenter-seams.md
+    depends_on:
+      - REQ-096-cli-provider-session-seams
+      - REQ-098-textual-tui-registries
+
+  - id: REQ-119-core-kernel-residuals
+    title: Core kernel removes hard-coded layout literals and dead Tool surface
+    description: >
+      The core kernel must not hard-code project-scope filesystem layout: the
+      ``.agentm/skills`` and ``.agentm/prompts`` fallbacks in
+      ``core._internal.skills`` and ``core._internal.prompt_templates`` are
+      removed, with project-scope directories supplied exclusively through
+      ``ProjectLayout``. The agent loop must expose a single
+      ``_default_action`` helper that takes paired ``(tool_name, ToolOutcome)``
+      tuples — the duplicated unnamed variant is gone. The ``Tool.execute``
+      Protocol must not advertise an ``on_update`` parameter that the kernel
+      never wires; the parameter is dropped from the Protocol and from every
+      builtin/internal implementation until a real progress channel ships.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/_internal/skills.py
+      - path: src/agentm/core/_internal/prompt_templates.py
+      - path: src/agentm/core/abi/loop.py
+      - path: src/agentm/core/abi/tool.py
+      - path: src/agentm/core/_internal/tools.py
+      - path: src/agentm/extensions/builtin/tool_grep.py
+      - path: src/agentm/extensions/builtin/tool_ls.py
+      - path: src/agentm/extensions/builtin/tool_find.py
+      - path: src/agentm/extensions/builtin/file_mutation_queue.py
+    tests:
+      - path: tests/unit/core/abi/test_decide_turn_action.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-119-core-kernel-residuals.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
+  - id: REQ-120-harness-reload-state-preservation
+    title: Harness reload uses immutable snapshot for double-failure rollback
+    description: >
+      Atom reload's claim of "transactional" must be backed by a single
+      pre-reload immutable snapshot covering loaded-atom registries, per-atom
+      handler/registration tracking, owners-by-kind, all extension registries,
+      apis dict, sys.modules entry, and bus subscriptions. On apply failure
+      the reloader first attempts in-place re-install of the original atom;
+      if that rollback itself raises, restore_from_snapshot writes back every
+      mutable structure from the snapshot's pre-copied data so the live agent
+      lands in an entirely pre-reload state rather than half-new / half-old.
+      The session_factory's three-section builtin/contrib/user auto-discovery
+      collapses into a single iteration over an AtomSource iterable.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/harness/atom_reloader.py
+      - path: src/agentm/harness/session_helpers.py
+      - path: src/agentm/harness/session_factory.py
+    tests:
+      - path: tests/unit/harness/test_transactional_reload.py
+    docs:
+      - path: .claude/tasks/2026-05-09-issue-120-harness-reload-dedup.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+    depends_on:
+      - REQ-086-atom-rework-infra

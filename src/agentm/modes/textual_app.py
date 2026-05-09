@@ -5,7 +5,8 @@ import base64
 import json
 import sys
 import time
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Generic, Literal, Protocol, TypeVar
 
@@ -15,7 +16,7 @@ from rich.syntax import Syntax
 from rich.table import Table as RichTable
 from rich.text import Text
 from textual import events, on
-from textual.app import App, ComposeResult, ScreenStackError
+from textual.app import App, ComposeResult, InvalidThemeError, ScreenStackError
 from textual.binding import Binding
 from textual.containers import Container, Vertical, VerticalScroll
 from textual.css.query import NoMatches
@@ -25,12 +26,13 @@ from textual.widgets import Collapsible, Input, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from agentm.core.abi import (
+    PHASE_GLYPHS,
     AssistantMessage,
     LlmRequestEndEvent,
     LlmRequestStartEvent,
     MessageEnd,
+    Phase as KernelPhase,
     StreamDeltaEvent,
-    TextContent,
     TextDelta,
     ThinkingDelta,
     ToolCallArgsDelta,
@@ -38,47 +40,122 @@ from agentm.core.abi import (
     ToolCallStart,
     ToolResultEvent,
     Usage,
+    Tool,
 )
-from agentm.extensions.builtin.cost_budget import _PRICING as _COST_PRICING
-from agentm.harness import AgentSession, AgentSessionConfig
-from agentm.harness.events import (
+from agentm.core.abi.events import DiagnosticEvent
+from agentm.core.lib.render import (
+    assistant_text as render_assistant_text,
+    tool_result_format,
+    tool_result_text as render_tool_result_text,
+    usage_report_from_usage,
+)
+from agentm.harness import (
+    AgentSession,
+    AgentSessionConfig,
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
     ChildSessionEndEvent,
     ChildSessionStartEvent,
+    CommandSpec,
     CostBudgetExceededEvent,
     ExtensionInstallEvent,
     ExtensionReloadEvent,
 )
-from agentm.harness.extension import CommandSpec
 
 
-_QUIT_COMMANDS = frozenset({"/quit", "/exit", "/q", "exit", "quit"})
-_BUILTIN_COMMANDS: dict[str, str] = {
-    "/quit": "Quit the TUI.",
-    "/exit": "Quit the TUI.",
-    "/q": "Quit the TUI.",
-    "/clear": "Clear the visible conversation log.",
-    "/help": "Show key bindings and slash commands.",
-    "/copy-last": "Copy the most recent assistant text block.",
-    "/extensions": "List loaded extensions and their status.",
-    "/tools": "List tools registered with the agent.",
-    "/budget": "Show current cost-budget state.",
-}
+# Re-export the kernel ``Phase`` literal under the legacy presenter name
+# so existing module consumers (tests, themes) keep their imports.
+Phase = KernelPhase
+CommandHandler = Callable[["AgentMApp", str], Awaitable[None] | None]
+KeyMap = Sequence[Binding]
+PromptFailure = Exception
 
-# Reload triggers that represent self-modification — the agent (or an
-# approved propose_change) edited an atom under its own catalog. The TUI
-# highlights these so the framework's signature behavior is *visible*
-# rather than silently happening through git.
-_SELF_MODIFY_TRIGGERS = frozenset({"agent", "propose_change_approved"})
 
-_PHASE_GLYPHS: dict[str, str] = {
-    "idle": "●",
-    "thinking": "◐",
-    "streaming": "◑",
-    "tool": "▶",
-    "subagent": "↳",
-}
+class Theme(Protocol):
+    @property
+    def phase_glyphs(self) -> Mapping[Phase, str]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DefaultTheme:
+    """Default presenter theme.
+
+    The glyph table comes from ``agentm.core.abi.PHASE_GLYPHS`` — the
+    kernel owns the canonical phase set so multiple presenters render
+    consistently. A custom theme can supply its own ``phase_glyphs`` to
+    override the look without forking the kernel.
+    """
+
+    phase_glyphs: Mapping[Phase, str] = field(default_factory=lambda: PHASE_GLYPHS)
+
+
+DEFAULT_THEME = DefaultTheme()
+
+
+@dataclass(frozen=True, slots=True)
+class ClipboardStatus:
+    ok: bool
+    message: str
+
+
+@dataclass(slots=True)
+class BuiltinCommand:
+    name: str
+    handler: CommandHandler
+    description: str
+    palette_label: str | None = None
+    source: str = "builtin"
+
+
+class BuiltinCommandRegistry:
+    def __init__(self, commands: Iterable[BuiltinCommand] = ()) -> None:
+        self._commands: dict[str, BuiltinCommand] = {}
+        for command in commands:
+            self.register(command)
+
+    def register(self, command: BuiltinCommand) -> None:
+        self._commands[self._normalize(command.name)] = command
+
+    def register_extension_command(
+        self, name: str, spec: CommandSpec, *, source: str
+    ) -> None:
+        slash_name = f"/{name.lstrip('/')}"
+
+        async def _dispatch(app: AgentMApp, args: str) -> None:
+            command_text = f"{slash_name} {args}".strip()
+            await app._session.prompt(command_text)
+
+        self.register(
+            BuiltinCommand(
+                name=slash_name,
+                handler=_dispatch,
+                description=spec.description,
+                source=source,
+            )
+        )
+
+    def get(self, text: str) -> tuple[BuiltinCommand, str] | None:
+        head, _, rest = text.strip().partition(" ")
+        command = self._commands.get(self._normalize(head))
+        if command is None:
+            return None
+        return command, rest.strip()
+
+    def entries(self) -> list[SlashCommandEntry]:
+        return [
+            SlashCommandEntry(
+                name=command.palette_label or command.name,
+                description=command.description,
+                source=command.source,
+            )
+            for command in self._commands.values()
+            if (command.palette_label or command.name).startswith("/")
+        ]
+
+    @staticmethod
+    def _normalize(name: str) -> str:
+        return name.strip().lower()
+
 
 _THEME_ALIASES: dict[str, str] = {
     "dark": "textual-dark",
@@ -102,6 +179,12 @@ class _SessionLike(Protocol):
 
     @property
     def model(self) -> Any: ...
+
+    @property
+    def tool_renderers(self) -> dict[str, Any]: ...
+
+    def find_tool(self, name: str) -> Tool | None: ...
+    def get_service(self, name: str) -> Any | None: ...
 
 
 @dataclass(slots=True)
@@ -146,10 +229,11 @@ class StatusHeader(Static):
     tokens_in: reactive[int] = reactive(0)
     tokens_out: reactive[int] = reactive(0)
     cost_usd: reactive[float] = reactive(0.0)
-    phase: reactive[str] = reactive("idle")
+    phase: reactive[Phase] = reactive("idle")
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, *, theme: Theme = DEFAULT_THEME, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        self._theme = theme
         # Plain (non-reactive) shadow state for registry counters and
         # budget. They are derived from ``AgentMApp`` dicts, so giving
         # them their own reactive setters would just create a second
@@ -197,7 +281,7 @@ class StatusHeader(Static):
         self._refresh()
 
     def _refresh(self) -> None:
-        glyph = _PHASE_GLYPHS.get(self.phase, "●")
+        glyph = self._theme.phase_glyphs.get(self.phase, "●")
         ext_segment = f"{self._extensions_loaded} ext"
         if self._extensions_failed:
             ext_segment = f"{ext_segment} ({self._extensions_failed} failed)"
@@ -288,29 +372,43 @@ class ToolCallBlock(Collapsible):
     def toggle_collapsed(self) -> None:
         self.collapsed = not self.collapsed
 
-    def set_pending_args(self, args: dict[str, Any], args_preview: str) -> None:
-        del args_preview  # legacy param; title now derives from args directly
+    def set_pending_args(self, args: dict[str, Any]) -> None:
         self.args = dict(args)
         self.title = f"{self.tool_name}({_format_args_inline(self.args)})"
         self._render_body(None)
 
-    def set_result(self, *, result: Any, duration_ms: int) -> None:
+    def set_result(
+        self,
+        *,
+        result: Any,
+        duration_ms: int,
+        tool: Tool | None = None,
+        renderers: dict[str, Any] | None = None,
+    ) -> None:
         self.duration_ms = duration_ms
         self.ok = not getattr(result, "is_error", False)
-        self.result_text = _tool_result_text(result)
+        self.result_text = render_tool_result_text(
+            result, tool_name=self.tool_name, renderers=renderers
+        )
         status = "✓" if self.ok else "✗"
         self.title = (
             f"{self.tool_name}({_format_args_inline(self.args)})"
             f"  {status} {duration_ms}ms"
         )
         self.collapsed = self.ok and _line_count(self.result_text) < 20
-        self._render_body(result)
+        self._render_body(result, tool=tool, renderers=renderers)
         if self.ok:
             self.remove_class("failed")
         else:
             self.add_class("failed")
 
-    def _render_body(self, result: Any | None) -> None:
+    def _render_body(
+        self,
+        result: Any | None,
+        *,
+        tool: Tool | None = None,
+        renderers: dict[str, Any] | None = None,
+    ) -> None:
         args_text = _format_full_args(self.args) if self.args else "{}"
         if result is None:
             renderable: Any = Group(
@@ -319,7 +417,9 @@ class ToolCallBlock(Collapsible):
             )
             self.body_kind = "text"
         else:
-            result_renderable = _render_tool_result(self.tool_name, self.result_text)
+            result_renderable = _render_tool_result(
+                self.tool_name, self.result_text, tool=tool, renderers=renderers
+            )
             self.body_kind = type(result_renderable).__name__
             ok = not getattr(result, "is_error", False)
             renderable = Group(
@@ -636,8 +736,99 @@ class InfoModal(_DismissibleModal[None]):
             yield Static(self._body, classes="info-body")
 
 
+def _legacy_command_handler(name: str) -> CommandHandler:
+    async def _dispatch(app: AgentMApp, args: str) -> None:
+        command_text = f"{name} {args}".strip()
+        await app._session.prompt(command_text)
+
+    return _dispatch
+
+
+def _quit_command(app: AgentMApp, args: str) -> None:
+    del args
+    app.exit(0)
+
+
+async def _clear_command(app: AgentMApp, args: str) -> None:
+    del args
+    await app.action_clear_log()
+
+
+def _help_command(app: AgentMApp, args: str) -> None:
+    del args
+    app.push_screen(HelpScreen(app._all_commands()))
+
+
+def _copy_last_command(app: AgentMApp, args: str) -> None:
+    del args
+    app._copy_last_assistant_text()
+
+
+def _extensions_command(app: AgentMApp, args: str) -> None:
+    del args
+    app.push_screen(InfoModal("Extensions", _build_extensions_table(app._extensions)))
+
+
+def _tools_command(app: AgentMApp, args: str) -> None:
+    del args
+    app.push_screen(InfoModal("Tools", _build_tools_table(app._tools)))
+
+
+def _budget_command(app: AgentMApp, args: str) -> None:
+    del args
+    app.push_screen(InfoModal("Budget", _build_budget_panel(app._budget_state)))
+
+
+def default_builtin_command_registry() -> BuiltinCommandRegistry:
+    registry = BuiltinCommandRegistry()
+    for name in ("/quit", "/exit", "/q", "exit", "quit"):
+        palette_label = name if name.startswith("/") else None
+        registry.register(
+            BuiltinCommand(
+                name=name,
+                handler=_quit_command,
+                description="Quit the TUI.",
+                palette_label=palette_label,
+            )
+        )
+    for command in (
+        BuiltinCommand("/clear", _clear_command, "Clear the visible conversation log."),
+        BuiltinCommand("/help", _help_command, "Show key bindings and slash commands."),
+        BuiltinCommand("/copy-last", _copy_last_command, "Copy the most recent assistant text block."),
+        BuiltinCommand("/extensions", _extensions_command, "List loaded extensions and their status."),
+        BuiltinCommand("/tools", _tools_command, "List tools registered with the agent."),
+        BuiltinCommand("/budget", _budget_command, "Show current cost-budget state."),
+    ):
+        registry.register(command)
+    return registry
+
+
+
+def _copy_to_clipboard(text: str) -> ClipboardStatus:
+    if not text:
+        return ClipboardStatus(ok=False, message="No assistant text to copy.")
+    try:
+        import pyperclip  # type: ignore[import-untyped]
+    except ImportError:
+        pyperclip = None
+    if pyperclip is not None:
+        try:
+            pyperclip.copy(text)
+            return ClipboardStatus(ok=True, message="Copied assistant text to clipboard.")
+        except pyperclip.PyperclipException:
+            pass
+    try:
+        payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        sys.stdout.write(f"\033]52;c;{payload}\a")
+        sys.stdout.flush()
+        return ClipboardStatus(ok=True, message="Copied assistant text via OSC 52.")
+    except OSError as exc:
+        return ClipboardStatus(ok=False, message=f"Clipboard copy failed: {exc}")
+
+
 class AgentMApp(App[int]):
-    CSS_PATH = str(Path(__file__).with_name("textual_app.tcss"))
+    DEFAULT_CSS_PATH = Path(__file__).with_name("textual_app.tcss")
+    CSS_PATH = str(DEFAULT_CSS_PATH)
     # The built-in command palette (Ctrl+P) is disabled — we have our own
     # at Ctrl+R so atom-registered slash commands surface naturally.
     ENABLE_COMMAND_PALETTE = False
@@ -660,15 +851,35 @@ class AgentMApp(App[int]):
         *,
         theme: str = "dark",
         session: _SessionLike,
-        slash_commands: list[SlashCommandEntry],
+        command_registry: BuiltinCommandRegistry | None = None,
+        slash_commands: list[SlashCommandEntry] | None = None,
         extensions: dict[str, ExtensionInstallEvent] | None = None,
         tools: list[ToolEntry] | None = None,
+        theme_data: Theme = DEFAULT_THEME,
+        css_path: Path | None = None,
+        keymap: KeyMap | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(css_path=css_path)
+        if keymap is not None:
+            self._bindings.key_to_bindings.clear()
+            for binding in keymap:
+                self._bindings._add_binding(binding)
         self.config = config
         self._session = session
         self._theme_name = theme
-        self._slash_commands = slash_commands
+        self._theme = theme_data
+        self._command_registry = command_registry or default_builtin_command_registry()
+        if slash_commands:
+            for entry in slash_commands:
+                if self._command_registry.get(entry.name) is None:
+                    self._command_registry.register(
+                        BuiltinCommand(
+                            name=entry.name,
+                            handler=_legacy_command_handler(entry.name),
+                            description=entry.description,
+                            source=entry.source,
+                        )
+                    )
         # Snapshots that drive the /extensions and /tools modals. The
         # ``run()`` factory accumulates create-time events into these
         # dicts so the user can ``/extensions`` immediately after
@@ -682,17 +893,7 @@ class AgentMApp(App[int]):
         self._header: StatusHeader | None = None
         self._prompt_task: asyncio.Task[None] | None = None
         self._flush_timer: Any = None
-        # ``turn_index`` from the kernel restarts at 0 on every ``prompt()``
-        # call (loop.py: ``for turn_index in range(max_turns)``). Keying
-        # purely by ``turn_index`` collides across user messages — the
-        # second prompt's turn_index=0 events would be routed back into the
-        # first prompt's TurnContainer, so the new assistant text and tool
-        # calls render above the new user bubble. The composite key
-        # ``(prompt_epoch, turn_index)`` keeps each user-prompt's turns in
-        # their own namespace; ``_prompt_epoch`` is bumped from
-        # ``submit_input`` and ``handle_api_send_user_message``.
-        self._prompt_epoch = 0
-        self._root_turns: dict[tuple[int, int], TurnContainer] = {}
+        self._root_turns: dict[int, TurnContainer] = {}
         self._child_turns: dict[str, SubagentBlock] = {}
         self._tool_states: dict[str, ToolRenderState] = {}
         self._latest_usage: Usage | None = None
@@ -709,7 +910,7 @@ class AgentMApp(App[int]):
         # ``Footer`` was previously yielded here to surface the binding
         # legend, but it overlapped the prompt input on common terminal
         # sizes and the same legend is reachable via ``/help``.
-        yield StatusHeader(id="status-header")
+        yield StatusHeader(id="status-header", theme=self._theme)
         yield ConversationLog(id="conversation-log")
         with Container(id="input-bar"):
             yield PromptInput()
@@ -721,7 +922,25 @@ class AgentMApp(App[int]):
         theme_name = _THEME_ALIASES.get(self._theme_name, self._theme_name)
         try:
             self.theme = theme_name
-        except Exception:  # noqa: BLE001 — tolerate unknown theme strings
+        except InvalidThemeError as exc:
+            bus = self.config.bus
+            if bus is not None:
+                bus.emit_sync(
+                    DiagnosticEvent.CHANNEL,
+                    DiagnosticEvent(
+                        level="warning",
+                        source="textual_app",
+                        message=(
+                            f"Theme {theme_name!r} is unavailable; "
+                            f"using textual-dark: {exc}"
+                        ),
+                    ),
+                )
+            self.notify(
+                f"Theme {theme_name!r} is unavailable; using textual-dark.",
+                severity="warning",
+                timeout=4,
+            )
             self.theme = "textual-dark"
         # Keep one custom class on the App so existing tests (and any
         # ad-hoc scripts) can still observe the requested theme name.
@@ -769,11 +988,6 @@ class AgentMApp(App[int]):
         self._history.append(text)
         self._history_index = None
         self._ctrl_c_armed_at = None
-        # Bump epoch BEFORE awaiting anything — once the prompt task fires
-        # the kernel will start emitting events with turn_index=0, and they
-        # must land in a fresh ``(epoch, 0)`` slot rather than the previous
-        # prompt's slot.
-        self._prompt_epoch += 1
         await self._append_user_turn(text)
         input_widget.clear()
         self.refresh_input_height()
@@ -785,7 +999,17 @@ class AgentMApp(App[int]):
         except asyncio.CancelledError:
             self.set_phase("idle")
             self.flush_stream_buffers()
-        except Exception as exc:  # noqa: BLE001
+        except PromptFailure as exc:
+            bus = self.config.bus
+            if bus is not None:
+                bus.emit_sync(
+                    DiagnosticEvent.CHANNEL,
+                    DiagnosticEvent(
+                        level="error",
+                        source="textual_app",
+                        message=f"Prompt failed: {exc}",
+                    ),
+                )
             self.notify(f"Prompt failed: {exc}", severity="error")
             self.set_phase("idle")
         finally:
@@ -798,7 +1022,7 @@ class AgentMApp(App[int]):
         self._needs_scroll_end = True
         log.scroll_end(animate=False)
 
-    def set_phase(self, phase: str) -> None:
+    def set_phase(self, phase: Phase) -> None:
         if self._header is not None:
             self._header.phase = phase
 
@@ -816,46 +1040,21 @@ class AgentMApp(App[int]):
         return True
 
     async def _handle_builtin_command(self, text: str) -> bool:
-        lowered = text.lower()
-        if lowered in _QUIT_COMMANDS:
-            self.exit(0)
-            return True
-        if lowered == "/clear":
-            await self.action_clear_log()
-            return True
-        if lowered == "/help":
-            self.push_screen(HelpScreen(self._all_commands()))
-            return True
-        if lowered == "/copy-last":
-            self._copy_last_assistant_text()
-            return True
-        if lowered == "/extensions":
-            self.push_screen(InfoModal("Extensions", _build_extensions_table(self._extensions)))
-            return True
-        if lowered == "/tools":
-            self.push_screen(InfoModal("Tools", _build_tools_table(self._tools)))
-            return True
-        if lowered == "/budget":
-            self.push_screen(InfoModal("Budget", _build_budget_panel(self._budget_state)))
-            return True
-        return False
+        match = self._command_registry.get(text)
+        if match is None:
+            return False
+        command, args = match
+        result = command.handler(self, args)
+        if isinstance(result, Awaitable):
+            await result
+        return True
 
     def _copy_last_assistant_text(self) -> None:
-        if not self._last_assistant_text:
+        status = _copy_to_clipboard(self._last_assistant_text)
+        if status.ok:
+            self.notify(status.message, timeout=2)
             return
-        try:
-            import pyperclip  # type: ignore[import-untyped]
-
-            pyperclip.copy(self._last_assistant_text)
-            return
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            payload = base64.b64encode(self._last_assistant_text.encode("utf-8")).decode("ascii")
-            sys.stdout.write(f"\033]52;c;{payload}\a")
-            sys.stdout.flush()
-        except Exception:  # noqa: BLE001
-            return
+        self.notify(status.message, severity="warning", timeout=4)
 
     def open_command_palette(self, *, initial: str = "") -> None:
         self.push_screen(
@@ -874,7 +1073,7 @@ class AgentMApp(App[int]):
         prompt.focus()
 
     def _all_commands(self) -> list[SlashCommandEntry]:
-        return sorted(self._slash_commands, key=lambda item: item.name)
+        return sorted(self._command_registry.entries(), key=lambda item: item.name)
 
     async def action_soft_cancel(self) -> None:
         prompt = self.query_one(PromptInput)
@@ -940,10 +1139,6 @@ class AgentMApp(App[int]):
         self._tool_states.clear()
         self._last_assistant_text = ""
         self._ctrl_c_armed_at = None
-        # No need to reset ``_prompt_epoch`` — its only purpose is to keep
-        # the dict keys unique across user prompts, and a monotonically
-        # growing counter does that whether or not the visual log is
-        # cleared.
 
     def action_open_palette_binding(self) -> None:
         self.open_command_palette(initial="")
@@ -978,14 +1173,13 @@ class AgentMApp(App[int]):
             log.scroll_end(animate=False)
             self._needs_scroll_end = False
 
-    def _ensure_root_turn_sync(self, turn_index: int) -> TurnContainer:
-        key = (self._prompt_epoch, turn_index)
-        turn = self._root_turns.get(key)
+    def _ensure_root_turn_sync(self, turn_id: int) -> TurnContainer:
+        turn = self._root_turns.get(turn_id)
         if turn is not None:
             return turn
         self._turn_counter += 1
         turn = TurnContainer(logical_turn=self._turn_counter)
-        self._root_turns[key] = turn
+        self._root_turns[turn_id] = turn
         self.run_worker(self._mount_turn(turn), exclusive=False)
         if self._header is not None:
             self._header.turn_number = self._turn_counter
@@ -1000,8 +1194,6 @@ class AgentMApp(App[int]):
     def _latest_turn(self) -> TurnContainer | None:
         if not self._root_turns:
             return None
-        # Tuples sort lexicographically — newer epoch wins, and within the
-        # same epoch the higher turn_index wins. Both are what we want.
         return self._root_turns[max(self._root_turns)]
 
     def _latest_tool_block(self) -> ToolCallBlock | None:
@@ -1017,60 +1209,80 @@ class AgentMApp(App[int]):
         status = self._header
         status.tokens_in = usage.input_tokens
         status.tokens_out = usage.output_tokens
-        model = self._session.model
-        pricing = _COST_PRICING.get(getattr(model, "provider", ""), (0.0, 0.0))
-        status.cost_usd = (
-            (usage.input_tokens / 1_000_000.0) * pricing[0]
-            + (usage.output_tokens / 1_000_000.0) * pricing[1]
-        )
+        cost_service = self._session.get_service("cost_query")
+        estimate = getattr(cost_service, "estimate", None)
+        if callable(estimate):
+            provider = (
+                self._session.model.provider
+                if self._session.model is not None
+                else None
+            )
+            status.cost_usd = estimate(
+                usage_report_from_usage(usage), provider=provider
+            ).amount
+        else:
+            status.cost_usd = 0.0
 
     def _render_child_delta(self, delta: Any) -> None:
         if not self._child_turns:
             return
         child = next(reversed(self._child_turns.values()))
-        if isinstance(delta, TextDelta):
-            child.add_line(delta.text)
-        elif isinstance(delta, ThinkingDelta):
-            child.add_line(f"[thinking] {delta.text}")
-        elif isinstance(delta, ToolCallStart):
-            child.add_line(f"→ {delta.name} …")
+        handler = _lookup_delta_handler(_CHILD_DELTA_HANDLERS, type(delta))
+        if handler is not None:
+            handler(self, child, delta)
 
     def handle_stream_delta(self, event: StreamDeltaEvent) -> None:
-        delta = event.delta
-        turn = self._ensure_root_turn_sync(event.turn_index)
-        if isinstance(delta, TextDelta):
-            turn.text_buffer += delta.text
-            self.set_phase("streaming")
-            self._needs_scroll_end = True
-            if self._child_turns:
-                self._render_child_delta(delta)
-            return
-        if isinstance(delta, ThinkingDelta):
-            turn.thinking_buffer += delta.text
-            self.set_phase("thinking")
-            self._needs_scroll_end = True
-            if self._child_turns:
-                self._render_child_delta(delta)
-            return
-        if isinstance(delta, ToolCallStart):
-            self._tool_states[delta.id] = ToolRenderState(
-                tool_name=delta.name,
-                start_ns=time.perf_counter_ns(),
-                args_json_fragments=[],
-            )
-            self.run_worker(turn.ensure_tool(delta.id, delta.name), exclusive=False)
-            self._needs_scroll_end = True
-            if self._child_turns:
-                self._render_child_delta(delta)
-            return
-        if isinstance(delta, ToolCallArgsDelta):
-            state = self._tool_states.get(delta.id)
-            if state is not None and state.args_json_fragments is not None:
-                state.args_json_fragments.append(delta.args_json_delta)
-            return
-        if isinstance(delta, MessageEnd):
-            self._latest_usage = delta.message.usage
-            self._last_assistant_text = _assistant_text(delta.message)
+        turn = self._ensure_root_turn_sync(event.turn_id)
+        handler = _lookup_delta_handler(_DELTA_HANDLERS, type(event.delta))
+        if handler is not None:
+            handler(self, turn, event.delta)
+
+    def _on_text_delta(self, turn: TurnContainer, delta: TextDelta) -> None:
+        turn.text_buffer += delta.text
+        self.set_phase("streaming")
+        self._needs_scroll_end = True
+        if self._child_turns:
+            self._render_child_delta(delta)
+
+    def _on_thinking_delta(self, turn: TurnContainer, delta: ThinkingDelta) -> None:
+        turn.thinking_buffer += delta.text
+        self.set_phase("thinking")
+        self._needs_scroll_end = True
+        if self._child_turns:
+            self._render_child_delta(delta)
+
+    def _on_tool_call_start(self, turn: TurnContainer, delta: ToolCallStart) -> None:
+        self._tool_states[delta.id] = ToolRenderState(
+            tool_name=delta.name,
+            start_ns=time.perf_counter_ns(),
+            args_json_fragments=[],
+        )
+        self.run_worker(turn.ensure_tool(delta.id, delta.name), exclusive=False)
+        self._needs_scroll_end = True
+        if self._child_turns:
+            self._render_child_delta(delta)
+
+    def _on_tool_call_args_delta(
+        self, turn: TurnContainer, delta: ToolCallArgsDelta
+    ) -> None:
+        del turn
+        state = self._tool_states.get(delta.id)
+        if state is not None and state.args_json_fragments is not None:
+            state.args_json_fragments.append(delta.args_json_delta)
+
+    def _on_message_end(self, turn: TurnContainer, delta: MessageEnd) -> None:
+        del turn
+        self._latest_usage = delta.message.usage
+        self._last_assistant_text = _assistant_text(delta.message)
+
+    def _child_text_delta(self, child: SubagentBlock, delta: TextDelta) -> None:
+        child.add_line(delta.text)
+
+    def _child_thinking_delta(self, child: SubagentBlock, delta: ThinkingDelta) -> None:
+        child.add_line(f"[thinking] {delta.text}")
+
+    def _child_tool_call_start(self, child: SubagentBlock, delta: ToolCallStart) -> None:
+        child.add_line(f"→ {delta.name} …")
 
     def handle_tool_call(self, event: ToolCallEvent) -> None:
         turn = self._latest_turn()
@@ -1085,7 +1297,7 @@ class AgentMApp(App[int]):
 
         async def _apply() -> None:
             block = await turn.ensure_tool(event.tool_call_id, event.tool_name)
-            block.set_pending_args(dict(event.args), "")
+            block.set_pending_args(dict(event.args))
 
         self.run_worker(_apply(), exclusive=False)
         self._needs_scroll_end = True
@@ -1097,20 +1309,27 @@ class AgentMApp(App[int]):
         state = self._tool_states.get(event.tool_call_id)
         duration_ms = 0
         if state is not None:
-            duration_ms = max(0, int((time.perf_counter_ns() - state.start_ns) / 1_000_000))
+            duration_ms = max(
+                0, int((time.perf_counter_ns() - state.start_ns) / 1_000_000)
+            )
 
         async def _apply() -> None:
             block = await turn.ensure_tool(event.tool_call_id, event.tool_name)
             if state is not None and state.args is not None:
                 block.args = dict(state.args)
-            block.set_result(result=event.result, duration_ms=duration_ms)
+            block.set_result(
+                result=event.result,
+                duration_ms=duration_ms,
+                tool=self._session.find_tool(event.tool_name),
+                renderers=self._session.tool_renderers,
+            )
 
         self.run_worker(_apply(), exclusive=False)
         self.set_phase("tool")
         self._needs_scroll_end = True
 
     def handle_llm_start(self, event: LlmRequestStartEvent) -> None:
-        self._ensure_root_turn_sync(event.turn_index)
+        self._ensure_root_turn_sync(event.turn_id)
         self.set_phase("thinking")
         if self._header is not None:
             self._header.model_name = (
@@ -1171,14 +1390,9 @@ class AgentMApp(App[int]):
             )
             self._refresh_registry_counters()
         elif event.kind == "command" and isinstance(event.payload, CommandSpec):
-            entry = SlashCommandEntry(
-                name=f"/{event.name}",
-                description=event.payload.description,
-                source=event.extension,
+            self._command_registry.register_extension_command(
+                event.name, event.payload, source=event.extension
             )
-            self._slash_commands = [
-                e for e in self._slash_commands if e.name != entry.name
-            ] + [entry]
 
     def handle_extension_reload(self, event: ExtensionReloadEvent) -> None:
         """Self-modification (``trigger=agent`` or ``propose_change_approved``)
@@ -1192,7 +1406,7 @@ class AgentMApp(App[int]):
                 timeout=6,
             )
             return
-        is_self_modify = event.trigger in _SELF_MODIFY_TRIGGERS
+        is_self_modify = event.is_self_modify
         prefix = "★ self-modify" if is_self_modify else "atom reload"
         old = (event.old_hash or "—")[:8]
         new = event.new_hash[:8]
@@ -1238,7 +1452,57 @@ class AgentMApp(App[int]):
         self._needs_scroll_end = True
 
 
-async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
+DeltaHandler = Callable[[AgentMApp, Any, Any], None]
+
+
+def _lookup_delta_handler(
+    handlers: dict[type[Any], DeltaHandler], delta_type: type[Any]
+) -> DeltaHandler | None:
+    for cls in delta_type.__mro__:
+        handler = handlers.get(cls)
+        if handler is not None:
+            return handler
+    return None
+
+
+_DELTA_HANDLERS: dict[type[Any], DeltaHandler] = {
+    TextDelta: AgentMApp._on_text_delta,
+    ThinkingDelta: AgentMApp._on_thinking_delta,
+    ToolCallStart: AgentMApp._on_tool_call_start,
+    ToolCallArgsDelta: AgentMApp._on_tool_call_args_delta,
+    MessageEnd: AgentMApp._on_message_end,
+}
+
+_CHILD_DELTA_HANDLERS: dict[type[Any], DeltaHandler] = {
+    TextDelta: AgentMApp._child_text_delta,
+    ThinkingDelta: AgentMApp._child_thinking_delta,
+    ToolCallStart: AgentMApp._child_tool_call_start,
+}
+
+_EVENT_SUBSCRIPTIONS: tuple[tuple[str, str], ...] = (
+    (StreamDeltaEvent.CHANNEL, "handle_stream_delta"),
+    (ToolCallEvent.CHANNEL, "handle_tool_call"),
+    (ToolResultEvent.CHANNEL, "handle_tool_result"),
+    (LlmRequestStartEvent.CHANNEL, "handle_llm_start"),
+    (LlmRequestEndEvent.CHANNEL, "handle_llm_end"),
+    (ChildSessionStartEvent.CHANNEL, "handle_child_start"),
+    (ChildSessionEndEvent.CHANNEL, "handle_child_end"),
+    (ExtensionInstallEvent.CHANNEL, "handle_extension_install"),
+    (ApiRegisterEvent.CHANNEL, "handle_api_register"),
+    (ExtensionReloadEvent.CHANNEL, "handle_extension_reload"),
+    (CostBudgetExceededEvent.CHANNEL, "handle_cost_budget_exceeded"),
+    (ApiSendUserMessageEvent.CHANNEL, "handle_api_send_user_message"),
+)
+
+
+async def run(
+    config: AgentSessionConfig,
+    *,
+    css_path: Path | None = None,
+    theme: str = "dark",
+    keymap: KeyMap | None = None,
+    theme_data: Theme = DEFAULT_THEME,
+) -> int:
     bus = config.bus
     if bus is None:
         from agentm.core.abi import EventBus
@@ -1254,19 +1518,14 @@ async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
     # unsubscribe callable; we hold them so the live ``app.handle_*``
     # subscribers below are the only ones that keep firing.
 
-    slash_commands: dict[str, SlashCommandEntry] = {
-        name: SlashCommandEntry(name=name, description=description, source="builtin")
-        for name, description in _BUILTIN_COMMANDS.items()
-    }
+    command_registry = default_builtin_command_registry()
     tools: dict[str, ToolEntry] = {}
     extensions: dict[str, ExtensionInstallEvent] = {}
 
     def _capture_register(event: ApiRegisterEvent) -> None:
         if event.kind == "command" and isinstance(event.payload, CommandSpec):
-            slash_commands[f"/{event.name}"] = SlashCommandEntry(
-                name=f"/{event.name}",
-                description=event.payload.description,
-                source=event.extension,
+            command_registry.register_extension_command(
+                event.name, event.payload, source=event.extension
             )
         elif event.kind == "tool":
             tools[event.name] = ToolEntry(
@@ -1281,12 +1540,12 @@ async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
     unsub_register = bus.on(ApiRegisterEvent.CHANNEL, _capture_register)
     unsub_install = bus.on(ExtensionInstallEvent.CHANNEL, _capture_extension_install)
 
-    session_cfg = AgentSessionConfig(**{**config.__dict__, "bus": bus})
+    session_cfg = config.with_bus(bus)
     try:
         session = await AgentSession.create(session_cfg)
     finally:
         # Drop the create-time accumulators no matter what — leaving
-        # them subscribed would mutate ``slash_commands`` / ``tools`` /
+        # them subscribed would mutate ``command_registry`` / ``tools`` /
         # ``extensions`` for the rest of the session even though those
         # dicts are never read again.
         unsub_register()
@@ -1296,74 +1555,48 @@ async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
         session_cfg,
         theme=theme,
         session=session,
-        slash_commands=list(slash_commands.values()),
+        command_registry=command_registry,
         extensions=extensions,
         tools=list(tools.values()),
+        theme_data=theme_data,
+        css_path=css_path,
+        keymap=keymap,
     )
 
     # Live subscriptions. Hot reloads, late tool registration, budget
     # overflow, and extension-injected user messages all happen after
     # create — these handlers carry the live state through.
 
-    bus.on(StreamDeltaEvent.CHANNEL, app.handle_stream_delta)
-    bus.on(ToolCallEvent.CHANNEL, app.handle_tool_call)
-    bus.on(ToolResultEvent.CHANNEL, app.handle_tool_result)
-    bus.on(LlmRequestStartEvent.CHANNEL, app.handle_llm_start)
-    bus.on(LlmRequestEndEvent.CHANNEL, app.handle_llm_end)
-    bus.on(ChildSessionStartEvent.CHANNEL, app.handle_child_start)
-    bus.on(ChildSessionEndEvent.CHANNEL, app.handle_child_end)
-    bus.on(ExtensionInstallEvent.CHANNEL, app.handle_extension_install)
-    bus.on(ApiRegisterEvent.CHANNEL, app.handle_api_register)
-    bus.on(ExtensionReloadEvent.CHANNEL, app.handle_extension_reload)
-    bus.on(CostBudgetExceededEvent.CHANNEL, app.handle_cost_budget_exceeded)
-    bus.on(ApiSendUserMessageEvent.CHANNEL, app.handle_api_send_user_message)
+    for channel, method_name in _EVENT_SUBSCRIPTIONS:
+        bus.on(channel, getattr(app, method_name))
 
     result = await app.run_async()
     return 0 if result is None else int(result)
 
 
 def _assistant_text(message: AssistantMessage) -> str:
-    chunks: list[str] = []
-    for block in message.content:
-        if isinstance(block, TextContent):
-            chunks.append(block.text)
-    return "\n".join(chunks)
+    return render_assistant_text(message)
 
 
 def _tool_result_text(result: Any) -> str:
-    content = getattr(result, "content", None) or []
-    parts: list[str] = []
-    for block in content:
-        text = getattr(block, "text", None)
-        if isinstance(text, str):
-            parts.append(text)
-    if not parts:
-        return ""
-    return "\n\n".join(parts)
+    return render_tool_result_text(result)
 
 
-def _looks_like_markdown(text: str) -> bool:
-    return "```" in text or "# " in text or "- " in text
-
-
-def _looks_like_diff(tool_name: str, text: str) -> bool:
-    if tool_name == "tool_edit":
-        return True
-    stripped = text.lstrip()
-    return stripped.startswith("--- ") or stripped.startswith("+++ ")
-
-
-def _render_tool_result(tool_name: str, text: str) -> Any:
-    if _looks_like_diff(tool_name, text):
+def _render_tool_result(
+    tool_name: str,
+    text: str,
+    *,
+    tool: Tool | None = None,
+    renderers: dict[str, Any] | None = None,
+) -> Any:
+    result_format = tool_result_format(
+        tool_name, text, tool=tool, renderers=renderers
+    )
+    if result_format == "diff":
         return Syntax(text, "diff", word_wrap=True)
-    if _looks_like_markdown(text):
+    if result_format == "markdown":
         return Markdown(text)
     return Text(text)
-
-
-def _format_args_preview(args: dict[str, Any]) -> str:
-    return _dump_json(args)
-
 
 def _format_full_args(args: dict[str, Any]) -> str:
     return _dump_json(args, indent=2)

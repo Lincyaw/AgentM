@@ -11,19 +11,18 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, TextIO, cast
 
 import typer
 from dotenv import load_dotenv
 
+from agentm.ai import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
 from agentm.core.abi.events import DiagnosticEvent, EventBus
-from agentm.core.abi.messages import (
-    AssistantMessage,
-    TextContent,
-    ToolCallBlock,
-)
-from agentm.harness.events import ExtensionInstallEvent
+from agentm.core.abi.session_store import SessionState, SessionStore
+from agentm.core.lib.render import final_summary
+from agentm.harness import ExtensionInstallEvent
 
 
 # Walk up from cwd to find the nearest .env. Existing env vars win
@@ -36,39 +35,32 @@ for _candidate in (_cur, *_cur.parents):
         break
 
 
-def _print_final(final_messages: list) -> None:
-    text_blocks: list[str] = []
-    tool_calls = 0
-    in_tok = out_tok = cache_r = cache_w = 0
-    assistant_turns = 0
-    for msg in final_messages:
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
-                if isinstance(block, TextContent):
-                    text_blocks.append(block.text)
-                elif isinstance(block, ToolCallBlock):
-                    tool_calls += 1
-            usage = getattr(msg, "usage", None)
-            if usage is not None:
-                in_tok += usage.input_tokens
-                out_tok += usage.output_tokens
-                cache_r += usage.cache_read
-                cache_w += usage.cache_write
-                assistant_turns += 1
-
-    typer.echo("\n" + "=" * 60)
-    typer.echo("AGENT FINAL OUTPUT")
-    typer.echo("=" * 60)
-    typer.echo("\n\n".join(text_blocks) if text_blocks else "<no text output>")
-    typer.echo("=" * 60)
-    typer.echo(f"messages={len(final_messages)} tool_calls={tool_calls}")
-    if assistant_turns:
-        typer.echo(
-            f"tokens: in={in_tok} out={out_tok} "
-            f"cache_r={cache_r} cache_w={cache_w} "
-            f"(over {assistant_turns} turn{'s' if assistant_turns != 1 else ''})"
+def _print_final(
+    final_messages: list[Any],
+    *,
+    cost_service: Any | None = None,
+    provider: str | None = None,
+    output: TextIO = sys.stdout,
+) -> None:
+    report = final_summary(final_messages)
+    print("\n" + "=" * 60, file=output)
+    print("AGENT FINAL OUTPUT", file=output)
+    print("=" * 60, file=output)
+    print(report.text if report.text else "<no text output>", file=output)
+    print("=" * 60, file=output)
+    print(f"messages={report.message_count} tool_calls={report.tool_calls}", file=output)
+    usage = report.usage
+    if usage.assistant_turns:
+        estimate = getattr(cost_service, "estimate", None)
+        cost = estimate(usage, provider=provider) if callable(estimate) else None
+        suffix = f" cost={cost.currency} {cost.amount:.6f}" if cost is not None else ""
+        turns = "turn" if usage.assistant_turns == 1 else "turns"
+        print(
+            f"tokens: in={usage.input_tokens} out={usage.output_tokens} "
+            f"cache_r={usage.cache_read} cache_w={usage.cache_write} "
+            f"(over {usage.assistant_turns} {turns}){suffix}",
+            file=output,
         )
-
 
 def _parse_tools(value: str | None) -> list[str] | None:
     if value is None:
@@ -119,90 +111,124 @@ def _parse_extensions(values: list[str] | None) -> list[tuple[str, dict[str, Any
     return out
 
 
-_FALSY = {"0", "false", "no", "off", "n", "f"}
-
-
-def _env_bool(name: str, *, default: bool) -> bool:
-    """Parse a tristate env var as bool. Unset → ``default``. Truthy unless
-    the value matches a small set of conventional falsy strings.
-    """
-
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in _FALSY
-
-
-def _build_provider(provider: str, model: str) -> tuple[str, dict[str, Any]]:
-    """Map ``--provider`` + ``--model`` into ``(module_path, config_dict)``.
-
-    Each branch reads its own env-var conventions so users can pick provider
-    without re-typing endpoint config on every invocation:
-
-    - ``anthropic`` (default): respects ``ANTHROPIC_BASE_URL``.
-    - ``openai``: respects ``OPENAI_BASE_URL``, ``WARPGATE_TICKET`` (folded
-      into ``default_query={"warpgate-ticket": ...}`` for self-signed
-      Warpgate gateways), and ``OPENAI_VERIFY_SSL`` (default ``true``;
-      set ``false``/``0``/``no``/``off`` to skip cert verification when
-      hitting a self-signed proxy).
-    """
-
-    if provider == "anthropic":
-        cfg: dict[str, Any] = {"model": model}
-        base_url = os.environ.get("ANTHROPIC_BASE_URL")
-        if base_url:
-            cfg["base_url"] = base_url
-        return ("agentm.llm.anthropic", cfg)
-
-    if provider == "openai":
-        cfg = {"model": model}
-        base_url = os.environ.get("OPENAI_BASE_URL")
-        if base_url:
-            cfg["base_url"] = base_url
-        ticket = os.environ.get("WARPGATE_TICKET")
-        if ticket:
-            cfg["default_query"] = {"warpgate-ticket": ticket}
-        if not _env_bool("OPENAI_VERIFY_SSL", default=True):
-            cfg["verify_ssl"] = False
-        return ("agentm.llm.openai", cfg)
-
-    raise typer.BadParameter(
-        f"unknown --provider {provider!r}; expected 'anthropic' or 'openai'"
+def _provider_default() -> str:
+    return os.environ.get(
+        "AGENTM_PROVIDER", DEFAULT_PROVIDER_REGISTRY.default_provider().id
     )
 
 
-def _resolve_session_manager(
+def _model_default() -> str:
+    provider = _provider_default()
+    return os.environ.get(
+        "AGENTM_MODEL", DEFAULT_PROVIDER_REGISTRY.default_model(provider)
+    )
+
+
+def _make_default_session_store(cwd: str) -> SessionStore:
+    from agentm.harness import JsonlSessionStore
+
+    return JsonlSessionStore(cwd=Path(cwd))
+
+
+def _resolve_session_state(
     *,
     cwd: str,
     resume: str | None,
     continue_recent: bool,
-) -> Any:
-    """Build a SessionManager honouring ``--resume`` / ``--continue``.
-
-    ``resume`` may be either a session id (hex) or a path to a ``.jsonl``
-    log; ids are resolved against the default session dir for ``cwd``.
-    """
-
-    from agentm.harness.session_manager import SessionManager
-
+    session_store: SessionStore,
+) -> SessionState:
     if resume:
-        candidate = Path(resume)
-        if candidate.is_file():
-            return SessionManager.open(candidate, cwd_override=cwd)
-        session_dir = SessionManager.default_session_dir(cwd)
-        matches = sorted(session_dir.glob(f"*_{resume}.jsonl"))
-        if not matches:
+        try:
+            return session_store.open(resume)
+        except FileNotFoundError as exc:
             raise typer.BadParameter(
-                f"--resume {resume!r}: no session file found "
-                f"(looked under {session_dir} and as a path)"
-            )
-        return SessionManager.open(matches[0], cwd_override=cwd)
+                f"--resume {resume!r}: no session found for cwd {cwd!r}"
+            ) from exc
     if continue_recent:
-        return SessionManager.continue_recent(cwd=cwd)
-    return SessionManager.create(cwd=cwd)
+        state = session_store.most_recent(Path(cwd))
+        if state is not None:
+            return state
+    return session_store.create(Path(cwd))
 
 
-async def _run(
+def _make_install_warner() -> Any:
+    def _on_install(event: ExtensionInstallEvent) -> None:
+        if event.phase != "error":
+            return
+        print(
+            f"WARNING: [extension_install] {event.module_path}: {event.error}",
+            file=sys.stderr,
+        )
+
+    return _on_install
+
+
+def _attach_default_diagnostics(bus: EventBus) -> dict[str, bool]:
+    state = {"error_seen": False}
+
+    def _on_diagnostic(event: DiagnosticEvent) -> None:
+        prefix = {
+            "info": "INFO",
+            "warning": "WARNING",
+            "error": "ERROR",
+        }.get(event.level, event.level.upper())
+        print(f"{prefix}: [{event.source}] {event.message}", file=sys.stderr)
+        if event.level == "error":
+            state["error_seen"] = True
+
+    bus.on(DiagnosticEvent.CHANNEL, _on_diagnostic)
+    bus.on(ExtensionInstallEvent.CHANNEL, _make_install_warner())
+    return state
+
+
+def _build_session_config(
+    *,
+    scenario: str | None,
+    extra_extensions: list[tuple[str, dict[str, Any]]],
+    no_extensions: bool,
+    no_skills: bool,
+    no_prompt_templates: bool,
+    tool_allowlist: list[str] | None,
+    provider: str,
+    model: str,
+    cwd: str,
+    bus: EventBus,
+    resume: str | None = None,
+    continue_recent: bool = False,
+    session_store: SessionStore | None = None,
+    provider_registry: ProviderRegistry = DEFAULT_PROVIDER_REGISTRY,
+) -> tuple[Any, SessionState]:
+    from agentm.harness import AgentSessionConfig
+
+    store = session_store or _make_default_session_store(cwd)
+    session_state = _resolve_session_state(
+        cwd=cwd,
+        resume=resume,
+        continue_recent=continue_recent,
+        session_store=store,
+    )
+    try:
+        provider_spec = provider_registry.build(provider, {"model": model})
+    except KeyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    return (
+        AgentSessionConfig(
+            cwd=cwd,
+            provider=provider_spec,
+            scenario=scenario,
+            extra_extensions=extra_extensions,
+            no_extensions=no_extensions,
+            no_skills=no_skills,
+            no_prompt_templates=no_prompt_templates,
+            tool_allowlist=tool_allowlist,
+            session_manager=cast(Any, session_state),
+            bus=bus,
+        ),
+        session_state,
+    )
+
+
+async def run(
     *,
     prompt: str,
     scenario: str | None,
@@ -217,68 +243,49 @@ async def _run(
     quiet: bool,
     resume: str | None,
     continue_recent: bool,
+    output: TextIO = sys.stdout,
 ) -> int:
-    from agentm.harness import AgentSession, AgentSessionConfig
-
-    error_seen = False
-
-    def _on_diagnostic(event: DiagnosticEvent) -> None:
-        nonlocal error_seen
-        prefix = {
-            "info": "INFO",
-            "warning": "WARNING",
-            "error": "ERROR",
-        }.get(event.level, event.level.upper())
-        typer.echo(f"{prefix}: [{event.source}] {event.message}", err=True)
-        if event.level == "error":
-            error_seen = True
-
-    def _on_extension_install(event: ExtensionInstallEvent) -> None:
-        if event.phase != "error":
-            return
-        typer.echo(
-            f"WARNING: [extension_install] {event.module_path}: {event.error}",
-            err=True,
-        )
+    from agentm.harness import AgentSession
 
     bus = EventBus()
-    bus.on(DiagnosticEvent.CHANNEL, _on_diagnostic)
-    bus.on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
+    diagnostic_state = _attach_default_diagnostics(bus)
 
-    session_manager = _resolve_session_manager(
-        cwd=cwd, resume=resume, continue_recent=continue_recent
-    )
-    if not quiet and session_manager.session_file is not None:
-        typer.echo(f"INFO: session log: {session_manager.session_file}", err=True)
-        typer.echo(f"INFO: session id: {session_manager.get_session_id()}", err=True)
-
-    config = AgentSessionConfig(
-        cwd=cwd,
-        provider=_build_provider(provider, model),
+    config, session_manager = _build_session_config(
         scenario=scenario,
         extra_extensions=extra_extensions,
         no_extensions=no_extensions,
         no_skills=no_skills,
         no_prompt_templates=no_prompt_templates,
         tool_allowlist=tool_allowlist,
-        session_manager=session_manager,
+        provider=provider,
+        model=model,
+        cwd=cwd,
         bus=bus,
+        resume=resume,
+        continue_recent=continue_recent,
     )
+    if not quiet and session_manager.session_file is not None:
+        print(f"INFO: session log: {session_manager.session_file}", file=sys.stderr)
+        print(f"INFO: session id: {session_manager.get_session_id()}", file=sys.stderr)
 
     session = await AgentSession.create(config)
     try:
         final = await session.prompt(prompt)
+        cost_service = session.get_service("cost_query")
+        provider_name = session.model.provider if session.model is not None else None
+        if not quiet:
+            _print_final(final, cost_service=cost_service, provider=provider_name, output=output)
     finally:
         await session.shutdown()
 
     if not quiet:
-        _print_final(final)
         sid = session_manager.get_session_id()
         if sid:
-            typer.echo(
-                f"session_id={sid}  (resume with: agentm --resume {sid} \"<prompt>\")"
+            print(
+                f'session_id={sid}  (resume with: agentm --resume {sid} "<prompt>")',
+                file=output,
             )
-    return 1 if error_seen else 0
+    return 1 if diagnostic_state["error_seen"] else 0
 
 
 async def _run_interactive(
@@ -292,50 +299,31 @@ async def _run_interactive(
     provider: str,
     model: str,
     cwd: str,
+    theme: str = "dark",
+    css_path: Path | None = None,
 ) -> int:
     """Build a session config and hand off to the Textual TUI runner."""
 
-    from agentm.harness import AgentSessionConfig
-    from agentm.harness.session_manager import SessionManager
     from agentm.modes.textual_app import run as run_textual_tui
 
     bus = EventBus()
-    session_manager = SessionManager.create(cwd=cwd)
-    if session_manager.session_file is not None:
-        typer.echo(f"INFO: session log: {session_manager.session_file}", err=True)
-
-    def _on_diagnostic(event: DiagnosticEvent) -> None:
-        prefix = {
-            "info": "INFO",
-            "warning": "WARNING",
-            "error": "ERROR",
-        }.get(event.level, event.level.upper())
-        typer.echo(f"{prefix}: [{event.source}] {event.message}", err=True)
-
-    def _on_extension_install(event: ExtensionInstallEvent) -> None:
-        if event.phase != "error":
-            return
-        typer.echo(
-            f"WARNING: [extension_install] {event.module_path}: {event.error}",
-            err=True,
-        )
-
-    bus.on(DiagnosticEvent.CHANNEL, _on_diagnostic)
-    bus.on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
-
-    config = AgentSessionConfig(
-        cwd=cwd,
-        provider=_build_provider(provider, model),
+    _attach_default_diagnostics(bus)
+    config, session_manager = _build_session_config(
         scenario=scenario,
         extra_extensions=extra_extensions,
         no_extensions=no_extensions,
         no_skills=no_skills,
         no_prompt_templates=no_prompt_templates,
         tool_allowlist=tool_allowlist,
-        session_manager=session_manager,
+        provider=provider,
+        model=model,
+        cwd=cwd,
         bus=bus,
     )
-    return await run_textual_tui(config)
+    if session_manager.session_file is not None:
+        print(f"INFO: session log: {session_manager.session_file}", file=sys.stderr)
+
+    return await run_textual_tui(config, theme=theme, css_path=css_path)
 
 
 def run_cmd(
@@ -367,7 +355,7 @@ def run_cmd(
             help=(
                 "Mount an extra atom on top of --scenario / auto-discovery. "
                 "Repeatable. Form: 'dotted.module.path' or "
-                "'dotted.module.path:{\"key\":\"value\"}' for inline JSON "
+                '\'dotted.module.path:{"key":"value"}\' for inline JSON '
                 "config. Example: --extension llmharness.adapters.agentm "
                 "--extension some.atom:'{\"k\":3}'."
             ),
@@ -406,24 +394,24 @@ def run_cmd(
         typer.Option(
             "--provider",
             help=(
-                "LLM provider to register: 'anthropic' (default; respects "
+                "LLM provider to register. Defaults to the provider registry. Builtins include 'anthropic' (respects "
                 "ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY) or 'openai' (respects "
                 "OPENAI_BASE_URL/OPENAI_API_KEY plus WARPGATE_TICKET and "
                 "OPENAI_VERIFY_SSL for self-signed gateways like Warpgate)."
             ),
         ),
-    ] = os.environ.get("AGENTM_PROVIDER", "anthropic"),
+    ] = _provider_default(),
     model: Annotated[
         str,
         typer.Option(
             "--model",
             help=(
-                "Model id passed to the active provider. Default fits the "
-                "anthropic provider; override when --provider openai (e.g. "
+                "Model id passed to the active provider. Defaults to the "
+                "selected provider registry descriptor; override for alternates (e.g. "
                 "'gpt-4o', 'Kimi-K2', 'deepseek-chat')."
             ),
         ),
-    ] = os.environ.get("AGENTM_MODEL", "claude-sonnet-4-6"),
+    ] = _model_default(),
     cwd: Annotated[
         str,
         typer.Option(
@@ -443,6 +431,23 @@ def run_cmd(
             help="Open the Textual multi-turn TUI instead of running a single prompt.",
         ),
     ] = False,
+    theme: Annotated[
+        str,
+        typer.Option(
+            "--theme",
+            help="Textual theme name for --interactive (aliases: dark, light).",
+        ),
+    ] = "dark",
+    css_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--css-path",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="Optional Textual CSS path for --interactive.",
+        ),
+    ] = None,
     resume: Annotated[
         str | None,
         typer.Option(
@@ -483,16 +488,18 @@ def run_cmd(
                 provider=provider,
                 model=model,
                 cwd=cwd,
+                theme=theme,
+                css_path=css_path,
             )
         )
         raise typer.Exit(code=rc)
 
     if not prompt:
-        typer.echo("ERROR: prompt is required (or pass --interactive)", err=True)
+        print("ERROR: prompt is required (or pass --interactive)", file=sys.stderr)
         raise typer.Exit(code=2)
 
     rc = asyncio.run(
-        _run(
+        run(
             prompt=prompt,
             scenario=scenario,
             extra_extensions=extra_extensions,
@@ -509,6 +516,9 @@ def run_cmd(
         )
     )
     raise typer.Exit(code=rc)
+
+
+_run = run
 
 
 def main() -> None:

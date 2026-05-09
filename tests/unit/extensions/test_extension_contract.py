@@ -11,6 +11,7 @@ signal in CI / pytest.
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -263,3 +264,185 @@ def test_tier_1_atom_listed_in_manifest_warns(
         f"listed in core_manifest.tier_2_atoms but declares tier!=2; "
         f"got: {[(i.rule, i.message) for i in issues]}"
     )
+
+
+def _validate_source(tmp_path: Path, source: str) -> list[ValidationIssue]:
+    path = tmp_path / "atom.py"
+    path.write_text(source, encoding="utf-8")
+    from agentm.extensions.validate import validate_atom_file
+
+    return validate_atom_file(path, module_path="agentm.extensions.builtin.synthetic")
+
+
+def test_D1_private_api_getattr_rejected(tmp_path: Path) -> None:
+    issues = _validate_source(tmp_path, 'def install(api, config):\n    getattr(api, "_observer")\n')
+
+    assert any(issue.rule == "11.4.D1-private-api-reflection" for issue in issues)
+
+
+def test_D1_other_object_private_getattr_allowed(tmp_path: Path) -> None:
+    issues = _validate_source(tmp_path, 'def install(api, config):\n    getattr(other_obj, "_x")\n')
+
+    assert not any(issue.rule == "11.4.D1-private-api-reflection" for issue in issues)
+
+
+def test_D1_private_api_events_getattr_rejected(tmp_path: Path) -> None:
+    issues = _validate_source(tmp_path, 'def install(api, config):\n    getattr(api.events, "_observer")\n')
+
+    assert any(issue.rule == "11.4.D1-private-api-reflection" for issue in issues)
+
+
+def test_D2_api_attribute_assignment_rejected(tmp_path: Path) -> None:
+    issues = _validate_source(tmp_path, 'def install(api, config):\n    api.on = something\n')
+
+    assert any(issue.rule == "11.4.D2-api-attribute-overwrite" for issue in issues)
+
+
+def test_D2_non_api_attribute_assignment_allowed(tmp_path: Path) -> None:
+    issues = _validate_source(tmp_path, 'def install(api, config):\n    local_var.on = something\n')
+
+    assert not any(issue.rule == "11.4.D2-api-attribute-overwrite" for issue in issues)
+
+
+def test_D3_mutable_global_without_final_rejected(tmp_path: Path) -> None:
+    issues = _validate_source(tmp_path, '_GLOBAL: dict[str, Any] = {}\n')
+
+    assert any(issue.rule == "11.4.D3-mutable-global" for issue in issues)
+
+
+def test_D3_mutable_global_with_final_allowed(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'from typing import Final\n_GLOBAL: Final[dict[str, Any]] = {}\n',
+    )
+
+    assert not any(issue.rule == "11.4.D3-mutable-global" for issue in issues)
+
+
+def test_D5_agentm_fstring_dynamic_import_rejected(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'import importlib\ndef install(api, config):\n    importlib.import_module(f"agentm.{name}")\n',
+    )
+
+    assert any(issue.rule == "11.4.D5-dynamic-agentm-import" for issue in issues)
+
+
+def test_D5_unrelated_fstring_dynamic_import_allowed(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'import importlib\ndef install(api, config):\n    importlib.import_module(f"unrelated.{name}")\n',
+    )
+
+    assert not any(issue.rule == "11.4.D5-dynamic-agentm-import" for issue in issues)
+
+
+def test_issue_87_reworked_atoms_validate_cleanly() -> None:
+    from agentm.extensions.validate import validate_atom_file
+
+    root = Path("src/agentm/extensions/builtin")
+    for name in (
+        "observability",
+        "sub_agent",
+        "artifact_store",
+        "micro_compact",
+        "llm_compaction",
+    ):
+        issues = validate_atom_file(
+            root / f"{name}.py",
+            module_path=f"agentm.extensions.builtin.{name}",
+        )
+        assert issues == []
+
+
+def test_D6_concrete_harness_service_isinstance_rejected(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        "def install(api, config):\n"
+        "    isinstance(writer, GitBackedResourceWriter)\n",
+    )
+
+    assert any(issue.rule == "11.4.D6-harness-service-downcast" for issue in issues)
+
+
+def test_D6_local_class_isinstance_allowed(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        "class MyAtomClass:\n"
+        "    pass\n"
+        "def install(api, config):\n"
+        "    isinstance(x, MyAtomClass)\n",
+    )
+
+    assert not any(issue.rule == "11.4.D6-harness-service-downcast" for issue in issues)
+
+
+def test_D4_peer_literal_requires_manifest_entry(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'from agentm.extensions import ExtensionManifest\n'
+        'MANIFEST = ExtensionManifest(name="synthetic", description="", registers=())\n'
+        'def install(api, config):\n'
+        '    return "system_prompt"\n',
+    )
+
+    assert any(issue.rule == "11.4.D4-peer-requires" for issue in issues)
+
+
+def test_D4_declared_peer_literal_allowed(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'from agentm.extensions import ExtensionManifest\n'
+        'MANIFEST = ExtensionManifest(\n'
+        '    name="synthetic", description="", registers=(), requires=("system_prompt",)\n'
+        ')\n'
+        'def install(api, config):\n'
+        '    return "system_prompt"\n',
+    )
+
+    assert not any(issue.rule == "11.4.D4-peer-requires" for issue in issues)
+
+
+def test_D7_warns_on_undeclared_api_registry_mutation(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'def install(api, config):\n'
+        '    api.tools.append(object())\n',
+    )
+
+    assert any(
+        issue.rule == "11.4.D7-registers-mutation" and issue.severity == "warning"
+        for issue in issues
+    )
+
+
+def test_D7_allows_agent_start_routed_registry_mutation(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'from agentm.extensions import ExtensionManifest\n'
+        'MANIFEST = ExtensionManifest(\n'
+        '    name="synthetic", description="", registers=("event:agent_start",)\n'
+        ')\n'
+        'def install(api, config):\n'
+        '    def on_start(event):\n'
+        '        api.tools.append(object())\n'
+        '    api.on("agent_start", on_start)\n',
+    )
+
+    assert not any(issue.rule == "11.4.D7-registers-mutation" for issue in issues)
+
+
+def test_D7_warns_when_agent_start_atom_mutates_registry_during_install(
+    tmp_path: Path,
+) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'from agentm.extensions import ExtensionManifest\n'
+        'MANIFEST = ExtensionManifest(\n'
+        '    name="synthetic", description="", registers=("event:agent_start",)\n'
+        ')\n'
+        'def install(api, config):\n'
+        '    api.tools.append(object())\n',
+    )
+
+    assert any(issue.rule == "11.4.D7-registers-mutation" for issue in issues)

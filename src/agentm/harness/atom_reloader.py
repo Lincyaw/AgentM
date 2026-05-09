@@ -41,11 +41,11 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
-from agentm.core._internal.catalog import _layout
 from agentm.core._internal.catalog.hashing import compute_atom_hash
 from agentm.core._internal.catalog.manifest import is_constitution_path
+from agentm.harness.catalog import _layout
 from agentm.core.abi import BusPriority, EventBus, Tool
 from agentm.extensions import ExtensionManifest
 from agentm.extensions import discover as discover_mod
@@ -69,7 +69,7 @@ from agentm.harness.extension import (
     _ExtensionAPIImpl,
     load_extension,
 )
-from agentm.harness.resource_writer import GitBackedResourceWriter, ResourceWriter
+from agentm.harness.resource_writer import ResourceWriter
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,50 @@ class LoadedAtom:
     config: dict[str, Any]
     manifest: ExtensionManifest | None
     is_provider: bool = False
+    import_kind: Literal["module", "synthetic"] = "module"
+
+
+@dataclass(slots=True, frozen=True)
+class _ReloadSnapshot:
+    """Single immutable pre-reload capture used as the rollback floor.
+
+    The transactional reload contract is:
+
+    1. ``capture()`` builds a defensive deep-ish copy of every mutable
+       structure the reloader can touch: the loaded-atom registries,
+       per-atom handler/registration tracking, the owners-by-kind map,
+       all extension registries (tools/commands/providers/renderers),
+       the live ``apis`` dict, the ``sys.modules`` entry for the atom's
+       module path, and the full bus subscription map.
+    2. ``apply`` (a.k.a. ``_activate_atom_install``) is then free to
+       mutate any of those structures.
+    3. If ``apply`` raises, the reloader first attempts an in-place
+       rollback by re-installing from the original ``LoadedAtom``. If
+       *that* rollback also raises, ``restore()`` is called — a single
+       function whose only job is to overwrite every mutable structure
+       from the snapshot. Because the snapshot already holds private
+       copies, ``restore()`` cannot half-fail.
+
+    The snapshot deliberately stores list/dict instances by *reference
+    after copy* (e.g. ``list(self._tools)``) instead of trying to deep
+    copy individual ``Tool`` / ``ProviderConfig`` payloads — those are
+    treated as opaque values whose identity is what callers compare
+    against.
+    """
+
+    loaded_by_module: dict[str, LoadedAtom]
+    loaded_by_name: dict[str, LoadedAtom]
+    handlers_by_atom: dict[str, list[Callable[[], None]]]
+    registrations_by_atom: dict[str, list[tuple[str, str, Any]]]
+    owners_by_kind: dict[str, dict[str, str]]
+    tools: list[Tool]
+    commands: dict[str, CommandSpec]
+    providers: dict[str, ProviderConfig]
+    renderers: dict[str, Renderer]
+    apis: dict[str, _ExtensionAPIImpl]
+    sys_module: ModuleType | None
+    module_path: str
+    bus_channels: dict[str, list[Any]]
 
 
 def _default_manifest(name: str) -> ExtensionManifest:
@@ -135,19 +179,18 @@ class AtomReloader:
         self._loaded_by_module: dict[str, LoadedAtom] = {}
         self._loaded_by_name: dict[str, LoadedAtom] = {}
         self._handlers_by_atom: dict[str, list[Callable[[], None]]] = {}
-        self._registrations_by_atom: dict[
-            str, list[tuple[str, str, Any]]
-        ] = {}
-        self._command_owners: dict[str, str] = {}
+        self._registrations_by_atom: dict[str, list[tuple[str, str, Any]]] = {}
+        self.owners_by_kind: dict[str, dict[str, str]] = {}
+        self._subscription_unsubs: list[Callable[[], None]] = [
+            bus.on(ApiRegisterEvent.CHANNEL, self._track_registration)
+        ]
         self._api_factory: Callable[[str], _ExtensionAPIImpl] | None = None
-
-        bus.on(ApiRegisterEvent.CHANNEL, self._track_registration)
+        self._sync_loop: asyncio.AbstractEventLoop | None = None
+        self._sync_loop_thread: threading.Thread | None = None
 
     # --- Lifecycle wiring --------------------------------------------------
 
-    def set_api_factory(
-        self, factory: Callable[[str], _ExtensionAPIImpl]
-    ) -> None:
+    def set_api_factory(self, factory: Callable[[str], _ExtensionAPIImpl]) -> None:
         """Inject the session's ``_make_api(owner)`` callable.
 
         Must be called before the first ``reload_atom`` call. We accept it
@@ -166,20 +209,28 @@ class AtomReloader:
     def loaded_by_name(self) -> dict[str, LoadedAtom]:
         return self._loaded_by_name
 
-    @property
-    def command_owners(self) -> dict[str, str]:
-        return self._command_owners
+    def shutdown(self) -> None:
+        for unsub in self._subscription_unsubs:
+            unsub()
+        self._subscription_unsubs.clear()
+        if self._sync_loop is not None:
+            self._sync_loop.call_soon_threadsafe(self._sync_loop.stop)
+        if self._sync_loop_thread is not None:
+            self._sync_loop_thread.join(timeout=1)
+        self._sync_loop = None
+        self._sync_loop_thread = None
 
-    # --- Subscription tracking (called from ExtensionAPI.on / register) ----
+    # --- Subscription tracking (called from ExtensionAPI.on/add_observer) ---
 
     def wrap_api_on(self, api: _ExtensionAPIImpl, owner: str) -> None:
-        """Wrap ``api.on`` so unsubscribes from ``owner`` are tracked.
+        """Wrap event registration APIs so ``owner`` cleanup is tracked.
 
         Each handler also gets a ``_agentm_obs_owner`` attribute so the
         ``observability`` atom can attribute event handlers to the
         installing extension.
         """
         original_on = api.on
+        original_add_observer = api.add_observer
 
         def tracked(
             channel: str,
@@ -195,14 +246,19 @@ class AtomReloader:
             self._handlers_by_atom.setdefault(owner, []).append(unsub)
             return unsub
 
+        def tracked_observer(callback: Any) -> Any:
+            unsub = original_add_observer(callback)
+            self._handlers_by_atom.setdefault(owner, []).append(unsub)
+            return unsub
+
         api.on = tracked  # type: ignore[method-assign]
+        api.add_observer = tracked_observer  # type: ignore[method-assign]
 
     def _track_registration(self, event: ApiRegisterEvent) -> None:
         self._registrations_by_atom.setdefault(event.extension, []).append(
             (event.kind, event.name, event.payload)
         )
-        if event.kind == "command":
-            self._command_owners[event.name] = event.extension
+        self.owners_by_kind.setdefault(event.kind, {})[event.name] = event.extension
 
     # --- Atom registry mutation -------------------------------------------
 
@@ -215,10 +271,14 @@ class AtomReloader:
     ) -> None:
         module = importlib.import_module(module_path)
         module_file = getattr(module, "__file__", None)
-        file_path = (
-            Path(module_file).resolve() if module_file else Path(".")
-        )
+        file_path = Path(module_file).resolve() if module_file else Path(".")
         manifest = _module_manifest(module)
+        import_kind: Literal["module", "synthetic"] = (
+            "synthetic"
+            if module_path.startswith(discover_mod.USER_ATOM_MODULE_PREFIX)
+            or module_path.startswith(discover_mod.CONTRIB_ATOM_MODULE_PREFIX)
+            else "module"
+        )
         atom = LoadedAtom(
             name=_module_name(module_path, module),
             module_path=module_path,
@@ -226,6 +286,7 @@ class AtomReloader:
             config=dict(ext_cfg),
             manifest=manifest,
             is_provider=is_provider,
+            import_kind=import_kind,
         )
         self._loaded_by_module[module_path] = atom
         self._loaded_by_name[atom.name] = atom
@@ -239,14 +300,10 @@ class AtomReloader:
     def _remove_registrations(self, owner: str) -> None:
         for kind, name, payload in self._registrations_by_atom.pop(owner, []):
             if kind == "tool":
-                self._tools[:] = [
-                    tool for tool in self._tools if tool is not payload
-                ]
+                self._tools[:] = [tool for tool in self._tools if tool is not payload]
             elif kind == "command":
                 if self._commands.get(name) is payload:
                     self._commands.pop(name, None)
-                if self._command_owners.get(name) == owner:
-                    self._command_owners.pop(name, None)
             elif kind == "provider":
                 if self._providers.get(name) is payload:
                     self._providers.pop(name, None)
@@ -254,6 +311,8 @@ class AtomReloader:
             elif kind == "renderer":
                 if self._renderers.get(name) is payload:
                     self._renderers.pop(name, None)
+            if self.owners_by_kind.setdefault(kind, {}).get(name) == owner:
+                self.owners_by_kind[kind].pop(name, None)
 
     @staticmethod
     def _clear_module_bytecode(path: Path) -> None:
@@ -315,15 +374,14 @@ class AtomReloader:
             positional = [
                 p
                 for p in sig.parameters.values()
-                if p.kind in (
+                if p.kind
+                in (
                     inspect.Parameter.POSITIONAL_ONLY,
                     inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 )
             ]
             if len(positional) < 2:
-                raise RuntimeError(
-                    f"'install' must accept (api, config); got {sig}"
-                )
+                raise RuntimeError(f"'install' must accept (api, config); got {sig}")
 
             manifest = _module_manifest(module)
             if manifest is None and require_manifest:
@@ -347,73 +405,53 @@ class AtomReloader:
             return manifest
 
     @staticmethod
-    def _finish_install_sync(
+    async def _finish_install(
         module_path: str,
         api: _ExtensionAPIImpl,
         ext_cfg: dict[str, Any],
     ) -> None:
-        """Run ``install(api, config)`` synchronously, awaiting if needed.
-
-        Reload happens from a synchronous call site (the agent's
-        ``api.reload_atom`` doesn't ``await``), but ``install`` itself can
-        be ``async``. We bounce into a fresh event loop on a worker thread
-        rather than mixing loops on the calling thread.
-        """
         result = load_extension(module_path, api, ext_cfg)
-        if not inspect.isawaitable(result):
-            return
+        if inspect.isawaitable(result):
+            await result
 
-        error: list[BaseException] = []
+    def _run_api_boundary(self, coro: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        loop = self._ensure_sync_loop()
+        return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
-        def _runner() -> None:
-            async def _await_result() -> None:
-                await result
+    def _ensure_sync_loop(self) -> asyncio.AbstractEventLoop:
+        if self._sync_loop is not None and self._sync_loop.is_running():
+            return self._sync_loop
 
-            try:
-                asyncio.run(_await_result())
-            except BaseException as exc:  # pragma: no cover - exercised in caller
-                error.append(exc)
-
-        thread = threading.Thread(
-            target=_runner,
-            name=f"agentm-reload-{module_path.rsplit('.', 1)[-1]}",
-        )
-        thread.start()
-        thread.join()
-        if error:
-            raise error[0]
-
-    @staticmethod
-    def _run_coro_sync(coro: Any) -> Any:
-        """Await a coroutine from sync code, even if an event loop is active."""
-
-        result: list[Any] = []
-        error: list[BaseException] = []
+        ready = threading.Event()
 
         def _runner() -> None:
-            try:
-                result.append(asyncio.run(coro))
-            except BaseException as exc:  # pragma: no cover - exercised via caller
-                error.append(exc)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._sync_loop = loop
+            ready.set()
+            loop.run_forever()
+            loop.close()
 
-        thread = threading.Thread(
+        self._sync_loop_thread = threading.Thread(
             target=_runner,
-            name="agentm-reload-async-bridge",
+            name="agentm-reloader-sync-loop",
+            daemon=True,
         )
-        thread.start()
-        thread.join()
-        if error:
-            raise error[0]
-        return result[0]
+        self._sync_loop_thread.start()
+        ready.wait()
+        assert self._sync_loop is not None
+        return self._sync_loop
 
-    def _activate_atom_install(self, atom: LoadedAtom) -> None:
+    async def _activate_atom_install(self, atom: LoadedAtom) -> None:
         if self._api_factory is None:
             raise RuntimeError(
                 "AtomReloader.set_api_factory must be called before reload_atom"
             )
         previous_api = self._apis.get(atom.module_path)
-        if previous_api is not None:
-            previous_api.mark_stale()
         # Capture per-channel rank BEFORE removal so reload can restore the
         # atom to its original slot. Without this, every reload silently
         # appends new handlers to the end of each channel's list, which
@@ -429,25 +467,25 @@ class AtomReloader:
         # have no package finder — once popped from ``sys.modules`` a plain
         # ``importlib.import_module`` cannot rediscover them. Re-establish
         # the sys.modules entry from the on-disk file before delegating to
-        # ``_finish_install_sync``; ``load_extension`` will then hit the
+        # ``_finish_install``; ``load_extension`` will then hit the
         # populated cache. Builtin atoms keep their normal import-finder
         # path: they aren't synthetic, so this branch is skipped and
         # ``import_module`` resolves them via ``sys.path`` as before.
-        if atom.module_path.startswith(
-            self._AGENT_ATOM_MODULE_PREFIX
-        ) or atom.module_path.startswith("agentm._scenarios."):
+        if atom.import_kind == "synthetic" or atom.module_path.startswith("agentm._scenarios."):
             # Scenario-local atoms (loaded by the loader under
-            # ``agentm._scenarios.<scenario>.<stem>``) are also synthetic
-            # and have no normal import finder; rebuild the sys.modules
+            # ``agentm._scenarios.<scenario>.<stem>``) are synthetic too —
+            # they have no normal import finder, so rebuild the sys.modules
             # entry from the on-disk file (which may now point at the
             # eval-sandbox tempdir) before delegating to
-            # ``_finish_install_sync``.
+            # ``_finish_install``.
             self._import_synthetic_module(atom.module_path, atom.file_path)
-        self._finish_install_sync(
+        await self._finish_install(
             atom.module_path,
             self._api_factory(atom.module_path),
             dict(atom.config),
         )
+        if previous_api is not None:
+            previous_api.mark_stale()
         self.record_loaded_atom(
             atom.module_path,
             atom.config,
@@ -472,9 +510,7 @@ class AtomReloader:
                     break
         return positions
 
-    def _restore_handler_positions(
-        self, owner: str, positions: dict[str, int]
-    ) -> None:
+    def _restore_handler_positions(self, owner: str, positions: dict[str, int]) -> None:
         """Splice ``owner``'s freshly-registered subscriptions back to
         ``positions[channel]``. Channels the new install didn't re-subscribe
         to are skipped; channels added that had no prior anchor stay at the
@@ -485,13 +521,15 @@ class AtomReloader:
             if not subs:
                 continue
             owner_subs = [
-                sub for sub in subs
+                sub
+                for sub in subs
                 if getattr(sub.handler, "_agentm_obs_owner", None) == owner
             ]
             if not owner_subs:
                 continue
             non_owner = [
-                sub for sub in subs
+                sub
+                for sub in subs
                 if getattr(sub.handler, "_agentm_obs_owner", None) != owner
             ]
             clamp = min(anchor_idx, len(non_owner))
@@ -500,18 +538,86 @@ class AtomReloader:
                 non_owner[:clamp] + owner_subs + non_owner[clamp:],
             )
 
-    def _restore_git_path(self, atom: LoadedAtom, pre_sha: str) -> None:
-        if not isinstance(self._resource_writer, GitBackedResourceWriter):
-            raise RuntimeError("git rollback requires GitBackedResourceWriter")
+    def _capture_snapshot(self, module_path: str) -> _ReloadSnapshot:
+        """Take a single immutable snapshot of all reloader-mutable state.
 
-        relative = atom.file_path.resolve().relative_to(Path(self._cwd).resolve())
-        rel_posix = relative.as_posix()
-        self._resource_writer._run_git_sync(  # type: ignore[attr-defined]
-            ("restore", "--source", pre_sha, "--", rel_posix)
+        Run this BEFORE any swap-in begins. ``restore_from_snapshot`` is
+        the sole guaranteed-safe rollback path: every list/dict in the
+        snapshot is a fresh copy, so writing those copies back into the
+        live registries cannot half-fail mid-restore.
+        """
+        return _ReloadSnapshot(
+            loaded_by_module=dict(self._loaded_by_module),
+            loaded_by_name=dict(self._loaded_by_name),
+            handlers_by_atom={
+                owner: list(unsubs)
+                for owner, unsubs in self._handlers_by_atom.items()
+            },
+            registrations_by_atom={
+                owner: list(regs) for owner, regs in self._registrations_by_atom.items()
+            },
+            owners_by_kind={
+                kind: dict(name_map) for kind, name_map in self.owners_by_kind.items()
+            },
+            tools=list(self._tools),
+            commands=dict(self._commands),
+            providers=dict(self._providers),
+            renderers=dict(self._renderers),
+            apis=dict(self._apis),
+            sys_module=sys.modules.get(module_path),
+            module_path=module_path,
+            bus_channels={
+                channel: self._bus.subscriptions_for(channel)
+                for channel in self._bus.channels()
+            },
         )
-        self._resource_writer._run_git_sync(  # type: ignore[attr-defined]
-            ("reset", "--hard", pre_sha)
+
+    def _restore_from_snapshot(self, snapshot: _ReloadSnapshot) -> None:
+        """Overwrite every mutable structure from ``snapshot``.
+
+        Defensive: the snapshot already holds copies, so this method
+        only does in-place ``clear() + update()`` / slice-assignment.
+        Nothing here can raise on partial state because by the time we
+        get here every value comes from immutable bookkeeping.
+        """
+        self._loaded_by_module.clear()
+        self._loaded_by_module.update(snapshot.loaded_by_module)
+        self._loaded_by_name.clear()
+        self._loaded_by_name.update(snapshot.loaded_by_name)
+        self._handlers_by_atom.clear()
+        self._handlers_by_atom.update(
+            {owner: list(unsubs) for owner, unsubs in snapshot.handlers_by_atom.items()}
         )
+        self._registrations_by_atom.clear()
+        self._registrations_by_atom.update(
+            {owner: list(regs) for owner, regs in snapshot.registrations_by_atom.items()}
+        )
+        self.owners_by_kind.clear()
+        self.owners_by_kind.update(
+            {kind: dict(name_map) for kind, name_map in snapshot.owners_by_kind.items()}
+        )
+        self._tools[:] = list(snapshot.tools)
+        self._commands.clear()
+        self._commands.update(snapshot.commands)
+        self._providers.clear()
+        self._providers.update(snapshot.providers)
+        self._renderers.clear()
+        self._renderers.update(snapshot.renderers)
+        self._apis.clear()
+        self._apis.update(snapshot.apis)
+        if snapshot.sys_module is not None:
+            sys.modules[snapshot.module_path] = snapshot.sys_module
+        else:
+            sys.modules.pop(snapshot.module_path, None)
+        # Reset the bus subscription map to the pre-reload shape.
+        live_channels = set(self._bus.channels())
+        for channel, subs in snapshot.bus_channels.items():
+            self._bus.replace_subscriptions(channel, list(subs))
+        for channel in live_channels - set(snapshot.bus_channels):
+            self._bus.replace_subscriptions(channel, [])
+
+    def _restore_git_path(self, atom: LoadedAtom, pre_sha: str) -> None:
+        self._resource_writer.restore(atom.file_path, pre_sha)
 
     def _advisory_hash(self, source: str) -> str:
         # Legacy fallback for git-less/advisory environments only.
@@ -520,6 +626,23 @@ class AtomReloader:
     # --- _SessionGateway protocol -----------------------------------------
 
     def reload_atom(
+        self,
+        name: str,
+        new_source: str,
+        *,
+        agent_initiated: bool = True,
+        rationale: str | None = None,
+    ) -> ReloadResult:
+        return self._run_api_boundary(
+            self.reload_atom_async(
+                name,
+                new_source,
+                agent_initiated=agent_initiated,
+                rationale=rationale,
+            )
+        )
+
+    async def reload_atom_async(
         self,
         name: str,
         new_source: str,
@@ -546,15 +669,11 @@ class AtomReloader:
                 name=name,
                 old_hash=None,
                 new_hash=None,
-                error=(
-                    f"refusing to reload constitution layer path {atom.file_path}"
-                ),
+                error=(f"refusing to reload constitution layer path {atom.file_path}"),
             )
 
         try:
-            manifest = self._validate_reload_source(
-                name, atom.module_path, new_source
-            )
+            manifest = self._validate_reload_source(name, atom.module_path, new_source)
         except Exception as exc:  # noqa: BLE001
             return ReloadResult(
                 ok=False,
@@ -564,9 +683,7 @@ class AtomReloader:
                 error=str(exc),
             )
 
-        effective_manifest = (
-            manifest or atom.manifest or _default_manifest(name)
-        )
+        effective_manifest = manifest or atom.manifest or _default_manifest(name)
         if effective_manifest.tier == 2:
             logger.warning("tier-2 reload proceeds in MVP for %s", name)
 
@@ -580,13 +697,11 @@ class AtomReloader:
                 new_hash=None,
                 error=str(exc),
             )
-        write_result = self._run_coro_sync(
-            self._resource_writer.write(
-                str(atom.file_path),
-                new_source.encode("utf-8"),
-                rationale=rationale or f"reload {name}",
-                author="agent" if agent_initiated else "human",
-            )
+        write_result = await self._resource_writer.write(
+            str(atom.file_path),
+            new_source.encode("utf-8"),
+            rationale=rationale or f"reload {name}",
+            author="agent" if agent_initiated else "human",
         )
         if write_result.error is not None:
             return ReloadResult(
@@ -605,17 +720,23 @@ class AtomReloader:
         if advisory_mode:
             old_hash = self._advisory_hash(current_source)
             new_hash = self._advisory_hash(new_source)
+        event_new_hash = new_hash or self._advisory_hash(new_source)
+        # Single transactional snapshot: every dict/list copy is taken
+        # eagerly, so the rollback floor (`_restore_from_snapshot`) is a
+        # pure write-back that cannot half-fail. See ``_ReloadSnapshot``.
+        snapshot = self._capture_snapshot(atom.module_path)
 
         try:
-            self._activate_atom_install(atom)
+            await self._activate_atom_install(atom)
             self._bus.emit_sync(
                 ExtensionReloadEvent.CHANNEL,
                 ExtensionReloadEvent(
                     name=name,
                     old_hash=old_hash,
-                    new_hash=new_hash,
+                    new_hash=event_new_hash,
                     trigger="agent" if agent_initiated else "human",
                     tier=effective_manifest.tier,
+                    is_self_modify=agent_initiated,
                 ),
             )
             return ReloadResult(
@@ -639,20 +760,29 @@ class AtomReloader:
                     os.replace(rollback_tmp_name, atom.file_path)
                 elif write_result.commit_sha_before is not None:
                     self._restore_git_path(atom, write_result.commit_sha_before)
-                self._activate_atom_install(atom)
+                await self._activate_atom_install(atom)
             except Exception as rollback_exc:  # noqa: BLE001
-                self._loaded_by_module.pop(atom.module_path, None)
-                self._loaded_by_name.pop(atom.name, None)
-                self._apis.pop(atom.module_path, None)
+                # Rollback (re-install of the original atom) itself blew
+                # up. Fall back to the immutable pre-reload snapshot —
+                # this is the only path that guarantees the live agent
+                # ends up with a consistent (entirely pre-reload) state
+                # rather than something half-new / half-old.
+                logger.exception(
+                    "atom %r rollback failed after apply failure; "
+                    "restoring from pre-reload snapshot",
+                    name,
+                )
+                self._restore_from_snapshot(snapshot)
                 self._bus.emit_sync(
                     ExtensionReloadEvent.CHANNEL,
                     ExtensionReloadEvent(
                         name=name,
                         old_hash=old_hash,
-                        new_hash=new_hash,
+                        new_hash=event_new_hash,
                         trigger="agent" if agent_initiated else "human",
                         tier=effective_manifest.tier,
-                        error="rollback_failure",
+                        error="rollback_failure_state_preserved",
+                        is_self_modify=agent_initiated,
                     ),
                 )
                 return ReloadResult(
@@ -660,7 +790,10 @@ class AtomReloader:
                     name=name,
                     old_hash=old_hash,
                     new_hash=new_hash,
-                    error=f"{exc}; rollback failed: {rollback_exc}",
+                    error=(
+                        f"rollback_failure_state_preserved: {exc}; "
+                        f"rollback failed: {rollback_exc}"
+                    ),
                     rolled_back=True,
                 )
             return ReloadResult(
@@ -673,15 +806,16 @@ class AtomReloader:
             )
 
     def freeze_current(self, name: str) -> str:
+        return self._run_api_boundary(self.freeze_current_async(name))
+
+    async def freeze_current_async(self, name: str) -> str:
         atom = self._loaded_by_name[name]
         source = atom.file_path.read_text(encoding="utf-8")
-        result = self._run_coro_sync(
-            self._resource_writer.write(
-                str(atom.file_path),
-                source.encode("utf-8"),
-                rationale="freeze_current snapshot",
-                author="indexer",
-            )
+        result = await self._resource_writer.write(
+            str(atom.file_path),
+            source.encode("utf-8"),
+            rationale="freeze_current snapshot",
+            author="indexer",
         )
         if result.error is not None:
             raise RuntimeError(result.error)
@@ -698,9 +832,7 @@ class AtomReloader:
 
     def list_atoms(self) -> list[AtomInfo]:
         out: list[AtomInfo] = []
-        for atom in sorted(
-            self._loaded_by_name.values(), key=lambda item: item.name
-        ):
+        for atom in sorted(self._loaded_by_name.values(), key=lambda item: item.name):
             current_hash = self.current_version_for_path(str(atom.file_path))
             if current_hash is None and atom.file_path.is_file():
                 current_hash = self._advisory_hash(
@@ -714,6 +846,7 @@ class AtomReloader:
                     tier=manifest.tier,
                     api_version=manifest.api_version,
                     source_path=str(atom.file_path),
+                    config=dict(atom.config),
                 )
             )
         return out
@@ -737,9 +870,28 @@ class AtomReloader:
     # (no accidental shadowing of builtin atoms) and lets us discard it
     # cleanly on unload.
 
-    _AGENT_ATOM_MODULE_PREFIX = "_agentm_user_atom__"
-
     def install_atom(
+        self,
+        *,
+        name: str,
+        source: str,
+        target_path: str | None,
+        config: dict[str, Any] | None,
+        rationale: str | None,
+        agent_initiated: bool,
+    ) -> InstallAtomResult:
+        return self._run_api_boundary(
+            self.install_atom_async(
+                name=name,
+                source=source,
+                target_path=target_path,
+                config=config,
+                rationale=rationale,
+                agent_initiated=agent_initiated,
+            )
+        )
+
+    async def install_atom_async(
         self,
         *,
         name: str,
@@ -775,7 +927,7 @@ class AtomReloader:
             )
 
         ext_cfg = dict(config or {})
-        module_path = f"{self._AGENT_ATOM_MODULE_PREFIX}{name}"
+        module_path = f"{discover_mod.USER_ATOM_MODULE_PREFIX}{name}"
 
         target_file = self._resolve_install_target(name, target_path)
         if is_constitution_path(str(target_file)):
@@ -846,13 +998,11 @@ class AtomReloader:
 
         file_existed = target_file.exists()
         target_file.parent.mkdir(parents=True, exist_ok=True)
-        write_result = self._run_coro_sync(
-            self._resource_writer.write(
-                str(target_file),
-                source.encode("utf-8"),
-                rationale=rationale or f"install atom {name}",
-                author="agent" if agent_initiated else "human",
-            )
+        write_result = await self._resource_writer.write(
+            str(target_file),
+            source.encode("utf-8"),
+            rationale=rationale or f"install atom {name}",
+            author="agent" if agent_initiated else "human",
         )
         if write_result.error is not None:
             return InstallAtomResult(
@@ -865,10 +1015,7 @@ class AtomReloader:
                 error=write_result.error,
             )
 
-        new_hash = (
-            write_result.commit_sha_after
-            or self._advisory_hash(source)
-        )
+        new_hash = write_result.commit_sha_after or self._advisory_hash(source)
         effective_manifest = manifest or _default_manifest(name)
 
         # Register the module bytes synthetically so load_extension's
@@ -899,7 +1046,7 @@ class AtomReloader:
 
         try:
             api = self._api_factory(module_path)
-            self._finish_install_sync(module_path, api, ext_cfg)
+            await self._finish_install(module_path, api, ext_cfg)
         except Exception as exc:  # noqa: BLE001
             self._remove_handlers(module_path)
             self._remove_registrations(module_path)
@@ -987,9 +1134,7 @@ class AtomReloader:
                 ok=False,
                 name=name,
                 module_path=atom.module_path,
-                error=(
-                    f"refusing to unload constitution-path atom {atom.file_path}"
-                ),
+                error=(f"refusing to unload constitution-path atom {atom.file_path}"),
             )
 
         manifest = atom.manifest or _default_manifest(name)
@@ -1102,22 +1247,16 @@ class AtomReloader:
                 target_file.unlink()
             except OSError:
                 pass
-            if (
-                isinstance(self._resource_writer, GitBackedResourceWriter)
-                and write_result.committed
-                and write_result.commit_sha_before is not None
-            ):
+            if write_result.committed and write_result.commit_sha_before is not None:
                 try:
-                    self._resource_writer._run_git_sync(  # type: ignore[attr-defined]
-                        ("reset", "--hard", write_result.commit_sha_before)
+                    self._resource_writer.restore(
+                        target_file, write_result.commit_sha_before
                     )
                 except Exception:  # noqa: BLE001
                     pass
 
     def current_version_for_path(self, path: str) -> str | None:
-        if isinstance(self._resource_writer, GitBackedResourceWriter):
-            return self._resource_writer.current_version_for_path(path)
-        return None
+        return self._resource_writer.current_version_for_path(path)
 
 
 __all__ = ["AtomReloader", "LoadedAtom"]

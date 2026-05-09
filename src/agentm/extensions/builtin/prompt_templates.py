@@ -23,6 +23,7 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": True,
     },
+    requires=(),  # Leaf atom: loads prompt templates from resources.
 )
 
 

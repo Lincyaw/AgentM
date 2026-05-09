@@ -62,6 +62,7 @@ from .events import (
     StreamDeltaEvent,
     TerminationCause,
     ToolCallEvent,
+    ToolErrorEvent,
     ToolResultEvent,
     ToolTerminated,
     TurnEndEvent,
@@ -76,11 +77,20 @@ from .messages import (
     ToolResultBlock,
     ToolResultMessage,
 )
+from .termination import (
+    Aborted,
+    EndTurn,
+    MaxTokens,
+    ProviderError,
+    ToolUseExpected,
+    VendorSpecific,
+)
 from .stream import (
     AssistantStreamEvent,
     MessageEnd,
     Model,
     StreamFn,
+    ToolCallArgsParseError,
     TextDelta,
 )
 from .tool import (
@@ -192,35 +202,62 @@ def _outcome_result(outcome: ToolOutcome) -> ToolResult:
 
 
 def _default_action(
-    assistant_msg: AssistantMessage, tool_outcomes: list[ToolOutcome]
+    assistant_msg: AssistantMessage,
+    paired_outcomes: list[tuple[str, ToolOutcome]],
 ) -> LoopAction:
     """Compute the kernel's default :class:`LoopAction` for a turn.
+
+    ``paired_outcomes`` carries each :class:`ToolOutcome` together with the
+    name of the originating tool call so :class:`ToolTerminated` can identify
+    *which* terminal tool fired without a separate lookup.
 
     Order of precedence:
     1. Any tool returned :class:`ToolTerminate` → ``Stop(ToolTerminated(...))``
        (first wins so the cause maps to the *first* terminal tool call).
-    2. No tool calls at all → map the provider's ``stop_reason``:
-       - ``max_tokens`` / ``error`` → ``Stop(ProviderTruncated(kind=...))``
-       - ``tool_use`` (no calls extracted) → ``Stop(ProviderProtocolViolation)``
-       - else → ``Stop(ModelEndTurn())``
+    2. No tool calls at all → dispatch on the provider's
+       :class:`TerminationHint`:
+       - :class:`MaxTokens` → ``Stop(ProviderTruncated(kind="max_tokens"))``
+       - :class:`ProviderError` → ``Stop(ProviderTruncated(kind="error"))``
+       - :class:`ToolUseExpected` → ``Stop(ProviderProtocolViolation)``
+       - :class:`EndTurn` / :class:`Aborted` / :class:`VendorSpecific` /
+         missing hint → ``Stop(ModelEndTurn())``
     3. Tools ran successfully and none asked to terminate → ``Step()``.
+
+    If ``termination`` is unset (legacy provider adapters), fall back to the
+    raw ``stop_reason`` string for graceful migration.
     """
 
-    for out in tool_outcomes:
+    for tool_name, out in paired_outcomes:
         if isinstance(out, ToolTerminate):
-            # Recover the tool name from the surrounding loop frame: callers
-            # in the loop pair outcomes with their originating tool_call so
-            # this helper only needs the outcomes themselves. The loop wraps
-            # the cause separately when it has the name handy.
-            return Stop(ToolTerminated(tool_name="", reason=out.reason))
+            return Stop(ToolTerminated(tool_name=tool_name, reason=out.reason))
 
-    if not tool_outcomes:
-        raw = assistant_msg.stop_reason
-        if raw == "max_tokens":
+    if not paired_outcomes:
+        hint = assistant_msg.termination
+        if hint is None:
+            # Back-compat path: providers that haven't migrated to
+            # ``TerminationHint`` yet still populate ``stop_reason`` with the
+            # legacy kernel vocabulary.
+            raw = assistant_msg.stop_reason
+            if raw == "max_tokens":
+                return Stop(ProviderTruncated(kind="max_tokens"))
+            if raw == "error":
+                return Stop(ProviderTruncated(kind="error"))
+            if raw == "tool_use":
+                return Stop(
+                    ProviderProtocolViolation(
+                        detail=(
+                            "provider reported tool_use but no tool_calls were "
+                            "extracted"
+                        )
+                    )
+                )
+            return Stop(ModelEndTurn())
+
+        if isinstance(hint, MaxTokens):
             return Stop(ProviderTruncated(kind="max_tokens"))
-        if raw == "error":
+        if isinstance(hint, ProviderError):
             return Stop(ProviderTruncated(kind="error"))
-        if raw == "tool_use":
+        if isinstance(hint, ToolUseExpected):
             return Stop(
                 ProviderProtocolViolation(
                     detail=(
@@ -229,28 +266,17 @@ def _default_action(
                     )
                 )
             )
-        return Stop(ModelEndTurn())
+        # EndTurn / Aborted / VendorSpecific all collapse to a clean end-turn
+        # at the kernel layer. ``Aborted`` is normally surfaced via the
+        # signal path (``SignalAborted``) before we reach this helper; if a
+        # provider reports it on the message itself we still terminate cleanly.
+        if isinstance(hint, EndTurn | Aborted | VendorSpecific):
+            return Stop(ModelEndTurn())
+        # Exhaustive over the ``TerminationHint`` union; the fall-through
+        # keeps mypy honest if a new variant is added without updating here.
+        return Stop(ModelEndTurn())  # pragma: no cover
 
     return Step()
-
-
-def _default_action_with_names(
-    assistant_msg: AssistantMessage,
-    paired_outcomes: list[tuple[str, ToolOutcome]],
-) -> LoopAction:
-    """Variant of :func:`_default_action` that knows each outcome's tool name.
-
-    Lifts ``tool_name`` from the loop's per-call bookkeeping into
-    :class:`ToolTerminated` so observers can identify *which* terminal tool
-    fired without a separate lookup.
-    """
-
-    for tool_name, out in paired_outcomes:
-        if isinstance(out, ToolTerminate):
-            return Stop(ToolTerminated(tool_name=tool_name, reason=out.reason))
-    return _default_action(
-        assistant_msg, [out for _, out in paired_outcomes]
-    )
 
 
 def _resolve_action(default: LoopAction, returns: list[Any]) -> LoopAction:
@@ -349,6 +375,16 @@ class AgentLoop:
         self._stream_fn = stream_fn
         self._bus = bus
         self._config = config if config is not None else LoopConfig()
+        self._next_turn_id = 0
+
+    def set_stream_fn(self, fn: StreamFn) -> None:
+        """Replace the active provider for subsequent turns.
+
+        This is the only supported way to swap LLM providers mid-session;
+        callers must not mutate the kernel's private stream state directly.
+        """
+
+        self._stream_fn = fn
 
     async def run(
         self,
@@ -384,6 +420,8 @@ class AgentLoop:
         try:
             for turn_index in range(max_turns):
                 last_turn_index = turn_index
+                turn_id = self._next_turn_id
+                self._next_turn_id += 1
                 # Rebuild dispatch index per turn so atoms registered mid-prompt
                 # via ``api.install_atom`` (or any other ``register_tool`` path)
                 # become callable on the very next turn within the same prompt.
@@ -394,6 +432,7 @@ class AgentLoop:
                         SignalAborted(),
                         last_assistant=last_assistant,
                         turn_index=turn_index,
+                        turn_id=turn_id,
                     )
                 if (
                     max_tool_calls is not None
@@ -404,9 +443,13 @@ class AgentLoop:
                         BudgetExhausted(detail="max_tool_calls"),
                         last_assistant=last_assistant,
                         turn_index=turn_index,
+                        turn_id=turn_id,
                     )
 
-                await self._bus.emit(TurnStartEvent.CHANNEL, TurnStartEvent(turn_index=turn_index))
+                await self._bus.emit(
+                    TurnStartEvent.CHANNEL,
+                    TurnStartEvent(turn_index=turn_index, turn_id=turn_id),
+                )
 
                 # context event — handlers may rewrite message list
                 ctx_event = ContextEvent(messages=messages)
@@ -439,6 +482,7 @@ class AgentLoop:
                         tool_count=len(tools),
                         system_chars=len(system or ""),
                         model_id=getattr(model, "id", None),
+                        turn_id=turn_id,
                     ),
                 )
                 stream_events: list[AssistantStreamEvent] = []
@@ -460,8 +504,10 @@ class AgentLoop:
                         # additive and ignored by everyone else.
                         await self._bus.emit(
                             StreamDeltaEvent.CHANNEL,
-                            StreamDeltaEvent(turn_index=turn_index, delta=ev),
+                            StreamDeltaEvent(turn_index=turn_index, delta=ev, turn_id=turn_id),
                         )
+                        if isinstance(ev, ToolCallArgsParseError):
+                            await self._bus.emit(ev.CHANNEL, ev)
                 except Exception as exc:
                     stream_error = repr(exc)
                     await self._bus.emit(
@@ -471,6 +517,7 @@ class AgentLoop:
                             chunk_count=len(stream_events),
                             duration_ns=time.perf_counter_ns() - stream_start_ns,
                             error=stream_error,
+                            turn_id=turn_id,
                         ),
                     )
                     raise
@@ -481,6 +528,7 @@ class AgentLoop:
                         chunk_count=len(stream_events),
                         duration_ns=time.perf_counter_ns() - stream_start_ns,
                         error=None,
+                        turn_id=turn_id,
                     ),
                 )
 
@@ -495,6 +543,7 @@ class AgentLoop:
                         turn_index=turn_index,
                         message=assistant_msg,
                         messages=tuple(messages),
+                        turn_id=turn_id,
                     ),
                 )
 
@@ -516,12 +565,14 @@ class AgentLoop:
                             SignalAborted(),
                             last_assistant=last_assistant,
                             turn_index=turn_index,
+                            turn_id=turn_id,
                         )
                     paired_outcomes = raw_outcomes
                     tool_calls_used += len(paired_outcomes)
 
                 action = await self._dispatch_decision(
                     turn_index=turn_index,
+                    turn_id=turn_id,
                     assistant_msg=assistant_msg,
                     paired_outcomes=paired_outcomes,
                 )
@@ -539,6 +590,7 @@ class AgentLoop:
                 MaxTurnsExhausted(),
                 last_assistant=last_assistant,
                 turn_index=last_turn_index,
+                turn_id=max(0, self._next_turn_id - 1),
             )
 
         except asyncio.CancelledError:
@@ -593,28 +645,22 @@ class AgentLoop:
                     or "blocked by extension"
                 )
                 outcome = ToolContinue(
-                    result=ToolResult(
-                        content=[
-                            TextContent(
-                                type="text",
-                                text=f"Tool call blocked: {reason}",
-                            )
-                        ],
-                        is_error=True,
+                    result=await self._make_error_result(
+                        kind="blocked",
+                        tool_name=tc.name,
+                        reason=str(reason),
+                        exception=None,
                     )
                 )
             else:
                 tool = tool_index.get(tc.name)
                 if tool is None:
                     outcome = ToolContinue(
-                        result=ToolResult(
-                            content=[
-                                TextContent(
-                                    type="text",
-                                    text=f"Unknown tool: {tc.name}",
-                                )
-                            ],
-                            is_error=True,
+                        result=await self._make_error_result(
+                            kind="unknown_tool",
+                            tool_name=tc.name,
+                            reason=tc.name,
+                            exception=None,
                         )
                     )
                 else:
@@ -629,14 +675,11 @@ class AgentLoop:
                     except Exception as exc:  # noqa: BLE001
                         # Uniform exception → error-result conversion.
                         outcome = ToolContinue(
-                            result=ToolResult(
-                                content=[
-                                    TextContent(
-                                        type="text",
-                                        text=f"Tool execution error: {exc}",
-                                    )
-                                ],
-                                is_error=True,
+                            result=await self._make_error_result(
+                                kind="execution_failed",
+                                tool_name=tc.name,
+                                reason=str(exc),
+                                exception=exc,
                             )
                         )
                     else:
@@ -681,21 +724,67 @@ class AgentLoop:
         )
         return paired
 
+    async def _make_error_result(
+        self,
+        *,
+        kind: str,
+        tool_name: str,
+        reason: str,
+        exception: BaseException | None,
+    ) -> ToolResult:
+        """Build the empty-content ``ToolResult`` for one of the three error
+        paths and let the ``tool_error`` channel populate ``content``.
+
+        The kernel deliberately does not synthesize the user-visible English
+        string itself; that policy is owned by the ``tool_error_messages``
+        builtin atom (or whatever extension replaces it). When no atom is
+        installed, the result still carries a single ``TextContent`` with a
+        bare fall-back so the trajectory remains debuggable.
+        """
+
+        # ``Literal`` already constrains the kernel call sites; the str hop
+        # here is a defensive cast for the dataclass's frozen Literal field.
+        narrowed: Any = kind
+        result = ToolResult(content=[], is_error=True)
+        await self._bus.emit(
+            ToolErrorEvent.CHANNEL,
+            ToolErrorEvent(
+                kind=narrowed,
+                tool_name=tool_name,
+                reason=reason,
+                result=result,
+                exception=exception,
+            ),
+        )
+        if not result.content:
+            # Recovery floor: no atom subscribed (or all subscribers were
+            # no-ops). Insert a minimal placeholder so observers and the
+            # provider both see *something* legible.
+            result.content.append(
+                TextContent(
+                    type="text",
+                    text=f"tool_error: {kind} ({tool_name})",
+                )
+            )
+        return result
+
     async def _dispatch_decision(
         self,
         *,
         turn_index: int,
         assistant_msg: AssistantMessage,
+        turn_id: int,
         paired_outcomes: list[tuple[str, ToolOutcome]],
     ) -> LoopAction:
         """Compute the default action, fire the hook, resolve overrides."""
 
-        default = _default_action_with_names(assistant_msg, paired_outcomes)
+        default = _default_action(assistant_msg, paired_outcomes)
         observation = TurnObservation(
             turn_index=turn_index,
             assistant_message=assistant_msg,
             tool_outcomes=[out for _, out in paired_outcomes],
             default_action=default,
+            turn_id=turn_id,
         )
         returns = await self._bus.emit(
             DecideTurnActionEvent.CHANNEL,
@@ -726,6 +815,7 @@ class AgentLoop:
         *,
         last_assistant: AssistantMessage | None,
         turn_index: int,
+        turn_id: int,
     ) -> list[AgentMessage]:
         """Kernel-imposed termination path.
 
@@ -741,6 +831,7 @@ class AgentLoop:
             assistant_message=last_assistant,
             tool_outcomes=[],
             default_action=Stop(cause),
+            turn_id=turn_id,
         )
         await self._bus.emit(
             DecideTurnActionEvent.CHANNEL,

@@ -33,63 +33,39 @@ three sibling v2 modules.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import shutil
-import sys
-import time
-import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from agentm.core.abi import (
     AgentEndEvent,
-    AgentLoop,
     AgentMessage,
-    BudgetExhausted,
     EventBus,
     ImageContent,
-    LoopConfig,
     Model,
     TextContent,
     Tool,
     UserMessage,
 )
-from agentm.core.abi.events import DiagnosticEvent
-
-from agentm.harness.atom_reloader import AtomReloader, LoadedAtom
+from agentm.harness.atom_reloader import LoadedAtom
 from agentm.harness.events import (
     BeforeAgentStartEvent,
     ChildSessionEndEvent,
-    ChildSessionStartEvent,
-    CommandDispatchedEvent,
-    CostBudgetExceededEvent,
-    ExtensionInstallEvent,
-    SessionReadyEvent,
     SessionShutdownEvent,
 )
-from agentm.harness.extension import (
-    CommandSpec,
-    ExtensionLoadError,
-    ProviderConfig,
-    ReadonlySession,
-    Renderer,
-    _ExtensionAPIImpl,
-    load_extension,
+from agentm.harness.resource_loader import ResourceLoader
+from agentm.harness.session_helpers import (
+    collect_start_veto,
+    collect_system_replacement,
+    now,
 )
-from agentm.extensions import discover as discover_mod
-from agentm.harness.resource_loader import (
-    DefaultResourceLoader,
-    ResourceLoader,
-)
-from agentm.harness.resource_writer import GitBackedResourceWriter
-from agentm.harness.session_manager import (
-    InMemorySessionManager,
-    SessionEntry,
-    SessionManager,
-)
+from agentm.harness.session_runtime import SessionRuntime
+from agentm.harness.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
+
+_LoadedAtom = LoadedAtom
 
 
 # --- Config -----------------------------------------------------------------
@@ -98,116 +74,9 @@ logger = logging.getLogger(__name__)
 # ``api.spawn_child_session``. Re-exported below for backward-compatible
 # imports from ``agentm.harness.session``.
 
-from agentm.harness.session_config import AgentSessionConfig  # noqa: E402
-
-
-# --- Helpers ----------------------------------------------------------------
-
-
-class _SessionView:
-    """``ReadonlySession`` adapter over a ``SessionManager``.
-
-    Exposes message reads plus the one mutation extensions are allowed:
-    ``append_entry`` for persisting structured payloads (compaction summaries,
-    hypothesis snapshots, plan submissions) into the entry tree. Everything
-    else (fork / navigate) stays inside the harness.
-    """
-
-    def __init__(
-        self,
-        sm: SessionManager,
-        *,
-        loop_config_getter: Callable[[], LoopConfig],
-    ) -> None:
-        self._sm = sm
-        self._loop_config_getter = loop_config_getter
-
-    def get_messages(self) -> list[AgentMessage]:
-        return self._sm.get_messages()
-
-    def get_branch(self) -> list[SessionEntry]:
-        return self._sm.get_active_branch()
-
-    def get_leaf_id(self) -> str | None:
-        return self._sm.get_leaf_id()
-
-    def get_entry(self, entry_id: str) -> SessionEntry | None:
-        return self._sm.get_entry(entry_id)
-
-    def get_loop_config(self) -> LoopConfig:
-        return self._loop_config_getter()
-
-    def append_entry(
-        self,
-        type: str,
-        payload: Any,
-        parent_id: str | None = None,
-    ) -> str:
-        if parent_id is None:
-            branch = self._sm.get_active_branch()
-            parent_id = branch[-1].id if branch else None
-        entry = SessionEntry(
-            type=type,
-            id=uuid.uuid4().hex,
-            parent_id=parent_id,
-            timestamp=_now(),
-            payload=payload,
-        )
-        self._sm.append(entry)
-        return entry.id
-
-
-def _now() -> float:
-    return time.time()
-
-
-def _collect_system_replacement(returns: list[Any]) -> str | None:
-    """Pick the last non-None ``system`` replacement from handler returns.
-
-    Mirrors ``loop._collect_replacement`` semantics: handlers may return a
-    dict ``{"system": "..."}`` to override the assembled system prompt; the
-    most recently registered authoritative voice wins.
-    """
-
-    chosen: str | None = None
-    for value in returns:
-        if isinstance(value, dict) and value.get("system") is not None:
-            candidate = value["system"]
-            if isinstance(candidate, str):
-                chosen = candidate
-    return chosen
-
-
-# Backward-compat alias: tests and external code referenced ``_LoadedAtom``
-# from this module before B1 moved the dataclass into ``atom_reloader``.
-_LoadedAtom = LoadedAtom
-
-
-def _atom_requires_unsupplied_config(
-    manifest: Any, supplied: dict[str, Any]
-) -> bool:
-    """Return True if ``manifest.config_schema.required`` lists a key that is
-    not present in ``supplied``. Used by auto-discovery to skip atoms that
-    would no-op anyway. Covers JSON Schema's ``required`` array; richer
-    constraints (``oneOf``, ``dependencies``, ...) are intentionally not
-    interpreted — atoms with those are loaded and let to fail loudly.
-    """
-    return bool(_missing_required_fields(manifest, supplied))
-
-
-def _missing_required_fields(
-    manifest: Any, supplied: dict[str, Any]
-) -> list[str]:
-    """List the ``required`` config keys absent from ``supplied``. Empty
-    when nothing is missing or no schema declares ``required``.
-    """
-    schema = getattr(manifest, "config_schema", None)
-    if not isinstance(schema, dict):
-        return []
-    required = schema.get("required")
-    if not isinstance(required, list):
-        return []
-    return [str(key) for key in required if key not in supplied]
+from agentm.harness.session_config import (  # noqa: E402
+    AgentSessionConfig,
+)
 
 
 # --- AgentSession -----------------------------------------------------------
@@ -220,18 +89,7 @@ class AgentSession:
         self,
         *,
         cwd: str,
-        bus: EventBus,
-        session_manager: SessionManager,
-        resource_loader: ResourceLoader,
-        loop: AgentLoop,
-        active_provider_box: dict[str, ProviderConfig | None],
-        tools: list[Tool],
-        commands: dict[str, CommandSpec],
-        providers: dict[str, ProviderConfig],
-        renderers: dict[str, Renderer],
-        apis: dict[str, _ExtensionAPIImpl],
-        reloader: AtomReloader,
-        pending_user_messages: list[str | list[Any]],
+        runtime: SessionRuntime,
         session_id: str,
         parent_bus: EventBus | None,
         parent_session_id: str | None,
@@ -239,19 +97,22 @@ class AgentSession:
         eval_sandbox: Path | None = None,
     ) -> None:
         self._cwd = cwd
-        self._bus = bus
-        self._session_manager = session_manager
-        self._resources = resource_loader
-        self._loop = loop
-        self._active_provider_box = active_provider_box
-        self._tools = tools
-        self._commands = commands
-        self._providers = providers
-        self._renderers = renderers
-        self._apis = apis
-        self._reloader = reloader
-        self._extension_api = next(iter(apis.values())) if apis else None
-        self._pending_user_messages = pending_user_messages
+        self._bus = runtime.bus
+        self._session_manager = runtime.session_manager
+        self._resources = runtime.resource_loader
+        self._loop = runtime.loop
+        self._active_provider_box = runtime.active_provider_box
+        self._tools = runtime.tools
+        self._commands = runtime.commands
+        self._providers = runtime.providers
+        self._renderers = runtime.renderers
+        self._apis = runtime.apis
+        self._services = runtime.services
+        self._reloader = runtime.reloader
+        self._extension_api = (
+            next(iter(runtime.apis.values())) if runtime.apis else None
+        )
+        self._pending_user_messages = runtime.pending_user_messages
         self._session_id = session_id
         self._parent_bus = parent_bus
         self._parent_session_id = parent_session_id
@@ -276,550 +137,16 @@ class AgentSession:
         return self._reloader.loaded_by_name
 
     @property
-    def _command_owners(self) -> dict[str, str]:
-        return self._reloader.command_owners
+    def _owners_by_kind(self) -> dict[str, dict[str, str]]:
+        return self._reloader.owners_by_kind
 
     # --- Construction -----------------------------------------------------
 
     @classmethod
     async def create(cls, config: AgentSessionConfig) -> "AgentSession":
-        """Build a session: assemble subsystems, load extensions, return."""
+        from agentm.harness.session_factory import create_agent_session
 
-        bus = config.bus if config.bus is not None else EventBus()
-        session_manager: SessionManager = (
-            config.session_manager
-            if config.session_manager is not None
-            else InMemorySessionManager(cwd=config.cwd)
-        )
-        resource_loader: ResourceLoader = (
-            config.resource_loader
-            if config.resource_loader is not None
-            else DefaultResourceLoader(
-                cwd=Path(config.cwd),
-                no_skills=config.no_skills,
-                no_prompt_templates=config.no_prompt_templates,
-            )
-        )
-
-        tools: list[Tool] = []
-        commands: dict[str, CommandSpec] = {}
-        providers: dict[str, ProviderConfig] = {}
-        renderers: dict[str, Renderer] = {}
-        pending_user_messages: list[str | list[Any]] = []
-        apis: dict[str, _ExtensionAPIImpl] = {}
-
-        # We need a forward reference to the picked-up active provider so the
-        # api.model property reflects it once the provider extension runs.
-        active_provider_box: dict[str, ProviderConfig | None] = {"value": None}
-        loop_box: dict[str, AgentLoop | None] = {"value": None}
-        configured_loop_config = config.loop_config or LoopConfig()
-
-        def _model_getter() -> Model | None:
-            cur = active_provider_box["value"]
-            return cur.model if cur is not None else None
-
-        def _provider_getter() -> ProviderConfig | None:
-            return active_provider_box["value"]
-
-        session_id = uuid.uuid4().hex
-        session_view: ReadonlySession = _SessionView(
-            session_manager,
-            loop_config_getter=lambda: configured_loop_config,
-        )
-        resource_writer = GitBackedResourceWriter(
-            cwd=config.cwd,
-            session_id=session_id,
-            bus=bus,
-        )
-        try:
-            from agentm.core._internal.catalog.migrate import migrate_catalog_v2
-
-            migrate_catalog_v2(root=Path(config.cwd))
-        except Exception as exc:
-            logger.warning("agentm catalog migration failed during startup: %r", exc)
-
-        def _refresh_active_provider() -> None:
-            active_provider_box["value"] = (
-                providers[next(reversed(providers))] if providers else None
-            )
-            loop = loop_box["value"]
-            active = active_provider_box["value"]
-            if loop is not None and active is not None:
-                loop._stream_fn = active.stream_fn  # type: ignore[attr-defined]
-
-        # The reload state machine + ``_SessionGateway`` implementation. See
-        # :class:`AtomReloader` for the rationale on why this is its own
-        # class rather than ~400 lines of closures inline in ``create``.
-        reloader = AtomReloader(
-            cwd=config.cwd,
-            resource_writer=resource_writer,
-            bus=bus,
-            tools=tools,
-            commands=commands,
-            providers=providers,
-            renderers=renderers,
-            apis=apis,
-            on_provider_changed=_refresh_active_provider,
-        )
-
-        async def _spawn_child_session(child_config: Any) -> "AgentSession":
-            """Build a child session rooted on this one.
-
-            Parent ``bus`` and ``session_id`` are injected here; any value
-            the caller put on those fields is overwritten so an extension
-            cannot impersonate a different parent. When ``child_config.provider``
-            is ``None`` we auto-wire the ``inherit_provider`` builtin so the
-            child re-uses the parent's active :class:`ProviderConfig` without
-            re-authenticating. Returns the constructed
-            child; lifecycle events are emitted by ``AgentSession.create``
-            via the existing ``parent_bus`` plumbing.
-            """
-            if not isinstance(child_config, AgentSessionConfig):
-                raise TypeError(
-                    "spawn_child_session expects an AgentSessionConfig; "
-                    f"got {type(child_config).__name__}"
-                )
-                # noqa: TRY004 — explicit message clearer than relying on dataclass replace
-            spec = AgentSessionConfig(**{**child_config.__dict__})
-            spec.parent_bus = bus
-            spec.parent_session_id = session_id
-            spec.root_session_id = config.root_session_id or session_id
-            if spec.provider is None:
-                parent_provider = _provider_getter()
-                if parent_provider is None:
-                    raise RuntimeError(
-                        "spawn_child_session: AgentSessionConfig.provider is "
-                        "None but the parent session has no active provider "
-                        "to inherit. Either set child_config.provider "
-                        "explicitly or ensure the parent has registered one."
-                    )
-                spec.provider = (
-                    "agentm.extensions.builtin.inherit_provider",
-                    {"provider": parent_provider},
-                )
-            return await cls.create(spec)
-
-        def _make_api(owner: str) -> _ExtensionAPIImpl:
-            api = _ExtensionAPIImpl(
-                bus=bus,
-                cwd=config.cwd,
-                session_id=session_id,
-                session=session_view,
-                tools=tools,
-                commands=commands,
-                providers=providers,
-                renderers=renderers,
-                pending_user_messages=pending_user_messages,
-                model_getter=_model_getter,
-                provider_getter=_provider_getter,
-                gateway=reloader,
-                owner_name=owner,
-                child_session_factory=_spawn_child_session,
-                resource_writer=resource_writer,
-            )
-            reloader.wrap_api_on(api, owner)
-            apis[owner] = api
-            return api
-
-        reloader.set_api_factory(_make_api)
-
-        async def _install_with_events(
-            module_path: str,
-            ext_cfg: dict[str, Any],
-            *,
-            is_provider: bool = False,
-        ) -> None:
-            await bus.emit(
-                ExtensionInstallEvent.CHANNEL,
-                ExtensionInstallEvent(
-                    module_path=module_path, config=dict(ext_cfg), phase="start"
-                ),
-            )
-            t0 = time.perf_counter_ns()
-            try:
-                result = load_extension(module_path, _make_api(module_path), ext_cfg)
-                if inspect.isawaitable(result):
-                    await result
-            except Exception as exc:
-                await bus.emit(
-                    ExtensionInstallEvent.CHANNEL,
-                    ExtensionInstallEvent(
-                        module_path=module_path,
-                        config=dict(ext_cfg),
-                        phase="error",
-                        duration_ns=time.perf_counter_ns() - t0,
-                        error=repr(exc),
-                    ),
-                )
-                raise
-            reloader.record_loaded_atom(
-                module_path, ext_cfg, is_provider=is_provider
-            )
-            await bus.emit(
-                ExtensionInstallEvent.CHANNEL,
-                ExtensionInstallEvent(
-                    module_path=module_path,
-                    config=dict(ext_cfg),
-                    phase="end",
-                    duration_ns=time.perf_counter_ns() - t0,
-                ),
-            )
-
-        # Prime contrib-atom discovery early so synthetic module names like
-        # ``_agentm_contrib__tool_catalog`` are resolvable through every
-        # branch below (including explicit extensions= lists and scenario
-        # manifests that reference them by synthetic name). Idempotent —
-        # repeated calls reuse already-registered sys.modules entries.
-        if not config.no_extensions:
-            try:
-                discover_mod.discover_contrib_atoms()
-            except Exception as exc:  # noqa: BLE001
-                await bus.emit(
-                    DiagnosticEvent.CHANNEL,
-                    DiagnosticEvent(
-                        level="error",
-                        source="auto_discovery",
-                        message=f"contrib atom discovery failed: {exc}",
-                    ),
-                )
-
-        # Determine the auxiliary extension list. Precedence:
-        #   no_extensions  → []
-        #   explicit list  → as supplied
-        #   scenario name  → load_scenario; on error emit diagnostic and []
-        #   default        → discover_builtin() in discovery order
-        to_load: list[tuple[str, dict[str, Any]]]
-        if config.no_extensions:
-            to_load = []
-        elif config.extensions:
-            to_load = list(config.extensions)
-        elif config.scenario is not None:
-            from agentm.extensions.loader import (
-                ScenarioLoadError,
-                load_scenario_with_meta,
-            )
-
-            try:
-                to_load, scenario_meta = load_scenario_with_meta(config.scenario)
-            except (ScenarioLoadError, Exception) as exc:  # noqa: BLE001
-                await bus.emit(
-                    DiagnosticEvent.CHANNEL,
-                    DiagnosticEvent(
-                        level="error",
-                        source="scenario_loader",
-                        message=str(exc),
-                    ),
-                )
-                to_load = []
-                scenario_meta = {}
-            # Adopt scenario-declared ``task_class`` unless the caller
-            # explicitly set one on AgentSessionConfig (caller wins —
-            # ``tool_eval_run`` overrides for child sessions).
-            if (
-                config.task_class is None
-                and isinstance(scenario_meta.get("task_class"), str)
-            ):
-                config.task_class = scenario_meta["task_class"]
-        else:
-            # Auto-discovery loads every builtin atom with ``{}`` config.
-            # Atoms whose ``MANIFEST.config_schema.required`` lists fields
-            # we cannot satisfy from an empty config are skipped — without
-            # this filter every such atom had to defensively ``return``
-            # from inside its own ``install``. Centralising the skip here
-            # means an atom can assume its required keys are present once
-            # ``install`` runs. We surface every skip as an info-level
-            # diagnostic so users can tell why a documented atom is absent.
-            to_load = []
-            for entry in discover_mod.discover_builtin().values():
-                if _atom_requires_unsupplied_config(entry.manifest, {}):
-                    missing = _missing_required_fields(entry.manifest, {})
-                    await bus.emit(
-                        DiagnosticEvent.CHANNEL,
-                        DiagnosticEvent(
-                            level="info",
-                            source="auto_discovery",
-                            message=(
-                                f"skipped {entry.name}: requires config keys "
-                                f"{missing!r}; load via --scenario or "
-                                f"explicit extensions= list"
-                            ),
-                        ),
-                    )
-                    continue
-                to_load.append((entry.module_path, {}))
-
-            # Pick up research-line / scenario-bound atoms shipped under
-            # ``<cwd>/contrib/extensions/<name>.py``. They are physically
-            # outside the SDK ``builtin/`` tree but are auto-loaded when
-            # the AgentM repo's contrib/ is present, so users don't have
-            # to enumerate them in every scenario manifest. Discovery
-            # errors are downgraded to a diagnostic so a single broken
-            # contrib file never bricks bootstrap.
-            try:
-                contrib_atoms = discover_mod.discover_contrib_atoms()
-            except Exception as exc:  # noqa: BLE001
-                await bus.emit(
-                    DiagnosticEvent.CHANNEL,
-                    DiagnosticEvent(
-                        level="error",
-                        source="auto_discovery",
-                        message=f"contrib atom discovery failed: {exc}",
-                    ),
-                )
-                contrib_atoms = {}
-            for entry in contrib_atoms.values():
-                if _atom_requires_unsupplied_config(entry.manifest, {}):
-                    missing = _missing_required_fields(entry.manifest, {})
-                    await bus.emit(
-                        DiagnosticEvent.CHANNEL,
-                        DiagnosticEvent(
-                            level="info",
-                            source="auto_discovery",
-                            message=(
-                                f"skipped contrib atom {entry.name}: requires "
-                                f"config keys {missing!r}; load via "
-                                f"--scenario or explicit extensions= list"
-                            ),
-                        ),
-                    )
-                    continue
-                to_load.append((entry.module_path, {}))
-
-            # Pick up atoms previously dropped into ``<cwd>/.agentm/atoms/``
-            # by ``api.install_atom``. Without this branch a self-installed
-            # atom evaporates the moment its session ends, breaking the
-            # plug-and-play promise across process restarts. Discovery
-            # errors are downgraded to a diagnostic so a single broken
-            # user file never bricks bootstrap.
-            try:
-                user_atoms = discover_mod.discover_user_atoms(Path(config.cwd))
-            except Exception as exc:  # noqa: BLE001
-                await bus.emit(
-                    DiagnosticEvent.CHANNEL,
-                    DiagnosticEvent(
-                        level="error",
-                        source="auto_discovery",
-                        message=f"user atom discovery failed: {exc}",
-                    ),
-                )
-                user_atoms = {}
-            for entry in user_atoms.values():
-                if _atom_requires_unsupplied_config(entry.manifest, {}):
-                    missing = _missing_required_fields(entry.manifest, {})
-                    await bus.emit(
-                        DiagnosticEvent.CHANNEL,
-                        DiagnosticEvent(
-                            level="info",
-                            source="auto_discovery",
-                            message=(
-                                f"skipped user atom {entry.name}: requires "
-                                f"config keys {missing!r}; load via "
-                                f"--scenario or explicit extensions= list"
-                            ),
-                        ),
-                    )
-                    continue
-                to_load.append((entry.module_path, {}))
-
-        # Append --extension / extra_extensions on top of the base list.
-        # No-op when extensions= was supplied explicitly (caller already
-        # controls the full list) or when --no-extensions disabled loading.
-        if (
-            not config.no_extensions
-            and not config.extensions
-            and config.extra_extensions
-        ):
-            to_load.extend(config.extra_extensions)
-
-        # Load auxiliary extensions. A failure on any one atom is non-fatal:
-        # emit a diagnostic and continue so the recovery floor (baseline
-        # tools + provider) survives.
-        for module_path, ext_cfg in to_load:
-            try:
-                await _install_with_events(module_path, ext_cfg)
-            except Exception as exc:  # noqa: BLE001
-                await bus.emit(
-                    DiagnosticEvent.CHANNEL,
-                    DiagnosticEvent(
-                        level="error",
-                        source="extension_loader",
-                        message=f"{module_path}: {exc}",
-                    ),
-                )
-
-        # Load the provider extension. After it returns, we expect it to have
-        # registered a ProviderConfig. Provider failure is the one fatal
-        # case — without a stream_fn the loop cannot run.
-        if config.provider is None:
-            raise ExtensionLoadError(
-                "<provider>",
-                RuntimeError(
-                    "AgentSessionConfig.provider is None. Root sessions must "
-                    "specify a provider explicitly; only spawn_child_session "
-                    "auto-fills None with the inherit_provider builtin."
-                ),
-            )
-        provider_path, provider_cfg = config.provider
-        await _install_with_events(provider_path, provider_cfg, is_provider=True)
-
-        if not providers:
-            raise ExtensionLoadError(
-                provider_path,
-                RuntimeError(
-                    "provider extension did not call api.register_provider"
-                ),
-            )
-
-        # Apply ``tool_allowlist`` to atom-registered tools. Mutating in
-        # place keeps the same list identity threaded through ExtensionAPI.
-        if config.tool_allowlist is not None:
-            tools[:] = [t for t in tools if t.name in config.tool_allowlist]
-
-        # Pick the most recently registered provider as active. dict insertion
-        # order is preserved on Python 3.7+; the last-inserted entry is the
-        # authoritative one.
-        active_name = next(reversed(providers))
-        active_provider = providers[active_name]
-        active_provider_box["value"] = active_provider
-
-        # Build the kernel loop now that we have a stream_fn.
-        loop = AgentLoop(
-            stream_fn=active_provider.stream_fn,
-            bus=bus,
-            config=configured_loop_config,
-        )
-        loop_box["value"] = loop
-
-        # Seed initial messages (if any) into the session manager.
-        for msg in config.initial_messages:
-            session_manager.append_message(msg)
-
-        # Apply ``atom_source_overrides`` BEFORE building the AgentSession
-        # façade so the running atoms reflect the overridden source by the
-        # time the loop is invoked. We redirect each atom's ``file_path`` to
-        # a per-session sandbox dir under ``.agentm/eval-sandbox/<id>/`` so
-        # ResourceWriter classifies the path as ``unmanaged`` (no git
-        # mutation, no working-tree change). The sandbox is cleaned up on
-        # ``AgentSession.shutdown``.
-        eval_sandbox: Path | None = None
-        if config.atom_source_overrides:
-            eval_sandbox = (
-                Path(config.cwd) / ".agentm" / "eval-sandbox" / session_id
-            ).resolve()
-            eval_sandbox.mkdir(parents=True, exist_ok=True)
-            for atom_name, new_source in config.atom_source_overrides.items():
-                atom = reloader.loaded_by_name.get(atom_name)
-                if atom is None:
-                    await bus.emit(
-                        DiagnosticEvent.CHANNEL,
-                        DiagnosticEvent(
-                            level="error",
-                            source="atom_source_overrides",
-                            message=(
-                                f"override target {atom_name!r} is not loaded; "
-                                f"skipping override"
-                            ),
-                        ),
-                    )
-                    continue
-                sandbox_path = eval_sandbox / f"{atom_name}.py"
-                sandbox_path.write_text(new_source, encoding="utf-8")
-                # Redirect the atom's file_path so reload_atom routes its
-                # write to the sandbox (path_class=unmanaged → no git).
-                atom.file_path = sandbox_path.resolve()
-                # Also update the loaded module's ``__file__`` so future
-                # reloads pick up the right source.
-                loaded_mod = sys.modules.get(atom.module_path)
-                if loaded_mod is not None:
-                    try:
-                        loaded_mod.__file__ = str(sandbox_path)
-                    except (AttributeError, TypeError):
-                        pass
-                result = reloader.reload_atom(
-                    atom_name,
-                    new_source,
-                    agent_initiated=False,
-                    rationale="atom_source_override (eval sandbox)",
-                )
-                if not result.ok:
-                    await bus.emit(
-                        DiagnosticEvent.CHANNEL,
-                        DiagnosticEvent(
-                            level="error",
-                            source="atom_source_overrides",
-                            message=(
-                                f"override of {atom_name!r} failed: {result.error}"
-                            ),
-                        ),
-                    )
-
-        instance = cls(
-            cwd=config.cwd,
-            bus=bus,
-            session_manager=session_manager,
-            resource_loader=resource_loader,
-            loop=loop,
-            active_provider_box=active_provider_box,
-            tools=tools,
-            commands=commands,
-            providers=providers,
-            renderers=renderers,
-            apis=apis,
-            reloader=reloader,
-            pending_user_messages=pending_user_messages,
-            session_id=session_id,
-            parent_bus=config.parent_bus,
-            parent_session_id=config.parent_session_id,
-            purpose=config.purpose,
-            eval_sandbox=eval_sandbox,
-        )
-
-        # Latch budget-exceeded once subscribed extensions emit it. The flag
-        # is checked at the top of every ``prompt`` so the next turn
-        # short-circuits with ``stop_reason='budget'``. Pure event-bus
-        # signalling per §10b.8 — no exceptions cross handler boundaries.
-        def _on_budget_exceeded(_: Any) -> None:
-            instance._budget_exceeded = True
-
-        bus.on(CostBudgetExceededEvent.CHANNEL, _on_budget_exceeded)
-
-        # Emit ``session_ready`` after every extension is loaded and the
-        # active provider is picked. This is the only point where extensions
-        # are guaranteed to see the final tool/command/model set; ``tool_filter``
-        # and similar post-install scrubbers hook here.
-        await bus.emit(
-            SessionReadyEvent.CHANNEL,
-            SessionReadyEvent(
-                cwd=config.cwd,
-                session_id=session_id,
-                tool_names=tuple(t.name for t in tools),
-                command_names=tuple(commands.keys()),
-                extension_module_paths=tuple(
-                    module_path for module_path, _ext_cfg in to_load
-                ),
-                model=active_provider.model,
-                root_session_id=config.root_session_id or session_id,
-                task_id=config.task_id,
-                persona=config.persona,
-                task_class=config.task_class,
-                eval_run_id=config.eval_run_id,
-                eval_task_id=config.eval_task_id,
-            ),
-        )
-
-        # Emit child-session lifecycle on the parent's bus (if any) so
-        # ``sub_agent`` / ``trajectory`` extensions can roll up nested work.
-        if config.parent_bus is not None:
-            await config.parent_bus.emit(
-                ChildSessionStartEvent.CHANNEL,
-                ChildSessionStartEvent(
-                    child_session_id=session_id,
-                    parent_session_id=config.parent_session_id or "unknown",
-                    purpose=config.purpose,
-                ),
-            )
-
-        return instance
+        return await create_agent_session(cls, config)
 
     # --- Public surface ---------------------------------------------------
 
@@ -849,6 +176,23 @@ class AgentSession:
     @property
     def cwd(self) -> str:
         return self._cwd
+
+    def get_service(self, name: str) -> Any | None:
+        return self._services.get(name)
+
+    @property
+    def tool_renderers(self) -> dict[str, Any]:
+        return {
+            name.removeprefix("tool:"): renderer
+            for name, renderer in self._renderers.items()
+            if name.startswith("tool:")
+        }
+
+    def find_tool(self, name: str) -> Tool | None:
+        for tool in self._tools:
+            if tool.name == name:
+                return tool
+        return None
 
     @property
     def session_id(self) -> str:
@@ -881,28 +225,13 @@ class AgentSession:
         if slash_handled is not None:
             return slash_handled
 
-        # 1. Budget gate: if a previous turn tripped cost_budget_exceeded,
-        # short-circuit with a BudgetExhausted agent_end and persist nothing.
-        # The flag stays latched until reset by an extension.
-        if self._budget_exceeded:
-            messages = self._session_manager.build_session_context().messages
-            await self._bus.emit(
-                AgentEndEvent.CHANNEL,
-                AgentEndEvent(
-                    messages=messages,
-                    cause=BudgetExhausted(detail="cost"),
-                ),
-            )
-            return messages
-
-        # 2. Drain ``send_user_message`` queue (FIFO) into user-message
+        # 1. Drain ``send_user_message`` queue (FIFO) into user-message
         # entries in the session. This is how ``sub_agent.inject_instruction``
         # and similar extensions push content into the next turn.
         await self._drain_pending_user_messages()
 
         # 3. Build the caller's user message, after any drained queue items
         # so they appear as turn-prefix context.
-        text = text.replace("//", "/", 1) if text.lstrip().startswith("//") else text
         user_msg = self._build_user_message(text=text, images=images)
         entry = self._append_message(user_msg)
 
@@ -913,7 +242,14 @@ class AgentSession:
             BeforeAgentStartEvent.CHANNEL,
             BeforeAgentStartEvent(messages=messages, system=system_prompt),
         )
-        replacement_system = _collect_system_replacement(before_returns)
+        veto_cause = collect_start_veto(before_returns)
+        if veto_cause is not None:
+            await self._bus.emit(
+                AgentEndEvent.CHANNEL,
+                AgentEndEvent(messages=messages, cause=veto_cause),
+            )
+            return messages
+        replacement_system = collect_system_replacement(before_returns)
         if replacement_system is not None:
             system_prompt = replacement_system
 
@@ -952,11 +288,6 @@ class AgentSession:
             child = self._session_manager.append_message(msg)
             cursor = child.id
 
-        # AgentLoop owns the agent_end emission; we do not re-emit here even
-        # if cost_budget tripped mid-turn. Subscribers that care about budget
-        # outcome listen to ``cost_budget_exceeded`` (see step 1's pre-turn
-        # gate, which short-circuits the next call cleanly).
-
         return final_messages
 
     # --- prompt helpers ---------------------------------------------------
@@ -964,39 +295,16 @@ class AgentSession:
     async def _preprocess_input(
         self, text: str
     ) -> tuple[str, list[AgentMessage] | None]:
-        """Dispatch code commands, then let ``input`` handlers rewrite text.
-
-        Unknown slash-prefixed text is left alone unless an ``input`` handler
-        mutates it, so templates can expand and unmatched commands still reach
-        the model verbatim.
-        """
-
-        stripped = text.lstrip()
-        if not stripped.startswith("/") or stripped.startswith("//"):
-            return text, None
-        head, _, rest = stripped[1:].partition(" ")
-        if not head:
-            return text, None
-        cmd = self._commands.get(head)
-        if cmd is not None:
-            owner = self._command_owners.get(head)
-            api = self._apis[owner] if owner is not None else next(iter(self._apis.values()))
-            stripped_args = rest.strip()
-            result = cmd.handler(stripped_args, api)
-            if inspect.isawaitable(result):
-                await result
-            await self._bus.emit(
-                CommandDispatchedEvent.CHANNEL,
-                CommandDispatchedEvent(
-                    name=head,
-                    args=stripped_args,
-                    owner=owner or "<unknown>",
-                ),
-            )
-            return text, self._session_manager.get_messages()
-
-        event = {"text": text}
-        await self._bus.emit("input", event)
+        event: dict[str, Any] = {"text": text}
+        returns = await self._bus.emit("input", event)
+        for value in returns:
+            if isinstance(value, dict) and value.get("handled") is True:
+                messages = value.get("messages")
+                if isinstance(messages, list):
+                    return text, messages
+        handled_messages = event.get("handled_messages")
+        if isinstance(handled_messages, list):
+            return text, handled_messages
         new_text = event.get("text")
         return (new_text if isinstance(new_text, str) else text), None
 
@@ -1013,9 +321,7 @@ class AgentSession:
                 content = [TextContent(type="text", text=queued)]
             else:
                 content = list(queued)
-            queued_msg = UserMessage(
-                role="user", content=content, timestamp=_now()
-            )
+            queued_msg = UserMessage(role="user", content=content, timestamp=now())
             self._append_message(queued_msg)
 
     def _build_user_message(
@@ -1026,7 +332,7 @@ class AgentSession:
             content.append(TextContent(type="text", text=text))
         if images:
             content.extend(images)
-        return UserMessage(role="user", content=content, timestamp=_now())
+        return UserMessage(role="user", content=content, timestamp=now())
 
     def _append_message(self, msg: AgentMessage) -> Any:
         return self._session_manager.append_message(msg)
@@ -1046,7 +352,9 @@ class AgentSession:
         subscription. Extensions that need cleanup hook ``on('session_shutdown')``.
         """
 
-        await self._bus.emit(SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=self._cwd))
+        await self._bus.emit(
+            SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=self._cwd)
+        )
 
         # Notify the parent (if any) BEFORE clearing handlers so that an
         # extension subscribed on the parent bus can still observe the end
@@ -1062,10 +370,11 @@ class AgentSession:
                 ),
             )
 
+        self._reloader.shutdown()
         self._bus.clear()
 
         try:
-            from agentm.core._internal.catalog.indexer import index_trace
+            from agentm.harness.catalog.indexer import index_trace
 
             trace_path = (
                 Path(self._cwd)

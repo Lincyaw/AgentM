@@ -232,6 +232,7 @@ class TurnObservation:
     assistant_message: AssistantMessage | None
     tool_outcomes: list[ToolOutcome]
     default_action: LoopAction
+    turn_id: int = 0
 
 
 @dataclass(slots=True)
@@ -260,6 +261,7 @@ class TurnStartEvent(Event):
 
     CHANNEL: ClassVar[Literal["turn_start"]] = "turn_start"
     turn_index: int
+    turn_id: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -279,6 +281,7 @@ class TurnEndEvent(Event):
     turn_index: int
     message: AssistantMessage
     messages: tuple[AgentMessage, ...] = ()
+    turn_id: int = 0
 
 
 @dataclass(slots=True)
@@ -314,6 +317,39 @@ class ToolResultEvent(Event):
     result: ToolResult
 
 
+@dataclass(slots=True, frozen=True)
+class ToolErrorEvent(Event):
+    """Emitted by the loop when a tool call cannot produce a normal result.
+
+    The kernel does NOT synthesize the user-visible English error string
+    itself; it constructs an empty :class:`ToolResult` (``is_error=True``,
+    ``content=[]``) and emits this event so a default builtin atom
+    (``tool_error_messages``) can write the human-readable text into
+    ``result.content``. Extensions that want to localize, re-format, or
+    suppress error text replace the default atom on this channel.
+
+    The ``result`` field is the same instance the loop will pass through
+    :class:`ToolResultEvent` and into the message trajectory; handlers
+    mutate ``result.content`` in place. The dataclass itself is frozen
+    because the *kind* / *tool_name* / *reason* are facts the kernel has
+    already decided; they describe the cause, not a recommendation.
+
+    ``kind`` discriminates the three kernel-imposed error paths:
+    - ``"execution_failed"`` — ``tool.execute`` raised an exception.
+    - ``"unknown_tool"``     — the assistant called a name not in the
+                                 tool index.
+    - ``"blocked"``          — a ``tool_call`` handler returned
+                                 ``{"block": True, "reason": ...}``.
+    """
+
+    CHANNEL: ClassVar[Literal["tool_error"]] = "tool_error"
+    kind: Literal["execution_failed", "unknown_tool", "blocked"]
+    tool_name: str
+    reason: str
+    result: ToolResult
+    exception: BaseException | None = None
+
+
 @dataclass(slots=True)
 class BeforeSendToLlmEvent(Event):
     """Fires after context handlers have rewritten messages, immediately
@@ -347,6 +383,7 @@ class LlmRequestStartEvent(Event):
     tool_count: int
     system_chars: int
     model_id: str | None
+    turn_id: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -360,6 +397,7 @@ class LlmRequestEndEvent(Event):
     chunk_count: int
     duration_ns: int
     error: str | None = None
+    turn_id: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -380,6 +418,7 @@ class StreamDeltaEvent(Event):
     turn_index: int
     delta: Any  # AssistantStreamEvent — typed Any here to avoid pulling
     # the ``stream`` module into the events surface for everyone.
+    turn_id: int = 0
 
 
 @dataclass(slots=True)
@@ -415,6 +454,7 @@ class DiagnosticEvent(Event):
 
 # A handler may be sync or async; it returns anything (the bus collects).
 Handler = Callable[[Any], Any] | Callable[[Any], Awaitable[Any]]
+ObserverCallback = Callable[[str, Any], None]
 
 
 class EventBusObserver(Protocol):
@@ -439,6 +479,9 @@ class EventBusObserver(Protocol):
     def on_emit_end(
         self, channel: str, event: Any, results: list[Any]
     ) -> None: ...
+
+
+ObserverRegistration = ObserverCallback | EventBusObserver
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,6 +514,7 @@ class EventBus:
     # ``stream_delta`` (one emission per provider chunk).
     _handler_cache: dict[str, list[Handler]] = field(default_factory=dict)
     _observer: EventBusObserver | None = None
+    _observer_callbacks: list[ObserverRegistration] = field(default_factory=list)
     _strict_sync_handlers: bool = False
     _next_seq: int = 0
 
@@ -480,6 +524,19 @@ class EventBus:
         Only one observer at a time — second call replaces the first.
         """
         self._observer = observer
+
+    def add_observer(self, callback: ObserverRegistration) -> Callable[[], None]:
+        """Observe every emit and return an idempotent unsubscribe fn."""
+
+        self._observer_callbacks.append(callback)
+
+        def unsubscribe() -> None:
+            try:
+                self._observer_callbacks.remove(callback)
+            except ValueError:
+                return
+
+        return unsubscribe
 
     def set_strict_sync(self, strict: bool) -> None:
         """If True, ``emit_sync`` raises ``RuntimeError`` when it encounters
@@ -711,14 +768,20 @@ class EventBus:
             registered = self._handlers.get(channel)
             handlers = [sub.handler for sub in (registered or ())]
             self._handler_cache[channel] = handlers
-        if not handlers and self._observer is None:
-            return []
+        observer_callbacks = tuple(self._observer_callbacks)
         observer = self._observer
+        observe_handlers = observer is not None or any(
+            not callable(callback) for callback in observer_callbacks
+        )
+        if not handlers and observer is None and not observer_callbacks:
+            return []
         self._safe_observe("on_emit_start", channel, event)
         results: list[Any] = []
         for h in handlers:
             err: BaseException | None = None
-            start_ns = time.perf_counter_ns() if observer is not None else 0
+            start_ns = time.perf_counter_ns() if observe_handlers else 0
+            if observe_handlers:
+                self._safe_observe("on_handler_start", channel, h, event)
             try:
                 value = h(event)
                 if inspect.isawaitable(value):
@@ -729,7 +792,7 @@ class EventBus:
                 )
                 err = exc
                 value = None
-            if observer is not None:
+            if observe_handlers:
                 self._safe_observe(
                     "on_handler_done",
                     channel,
@@ -743,11 +806,30 @@ class EventBus:
         return results
 
     def _safe_observe(self, method: str, *args: Any) -> None:
+        for callback in tuple(self._observer_callbacks):
+            try:
+                if callable(callback):
+                    if method == "on_emit_start":
+                        channel, event = args[0], args[1]
+                        callback(channel, event)
+                    continue
+                observer_method = getattr(callback, method, None)
+                if observer_method is None:
+                    continue
+                observer_method(*args)
+            except Exception:
+                if callable(callback):
+                    logger.exception("EventBus observer callback raised; suppressing.")
+                else:
+                    logger.exception("EventBus observer.%s raised; suppressing.", method)
         observer = self._observer
         if observer is None:
             return
         try:
-            getattr(observer, method)(*args)
+            observer_method = getattr(observer, method, None)
+            if observer_method is None:
+                return
+            observer_method(*args)
         except Exception:
             logger.exception("EventBus observer.%s raised; suppressing.", method)
 
@@ -764,15 +846,21 @@ class EventBus:
             registered = self._handlers.get(channel)
             handlers = [sub.handler for sub in (registered or ())]
             self._handler_cache[channel] = handlers
-        if not handlers and self._observer is None:
-            return []
+        observer_callbacks = tuple(self._observer_callbacks)
         observer = self._observer
+        observe_handlers = observer is not None or any(
+            not callable(callback) for callback in observer_callbacks
+        )
+        if not handlers and observer is None and not observer_callbacks:
+            return []
         self._safe_observe("on_emit_start", channel, event)
         results: list[Any] = []
         async_violation: tuple[str, Any] | None = None
         for h in handlers:
             err: BaseException | None = None
-            start_ns = time.perf_counter_ns() if observer is not None else 0
+            start_ns = time.perf_counter_ns() if observe_handlers else 0
+            if observe_handlers:
+                self._safe_observe("on_handler_start", channel, h, event)
             try:
                 value = h(event)
                 if inspect.isawaitable(value):
@@ -793,7 +881,7 @@ class EventBus:
                 )
                 err = exc
                 value = None
-            if observer is not None:
+            if observe_handlers:
                 self._safe_observe(
                     "on_handler_done",
                     channel,
@@ -830,7 +918,9 @@ __all__ = [
     "Event",
     "EventBus",
     "EventBusObserver",
+    "ObserverRegistration",
     "Handler",
+    "ObserverCallback",
     "Inject",
     "LlmRequestEndEvent",
     "LlmRequestStartEvent",
@@ -845,6 +935,7 @@ __all__ = [
     "StreamDeltaEvent",
     "TerminationCause",
     "ToolCallEvent",
+    "ToolErrorEvent",
     "ToolResultEvent",
     "ToolTerminated",
     "TurnEndEvent",

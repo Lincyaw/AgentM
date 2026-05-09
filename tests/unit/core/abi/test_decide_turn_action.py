@@ -40,9 +40,10 @@ from agentm.core.abi import (
     text_message,
 )
 from agentm.core.abi.loop import (
-    _default_action_with_names,
+    _default_action,
     _resolve_action,
 )
+from agentm.core.abi.termination import VendorSpecific
 from agentm.core.abi.tool import ToolContinue
 
 
@@ -222,13 +223,34 @@ def test_default_action_distinguishes_protocol_violation_from_end_turn() -> None
         stop_reason="end_turn",
     )
 
-    violation = _default_action_with_names(msg_violation, [])
-    clean = _default_action_with_names(msg_clean, [])
+    violation = _default_action(msg_violation, [])
+    clean = _default_action(msg_clean, [])
 
     assert isinstance(violation, Stop)
     assert isinstance(violation.cause, ProviderProtocolViolation)
     assert isinstance(clean, Stop)
     assert isinstance(clean.cause, ModelEndTurn)
+
+
+def test_default_action_treats_vendor_specific_termination_as_end_turn() -> None:
+    """A provider returning a hint the kernel doesn't recognize
+    (``VendorSpecific("custom_stop")``) must terminate cleanly via
+    :class:`ModelEndTurn`. The kernel never inspects vendor strings — adding
+    a new provider whose stop-reason vocabulary differs MUST NOT require
+    editing kernel code (issue #75)."""
+
+    msg = AssistantMessage(
+        role="assistant",
+        content=[TextContent(type="text", text="custom termination")],
+        timestamp=1.0,
+        stop_reason="custom_stop",
+        termination=VendorSpecific(raw="custom_stop"),
+    )
+
+    action = _default_action(msg, [])
+
+    assert isinstance(action, Stop)
+    assert isinstance(action.cause, ModelEndTurn)
 
 
 def test_default_action_maps_tool_terminate_to_tool_terminated_cause() -> None:
@@ -250,7 +272,7 @@ def test_default_action_maps_tool_terminate_to_tool_terminated_cause() -> None:
         result=ToolResult(content=[TextContent(type="text", text="done")]),
         reason="rca:final-report-submitted",
     )
-    action = _default_action_with_names(msg, [("submit_final_report", outcome)])
+    action = _default_action(msg, [("submit_final_report", outcome)])
 
     assert isinstance(action, Stop)
     assert isinstance(action.cause, ToolTerminated)
@@ -396,6 +418,6 @@ def test_bare_tool_result_normalizes_to_tool_continue() -> None:
         ("some_tool", ToolContinue(result=bare_result))
     ]
 
-    action = _default_action_with_names(msg, paired)
+    action = _default_action(msg, paired)
 
     assert isinstance(action, Step)

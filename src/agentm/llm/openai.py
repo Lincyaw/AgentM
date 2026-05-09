@@ -11,8 +11,7 @@ extension mechanism described in ``.claude/designs/extension-as-scenario.md``
 Boundaries:
 
 * The kernel layer (``agentm.core.abi``) is the only AgentM dependency
-  imported at module import time. The harness layer is **not** imported here;
-  ``ProviderConfig`` is resolved lazily inside :func:`install`.
+  imported at module import time. The harness layer is **not** imported here.
 * Streaming is delegated to the official ``openai`` Python SDK
   (:class:`openai.AsyncOpenAI`); we never reimplement HTTP/SSE.
 
@@ -33,16 +32,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import logging
 import os
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from agentm.core.abi.messages import (
     AgentMessage,
-    AssistantContent,
     AssistantMessage,
     ImageContent,
     TextContent,
@@ -52,6 +50,18 @@ from agentm.core.abi.messages import (
     ToolResultMessage,
     Usage,
     UserMessage,
+)
+from agentm.core.abi.events import DiagnosticEvent, EventBus
+from agentm.core.abi.provider import ProviderConfig
+from agentm.core.abi.retry import RetryPolicy
+from agentm.core.abi.termination import (
+    Aborted,
+    EndTurn,
+    MaxTokens,
+    ProviderError,
+    TerminationHint,
+    ToolUseExpected,
+    VendorSpecific,
 )
 from agentm.core.abi.stream import (
     AssistantStreamEvent,
@@ -65,10 +75,45 @@ from agentm.core.abi.stream import (
 )
 from agentm.core.abi.tool import Tool
 
+from ._common import StreamAccumulator, ToolSpecAdapter, encode_tool_args
+
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
+
+
+def _is_openai_retryable(exc: BaseException) -> bool:
+    try:
+        import openai
+    except ImportError:  # pragma: no cover - SDK dependency is optional here
+        return False
+    # APIConnectionError / APITimeoutError surface read-timeouts and
+    # half-dead TCP — without retry these propagate up and waste the
+    # whole rollout. Treat them like 429s.
+    retryable_types = tuple(
+        err_type
+        for name in ("RateLimitError", "APIConnectionError", "APITimeoutError")
+        if isinstance((err_type := getattr(openai, name, None)), type)
+    )
+    return bool(retryable_types) and isinstance(exc, retryable_types)
+
+
+def _default_httpx_client(*, verify: bool) -> Any:
+    import httpx
+
+    # Without explicit read timeout, a half-dead TCP connection (server
+    # crash, LB drops idle conn, NAT entry expired) leaves the request
+    # hanging forever — the retry layer never fires because no exception
+    # is raised. Force a finite read timeout so hangs surface as errors
+    # and fall into _create_with_retry.
+    timeout = httpx.Timeout(
+        connect=30.0,
+        read=180.0,
+        write=60.0,
+        pool=30.0,
+    )
+    return httpx.AsyncClient(verify=verify, timeout=timeout)
 
 
 # --- Model registry ---------------------------------------------------------
@@ -134,18 +179,22 @@ def _encode_user_content(
     return parts
 
 
-def _encode_assistant_message(msg: AssistantMessage) -> dict[str, Any]:
+def _encode_assistant_message(
+    msg: AssistantMessage,
+    *,
+    thinking_round_trip: Literal["drop", "system_note", "raise"] = "drop",
+    on_drop: Callable[[], None] | None = None,
+) -> list[dict[str, Any]]:
     """Encode an assistant turn as a single OpenAI assistant message.
 
     Text blocks concatenate into ``content``; ``ToolCallBlock``s flatten
-    into a ``tool_calls`` array. ``ThinkingBlock``s are dropped — the chat
-    completions protocol has no slot for them; reasoning that the model
-    streams back as ``reasoning_content`` is not echoed in subsequent
-    turns. (For round-tripping reasoning, callers should use the OpenAI
-    Responses API, which is out of scope for this provider.)
+    into a ``tool_calls`` array. ``ThinkingBlock`` handling is controlled by
+    ``thinking_round_trip`` because chat completions has no native slot for
+    assistant reasoning.
     """
 
     text_parts: list[str] = []
+    thinking_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     for block in msg.content:
         if isinstance(block, TextContent):
@@ -157,13 +206,22 @@ def _encode_assistant_message(msg: AssistantMessage) -> dict[str, Any]:
                     "type": "function",
                     "function": {
                         "name": block.name,
-                        "arguments": json.dumps(block.arguments, ensure_ascii=False),
+                        "arguments": OpenAIToolSpecAdapter().encode_tool_args(block.arguments),
                     },
                 }
             )
         elif isinstance(block, ThinkingBlock):
-            # Intentionally dropped — see docstring.
-            continue
+            if thinking_round_trip == "raise":
+                raise ValueError(
+                    "OpenAIStreamFn cannot encode ThinkingBlock content with "
+                    "thinking_round_trip='raise'."
+                )
+            if thinking_round_trip == "system_note":
+                thinking_parts.append(block.text)
+            else:
+                if on_drop is not None:
+                    on_drop()
+                continue
         else:  # pragma: no cover
             raise TypeError(f"unexpected assistant content type: {type(block)!r}")
     out: dict[str, Any] = {"role": "assistant"}
@@ -175,7 +233,13 @@ def _encode_assistant_message(msg: AssistantMessage) -> dict[str, Any]:
         out["content"] = ""
     if tool_calls:
         out["tool_calls"] = tool_calls
-    return out
+    if thinking_parts:
+        note = {
+            "role": "system",
+            "content": "Previous assistant reasoning: " + "\n".join(thinking_parts),
+        }
+        return [note, out]
+    return [out]
 
 
 def _encode_tool_result_block(block: ToolResultBlock) -> dict[str, Any]:
@@ -198,6 +262,8 @@ def _to_openai_messages(
     messages: list[AgentMessage],
     *,
     system: str | None,
+    thinking_round_trip: Literal["drop", "system_note", "raise"] = "drop",
+    on_thinking_drop: Callable[[], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert kernel messages to the OpenAI Chat Completions request shape.
 
@@ -215,7 +281,13 @@ def _to_openai_messages(
                 {"role": "user", "content": _encode_user_content(list(msg.content))}
             )
         elif isinstance(msg, AssistantMessage):
-            out.append(_encode_assistant_message(msg))
+            out.extend(
+                _encode_assistant_message(
+                    msg,
+                    thinking_round_trip=thinking_round_trip,
+                    on_drop=on_thinking_drop,
+                )
+            )
         elif isinstance(msg, ToolResultMessage):
             for block in msg.content:
                 out.append(_encode_tool_result_block(block))
@@ -224,20 +296,27 @@ def _to_openai_messages(
     return out
 
 
-def _to_openai_tools(tools: list[Tool]) -> list[dict[str, Any]]:
-    """Convert kernel ``Tool``s to OpenAI function-tool definitions."""
+@dataclass(frozen=True)
+class OpenAIToolSpecAdapter(ToolSpecAdapter):
+    """Convert AgentM tools to OpenAI function-tool specs."""
 
-    return [
-        {
+    def vendor_spec(self, tool: Tool) -> dict[str, Any]:
+        return {
             "type": "function",
             "function": {
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.parameters,
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
             },
         }
-        for t in tools
-    ]
+
+    def encode_tool_args(self, args: Mapping[str, Any]) -> str:
+        return encode_tool_args(args)
+
+
+def _to_openai_tools(tools: list[Tool]) -> list[dict[str, Any]]:
+    adapter = OpenAIToolSpecAdapter()
+    return [adapter.vendor_spec(t) for t in tools]
 
 
 # --- Streaming bridge -------------------------------------------------------
@@ -245,40 +324,33 @@ def _to_openai_tools(tools: list[Tool]) -> list[dict[str, Any]]:
 
 @dataclass
 class _StreamState:
-    """Mutable accumulator for one turn of streaming.
+    """Provider event mapping state for one OpenAI-compatible stream."""
 
-    OpenAI streams tool calls keyed by ``index`` (not by id), so we keep a
-    per-index scratch with the running id/name/json fragments. ``order``
-    preserves emission order for the assembled ``AssistantMessage``.
-    """
-
-    text: str = ""
-    thinking: str = ""
+    accumulator: StreamAccumulator = field(default_factory=StreamAccumulator)
     tool_scratch: dict[int, dict[str, Any]] = field(default_factory=dict)
     tool_order: list[int] = field(default_factory=list)
-    started_text: bool = False
-    started_thinking: bool = False
     usage: Usage | None = None
-    stop_reason: (
-        Literal["end_turn", "tool_use", "max_tokens", "error", "aborted"] | None
-    ) = None
+    stop_reason: str | None = None
+    termination: TerminationHint | None = None
 
+def _map_finish_reason(raw: str | None) -> TerminationHint | None:
+    """Translate OpenAI ``finish_reason`` into a kernel ``TerminationHint``.
 
-_STOP_REASON_MAP: dict[str, Literal["end_turn", "tool_use", "max_tokens", "error"]] = {
-    "stop": "end_turn",
-    "tool_calls": "tool_use",
-    "function_call": "tool_use",
-    "length": "max_tokens",
-    "content_filter": "error",
-}
+    Per `.claude/designs/pluggable-architecture.md` §3.1, providers own the
+    vocabulary translation so the kernel never inspects vendor strings.
+    """
 
-
-def _map_stop_reason(
-    raw: str | None,
-) -> Literal["end_turn", "tool_use", "max_tokens", "error"] | None:
     if raw is None:
         return None
-    return _STOP_REASON_MAP.get(raw, "error")
+    if raw == "stop":
+        return EndTurn()
+    if raw == "length":
+        return MaxTokens()
+    if raw == "tool_calls" or raw == "function_call":
+        return ToolUseExpected()
+    if raw == "content_filter":
+        return ProviderError(detail="content_filter")
+    return VendorSpecific(raw=raw)
 
 
 def _extract_usage(usage_obj: Any) -> Usage | None:
@@ -301,43 +373,16 @@ def _extract_usage(usage_obj: Any) -> Usage | None:
     )
 
 
-def _assemble_message(state: _StreamState) -> AssistantMessage:
-    """Materialize the kernel ``AssistantMessage`` from accumulated state."""
-
-    blocks: list[AssistantContent] = []
-    if state.thinking:
-        blocks.append(ThinkingBlock(type="thinking", text=state.thinking))
-    if state.text:
-        blocks.append(TextContent(type="text", text=state.text))
-    for index in state.tool_order:
-        scratch = state.tool_scratch.get(index)
-        if scratch is None:
-            continue
-        raw_args = scratch.get("arguments", "")
-        try:
-            args = json.loads(raw_args) if raw_args else {}
-        except json.JSONDecodeError:
-            # Mirror anthropic provider: surface arg-parse errors back to the
-            # loop layer, not the kernel. Here we hand back ``{}`` so the
-            # kernel invariant (``arguments`` is a dict) holds.
-            args = {}
-        if not isinstance(args, dict):
-            args = {}
-        blocks.append(
-            ToolCallBlock(
-                type="tool_call",
-                id=scratch.get("id", ""),
-                name=scratch.get("name", ""),
-                arguments=args,
-            )
-        )
-    return AssistantMessage(
-        role="assistant",
-        content=blocks,
-        timestamp=0.0,
-        stop_reason=state.stop_reason,
-        usage=state.usage,
+def _flush_tool_call(state: _StreamState, index: int) -> None:
+    scratch = state.tool_scratch.get(index)
+    if scratch is None or scratch.get("flushed"):
+        return
+    state.accumulator.add_tool_call(
+        id=scratch.get("id", ""),
+        name=scratch.get("name", ""),
+        args_delta=scratch.get("arguments", ""),
     )
+    scratch["flushed"] = True
 
 
 # --- Public callable -------------------------------------------------------
@@ -357,6 +402,9 @@ class OpenAIStreamFn:
     - ``default_headers``: extra headers forwarded on every request.
     - ``verify_ssl``: forwarded to the underlying httpx client. Set ``False``
       for self-signed cert environments. ``True`` by default.
+    - ``retry_policy``: optional policy used for retrying provider calls.
+    - ``httpx_client_factory``: optional transport factory used when a custom
+      HTTP client is needed (for example ``verify_ssl=False``).
     - ``client``: pre-configured :class:`openai.AsyncOpenAI` instance. Tests
       may inject a stub here to bypass network entirely; if provided, all the
       preceding fields are ignored on the request path.
@@ -367,7 +415,37 @@ class OpenAIStreamFn:
     default_query: dict[str, str] | None = None
     default_headers: dict[str, str] | None = None
     verify_ssl: bool = True
+    retry_policy: RetryPolicy | None = None
+    httpx_client_factory: Callable[..., Any] | None = None
     client: AsyncOpenAI | None = None
+    clock: Callable[[], float] = time.time
+    thinking_round_trip: Literal["drop", "system_note", "raise"] = "drop"
+    events: EventBus | None = None
+    _reported_thinking_drop: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        if self.thinking_round_trip not in {"drop", "system_note", "raise"}:
+            raise ValueError(
+                "OpenAIStreamFn thinking_round_trip must be one of "
+                "'drop', 'system_note', or 'raise'."
+            )
+
+    def _emit_thinking_drop_diagnostic(self) -> None:
+        if self.events is None or self._reported_thinking_drop:
+            return
+        self._reported_thinking_drop = True
+        self.events.emit_sync(
+            DiagnosticEvent.CHANNEL,
+            DiagnosticEvent(
+                level="info",
+                source="openai",
+                message=(
+                    "OpenAI provider dropped assistant ThinkingBlock content; "
+                    "set thinking_round_trip='system_note' or 'raise' to "
+                    "change this behavior."
+                ),
+            ),
+        )
 
     def _get_client(self) -> AsyncOpenAI:
         if self.client is not None:
@@ -385,11 +463,8 @@ class OpenAIStreamFn:
         if self.default_headers:
             kwargs["default_headers"] = dict(self.default_headers)
         if not self.verify_ssl:
-            # The SDK forwards a custom http_client wholesale; we use this
-            # only to disable cert verification for self-signed gateways.
-            import httpx
-
-            kwargs["http_client"] = httpx.AsyncClient(verify=False)
+            factory = self.httpx_client_factory or _default_httpx_client
+            kwargs["http_client"] = factory(verify=False)
         self.client = _AsyncOpenAI(**kwargs)
         return self.client
 
@@ -432,7 +507,12 @@ class OpenAIStreamFn:
         body: dict[str, Any] = {
             "model": model.id,
             "max_tokens": model.max_output_tokens,
-            "messages": _to_openai_messages(messages, system=system),
+            "messages": _to_openai_messages(
+                messages,
+                system=system,
+                thinking_round_trip=self.thinking_round_trip,
+                on_thinking_drop=self._emit_thinking_drop_diagnostic,
+            ),
             "stream": True,
             # Without this the upstream usage block is null on streaming.
             "stream_options": {"include_usage": True},
@@ -443,7 +523,15 @@ class OpenAIStreamFn:
         state = _StreamState()
         aborted = False
 
-        stream = await client.chat.completions.create(**body)
+        retry_policy = self.retry_policy or _IdentityRetryPolicy()
+
+        async def _create_stream() -> Any:
+            return await client.chat.completions.create(**body)
+
+        stream = await retry_policy.run(
+            _create_stream,
+            is_retryable=_is_openai_retryable,
+        )
         try:
             async for chunk in stream:
                 if signal is not None and signal.is_set():
@@ -480,11 +568,34 @@ class OpenAIStreamFn:
             if scratch is not None and not scratch.get("ended"):
                 yield ToolCallEnd(id=scratch.get("id", ""))
                 scratch["ended"] = True
+                _flush_tool_call(state, index)
 
         if aborted:
             state.stop_reason = "aborted"
+            state.termination = Aborted()
 
-        yield MessageEnd(message=_assemble_message(state))
+        for index in state.tool_order:
+            _flush_tool_call(state, index)
+        assembled = state.accumulator.assemble(
+            stop_reason=state.stop_reason,
+            termination=state.termination,
+            usage=state.usage,
+            timestamp=self.clock(),
+        )
+        for parse_error in state.accumulator.parse_errors:
+            yield parse_error
+        yield MessageEnd(message=assembled)
+
+
+class _IdentityRetryPolicy:
+    async def run(
+        self,
+        fn: Callable[[], Any],
+        *,
+        is_retryable: Callable[[BaseException], bool],
+    ) -> Any:
+        del is_retryable
+        return await fn()
 
 
 async def _translate_chunk(
@@ -516,15 +627,13 @@ async def _translate_chunk(
         # 1) Reasoning content (OpenAI o-series, DeepSeek-R1, LiteLLM Kimi).
         reasoning = getattr(delta, "reasoning_content", None)
         if reasoning:
-            state.thinking += reasoning
-            state.started_thinking = True
+            state.accumulator.add_thinking(None, reasoning)
             yield ThinkingDelta(text=reasoning, signature=None)
 
         # 2) Plain text content.
         content = getattr(delta, "content", None)
         if content:
-            state.text += content
-            state.started_text = True
+            state.accumulator.add_text(None, content)
             yield TextDelta(text=content)
 
         # 3) Tool call deltas. Each entry is identified by ``index``; the
@@ -547,6 +656,7 @@ async def _translate_chunk(
                     "arguments": "",
                     "started": False,
                     "ended": False,
+                    "flushed": False,
                 }
                 state.tool_scratch[index] = scratch
                 state.tool_order.append(index)
@@ -579,9 +689,10 @@ async def _translate_chunk(
             ):
                 yield ToolCallEnd(id=scratch["id"])
                 scratch["ended"] = True
-        mapped = _map_stop_reason(finish_reason)
-        if mapped is not None:
-            state.stop_reason = mapped
+                _flush_tool_call(state, index)
+        if finish_reason is not None:
+            state.stop_reason = finish_reason
+            state.termination = _map_finish_reason(finish_reason)
 
 
 # --- Extension entrypoint --------------------------------------------------
@@ -596,9 +707,6 @@ def install(api: Any, config: dict[str, Any]) -> None:
     defaults to ``"openai"``; override when registering multiple
     OpenAI-compatible providers in the same session).
 
-    ``ProviderConfig`` is imported from :mod:`agentm.harness.extension`
-    lazily so that this module can be loaded without the harness present
-    (e.g. embedded SDK use cases or kernel-only tests).
     """
 
     model_id = config.get("model")
@@ -608,12 +716,30 @@ def install(api: Any, config: dict[str, Any]) -> None:
             "be a non-empty string (e.g. 'gpt-4o' or 'Kimi-K2')."
         )
 
+    retry_policy = api.get_service("retry_policy")
+    verify_ssl = bool(config.get("verify_ssl", True))
+    if not verify_ssl:
+        api.events.emit_sync(
+            DiagnosticEvent.CHANNEL,
+            DiagnosticEvent(
+                level="warning",
+                source="openai",
+                message=(
+                    "OpenAI provider configured with verify_ssl=False; "
+                    "TLS certificate verification is disabled for this session."
+                ),
+            ),
+        )
+
     stream_fn = OpenAIStreamFn(
         api_key=config.get("api_key"),
         base_url=config.get("base_url"),
         default_query=config.get("default_query"),
         default_headers=config.get("default_headers"),
-        verify_ssl=bool(config.get("verify_ssl", True)),
+        verify_ssl=verify_ssl,
+        retry_policy=retry_policy,
+        thinking_round_trip=config.get("thinking_round_trip", "drop"),
+        events=getattr(api, "events", None),
     )
 
     model_kwargs: dict[str, int] = {}
@@ -623,15 +749,33 @@ def install(api: Any, config: dict[str, Any]) -> None:
         model_kwargs["max_output_tokens"] = int(config["max_output_tokens"])
     model = _build_model(model_id, **model_kwargs)
 
-    name = config.get("name") or "openai"
+    raw_name = config.get("name")
+    base_url = config.get("base_url")
+    if raw_name is None:
+        if _is_non_canonical_base_url(base_url):
+            raise DuplicateProviderError(
+                "agentm.llm.openai.install: config['name'] is required when "
+                f"base_url={base_url!r} is set to a non-canonical "
+                "OpenAI-compatible endpoint. Multiple custom endpoints "
+                "default to the bare 'openai' registry name and would "
+                "silently overwrite each other. Pass an explicit "
+                "config['name'] (e.g. 'doubao', 'litellm', 'deepseek')."
+            )
+        name = "openai"
+    else:
+        name = raw_name
     if not isinstance(name, str) or not name:
         raise ValueError(
             "agentm.llm.openai.install: config['name'] must be a non-empty string."
         )
 
-    # Lazy import: ``ProviderConfig`` is defined in the harness layer; keep
-    # this module independent for kernel-only consumers.
-    from agentm.harness.extension import ProviderConfig  # noqa: PLC0415
+    existing = getattr(api, "_providers", None)
+    if isinstance(existing, dict) and name in existing:
+        raise DuplicateProviderError(
+            f"agentm.llm.openai.install: provider name {name!r} is already "
+            "registered in this session. Choose a unique config['name'] for "
+            "each OpenAI-compatible endpoint."
+        )
 
     api.register_provider(
         name,
@@ -639,4 +783,39 @@ def install(api: Any, config: dict[str, Any]) -> None:
     )
 
 
-__all__ = ["OpenAIStreamFn", "install"]
+# Canonical OpenAI base URLs — anything else is treated as a custom endpoint
+# (LiteLLM, DeepSeek, Doubao, vLLM, Ollama, ...). When ``name`` is omitted for
+# such an endpoint the provider would otherwise silently register under the
+# default key ``"openai"`` and overwrite an earlier custom registration.
+_CANONICAL_OPENAI_BASE_URLS: frozenset[str] = frozenset(
+    {
+        "https://api.openai.com/v1",
+        "https://api.openai.com/v1/",
+        "https://api.openai.com",
+        "https://api.openai.com/",
+    }
+)
+
+
+def _is_non_canonical_base_url(base_url: object) -> bool:
+    if base_url is None:
+        return False
+    if not isinstance(base_url, str) or not base_url.strip():
+        return False
+    return base_url.rstrip("/") not in {url.rstrip("/") for url in _CANONICAL_OPENAI_BASE_URLS}
+
+
+class DuplicateProviderError(ValueError):
+    """Raised when an OpenAI-compatible provider would shadow an existing one.
+
+    Two situations trigger this:
+
+    * ``config['base_url']`` points at a non-canonical (custom) OpenAI-compatible
+      endpoint and ``config['name']`` was not supplied — the install would
+      otherwise default to the bare ``"openai"`` registry key and silently
+      collide with another custom endpoint registered in the same session.
+    * The session already has a provider registered under the requested name.
+    """
+
+
+__all__ = ["DuplicateProviderError", "OpenAIStreamFn", "install"]

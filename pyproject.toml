@@ -56,3 +56,23 @@ markers = [
 # top-level pytest must not recurse into them — both define a ``tests``
 # package and the import paths collide.
 addopts = "-m 'not ui' --ignore=contrib/extensions/llmharness --ignore=contrib/scenarios/rca"
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = ["src", "contrib/scenarios/rca/src", "contrib/extensions/llmharness/src"]
+namespace_packages = true
+explicit_package_bases = true
+ignore_missing_imports = true
+exclude = [
+    "^contrib/extensions/llmharness/",
+    "^contrib/scenarios/rca/",
+    "^contrib/scenarios/rca_single/",
+]
+
+[[tool.mypy.overrides]]
+module = ["rcabench_platform", "rcabench_platform.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["sqlmodel", "sqlmodel.*"]
+ignore_missing_imports = true

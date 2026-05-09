@@ -2,7 +2,11 @@
 
 Implements §3.2 (Tool Execution boundary) of
 `.claude/designs/pluggable-architecture.md` — the bare ``Tool`` Protocol the
-agent loop sees, plus a ``FunctionTool`` adapter for tests and simple cases.
+agent loop sees, plus the ``ToolResult`` / ``ToolOutcome`` data shapes.
+
+Concrete adapters such as ``FunctionTool`` live outside the ABI surface in
+``agentm.core._internal.tools``; they are re-exported from this package's
+``__init__`` for ergonomics but are not part of the boundary contract.
 
 Schemas are raw JSON Schema dicts; no pydantic in the kernel.
 
@@ -16,48 +20,38 @@ would have to compete with ``is_error`` for meaning.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from .messages import ImageContent, TextContent
 
 
-@dataclass(slots=True, init=False)
+# --- File-op metadata vocabulary -------------------------------------------
+#
+# Tools that touch the filesystem self-describe via ``metadata[FILE_OP_METADATA_KEY]``
+# so kernel subsystems (notably the compaction engine) can route file
+# operations without hard-coding tool names. See issue #76.
+
+FILE_OP_METADATA_KEY = "file_op"
+FILE_OP_READ = "read"
+FILE_OP_WRITE = "write"
+FILE_OP_EDIT = "edit"
+TOOL_RESULT_FORMAT_METADATA_KEY = "result_format"
+
+
+@dataclass(slots=True)
 class ToolResult:
     """The result of one tool execution.
 
     ``content`` is the user-visible payload (text and/or images) that becomes
     a ``ToolResultBlock``. ``extras`` is opaque structured data the harness
     or extensions may use (e.g. for richer rendering); the kernel never reads
-    it. ``details`` remains as a backwards-compatible alias because earlier
-    extensions and tests already used that name.
+    it.
     """
 
     content: list[TextContent | ImageContent]
     is_error: bool = False
     extras: Any = None
-
-    def __init__(
-        self,
-        content: list[TextContent | ImageContent],
-        is_error: bool = False,
-        details: Any = None,
-        extras: Any = None,
-    ) -> None:
-        self.content = content
-        self.is_error = is_error
-        if extras is not None and details is not None and extras != details:
-            raise ValueError("ToolResult received conflicting details and extras")
-        self.extras = extras if extras is not None else details
-
-    @property
-    def details(self) -> Any:
-        return self.extras
-
-    @details.setter
-    def details(self, value: Any) -> None:
-        self.extras = value
 
 
 @dataclass(slots=True, frozen=True)
@@ -111,11 +105,13 @@ class Tool(Protocol):
 
     - ``name`` / ``description`` / ``parameters`` (JSON Schema dict) — used
       when assembling the tool catalog passed to the LLM stream.
-    - ``execute(args, *, signal, on_update)`` — the call that runs the tool.
+    - ``execute(args, *, signal)`` — the call that runs the tool.
 
     ``signal`` is an :class:`asyncio.Event`; tools may poll it to abort
-    cooperatively. ``on_update`` lets long-running tools push progress events
-    (the kernel itself doesn't dispatch them; the harness wires it up).
+    cooperatively. Streaming progress is intentionally *not* part of the
+    kernel surface: the previous ``on_update`` parameter was never wired
+    through and has been removed. A future progress channel will be a
+    deliberate event-bus extension, not a dead Protocol parameter.
 
     Returning a bare :class:`ToolResult` is treated as ``ToolContinue(result)``;
     a tool that wants to end the loop returns :class:`ToolTerminate` instead.
@@ -130,46 +126,15 @@ class Tool(Protocol):
         args: dict[str, Any],
         *,
         signal: asyncio.Event | None = None,
-        on_update: Callable[[Any], None] | None = None,
     ) -> ToolResult | ToolOutcome: ...
 
 
-@dataclass(slots=True)
-class FunctionTool:
-    """Concrete ``Tool`` adapter wrapping an async callable.
-
-    Useful for tests and trivial cases where a full tool class would be
-    overkill. The wrapped ``fn`` is called with the raw ``args`` dict; if it
-    raises, the exception **propagates** — ``FunctionTool`` deliberately does
-    not convert exceptions to ``ToolResult(is_error=True)``. The agent loop is
-    responsible for that conversion so the policy is uniform across all tool
-    implementations.
-
-    ``fn`` may return either a bare :class:`ToolResult` or any
-    :class:`ToolOutcome`; the kernel handles both.
-    """
-
-    name: str
-    description: str
-    parameters: dict[str, Any]
-    fn: Callable[[dict[str, Any]], Awaitable[ToolResult | ToolOutcome]]
-    # Mirrors the Tool protocol surface; not consumed by the kernel itself.
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    async def execute(
-        self,
-        args: dict[str, Any],
-        *,
-        signal: asyncio.Event | None = None,
-        on_update: Callable[[Any], None] | None = None,
-    ) -> ToolResult | ToolOutcome:
-        """Invoke the wrapped function. Exceptions propagate unchanged."""
-
-        return await self.fn(args)
-
-
 __all__ = [
-    "FunctionTool",
+    "FILE_OP_EDIT",
+    "FILE_OP_METADATA_KEY",
+    "FILE_OP_READ",
+    "FILE_OP_WRITE",
+    "TOOL_RESULT_FORMAT_METADATA_KEY",
     "Tool",
     "ToolContinue",
     "ToolOutcome",

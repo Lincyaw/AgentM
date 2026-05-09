@@ -4,7 +4,7 @@ Companion to :mod:`agentm_rca.tools.finalize` (which terminates the
 orchestrator). Workers in this scenario kept burning their full budget on
 ``query_sql`` calls without ever emitting a final assistant text turn —
 ``wait_subagent`` then surfaced ``final_text: null`` to the orchestrator,
-which dispatched yet another scout. The fundamental issue: with only
+which dispatched another worker. The fundamental issue: with only
 investigation tools available, the model never decides "I'm done; time to
 write a summary."
 
@@ -15,11 +15,11 @@ This extension installs two things:
   :class:`ToolTerminate` so the child loop exits cleanly. The text is
   JSON-encoded into the tool result for ``_extract_response`` to recover.
 * ``decide_turn_action`` handler — a budget-aware injector. Empirically,
-  open-ended personas (deep_analyze, verify) never call ``return_response``
-  on their own and just keep querying until force-stopped. When the worker
-  has consumed ``warn_threshold`` of its turn budget without submitting,
-  this handler injects a strong reminder; at ``force_threshold`` the
-  reminder becomes a hard demand.
+  open-ended adversarial personas (e.g., the current ``critic``) never call
+  ``return_response`` on their own and just keep querying until
+  force-stopped. When the worker has consumed ``warn_threshold`` of its
+  turn budget without submitting, this handler injects a strong reminder;
+  at ``force_threshold`` the reminder becomes a hard demand.
 
 Scenarios that need a structured worker submission can override the tool
 by registering one with the same name and a richer schema *after* this
@@ -39,7 +39,7 @@ from agentm.core.abi import (
     LoopAction,
 )
 from agentm.core.abi.messages import TextContent, UserMessage
-from agentm.core.abi.tool import (
+from agentm.core.abi import (
     FunctionTool,
     ToolResult,
     ToolTerminate,

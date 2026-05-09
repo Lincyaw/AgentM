@@ -17,6 +17,10 @@ class CompactionSettings:
     enabled: bool = True
     reserve_tokens: int = 16_384
     keep_recent_tokens: int = 20_000
+    tool_result_max_chars: int = 2_000
+    """Per-tool-result truncation cap used by ``serialize_conversation``
+    when rendering tool outputs into the summary prompt. Larger values
+    preserve more verbatim tool detail at the cost of summary tokens."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,8 +45,24 @@ class ContextUsageEstimate:
     last_usage_index: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class CompactionPrompts:
+    """Prompt bodies threaded into the compaction engine by callers.
+
+    Atoms resolve these via ``api.prompt_templates.get_prompt(...)`` and
+    pass an instance into ``api.compaction.compact``. Empty strings are
+    legal — they represent the graceful-degradation path used when the
+    ``compaction_prompts`` atom is not installed.
+    """
+
+    summarization_system: str
+    update_summarization: str
+    turn_prefix_summarization: str
+
+
 __all__ = [
     "CompactionDetails",
+    "CompactionPrompts",
     "CompactionResult",
     "CompactionSettings",
     "ContextUsageEstimate",

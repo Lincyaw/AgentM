@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import subprocess
+import sys
+import threading
 import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from agentm.core.abi import AssistantMessage, EventBus, TextContent
+from agentm.core.abi import AssistantMessage, EventBus, TextContent, ToolResult
 from agentm.core.abi.messages import ToolResultBlock, ToolResultMessage, UserMessage
-from agentm.core._internal.catalog import _layout
+from agentm.harness.catalog import _layout
 from agentm.core._internal.catalog.manifest import reload_manifest
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.resource_writer import GitBackedResourceWriter
@@ -52,6 +57,62 @@ def install(api, config):
         ),
     )
 '''
+
+
+class _PlanModeOpenAIStubHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self) -> None:  # noqa: N802 - stdlib callback name
+        length = int(self.headers.get("content-length", "0"))
+        if length:
+            self.rfile.read(length)
+        chunks = [
+            {
+                "id": "chatcmpl-plan-mode-tool-catalog-test",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "plan-mode-stub",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": "planned"},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "chatcmpl-plan-mode-tool-catalog-test",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "plan-mode-stub",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+            {
+                "id": "chatcmpl-plan-mode-tool-catalog-test",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "plan-mode-stub",
+                "choices": [],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        ]
+        body = b"".join(
+            b"data: " + json.dumps(chunk).encode("utf-8") + b"\n\n"
+            for chunk in chunks
+        ) + b"data: [DONE]\n\n"
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return
+
+
+def _as_tool_result(result: object) -> ToolResult:
+    assert isinstance(result, ToolResult)
+    return result
 
 
 def _tool_result_text(message: UserMessage | AssistantMessage | ToolResultMessage) -> str:
@@ -169,7 +230,8 @@ async def _build_session(
             cwd=str(tmp_path),
             extensions=[
                 (f"{pkg}.tool_demo", {}),
-                ("_agentm_contrib__tool_catalog", {}),
+                ("contrib.extensions.tool_catalog.browse", {}),
+                ("contrib.extensions.tool_catalog.mutate", {}),
             ],
             provider=(f"{pkg}.provider", {}),
             resource_loader=InMemoryResourceLoader(),
@@ -177,6 +239,149 @@ async def _build_session(
     )
     session._test_pkg = pkg  # type: ignore[attr-defined]
     return session
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_mounts_only_tool_catalog_browse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _init_repo(tmp_path)
+    _write_manifest(tmp_path, monkeypatch)
+    pkg = f"rollbackpkg_{uuid.uuid4().hex[:8]}"
+    pkg_dir = tmp_path / pkg
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+    (pkg_dir / "provider.py").write_text(_PROVIDER_SOURCE, encoding="utf-8")
+    _git(tmp_path, "add", pkg)
+    _git(tmp_path, "commit", "-m", f"seed {pkg}", "--quiet")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+
+    repo_root = Path(__file__).resolve().parents[2]
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            scenario=str(repo_root / "contrib" / "scenarios" / "plan_mode"),
+            provider=(f"{pkg}.provider", {}),
+            resource_loader=InMemoryResourceLoader(),
+        )
+    )
+    try:
+        tool_names = {tool.name for tool in session.tools}
+        assert {
+            "catalog_list_versions",
+            "catalog_get_manifest",
+            "catalog_runs_for",
+            "get_source_at",
+            "list_history",
+            "list_atoms",
+        }.issubset(tool_names)
+        assert {
+            "rollback_resource",
+            "install_atom",
+            "unload_atom",
+            "reload_atom",
+        }.isdisjoint(tool_names)
+    finally:
+        await session.shutdown()
+
+
+def test_plan_mode_cli_trace_exposes_browse_without_mutate_tools(tmp_path: Path) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    repo_root = Path(__file__).resolve().parents[2]
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _PlanModeOpenAIStubHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        env = os.environ.copy()
+        env.update(
+            {
+                "OPENAI_API_KEY": "test-key",
+                "OPENAI_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
+            }
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from agentm.cli import main; main()",
+                "inspect the repo and prepare a plan",
+                "--cwd",
+                str(sandbox),
+                "--scenario",
+                str(repo_root / "contrib" / "scenarios" / "plan_mode" / "manifest.yaml"),
+                "--extension",
+                (
+                    'agentm.extensions.builtin.observability:{"path":".agentm/observability/'
+                    '{session_id}.jsonl","include_handler_records":false}'
+                ),
+                "--provider",
+                "openai",
+                "--model",
+                "plan-mode-stub",
+                "--quiet",
+                "--no-skills",
+                "--no-prompt-templates",
+            ],
+            cwd=Path.cwd(),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert completed.returncode == 0, completed.stderr
+    trace_files = sorted((sandbox / ".agentm" / "observability").glob("*.jsonl"))
+    assert len(trace_files) == 1
+    rows = [
+        json.loads(line)
+        for line in trace_files[0].read_text(encoding="utf-8").splitlines()
+    ]
+    ready = next(row for row in rows if row.get("kind") == "session.ready")
+    tool_names = set(ready["attributes"]["tool_names"])
+    assert {
+        "catalog_list_versions",
+        "catalog_get_manifest",
+        "catalog_runs_for",
+        "get_source_at",
+        "list_history",
+        "list_atoms",
+    }.issubset(tool_names)
+    assert {
+        "rollback_resource",
+        "install_atom",
+        "unload_atom",
+        "reload_atom",
+    }.isdisjoint(tool_names)
+
+
+def test_tool_catalog_split_manifests_are_exact() -> None:
+    from contrib.extensions.tool_catalog import BROWSE_MANIFEST, MUTATE_MANIFEST
+
+    assert BROWSE_MANIFEST.name == "tool_catalog_browse"
+    assert BROWSE_MANIFEST.registers == (
+        "tool:catalog_list_versions",
+        "tool:catalog_get_manifest",
+        "tool:catalog_runs_for",
+        "tool:get_source_at",
+        "tool:list_history",
+        "tool:list_atoms",
+    )
+    assert MUTATE_MANIFEST.name == "tool_catalog_mutate"
+    assert MUTATE_MANIFEST.registers == (
+        "tool:rollback_resource",
+        "tool:install_atom",
+        "tool:unload_atom",
+        "tool:reload_atom",
+    )
 
 
 @pytest.mark.asyncio
@@ -190,7 +395,8 @@ async def test_G6_tool_catalog_history_source_and_forceable_rollback(
         monkeypatch,
         atom_source=_tool_source("tool_demo", "v1"),
     )
-    tool_path = f"{session._test_pkg}/tool_demo.py"  # type: ignore[attr-defined]
+    pkg = session._test_pkg  # type: ignore[attr-defined]
+    tool_path = f"{pkg}/tool_demo.py"
     try:
         first_sha = _git(tmp_path, "log", "-n", "1", "--format=%H", "--", tool_path)
         upgrade = session._apis[f"{session._test_pkg}.tool_demo"].reload_atom(  # type: ignore[attr-defined]
@@ -202,19 +408,23 @@ async def test_G6_tool_catalog_history_source_and_forceable_rollback(
         second_sha = _git(tmp_path, "rev-parse", "HEAD")
 
         history_tool = next(tool for tool in session.tools if tool.name == "list_history")
-        history = await history_tool.execute({"path": "tool_demo", "limit": 2})
+        history = _as_tool_result(
+            await history_tool.execute({"path": "tool_demo", "limit": 2})
+        )
         assert history.is_error is False
-        assert [entry["sha"] for entry in history.details] == [second_sha, first_sha]
-        assert [entry["author"] for entry in history.details] == ["agent", "Test User"]
-        assert [entry["message"] for entry in history.details] == [
+        assert [entry["sha"] for entry in history.extras] == [second_sha, first_sha]
+        assert [entry["author"] for entry in history.extras] == ["agent", "Test User"]
+        assert [entry["message"] for entry in history.extras] == [
             "upgrade to v2",
-            f"seed {session._test_pkg}",  # type: ignore[index]
+            f"seed {pkg}",
         ]
 
         source_tool = next(tool for tool in session.tools if tool.name == "get_source_at")
-        old_source = await source_tool.execute({"path": "tool_demo", "sha": first_sha})
+        old_source = _as_tool_result(
+            await source_tool.execute({"path": "tool_demo", "sha": first_sha})
+        )
         assert old_source.is_error is False
-        assert "v1" in old_source.details
+        assert "v1" in old_source.extras
         assert _tool_result_text((await session.prompt("before rollback"))[-2]) == "v2"
 
         decisions_path = _layout.atom_decisions_path("tool_demo", first_sha, root=tmp_path)
@@ -225,28 +435,32 @@ async def test_G6_tool_catalog_history_source_and_forceable_rollback(
         )
 
         rollback_tool = next(tool for tool in session.tools if tool.name == "rollback_resource")
-        blocked = await rollback_tool.execute(
-            {
-                "path": "tool_demo",
-                "target_sha": first_sha,
-                "rationale": "undo regression",
-            }
+        blocked = _as_tool_result(
+            await rollback_tool.execute(
+                {
+                    "path": "tool_demo",
+                    "target_sha": first_sha,
+                    "rationale": "undo regression",
+                }
+            )
         )
         assert blocked.is_error is True
-        assert blocked.details["error"] == "rollback_blocked"
-        assert blocked.details["decision"]["kind"] == "regressed"
+        assert blocked.extras["error"] == "rollback_blocked"
+        assert blocked.extras["decision"]["kind"] == "regressed"
 
-        rolled_back = await rollback_tool.execute(
-            {
-                "path": "tool_demo",
-                "target_sha": first_sha,
-                "rationale": "undo regression",
-                "force": True,
-            }
+        rolled_back = _as_tool_result(
+            await rollback_tool.execute(
+                {
+                    "path": "tool_demo",
+                    "target_sha": first_sha,
+                    "rationale": "undo regression",
+                    "force": True,
+                }
+            )
         )
         assert rolled_back.is_error is False
-        assert rolled_back.details["ok"] is True
-        assert rolled_back.details["old_hash"] == second_sha
+        assert rolled_back.extras["ok"] is True
+        assert rolled_back.extras["old_hash"] == second_sha
         assert _tool_result_text((await session.prompt("after rollback"))[-2]) == "v1"
         latest_log = _git(tmp_path, "log", "--format=%an|%s", "-n", "1", "--", tool_path)
         assert latest_log == f"agent|rollback to {first_sha[:8]}: undo regression"
@@ -288,18 +502,20 @@ async def test_rollback_by_repo_relative_path_still_reloads_atom(
         assert _tool_result_text((await session.prompt("before"))[-2]) == "v2"
 
         rollback_tool = next(t for t in session.tools if t.name == "rollback_resource")
-        result_rel = await rollback_tool.execute(
-            {
-                "path": rel_path,
-                "target_sha": first_sha,
-                "rationale": "undo via repo-relative path",
-            }
+        result_rel = _as_tool_result(
+            await rollback_tool.execute(
+                {
+                    "path": rel_path,
+                    "target_sha": first_sha,
+                    "rationale": "undo via repo-relative path",
+                }
+            )
         )
         # The success criterion: result is the ReloadResult shape (has 'ok'),
         # not the WriteResult shape — proving rollback dispatched through
         # reload_atom rather than degrading to plain writer.write.
-        assert result_rel.is_error is False, result_rel.details
-        assert "ok" in result_rel.details and result_rel.details["ok"] is True
+        assert result_rel.is_error is False, result_rel.extras
+        assert "ok" in result_rel.extras and result_rel.extras["ok"] is True
         # And the live session uses the reloaded code on the next turn.
         assert _tool_result_text((await session.prompt("after rel"))[-2]) == "v1"
 
@@ -310,15 +526,17 @@ async def test_rollback_by_repo_relative_path_still_reloads_atom(
         )
         assert _tool_result_text((await session.prompt("between"))[-2]) == "v2"
         abs_path = str((tmp_path / rel_path).resolve())
-        result_abs = await rollback_tool.execute(
-            {
-                "path": abs_path,
-                "target_sha": first_sha,
-                "rationale": "undo via absolute path",
-            }
+        result_abs = _as_tool_result(
+            await rollback_tool.execute(
+                {
+                    "path": abs_path,
+                    "target_sha": first_sha,
+                    "rationale": "undo via absolute path",
+                }
+            )
         )
-        assert result_abs.is_error is False, result_abs.details
-        assert "ok" in result_abs.details and result_abs.details["ok"] is True
+        assert result_abs.is_error is False, result_abs.extras
+        assert "ok" in result_abs.extras and result_abs.extras["ok"] is True
         assert _tool_result_text((await session.prompt("after abs"))[-2]) == "v1"
     finally:
         await session.shutdown()

@@ -23,6 +23,7 @@ from agentm.core.abi.resource import (
     WriterAuthor,
 )
 from agentm.core._internal.catalog.manifest import (
+    CoreManifestPathUnsetError,
     is_constitution_path,
     load_core_manifest,
     matches_manifest_glob,
@@ -92,6 +93,70 @@ class _BatchImpl(BatchHandle):
         self.pending.append(_PendingBatchOp(kind="delete", path=path))
 
 
+class _NoopResourceWriter:
+    async def read(self, path: str) -> bytes:
+        return await asyncio.to_thread(Path(path).read_bytes)
+
+    async def write(
+        self,
+        path: str,
+        content: bytes,
+        *,
+        rationale: str,
+        author: WriterAuthor = "agent",
+    ) -> WriteResult:
+        del content, rationale, author
+        return WriteResult(path=path, path_class="unmanaged", committed=False, commit_sha_before=None, commit_sha_after=None)
+
+    async def replace(
+        self,
+        path: str,
+        old: bytes,
+        new: bytes,
+        *,
+        rationale: str,
+        author: WriterAuthor = "agent",
+    ) -> WriteResult:
+        del old, new, rationale, author
+        return WriteResult(path=path, path_class="unmanaged", committed=False, commit_sha_before=None, commit_sha_after=None)
+
+    async def delete(
+        self,
+        path: str,
+        *,
+        rationale: str,
+        author: WriterAuthor = "agent",
+    ) -> WriteResult:
+        del rationale, author
+        return WriteResult(path=path, path_class="unmanaged", committed=False, commit_sha_before=None, commit_sha_after=None)
+
+    def classify(self, path: str) -> PathClass:
+        del path
+        return "unmanaged"
+
+    def restore(self, path: Path, version: str) -> None:
+        del path, version
+        raise NotImplementedError("noop ResourceWriter has no versions")
+
+    def current_version_for_path(self, path: str) -> str | None:
+        del path
+        return None
+
+    def batch(
+        self,
+        *,
+        rationale: str,
+        author: WriterAuthor = "agent",
+    ) -> AbstractAsyncContextManager[BatchHandle]:
+        del rationale, author
+
+        @asynccontextmanager
+        async def _manager() -> AsyncIterator[BatchHandle]:
+            yield _BatchImpl()
+
+        return _manager()
+
+
 class GitBackedResourceWriter:
     """Single chokepoint for managed-resource writes."""
 
@@ -152,6 +217,9 @@ class GitBackedResourceWriter:
             f"--work-tree={self._cwd}",
         )
         self._initial_snapshot_needed = True
+
+    async def read(self, path: str) -> bytes:
+        return await asyncio.to_thread(self._resolve_path(path).read_bytes)
 
     async def write(
         self,
@@ -312,8 +380,12 @@ class GitBackedResourceWriter:
         )
 
     def classify(self, path: str) -> PathClass:
-        if is_constitution_path(path):
-            return "constitution"
+        try:
+            if is_constitution_path(path):
+                return "constitution"
+            managed_globs = load_core_manifest().managed_globs
+        except CoreManifestPathUnsetError:
+            managed_globs = ()
 
         resolved = self._resolve_path(path)
         try:
@@ -322,7 +394,6 @@ class GitBackedResourceWriter:
             return "unmanaged"
 
         rel_posix = PurePosixPath(relative).as_posix()
-        managed_globs = load_core_manifest().managed_globs
         if any(matches_manifest_glob(pattern, rel_posix) for pattern in managed_globs):
             return "managed"
         return "unmanaged"
@@ -362,6 +433,17 @@ class GitBackedResourceWriter:
 
         sha = result.stdout.strip()
         return sha or None
+
+    def restore(self, path: Path, version: str) -> None:
+        if self._advisory_mode or self.classify(str(path)) != "managed":
+            raise NotImplementedError("git rollback requires a versioned ResourceWriter")
+
+        resolved = self._resolve_path(str(path))
+        relative = resolved.relative_to(self._cwd)
+        relative_posix = PurePosixPath(relative).as_posix()
+        self._ensure_git_ready()
+        self._run_git_sync(("restore", "--source", version, "--", relative_posix))
+        self._run_git_sync(("reset", "--hard", version))
 
     async def _apply_batch(
         self,
@@ -743,4 +825,5 @@ __all__ = [
     "ResourceWriter",
     "WriteResult",
     "WriterAuthor",
+    "_NoopResourceWriter",
 ]

@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
 
 from .messages import AgentMessage, AssistantMessage
 from .tool import Tool
@@ -62,6 +62,18 @@ class ToolCallEnd:
 
 
 @dataclass(slots=True, frozen=True)
+class ToolCallArgsParseError:
+    """Provider could not parse a streamed tool-call argument JSON object."""
+
+    CHANNEL: ClassVar[Literal["tool_call_args_parse_error"]] = (
+        "tool_call_args_parse_error"
+    )
+    tool_call_id: str
+    raw: str
+    error: str
+
+
+@dataclass(slots=True, frozen=True)
 class MessageEnd:
     """Terminal event carrying the fully assembled assistant message.
 
@@ -78,6 +90,7 @@ AssistantStreamEvent = (
     | ThinkingDelta
     | ToolCallStart
     | ToolCallArgsDelta
+    | ToolCallArgsParseError
     | ToolCallEnd
     | MessageEnd
 )
@@ -90,8 +103,7 @@ AssistantStreamEvent = (
 class Model:
     """Provider-agnostic model descriptor.
 
-    ``metadata`` holds free-form provider-specific bits (e.g. anthropic-beta
-    headers, OpenAI tool-choice quirks); the kernel never inspects it.
+    ``metadata`` holds vendor-specific bits, opaque to the kernel.
     """
 
     id: str
@@ -133,6 +145,7 @@ __all__ = [
     "TextDelta",
     "ThinkingDelta",
     "ToolCallArgsDelta",
+    "ToolCallArgsParseError",
     "ToolCallEnd",
     "ToolCallStart",
 ]

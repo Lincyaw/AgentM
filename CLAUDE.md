@@ -18,8 +18,7 @@ boundary contract in `.claude/designs/pluggable-architecture.md`.
 
 ```bash
 uv sync                                # install deps
-uv run agentm "<prompt>"               # full mode (loads general_purpose scenario)
-uv run agentm --minimal "<prompt>"     # recovery floor (stdlib tools only)
+uv run agentm "<prompt>"               # full mode (auto-discovers builtin atoms)
 uv run pytest                          # run tests (excludes nested workspaces, ui)
 uv run pytest -m ui                    # Textual TUI tests (opt-in)
 uv run ruff check src/                 # lint
@@ -62,6 +61,9 @@ checker rejects atoms that import `core._internal.*` directly.
 
 **Five pluggability axes** (each is a `typing.Protocol` with a default impl):
 LLM stream · Tool environment · Session state · Project context · Policy / cross-cut.
+Tool environment `Operations` are a constitution-only axis in v0: the harness
+selects the bundle at session construction; atoms consume it through
+`api.get_operations()` but cannot replace it with `register_operations`.
 
 ## Extension-as-Scenario
 

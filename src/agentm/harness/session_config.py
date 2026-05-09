@@ -9,12 +9,22 @@ canonical case is the ``sub_agent`` builtin going through
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from typing import Any
 
-from agentm.core.abi import AgentMessage, EventBus, LoopConfig
+from agentm.core.abi import AgentMessage, EventBus, LoopConfig, ProviderResolver
 from agentm.harness.resource_loader import ResourceLoader
 from agentm.harness.session_manager import SessionManager
+
+
+def default_child_provider_factory(parent_provider: Any) -> tuple[str, dict[str, Any]]:
+    """Return the inherit-provider atom spec for a child session."""
+    from agentm.extensions.discover import discover_builtin
+    from agentm.extensions.builtin.inherit_provider import PARENT_PROVIDER_CONFIG_KEY
+
+    entry = discover_builtin()["inherit_provider"]
+    return (entry.module_path, {PARENT_PROVIDER_CONFIG_KEY: parent_provider})
 
 
 @dataclass
@@ -50,6 +60,12 @@ class AgentSessionConfig:
     resource_loader: ResourceLoader | None = None
     loop_config: LoopConfig | None = None
     bus: EventBus | None = None
+
+    provider_resolver: ProviderResolver[Any] | None = None
+    """Selects the active provider after provider registrations complete."""
+
+    child_provider_factory: Callable[[Any], tuple[str, dict[str, Any]]] | None = None
+    """Builds the provider extension spec for child sessions that inherit a parent provider."""
     # --- Child-session lifecycle (used by sub-agent extensions) ----------
     parent_bus: EventBus | None = None
     """If set, ``child_session_start`` / ``child_session_end`` are emitted on
@@ -100,5 +116,8 @@ class AgentSessionConfig:
     ``tool_eval_run`` to evaluate proposed atom versions without mutating
     the source-of-truth tree. Cleaned up on ``AgentSession.shutdown``."""
 
+    def with_bus(self, bus: EventBus) -> "AgentSessionConfig":
+        return replace(self, bus=bus)
 
-__all__ = ["AgentSessionConfig"]
+
+__all__ = ["AgentSessionConfig", "default_child_provider_factory"]

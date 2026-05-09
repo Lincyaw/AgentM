@@ -8,6 +8,15 @@ Reaches into: `core/abi/events.py`, `core/abi/loop.py`, `extensions/builtin/sub_
 `decide_turn_action` handler returning `LoopAction.Inject(messages=[...])` — see
 [agent-loop.md](agent-loop.md) for the per-turn termination protocol.
 
+
+## Issue #87 C18 file-shape decision
+
+`extensions/builtin/sub_agent.py` stays a single builtin atom file in issue #87.
+The next split review threshold is **1500 LOC or more**; until then the §11
+single-file atom contract is stronger than a cosmetic decomposition. The atom
+now spawns children through `ExtensionAPI.spawn_child_session(**kwargs)` rather
+than constructing harness session config objects directly.
+
 ## Problem
 
 `extensions/builtin/sub_agent.py` already lets a parent dispatch a child `AgentSession`
@@ -277,3 +286,12 @@ findings have been delivered to the parent, they will not be redelivered.
   `True`, so handler `Inject` returns are ignored at that boundary.
 - Scenario manifests do not need to opt in. Loading `sub_agent` enables the
   handler automatically.
+
+## Config Inheritance By Manifest Name
+
+`sub_agent.available_inherited_extensions` may name a parent atom with only a
+module path. When the inherited spec omits `config` or supplies an empty config,
+`sub_agent` copies the already loaded parent atom's resolved config by manifest
+name into the child session. Scenarios can therefore define data-tool limits and
+exclusions once on the parent atom while still mounting the same module in
+critic/worker sessions.

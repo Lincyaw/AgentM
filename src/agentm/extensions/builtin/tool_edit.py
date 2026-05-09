@@ -2,28 +2,27 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.abi.operations import FileOperations
+from agentm.core.abi.tool import TOOL_RESULT_FORMAT_METADATA_KEY
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
 
 MANIFEST = ExtensionManifest(
     name="tool_edit",
-    description="Register the edit tool backed by FileOperations.",
+    description="Register the edit tool backed by ResourceWriter.",
     registers=("tool:edit",),
     config_schema={
         "type": "object",
-        "properties": {
-            "file_ops": {"type": "object"},
-        },
+        "properties": {},
         "additionalProperties": True,
     },
+    requires=(),  # Leaf tool atom: consumes ResourceWriter via ExtensionAPI.
 )
 
-_PARAMETERS = {
+_PARAMETERS: Final = {
     "type": "object",
     "properties": {
         "path": {"type": "string"},
@@ -38,7 +37,7 @@ _PARAMETERS = {
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    file_ops = _coerce_file_ops(api, config.get("file_ops"))
+    del config
     writer = api.get_resource_writer()
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
@@ -52,9 +51,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return _error("old_string must not be empty")
 
         try:
-            original = (await file_ops.read_file(path)).decode(
-                "utf-8", errors="replace"
-            )
+            original = (await writer.read(path)).decode("utf-8", errors="replace")
             occurrences = original.count(old_string)
             if occurrences == 0:
                 return _error(f"String not found in {path!r}: {old_string!r}")
@@ -68,12 +65,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 if replace_all
                 else original.replace(old_string, new_string, 1)
             )
-            result = await writer.replace(
-                path,
-                original.encode("utf-8"),
-                updated.encode("utf-8"),
-                rationale=rationale,
-            )
+            result = await writer.replace(path, original.encode("utf-8"), updated.encode("utf-8"), rationale=rationale)
             if result.error is not None:
                 return _error(result.error)
             return _ok(f"Updated {path!r}")
@@ -86,14 +78,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             description="Replace text in a UTF-8 text file.",
             parameters=_PARAMETERS,
             fn=_execute,
+            metadata={"file_op": "edit", TOOL_RESULT_FORMAT_METADATA_KEY: "diff"},
         )
     )
-
-
-def _coerce_file_ops(api: ExtensionAPI, candidate: Any) -> FileOperations:
-    return candidate if candidate is not None else api.get_operations().file
-
-
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
 

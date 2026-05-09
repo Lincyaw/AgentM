@@ -56,7 +56,7 @@ Inspired by pi-mono's three-layer split (`pi-ai` → `pi-agent` → `pi-coding-a
 
 ## 3. Five Pluggability Axes
 
-Every axis below is a `typing.Protocol` in `agentm-core`. The harness ships a default implementation; extensions/users can substitute. **All five must be replaceable without forking.**
+Every axis below is a `typing.Protocol` in `agentm-core`. The harness ships a default implementation; extensions/users can substitute. **All five must be replaceable without forking.** In v0, Operations replacement is constitution-only: the harness selects the operations bundle when constructing a session, and atoms only consume it through `ExtensionAPI.get_operations()`.
 
 ### 3.1 LLM Stream (the model boundary)
 
@@ -74,15 +74,18 @@ class StreamFn(Protocol):
 ```
 
 - Pure boundary: takes provider-shaped messages, returns events.
-- Default implementations live in `agentm-llm` per provider.
-- Extensions register additional providers via `register_provider(name, ProviderConfig)`.
+- Default implementations live in `agentm-llm` per provider; provider-internal stream assembly is shared by `agentm.llm._common.StreamAccumulator`, so new providers supply only event mapping plus a `ToolSpecAdapter`.
+- Retry, transport, and reasoning round-trip behavior are policy, not provider folklore: providers may accept an injected `RetryPolicy`, expose security-relevant transport overrides such as `verify_ssl=False` via diagnostics, and surface provider-specific thinking/reasoning choices as constructor/config options.
+- Tool-call argument parse failures stay observable as typed stream/bus events (`ToolCallArgsParseError`) while preserving the kernel invariant that `ToolCallBlock.arguments` is a parsed dict.
+- Extensions register additional providers via `register_provider(name, ProviderConfig)`. `ProviderConfig` lives in `agentm.core.abi.provider` so provider modules do not import the harness; the harness re-exports it for extension compatibility. The harness chooses the active registration through the `ProviderResolver` port; the default `LastRegisteredWins` resolver preserves insertion-order behavior.
+- Presenter-side provider selection goes through `ProviderRegistry.build(provider, config)`: descriptors own CLI extension module paths, default model ids, aliases, and ambient env-var conventions, so adding a provider descriptor does not require editing CLI branches.
 - **Crucial**: `StreamFn` is the only point that touches a real LLM API. The agent loop has zero hard-coded provider knowledge.
 
 **Reference**: pi-mono `packages/agent/src/types.ts:18-26` (`StreamFn` type), `packages/coding-agent/src/core/extensions/types.ts:1212-1245` (`registerProvider` API with `streamSimple` override).
 
 ### 3.2 Tool Execution (the environment boundary)
 
-Three-layer split, each replaceable:
+Three-layer split. `ToolDefinition` and `Tool` are extension/runtime surfaces; `Operations` are a constitution-selected environment port in v0:
 
 ```python
 @dataclass
@@ -106,8 +109,9 @@ class Tool(Protocol):                 # what the loop sees
 
 class FileOperations(Protocol):       # the environment port
     async def read_file(self, path: str) -> bytes: ...
-    async def write_file(self, path: str, content: bytes) -> None: ...
-    async def access(self, path: str) -> None: ...
+    async def access(self, path: str) -> bool: ...
+    async def is_dir(self, path: str) -> bool: ...
+    async def list_dir(self, path: str) -> list[str]: ...
 
 class BashOperations(Protocol):
     async def exec(self, cmd, cwd, *, on_data, signal, timeout, env) -> ExecResult: ...
@@ -115,7 +119,17 @@ class BashOperations(Protocol):
 
 - `ToolDefinition` is the harness/UI-facing record.
 - `Tool` is the bare execution interface used by the agent loop.
-- `XxxOperations` is the **smallest possible port** for swapping environments (local FS → SSH → sandbox → in-memory).
+- `XxxOperations` is the **smallest possible port** for swapping environments (local FS → SSH → sandbox → in-memory). It is replaceable by harness/session construction, not by an atom-level `register_operations` hook.
+
+**File IO seam decision (issue #89)**: AgentM uses the hybrid seam. Read-only
+file tools (`read`, `grep`, `find`, `ls`) consume `api.get_operations().file`;
+write tools (`write`, `edit`) consume `api.get_resource_writer()`. The split is
+intentional: `FileOperations` is the environment read port, while
+`ResourceWriter` is the mutation chokepoint that enforces managed-resource
+versioning and constitution-path rejection. Scenario authors that need to
+redirect reads override `FileOperations`; scenario authors that need to redirect
+or audit writes override `ResourceWriter`. Atoms must not call both seams for one
+write path.
 
 **Why three layers**: the "what" (definition), "how-to-call" (Tool), and "where-it-runs" (Operations) vary independently. Pi proves it: their `read.ts` tool body is unchanged whether running locally or over SSH; only `ReadOperations` is swapped.
 
@@ -148,6 +162,7 @@ class SessionManager(Protocol):
 - `payload: Any` (or extensible `details` field per entry type) lets extensions persist structured data without forking the format.
 - Branching, forking, compaction, navigation are **operations on the entry tree**, not separate features.
 - Default impl writes to `~/.agentm/sessions/`; SDK callers can pass `InMemorySessionManager` or `SqliteSessionManager`.
+- Presenters depend on `SessionStore` (`open`, `most_recent`, `create`) rather than globbing JSONL files directly. `JsonlSessionStore` wraps the current `SessionManager` format, while tests and future backends can provide in-memory, sqlite, or remote implementations without changing CLI/TUI construction.
 
 **Reference**: `packages/coding-agent/src/core/session-manager.ts:30-90` (entry types with `parentId`), `:60-78` (`CompactionEntry.details: T` for extension data), `1425` lines total — but the format is what matters, not the implementation size.
 
@@ -178,7 +193,7 @@ The mechanism by which "built-in features" become "default extensions". An Event
 |---|---|---|
 | Lifecycle (passive) | `session_start`, `agent_start`, `turn_end` | None — observers only |
 | Mutating (active) | `tool_call`, `context`, `input` | Mutate payload in place; later handlers see prior changes |
-| Replaceable (`before_*`) | `before_agent_start`, `session_before_compact`, `session_before_tree` | Return `{cancel?, replacement?}` to override default flow |
+| Replaceable (`before_*`) | `before_agent_start`, `session_before_compact`, `session_before_tree` | Return `{block?, cause?, cancel?, replacement?}` to override default flow |
 
 **The killer property**: any built-in operation (compaction, fork, system-prompt assembly, tool execution) emits a `before_*` event whose handlers can `cancel: true` and supply a custom result. This is how plan-mode, sub-agent, permission gate, sandbox, sub-agent — all the things AgentM might want to add — become **default extensions** rather than core features.
 
@@ -197,6 +212,18 @@ class ExtensionAPI(Protocol):
     append_entry: Callable[[str, Any], None]
     events: EventBus                         # cross-extension comms
 ```
+
+Registered slash-command execution is itself a policy port: the
+`slash_commands` atom parses `/cmd args`, but command lookup, ownership, and
+handler execution go through the typed `CommandDispatcher` service facade. The
+harness default owns the live command registry and owner API selection; atoms do
+not read raw harness registry dictionaries.
+
+Retry policy follows the same service-facade rule: `agentm.core.abi.retry.RetryPolicy`
+is a tiny async port, the built-in `retry_policy` atom registers the default
+exponential-backoff implementation with `api.set_service("retry_policy", ...)`,
+and provider adapters use provider-typed retry predicates rather than string
+sniffing wire errors.
 
 **Reference**:
 - Minimal EventBus: `packages/coding-agent/src/core/event-bus.ts` (33 lines — copy this verbatim conceptually)
@@ -223,17 +250,13 @@ class AgentSession:
         self._event_bus: EventBus
 
     async def prompt(self, text: str, *, options: PromptOptions) -> None:
-        # 1. handle /commands (extension-registered)
-        # 2. emit "input" event (extensions can transform/handle)
-        # 3. expand skill / prompt template
-        # 4. if streaming, queue via steer/followUp
-        # 5. check compaction need
-        # 6. assemble user message + injected nextTurn entries
-        # 7. emit "before_agent_start" (extensions can override system prompt)
-        # 8. await self.agent.run(...)
+        # 1. emit "input" event (slash_commands and templates transform/handle)
+        # 2. assemble user message + injected nextTurn entries
+        # 3. emit "before_agent_start" (extensions can replace system or veto)
+        # 4. await self.agent.run(...)
 ```
 
-**Design rule**: `AgentSession.prompt` and friends are 100-line **dispatchers**. Any branch with logic-content >10 lines is a smell — extract it to a service or extension.
+**Design rule**: `AgentSession.prompt` and friends are 100-line **dispatchers**. Any branch with logic-content >10 lines is a smell — extract it to a service or extension. Construction-only wiring can live beside the façade in harness factory/runtime modules; runtime dependency bundles should be passed as data (`SessionRuntime`) rather than long parameter lists.
 
 **Reference**: `packages/coding-agent/src/core/agent-session.ts:942-1050` (`prompt` method — note how mechanical it is).
 
@@ -256,6 +279,8 @@ Modes share **all** runtime; they only differ in:
 - how events are rendered/serialized
 - which `ExtensionUIContext` they provide (TUI / no-op / structured)
 
+Presenter-owned commands may add UI affordances, but command discovery and extension-registered command parity stay registry-driven: the Textual mode uses a `BuiltinCommandRegistry` for its local commands and mirrors `ExtensionAPI.register_command` registrations into the same palette/dispatch path. Kernel event identity uses prompt-local `turn_index` plus session-monotone `turn_id`; presenters key long-lived widgets by `turn_id`.
+
 **Reference**: `packages/coding-agent/src/modes/{print-mode.ts, rpc/, interactive/}` and `core/sdk.ts:createAgentSession` (the SDK entrypoint shared by all modes).
 
 **Design rule for AgentM**: any feature added to a mode that *cannot* also be reached via the SDK is a bug. The SDK is the contract; modes are sugar.
@@ -267,7 +292,7 @@ Modes share **all** runtime; they only differ in:
 A change to the architecture is acceptable iff each of these is achievable **without forking core**:
 
 1. **Replace the LLM provider** with a corporate proxy speaking a custom protocol → register a `StreamFn`.
-2. **Run `bash` tool over SSH** to a remote host → swap `BashOperations`.
+2. **Run `bash` tool over SSH** to a remote host → construct the session with SSH-backed `BashOperations`.
 3. **Persist sessions to Postgres** instead of JSONL → swap `SessionManager`.
 4. **Embed AgentM in a Django app** with no filesystem access → swap `ResourceLoader`.
 5. **Add a permission-prompt gate** before every tool call → register `on("tool_call", ...)` returning `{block, reason}`.
@@ -385,4 +410,21 @@ Quick lookup for implementation. All paths relative to `pi-mono/packages/`.
    b. Define the five Protocol ports.
    c. Implement minimal `EventBus` + 6 critical events (`input`, `before_agent_start`, `tool_call`, `tool_result`, `context`, `agent_end`).
    d. Refactor existing `AgentRuntime` to be the harness orchestrator.
-3. Acceptance: a smoke-test scenario that swaps `StreamFn` (mock LLM) and `BashOperations` (in-memory FS) without modifying core.
+3. Acceptance: a smoke-test scenario that swaps `StreamFn` (mock LLM) and constructs the session with `BashOperations` (in-memory FS) without modifying core.
+
+### 5.1 Shared Presenter Rendering
+
+CLI and Textual remain presenters, so shared display decisions live in pure
+`agentm.core.lib.render` helpers rather than in either mode. The helpers produce
+headless strings and token reports only; they do not import Rich, Textual,
+harness, filesystem state, or pricing tables.
+
+Cost is a policy concern exposed as an ExtensionAPI service named
+`cost_query`. The `cost_budget` atom owns pricing configuration and registers a
+service with `estimate(usage, provider=...)`; presenters call it opportunistically
+and fall back to token-only output when the service is absent.
+
+Tool-result display uses tool-declared metadata (`metadata["result_format"]`) or
+`api.register_tool_renderer(tool_name, renderer)`. Presenters may choose their
+surface-specific rich widget for a returned format, but they must not infer atom
+identity from exact tool-name strings.

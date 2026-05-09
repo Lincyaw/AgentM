@@ -21,6 +21,7 @@ from agentm.core.abi import (
     ToolResult,
 )
 from agentm.harness.extension import ProviderConfig
+from agentm.harness.events import ResolveSubagentEvent
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
 
@@ -99,7 +100,9 @@ class _BudgetProvider:
             )
         return self._iter(_text_msg("child done", ts=20.0))
 
-    async def _iter(self, message: AssistantMessage) -> AsyncIterator[AssistantStreamEvent]:
+    async def _iter(
+        self, message: AssistantMessage
+    ) -> AsyncIterator[AssistantStreamEvent]:
         yield MessageEnd(message=message)
 
 
@@ -131,19 +134,23 @@ def _install_provider_module(name: str, provider: _BudgetProvider) -> str:
     return name
 
 
-def _install_resolver_module(name: str, *, persona_budget: dict[str, int] | None) -> str:
+def _install_resolver_module(
+    name: str, *, persona_budget: dict[str, int] | None
+) -> str:
     module = types.ModuleType(name)
 
     def install(api: Any, _config: dict[str, Any]) -> None:
         api.on(
-            "resolve_subagent",
-            lambda event: {
-                "body": CHILD_PERSONA,
-                "tools": ["ping"],
-                "budget_defaults": persona_budget,
-            }
-            if event.get("name") == "worker"
-            else None,
+            ResolveSubagentEvent.CHANNEL,
+            lambda event: (
+                {
+                    "body": CHILD_PERSONA,
+                    "tools": ["ping"],
+                    "budget_defaults": persona_budget,
+                }
+                if isinstance(event, ResolveSubagentEvent) and event.name == "worker"
+                else None
+            ),
         )
 
     module.install = install  # type: ignore[attr-defined]
@@ -212,11 +219,15 @@ def _extract_dispatched_task_id(messages: list[Any]) -> str:
         if not isinstance(content, list):
             continue
         for block in content:
-            payload = "".join(
-                text_block.text
-                for text_block in getattr(block, "content", [])
-                if getattr(text_block, "type", None) == "text"
-            )
+            block_content = getattr(block, "content", None)
+            if isinstance(block_content, list):
+                payload = "".join(
+                    text_block.text
+                    for text_block in block_content
+                    if getattr(text_block, "type", None) == "text"
+                )
+            else:
+                payload = str(getattr(block, "text", ""))
             try:
                 data = json.loads(payload)
             except json.JSONDecodeError:

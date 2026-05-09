@@ -33,15 +33,18 @@ MANIFEST = ExtensionManifest(
     config_schema={
         "type": "object",
         "properties": {
-            "max_chars": {"type": "integer", "minimum": 0},
+            "max_chars": {"type": "integer", "minimum": 0, "default": 50_000},
+            "error_floor": {"type": "integer", "minimum": 0, "default": _ERROR_FLOOR},
         },
         "additionalProperties": True,
     },
+    requires=(),  # Leaf atom: post-processes tool results only.
 )
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     max_chars = max(0, int(config.get("max_chars", 50_000)))
+    error_floor = max(0, int(config.get("error_floor", _ERROR_FLOOR)))
 
     def _on_tool_result(event: ToolResultEvent) -> ToolResult | None:
         text_total = sum(
@@ -52,12 +55,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         if text_total <= max_chars:
             return None
 
-        # Error tool results carry block reasons that must remain legible; lift
-        # the budget to ``_ERROR_FLOOR`` (or the full payload, whichever is
-        # smaller) when the kernel marked this result as an error.
+        # Error tool results carry block reasons that must remain legible.
         effective_max = max_chars
         if event.result.is_error:
-            effective_max = max(max_chars, min(_ERROR_FLOOR, text_total))
+            effective_max = max(max_chars, min(error_floor, text_total))
             if text_total <= effective_max:
                 return None
 
@@ -87,7 +88,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         return ToolResult(
             content=new_content,
             is_error=event.result.is_error,
-            details=event.result.details,
+            extras=event.result.extras,
         )
 
     api.on(ToolResultEvent.CHANNEL, _on_tool_result)

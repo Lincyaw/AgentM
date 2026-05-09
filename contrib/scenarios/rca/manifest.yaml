@@ -1,72 +1,70 @@
 name: rca
 description: Root-cause analysis over parquet observability data via DuckDB SQL.
 extensions:
-  # Orchestrator-side: NO direct data tools. The lead investigator only
-  # plans, dispatches workers, tracks hypotheses, and finalizes. SQL
-  # tools live exclusively on worker sessions via ``inherit_extensions``
-  # below — this forces the orchestrator to delegate instead of spinning
-  # on ``query_sql`` until the turn budget runs out.
-  - local: hypothesis_tools
+  # Orchestrator-side: the lead investigator now does the investigation
+  # itself (single-critic flow). Earlier 3-persona dispatch caused error
+  # cascades — biased subagent verdicts steered the orchestrator and the
+  # role distinction (scout / deep_analyze / verify) was too thin to be
+  # worth the routing overhead. The orchestrator carries the data tools
+  # directly and only delegates ONE thing: adversarial review by `critic`.
+  - module: agentm_rca.tools.hypothesis_tools
+  - module: agentm_rca.tools.duckdb_sql
+    config:
+      exclude:
+        - conclusion.parquet
   - module: agentm_rca.tools.finalize
   - module: agentm.extensions.builtin.artifact_store
   - module: agentm.extensions.builtin.observability
+  - module: agentm_rca.worker_skills
+  - module: agentm.extensions.builtin.skill_loader
+    config:
+      include_defaults: false
+      inherit_claude: false
+  - module: agentm.extensions.builtin.tool_read
+  - module: contrib.extensions.rcabench_contract
 
   # Multi-agent wiring. ``orchestrator_setup`` (scenario-local) loads the
   # orchestrator system prompt, appends the available-personas block, and
-  # answers ``resolve_subagent`` for the personas under ``agents/``.
+  # answers ``ResolveSubagentEvent.CHANNEL`` for the personas under ``agents/``
+  # (now only ``critic``).
   - local: orchestrator_setup
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: ""
   - module: agentm.extensions.builtin.sub_agent
     config:
-      max_workers: 4
+      max_workers: 2
       inherit_extensions:
         - duckdb_sql
         - artifact_store
         - observability
-        # Worker-only skills: ``worker_skills`` publishes the
+        # Critic-only skills: ``worker_skills`` publishes the
         # ``contrib/scenarios/rca/skills/`` directory via
         # ``ResourcesDiscoverEvent``; ``skill_loader`` (builtin) reads
         # that hook and injects the diagnose-sql / rca-worker-guide
-        # SKILL.md content into the worker system prompt. ``tool_read``
-        # lets workers drill into the skill body files (correlation.md,
-        # traces.md, ...) — without it the worker only sees the skill
-        # description, not the recipes.
+        # SKILL.md content into the critic's system prompt. ``tool_read``
+        # lets the critic drill into the skill body files
+        # (correlation.md, traces.md, ...).
         - worker_skills
         - skill_loader
         - tool_read
         # ``worker_finalize`` registers ``return_response`` — the only
-        # sanctioned worker-termination tool. Without it, workers loop
-        # on query_sql until their budget runs out and ``final_text``
+        # sanctioned worker-termination tool. Without it, the critic
+        # loops on query_sql until its budget runs out and ``final_text``
         # comes back null to the orchestrator.
         - worker_finalize
       available_inherited_extensions:
         duckdb_sql:
-          # Real importable path. The synthetic
-          # ``agentm._scenarios.rca.duckdb_sql`` name only exists when the
-          # orchestrator loads a ``local: duckdb_sql`` entry — and we
-          # deliberately do NOT, so workers must import the real module.
           module: agentm_rca.tools.duckdb_sql
-          config:
-            exclude:
-              - conclusion.parquet
-            row_limit: 200
-            token_limit: 5000
         artifact_store:
           module: agentm.extensions.builtin.artifact_store
-          config: {}
         observability:
           module: agentm.extensions.builtin.observability
-          config: {}
         worker_skills:
           module: agentm_rca.worker_skills
-          config: {}
         skill_loader:
           module: agentm.extensions.builtin.skill_loader
-          config:
-            include_defaults: false
-            inherit_claude: false
         tool_read:
           module: agentm.extensions.builtin.tool_read
-          config: {}
         worker_finalize:
           module: agentm_rca.tools.worker_finalize
-          config: {}

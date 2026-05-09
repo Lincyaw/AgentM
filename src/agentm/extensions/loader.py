@@ -212,7 +212,83 @@ def _parse_extensions(
                 ),
             )
 
-    return extensions
+    return sort_extensions_by_requires(extensions, source=source)
+
+
+def sort_extensions_by_requires(
+    extensions: list[tuple[str, dict[str, Any]]],
+    *,
+    source: str = "<extensions>",
+) -> list[tuple[str, dict[str, Any]]]:
+    manifests: dict[str, ExtensionManifest] = {}
+    name_by_module: dict[str, str] = {}
+    entries_by_name: dict[str, tuple[str, dict[str, Any]]] = {}
+
+    for module_path, config in extensions:
+        try:
+            module = importlib.import_module(module_path)
+        except Exception:  # noqa: BLE001
+            continue
+        manifest = getattr(module, "MANIFEST", None)
+        if not isinstance(manifest, ExtensionManifest):
+            continue
+        existing = entries_by_name.get(manifest.name)
+        if existing is not None:
+            raise ScenarioLoadError(
+                source,
+                ValueError(
+                    f"extension {manifest.name!r} is loaded more than once; "
+                    "duplicate extension entries are not supported"
+                ),
+            )
+        manifests[manifest.name] = manifest
+        name_by_module[module_path] = manifest.name
+        entries_by_name[manifest.name] = (module_path, config)
+
+    for name, manifest in manifests.items():
+        for dep in manifest.requires:
+            if dep not in entries_by_name:
+                raise ScenarioLoadError(
+                    source,
+                    ValueError(
+                        f"extension {name!r} requires {dep!r}, but {dep!r} "
+                        "is not loaded"
+                    ),
+                )
+
+    sorted_entries: list[tuple[str, dict[str, Any]]] = []
+    temporary: set[str] = set()
+    permanent: set[str] = set()
+    emitted_modules: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in permanent:
+            return
+        if name in temporary:
+            raise ScenarioLoadError(
+                source, ValueError(f"extension dependency cycle involving {name!r}")
+            )
+        temporary.add(name)
+        for dep in manifests[name].requires:
+            visit(dep)
+        temporary.remove(name)
+        permanent.add(name)
+        entry = entries_by_name[name]
+        if entry[0] not in emitted_modules:
+            sorted_entries.append(entry)
+            emitted_modules.add(entry[0])
+
+    for entry in extensions:
+        module_path = entry[0]
+        module_name = name_by_module.get(module_path)
+        if module_name is None:
+            if module_path not in emitted_modules:
+                sorted_entries.append(entry)
+                emitted_modules.add(module_path)
+            continue
+        visit(module_name)
+
+    return sorted_entries
 
 
 def _validate_module(source: str, index: int, module: str) -> None:
@@ -240,22 +316,65 @@ def _validate_module(source: str, index: int, module: str) -> None:
         )
 
 
-def _ensure_scenario_import_roots(scenario_dir: Path) -> None:
-    """Make editable-style scenario packages importable during manifest load.
+def _find_project_root(start: Path) -> Path | None:
+    """Locate the topmost project root above ``start``.
 
-    Scenario manifests are allowed to reference modules from
-    ``<scenario_dir>/src`` (for example ``agentm_rca.tools.duckdb_sql``).
-    Tests and local dev runs load manifests straight from the repo checkout
-    without first installing each scenario package, so the loader needs to
-    surface that source root on ``sys.path`` before validating imports.
+    A scenario directory may itself be a workspace member with its own
+    ``pyproject.toml`` (e.g. ``contrib/scenarios/rca/pyproject.toml``),
+    so the *first* marker hit when ascending is not the project root —
+    it's the nested member. We want the outermost project so
+    cross-package references like ``contrib.extensions.<name>`` resolve.
+
+    Strategy: prefer the directory containing ``.git`` if any ancestor
+    has one (the canonical monorepo boundary); otherwise return the
+    highest ancestor that still carries a Python project marker.
+    """
+
+    project_markers = ("pyproject.toml", "setup.py", "setup.cfg")
+    highest_with_marker: Path | None = None
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+        if any((candidate / m).is_file() for m in project_markers):
+            highest_with_marker = candidate
+    return highest_with_marker
+
+
+def _prepend_sys_path(path: Path) -> None:
+    text = str(path)
+    if text not in sys.path:
+        sys.path.insert(0, text)
+
+
+def _ensure_scenario_import_roots(scenario_dir: Path) -> None:
+    """Make in-tree scenario packages importable during manifest load.
+
+    Scenario manifests reference modules in two ways:
+
+    1. ``<scenario_dir>/src/<pkg>`` — editable-style scenario packages
+       (e.g. ``agentm_rca.tools.duckdb_sql`` under
+       ``contrib/scenarios/rca/src/agentm_rca/``).
+    2. ``<project_root>/<pkg>`` — peer packages from the same checkout
+       (e.g. ``contrib.extensions.rcabench_contract`` under
+       ``contrib/extensions/``).
+
+    Entry-point scripts launch with ``sys.path[0]`` pointing at the
+    venv bin dir rather than the project root, so neither path is on
+    ``sys.path`` by default and ``import`` fails — silently, because
+    the caller in ``session_factory`` swallows the manifest load error
+    and the session ends up with zero tools. We surface both roots
+    here so the imports resolve regardless of how the process was
+    launched. Project root is located via the standard Python project
+    markers rather than hard-coded directory names.
     """
 
     src_root = scenario_dir / "src"
-    if not src_root.is_dir():
-        return
-    src_str = str(src_root)
-    if src_str not in sys.path:
-        sys.path.insert(0, src_str)
+    if src_root.is_dir():
+        _prepend_sys_path(src_root)
+
+    project_root = _find_project_root(scenario_dir)
+    if project_root is not None:
+        _prepend_sys_path(project_root)
 
 
 def _register_local(
@@ -350,4 +469,4 @@ def _entry_error(index: int, detail: str) -> str:
     return f"extensions[{index}] {detail}"
 
 
-__all__ = ["ScenarioLoadError", "load_scenario", "load_scenario_with_meta"]
+__all__ = ["ScenarioLoadError", "load_scenario", "load_scenario_with_meta", "sort_extensions_by_requires"]

@@ -28,6 +28,8 @@ from .events import (
     EventBus,
     EventBusObserver,
     Handler,
+    ObserverCallback,
+    ObserverRegistration,
     Inject,
     LlmRequestEndEvent,
     LlmRequestStartEvent,
@@ -42,6 +44,7 @@ from .events import (
     StreamDeltaEvent,
     TerminationCause,
     ToolCallEvent,
+    ToolErrorEvent,
     ToolResultEvent,
     ToolTerminated,
     TurnEndEvent,
@@ -49,6 +52,11 @@ from .events import (
     TurnStartEvent,
 )
 from .loop import AgentLoop, LoopConfig
+from .presenter import PHASE_GLYPHS, Phase
+from .provider import ProviderConfig, ProviderManifest, ProviderResolver
+from .retry import RetryPolicy
+from .services import CostBreakdown, CostQueryService
+from .session_store import SessionState, SessionStore
 from .messages import (
     AgentMessage,
     AssistantContent,
@@ -72,15 +80,45 @@ from .stream import (
     TextDelta,
     ThinkingDelta,
     ToolCallArgsDelta,
+    ToolCallArgsParseError,
     ToolCallEnd,
     ToolCallStart,
 )
-from .tool import FunctionTool, Tool, ToolContinue, ToolOutcome, ToolResult, ToolTerminate
+from .termination import (
+    Aborted,
+    EndTurn,
+    MaxTokens,
+    ProviderError,
+    TerminationHint,
+    ToolUseExpected,
+    VendorSpecific,
+)
+from .tool import Tool, ToolContinue, ToolOutcome, ToolResult, ToolTerminate
+
+# ``FunctionTool`` is a concrete adapter — it lives outside the ABI surface
+# proper (under ``core/_internal/tools.py``) but is re-exported here for
+# ergonomic access from atoms and tests. Importing _internal from the abi
+# __init__ is allowed: this module is itself part of the constitution.
+from agentm.core._internal.tools import FunctionTool  # noqa: E402
 
 __all__ = [
     # loop
     "AgentLoop",
     "LoopConfig",
+    # presenter view contract
+    "PHASE_GLYPHS",
+    "Phase",
+    # provider
+    "ProviderConfig",
+    "ProviderManifest",
+    "ProviderResolver",
+    # retry
+    "RetryPolicy",
+    "CostBreakdown",
+    "CostQueryService",
+    # session store
+    "SessionState",
+    "SessionStore",
     # messages
     "AgentMessage",
     "AssistantContent",
@@ -118,6 +156,8 @@ __all__ = [
     "LlmRequestStartEvent",
     "LoopAction",
     "Handler",
+    "ObserverCallback",
+    "ObserverRegistration",
     "MaxTurnsExhausted",
     "ModelEndTurn",
     "ProviderProtocolViolation",
@@ -128,6 +168,7 @@ __all__ = [
     "StreamDeltaEvent",
     "TerminationCause",
     "ToolCallEvent",
+    "ToolErrorEvent",
     "ToolResultEvent",
     "ToolTerminated",
     "TurnEndEvent",
@@ -141,6 +182,15 @@ __all__ = [
     "TextDelta",
     "ThinkingDelta",
     "ToolCallArgsDelta",
+    "ToolCallArgsParseError",
     "ToolCallEnd",
     "ToolCallStart",
+    # termination
+    "Aborted",
+    "EndTurn",
+    "MaxTokens",
+    "ProviderError",
+    "TerminationHint",
+    "ToolUseExpected",
+    "VendorSpecific",
 ]

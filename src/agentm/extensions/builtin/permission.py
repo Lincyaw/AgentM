@@ -25,6 +25,7 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": True,
     },
+    requires=(),  # Leaf policy atom: can guard absent, present, or future tools.
     tier=2,
 )
 

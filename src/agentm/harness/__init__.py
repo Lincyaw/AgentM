@@ -6,7 +6,17 @@ points are listed below.
 
 from __future__ import annotations
 
+from agentm.core.abi import FunctionTool
 from agentm.harness import events
+from agentm.harness.events import (
+    ApiRegisterEvent,
+    ApiSendUserMessageEvent,
+    ChildSessionEndEvent,
+    ChildSessionStartEvent,
+    CostBudgetExceededEvent,
+    ExtensionInstallEvent,
+    ExtensionReloadEvent,
+)
 from agentm.harness.extension import (
     CommandSpec,
     ExtensionAPI,
@@ -31,6 +41,7 @@ from agentm.harness.session import AgentSession, AgentSessionConfig
 from agentm.harness.session_manager import (
     InMemorySessionManager,
     JsonlSessionManager,
+    JsonlSessionStore,
     SessionContext,
     SessionEntry,
     SessionHeader,
@@ -49,14 +60,23 @@ from agentm.harness.session_services import (
 
 __all__ = [
     "AgentSession",
+    "ApiRegisterEvent",
+    "ApiSendUserMessageEvent",
+    "ChildSessionEndEvent",
+    "ChildSessionStartEvent",
+    "CostBudgetExceededEvent",
     "AgentSessionConfig",
     "CommandSpec",
     "DefaultResourceLoader",
     "ExtensionAPI",
+    "ExtensionInstallEvent",
     "ExtensionLoadError",
+    "ExtensionReloadEvent",
+    "FunctionTool",
     "InMemoryResourceLoader",
     "InMemorySessionManager",
     "JsonlSessionManager",
+    "JsonlSessionStore",
     "MissingSessionCwdError",
     "ProviderConfig",
     "ReadonlySession",

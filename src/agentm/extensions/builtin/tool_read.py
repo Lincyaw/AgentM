@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.operations import FileOperations
@@ -21,9 +21,10 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": True,
     },
+    requires=(),  # Leaf tool atom: consumes Operations via ExtensionAPI.
 )
 
-_PARAMETERS = {
+_PARAMETERS: Final = {
     "type": "object",
     "properties": {
         "path": {"type": "string"},
@@ -59,6 +60,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             description="Read a UTF-8 text file from disk by line range.",
             parameters=_PARAMETERS,
             fn=_execute,
+            metadata={"file_op": "read"},
         )
     )
 

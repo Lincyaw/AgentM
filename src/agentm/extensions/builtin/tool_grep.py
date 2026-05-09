@@ -3,29 +3,41 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
-import shutil
-from typing import Any, Protocol
+from typing import Any, Final
 
 import pathspec
 
 from agentm.core.abi import TextContent, Tool, ToolResult
 from agentm.core.abi.operations import FileOperations
-from agentm.core.lib.path_utils import load_gitignore_patterns, resolve_to_cwd
-from agentm.core.lib.text_truncate import DEFAULT_MAX_BYTES, GREP_MAX_LINE_LENGTH, format_size, truncate_head, truncate_line
+from agentm.core.lib.path_utils import (
+    load_gitignore_patterns_from_file_ops,
+    resolve_to_cwd,
+)
+from agentm.core.lib.text_truncate import (
+    DEFAULT_MAX_BYTES,
+    GREP_MAX_LINE_LENGTH,
+    format_size,
+    truncate_head,
+    truncate_line,
+)
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(
     name="tool_grep",
-    description="Register the grep tool backed by rg or stdlib fallback.",
+    description="Register the grep tool backed by FileOperations.",
     registers=("tool:grep",),
-    config_schema={"type": "object", "properties": {"ops": {"type": "object"}}, "additionalProperties": True},
+    config_schema={
+        "type": "object",
+        "properties": {"file_ops": {"type": "object"}},
+        "additionalProperties": True,
+    },
+    requires=(),  # Leaf tool atom: consumes Operations via ExtensionAPI.
 )
 
-_PARAMETERS = {
+_PARAMETERS: Final = {
     "type": "object",
     "properties": {
         "pattern": {"type": "string"},
@@ -41,41 +53,21 @@ _PARAMETERS = {
 }
 
 
-class GrepOperations(Protocol):
-    async def is_directory(self, path: str) -> bool: ...
-
-    async def read_file(self, path: str) -> str: ...
-
-
-class _LocalGrepOperations:
-    def __init__(self, file_ops: FileOperations) -> None:
-        self._file_ops = file_ops
-
-    async def is_directory(self, path: str) -> bool:
-        return await asyncio.to_thread(os.path.isdir, path)
-
-    async def read_file(self, path: str) -> str:
-        data = await self._file_ops.read_file(path)
-        return data.decode("utf-8", errors="replace")
-
-
 class _GrepTool(Tool):
     name = "grep"
     description = "Search files for regex or literal matches, honoring .gitignore."
     parameters = _PARAMETERS
 
-    def __init__(
-        self,
-        cwd: str,
-        ops: GrepOperations | None,
-        file_ops: FileOperations,
-    ) -> None:
+    def __init__(self, cwd: str, file_ops: FileOperations) -> None:
         self._cwd = cwd
-        self._ops = ops or _LocalGrepOperations(file_ops)
-        self._has_custom_ops = ops is not None
+        self._file_ops = file_ops
 
-    async def execute(self, args: dict[str, Any], *, signal: asyncio.Event | None = None, on_update: Any = None) -> ToolResult:
-        del on_update
+    async def execute(
+        self,
+        args: dict[str, Any],
+        *,
+        signal: asyncio.Event | None = None,
+    ) -> ToolResult:
         if signal is not None and signal.is_set():
             raise Exception("Operation aborted")
         pattern = str(args["pattern"])
@@ -83,39 +75,28 @@ class _GrepTool(Tool):
         glob = str(args["glob"]) if args.get("glob") is not None else None
         context = max(0, int(args.get("context", 0)))
         limit = max(1, int(args.get("limit", 100)))
-        is_dir, prefetched_text = await _classify_path(self._ops, search_path)
-        rg_path = shutil.which("rg")
-        if rg_path and not self._has_custom_ops:
-            hits = await _grep_with_rg(rg_path, pattern, search_path, glob, bool(args.get("ignore_case", False)), bool(args.get("literal", False)), limit, signal)
-            fallback = False
-        else:
-            hits = await _grep_fallback(
-                self._ops,
-                pattern,
-                search_path,
-                glob,
-                bool(args.get("ignore_case", False)),
-                bool(args.get("literal", False)),
-                limit,
-                is_dir,
-                prefetched_text,
-                signal,
-            )
-            fallback = True
+        is_dir = await self._classify_path(search_path)
+        hits = await _grep_with_file_ops(
+            self._file_ops,
+            pattern,
+            search_path,
+            glob,
+            bool(args.get("ignore_case", False)),
+            bool(args.get("literal", False)),
+            limit,
+            is_dir,
+            signal,
+        )
         lines, line_cut = await _render(
-            self._ops,
+            self._file_ops,
             search_path,
             is_dir,
             hits[:limit],
             context,
-            prefetched_text,
             self._cwd,
         )
         if not lines:
-            text = "No matches found"
-            if fallback:
-                text += "\n[rg unavailable; used slower stdlib fallback. Install ripgrep via your package manager for faster searches.]"
-            return ToolResult(content=[TextContent(type="text", text=text)])
+            return ToolResult(content=[TextContent(type="text", text="No matches found")])
         trunc = truncate_head("\n".join(lines), max_lines=10**9, max_bytes=DEFAULT_MAX_BYTES)
         text = trunc.content
         notes: list[str] = []
@@ -129,50 +110,14 @@ class _GrepTool(Tool):
             text += f"\n[Truncated: {', '.join(notes)}]"
         return ToolResult(content=[TextContent(type="text", text=text)])
 
-
-async def _grep_with_rg(
-    rg_path: str,
-    pattern: str,
-    search_path: str,
-    glob: str | None,
-    ignore_case: bool,
-    literal: bool,
-    limit: int,
-    signal: asyncio.Event | None,
-) -> list[tuple[str, int]]:
-    args = [rg_path, "--json", "--line-number", "--color=never", "--hidden"]
-    if ignore_case:
-        args.append("--ignore-case")
-    if literal:
-        args.append("--fixed-strings")
-    if glob:
-        args.extend(["--glob", glob])
-    args.extend([pattern, search_path])
-    proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    assert proc.stdout is not None and proc.stderr is not None
-    hits: list[tuple[str, int]] = []
-    while raw := await proc.stdout.readline():
-        if signal is not None and signal.is_set():
-            proc.terminate()
-            await proc.wait()
-            raise Exception("Operation aborted")
-        event = json.loads(raw.decode("utf-8", errors="replace"))
-        if event.get("type") != "match":
-            continue
-        data = event["data"]
-        hits.append((data["path"]["text"], int(data["line_number"])))
-        if len(hits) >= limit:
-            proc.terminate()
-            break
-    stderr = await proc.stderr.read()
-    await proc.wait()
-    if proc.returncode not in (0, 1, -15):
-        raise Exception(stderr.decode("utf-8", errors="replace").strip() or "ripgrep search failed")
-    return hits
+    async def _classify_path(self, search_path: str) -> bool:
+        if not await self._file_ops.access(search_path):
+            raise Exception(f"Path not found: {search_path}")
+        return await self._file_ops.is_dir(search_path)
 
 
-async def _grep_fallback(
-    ops: GrepOperations,
+async def _grep_with_file_ops(
+    file_ops: FileOperations,
     pattern: str,
     search_path: str,
     glob: str | None,
@@ -180,17 +125,19 @@ async def _grep_fallback(
     literal: bool,
     limit: int,
     is_dir: bool,
-    prefetched_text: str | None,
     signal: asyncio.Event | None,
 ) -> list[tuple[str, int]]:
-    compiled = re.compile(re.escape(pattern) if literal else pattern, re.IGNORECASE if ignore_case else 0)
-    files = [search_path] if not is_dir else await _list_search_files(ops, search_path, glob)
+    compiled = re.compile(
+        re.escape(pattern) if literal else pattern,
+        re.IGNORECASE if ignore_case else 0,
+    )
+    files = [search_path] if not is_dir else await _list_search_files(file_ops, search_path, glob, signal)
     hits: list[tuple[str, int]] = []
     for file_path in files:
         if signal is not None and signal.is_set():
             raise Exception("Operation aborted")
         try:
-            text = prefetched_text if file_path == search_path and prefetched_text is not None else await ops.read_file(file_path)
+            text = (await file_ops.read_file(file_path)).decode("utf-8", errors="replace")
         except Exception:
             continue
         for line_no, line in enumerate(_split_lines(text), start=1):
@@ -201,45 +148,53 @@ async def _grep_fallback(
     return hits
 
 
-async def _classify_path(ops: GrepOperations, search_path: str) -> tuple[bool, str | None]:
-    try:
-        if await ops.is_directory(search_path):
-            return True, None
-        return False, await ops.read_file(search_path)
-    except Exception as exc:
-        raise Exception(f"Path not found: {search_path}") from exc
-
-
 async def _list_search_files(
-    ops: GrepOperations,
+    file_ops: FileOperations,
     root: str,
     glob: str | None,
+    signal: asyncio.Event | None,
 ) -> list[str]:
-    walk_files = getattr(ops, "walk_files", None)
-    if callable(walk_files):
-        return sorted(await walk_files(root, glob=glob))
-    ignore = pathspec.GitIgnoreSpec.from_lines(load_gitignore_patterns(root, extra=[".git/"]))
-    return await asyncio.to_thread(_walk_files, root, glob, ignore)
+    ignore = pathspec.GitIgnoreSpec.from_lines(
+        await load_gitignore_patterns_from_file_ops(file_ops, root, extra=[".git/"])
+    )
+    glob_spec = _compile_glob(glob) if glob else None
+    files: list[str] = []
+
+    async def _walk(path: str, rel_dir: str) -> None:
+        if signal is not None and signal.is_set():
+            raise Exception("Operation aborted")
+        for name in sorted(await file_ops.list_dir(path), key=lambda item: (item.lower(), item)):
+            rel_path = f"{rel_dir}/{name}".strip("/")
+            child = os.path.join(path, name)
+            is_dir = await file_ops.is_dir(child)
+            if ignore.match_file(rel_path) or (is_dir and ignore.match_file(rel_path + "/")):
+                continue
+            if is_dir:
+                await _walk(child, rel_path)
+                continue
+            if glob_spec is not None and not glob_spec.match_file(rel_path):
+                continue
+            files.append(child)
+
+    await _walk(root, "")
+    return files
 
 
 async def _render(
-    ops: GrepOperations,
+    file_ops: FileOperations,
     root: str,
     is_dir: bool,
     hits: list[tuple[str, int]],
     context: int,
-    prefetched_text: str | None,
     cwd: str,
 ) -> tuple[list[str], bool]:
-    cache: dict[str, list[str]] = (
-        {root: _split_lines(prefetched_text)} if prefetched_text is not None and not is_dir else {}
-    )
+    cache: dict[str, list[str]] = {}
     output: list[str] = []
     line_cut = False
     for offset, (file_path, line_no) in enumerate(sorted(hits, key=lambda item: (item[0], item[1]))):
         lines = cache.get(file_path)
         if lines is None:
-            lines = _split_lines(await ops.read_file(file_path))
+            lines = _split_lines((await file_ops.read_file(file_path)).decode("utf-8", errors="replace"))
             cache[file_path] = lines
         if context and offset:
             output.append("--")
@@ -256,26 +211,6 @@ async def _render(
     return output, line_cut
 
 
-def _walk_files(root: str, glob: str | None, ignore: pathspec.PathSpec) -> list[str]:
-    glob_spec = _compile_glob(glob) if glob else None
-    files: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=True):
-        rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
-        rel_dir = "" if rel_dir == "." else rel_dir
-        dirnames[:] = [name for name in dirnames if not _ignored(ignore, rel_dir, name)]
-        for filename in filenames:
-            rel_path = f"{rel_dir}/{filename}".strip("/")
-            if ignore.match_file(rel_path) or (glob_spec is not None and not glob_spec.match_file(rel_path)):
-                continue
-            files.append(os.path.join(dirpath, filename))
-    return sorted(files)
-
-
-def _ignored(spec: pathspec.PathSpec, rel_dir: str, name: str) -> bool:
-    rel_path = f"{rel_dir}/{name}".strip("/")
-    return spec.match_file(rel_path) or spec.match_file(rel_path + "/")
-
-
 def _compile_glob(glob: str) -> pathspec.GitIgnoreSpec:
     # Bare patterns (no slash) match basename anywhere in the tree.
     pattern = glob if "/" in glob else f"**/{glob}"
@@ -286,7 +221,9 @@ def _split_lines(text: str) -> list[str]:
     return text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
 
+def _coerce_file_ops(api: ExtensionAPI, candidate: Any) -> FileOperations:
+    return candidate if candidate is not None else api.get_operations().file
+
+
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    api.register_tool(
-        _GrepTool(api.cwd, config.get("ops"), api.get_operations().file)
-    )
+    api.register_tool(_GrepTool(api.cwd, _coerce_file_ops(api, config.get("file_ops"))))

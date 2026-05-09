@@ -17,12 +17,13 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from agentm.core.abi import AgentMessage
+from agentm.core.abi import AgentMessage, Tool
 from agentm.core.abi.compaction import (
     CompactionResult,
     CompactionSettings,
     ContextUsageEstimate,
 )
+from agentm.core.abi.project_layout import ProjectLayout
 from agentm.core.abi.prompt_template import PromptTemplateRecord
 from agentm.core.abi.skill import SkillDiagnostic, SkillRecord
 
@@ -45,6 +46,9 @@ class SkillsService(Protocol):
 
 
 class _DefaultSkillsService:
+    def __init__(self, layout: ProjectLayout | None = None) -> None:
+        self._layout = layout
+
     def load_skills(
         self,
         *,
@@ -55,11 +59,17 @@ class _DefaultSkillsService:
     ) -> tuple[list[SkillRecord], list[SkillDiagnostic]]:
         from agentm.core._internal.skills import load_skills as _impl
 
+        project_dirs: tuple[str, ...] | None
+        if self._layout is None:
+            project_dirs = None
+        else:
+            project_dirs = tuple(str(p) for p in self._layout.skills_dirs())
         return _impl(
             cwd=cwd,
             agent_dir=agent_dir,
             skill_paths=skill_paths,
             include_defaults=include_defaults,
+            project_skill_dirs=project_dirs,
         )
 
     def format_skills_for_prompt(self, skills: list[SkillRecord]) -> str:
@@ -90,8 +100,20 @@ class PromptTemplatesService(Protocol):
         templates: list[PromptTemplateRecord],
     ) -> str | None: ...
 
+    # In-memory prompt registry (issue #76). Atoms register named prompt
+    # bodies at install time; engine code retrieves them by name. Decoupled
+    # from the on-disk slash-command template flow above so kernel callers
+    # don't have to coordinate filesystem state.
+    def register_prompt(self, name: str, body: str) -> None: ...
+
+    def get_prompt(self, name: str) -> str | None: ...
+
 
 class _DefaultPromptTemplatesService:
+    def __init__(self, layout: ProjectLayout | None = None) -> None:
+        self._layout = layout
+        self._registry: dict[str, str] = {}
+
     def load_prompt_templates(
         self,
         *,
@@ -104,11 +126,17 @@ class _DefaultPromptTemplatesService:
             load_prompt_templates as _impl,
         )
 
+        project_dirs: tuple[str, ...] | None
+        if self._layout is None:
+            project_dirs = None
+        else:
+            project_dirs = tuple(str(p) for p in self._layout.prompts_dirs())
         return _impl(
             cwd=cwd,
             agent_dir=agent_dir,
             prompt_paths=prompt_paths,
             include_defaults=include_defaults,
+            project_prompt_dirs=project_dirs,
         )
 
     def expand_prompt_template(
@@ -121,6 +149,12 @@ class _DefaultPromptTemplatesService:
         )
 
         return _impl(text, templates)
+
+    def register_prompt(self, name: str, body: str) -> None:
+        self._registry[name] = body
+
+    def get_prompt(self, name: str) -> str | None:
+        return self._registry.get(name)
 
 
 # --- Catalog service -------------------------------------------------------
@@ -238,7 +272,7 @@ class _DefaultCatalogService:
     ) -> list[dict[str, Any]]:
         import json
 
-        from agentm.core._internal.catalog import _layout
+        from agentm.harness.catalog import _layout
 
         path = _layout.atom_decisions_path(name, version_key, root=root)
         if not path.exists():
@@ -259,7 +293,7 @@ class _DefaultCatalogService:
     ) -> None:
         import json
 
-        from agentm.core._internal.catalog import _layout
+        from agentm.harness.catalog import _layout
 
         path = _layout.atom_decisions_path(name, version_key, root=root)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -291,6 +325,7 @@ class CompactionService(Protocol):
         path_entries: list[Any],
         settings: CompactionSettings,
         current_messages: list[AgentMessage] | None = None,
+        tools: list[Tool] | None = None,
     ) -> Any | None: ...
 
     async def compact(
@@ -299,6 +334,7 @@ class CompactionService(Protocol):
         summarizer: Summarizer,
         summarization_prompt: str,
         custom_instructions: str | None = None,
+        prompts: Any | None = None,
     ) -> CompactionResult: ...
 
 
@@ -327,12 +363,13 @@ class _DefaultCompactionService:
         path_entries: list[Any],
         settings: CompactionSettings,
         current_messages: list[AgentMessage] | None = None,
+        tools: list[Tool] | None = None,
     ) -> Any | None:
         from agentm.core._internal.compaction import (
             prepare_compaction as _impl,
         )
 
-        return _impl(path_entries, settings, current_messages)
+        return _impl(path_entries, settings, current_messages, tools)
 
     async def compact(
         self,
@@ -340,23 +377,32 @@ class _DefaultCompactionService:
         summarizer: Summarizer,
         summarization_prompt: str,
         custom_instructions: str | None = None,
+        prompts: Any | None = None,
     ) -> CompactionResult:
         from agentm.core._internal.compaction import compact as _impl
 
         return await _impl(
-            preparation, summarizer, summarization_prompt, custom_instructions
+            preparation,
+            summarizer,
+            summarization_prompt,
+            custom_instructions,
+            prompts,
         )
 
 
 # --- Default builders ------------------------------------------------------
 
 
-def default_skills_service() -> SkillsService:
-    return _DefaultSkillsService()
+def default_skills_service(
+    layout: ProjectLayout | None = None,
+) -> SkillsService:
+    return _DefaultSkillsService(layout)
 
 
-def default_prompt_templates_service() -> PromptTemplatesService:
-    return _DefaultPromptTemplatesService()
+def default_prompt_templates_service(
+    layout: ProjectLayout | None = None,
+) -> PromptTemplatesService:
+    return _DefaultPromptTemplatesService(layout)
 
 
 def default_catalog_service() -> CatalogService:
@@ -367,14 +413,24 @@ def default_compaction_service() -> CompactionService:
     return _DefaultCompactionService()
 
 
+def default_project_layout(cwd: str) -> ProjectLayout:
+    """Return the harness's default :class:`ProjectLayout` for ``cwd``."""
+
+    from agentm.harness.catalog import default_project_layout as _impl
+
+    return _impl(cwd)
+
+
 __all__ = [
     "CatalogService",
     "CompactionService",
+    "ProjectLayout",
     "PromptTemplatesService",
     "SkillsService",
     "Summarizer",
     "default_catalog_service",
     "default_compaction_service",
+    "default_project_layout",
     "default_prompt_templates_service",
     "default_skills_service",
 ]

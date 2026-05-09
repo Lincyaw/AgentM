@@ -22,9 +22,9 @@ A stronger property follows from this boundary, and the constitution split is de
 
 > **`core/abi/` + `core/lib/` + `llm/` + stdlib must be sufficient to launch a working agent loop.** No import from `agentm.harness` or `agentm.extensions` may be required.
 
-This is not just "agent cannot break core" — it is "core alone yields a usable agent". When the autonomy layer is corrupted (a self-edited atom misbehaves, a scenario YAML is malformed, an extension reload leaves harness in an inconsistent state), the operator still has a path to launch an agent: the minimal mode at `src/agentm/minimal.py`, exposed by `agentm --minimal`. That agent has only stdlib-backed tools (`read_file`, `write_file`, `bash`, `list_dir`) and no observability or session state, but it launches, accepts a prompt, calls tools, and returns — enough to inspect and repair whatever is broken above.
+This is not just "agent cannot break core" — it is "core alone yields a usable agent". When the autonomy layer is corrupted (a self-edited atom misbehaves, a scenario YAML is malformed, an extension reload leaves harness in an inconsistent state), the operator still has a path to launch an agent: invoke `agentm --no-extensions "<prompt>"` to bypass atom discovery entirely, leaving only the kernel + provider + loop. That floor has no tool environment, skills, or observability, but it launches, accepts a prompt, and returns — enough to inspect and repair whatever is broken above.
 
-The invariant is enforced structurally (the import graph of `agentm.minimal` is clean of `harness`/`extensions`) and is the load-bearing reason for keeping `core/abi/` and `core/lib/` import-closed. Future PRs that introduce a `harness` import into `core/abi/` or `core/lib/` should be rejected on this basis alone.
+The invariant is enforced structurally (no `harness`/`extensions` import in `core/abi/`, `core/lib/`, or `llm/`) and is the load-bearing reason for keeping `core/abi/` and `core/lib/` import-closed. Future PRs that introduce a `harness` import into `core/abi/` or `core/lib/` should be rejected on this basis alone.
 
 ---
 
@@ -153,8 +153,9 @@ extension_api:
 
 reload:
   # Atoms in tier_2 require explicit `propose_change` decision to reload.
-  # cc_agents lives under contrib/extensions/cc/ (opt-in); scenarios that load
-  # it can re-list it in their own scenario manifest's reload.tier_2_atoms.
+  # Claude Code compatibility atoms live under contrib/extensions/cc/
+  # (opt-in package); scenarios that load them can re-list them in their
+  # own scenario manifest's reload.tier_2_atoms.
   tier_2_atoms:
     - permission
     - cost_budget
@@ -240,15 +241,17 @@ agent calls api.reload_atom(name, new_source)
 
 Key properties:
 - **Atomicity**: validator runs *before* any file is written. The agent never sees a half-validated state.
-- **Reversibility**: every reload freezes the previous source; rollback is mechanical, not LLM-driven.
+- **Reversibility**: every reload freezes the previous source; rollback is mechanical, not LLM-driven. If installing the new source fails and rollback activation also fails, the in-memory loaded-atom registries keep the previously live `LoadedAtom` instead of purging the operational state; the failure is surfaced as `rollback_failure_state_preserved`.
 - **Auditability**: success and failure both produce catalog records (sister doc §6).
 - **Stale-ctx safety**: the old `install(api, ...)` closures invalidate via `assert_active()` (§6 below).
+- **Async boundary discipline**: reload/install/freeze are native async in the reloader; synchronous ExtensionAPI facades are only API-boundary adapters.
+- **Lifecycle symmetry**: harness-owned EventBus subscriptions registered by the reloader are explicitly unsubscribed during `AgentSession.shutdown()` before the bus is cleared.
 
 ### 5.2 What `freeze_current` does
 
 Writes the current source + manifest to `.agentm/catalog/atoms/<name>/<content_hash>/` (constitution-owned path). See sister doc §3 for catalog schema. Idempotent: if hash already exists, no rewrite.
 
-> **Implementation note**: as of [git-backed-versioning.md](git-backed-versioning.md), this snapshot mechanism is provided by git plumbing through the harness `ResourceWriter` service. The catalog directory still exists for `metrics.jsonl` and `runs/`; source/manifest content moves into the git object store. The transactional reload flow simplifies to `writer.write(...) → on install failure: git restore + git reset --hard <pre_sha>`.
+> **Implementation note**: as of [git-backed-versioning.md](git-backed-versioning.md), this snapshot mechanism is provided by git plumbing through the harness `ResourceWriter` service. The catalog directory still exists for `metrics.jsonl` and `runs/`; source/manifest content moves into the git object store. The transactional reload flow simplifies to `writer.write(...) → on install failure: writer.restore(path, pre_sha)`.
 
 ### 5.3 What `restore_from_snapshot` does
 
@@ -319,9 +322,10 @@ Atoms whose worst-case bug breaks safety, cost, or trust boundaries. Validator r
 | `tool_filter` | Re-enabling a deny-listed tool is the canonical failure mode |
 | `llm_compaction` | Affects context fidelity; bad strategies amplify silently |
 
-Contrib atoms (e.g. `cc_agents` under `contrib/extensions/cc/`) declare their own
-tier; scenarios opting in are responsible for re-listing them in the scenario
-manifest's `reload.tier_2_atoms`.
+Contrib atoms (e.g. `contrib.extensions.cc.agents` under the opt-in
+`contrib/extensions/cc/` package) declare their own tier; scenarios opting in
+are responsible for re-listing them in the scenario manifest's
+`reload.tier_2_atoms`.
 
 ### 7.3 Tier declaration
 
@@ -336,6 +340,21 @@ Added to `harness.extension.ExtensionAPI` (constitution layer; methods themselve
 ```python
 class ExtensionAPI(Protocol):
     # ... existing methods ...
+
+    def add_observer(self, callback: ObserverCallback) -> Unsubscribe:
+        ...
+
+    async def spawn_child_session(self, config: AgentSessionConfig | dict[str, Any]) -> Any:
+        ...
+
+    def set_service(self, name: str, obj: Any) -> None:
+        ...
+
+    def get_service(self, name: str) -> Any | None:
+        ...
+
+    def get_resource_writer(self) -> ResourceWriter:
+        ...
 
     def reload_atom(
         self,

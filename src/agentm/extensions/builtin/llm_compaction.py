@@ -1,10 +1,17 @@
-"""Builtin LLM-driven compaction extension."""
+"""Builtin LLM-driven compaction extension.
+
+Per issue #76 the compaction kernel owns no English prompt text; this atom
+resolves the active bodies via ``api.prompt_templates.get_prompt`` (populated
+by the ``compaction_prompts`` atom) and threads them into the engine. When
+the prompts atom is not installed, this atom falls back to neutral empty
+strings and emits a diagnostic so users see the configuration drift.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
-from agentm.core.abi.compaction import CompactionSettings
+from agentm.core.abi.compaction import CompactionPrompts, CompactionSettings
 from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
@@ -14,77 +21,19 @@ from agentm.core.abi import (
     TextContent,
     UserMessage,
 )
+from agentm.core.abi.events import DiagnosticEvent
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import AfterCompactEvent, BeforeCompactEvent
 from agentm.harness.extension import ExtensionAPI, ProviderConfig
 
 
-_SUMMARIZATION_PROMPT = """The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
-
-Use this EXACT format:
-
-## Goal
-[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
-
-## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned by user]
-- [Or "(none)" if none were mentioned]
-
-## Progress
-### Done
-- [x] [Completed tasks/changes]
-
-### In Progress
-- [ ] [Current work]
-
-### Blocked
-- [Issues preventing progress, if any]
-
-## Key Decisions
-- **[Decision]**: [Brief rationale]
-
-## Next Steps
-1. [Ordered list of what should happen next]
-
-## Critical Context
-- [Any data, examples, or references needed to continue]
-- [Or "(none)" if not applicable]
-
-Keep each section concise. Preserve exact file paths, function names, and error messages."""
-
-_BRANCH_SUMMARY_PREAMBLE = (
-    "The user explored a different conversation branch before returning here.\n"
-    "Summary of that exploration:\n\n"
-)
-
-_BRANCH_SUMMARY_PROMPT = """Create a structured summary of this conversation branch for context when returning later.
-
-Use this EXACT format:
-
-## Goal
-[What was the user trying to accomplish in this branch?]
-
-## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned]
-- [Or "(none)" if none were mentioned]
-
-## Progress
-### Done
-- [x] [Completed tasks/changes]
-
-### In Progress
-- [ ] [Work that was started but not finished]
-
-### Blocked
-- [Issues preventing progress, if any]
-
-## Key Decisions
-- **[Decision]**: [Brief rationale]
-
-## Next Steps
-1. [What should happen next to continue this work]
-
-Keep each section concise. Preserve exact file paths, function names, and error messages."""
+# Prompt registry keys. Kept in sync with ``compaction_prompts.py``;
+# §11 forbids atom-to-atom imports so we duplicate the canonical names
+# here instead of importing them.
+_PROMPT_SUMMARIZATION_SYSTEM = "compaction.summarization_system"
+_PROMPT_SUMMARIZATION = "compaction.summarization"
+_PROMPT_UPDATE_SUMMARIZATION = "compaction.update_summarization"
+_PROMPT_TURN_PREFIX_SUMMARIZATION = "compaction.turn_prefix_summarization"
 
 
 MANIFEST = ExtensionManifest(
@@ -94,13 +43,14 @@ MANIFEST = ExtensionManifest(
     config_schema={
         "type": "object",
         "properties": {
-            "enabled": {"type": "boolean"},
-            "reserve_tokens": {"type": "integer", "minimum": 1},
-            "keep_recent_tokens": {"type": "integer", "minimum": 1},
+            "enabled": {"type": "boolean", "default": True},
+            "reserve_tokens": {"type": "integer", "minimum": 1, "default": 16_384},
+            "keep_recent_tokens": {"type": "integer", "minimum": 1, "default": 20_000},
             "custom_instructions": {"type": "string"},
         },
         "additionalProperties": False,
     },
+    requires=("compaction_prompts",),
     tier=2,
 )
 
@@ -130,12 +80,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
         branch = api.session.get_branch()
         preparation = api.compaction.prepare_compaction(
-            branch, settings, current_messages=session_messages
+            branch, settings, current_messages=session_messages, tools=list(api.tools)
         )
         if preparation is None:
             return
         if not preparation.messages_to_summarize and not preparation.turn_prefix_messages:
             return
+
+        prompts, summarization_body = await _resolve_prompts(api)
 
         before = BeforeCompactEvent(messages=event.messages, reason="llm_auto_overflow")
         await api.events.emit(BeforeCompactEvent.CHANNEL, before)
@@ -143,8 +95,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         result = await api.compaction.compact(
             preparation,
             _ProviderSummarizer(provider, model),
-            _SUMMARIZATION_PROMPT,
+            summarization_body,
             custom_instructions,
+            prompts=prompts,
         )
 
         details = {
@@ -173,6 +126,60 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         )
 
     api.on(BeforeSendToLlmEvent.CHANNEL, before_send_to_llm)
+
+
+async def _resolve_prompts(api: ExtensionAPI) -> tuple[CompactionPrompts, str]:
+    """Pull prompt bodies from the registry; emit a diagnostic if missing.
+
+    Returns a 2-tuple ``(prompts, summarization_body)`` where ``prompts`` is
+    a :class:`CompactionPrompts` and ``summarization_body`` is the
+    fresh-summarization prompt body.
+
+    When any required prompt is missing — i.e. the ``compaction_prompts``
+    atom is not installed — we substitute empty strings and emit a single
+    ``warning`` diagnostic. The compaction call still goes through; the LLM
+    sees an empty instruction trailer and a neutral system prompt, which
+    degrades quality but avoids a hard crash.
+    """
+
+    system = api.prompt_templates.get_prompt(_PROMPT_SUMMARIZATION_SYSTEM)
+    summarization = api.prompt_templates.get_prompt(_PROMPT_SUMMARIZATION)
+    update = api.prompt_templates.get_prompt(_PROMPT_UPDATE_SUMMARIZATION)
+    turn_prefix = api.prompt_templates.get_prompt(_PROMPT_TURN_PREFIX_SUMMARIZATION)
+
+    missing = [
+        name
+        for name, body in (
+            (_PROMPT_SUMMARIZATION_SYSTEM, system),
+            (_PROMPT_SUMMARIZATION, summarization),
+            (_PROMPT_UPDATE_SUMMARIZATION, update),
+            (_PROMPT_TURN_PREFIX_SUMMARIZATION, turn_prefix),
+        )
+        if not body
+    ]
+    if missing:
+        await api.events.emit(
+            DiagnosticEvent.CHANNEL,
+            DiagnosticEvent(
+                level="warning",
+                source="llm_compaction",
+                message=(
+                    "compaction_prompts atom not installed (missing prompts: "
+                    f"{missing!r}); proceeding with empty prompt bodies — "
+                    "summary quality will degrade. Install "
+                    "extensions.builtin.compaction_prompts to restore defaults."
+                ),
+            ),
+        )
+
+    return (
+        CompactionPrompts(
+            summarization_system=system or "",
+            update_summarization=update or "",
+            turn_prefix_summarization=turn_prefix or "",
+        ),
+        summarization or "",
+    )
 
 
 class _ProviderSummarizer:

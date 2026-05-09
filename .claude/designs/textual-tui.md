@@ -2,7 +2,7 @@
 
 **Status**: implemented (sole interactive frontend; `rich.live` simple TUI deleted 2026-05-02; layout rebuilt outside-in 2026-05-02)
 **Created**: 2026-05-01
-**Last Updated**: 2026-05-02
+**Last Updated**: 2026-05-09
 **Builds on**: [pluggable-architecture.md](pluggable-architecture.md), [observability.md](observability.md)
 
 ---
@@ -119,9 +119,8 @@ Key Textual idioms used:
 - `Footer` widget auto-renders any `BINDINGS` entries with `show=True`,
   so users see `⌃C ⌃D ⌃L ⌃R ⌃E` without opening `/help`.
 - App-level theme switching via `self.theme = "textual-dark"` /
-  `"textual-light"` (Textual built-in registered themes) — no custom
-  `.theme-dark { background: #0f1115 }` overrides that fight the
-  framework.
+  `"textual-light"` (Textual built-in registered themes) with invalid
+  theme failures surfaced as warning diagnostics before falling back.
 - `Collapsible` for tool blocks (one keystroke to expand). Default
   state: collapsed if result < 20 lines, expanded if it's a code/diff
   write.
@@ -139,9 +138,9 @@ The bus events are the contract. Each event maps to exactly one widget mutation:
 
 | Event | Source | UI effect |
 |---|---|---|
-| `stream_delta(TextDelta)` | `AgentLoop` | Append to active `AssistantTextBlock`. Refresh panel. |
-| `stream_delta(ThinkingDelta)` | `AgentLoop` | Append to active `ThinkingBlock`. Block is auto-collapsed when streaming ends. |
-| `stream_delta(ToolCallStart)` | `AgentLoop` | Insert a placeholder `ToolCallBlock` with name, no args yet. |
+| `stream_delta(TextDelta)` | `AgentLoop` | Dispatch table entry appends to active `AssistantTextBlock`. Refresh panel. |
+| `stream_delta(ThinkingDelta)` | `AgentLoop` | Dispatch table entry appends to active `ThinkingBlock`. Block is auto-collapsed when streaming ends. |
+| `stream_delta(ToolCallStart)` | `AgentLoop` | Dispatch table entry inserts a placeholder `ToolCallBlock` with name, no args yet. |
 | `tool_call(name, args)` | `OperationsImpl` | Fill the placeholder's args; mark phase=`tool` in status. |
 | `tool_result(result, duration_ms)` | `OperationsImpl` | Set the block's result body + header status glyph (`✓`/`✗`). Auto-collapse if short and successful. |
 | `llm_request_start(model, ...)` | `AgentLoop` | Status phase=`thinking`. StatusHeader updates `model_name` and the phase glyph. |
@@ -150,7 +149,7 @@ The bus events are the contract. Each event maps to exactly one widget mutation:
 | `child_session_end(error?)` | `sub_agent` | Close the SubagentBlock; if error, render in red. |
 | `extension_install(phase=*)` | harness | Tracked into the `/extensions` modal snapshot. `phase=error` also emits an error toast. Header counters update with `loaded` / `failed` totals. |
 | `api_register(kind=command\|tool)` | `ExtensionAPI` | Captured into the `slash_commands` and `tools` snapshots. Header `N tools` counter updates. Late registrations (post-create reload) are routed through the live `handle_api_register`. |
-| `extension_reload(trigger, ok/error)` | `atom_reloader` | Toast. `trigger ∈ {agent, propose_change_approved}` → `★ self-modify` warning toast (the framework's headline behavior is made visible). `trigger=human` → information toast. `error` → error toast. |
+| `extension_reload(is_self_modify, ok/error)` | `atom_reloader` | Toast. `is_self_modify=true` → `★ self-modify` warning toast (the framework's headline behavior is made visible). Human reloads stay informational. `error` → error toast. |
 | `cost_budget_exceeded(used, limit, currency)` | `cost_budget` atom | Latch `_budget_state`; header shows `$… ⚠`; error toast names the cap and warns the next prompt will halt with `stop_reason='budget'`. `/budget` modal then shows current state. |
 | `api_send_user_message(extension, content)` | `ExtensionAPI` (any extension calling `api.send_user_message`) | Render a synthetic `UserTurn` with `injected_from=<extension>` — yellow gutter and a `system → you` label so the user can tell it apart from a turn they typed. |
 | `permission_request(tool, args)` | `permission` atom (future event) | Open inline `PermissionPrompt` modal — NOT a system modal — with Allow / Allow once / Deny buttons. |
@@ -159,9 +158,9 @@ The `permission_request` event does not exist yet; the design assumes it's added
 
 ### 3.4 Slash commands and the command palette
 
-When the user types `/` at column 0 of an empty input line, open the `CommandPalette` modal. It lists the slash commands registered with `ExtensionAPI.register_command` (already implemented). Filter on each keystroke; Enter selects; Esc cancels.
+When the user types `/` at column 0 of an empty input line, open the `CommandPalette` modal. It lists one `BuiltinCommandRegistry`: TUI-owned commands and commands observed from `ExtensionAPI.register_command` via `ApiRegisterEvent(kind="command")`. Filter on each keystroke; Enter selects; Esc cancels.
 
-Commands prefixed with `/` and not in the registry pass through as raw text (so users can type `/something` literally if they want to).
+Commands prefixed with `/` and not in the registry pass through as raw text (so users can type `/something` literally if they want to). Registered extension commands use the same registry lookup path as built-ins; their handler delegates to `session.prompt("/<name> ...")` so the harness `slash_commands` atom remains the SDK-level dispatcher.
 
 Built-in commands the TUI itself owns (not from extensions):
 
@@ -239,7 +238,8 @@ Semantic role → CSS variable:
 - subagent indent: `$accent`
 - status header: `$primary 60%` background, `$text` foreground
 
-CSS lives in `src/agentm/modes/textual_app.tcss`.
+CSS defaults to `src/agentm/modes/textual_app.tcss`; callers may inject an
+alternate Textual CSS path for tests or embedding.
 
 ### 3.8 Migration path (historical)
 
@@ -262,12 +262,13 @@ from agentm.harness import AgentSessionConfig
 class AgentMApp(App[int]):
     """Textual TUI for AgentM. Returns process exit code on exit."""
 
-    CSS_PATH = "textual_app.tcss"
+    DEFAULT_CSS_PATH = Path(__file__).with_name("textual_app.tcss")
+    CSS_PATH = str(DEFAULT_CSS_PATH)
     BINDINGS = [
-        Binding("ctrl+c", "interrupt_or_quit", show=False),
-        Binding("ctrl+d", "quit", show=True, priority=True),
+        Binding("ctrl+c", "interrupt_or_quit", show=True, priority=True),
+        Binding("ctrl+d", "force_quit", show=True, priority=True),
         Binding("ctrl+l", "clear_log", show=True),
-        Binding("ctrl+r", "open_palette", show=True),
+        Binding("ctrl+r", "open_palette_binding", show=True),
         # ... see §3.5
     ]
 
@@ -295,7 +296,8 @@ Dependencies: `textual>=0.85` is a hard requirement. Optional: `pyperclip` for `
 | ~~Keep simple mode as fallback~~ (reverted 2026-05-02) | Initially the rich-live mode stayed for environments where Textual misbehaves. In practice no such environment surfaced and maintaining two frontends doubled the test surface. Simple mode deleted. | — |
 | Outside-in dock layout (top header, bottom footer + input, 1fr middle) | Per Textual's official layout guide. Anchors fixed regions so the conversation log can never push them out of position; Footer auto-renders BINDINGS so users discover keys without /help. | Vertical-stack-with-implicit-flex (the previous approach). Rejected: status row could shift on empty/clear; readability suffered |
 | Single-source-of-truth gutters via CSS `border-left` | Previous design rendered user/subagent with `rich.Panel(border_style=...)` AND CSS `border-left` simultaneously, producing doubled borders. Now Rich Panel is gone; gutters live only in CSS. | Keep both. Rejected: double-rendered borders look broken |
-| Built-in `textual-dark` / `textual-light` themes (not custom hex) | The previous `.theme-dark { background: #0f1115 }` overrides fought the framework's theming system on every redraw and forced anyone who wanted a third theme to rewrite CSS. Built-in themes use semantic CSS variables. | Hardcoded hex per theme class. Rejected: brittle, no extension point |
+| Built-in `textual-dark` / `textual-light` themes (not custom hex), with injected theme names diagnosed on failure | The previous `.theme-dark { background: #0f1115 }` overrides fought the framework's theming system on every redraw. Invalid theme strings are presenter errors, so they emit `DiagnosticEvent(level="warning")` before falling back. | Hardcoded hex per theme class or silent fallback. Rejected: brittle and hides presenter misconfiguration |
+| Injectable CSS path and keymap | Embedders and tests need to replace terminal presentation assets without mutating class attributes or reaching into Textual internals. | Fixed `CSS_PATH` / `BINDINGS`. Rejected: no seam for presenters under test |
 | No left sidebar in MVP | Single-pane is enough to validate the framework migration; sidebar is feature creep | Build full Claude-Code-style multi-pane. Rejected: too much surface for one issue |
 | Streaming flushes at 20 Hz, not per-token | Token rate is ~50/s; per-token repaint is wasteful | Per-token. Rejected: CPU + screen flicker without visible benefit |
 | Esc cancels in-flight prompt; on idle emits explicit toast | Bare-Esc-to-exit is a documented foot-gun, but the previous silent no-op on idle made the app look stalled. The toast acknowledges the keypress. | Esc exits / Esc silent. Both rejected as user-confusing |
@@ -332,3 +334,12 @@ Dependencies: `textual>=0.85` is a hard requirement. Optional: `pyperclip` for `
 4. **History persistence.** Up/Down on empty input cycles prior user inputs (§3.5). In-memory only? Or a file `~/.local/state/agentm/history`? Match shell history behavior (file-backed) is friendlier but adds a state-file dependency. Recommend: in-memory MVP; file-backed in a follow-up when someone complains.
 
 5. **Multi-turn copy of "the response".** `/copy-last` copies the last assistant text block. What about copying a specific tool result, or all of a turn? Defer; one verb is enough for MVP.
+
+### 3.8 Presenter Dispatch Tables and Turn Identity
+
+The presenter keeps wiring declarative:
+
+- Live event subscriptions are `_EVENT_SUBSCRIPTIONS: (channel, method_name)[]` and registered with one loop in `run()`; adding a public event no longer requires a repeated `bus.on(...)` block.
+- Stream deltas are rendered through `_DELTA_HANDLERS` and `_CHILD_DELTA_HANDLERS`, keyed by delta type. New provider delta classes can be registered without editing the main `handle_stream_delta` body.
+- Status phases are typed as `Phase = Literal["idle", "thinking", "streaming", "tool", "subagent"]`. `StatusHeader` reads glyphs from a `Theme` protocol; `DEFAULT_THEME` preserves the existing glyphs.
+- `AgentLoop` emits `turn_id`, monotone for the lifetime of the loop, alongside prompt-local `turn_index`. The TUI keys root `TurnContainer`s by `turn_id`; the old prompt-epoch workaround is deleted.

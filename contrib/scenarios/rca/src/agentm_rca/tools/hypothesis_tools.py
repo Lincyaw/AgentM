@@ -7,12 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from agentm.core.abi.messages import TextContent
-from agentm.core.abi.tool import FunctionTool, ToolResult
+from agentm.core.abi import FunctionTool, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.extensions.builtin.artifact_store import (
-    ArtifactStore,
-    get_artifact_store,
-)
+from agentm.extensions.builtin.artifact_store import ArtifactStore
 from agentm.harness.events import SessionReadyEvent
 from agentm.harness.extension import ExtensionAPI
 
@@ -24,7 +21,7 @@ MANIFEST = ExtensionManifest(
         "tool:update_hypothesis",
         "tool:remove_hypothesis",
         "tool:list_hypotheses",
-        "event:session_ready",
+        f"event:{SessionReadyEvent.CHANNEL}",
     ),
 )
 
@@ -58,8 +55,8 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
     store_cell: list[ArtifactStore | None] = [None]
 
     async def _on_session_ready(_event: SessionReadyEvent) -> None:
-        store = get_artifact_store(api.session_id)
-        if store is None:
+        store = api.get_service("artifact_store")
+        if not isinstance(store, ArtifactStore):
             raise RuntimeError(
                 "hypothesis_tools requires the 'artifact_store' extension to "
                 "be loaded for the same session"
@@ -68,10 +65,8 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
 
     def _store() -> ArtifactStore:
         store = store_cell[0]
-        if store is None:
-            raise RuntimeError(
-                "hypothesis_tools called before session_ready"
-            )
+        if not isinstance(store, ArtifactStore):
+            raise RuntimeError("hypothesis_tools called before session_ready")
         return store
 
     async def _write_hypothesis(
@@ -161,7 +156,7 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
         )
         if artifact_listing.is_error:
             return artifact_listing
-        artifacts = artifact_listing.details.get("artifacts", [])
+        artifacts = artifact_listing.extras.get("artifacts", [])
         if not isinstance(artifacts, list):
             return _err("artifact store returned an invalid listing")
         hid_filter = _maybe_str(args.get("id"))
@@ -188,7 +183,7 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
             items.append(payload)
         return _ok(json.dumps({"hypotheses": items}, ensure_ascii=False, indent=2))
 
-    api.on("session_ready", _on_session_ready)
+    api.on(SessionReadyEvent.CHANNEL, _on_session_ready)
     api.register_tool(
         FunctionTool(
             name="add_hypothesis",
@@ -258,7 +253,10 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
                 "type": "object",
                 "properties": {
                     "id": {"type": ["string", "null"]},
-                    "status": {"type": ["string", "null"], "enum": [*_STATUSES, "removed", None]},
+                    "status": {
+                        "type": ["string", "null"],
+                        "enum": [*_STATUSES, "removed", None],
+                    },
                     "limit": {"type": "integer", "minimum": 1},
                 },
                 "additionalProperties": False,

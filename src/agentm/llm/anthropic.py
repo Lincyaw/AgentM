@@ -9,9 +9,7 @@ extension mechanism described in ``.claude/designs/extension-as-scenario.md``
 Boundaries:
 
 * The kernel layer (``agentm.core.abi``) is the only AgentM dependency
-  imported at module import time. The harness layer is **not** imported here;
-  ``ProviderConfig`` is resolved lazily inside :func:`install` so this module
-  remains usable in isolation (e.g. notebook embedding, harness-less tests).
+  imported at module import time. The harness layer is **not** imported here.
 * Streaming is delegated to the official ``anthropic`` Python SDK
   (:class:`anthropic.AsyncAnthropic`); we never reimplement HTTP/SSE.
 
@@ -29,9 +27,10 @@ import asyncio
 import base64
 import logging
 import os
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from agentm.core.abi.messages import (
     AgentMessage,
@@ -46,6 +45,16 @@ from agentm.core.abi.messages import (
     Usage,
     UserMessage,
 )
+from agentm.core.abi.provider import ProviderConfig, ProviderManifest
+from agentm.core.abi.retry import RetryPolicy
+from agentm.core.abi.termination import (
+    Aborted,
+    EndTurn,
+    MaxTokens,
+    TerminationHint,
+    ToolUseExpected,
+    VendorSpecific,
+)
 from agentm.core.abi.stream import (
     AssistantStreamEvent,
     MessageEnd,
@@ -58,10 +67,54 @@ from agentm.core.abi.stream import (
 )
 from agentm.core.abi.tool import Tool
 
+from ._common import StreamAccumulator, ToolSpecAdapter, encode_tool_args
+
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from anthropic import AsyncAnthropic
 
 logger = logging.getLogger(__name__)
+
+
+MANIFEST = ProviderManifest(
+    name="anthropic",
+    description="Register an Anthropic Messages API LLM stream provider.",
+    registers=("provider:anthropic",),
+    config_schema={
+        "type": "object",
+        "properties": {
+            "model": {"type": "string", "minLength": 1},
+            "api_key": {"type": "string"},
+            "base_url": {"type": "string"},
+            "context_window": {"type": "integer", "minimum": 1},
+            "max_output_tokens": {"type": "integer", "minimum": 1},
+            "thinking_budgets": {
+                "type": "object",
+                "additionalProperties": {"type": "integer", "minimum": 1},
+            },
+        },
+        "required": ["model"],
+        "additionalProperties": True,
+    },
+)
+
+
+def _is_anthropic_retryable(exc: BaseException) -> bool:
+    try:
+        import anthropic
+    except ImportError:  # pragma: no cover - SDK dependency is optional here
+        return False
+    return isinstance(exc, anthropic.RateLimitError)
+
+
+class _IdentityRetryPolicy:
+    async def run(
+        self,
+        fn: Callable[[], Any],
+        *,
+        is_retryable: Callable[[BaseException], bool],
+    ) -> Any:
+        del is_retryable
+        return await fn()
 
 
 # --- Model registry ---------------------------------------------------------
@@ -90,13 +143,6 @@ def _build_model(
         context_window=context_window,
         max_output_tokens=max_output_tokens,
     )
-
-
-_THINKING_BUDGETS: dict[str, int] = {
-    "low": 1_024,
-    "medium": 4_096,
-    "high": 16_384,
-}
 
 
 # --- Message / tool serialization ------------------------------------------
@@ -172,11 +218,15 @@ def _to_anthropic_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]
     """
 
     out: list[dict[str, Any]] = []
+    previous_role: str | None = None
+    was_tool_result_user = False
     for msg in messages:
         if isinstance(msg, UserMessage):
             out.append(
                 {"role": "user", "content": _encode_user_content(list(msg.content))}
             )
+            previous_role = "user"
+            was_tool_result_user = False
         elif isinstance(msg, AssistantMessage):
             out.append(
                 {
@@ -184,42 +234,39 @@ def _to_anthropic_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]
                     "content": _encode_assistant_content(list(msg.content)),
                 }
             )
+            previous_role = "assistant"
+            was_tool_result_user = False
         elif isinstance(msg, ToolResultMessage):
             blocks = [_encode_tool_result_block(b) for b in msg.content]
-            # Pack into the previous message if it was also a tool-result-only
-            # user message, matching Anthropic's "results from one turn live in
-            # one user message" convention.
-            if (
-                out
-                and out[-1]["role"] == "user"
-                and all(
-                    isinstance(c, dict) and c.get("type") == "tool_result"
-                    for c in out[-1]["content"]
-                )
-            ):
+            if out and previous_role == "user" and was_tool_result_user:
                 out[-1]["content"].extend(blocks)
             else:
                 out.append({"role": "user", "content": blocks})
+            previous_role = "user"
+            was_tool_result_user = True
         else:  # pragma: no cover - exhaustive
             raise TypeError(f"unsupported message type: {type(msg)!r}")
     return out
 
 
-def _to_anthropic_tools(tools: list[Tool]) -> list[dict[str, Any]]:
-    """Convert kernel ``Tool``s to Anthropic tool definitions.
+@dataclass(frozen=True)
+class AnthropicToolSpecAdapter(ToolSpecAdapter):
+    """Convert AgentM tools to Anthropic Messages API tool specs."""
 
-    The kernel already exposes ``parameters`` as a JSON Schema dict, so this is
-    a direct field rename to ``input_schema``.
-    """
-
-    return [
-        {
-            "name": t.name,
-            "description": t.description,
-            "input_schema": t.parameters,
+    def vendor_spec(self, tool: Tool) -> dict[str, Any]:
+        return {
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": tool.parameters,
         }
-        for t in tools
-    ]
+
+    def encode_tool_args(self, args: Mapping[str, Any]) -> str:
+        return encode_tool_args(args)
+
+
+def _to_anthropic_tools(tools: list[Tool]) -> list[dict[str, Any]]:
+    adapter = AnthropicToolSpecAdapter()
+    return [adapter.vendor_spec(t) for t in tools]
 
 
 # --- Streaming bridge -------------------------------------------------------
@@ -227,35 +274,27 @@ def _to_anthropic_tools(tools: list[Tool]) -> list[dict[str, Any]]:
 
 @dataclass
 class _StreamState:
-    """Mutable accumulator for one turn of streaming.
+    """Provider event mapping state for one Anthropic stream."""
 
-    Tracks per-content-block state so we can assemble the final
-    :class:`AssistantMessage` from incremental events.
-    """
-
-    content_blocks: list[AssistantContent] = field(default_factory=list)
-    # Per-block scratch keyed by Anthropic content_block index.
+    accumulator: StreamAccumulator = field(default_factory=StreamAccumulator)
     scratch: dict[int, dict[str, Any]] = field(default_factory=dict)
     usage: Usage | None = None
-    stop_reason: (
-        Literal["end_turn", "tool_use", "max_tokens", "error", "aborted"] | None
-    ) = None
+    stop_reason: str | None = None
+    termination: TerminationHint | None = None
 
 
-_STOP_REASON_MAP: dict[str, Literal["end_turn", "tool_use", "max_tokens", "error"]] = {
-    "end_turn": "end_turn",
-    "tool_use": "tool_use",
-    "max_tokens": "max_tokens",
-    "stop_sequence": "end_turn",
-}
+def _map_stop_reason(raw: str | None) -> TerminationHint | None:
+    """Translate Anthropic ``stop_reason`` into a kernel ``TerminationHint``."""
 
-
-def _map_stop_reason(
-    raw: str | None,
-) -> Literal["end_turn", "tool_use", "max_tokens", "error"] | None:
     if raw is None:
         return None
-    return _STOP_REASON_MAP.get(raw, "error")
+    if raw == "end_turn" or raw == "stop_sequence":
+        return EndTurn()
+    if raw == "tool_use":
+        return ToolUseExpected()
+    if raw == "max_tokens":
+        return MaxTokens()
+    return VendorSpecific(raw=raw)
 
 
 def _extract_usage(message_obj: Any) -> Usage | None:
@@ -273,44 +312,23 @@ def _extract_usage(message_obj: Any) -> Usage | None:
 
 
 def _finalize_block(state: _StreamState, index: int) -> None:
-    """Materialize the per-index scratch into a final ``AssistantContent``."""
+    """Flush provider scratch for one Anthropic content block."""
 
     scratch = state.scratch.pop(index, None)
     if scratch is None:
         return
     kind = scratch.get("kind")
     if kind == "text":
-        state.content_blocks.append(
-            TextContent(type="text", text=scratch.get("text", ""))
-        )
+        state.accumulator.add_text(index, scratch.get("text", ""))
     elif kind == "thinking":
-        state.content_blocks.append(
-            ThinkingBlock(
-                type="thinking",
-                text=scratch.get("text", ""),
-                signature=scratch.get("signature"),
-            )
-        )
+        state.accumulator.add_thinking(index, scratch.get("text", ""))
+        state.accumulator.set_thinking_signature(index, scratch.get("signature"))
     elif kind == "tool_use":
-        import json
-
-        raw_args = scratch.get("partial_json", "")
-        try:
-            args = json.loads(raw_args) if raw_args else {}
-        except json.JSONDecodeError:
-            # Fall back to empty dict; the loop layer is responsible for
-            # surfacing argument-parse errors back to the model. This keeps
-            # the kernel's invariant that ``arguments`` is a parsed dict.
-            args = {}
-        if not isinstance(args, dict):
-            args = {}
-        state.content_blocks.append(
-            ToolCallBlock(
-                type="tool_call",
-                id=scratch.get("id", ""),
-                name=scratch.get("name", ""),
-                arguments=args,
-            )
+        state.accumulator.add_tool_call(
+            id=scratch.get("id", ""),
+            name=scratch.get("name", ""),
+            args_delta=scratch.get("partial_json", ""),
+            index=index,
         )
 
 
@@ -325,13 +343,28 @@ class AnthropicStreamFn:
 
     - ``api_key``: Anthropic API key. Defaults to ``ANTHROPIC_API_KEY``.
     - ``base_url``: optional override for the API base URL.
+    - ``retry_policy``: optional policy used for retrying provider calls.
     - ``client``: pre-configured :class:`anthropic.AsyncAnthropic` instance.
       Tests may inject a mock here to bypass network entirely.
     """
 
     api_key: str | None = None
     base_url: str | None = None
+    thinking_budgets: Mapping[str, int] | None = None
+    retry_policy: RetryPolicy | None = None
     client: AsyncAnthropic | None = None
+    clock: Callable[[], float] = time.time
+
+    def __post_init__(self) -> None:
+        budgets = {"low": 1_024, "medium": 4_096, "high": 16_384}
+        if self.thinking_budgets is not None:
+            budgets.update(
+                {
+                    str(key): int(value)
+                    for key, value in self.thinking_budgets.items()
+                }
+            )
+        self.thinking_budgets = budgets
 
     def _get_client(self) -> AsyncAnthropic:
         if self.client is not None:
@@ -387,16 +420,27 @@ class AnthropicStreamFn:
         if tools:
             body["tools"] = _to_anthropic_tools(tools)
         if thinking != "off":
+            assert self.thinking_budgets is not None
             body["thinking"] = {
                 "type": "enabled",
-                "budget_tokens": _THINKING_BUDGETS[thinking],
+                "budget_tokens": self.thinking_budgets[thinking],
             }
 
         state = _StreamState()
         aborted = False
 
-        stream_ctx = client.messages.stream(**body)
-        async with stream_ctx as stream:
+        retry_policy = self.retry_policy or _IdentityRetryPolicy()
+
+        async def _open_stream() -> tuple[Any, Any]:
+            ctx = client.messages.stream(**body)
+            stream = await ctx.__aenter__()
+            return ctx, stream
+
+        stream_ctx, stream = await retry_policy.run(
+            _open_stream,
+            is_retryable=_is_anthropic_retryable,
+        )
+        try:
             async for event in stream:
                 if signal is not None and signal.is_set():
                     aborted = True
@@ -411,20 +455,24 @@ class AnthropicStreamFn:
                     break
                 async for kernel_event in _translate_event(event, state):
                     yield kernel_event
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
 
         if aborted:
             state.stop_reason = "aborted"
+            state.termination = Aborted()
             # Flush any in-flight blocks so the assembled message is consistent.
             for idx in sorted(state.scratch.keys()):
                 _finalize_block(state, idx)
 
-        assembled = AssistantMessage(
-            role="assistant",
-            content=list(state.content_blocks),
-            timestamp=0.0,
+        assembled = state.accumulator.assemble(
             stop_reason=state.stop_reason,
+            termination=state.termination,
             usage=state.usage,
+            timestamp=self.clock(),
         )
+        for parse_error in state.accumulator.parse_errors:
+            yield parse_error
         yield MessageEnd(message=assembled)
 
 
@@ -517,9 +565,9 @@ async def _translate_event(
     if etype == "message_delta":
         delta = getattr(event, "delta", None)
         raw_stop = getattr(delta, "stop_reason", None) if delta is not None else None
-        mapped = _map_stop_reason(raw_stop)
-        if mapped is not None:
-            state.stop_reason = mapped
+        if raw_stop is not None:
+            state.stop_reason = raw_stop
+            state.termination = _map_stop_reason(raw_stop)
         # Anthropic emits a final usage update on message_delta.
         usage = getattr(event, "usage", None)
         if usage is not None:
@@ -564,9 +612,6 @@ def install(api: Any, config: dict[str, Any]) -> None:
     ``config["base_url"]``, then registers the resulting ``AnthropicStreamFn``
     on the given :class:`ExtensionAPI` under the name ``"anthropic"``.
 
-    ``ProviderConfig`` is imported from :mod:`agentm.harness.extension`
-    lazily so that this module can be loaded without the harness present
-    (e.g. embedded SDK use cases or kernel-only tests).
     """
 
     model_id = config.get("model")
@@ -578,7 +623,12 @@ def install(api: Any, config: dict[str, Any]) -> None:
 
     api_key = config.get("api_key")
     base_url = config.get("base_url")
-    stream_fn = AnthropicStreamFn(api_key=api_key, base_url=base_url)
+    stream_fn = AnthropicStreamFn(
+        api_key=api_key,
+        base_url=base_url,
+        thinking_budgets=config.get("thinking_budgets"),
+        retry_policy=api.get_service("retry_policy"),
+    )
     # Optional model-spec overrides; defaults handled in ``_build_model``.
     model_kwargs: dict[str, int] = {}
     if "context_window" in config:
@@ -587,15 +637,10 @@ def install(api: Any, config: dict[str, Any]) -> None:
         model_kwargs["max_output_tokens"] = int(config["max_output_tokens"])
     model = _build_model(model_id, **model_kwargs)
 
-    # Lazy import: ``ProviderConfig`` is defined in the harness layer that is
-    # being implemented in parallel; this keeps the LLM module independent
-    # for kernel-only consumers.
-    from agentm.harness.extension import ProviderConfig  # noqa: PLC0415
-
     api.register_provider(
         "anthropic",
         ProviderConfig(stream_fn=stream_fn, model=model, name="anthropic"),
     )
 
 
-__all__ = ["AnthropicStreamFn", "install"]
+__all__ = ["AnthropicStreamFn", "MANIFEST", "install"]

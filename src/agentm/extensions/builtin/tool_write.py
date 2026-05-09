@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
@@ -11,18 +11,17 @@ from agentm.harness.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(
     name="tool_write",
-    description="Register the write tool backed by FileOperations.",
+    description="Register the write tool backed by ResourceWriter.",
     registers=("tool:write",),
     config_schema={
         "type": "object",
-        "properties": {
-            "file_ops": {"type": "object"},
-        },
+        "properties": {},
         "additionalProperties": True,
     },
+    requires=(),  # Leaf tool atom: consumes ResourceWriter via ExtensionAPI.
 )
 
-_PARAMETERS = {
+_PARAMETERS: Final = {
     "type": "object",
     "properties": {
         "path": {"type": "string"},
@@ -60,6 +59,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             description="Write a UTF-8 text file to disk.",
             parameters=_PARAMETERS,
             fn=_execute,
+            metadata={"file_op": "write"},
         )
     )
 
