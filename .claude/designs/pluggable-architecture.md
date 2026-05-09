@@ -74,7 +74,8 @@ class StreamFn(Protocol):
 ```
 
 - Pure boundary: takes provider-shaped messages, returns events.
-- Default implementations live in `agentm-llm` per provider.
+- Default implementations live in `agentm-llm` per provider; provider-internal stream assembly is shared by `agentm.llm._common.StreamAccumulator`, so new providers supply only event mapping plus a `ToolSpecAdapter`.
+- Tool-call argument parse failures stay observable as typed stream/bus events (`ToolCallArgsParseError`) while preserving the kernel invariant that `ToolCallBlock.arguments` is a parsed dict.
 - Extensions register additional providers via `register_provider(name, ProviderConfig)`. The harness chooses the active registration through the `ProviderResolver` port; the default `LastRegisteredWins` resolver preserves insertion-order behavior.
 - **Crucial**: `StreamFn` is the only point that touches a real LLM API. The agent loop has zero hard-coded provider knowledge.
 
