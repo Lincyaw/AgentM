@@ -163,6 +163,7 @@ _PARAMETERS: dict[str, Any] = {
 
 _DEFAULT_THRESHOLD_RELATIVE = 0.05
 _DEFAULT_GUARD_TOLERANCE = 0.10
+_DEFAULT_STOP_AFTER_NO_IMPROVEMENT = 3
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
@@ -174,6 +175,25 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     guard_tolerance = float(
         promotion.get("guard_tolerance", _DEFAULT_GUARD_TOLERANCE)
     )
+    # B-9: structural anti-thrash counter. Default 3 consecutive rejections;
+    # explicit None disables. Counter reads from activations.jsonl on every
+    # call so it persists across tuner restarts (the load-bearing property).
+    stop_after_raw = promotion.get(
+        "stop_after_no_improvement", _DEFAULT_STOP_AFTER_NO_IMPROVEMENT
+    )
+    stop_after_no_improvement: int | None
+    if stop_after_raw is None:
+        stop_after_no_improvement = None
+    else:
+        try:
+            stop_after_no_improvement = int(stop_after_raw)
+        except (TypeError, ValueError):
+            stop_after_no_improvement = _DEFAULT_STOP_AFTER_NO_IMPROVEMENT
+        if (
+            stop_after_no_improvement is not None
+            and stop_after_no_improvement <= 0
+        ):
+            stop_after_no_improvement = None
     rollouts_budget_raw = config.get("rollouts_budget")
     rollouts_budget: int | None
     try:
@@ -338,6 +358,42 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     indent=2,
                 )
             )
+
+        # B-9: structural anti-thrash gate. After N consecutive ``rejected``
+        # entries in activations.jsonl, refuse further deployment-gated
+        # decisions (``activate`` / ``merge``). The counter persists across
+        # tuner restarts because we re-read the log on every call. A
+        # ``stop_blocked`` record is appended to the log but does NOT itself
+        # increment the counter (else the constraint self-perpetuates).
+        if (
+            stop_after_no_improvement is not None
+            and decision == "activate"
+        ):
+            decisions_path = _decisions_path(cwd, target_scenario)
+            consec = _count_consecutive_rejections(decisions_path)
+            if consec >= stop_after_no_improvement:
+                stop_record = {
+                    "at": time.time(),
+                    "kind": "stop_blocked",
+                    "scenario": target_scenario,
+                    "atom": target_atom,
+                    "tier": tier,
+                    "rationale": rationale,
+                    "change_spec": change_spec,
+                    "evidence": {
+                        "baseline_run": baseline_id,
+                        "proposed_run": proposed_id,
+                        "consecutive_rejections": consec,
+                        "threshold": stop_after_no_improvement,
+                    },
+                    "decision": decision,
+                    "by": "tool_propose_change",
+                }
+                _append_decision_record(decisions_path, stop_record)
+                return _error(
+                    f"stop_after_no_improvement: {consec} consecutive "
+                    f"rejections; change strategy or escalate"
+                )
 
         # Load the eval-run summaries.
         baseline = _load_eval_run_summary(cwd, baseline_id)
@@ -1034,6 +1090,51 @@ def _prune_dominated_candidates(decisions_dir: Path) -> None:
                     flag.write_text("", encoding="utf-8")
                 except OSError:
                     pass
+
+
+def _count_consecutive_rejections(activations_path: Path) -> int:
+    """B-9: walk ``activations.jsonl`` from the most recent entry backward
+    and count contiguous ``kind == "rejected"`` records. The walk stops on
+    any record that represents *forward progress* — ``activate``,
+    ``exploratory``, ``rollback``, ``merge`` — at which point the counter
+    resets to whatever has been seen so far (which is the count between
+    the last forward-progress record and the present).
+
+    ``stop_blocked`` entries are skipped (they neither increment nor
+    reset). Without this carve-out the constraint would self-perpetuate:
+    one block becomes a permanent block. ``reload_failed`` is treated as
+    a rejection — it represents an attempted swap that didn't land.
+
+    The counter persists across tuner restarts because it is computed
+    from on-disk state, never cached in memory. This is the load-bearing
+    property of B-9's fail-stop test.
+    """
+    if not activations_path.is_file():
+        return 0
+    try:
+        with activations_path.open("r", encoding="utf-8") as fh:
+            lines = [ln.strip() for ln in fh if ln.strip()]
+    except OSError:
+        return 0
+    consec = 0
+    for line in reversed(lines):
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        kind = rec.get("kind")
+        if kind == "stop_blocked":
+            # Transparent: doesn't break the chain, doesn't extend it.
+            continue
+        if kind in ("rejected", "reload_failed"):
+            consec += 1
+            continue
+        # Any other terminal kind (activate / exploratory / rollback /
+        # merge / pending_human_approval) breaks the chain.
+        break
+    return consec
 
 
 def _ok(text: str) -> ToolResult:
