@@ -21,7 +21,7 @@ MANIFEST = ExtensionManifest(
     config_schema={
         "type": "object",
         "properties": {
-            "window": {"type": "integer", "minimum": 0},
+            "window": {"type": "integer", "minimum": 0, "default": 10},
         },
         "additionalProperties": True,
     },
