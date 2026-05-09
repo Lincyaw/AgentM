@@ -3,7 +3,7 @@
 
 exp_id: "agentm-rca-smoke"
 agent_type: "agentm"
-model_name: "K2.6"
+model_name: "Doubao-Seed-2.0-pro"
 
 data:
   # Must match a registered processer name (case-insensitive) so the
@@ -22,8 +22,8 @@ data:
 source_path: "/home/ddq/AoyangSpace/dataset/rca"
 source_path_pattern: "{source_path}/{source}"
 
-concurrency: 1
-judge_concurrency: 1
+concurrency: 5
+judge_concurrency: 5
 
 # RCABench's judge processor is purely structural (CausalGraph diff +
 # service-name match) — it never calls the judge model. We still have to
@@ -33,5 +33,5 @@ judge_concurrency: 1
 judge_model:
   model_provider:
     type: "chat.completions"
-    model: "K2.6"
+    model: "Doubao-Seed-2.0-pro"
     api_format: "anthropic"
