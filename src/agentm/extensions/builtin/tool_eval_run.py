@@ -32,7 +32,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import yaml
 
@@ -41,6 +41,24 @@ from agentm.core.abi.messages import AssistantMessage
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 from agentm.harness.session_config import AgentSessionConfig
+
+
+class GradeResult(TypedDict):
+    """mu_f feedback function output (design §3.2). Graders may return
+    this dict directly or a bare ``float``; ``_normalize_grade`` wraps
+    the latter so downstream aggregation always sees the full shape.
+    """
+
+    score: float
+    dimensions: dict[str, float]
+    feedback_text: str
+    module_feedback: dict[str, str]
+
+
+# Cap on the feedback_corpus written to the eval-run summary. Without a
+# cap a long run with chatty graders blows the JSONL line size; 200 is a
+# soft ceiling that covers typical eval suites (40 tasks x 5 samples).
+_FEEDBACK_CORPUS_CAP = 200
 
 
 MANIFEST = ExtensionManifest(
@@ -146,11 +164,17 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         task_class = _detect_task_class(tasks)
 
         per_task_records: list[dict[str, Any]] = []
+        feedback_corpus: list[dict[str, Any]] = []
         for task in tasks:
             task_id = str(task.get("id") or task.get("name") or "unknown")
             grades: list[float] = []
             tool_errors: list[int] = []
             turns_log: list[int] = []
+            feedback_texts: list[str] = []
+            # Last-write-wins union per design §3.2 / task A-3 acceptance:
+            # multiple samples on the same task overwrite earlier module
+            # feedback. Documented here so callers don't expect joining.
+            module_feedback_union: dict[str, str] = {}
             for sample_idx in range(samples_per_task):
                 outcome = await _run_single_sample(
                     api=api,
@@ -162,10 +186,26 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     sample_idx=sample_idx,
                     overrides=overrides,
                 )
-                grade_value = grader(task, outcome["final_text"]) if grader else 0.0
-                grades.append(float(grade_value))
+                raw_grade = (
+                    grader(task, outcome["final_text"]) if grader else 0.0
+                )
+                grade = _normalize_grade(raw_grade)
+                grades.append(grade["score"])
                 tool_errors.append(int(outcome.get("tool_errors", 0)))
                 turns_log.append(int(outcome.get("turns", 0)))
+                feedback_texts.append(grade["feedback_text"])
+                module_feedback_union.update(grade["module_feedback"])
+                if (
+                    len(feedback_corpus) < _FEEDBACK_CORPUS_CAP
+                    and grade["feedback_text"]
+                ):
+                    feedback_corpus.append(
+                        {
+                            "task_id": task_id,
+                            "sample_idx": sample_idx,
+                            "feedback_text": grade["feedback_text"],
+                        }
+                    )
             per_task_records.append(
                 {
                     "task_id": task_id,
@@ -177,6 +217,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                         [1.0 if t else 0.0 for t in tool_errors]
                     ),
                     "turns_mean": _mean([float(t) for t in turns_log]),
+                    "feedback_texts": feedback_texts,
+                    "module_feedback_union": module_feedback_union,
                 }
             )
 
@@ -214,6 +256,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             guard_metrics=guard_metrics,
             per_task=per_task_records,
             samples_per_task=samples_per_task,
+            feedback_corpus=feedback_corpus,
         )
 
         result = {
@@ -374,6 +417,69 @@ def _extract_user_message(task: dict[str, Any]) -> str:
     return json.dumps(inp) if inp else ""
 
 
+def _normalize_grade(value: Any) -> GradeResult:
+    """Adapt a grader return value to the μ_f shape (design §3.2).
+
+    - Bare ``float`` / ``int`` / ``bool`` is wrapped with empty diagnostic
+      fields (back-compat shim — keeps third-party scalar graders working).
+    - A ``dict`` is interpreted as a partial GradeResult; missing fields
+      are filled with safe defaults; unexpected fields are dropped.
+    - Anything else is treated as score 0.0 with a hint that the grader
+      misbehaved (recorded in feedback_text for debuggability).
+    """
+    if isinstance(value, bool):
+        # bool is a subclass of int — handle before the int branch.
+        return {
+            "score": float(value),
+            "dimensions": {},
+            "feedback_text": "",
+            "module_feedback": {},
+        }
+    if isinstance(value, (int, float)):
+        return {
+            "score": float(value),
+            "dimensions": {},
+            "feedback_text": "",
+            "module_feedback": {},
+        }
+    if isinstance(value, dict):
+        score_raw = value.get("score", 0.0)
+        try:
+            score = float(score_raw)
+        except (TypeError, ValueError):
+            score = 0.0
+        dims_raw = value.get("dimensions") or {}
+        dimensions: dict[str, float] = {}
+        if isinstance(dims_raw, dict):
+            for k, v in dims_raw.items():
+                try:
+                    dimensions[str(k)] = float(v)
+                except (TypeError, ValueError):
+                    continue
+        feedback_text_raw = value.get("feedback_text", "")
+        feedback_text = (
+            feedback_text_raw if isinstance(feedback_text_raw, str) else ""
+        )
+        module_feedback_raw = value.get("module_feedback") or {}
+        module_feedback: dict[str, str] = {}
+        if isinstance(module_feedback_raw, dict):
+            for k, v in module_feedback_raw.items():
+                if isinstance(k, str) and isinstance(v, str):
+                    module_feedback[k] = v
+        return {
+            "score": score,
+            "dimensions": dimensions,
+            "feedback_text": feedback_text,
+            "module_feedback": module_feedback,
+        }
+    return {
+        "score": 0.0,
+        "dimensions": {},
+        "feedback_text": f"<grader returned unsupported type: {type(value).__name__}>",
+        "module_feedback": {},
+    }
+
+
 def _mean(values: list[float]) -> float:
     if not values:
         return 0.0
@@ -409,6 +515,7 @@ def _append_run_records(
     guard_metrics: dict[str, float],
     per_task: list[dict[str, Any]],
     samples_per_task: int,
+    feedback_corpus: list[dict[str, Any]],
 ) -> None:
     overrides_meta = (
         sorted(atom_source_overrides.keys())
@@ -427,6 +534,7 @@ def _append_run_records(
         "guard_metrics": guard_metrics,
         "samples_per_task": samples_per_task,
         "task_count": len(per_task),
+        "feedback_corpus": feedback_corpus,
         "at": time.time(),
     }
     with path.open("a", encoding="utf-8") as fh:
