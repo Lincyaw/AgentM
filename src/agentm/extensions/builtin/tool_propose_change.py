@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import math
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -355,6 +356,30 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return _error(f"reload failed: {error}")
 
         decisions_path = _decisions_path(cwd, target_scenario)
+
+        # A-4: write a degenerate single-entry candidate record alongside
+        # the activation. parent_id chains to the prior activation's
+        # candidate_id (or null on the first ever). per_task_scores +
+        # holdout_scores come from the proposed eval-run's task records.
+        decisions_dir = decisions_path.parent
+        parent_id = _last_candidate_id(decisions_path)
+        candidate_id = f"c_{uuid.uuid4().hex[:12]}"
+        proposed_per_task = _load_eval_run_per_task(cwd, proposed_id)
+        candidate_record = {
+            "candidate_id": candidate_id,
+            "parent_id": parent_id,
+            "change_spec": change_spec,
+            "per_task_scores": _per_task_score_map(
+                proposed_per_task, holdout=False
+            ),
+            "holdout_scores": _per_task_score_map(
+                proposed_per_task, holdout=True
+            ),
+            "eval_run_id": proposed_id,
+            "created_at": time.time(),
+        }
+        _write_candidate_record(decisions_dir, candidate_record)
+
         record = {
             "at": time.time(),
             "kind": decision,
@@ -367,6 +392,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "rationale": rationale,
             "exploratory": decision == "exploratory",
             "change_spec": change_spec,
+            "candidate_id": candidate_id,
             "evidence": {
                 "baseline_run": baseline_id,
                 "proposed_run": proposed_id,
@@ -384,6 +410,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "old_hash": old_hash,
                     "new_hash": new_hash,
                     "decision_path": str(decisions_path),
+                    "candidate_id": candidate_id,
                     "gate": gate_outcome,
                 },
                 indent=2,
@@ -542,6 +569,88 @@ def _append_decision_record(path: Path, record: dict[str, Any]) -> None:
     """
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _write_candidate_record(decisions_dir: Path, record: dict[str, Any]) -> None:
+    """Write ``record`` to ``candidates/<candidate_id>.json`` under
+    ``decisions_dir``. The ``.agentm/decisions/**`` glob covers this path,
+    so it inherits the constitution-protect rejection from ResourceWriter
+    — only this atom (the mediated channel) writes here.
+    """
+    candidates_dir = decisions_dir / "candidates"
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    candidate_id = str(record["candidate_id"])
+    path = candidates_dir / f"{candidate_id}.json"
+    with path.open("w", encoding="utf-8") as fh:
+        json.dump(record, fh, indent=2, sort_keys=True)
+
+
+def _last_candidate_id(activations_path: Path) -> str | None:
+    """Scan ``activations.jsonl`` for the most recent record carrying a
+    ``candidate_id`` and return it, or None if the log is empty / first
+    activation."""
+    if not activations_path.is_file():
+        return None
+    last: str | None = None
+    try:
+        with activations_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                cid = rec.get("candidate_id") if isinstance(rec, dict) else None
+                if isinstance(cid, str) and cid:
+                    last = cid
+    except OSError:
+        return None
+    return last
+
+
+def _load_eval_run_per_task(cwd: Path, run_id: str) -> list[dict[str, Any]]:
+    """Read ``.agentm/eval_runs/<run_id>.jsonl`` and return the
+    ``eval_run.task`` records (one per task). Returns an empty list when
+    the run is unknown or contains no task records (degenerate case is
+    fine — candidate scores just default to empty maps).
+    """
+    run_path = cwd / ".agentm" / "eval_runs" / f"{run_id}.jsonl"
+    if not run_path.is_file():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        with run_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(rec, dict) and rec.get("kind") == "eval_run.task":
+                    out.append(rec)
+    except OSError:
+        return []
+    return out
+
+
+def _per_task_score_map(
+    records: list[dict[str, Any]], *, holdout: bool
+) -> dict[str, float]:
+    """Project ``eval_run.task`` records into a {task_id: grade_mean}
+    map, filtered by holdout flag."""
+    out: dict[str, float] = {}
+    for rec in records:
+        if bool(rec.get("holdout", False)) != holdout:
+            continue
+        task_id = rec.get("task_id")
+        score = rec.get("grade_mean")
+        if isinstance(task_id, str) and isinstance(score, (int, float)):
+            out[task_id] = float(score)
+    return out
 
 
 def _load_eval_run_summary(cwd: Path, run_id: str) -> dict[str, Any] | None:

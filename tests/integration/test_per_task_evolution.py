@@ -736,6 +736,32 @@ async def test_end_to_end_loop_activates_known_good_replacement(
             for r in records
         )
 
+        # A-4: candidate companion exists with the design §11.1 schema.
+        candidates_dir = (
+            tmp_path / ".agentm" / "decisions" / "format_fix" / "candidates"
+        )
+        assert candidates_dir.is_dir()
+        candidate_files = list(candidates_dir.glob("c_*.json"))
+        assert len(candidate_files) == 1
+        with candidate_files[0].open("r", encoding="utf-8") as fh:
+            cand = json.load(fh)
+        assert set(cand.keys()) == {
+            "candidate_id",
+            "parent_id",
+            "change_spec",
+            "per_task_scores",
+            "holdout_scores",
+            "eval_run_id",
+            "created_at",
+        }
+        assert cand["parent_id"] is None  # first activation in the log
+        assert cand["change_spec"]["target_atom"] == "tool_normalize_json"
+        assert cand["eval_run_id"] == "er_proposed"
+        # Activation entry references the candidate file.
+        activate_entries = [r for r in records if r.get("kind") == "activate"]
+        assert activate_entries
+        assert activate_entries[0]["candidate_id"] == cand["candidate_id"]
+
         # Atom-on-disk swapped to the strong version.
         assert (
             scenario_dir / "tool_normalize_json.py"
