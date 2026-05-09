@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import fields, is_dataclass
-from typing import Any, Final
+from typing import Any
 
 from agentm.core.abi import BeforeSendToLlmEvent, BudgetExhausted, TurnEndEvent
+from agentm.core.abi.events import DiagnosticEvent
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import BeforeAgentStartEvent, CostBudgetExceededEvent
 from agentm.harness.extension import ExtensionAPI
@@ -32,18 +33,22 @@ MANIFEST = ExtensionManifest(
         "properties": {
             "limit": {"type": "number", "minimum": 0},
             "currency": {"type": "string"},
+            "pricing": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "array",
+                    "prefixItems": [{"type": "number"}, {"type": "number"}],
+                    "minItems": 2,
+                    "maxItems": 2,
+                },
+            },
         },
         "required": ["limit"],
         "additionalProperties": True,
     },
+    requires=(),  # Leaf atom: consumes model/events only.
     tier=2,
 )
-
-
-_PRICING: Final[dict[str, tuple[float, float]]] = {
-    "anthropic": (15.0, 75.0),
-    "fake": (1.0, 1.0),
-}
 
 
 def _serialize(value: Any) -> Any:
@@ -64,6 +69,17 @@ def _estimate_input_tokens(messages: list[Any]) -> int:
     return len(encoded) // 4
 
 
+def _coerce_pricing(raw: Any) -> dict[str, tuple[float, float]]:
+    if not isinstance(raw, dict):
+        return {}
+    pricing: dict[str, tuple[float, float]] = {}
+    for provider, pair in raw.items():
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            continue
+        pricing[str(provider)] = (float(pair[0]), float(pair[1]))
+    return pricing
+
+
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # ``limit`` is in ``MANIFEST.config_schema.required``, so the discovery
     # filter (session.py:_atom_requires_unsupplied_config) skips this atom
@@ -71,10 +87,31 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # the key is present.
     limit = float(config["limit"])
     currency = str(config.get("currency", "usd"))
+    pricing = _coerce_pricing(config.get("pricing"))
+    warned_unpriced: set[str] = set()
     state = {
         "used": 0.0,
         "overflowed": False,
     }
+
+    async def _pricing_for(provider: str) -> tuple[float, float]:
+        configured = pricing.get(provider)
+        if configured is not None:
+            return configured
+        if provider not in warned_unpriced:
+            warned_unpriced.add(provider)
+            await api.events.emit(
+                DiagnosticEvent.CHANNEL,
+                DiagnosticEvent(
+                    level="warning",
+                    source="cost_budget",
+                    message=(
+                        f"cost_budget has no pricing for provider {provider!r}; "
+                        "usage for that provider is counted as zero"
+                    ),
+                ),
+            )
+        return (0.0, 0.0)
 
     async def _emit_if_needed() -> None:
         if state["overflowed"] or state["used"] <= limit:
@@ -95,19 +132,18 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         return {"block": True, "cause": BudgetExhausted(detail="cost")}
 
     async def _before_send(event: BeforeSendToLlmEvent) -> None:
-        pricing = _PRICING.get(event.model.provider, (0.0, 0.0))
+        provider_pricing = await _pricing_for(event.model.provider)
         estimated_input_tokens = _estimate_input_tokens(event.messages)
-        state["used"] += (estimated_input_tokens / 1_000_000.0) * pricing[0]
+        state["used"] += (estimated_input_tokens / 1_000_000.0) * provider_pricing[0]
         await _emit_if_needed()
 
     async def _on_turn_end(event: TurnEndEvent) -> None:
         usage = event.message.usage
         if usage is None:
             return
-        pricing = _PRICING.get(
-            api.model.provider if api.model is not None else "", (0.0, 0.0)
-        )
-        state["used"] += (usage.output_tokens / 1_000_000.0) * pricing[1]
+        provider = api.model.provider if api.model is not None else ""
+        provider_pricing = await _pricing_for(provider)
+        state["used"] += (usage.output_tokens / 1_000_000.0) * provider_pricing[1]
         await _emit_if_needed()
 
     api.on(BeforeAgentStartEvent.CHANNEL, _before_agent_start)

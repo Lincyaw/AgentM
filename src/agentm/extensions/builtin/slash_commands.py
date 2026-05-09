@@ -18,6 +18,7 @@ MANIFEST = ExtensionManifest(
         "type": "object",
         "additionalProperties": False,
     },
+    requires=(),  # Leaf atom: dispatches commands registered by any peer.
     api_version=1,
     tier=1,
 )

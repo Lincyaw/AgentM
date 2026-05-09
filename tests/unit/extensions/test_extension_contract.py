@@ -375,3 +375,74 @@ def test_D6_local_class_isinstance_allowed(tmp_path: Path) -> None:
     )
 
     assert not any(issue.rule == "11.4.D6-harness-service-downcast" for issue in issues)
+
+
+def test_D4_peer_literal_requires_manifest_entry(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'from agentm.extensions import ExtensionManifest\n'
+        'MANIFEST = ExtensionManifest(name="synthetic", description="", registers=())\n'
+        'def install(api, config):\n'
+        '    return "system_prompt"\n',
+    )
+
+    assert any(issue.rule == "11.4.D4-peer-requires" for issue in issues)
+
+
+def test_D4_declared_peer_literal_allowed(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'from agentm.extensions import ExtensionManifest\n'
+        'MANIFEST = ExtensionManifest(\n'
+        '    name="synthetic", description="", registers=(), requires=("system_prompt",)\n'
+        ')\n'
+        'def install(api, config):\n'
+        '    return "system_prompt"\n',
+    )
+
+    assert not any(issue.rule == "11.4.D4-peer-requires" for issue in issues)
+
+
+def test_D7_warns_on_undeclared_api_registry_mutation(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'def install(api, config):\n'
+        '    api.tools.append(object())\n',
+    )
+
+    assert any(
+        issue.rule == "11.4.D7-registers-mutation" and issue.severity == "warning"
+        for issue in issues
+    )
+
+
+def test_D7_allows_agent_start_routed_registry_mutation(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'from agentm.extensions import ExtensionManifest\n'
+        'MANIFEST = ExtensionManifest(\n'
+        '    name="synthetic", description="", registers=("event:agent_start",)\n'
+        ')\n'
+        'def install(api, config):\n'
+        '    def on_start(event):\n'
+        '        api.tools.append(object())\n'
+        '    api.on("agent_start", on_start)\n',
+    )
+
+    assert not any(issue.rule == "11.4.D7-registers-mutation" for issue in issues)
+
+
+def test_D7_warns_when_agent_start_atom_mutates_registry_during_install(
+    tmp_path: Path,
+) -> None:
+    issues = _validate_source(
+        tmp_path,
+        'from agentm.extensions import ExtensionManifest\n'
+        'MANIFEST = ExtensionManifest(\n'
+        '    name="synthetic", description="", registers=("event:agent_start",)\n'
+        ')\n'
+        'def install(api, config):\n'
+        '    api.tools.append(object())\n',
+    )
+
+    assert any(issue.rule == "11.4.D7-registers-mutation" for issue in issues)

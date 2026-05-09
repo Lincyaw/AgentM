@@ -262,6 +262,7 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": True,
     },
+    requires=(),  # Leaf atom: publishes prompt templates through api.prompt_templates.
 )
 
 

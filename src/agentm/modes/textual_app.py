@@ -39,7 +39,6 @@ from agentm.core.abi import (
     ToolResultEvent,
     Usage,
 )
-from agentm.extensions.builtin.cost_budget import _PRICING as _COST_PRICING
 from agentm.harness import AgentSession, AgentSessionConfig
 from agentm.harness.events import (
     ApiRegisterEvent,
@@ -1018,7 +1017,7 @@ class AgentMApp(App[int]):
         status.tokens_in = usage.input_tokens
         status.tokens_out = usage.output_tokens
         model = self._session.model
-        pricing = _COST_PRICING.get(getattr(model, "provider", ""), (0.0, 0.0))
+        pricing = getattr(model, "metadata", {}).get("pricing", (0.0, 0.0))
         status.cost_usd = (
             (usage.input_tokens / 1_000_000.0) * pricing[0]
             + (usage.output_tokens / 1_000_000.0) * pricing[1]

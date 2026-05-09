@@ -188,7 +188,83 @@ def _parse_extensions(
                 ),
             )
 
-    return extensions
+    return sort_extensions_by_requires(extensions, source=source)
+
+
+def sort_extensions_by_requires(
+    extensions: list[tuple[str, dict[str, Any]]],
+    *,
+    source: str = "<extensions>",
+) -> list[tuple[str, dict[str, Any]]]:
+    manifests: dict[str, ExtensionManifest] = {}
+    name_by_module: dict[str, str] = {}
+    entries_by_name: dict[str, tuple[str, dict[str, Any]]] = {}
+
+    for module_path, config in extensions:
+        try:
+            module = importlib.import_module(module_path)
+        except Exception:  # noqa: BLE001
+            continue
+        manifest = getattr(module, "MANIFEST", None)
+        if not isinstance(manifest, ExtensionManifest):
+            continue
+        existing = entries_by_name.get(manifest.name)
+        if existing is not None:
+            raise ScenarioLoadError(
+                source,
+                ValueError(
+                    f"extension {manifest.name!r} is loaded more than once; "
+                    "duplicate extension entries are not supported"
+                ),
+            )
+        manifests[manifest.name] = manifest
+        name_by_module[module_path] = manifest.name
+        entries_by_name[manifest.name] = (module_path, config)
+
+    for name, manifest in manifests.items():
+        for dep in manifest.requires:
+            if dep not in entries_by_name:
+                raise ScenarioLoadError(
+                    source,
+                    ValueError(
+                        f"extension {name!r} requires {dep!r}, but {dep!r} "
+                        "is not loaded"
+                    ),
+                )
+
+    sorted_entries: list[tuple[str, dict[str, Any]]] = []
+    temporary: set[str] = set()
+    permanent: set[str] = set()
+    emitted_modules: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in permanent:
+            return
+        if name in temporary:
+            raise ScenarioLoadError(
+                source, ValueError(f"extension dependency cycle involving {name!r}")
+            )
+        temporary.add(name)
+        for dep in manifests[name].requires:
+            visit(dep)
+        temporary.remove(name)
+        permanent.add(name)
+        entry = entries_by_name[name]
+        if entry[0] not in emitted_modules:
+            sorted_entries.append(entry)
+            emitted_modules.add(entry[0])
+
+    for entry in extensions:
+        module_path = entry[0]
+        module_name = name_by_module.get(module_path)
+        if module_name is None:
+            if module_path not in emitted_modules:
+                sorted_entries.append(entry)
+                emitted_modules.add(module_path)
+            continue
+        visit(module_name)
+
+    return sorted_entries
 
 
 def _validate_module(source: str, index: int, module: str) -> None:
@@ -326,4 +402,4 @@ def _entry_error(index: int, detail: str) -> str:
     return f"extensions[{index}] {detail}"
 
 
-__all__ = ["ScenarioLoadError", "load_scenario"]
+__all__ = ["ScenarioLoadError", "load_scenario", "sort_extensions_by_requires"]

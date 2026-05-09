@@ -35,6 +35,7 @@ MANIFEST = ExtensionManifest(
         "required": ["provider"],
         "additionalProperties": False,
     },
+    requires=(),  # Leaf provider shim: consumes only injected config.
     api_version=1,
     tier=1,
 )
