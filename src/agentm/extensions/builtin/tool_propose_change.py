@@ -1,26 +1,44 @@
 """Tool atom: gate-keeper for activating an atom mutation.
 
-See ``.claude/designs/per-task-evolution-loop.md`` §6 / §8.
+See ``.claude/designs/per-task-evolution-loop.md`` §6 / §8 / §11.
 
 Required-arg validation enforces "evidence-driven, not error-driven":
 the caller must pass both ``eval_run_baseline`` and ``eval_run_proposed``
 or the call is rejected. Tier-2 atoms cannot be auto-activated and produce
 a ``pending_human_approval`` decision record (no ``reload_atom`` call).
 
-For tier-1 ``activate`` decisions, the gate runs a four-part check:
+Phase 2 (B-1) splits the gate role into two:
+
+- **Inclusion gate** — Pareto: a candidate enters the pool iff it wins
+  on >=1 task vs the current frontier. Strictly-dominated candidates are
+  marked pruned (``candidates/<id>.json.pruned`` sidecar; the .json
+  itself stays for audit). This runs whenever an eval lookup succeeds,
+  even when the deployment gate ultimately rejects.
+- **Deployment gate** — the legacy four-floor check (threshold,
+  statistical sanity, guard tolerance, rollback bypass). Decides whether
+  to swap the live atom; *not* whether to keep the candidate.
+
+For tier-1 ``activate`` decisions the deployment gate runs:
 
 1. ``threshold_relative`` improvement on primary score.
-2. Statistical-sanity check (Δ > 2 · sqrt(σ_b² + σ_p²)) — disables for
-   ``decision="exploratory"``.
-3. Guard metrics within ``±guard_tolerance`` (relative).
+2. Statistical-sanity check (delta > 2 * sqrt(sigma_b^2 + sigma_p^2)) —
+   disabled for ``decision="exploratory"``.
+3. Guard metrics within ``+/- guard_tolerance`` (relative).
 4. ``decision="rollback"`` skips gates entirely (rollback is always safe).
 
-On success, calls ``api.reload_atom`` and appends a structured activation
-record to ``.agentm/decisions/<scenario>/activations.jsonl`` via a direct
-file-append (the path is constitution-protected against ``tool_edit`` /
-``tool_write``; only this atom may write). The file is the deployment
-log; the Phase 2 candidate pool lives in the sibling ``candidates/``
-directory.
+ChangeSpec kinds (B-3): MVP supported ``atom_source``; Phase 2 also
+supports ``system_prompt``, ``manifest_field``, ``manifest_extensions``
+through validators under ``contrib/extensions/changespec_validators/``.
+``scenario_compose`` remains ``not_yet_implemented``.
+
+Budget (B-6): both ``rollouts_used`` and ``usd_used`` are read from
+``.agentm/decisions/<scenario>/budget.json`` before evidence checks and
+incremented on each call. A configured ``rollouts_budget`` /
+``usd_budget`` causes the next call to abort with ``budget_exhausted``.
+
+Activation records append to ``.agentm/decisions/<scenario>/activations.jsonl``;
+a ``tree.jsonl`` sibling records parent->child edges between candidates.
+Both paths are constitution-protected — only this atom writes here.
 """
 
 from __future__ import annotations
@@ -59,6 +77,19 @@ MANIFEST = ExtensionManifest(
                     "stop_after_no_improvement": {"type": "integer"},
                 },
                 "additionalProperties": True,
+            },
+            "rollouts_budget": {
+                "type": ["integer", "null"],
+                "description": (
+                    "B-6: per-tuning-session rollout cap. None = unbounded."
+                ),
+            },
+            "usd_budget": {
+                "type": ["number", "null"],
+                "description": (
+                    "B-6: per-tuning-session USD cap; mirrors "
+                    "tool_eval_run.max_cost_usd. None = unbounded."
+                ),
             },
         },
         "additionalProperties": True,
@@ -143,9 +174,33 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     guard_tolerance = float(
         promotion.get("guard_tolerance", _DEFAULT_GUARD_TOLERANCE)
     )
+    rollouts_budget_raw = config.get("rollouts_budget")
+    rollouts_budget: int | None
+    try:
+        rollouts_budget = (
+            int(rollouts_budget_raw) if rollouts_budget_raw is not None else None
+        )
+    except (TypeError, ValueError):
+        rollouts_budget = None
+    usd_budget_raw = config.get("usd_budget")
+    usd_budget: float | None
+    try:
+        usd_budget = (
+            float(usd_budget_raw) if usd_budget_raw is not None else None
+        )
+    except (TypeError, ValueError):
+        usd_budget = None
     cwd = Path(api.cwd)
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
+        # B-6: budget gate runs first. If a prior call already exhausted
+        # the cap, refuse before doing any evidence work.
+        budget_check = _check_budget(
+            cwd, target_scenario, rollouts_budget, usd_budget
+        )
+        if budget_check is not None:
+            return _error(budget_check)
+
         # Required-arg validation — explicit even though the schema requires
         # them, because the design's evidence contract is the load-bearing
         # piece (P3 in design §10).
@@ -175,48 +230,44 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 f"target.kind must be one of {list(_CHANGE_KINDS)!r}; "
                 f"got {kind!r}"
             )
-        # MVP guard — reserved kinds reject explicitly.
-        if kind != "atom_source":
+        # B-3: dispatch to per-kind validator. ``scenario_compose`` is
+        # explicitly out of scope for Phase 2 — keep the not_yet_implemented
+        # rejection in place so callers get a clear signal.
+        if kind == "scenario_compose":
             return _error(
-                f"not_yet_implemented: target.kind={kind!r} is reserved "
-                f"for Phase 2 (design §11); MVP accepts only 'atom_source'"
+                f"not_yet_implemented: target.kind={kind!r} requires "
+                f"harness compose-graph reload; out of scope for Phase 2 "
+                f"(design §11)"
             )
-        path_value = target_spec.get("path")
-        if not isinstance(path_value, str) or not path_value:
+        validator = _load_validator(kind)
+        if validator is None:
             return _error(
-                "evidence missing: target.path is required for "
-                "kind='atom_source'"
+                f"not_yet_implemented: no validator registered for "
+                f"target.kind={kind!r}"
             )
-        new_content = target_spec.get("new_content")
-        if not isinstance(new_content, str) or not new_content:
-            return _error(
-                "evidence missing: target.new_content is required and "
-                "must be a non-empty string"
-            )
-        atom_name_raw = target_spec.get("target_atom")
-        if atom_name_raw is None or (
-            isinstance(atom_name_raw, str) and not atom_name_raw
-        ):
-            return _error(
-                "evidence missing: target.target_atom is required for "
-                "kind='atom_source'"
-            )
-        if not isinstance(atom_name_raw, str):
-            return _error(
-                "target.target_atom must be a string (atom name) for "
-                "kind='atom_source'"
-            )
+        v_result = validator(target_spec, cwd, target_scenario)
+        if not v_result.get("ok"):
+            err_text = v_result.get("error") or "validator rejected"
+            return _error(str(err_text))
 
-        target_atom = atom_name_raw
+        path_value = str(target_spec["path"])
+        new_content = str(target_spec.get("new_content") or "")
+        atom_name_raw = target_spec.get("target_atom")
+
+        # Per-kind branching — only ``atom_source`` interacts with
+        # in-session reload + tier metadata. Manifest-bearing kinds use
+        # the cross-session writer path.
+        if kind == "atom_source":
+            target_atom = str(atom_name_raw) if isinstance(atom_name_raw, str) else ""
+        else:
+            target_atom = ""
         new_source = new_content
-        # Snapshot the ChangeSpec verbatim for the activation record
-        # (forward-compat: B-3 / B-10 read this back). Restrict to the
-        # design fields to keep the schema stable.
+
         change_spec: dict[str, Any] = {
             "kind": kind,
             "path": path_value,
             "new_content": new_content,
-            "target_atom": atom_name_raw,
+            "target_atom": atom_name_raw if isinstance(atom_name_raw, str) else None,
         }
         rationale = str(args["rationale"])
         baseline_id = str(args["eval_run_baseline"])
@@ -227,16 +278,35 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         # Cross-session case: tuner runs in its own session and does NOT load
         # the target_scenario's atoms. Fall back to a filesystem scan under
         # the scenario root so we can still resolve tier + source path.
-        loaded = _find_atom_info(api, target_atom)
-        atom_in_session = loaded is not None
-        if loaded is None and target_scenario:
-            loaded = _find_atom_on_disk(cwd, target_scenario, target_atom)
-        if loaded is None:
-            return _error(
-                f"unknown atom {target_atom!r}: not in current session and "
-                f"no matching MANIFEST under contrib/scenarios/{target_scenario}/"
-            )
-        tier = int(loaded.get("tier", 1) or 1)
+        # Only atom_source kinds carry an atom name; manifest-bearing kinds
+        # use the resolved_path from the validator and are treated as tier-1.
+        loaded: dict[str, Any] | None
+        atom_in_session: bool
+        if kind == "atom_source":
+            loaded = _find_atom_info(api, target_atom)
+            atom_in_session = loaded is not None
+            if loaded is None and target_scenario:
+                loaded = _find_atom_on_disk(cwd, target_scenario, target_atom)
+            if loaded is None:
+                return _error(
+                    f"unknown atom {target_atom!r}: not in current session and "
+                    f"no matching MANIFEST under contrib/scenarios/{target_scenario}/"
+                )
+            tier = int(loaded.get("tier", 1) or 1)
+        else:
+            # Manifest-bearing kinds: there is no MANIFEST.tier to read;
+            # the target is the validated on-disk path returned by the
+            # validator. Treat as tier-1 (auto-promotable subject to the
+            # deployment gate) — manifest field tweaks are scenario-shape
+            # policy, not capability boundaries.
+            loaded = {
+                "name": kind,
+                "tier": 1,
+                "current_hash": None,
+                "source_path": v_result.get("resolved_path"),
+            }
+            atom_in_session = False
+            tier = 1
 
         # Tier-2 gate: refuse to auto-activate. Decision record still written
         # so the operator can manually approve later.
@@ -277,90 +347,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         if proposed is None:
             return _error(f"proposed eval run not found: {proposed_id}")
 
-        # Promotion gate (skipped for rollback + exploratory).
-        gate_outcome: dict[str, Any] = {"applied": False}
-        if decision == "activate":
-            gate_outcome = _apply_promotion_gate(
-                baseline=baseline,
-                proposed=proposed,
-                threshold_relative=threshold_relative,
-                guard_tolerance=guard_tolerance,
-                exploratory=False,
-            )
-            if not gate_outcome["passed"]:
-                # Reject without invoking reload; record the rejection.
-                decisions_path = _decisions_path(cwd, target_scenario)
-                record = {
-                    "at": time.time(),
-                    "kind": "rejected",
-                    "scenario": target_scenario,
-                    "atom": target_atom,
-                    "tier": tier,
-                    "rationale": rationale,
-                    "change_spec": change_spec,
-                    "evidence": {
-                        "baseline_run": baseline_id,
-                        "proposed_run": proposed_id,
-                        "gate": gate_outcome,
-                    },
-                    "by": "tool_propose_change",
-                }
-                _append_decision_record(decisions_path, record)
-                return _error(
-                    f"promotion gate failed: {gate_outcome['reason']}; "
-                    f"baseline={gate_outcome.get('baseline_score')}, "
-                    f"proposed={gate_outcome.get('proposed_score')}"
-                )
-
-        # Apply the change.
-        # In-session: reload_atom is the transactional path (validate, swap
-        # sys.modules, rerun install, rollback on failure).
-        # Cross-session (tuner mutating production atom it doesn't load):
-        # reload_atom can't run; instead write through ResourceWriter so the
-        # change commits to git — the next production session loads the new
-        # version on startup. This matches the design's "git log IS the
-        # activation history".
-        if atom_in_session:
-            reload_result = api.reload_atom(
-                target_atom,
-                new_source,
-                agent_initiated=True,
-                rationale=rationale,
-            )
-            ok = reload_result.ok
-            old_hash = reload_result.old_hash
-            new_hash = reload_result.new_hash
-            error = reload_result.error
-        else:
-            ok, old_hash, new_hash, error = _write_cross_session(
-                api, loaded["source_path"], new_source, rationale
-            )
-        if not ok:
-            decisions_path = _decisions_path(cwd, target_scenario)
-            record = {
-                "at": time.time(),
-                "kind": "reload_failed",
-                "scenario": target_scenario,
-                "atom": target_atom,
-                "tier": tier,
-                "rationale": rationale,
-                "change_spec": change_spec,
-                "evidence": {
-                    "baseline_run": baseline_id,
-                    "proposed_run": proposed_id,
-                },
-                "error": error,
-                "by": "tool_propose_change",
-            }
-            _append_decision_record(decisions_path, record)
-            return _error(f"reload failed: {error}")
-
+        # B-1 inclusion phase: build the candidate record from the
+        # proposed eval-run, write it under candidates/ unconditionally,
+        # then run Pareto pruning across the pool. This phase runs *before*
+        # the deployment gate so dominated-but-niche-winning candidates
+        # are retained for future search even when the four-floor gate
+        # rejects this activation.
         decisions_path = _decisions_path(cwd, target_scenario)
-
-        # A-4: write a degenerate single-entry candidate record alongside
-        # the activation. parent_id chains to the prior activation's
-        # candidate_id (or null on the first ever). per_task_scores +
-        # holdout_scores come from the proposed eval-run's task records.
         decisions_dir = decisions_path.parent
         parent_id = _last_candidate_id(decisions_path)
         candidate_id = f"c_{uuid.uuid4().hex[:12]}"
@@ -379,6 +372,96 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "created_at": time.time(),
         }
         _write_candidate_record(decisions_dir, candidate_record)
+        _append_tree_edge(decisions_dir, child=candidate_id, parent=parent_id)
+        # Pareto pruning: a candidate is on the frontier iff it wins on
+        # >=1 task across the pool. Strictly-dominated peers get a
+        # ``.pruned`` sidecar (the .json itself stays for audit).
+        _prune_dominated_candidates(decisions_dir)
+
+        # B-6: increment rollouts_used (one per call). usd_used is
+        # incremented by tool_eval_run; we don't double-count cost here.
+        _bump_budget_rollouts(cwd, target_scenario)
+
+        # B-1 deployment gate (formerly "promotion gate"). Skipped for
+        # rollback + exploratory. Even on rejection the candidate stays in
+        # the pool — rejection only prevents the swap.
+        gate_outcome: dict[str, Any] = {"applied": False}
+        if decision == "activate":
+            gate_outcome = _apply_deployment_gate(
+                baseline=baseline,
+                proposed=proposed,
+                threshold_relative=threshold_relative,
+                guard_tolerance=guard_tolerance,
+                exploratory=False,
+            )
+            if not gate_outcome["passed"]:
+                # Reject without invoking reload; record the rejection.
+                # The candidate record is already on disk (inclusion phase).
+                record = {
+                    "at": time.time(),
+                    "kind": "rejected",
+                    "scenario": target_scenario,
+                    "atom": target_atom,
+                    "tier": tier,
+                    "rationale": rationale,
+                    "change_spec": change_spec,
+                    "candidate_id": candidate_id,
+                    "evidence": {
+                        "baseline_run": baseline_id,
+                        "proposed_run": proposed_id,
+                        "gate": gate_outcome,
+                    },
+                    "by": "tool_propose_change",
+                }
+                _append_decision_record(decisions_path, record)
+                return _error(
+                    f"deployment gate failed: {gate_outcome['reason']}; "
+                    f"baseline={gate_outcome.get('baseline_score')}, "
+                    f"proposed={gate_outcome.get('proposed_score')}"
+                )
+
+        # Apply the change.
+        # In-session: reload_atom is the transactional path (validate, swap
+        # sys.modules, rerun install, rollback on failure).
+        # Cross-session (tuner mutating production atom it doesn't load):
+        # reload_atom can't run; instead write through ResourceWriter so the
+        # change commits to git — the next production session loads the new
+        # version on startup. This matches the design's "git log IS the
+        # activation history".
+        if kind == "atom_source" and atom_in_session:
+            reload_result = api.reload_atom(
+                target_atom,
+                new_source,
+                agent_initiated=True,
+                rationale=rationale,
+            )
+            ok = reload_result.ok
+            old_hash = reload_result.old_hash
+            new_hash = reload_result.new_hash
+            error = reload_result.error
+        else:
+            ok, old_hash, new_hash, error = _write_cross_session(
+                api, loaded["source_path"], new_source, rationale
+            )
+        if not ok:
+            record = {
+                "at": time.time(),
+                "kind": "reload_failed",
+                "scenario": target_scenario,
+                "atom": target_atom,
+                "tier": tier,
+                "rationale": rationale,
+                "change_spec": change_spec,
+                "candidate_id": candidate_id,
+                "evidence": {
+                    "baseline_run": baseline_id,
+                    "proposed_run": proposed_id,
+                },
+                "error": error,
+                "by": "tool_propose_change",
+            }
+            _append_decision_record(decisions_path, record)
+            return _error(f"reload failed: {error}")
 
         record = {
             "at": time.time(),
@@ -671,7 +754,7 @@ def _load_eval_run_summary(cwd: Path, run_id: str) -> dict[str, Any] | None:
     return None
 
 
-def _apply_promotion_gate(
+def _apply_deployment_gate(
     *,
     baseline: dict[str, Any],
     proposed: dict[str, Any],
@@ -762,6 +845,195 @@ def _apply_promotion_gate(
         "delta": delta,
         "relative": relative,
     }
+
+
+def _load_validator(kind: str) -> Any:
+    """Load the per-kind validator from
+    ``contrib/extensions/changespec_validators/<kind>.py`` and return its
+    ``validate`` callable. Returns ``None`` when no module is registered.
+
+    The validators live under ``contrib/`` (not ``src/agentm/``) because
+    they encode scenario-shape policy, not core mechanism. Importing them
+    from this builtin atom is acceptable: validators are not atoms (no
+    MANIFEST), so the §11 "no atom-to-atom imports" rule does not apply.
+    """
+    import importlib
+
+    safe_kind = kind.strip().lower()
+    if not safe_kind.replace("_", "").isalnum():
+        return None
+    module_name = (
+        f"contrib.extensions.changespec_validators.{safe_kind}"
+    )
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError:
+        return None
+    fn = getattr(module, "validate", None)
+    return fn if callable(fn) else None
+
+
+def _budget_path(cwd: Path, scenario: str) -> Path:
+    return cwd / ".agentm" / "decisions" / scenario / "budget.json"
+
+
+def _read_budget(cwd: Path, scenario: str) -> dict[str, Any]:
+    path = _budget_path(cwd, scenario)
+    default = {
+        "scenario": scenario,
+        "rollouts_used": 0,
+        "usd_used": 0.0,
+        "updated_at": 0.0,
+    }
+    if not path.is_file():
+        return default
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return default
+    return {
+        "scenario": str(data.get("scenario") or scenario),
+        "rollouts_used": int(data.get("rollouts_used") or 0),
+        "usd_used": float(data.get("usd_used") or 0.0),
+        "updated_at": float(data.get("updated_at") or 0.0),
+    }
+
+
+def _write_budget(cwd: Path, scenario: str, budget: dict[str, Any]) -> None:
+    import os
+
+    path = _budget_path(cwd, scenario)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        json.dump(budget, fh, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def _check_budget(
+    cwd: Path,
+    scenario: str,
+    rollouts_budget: int | None,
+    usd_budget: float | None,
+) -> str | None:
+    """B-6 budget gate. Returns a ``budget_exhausted: ...`` error message
+    when the configured cap is hit, else None. Caps are read from
+    ``budget.json``; tool_eval_run increments ``usd_used`` and this atom
+    increments ``rollouts_used`` per call."""
+    if rollouts_budget is None and usd_budget is None:
+        return None
+    budget = _read_budget(cwd, scenario)
+    if (
+        rollouts_budget is not None
+        and budget["rollouts_used"] >= rollouts_budget
+    ):
+        return (
+            f"budget_exhausted: rollouts_used={budget['rollouts_used']} "
+            f">= rollouts_budget={rollouts_budget}"
+        )
+    if usd_budget is not None and budget["usd_used"] >= usd_budget:
+        return (
+            f"budget_exhausted: usd_used={budget['usd_used']:.4f} "
+            f">= usd_budget={usd_budget:.4f}"
+        )
+    return None
+
+
+def _bump_budget_rollouts(cwd: Path, scenario: str) -> None:
+    """Increment ``rollouts_used`` by one. Called once per propose_change
+    call (B-6). The eval_run atom continues to be the sole writer of
+    ``usd_used``; we deliberately don't double-count cost here."""
+    budget = _read_budget(cwd, scenario)
+    budget["rollouts_used"] = int(budget["rollouts_used"]) + 1
+    budget["updated_at"] = time.time()
+    _write_budget(cwd, scenario, budget)
+
+
+def _append_tree_edge(
+    decisions_dir: Path, *, child: str, parent: str | None
+) -> None:
+    """Append a parent->child edge to ``tree.jsonl`` (B-1). The file lives
+    under the constitution-protected decisions dir; only this atom writes
+    here. ``parent`` is null on the first candidate."""
+    path = decisions_dir / "tree.jsonl"
+    decisions_dir.mkdir(parents=True, exist_ok=True)
+    record = {"child": child, "parent": parent, "at": time.time()}
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _prune_dominated_candidates(decisions_dir: Path) -> None:
+    """Pareto pruning (B-1). A candidate is on the frontier iff it is the
+    sole top-scorer on >=1 task across the pool's ``per_task_scores`` (a
+    candidate that ties for the best on a task does *not* claim that win
+    — strict-dominance only). Strictly-dominated peers get a sidecar
+    ``<id>.json.pruned`` flag; the .json itself stays for audit. Already-
+    pruned candidates that happen to win on a task on a later pass have
+    their flag removed (re-include).
+
+    We use strict argmax (a candidate must be strictly greater than all
+    others on at least one task) to avoid infinite tie-breaking when two
+    identical candidates are added — neither would otherwise claim
+    inclusion.
+    """
+    candidates_dir = decisions_dir / "candidates"
+    if not candidates_dir.is_dir():
+        return
+    records: dict[str, dict[str, Any]] = {}
+    for p in candidates_dir.glob("c_*.json"):
+        try:
+            with p.open("r", encoding="utf-8") as fh:
+                rec = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        cid = rec.get("candidate_id")
+        scores = rec.get("per_task_scores")
+        if isinstance(cid, str) and isinstance(scores, dict):
+            records[cid] = rec
+    if not records:
+        return
+
+    # Collect the union of task ids across all candidates.
+    task_ids: set[str] = set()
+    for rec in records.values():
+        for tid in rec["per_task_scores"].keys():
+            task_ids.add(tid)
+
+    winners: set[str] = set()
+    for tid in task_ids:
+        best_score = float("-inf")
+        best_holders: list[str] = []
+        for cid, rec in records.items():
+            score = rec["per_task_scores"].get(tid)
+            if not isinstance(score, (int, float)):
+                continue
+            score_f = float(score)
+            if score_f > best_score:
+                best_score = score_f
+                best_holders = [cid]
+            elif score_f == best_score:
+                best_holders.append(cid)
+        # Strict winner only — ties claim no inclusion via this task.
+        if len(best_holders) == 1:
+            winners.add(best_holders[0])
+
+    for cid in records:
+        flag = candidates_dir / f"{cid}.json.pruned"
+        if cid in winners:
+            # Restore: drop a stale .pruned flag if a later candidate
+            # changed who wins.
+            if flag.is_file():
+                try:
+                    flag.unlink()
+                except OSError:
+                    pass
+        else:
+            if not flag.is_file():
+                try:
+                    flag.write_text("", encoding="utf-8")
+                except OSError:
+                    pass
 
 
 def _ok(text: str) -> ToolResult:
