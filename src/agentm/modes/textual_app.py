@@ -5,8 +5,8 @@ import base64
 import json
 import sys
 import time
-from collections.abc import Awaitable, Callable, Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Generic, Literal, Protocol, TypeVar
 
@@ -26,10 +26,12 @@ from textual.widgets import Collapsible, Input, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from agentm.core.abi import (
+    PHASE_GLYPHS,
     AssistantMessage,
     LlmRequestEndEvent,
     LlmRequestStartEvent,
     MessageEnd,
+    Phase as KernelPhase,
     StreamDeltaEvent,
     TextDelta,
     ThinkingDelta,
@@ -61,7 +63,9 @@ from agentm.harness import (
 )
 
 
-Phase = Literal["idle", "thinking", "streaming", "tool", "subagent"]
+# Re-export the kernel ``Phase`` literal under the legacy presenter name
+# so existing module consumers (tests, themes) keep their imports.
+Phase = KernelPhase
 CommandHandler = Callable[["AgentMApp", str], Awaitable[None] | None]
 KeyMap = Sequence[Binding]
 PromptFailure = Exception
@@ -69,23 +73,23 @@ PromptFailure = Exception
 
 class Theme(Protocol):
     @property
-    def phase_glyphs(self) -> dict[Phase, str]: ...
+    def phase_glyphs(self) -> Mapping[Phase, str]: ...
 
 
 @dataclass(frozen=True, slots=True)
 class DefaultTheme:
-    phase_glyphs: dict[Phase, str]
+    """Default presenter theme.
+
+    The glyph table comes from ``agentm.core.abi.PHASE_GLYPHS`` — the
+    kernel owns the canonical phase set so multiple presenters render
+    consistently. A custom theme can supply its own ``phase_glyphs`` to
+    override the look without forking the kernel.
+    """
+
+    phase_glyphs: Mapping[Phase, str] = field(default_factory=lambda: PHASE_GLYPHS)
 
 
-DEFAULT_THEME = DefaultTheme(
-    phase_glyphs={
-        "idle": "●",
-        "thinking": "◐",
-        "streaming": "◑",
-        "tool": "▶",
-        "subagent": "↳",
-    }
-)
+DEFAULT_THEME = DefaultTheme()
 
 
 @dataclass(frozen=True, slots=True)
