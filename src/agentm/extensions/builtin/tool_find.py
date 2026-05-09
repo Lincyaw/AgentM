@@ -27,6 +27,7 @@ MANIFEST = ExtensionManifest(
         "properties": {"file_ops": {"type": "object"}},
         "additionalProperties": True,
     },
+    requires=(),  # Leaf tool atom: consumes Operations via ExtensionAPI.
 )
 
 _PARAMETERS: Final = {
