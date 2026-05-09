@@ -286,3 +286,12 @@ findings have been delivered to the parent, they will not be redelivered.
   `True`, so handler `Inject` returns are ignored at that boundary.
 - Scenario manifests do not need to opt in. Loading `sub_agent` enables the
   handler automatically.
+
+## Config Inheritance By Manifest Name
+
+`sub_agent.available_inherited_extensions` may name a parent atom with only a
+module path. When the inherited spec omits `config` or supplies an empty config,
+`sub_agent` copies the already loaded parent atom's resolved config by manifest
+name into the child session. Scenarios can therefore define data-tool limits and
+exclusions once on the parent atom while still mounting the same module in
+critic/worker sessions.

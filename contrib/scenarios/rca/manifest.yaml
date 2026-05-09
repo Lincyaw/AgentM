@@ -7,13 +7,11 @@ extensions:
   # role distinction (scout / deep_analyze / verify) was too thin to be
   # worth the routing overhead. The orchestrator carries the data tools
   # directly and only delegates ONE thing: adversarial review by `critic`.
-  - local: hypothesis_tools
+  - module: agentm_rca.tools.hypothesis_tools
   - module: agentm_rca.tools.duckdb_sql
     config:
       exclude:
         - conclusion.parquet
-      row_limit: 200
-      token_limit: 5000
   - module: agentm_rca.tools.finalize
   - module: agentm.extensions.builtin.artifact_store
   - module: agentm.extensions.builtin.observability
@@ -23,11 +21,12 @@ extensions:
       include_defaults: false
       inherit_claude: false
   - module: agentm.extensions.builtin.tool_read
+  - module: contrib.extensions.rcabench_contract
 
   # Multi-agent wiring. ``orchestrator_setup`` (scenario-local) loads the
   # orchestrator system prompt, appends the available-personas block, and
-  # answers ``resolve_subagent`` for the personas under ``agents/`` (now
-  # only ``critic``).
+  # answers ``ResolveSubagentEvent.CHANNEL`` for the personas under ``agents/``
+  # (now only ``critic``).
   - local: orchestrator_setup
   - module: agentm.extensions.builtin.system_prompt
     config:
@@ -56,33 +55,16 @@ extensions:
         - worker_finalize
       available_inherited_extensions:
         duckdb_sql:
-          # Real importable path. The synthetic
-          # ``agentm._scenarios.rca.duckdb_sql`` name only exists when the
-          # orchestrator loads a ``local: duckdb_sql`` entry — and we
-          # deliberately do NOT, so the critic must import the real module.
           module: agentm_rca.tools.duckdb_sql
-          config:
-            exclude:
-              - conclusion.parquet
-            row_limit: 200
-            token_limit: 5000
         artifact_store:
           module: agentm.extensions.builtin.artifact_store
-          config: {}
         observability:
           module: agentm.extensions.builtin.observability
-          config: {}
         worker_skills:
           module: agentm_rca.worker_skills
-          config: {}
         skill_loader:
           module: agentm.extensions.builtin.skill_loader
-          config:
-            include_defaults: false
-            inherit_claude: false
         tool_read:
           module: agentm.extensions.builtin.tool_read
-          config: {}
         worker_finalize:
           module: agentm_rca.tools.worker_finalize
-          config: {}

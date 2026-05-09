@@ -2,8 +2,8 @@
 
 Mirrors :mod:`agentm_rca.orchestrator_setup` but without sub-agent
 machinery — there is no sub-agent availability block, no
-``resolve_subagent`` handler, no persona discovery. Just the prompt
-plus the rcabench-platform agent contract block.
+``resolve_subagent`` handler, no persona discovery. The shared
+``rcabench_contract`` atom owns vendor-contract prompt injection.
 """
 
 from __future__ import annotations
@@ -27,32 +27,12 @@ MANIFEST = ExtensionManifest(
         "rcabench-platform agent contract block."
     ),
     registers=(
-        "event:session_ready",
-        "event:before_agent_start",
+        f"event:{SessionReadyEvent.CHANNEL}",
+        f"event:{BeforeAgentStartEvent.CHANNEL}",
     ),
     config_schema={"type": "object", "additionalProperties": False},
     tier=2,
 )
-
-
-def _load_agent_contract_block() -> str:
-    try:
-        from rcabench_platform.v3.sdk.evaluation.v2 import (  # type: ignore[import-not-found]
-            get_agent_contract_prompt,
-        )
-    except ImportError:
-        return ""
-    body = str(get_agent_contract_prompt()).strip()
-    if not body:
-        return ""
-    return (
-        "<agent_contract>\n"
-        "The shape and vocabulary below are enforced by `submit_final_report`.\n"
-        "Match `service` and `fault_kind` exactly; evidence SQL must be "
-        "runnable on the case dir.\n\n"
-        f"{body}\n"
-        "</agent_contract>"
-    )
 
 
 async def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
@@ -63,8 +43,7 @@ async def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
         prompt = ""
         if _PROMPT_PATH.is_file():
             prompt = _PROMPT_PATH.read_text(encoding="utf-8").strip()
-        contract_block = _load_agent_contract_block()
-        sections = [s for s in (prompt, contract_block) if s]
+        sections = [s for s in (prompt,) if s]
         cached_system = "\n\n".join(sections)
 
     def _inject_prompt(event: BeforeAgentStartEvent) -> dict[str, str] | None:
@@ -75,5 +54,5 @@ async def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
         event.system = merged
         return {"system": merged}
 
-    api.on("session_ready", _load)
-    api.on("before_agent_start", _inject_prompt)
+    api.on(SessionReadyEvent.CHANNEL, _load)
+    api.on(BeforeAgentStartEvent.CHANNEL, _inject_prompt)
