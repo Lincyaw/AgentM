@@ -90,7 +90,8 @@ AssistantStreamEvent = (
 class Model:
     """Provider-agnostic model descriptor.
 
-    ``metadata`` holds vendor-specific bits, opaque to the kernel.
+    ``metadata`` holds free-form provider-specific bits (e.g. anthropic-beta
+    headers, OpenAI tool-choice quirks); the kernel never inspects it.
     """
 
     id: str
