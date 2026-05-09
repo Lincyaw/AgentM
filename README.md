@@ -125,8 +125,8 @@ auto-discovered alongside builtins under the synthetic module prefix
 are opt-in and are mounted explicitly by scenario manifests or
 `agentm --extension <dotted.module.path>`.
 
-- `cc_agents`, `cc_commands`, `cc_plugins` (under `contrib/extensions/cc/`)
-  — Claude Code compatibility
+- `contrib.extensions.cc` (package under `contrib/extensions/cc/`)
+  — Claude Code compatibility atoms (`agents`, `commands`, `plugins`)
   (read `~/.claude/{agents,commands,plugins}` and surface them through
   the generic `resources_discover` event).
 

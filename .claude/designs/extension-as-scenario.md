@@ -617,7 +617,7 @@ The §10b.7 method is reachable as `api.session.append_entry(...)`, **not** `api
 
 ### 11.1 Hard rules
 
-1. **One file, one extension.** A new built-in extension is a single Python file at `src/agentm/extensions/builtin/<name>.py`. **No subpackages**, no helper modules. If the file would exceed ~300 LoC, the responsibility is too broad — split it into two extensions instead.
+1. **One file, one extension.** A new built-in extension is a single Python file at `src/agentm/extensions/builtin/<name>.py`. **No subpackages**, no helper modules. If the file would exceed ~300 LoC, the responsibility is too broad — split it into two extensions instead. Opt-in contrib packages may group multiple single-file atoms under `contrib/extensions/<package>/` when mounted explicitly with `--extension`; package-internal helper modules are allowed only for shared install-time parsing/rendering, and each public atom file still exports its own `MANIFEST` + `install`.
 2. **Module-level `MANIFEST`.** Every built-in extension exports a module-level constant `MANIFEST: ExtensionManifest` (frozen dataclass; defined in `agentm.extensions`). This is the *only* way an extension declares what it is. No magic comments, no plugin entry-point files.
 3. **`install(api, config)` is the only callable surface.** Internal helpers may exist as module-private functions (`_underscore_prefixed`); they are never imported by other modules.
 4. **Allowed imports** (enforced by validator):
@@ -651,7 +651,7 @@ class ExtensionManifest:
 - The validator (§11.4).
 - Future tooling: an agent listing "what atoms exist" reads this map; nothing else.
 
-Discovery is **memoized per process** so production loads pay the directory walk once.
+Discovery is **memoized per process** so production loads pay the directory walk once. Flat-file contrib discovery intentionally scans only `contrib/extensions/*.py`; privileged contrib packages such as `contrib.extensions.cc` are loaded only by explicit module path and are not auto-discovered from their package directory.
 
 ### 11.4 Validator
 

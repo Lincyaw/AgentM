@@ -34,8 +34,8 @@ Finalizing without a SUPPORTED critic pass on the current conclusion is
 **invalid** — see `<critic_protocol>` below for the gate.
 </termination_protocol>
 
-The single available worker persona is advertised in the `<available_agents>`
-block appended below by the runtime. The entry includes a `<persona_file>`
+The single available worker persona is advertised in the sub-agent availability block
+appended below by the runtime. The entry includes a `<persona_file>`
 path; do NOT read or inline the persona body — the runtime injects it
 automatically when you call:
 
