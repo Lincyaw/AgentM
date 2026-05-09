@@ -56,7 +56,7 @@ Inspired by pi-mono's three-layer split (`pi-ai` → `pi-agent` → `pi-coding-a
 
 ## 3. Five Pluggability Axes
 
-Every axis below is a `typing.Protocol` in `agentm-core`. The harness ships a default implementation; extensions/users can substitute. **All five must be replaceable without forking.** In v0, Operations replacement is constitution-only: the harness selects the operations bundle when constructing a session, and atoms only consume it through `ExtensionAPI.get_operations()`.
+Every axis below is a `typing.Protocol` in `agentm-core`. The harness ships a default implementation; extensions/users can substitute. **All five must be replaceable without forking.**
 
 ### 3.1 LLM Stream (the model boundary)
 
@@ -82,7 +82,7 @@ class StreamFn(Protocol):
 
 ### 3.2 Tool Execution (the environment boundary)
 
-Three-layer split. `ToolDefinition` and `Tool` are extension/runtime surfaces; `Operations` are a constitution-selected environment port in v0:
+Three-layer split, each replaceable:
 
 ```python
 @dataclass
@@ -115,7 +115,7 @@ class BashOperations(Protocol):
 
 - `ToolDefinition` is the harness/UI-facing record.
 - `Tool` is the bare execution interface used by the agent loop.
-- `XxxOperations` is the **smallest possible port** for swapping environments (local FS → SSH → sandbox → in-memory). It is replaceable by harness/session construction, not by an atom-level `register_operations` hook.
+- `XxxOperations` is the **smallest possible port** for swapping environments (local FS → SSH → sandbox → in-memory).
 
 **Why three layers**: the "what" (definition), "how-to-call" (Tool), and "where-it-runs" (Operations) vary independently. Pi proves it: their `read.ts` tool body is unchanged whether running locally or over SSH; only `ReadOperations` is swapped.
 
@@ -267,7 +267,7 @@ Modes share **all** runtime; they only differ in:
 A change to the architecture is acceptable iff each of these is achievable **without forking core**:
 
 1. **Replace the LLM provider** with a corporate proxy speaking a custom protocol → register a `StreamFn`.
-2. **Run `bash` tool over SSH** to a remote host → construct the session with SSH-backed `BashOperations`.
+2. **Run `bash` tool over SSH** to a remote host → swap `BashOperations`.
 3. **Persist sessions to Postgres** instead of JSONL → swap `SessionManager`.
 4. **Embed AgentM in a Django app** with no filesystem access → swap `ResourceLoader`.
 5. **Add a permission-prompt gate** before every tool call → register `on("tool_call", ...)` returning `{block, reason}`.
@@ -385,4 +385,4 @@ Quick lookup for implementation. All paths relative to `pi-mono/packages/`.
    b. Define the five Protocol ports.
    c. Implement minimal `EventBus` + 6 critical events (`input`, `before_agent_start`, `tool_call`, `tool_result`, `context`, `agent_end`).
    d. Refactor existing `AgentRuntime` to be the harness orchestrator.
-3. Acceptance: a smoke-test scenario that swaps `StreamFn` (mock LLM) and constructs the session with `BashOperations` (in-memory FS) without modifying core.
+3. Acceptance: a smoke-test scenario that swaps `StreamFn` (mock LLM) and `BashOperations` (in-memory FS) without modifying core.
