@@ -11,7 +11,10 @@ import pathspec
 
 from agentm.core.abi import TextContent, Tool, ToolResult
 from agentm.core.abi.operations import FileOperations
-from agentm.core.lib.path_utils import load_gitignore_patterns, resolve_to_cwd
+from agentm.core.lib.path_utils import (
+    load_gitignore_patterns_from_file_ops,
+    resolve_to_cwd,
+)
 from agentm.core.lib.text_truncate import (
     DEFAULT_MAX_BYTES,
     GREP_MAX_LINE_LENGTH,
@@ -152,7 +155,9 @@ async def _list_search_files(
     glob: str | None,
     signal: asyncio.Event | None,
 ) -> list[str]:
-    ignore = pathspec.GitIgnoreSpec.from_lines(load_gitignore_patterns(root, extra=[".git/"]))
+    ignore = pathspec.GitIgnoreSpec.from_lines(
+        await load_gitignore_patterns_from_file_ops(file_ops, root, extra=[".git/"])
+    )
     glob_spec = _compile_glob(glob) if glob else None
     files: list[str] = []
 

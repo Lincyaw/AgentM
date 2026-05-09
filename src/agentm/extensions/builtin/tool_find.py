@@ -10,7 +10,10 @@ import pathspec
 
 from agentm.core.abi import TextContent, Tool, ToolResult
 from agentm.core.abi.operations import FileOperations
-from agentm.core.lib.path_utils import load_gitignore_patterns, resolve_to_cwd
+from agentm.core.lib.path_utils import (
+    load_gitignore_patterns_from_file_ops,
+    resolve_to_cwd,
+)
 from agentm.core.lib.text_truncate import DEFAULT_MAX_BYTES, format_size, truncate_head
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
@@ -92,7 +95,7 @@ async def _find_with_file_ops(
     limit: int,
     signal: asyncio.Event | None,
 ) -> tuple[list[str], bool]:
-    ignore = _ignore_spec(root, [".git/", "node_modules/"])
+    ignore = await _ignore_spec(file_ops, root, [".git/", "node_modules/"])
     match_spec = _compile_pattern(pattern)
     results: list[str] = []
 
@@ -130,8 +133,17 @@ def _compile_pattern(pattern: str) -> pathspec.GitIgnoreSpec:
     return pathspec.GitIgnoreSpec.from_lines([expanded.lstrip("/")])
 
 
-def _ignore_spec(root: str, extra: list[str]) -> pathspec.PathSpec:
-    return pathspec.GitIgnoreSpec.from_lines(load_gitignore_patterns(root, extra=extra))
+async def _ignore_spec(
+    file_ops: FileOperations,
+    root: str,
+    extra: list[str],
+) -> pathspec.PathSpec:
+    patterns = await load_gitignore_patterns_from_file_ops(
+        file_ops,
+        root,
+        extra=extra,
+    )
+    return pathspec.GitIgnoreSpec.from_lines(patterns)
 
 
 def _coerce_file_ops(api: ExtensionAPI, candidate: Any) -> FileOperations:

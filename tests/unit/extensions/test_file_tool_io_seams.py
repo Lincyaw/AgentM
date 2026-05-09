@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -27,7 +27,9 @@ class _RecordingFileOperations:
         self.listed: list[str] = []
         self.dirs = {"/repo", "/repo/src"}
         self.files = {
+            "/repo/.gitignore": b"ignored.py\n",
             "/repo/README.md": b"hello readme\n",
+            "/repo/src/ignored.py": b"needle hidden\n",
             "/repo/src/target.py": b"needle\nother\n",
         }
 
@@ -164,8 +166,11 @@ async def test_read_only_file_atoms_use_file_operations() -> None:
     assert "src/" in ls_result.content[0].text
     assert "README.md" in ls_result.content[0].text
     assert "src/target.py" in find_result.content[0].text
+    assert "src/ignored.py" not in find_result.content[0].text
     assert "src/target.py:1: needle" in grep_result.content[0].text
+    assert "src/ignored.py" not in grep_result.content[0].text
     assert "/repo/README.md" in file_ops.reads
+    assert "/repo/.gitignore" in file_ops.reads
     assert "/repo" in file_ops.listed
     assert "/repo/src" in file_ops.listed
 
@@ -175,8 +180,8 @@ async def test_write_atoms_use_resource_writer_exclusively() -> None:
     writer = _RecordingResourceWriter()
     api = _FakeAPI(file_ops=_FailingFileOperations(), writer=writer)
 
-    tool_write.install(api, {})
-    tool_edit.install(api, {})
+    tool_write.install(cast(Any, api), {})
+    tool_edit.install(cast(Any, api), {})
 
     by_name = {tool.name: tool for tool in api.tools}
     write_result = await by_name["write"].execute(

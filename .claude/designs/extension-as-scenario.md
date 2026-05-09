@@ -286,10 +286,10 @@ Each is one Python module with `install(api, config)` doing **one thing**. The a
 
 | Module | Registers | Notes |
 |---|---|---|
-| `extensions.builtin.tool_read` | `read` | Delegates to `FileOperations` from config |
+| `extensions.builtin.tool_read` | `read` | Delegates to `FileOperations` from config / `api.get_operations().file` |
 | `extensions.builtin.tool_bash` | `bash` | Delegates to `BashOperations` from config |
-| `extensions.builtin.tool_edit` | `edit` | Delegates to `FileOperations` |
-| `extensions.builtin.tool_write` | `write` | Delegates to `FileOperations` |
+| `extensions.builtin.tool_edit` | `edit` | Delegates exclusively to `ResourceWriter` |
+| `extensions.builtin.tool_write` | `write` | Delegates exclusively to `ResourceWriter` |
 | `extensions.builtin.tool_hypothesis_store` | `add_hypothesis`, `update_hypothesis`, `list_hypotheses` | Owns an in-memory store; persists via `api.session.append_entry("hypothesis", …)` |
 | `extensions.builtin.tool_trajectory_loader` | `load_trajectory`, `summarize_trajectory`, `find_event`, `compare_trajectories` | Reads JSONL trajectory files |
 | `extensions.builtin.tool_submit_plan` | `submit_plan` | Appends a `plan` SessionEntry; emits `plan_submitted` event |
