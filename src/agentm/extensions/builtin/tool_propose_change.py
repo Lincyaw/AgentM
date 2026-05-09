@@ -91,6 +91,19 @@ MANIFEST = ExtensionManifest(
                     "tool_eval_run.max_cost_usd. None = unbounded."
                 ),
             },
+            "transfer_to": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "B-8: opt-in cross-task transfer. After a successful "
+                    "kind='atom_source' activation, plant a non-activating "
+                    "candidate record in each listed sibling scenario's "
+                    "candidates/ directory with transferred_from=<source>. "
+                    "The destination tuner decides independently whether "
+                    "to eval + activate. Only atom_source transfers — "
+                    "system_prompt and manifest changes are scenario-shape."
+                ),
+            },
         },
         "additionalProperties": True,
     },
@@ -222,6 +235,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         )
     except (TypeError, ValueError):
         rollouts_budget = None
+    transfer_to_raw = config.get("transfer_to") or []
+    transfer_to: tuple[str, ...]
+    if isinstance(transfer_to_raw, (list, tuple)):
+        transfer_to = tuple(
+            str(s) for s in transfer_to_raw if isinstance(s, str) and s
+        )
+    else:
+        transfer_to = ()
     usd_budget_raw = config.get("usd_budget")
     usd_budget: float | None
     try:
@@ -657,6 +678,49 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "by": "tool_propose_change",
         }
         _append_decision_record(decisions_path, record)
+
+        # B-8: cross-task transfer. After a successful atom_source
+        # ``activate``, plant a non-activating candidate in each sibling
+        # scenario's candidates/ directory. The sibling's tuner will see
+        # it via tool_query_candidates and decide independently whether
+        # to eval + activate. We only transfer atom_source because
+        # system_prompt and manifest changes are scenario-shape and
+        # don't carry cleanly. We don't write to the destination's
+        # tree.jsonl — transferred candidates are roots of new subtrees
+        # in the destination's pool.
+        transferred: list[str] = []
+        if (
+            transfer_to
+            and decision == "activate"
+            and kind == "atom_source"
+        ):
+            cwd_root = Path(api.cwd)
+            for dest_scenario in transfer_to:
+                if dest_scenario == target_scenario:
+                    continue
+                dest_decisions_dir = (
+                    cwd_root / ".agentm" / "decisions" / dest_scenario
+                )
+                dest_decisions_dir.mkdir(parents=True, exist_ok=True)
+                xfer_id = f"c_{uuid.uuid4().hex[:12]}"
+                xfer_record: dict[str, Any] = {
+                    "candidate_id": xfer_id,
+                    "parent_ids": [],
+                    "transferred_from": target_scenario,
+                    "source_eval_run_id": proposed_id,
+                    "source_candidate_id": candidate_id,
+                    "change_spec": change_spec,
+                    # Per-task scores do NOT carry across task classes —
+                    # the destination tuner must re-eval to claim a
+                    # frontier slot. Empty maps signal "unscored, unranked".
+                    "per_task_scores": {},
+                    "holdout_scores": {},
+                    "eval_run_id": None,
+                    "created_at": time.time(),
+                }
+                _write_candidate_record(dest_decisions_dir, xfer_record)
+                transferred.append(f"{dest_scenario}:{xfer_id}")
+
         return _ok(
             json.dumps(
                 {
@@ -668,6 +732,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "decision_path": str(decisions_path),
                     "candidate_id": candidate_id,
                     "gate": gate_outcome,
+                    "transferred": transferred,
                 },
                 indent=2,
             )
