@@ -12,3 +12,4 @@
 - `grep -R -n "_RATE_LIMIT_\|_is_rate_limit\|_create_with_retry" src/agentm/llm/` returns no hits.
 - `validate_builtin()` reports 0 issues with `core-manifest.yaml` configured.
 - Unit tests cover OpenAI retry, Anthropic retry parity, and the `verify_ssl=False` diagnostic warning.
+- CLI sandbox E2E covers retry_policy atom installation, provider registration, and the `verify_ssl=False` diagnostic in `.agentm/observability/<trace>.jsonl`.

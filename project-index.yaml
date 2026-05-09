@@ -327,6 +327,7 @@ requirements:
       - path: src/agentm/llm/anthropic.py
     tests:
       - path: tests/unit/llm/test_retry_policy.py
+      - path: tests/integration/test_observability_cli.py
     docs:
       - path: .claude/designs/pluggable-architecture.md
       - path: .claude/tasks/2026-05-09-issue-92-retry-policy.md
