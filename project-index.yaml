@@ -333,3 +333,33 @@ requirements:
     depends_on:
       - REQ-086-atom-rework-infra
       - REQ-093-llm-provider-stream-common
+
+  - id: REQ-096-cli-provider-session-seams
+    title: CLI presenter consumes provider registry and session-store ports
+    description: >
+      CLI and TUI presenter construction must not encode the provider universe
+      or JSONL session lookup format inline. Provider extension specs and
+      defaults come from ProviderRegistry descriptors, CLI resume/continue
+      flows consume the SessionStore protocol with JsonlSessionStore as the
+      default implementation, shared diagnostic/session-config helpers remove
+      duplicated presenter wiring, and Textual must clone AgentSessionConfig
+      through a public with_bus helper instead of reflecting on __dict__.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/cli.py
+      - path: src/agentm/ai/types.py
+      - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/core/abi/session_store.py
+      - path: src/agentm/harness/session_manager.py
+      - path: src/agentm/harness/session_config.py
+      - path: src/agentm/modes/textual_app.py
+    tests:
+      - path: tests/unit/test_cli_pluggable_boundaries.py
+      - path: tests/ai/test_provider_registry.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-96-cli-provider-session-seams.md
+    depends_on:
+      - REQ-094-ai-provider-descriptor-registry
