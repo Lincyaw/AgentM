@@ -698,7 +698,7 @@ class AtomReloader:
         out: list[AtomInfo] = []
         for atom in sorted(self._loaded_by_name.values(), key=lambda item: item.name):
             current_hash = self.current_version_for_path(str(atom.file_path))
-            if current_hash is None and atom.file_path.exists():
+            if current_hash is None and atom.file_path.is_file():
                 current_hash = self._advisory_hash(
                     atom.file_path.read_text(encoding="utf-8")
                 )
@@ -710,6 +710,7 @@ class AtomReloader:
                     tier=manifest.tier,
                     api_version=manifest.api_version,
                     source_path=str(atom.file_path),
+                    config=dict(atom.config),
                 )
             )
         return out
