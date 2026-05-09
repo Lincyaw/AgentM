@@ -46,6 +46,14 @@ from agentm.core.abi.messages import (
     Usage,
     UserMessage,
 )
+from agentm.core.abi.termination import (
+    Aborted,
+    EndTurn,
+    MaxTokens,
+    TerminationHint,
+    ToolUseExpected,
+    VendorSpecific,
+)
 from agentm.core.abi.stream import (
     AssistantStreamEvent,
     MessageEnd,
@@ -237,25 +245,28 @@ class _StreamState:
     # Per-block scratch keyed by Anthropic content_block index.
     scratch: dict[int, dict[str, Any]] = field(default_factory=dict)
     usage: Usage | None = None
-    stop_reason: (
-        Literal["end_turn", "tool_use", "max_tokens", "error", "aborted"] | None
-    ) = None
+    # Raw vendor stop_reason (verbatim Anthropic string) for observability.
+    stop_reason: str | None = None
+    # Kernel-canonical termination hint, set when ``stop_reason`` arrives.
+    termination: TerminationHint | None = None
 
 
-_STOP_REASON_MAP: dict[str, Literal["end_turn", "tool_use", "max_tokens", "error"]] = {
-    "end_turn": "end_turn",
-    "tool_use": "tool_use",
-    "max_tokens": "max_tokens",
-    "stop_sequence": "end_turn",
-}
+def _map_stop_reason(raw: str | None) -> TerminationHint | None:
+    """Translate Anthropic ``stop_reason`` into a kernel ``TerminationHint``.
 
+    Per `.claude/designs/pluggable-architecture.md` §3.1, providers own the
+    vocabulary translation so the kernel never inspects vendor strings.
+    """
 
-def _map_stop_reason(
-    raw: str | None,
-) -> Literal["end_turn", "tool_use", "max_tokens", "error"] | None:
     if raw is None:
         return None
-    return _STOP_REASON_MAP.get(raw, "error")
+    if raw == "end_turn" or raw == "stop_sequence":
+        return EndTurn()
+    if raw == "tool_use":
+        return ToolUseExpected()
+    if raw == "max_tokens":
+        return MaxTokens()
+    return VendorSpecific(raw=raw)
 
 
 def _extract_usage(message_obj: Any) -> Usage | None:
@@ -414,6 +425,7 @@ class AnthropicStreamFn:
 
         if aborted:
             state.stop_reason = "aborted"
+            state.termination = Aborted()
             # Flush any in-flight blocks so the assembled message is consistent.
             for idx in sorted(state.scratch.keys()):
                 _finalize_block(state, idx)
@@ -423,6 +435,7 @@ class AnthropicStreamFn:
             content=list(state.content_blocks),
             timestamp=0.0,
             stop_reason=state.stop_reason,
+            termination=state.termination,
             usage=state.usage,
         )
         yield MessageEnd(message=assembled)
@@ -517,9 +530,9 @@ async def _translate_event(
     if etype == "message_delta":
         delta = getattr(event, "delta", None)
         raw_stop = getattr(delta, "stop_reason", None) if delta is not None else None
-        mapped = _map_stop_reason(raw_stop)
-        if mapped is not None:
-            state.stop_reason = mapped
+        if raw_stop is not None:
+            state.stop_reason = raw_stop
+            state.termination = _map_stop_reason(raw_stop)
         # Anthropic emits a final usage update on message_delta.
         usage = getattr(event, "usage", None)
         if usage is not None:
