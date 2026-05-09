@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from agentm.core.abi import (
@@ -11,6 +10,7 @@ from agentm.core.abi import (
     BeforeSendToLlmEvent,
     TextContent,
 )
+from agentm.core.lib import _to_jsonable
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import AfterCompactEvent, BeforeCompactEvent
 from agentm.harness.extension import ExtensionAPI
@@ -139,6 +139,4 @@ def _estimate_messages(messages: list[AgentMessage]) -> int:
 
 
 def _safe_string(value: Any) -> str:
-    if is_dataclass(value) and not isinstance(value, type):
-        return str(asdict(value))
-    return str(value)
+    return str(_to_jsonable(value))

@@ -9,10 +9,7 @@ from typing import Any
 from agentm.core.abi.messages import TextContent
 from agentm.core.abi import FunctionTool, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.extensions.builtin.artifact_store import (
-    ArtifactStore,
-    get_artifact_store,
-)
+from agentm.extensions.builtin.artifact_store import ArtifactStore
 from agentm.harness.events import SessionReadyEvent
 from agentm.harness.extension import ExtensionAPI
 
@@ -58,8 +55,8 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
     store_cell: list[ArtifactStore | None] = [None]
 
     async def _on_session_ready(_event: SessionReadyEvent) -> None:
-        store = get_artifact_store(api.session_id)
-        if store is None:
+        store = api.get_service("artifact_store")
+        if not isinstance(store, ArtifactStore):
             raise RuntimeError(
                 "hypothesis_tools requires the 'artifact_store' extension to "
                 "be loaded for the same session"
@@ -68,7 +65,7 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
 
     def _store() -> ArtifactStore:
         store = store_cell[0]
-        if store is None:
+        if not isinstance(store, ArtifactStore):
             raise RuntimeError(
                 "hypothesis_tools called before session_ready"
             )
