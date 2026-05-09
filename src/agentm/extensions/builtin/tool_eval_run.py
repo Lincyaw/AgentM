@@ -81,6 +81,15 @@ MANIFEST = ExtensionManifest(
                     "eval run aborts BETWEEN tasks (never mid-task)."
                 ),
             },
+            "rollouts_budget": {
+                "type": ["integer", "null"],
+                "description": (
+                    "B-6: per-tuning-session rollout cap. Each task x "
+                    "sample counts as one rollout. Aborts BETWEEN tasks "
+                    "when the cap is hit; refuses the call entirely when "
+                    "already exhausted at start."
+                ),
+            },
         },
         "additionalProperties": True,
     },
@@ -144,6 +153,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         )
     except (TypeError, ValueError):
         max_cost_usd = None
+    rollouts_budget_raw = config.get("rollouts_budget")
+    rollouts_budget: int | None
+    try:
+        rollouts_budget = (
+            int(rollouts_budget_raw) if rollouts_budget_raw is not None else None
+        )
+    except (TypeError, ValueError):
+        rollouts_budget = None
     cwd = Path(api.cwd)
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
@@ -180,6 +197,25 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
         scenario_key = _scenario_key(target_scenario)
         budget = _load_budget(cwd, scenario_key)
+        # B-6: refuse the call entirely if a configured cap is already
+        # exhausted before any work happens. Mid-run aborts continue to
+        # land between tasks (loop guard below).
+        if (
+            max_cost_usd is not None
+            and budget["usd_used"] >= max_cost_usd
+        ):
+            return _error(
+                f"budget_exhausted: usd_used={budget['usd_used']:.4f} "
+                f">= max_cost_usd={max_cost_usd:.4f}"
+            )
+        if (
+            rollouts_budget is not None
+            and budget["rollouts_used"] >= rollouts_budget
+        ):
+            return _error(
+                f"budget_exhausted: rollouts_used={budget['rollouts_used']} "
+                f">= rollouts_budget={rollouts_budget}"
+            )
         usd_used_in_run = 0.0
         aborted_due_to_budget = False
 
@@ -192,6 +228,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             if (
                 max_cost_usd is not None
                 and budget["usd_used"] >= max_cost_usd
+            ):
+                aborted_due_to_budget = True
+                break
+            if (
+                rollouts_budget is not None
+                and budget["rollouts_used"] >= rollouts_budget
             ):
                 aborted_due_to_budget = True
                 break
