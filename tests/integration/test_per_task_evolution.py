@@ -234,8 +234,12 @@ async def test_propose_change_rejects_without_evidence(tmp_path: Path) -> None:
         # eval_run_proposed missing -> rejected.
         result = await propose.execute(
             {
-                "target_atom": "tool_normalize_json",
-                "new_source": "raise NotImplementedError()",
+                "target": {
+                    "kind": "atom_source",
+                    "path": "tool_normalize_json.py",
+                    "new_content": "raise NotImplementedError()",
+                    "target_atom": "tool_normalize_json",
+                },
                 "rationale": "test",
                 "eval_run_baseline": "er_baseline",
                 "eval_run_proposed": "",
@@ -244,6 +248,25 @@ async def test_propose_change_rejects_without_evidence(tmp_path: Path) -> None:
         )
         assert result.is_error is True
         assert "evidence missing" in result.content[0].text
+
+        # Phase-2 ChangeSpec kinds reserved — must reject with
+        # not_yet_implemented (forward-compat MVP guard).
+        result2 = await propose.execute(
+            {
+                "target": {
+                    "kind": "system_prompt",
+                    "path": "system_prompt.md",
+                    "new_content": "you are a helpful agent",
+                    "target_atom": None,
+                },
+                "rationale": "test reserved kind",
+                "eval_run_baseline": "er_b",
+                "eval_run_proposed": "er_p",
+                "decision": "activate",
+            }
+        )
+        assert result2.is_error is True
+        assert "not_yet_implemented" in result2.content[0].text
     finally:
         await session.shutdown()
 
@@ -298,8 +321,14 @@ async def test_tier2_activate_is_deferred(tmp_path: Path) -> None:
         propose = _tool(session, "propose_change")
         result = await propose.execute(
             {
-                "target_atom": "permission",
-                "new_source": "MANIFEST = None\ndef install(api, config):\n    pass\n",
+                "target": {
+                    "kind": "atom_source",
+                    "path": "permission.py",
+                    "new_content": (
+                        "MANIFEST = None\ndef install(api, config):\n    pass\n"
+                    ),
+                    "target_atom": "permission",
+                },
                 "rationale": "test tier-2 deferral",
                 "eval_run_baseline": "er_b",
                 "eval_run_proposed": "er_p",
@@ -678,8 +707,12 @@ async def test_end_to_end_loop_activates_known_good_replacement(
         propose = _tool(session, "propose_change")
         result = await propose.execute(
             {
-                "target_atom": "tool_normalize_json",
-                "new_source": strong_atom,
+                "target": {
+                    "kind": "atom_source",
+                    "path": "tool_normalize_json.py",
+                    "new_content": strong_atom,
+                    "target_atom": "tool_normalize_json",
+                },
                 "rationale": "test e2e activation",
                 "eval_run_baseline": "er_baseline",
                 "eval_run_proposed": "er_proposed",

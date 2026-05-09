@@ -25,8 +25,9 @@ mutations.
 5. `eval_run({"atom_source_overrides": {"tool_normalize_json": <source>}})`
    — get the **proposed** eval score. Capture `eval_run_id`.
 6. If proposed primary_score - baseline primary_score >= 5% **AND** all
-   guard metrics within ±10%, call `propose_change(target_atom=
-   "tool_normalize_json", new_source=<source>, rationale=..., 
+   guard metrics within ±10%, call `propose_change(target={"kind":
+   "atom_source", "path": "tool_normalize_json.py", "new_content":
+   <source>, "target_atom": "tool_normalize_json"}, rationale=...,
    eval_run_baseline=<id>, eval_run_proposed=<id>, decision="activate")`.
 
 ## Stop condition

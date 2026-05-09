@@ -65,11 +65,51 @@ MANIFEST = ExtensionManifest(
 )
 
 
+_CHANGE_KINDS = (
+    "atom_source",
+    "system_prompt",
+    "manifest_extensions",
+    "manifest_field",
+    "scenario_compose",
+)
+
 _PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "target_atom": {"type": "string"},
-        "new_source": {"type": "string"},
+        "target": {
+            "type": "object",
+            "description": (
+                "ChangeSpec — what to change. MVP accepts only "
+                "kind='atom_source'; other kinds reserved for Phase 2 and "
+                "rejected with not_yet_implemented."
+            ),
+            "properties": {
+                "kind": {"type": "string", "enum": list(_CHANGE_KINDS)},
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Target file relative to "
+                        "contrib/scenarios/<target_scenario>/."
+                    ),
+                },
+                "new_content": {
+                    "type": "string",
+                    "description": (
+                        "Full replacement content (or structured patch — "
+                        "Phase 2)."
+                    ),
+                },
+                "target_atom": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Atom name, only for kind='atom_source'; null "
+                        "otherwise."
+                    ),
+                },
+            },
+            "required": ["kind", "path", "new_content"],
+            "additionalProperties": False,
+        },
         "rationale": {"type": "string"},
         "eval_run_baseline": {"type": "string"},
         "eval_run_proposed": {"type": "string"},
@@ -79,8 +119,7 @@ _PARAMETERS: dict[str, Any] = {
         },
     },
     "required": [
-        "target_atom",
-        "new_source",
+        "target",
         "rationale",
         "eval_run_baseline",
         "eval_run_proposed",
@@ -112,8 +151,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         for key in (
             "eval_run_baseline",
             "eval_run_proposed",
-            "target_atom",
-            "new_source",
             "rationale",
             "decision",
         ):
@@ -124,8 +161,62 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     f"non-empty string"
                 )
 
-        target_atom = str(args["target_atom"])
-        new_source = str(args["new_source"])
+        # Validate ChangeSpec (design §6).
+        target_spec = args.get("target")
+        if not isinstance(target_spec, dict):
+            return _error(
+                "evidence missing: 'target' is required and must be a "
+                "ChangeSpec object {kind, path, new_content, target_atom?}"
+            )
+        kind = target_spec.get("kind")
+        if not isinstance(kind, str) or kind not in _CHANGE_KINDS:
+            return _error(
+                f"target.kind must be one of {list(_CHANGE_KINDS)!r}; "
+                f"got {kind!r}"
+            )
+        # MVP guard — reserved kinds reject explicitly.
+        if kind != "atom_source":
+            return _error(
+                f"not_yet_implemented: target.kind={kind!r} is reserved "
+                f"for Phase 2 (design §11); MVP accepts only 'atom_source'"
+            )
+        path_value = target_spec.get("path")
+        if not isinstance(path_value, str) or not path_value:
+            return _error(
+                "evidence missing: target.path is required for "
+                "kind='atom_source'"
+            )
+        new_content = target_spec.get("new_content")
+        if not isinstance(new_content, str) or not new_content:
+            return _error(
+                "evidence missing: target.new_content is required and "
+                "must be a non-empty string"
+            )
+        atom_name_raw = target_spec.get("target_atom")
+        if atom_name_raw is None or (
+            isinstance(atom_name_raw, str) and not atom_name_raw
+        ):
+            return _error(
+                "evidence missing: target.target_atom is required for "
+                "kind='atom_source'"
+            )
+        if not isinstance(atom_name_raw, str):
+            return _error(
+                "target.target_atom must be a string (atom name) for "
+                "kind='atom_source'"
+            )
+
+        target_atom = atom_name_raw
+        new_source = new_content
+        # Snapshot the ChangeSpec verbatim for the activation record
+        # (forward-compat: B-3 / B-10 read this back). Restrict to the
+        # design fields to keep the schema stable.
+        change_spec: dict[str, Any] = {
+            "kind": kind,
+            "path": path_value,
+            "new_content": new_content,
+            "target_atom": atom_name_raw,
+        }
         rationale = str(args["rationale"])
         baseline_id = str(args["eval_run_baseline"])
         proposed_id = str(args["eval_run_proposed"])
@@ -157,6 +248,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "atom": target_atom,
                 "tier": tier,
                 "rationale": rationale,
+                "change_spec": change_spec,
                 "evidence": {
                     "baseline_run": baseline_id,
                     "proposed_run": proposed_id,
@@ -204,6 +296,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "atom": target_atom,
                     "tier": tier,
                     "rationale": rationale,
+                    "change_spec": change_spec,
                     "evidence": {
                         "baseline_run": baseline_id,
                         "proposed_run": proposed_id,
@@ -250,6 +343,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "atom": target_atom,
                 "tier": tier,
                 "rationale": rationale,
+                "change_spec": change_spec,
                 "evidence": {
                     "baseline_run": baseline_id,
                     "proposed_run": proposed_id,
@@ -272,6 +366,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "to_sha": new_hash,
             "rationale": rationale,
             "exploratory": decision == "exploratory",
+            "change_spec": change_spec,
             "evidence": {
                 "baseline_run": baseline_id,
                 "proposed_run": proposed_id,
