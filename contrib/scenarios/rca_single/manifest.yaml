@@ -4,6 +4,12 @@ description: |
   tools, same agent contract — but no sub-agent dispatch. The lead
   investigator runs every SQL query itself. Used as an A/B comparison
   baseline against the multi-agent rca scenario.
+
+# task_class drives session.fingerprint.task_meta.task_class so production
+# traces are filterable by ``tool_query_traces(task_class="rca_single")`` —
+# load-bearing for the GEPA tuner under tuner/.
+task_class: rca_single
+
 extensions:
   # Data tools live directly on the main session — no orchestrator/worker
   # split. The agent owns the full investigation.

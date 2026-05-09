@@ -1,0 +1,25 @@
+id: 03_service_stress
+task_class: rca_single
+holdout: false
+description: |
+  JVMMemoryStress on ts-auth-service. JVM-level resource fault — exercises
+  metrics_sum / jvm.memory.* dimension in addition to traces. Source:
+  ts0-ts-auth-service-stress-nlpsfx.
+input:
+  user_message: |
+    The following API endpoints are experiencing possible SLO violations and need investigation:
+    - HTTP POST http://ts-ui-dashboard:8080/api/v1/users/login
+
+    Please investigate the root cause of these SLO violations.
+  fixtures:
+    - /home/ddq/AoyangSpace/dataset/rca/ts0-ts-auth-service-stress-nlpsfx
+expected:
+  expected_services:
+    - ts-auth-service
+  # rcabench enum has both ``mem_stress`` (container) and ``jvm_heap_stress``
+  # (JVM heap). The dataset label is "JVMMemoryStress" — accept either via
+  # the substring rule in grader.py.
+  fault_kind: jvm_heap_stress
+budget:
+  max_turns: 25
+  max_cost_usd: 0.30
