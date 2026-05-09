@@ -19,6 +19,9 @@ from agentm.core.lib.render import (
 )
 
 
+# Shared presenter rendering is load-bearing for the pluggability boundary:
+# CLI/TUI must consume core helpers without atom-private pricing or tool-name
+# branches, otherwise disabling/replacing atoms breaks presenter surfaces.
 def test_assistant_and_tool_result_text_are_stable() -> None:
     message = AssistantMessage(
         role="assistant",
