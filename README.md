@@ -56,7 +56,10 @@ directly.
 ## Five pluggability axes
 
 Every axis is a `typing.Protocol` in `agentm.core`. The harness ships a default;
-extensions or users can substitute without forking.
+extensions or users can substitute without forking. The Tool environment axis is
+constitution-only in v0: the operations bundle is selected by the harness at
+session construction and exposed to atoms via `api.get_operations()`, but atoms
+do not register a replacement operations bundle at runtime.
 
 | # | Axis                | Protocol / Port          | Default impl                       |
 |---|---------------------|--------------------------|------------------------------------|

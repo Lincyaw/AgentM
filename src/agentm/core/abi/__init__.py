@@ -76,15 +76,6 @@ from .stream import (
     ToolCallEnd,
     ToolCallStart,
 )
-from .termination import (
-    Aborted,
-    EndTurn,
-    MaxTokens,
-    ProviderError,
-    TerminationHint,
-    ToolUseExpected,
-    VendorSpecific,
-)
 from .tool import Tool, ToolContinue, ToolOutcome, ToolResult, ToolTerminate
 
 # ``FunctionTool`` is a concrete adapter — it lives outside the ABI surface
@@ -160,12 +151,4 @@ __all__ = [
     "ToolCallArgsDelta",
     "ToolCallEnd",
     "ToolCallStart",
-    # termination
-    "Aborted",
-    "EndTurn",
-    "MaxTokens",
-    "ProviderError",
-    "TerminationHint",
-    "ToolUseExpected",
-    "VendorSpecific",
 ]

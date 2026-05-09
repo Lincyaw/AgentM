@@ -62,6 +62,9 @@ checker rejects atoms that import `core._internal.*` directly.
 
 **Five pluggability axes** (each is a `typing.Protocol` with a default impl):
 LLM stream · Tool environment · Session state · Project context · Policy / cross-cut.
+Tool environment `Operations` are a constitution-only axis in v0: the harness
+selects the bundle at session construction; atoms consume it through
+`api.get_operations()` but cannot replace it with `register_operations`.
 
 ## Extension-as-Scenario
 
