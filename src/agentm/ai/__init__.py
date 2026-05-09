@@ -14,12 +14,27 @@ from agentm.ai.api_registry import (
     register_api_provider,
     unregister_api_providers,
 )
-from agentm.ai.env_api_keys import find_env_keys, get_env_api_key
-from agentm.ai.types import Model, StreamFunction
+from agentm.ai.env_api_keys import find_env_keys, get_env_api_key, resolve
+from agentm.ai.types import (
+    DEFAULT_PROVIDER_DESCRIPTORS,
+    DEFAULT_PROVIDER_REGISTRY,
+    KNOWN_APIS,
+    KNOWN_PROVIDERS,
+    Model,
+    ProviderDescriptor,
+    ProviderRegistry,
+    StreamFunction,
+)
 
 __all__ = [
     "ApiProvider",
+    "DEFAULT_PROVIDER_DESCRIPTORS",
+    "DEFAULT_PROVIDER_REGISTRY",
+    "KNOWN_APIS",
+    "KNOWN_PROVIDERS",
     "Model",
+    "ProviderDescriptor",
+    "ProviderRegistry",
     "StreamFunction",
     "clear_api_providers",
     "find_env_keys",
@@ -27,5 +42,6 @@ __all__ = [
     "get_api_providers",
     "get_env_api_key",
     "register_api_provider",
+    "resolve",
     "unregister_api_providers",
 ]
