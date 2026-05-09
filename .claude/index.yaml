@@ -450,3 +450,10 @@ concepts:
     related_concepts: [orchestrator, middleware_system, scenario_protocol, loop_resilience, trajectory_judger, service_profile]
     plans: []
     tasks: []
+
+  shared_presenter_rendering:
+    description: "Shared headless rendering contract for presenter surfaces: core/lib/render.py owns AssistantMessage text extraction, tool result text extraction, raw token UsageReport/FinalReport summaries, and tool result format selection from metadata or registered renderer hints. Cost remains a policy service (`cost_query`) registered by cost_budget and consumed opportunistically by CLI/TUI; missing service yields token-only output. Presenters map headless output to their own UI widgets without importing atom-private pricing or string-matching builtin tool identities."
+    design: "designs/pluggable-architecture.md"
+    related_concepts: [pluggable_architecture, self_modifiable_architecture, tool_event_narrowing]
+    plans: []
+    tasks: ["tasks/2026-05-09-issue-97-shared-rendering.md"]
