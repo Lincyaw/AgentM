@@ -11,13 +11,11 @@ from agentm.harness.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(
     name="tool_write",
-    description="Register the write tool backed by FileOperations.",
+    description="Register the write tool backed by ResourceWriter.",
     registers=("tool:write",),
     config_schema={
         "type": "object",
-        "properties": {
-            "file_ops": {"type": "object"},
-        },
+        "properties": {},
         "additionalProperties": True,
     },
     requires=(),  # Leaf tool atom: consumes ResourceWriter via ExtensionAPI.

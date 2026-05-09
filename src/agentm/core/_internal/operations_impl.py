@@ -35,15 +35,15 @@ class LocalFileOperations:
     async def read_file(self, path: str) -> bytes:
         return await asyncio.to_thread(self._resolve(path).read_bytes)
 
-    async def write_file(self, path: str, content: bytes) -> None:
-        await asyncio.to_thread(self._resolve(path).write_bytes, content)
-
     async def access(self, path: str) -> bool:
         def _access() -> bool:
             target = self._resolve(path)
             return target.exists() and os.access(target, os.R_OK)
 
         return await asyncio.to_thread(_access)
+
+    async def is_dir(self, path: str) -> bool:
+        return await asyncio.to_thread(self._resolve(path).is_dir)
 
     async def list_dir(self, path: str) -> list[str]:
         def _list_dir() -> list[str]:
