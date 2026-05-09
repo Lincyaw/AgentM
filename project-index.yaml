@@ -519,3 +519,30 @@ requirements:
     depends_on:
       - REQ-096-cli-provider-session-seams
       - REQ-098-textual-tui-registries
+
+  - id: REQ-120-harness-reload-state-preservation
+    title: Harness reload uses immutable snapshot for double-failure rollback
+    description: >
+      Atom reload's claim of "transactional" must be backed by a single
+      pre-reload immutable snapshot covering loaded-atom registries, per-atom
+      handler/registration tracking, owners-by-kind, all extension registries,
+      apis dict, sys.modules entry, and bus subscriptions. On apply failure
+      the reloader first attempts in-place re-install of the original atom;
+      if that rollback itself raises, restore_from_snapshot writes back every
+      mutable structure from the snapshot's pre-copied data so the live agent
+      lands in an entirely pre-reload state rather than half-new / half-old.
+      The session_factory's three-section builtin/contrib/user auto-discovery
+      collapses into a single iteration over an AtomSource iterable.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/harness/atom_reloader.py
+      - path: src/agentm/harness/session_helpers.py
+      - path: src/agentm/harness/session_factory.py
+    tests:
+      - path: tests/unit/harness/test_transactional_reload.py
+    docs:
+      - path: .claude/tasks/2026-05-09-issue-120-harness-reload-dedup.md
+    depends_on:
+      - REQ-086-atom-rework-infra

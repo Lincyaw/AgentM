@@ -504,6 +504,83 @@ async def test_reload_double_failure_preserves_loaded_atom_state(
         await session.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_reload_double_failure_preserves_bus_subscriptions_and_registrations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshot-based rollback must preserve handler/registration tracking,
+    not just the loaded-atom registry. Pre-reload the atom registers a
+    handler on the ``marker`` channel; both apply and rollback then fail.
+    Post-restore, emitting ``marker`` must still hit the original handler
+    once and exactly once (proving handler list, owners_by_kind, and bus
+    subscriptions all came back from the immutable snapshot)."""
+    session = await _build_session(
+        tmp_path,
+        monkeypatch,
+        atom_source=_tool_source("tool_demo", "stable", marker_label="v1"),
+    )
+    module_path = f"{session._test_pkg}.tool_demo"  # type: ignore[attr-defined]
+    state = importlib.import_module("reload_state_shared")
+    original_activate = session._reloader._activate_atom_install  # type: ignore[attr-defined]
+    pre_handlers = list(session._reloader._handlers_by_atom.get(module_path, []))  # type: ignore[attr-defined]
+    pre_registrations = list(
+        session._reloader._registrations_by_atom.get(module_path, [])  # type: ignore[attr-defined]
+    )
+    pre_marker_subs = session.bus.subscriptions_for("marker")
+    calls = 0
+
+    async def fail_only_rollback(atom: _LoadedAtom) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await original_activate(atom)
+            return
+        raise RuntimeError("rollback activation exploded")
+
+    monkeypatch.setattr(
+        session._reloader,  # type: ignore[attr-defined]
+        "_activate_atom_install",
+        fail_only_rollback,
+    )
+    try:
+        result = session._apis[module_path].reload_atom(  # type: ignore[attr-defined]
+            "tool_demo",
+            _raising_source("tool_demo"),
+            rationale="exercise double failure with subscriptions",
+        )
+        assert result.ok is False
+        assert "rollback_failure_state_preserved" in (result.error or "")
+
+        # Snapshot restoration must rebuild handlers / registrations exactly,
+        # not leave the registries half-populated.
+        assert (
+            session._reloader._handlers_by_atom.get(module_path, []) == pre_handlers  # type: ignore[attr-defined]
+        )
+        assert (
+            session._reloader._registrations_by_atom.get(module_path, [])  # type: ignore[attr-defined]
+            == pre_registrations
+        )
+        assert session._reloader.owners_by_kind["tool"]["demo"] == module_path  # type: ignore[attr-defined]
+
+        # The bus must hold the same subscription objects (same identities,
+        # same order) as before the reload attempt — no orphaned post-apply
+        # handlers, no missing pre-apply ones.
+        post_marker_subs = session.bus.subscriptions_for("marker")
+        assert [sub.handler for sub in post_marker_subs] == [
+            sub.handler for sub in pre_marker_subs
+        ]
+
+        state.EVENTS.clear()
+        await session.bus.emit("marker", {"value": "after-double-failure"})
+        # Exactly one ``v1`` handler should fire; if rollback had left a
+        # second handler subscribed we'd see two events.
+        assert state.EVENTS == [("v1", {"value": "after-double-failure"})]
+    finally:
+        await session.shutdown()
+        state.EVENTS.clear()
+
+
 _OWNER_KIND_SOURCE = '''
 from __future__ import annotations
 
