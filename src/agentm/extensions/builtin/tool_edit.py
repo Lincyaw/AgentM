@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.abi.tool import TOOL_RESULT_FORMAT_METADATA_KEY
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
@@ -77,7 +78,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             description="Replace text in a UTF-8 text file.",
             parameters=_PARAMETERS,
             fn=_execute,
-            metadata={"file_op": "edit"},
+            metadata={"file_op": "edit", TOOL_RESULT_FORMAT_METADATA_KEY: "diff"},
         )
     )
 def _ok(text: str) -> ToolResult:

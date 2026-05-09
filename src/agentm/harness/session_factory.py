@@ -284,6 +284,7 @@ async def create_agent_session(
         providers=providers,
         renderers=renderers,
         apis=apis,
+        services=services,
         reloader=reloader,
         pending_user_messages=pending_user_messages,
     )

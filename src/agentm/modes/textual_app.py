@@ -30,7 +30,6 @@ from agentm.core.abi import (
     LlmRequestStartEvent,
     MessageEnd,
     StreamDeltaEvent,
-    TextContent,
     TextDelta,
     ThinkingDelta,
     ToolCallArgsDelta,
@@ -38,6 +37,13 @@ from agentm.core.abi import (
     ToolCallStart,
     ToolResultEvent,
     Usage,
+    Tool,
+)
+from agentm.core.lib.render import (
+    assistant_text as render_assistant_text,
+    tool_result_format,
+    tool_result_text as render_tool_result_text,
+    usage_report_from_usage,
 )
 from agentm.harness import AgentSession, AgentSessionConfig
 from agentm.harness.events import (
@@ -101,6 +107,12 @@ class _SessionLike(Protocol):
 
     @property
     def model(self) -> Any: ...
+
+    @property
+    def tool_renderers(self) -> dict[str, Any]: ...
+
+    def find_tool(self, name: str) -> Tool | None: ...
+    def get_service(self, name: str) -> Any | None: ...
 
 
 @dataclass(slots=True)
@@ -293,23 +305,38 @@ class ToolCallBlock(Collapsible):
         self.title = f"{self.tool_name}({_format_args_inline(self.args)})"
         self._render_body(None)
 
-    def set_result(self, *, result: Any, duration_ms: int) -> None:
+    def set_result(
+        self,
+        *,
+        result: Any,
+        duration_ms: int,
+        tool: Tool | None = None,
+        renderers: dict[str, Any] | None = None,
+    ) -> None:
         self.duration_ms = duration_ms
         self.ok = not getattr(result, "is_error", False)
-        self.result_text = _tool_result_text(result)
+        self.result_text = render_tool_result_text(
+            result, tool_name=self.tool_name, renderers=renderers
+        )
         status = "✓" if self.ok else "✗"
         self.title = (
             f"{self.tool_name}({_format_args_inline(self.args)})"
             f"  {status} {duration_ms}ms"
         )
         self.collapsed = self.ok and _line_count(self.result_text) < 20
-        self._render_body(result)
+        self._render_body(result, tool=tool, renderers=renderers)
         if self.ok:
             self.remove_class("failed")
         else:
             self.add_class("failed")
 
-    def _render_body(self, result: Any | None) -> None:
+    def _render_body(
+        self,
+        result: Any | None,
+        *,
+        tool: Tool | None = None,
+        renderers: dict[str, Any] | None = None,
+    ) -> None:
         args_text = _format_full_args(self.args) if self.args else "{}"
         if result is None:
             renderable: Any = Group(
@@ -318,7 +345,9 @@ class ToolCallBlock(Collapsible):
             )
             self.body_kind = "text"
         else:
-            result_renderable = _render_tool_result(self.tool_name, self.result_text)
+            result_renderable = _render_tool_result(
+                self.tool_name, self.result_text, tool=tool, renderers=renderers
+            )
             self.body_kind = type(result_renderable).__name__
             ok = not getattr(result, "is_error", False)
             renderable = Group(
@@ -1016,12 +1045,19 @@ class AgentMApp(App[int]):
         status = self._header
         status.tokens_in = usage.input_tokens
         status.tokens_out = usage.output_tokens
-        model = self._session.model
-        pricing = getattr(model, "metadata", {}).get("pricing", (0.0, 0.0))
-        status.cost_usd = (
-            (usage.input_tokens / 1_000_000.0) * pricing[0]
-            + (usage.output_tokens / 1_000_000.0) * pricing[1]
-        )
+        cost_service = self._session.get_service("cost_query")
+        estimate = getattr(cost_service, "estimate", None)
+        if callable(estimate):
+            provider = (
+                self._session.model.provider
+                if self._session.model is not None
+                else None
+            )
+            status.cost_usd = estimate(
+                usage_report_from_usage(usage), provider=provider
+            ).amount
+        else:
+            status.cost_usd = 0.0
 
     def _render_child_delta(self, delta: Any) -> None:
         if not self._child_turns:
@@ -1096,13 +1132,20 @@ class AgentMApp(App[int]):
         state = self._tool_states.get(event.tool_call_id)
         duration_ms = 0
         if state is not None:
-            duration_ms = max(0, int((time.perf_counter_ns() - state.start_ns) / 1_000_000))
+            duration_ms = max(
+                0, int((time.perf_counter_ns() - state.start_ns) / 1_000_000)
+            )
 
         async def _apply() -> None:
             block = await turn.ensure_tool(event.tool_call_id, event.tool_name)
             if state is not None and state.args is not None:
                 block.args = dict(state.args)
-            block.set_result(result=event.result, duration_ms=duration_ms)
+            block.set_result(
+                result=event.result,
+                duration_ms=duration_ms,
+                tool=self._session.find_tool(event.tool_name),
+                renderers=self._session.tool_renderers,
+            )
 
         self.run_worker(_apply(), exclusive=False)
         self.set_phase("tool")
@@ -1322,43 +1365,28 @@ async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
 
 
 def _assistant_text(message: AssistantMessage) -> str:
-    chunks: list[str] = []
-    for block in message.content:
-        if isinstance(block, TextContent):
-            chunks.append(block.text)
-    return "\n".join(chunks)
+    return render_assistant_text(message)
 
 
 def _tool_result_text(result: Any) -> str:
-    content = getattr(result, "content", None) or []
-    parts: list[str] = []
-    for block in content:
-        text = getattr(block, "text", None)
-        if isinstance(text, str):
-            parts.append(text)
-    if not parts:
-        return ""
-    return "\n\n".join(parts)
+    return render_tool_result_text(result)
 
 
-def _looks_like_markdown(text: str) -> bool:
-    return "```" in text or "# " in text or "- " in text
-
-
-def _looks_like_diff(tool_name: str, text: str) -> bool:
-    if tool_name == "tool_edit":
-        return True
-    stripped = text.lstrip()
-    return stripped.startswith("--- ") or stripped.startswith("+++ ")
-
-
-def _render_tool_result(tool_name: str, text: str) -> Any:
-    if _looks_like_diff(tool_name, text):
+def _render_tool_result(
+    tool_name: str,
+    text: str,
+    *,
+    tool: Tool | None = None,
+    renderers: dict[str, Any] | None = None,
+) -> Any:
+    result_format = tool_result_format(
+        tool_name, text, tool=tool, renderers=renderers
+    )
+    if result_format == "diff":
         return Syntax(text, "diff", word_wrap=True)
-    if _looks_like_markdown(text):
+    if result_format == "markdown":
         return Markdown(text)
     return Text(text)
-
 
 def _format_args_preview(args: dict[str, Any]) -> str:
     return _dump_json(args)

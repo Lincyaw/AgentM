@@ -341,6 +341,7 @@ async def test_shutdown_indexes_observability_trace_when_present(
         providers={},
         renderers={},
         apis={},
+        services={},
         reloader=reloader,
         pending_user_messages=[],
     )
