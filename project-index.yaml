@@ -306,3 +306,30 @@ requirements:
       - path: tests/ai/test_provider_registry.py
     docs: []
     depends_on: []
+
+  - id: REQ-092-retry-transport-policy
+    title: Retry and transport policy are pluggable provider services
+    description: >
+      LLM provider retry behavior must be supplied through a core RetryPolicy
+      port and a builtin retry_policy atom instead of provider-local module
+      globals, string-sniffed rate-limit checks, or OpenAI-only wire retries.
+      OpenAI and Anthropic providers must accept injected retry policies with
+      provider-typed retry predicates, and security-relevant transport overrides
+      such as verify_ssl=False must emit visible diagnostics at composition time.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/retry.py
+      - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/extensions/builtin/retry_policy.py
+      - path: src/agentm/llm/openai.py
+      - path: src/agentm/llm/anthropic.py
+    tests:
+      - path: tests/unit/llm/test_retry_policy.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-92-retry-policy.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+      - REQ-093-llm-provider-stream-common

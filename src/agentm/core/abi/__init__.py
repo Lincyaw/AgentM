@@ -53,6 +53,7 @@ from .events import (
 )
 from .loop import AgentLoop, LoopConfig
 from .provider import ProviderResolver
+from .retry import RetryPolicy
 from .messages import (
     AgentMessage,
     AssistantContent,
@@ -103,6 +104,8 @@ __all__ = [
     "LoopConfig",
     # provider
     "ProviderResolver",
+    # retry
+    "RetryPolicy",
     # messages
     "AgentMessage",
     "AssistantContent",

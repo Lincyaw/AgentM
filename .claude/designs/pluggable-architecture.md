@@ -75,6 +75,7 @@ class StreamFn(Protocol):
 
 - Pure boundary: takes provider-shaped messages, returns events.
 - Default implementations live in `agentm-llm` per provider; provider-internal stream assembly is shared by `agentm.llm._common.StreamAccumulator`, so new providers supply only event mapping plus a `ToolSpecAdapter`.
+- Retry and transport behavior is policy, not provider folklore: providers may accept an injected `RetryPolicy` from the `retry_policy` atom and must expose security-relevant transport overrides such as `verify_ssl=False` at extension composition time via diagnostics.
 - Tool-call argument parse failures stay observable as typed stream/bus events (`ToolCallArgsParseError`) while preserving the kernel invariant that `ToolCallBlock.arguments` is a parsed dict.
 - Extensions register additional providers via `register_provider(name, ProviderConfig)`. The harness chooses the active registration through the `ProviderResolver` port; the default `LastRegisteredWins` resolver preserves insertion-order behavior.
 - **Crucial**: `StreamFn` is the only point that touches a real LLM API. The agent loop has zero hard-coded provider knowledge.
@@ -215,6 +216,12 @@ Registered slash-command execution is itself a policy port: the
 handler execution go through the typed `CommandDispatcher` service facade. The
 harness default owns the live command registry and owner API selection; atoms do
 not read raw harness registry dictionaries.
+
+Retry policy follows the same service-facade rule: `agentm.core.abi.retry.RetryPolicy`
+is a tiny async port, the built-in `retry_policy` atom registers the default
+exponential-backoff implementation with `api.set_service("retry_policy", ...)`,
+and provider adapters use provider-typed retry predicates rather than string
+sniffing wire errors.
 
 **Reference**:
 - Minimal EventBus: `packages/coding-agent/src/core/event-bus.ts` (33 lines — copy this verbatim conceptually)
