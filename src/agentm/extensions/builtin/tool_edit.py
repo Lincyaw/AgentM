@@ -86,6 +86,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             description="Replace text in a UTF-8 text file.",
             parameters=_PARAMETERS,
             fn=_execute,
+            metadata={"file_op": "edit"},
         )
     )
 
