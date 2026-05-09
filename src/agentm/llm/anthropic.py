@@ -47,6 +47,7 @@ from agentm.core.abi.messages import (
     Usage,
     UserMessage,
 )
+from agentm.core.abi.retry import RetryPolicy
 from agentm.core.abi.termination import (
     Aborted,
     EndTurn,
@@ -73,6 +74,25 @@ if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from anthropic import AsyncAnthropic
 
 logger = logging.getLogger(__name__)
+
+
+def _is_anthropic_retryable(exc: BaseException) -> bool:
+    try:
+        import anthropic
+    except ImportError:  # pragma: no cover - SDK dependency is optional here
+        return False
+    return isinstance(exc, anthropic.RateLimitError)
+
+
+class _IdentityRetryPolicy:
+    async def run(
+        self,
+        fn: Callable[[], Any],
+        *,
+        is_retryable: Callable[[BaseException], bool],
+    ) -> Any:
+        del is_retryable
+        return await fn()
 
 
 # --- Model registry ---------------------------------------------------------
@@ -308,12 +328,14 @@ class AnthropicStreamFn:
 
     - ``api_key``: Anthropic API key. Defaults to ``ANTHROPIC_API_KEY``.
     - ``base_url``: optional override for the API base URL.
+    - ``retry_policy``: optional policy used for retrying provider calls.
     - ``client``: pre-configured :class:`anthropic.AsyncAnthropic` instance.
       Tests may inject a mock here to bypass network entirely.
     """
 
     api_key: str | None = None
     base_url: str | None = None
+    retry_policy: RetryPolicy | None = None
     client: AsyncAnthropic | None = None
     clock: Callable[[], float] = time.time
 
@@ -379,8 +401,18 @@ class AnthropicStreamFn:
         state = _StreamState()
         aborted = False
 
-        stream_ctx = client.messages.stream(**body)
-        async with stream_ctx as stream:
+        retry_policy = self.retry_policy or _IdentityRetryPolicy()
+
+        async def _open_stream() -> tuple[Any, Any]:
+            ctx = client.messages.stream(**body)
+            stream = await ctx.__aenter__()
+            return ctx, stream
+
+        stream_ctx, stream = await retry_policy.run(
+            _open_stream,
+            is_retryable=_is_anthropic_retryable,
+        )
+        try:
             async for event in stream:
                 if signal is not None and signal.is_set():
                     aborted = True
@@ -395,6 +427,8 @@ class AnthropicStreamFn:
                     break
                 async for kernel_event in _translate_event(event, state):
                     yield kernel_event
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
 
         if aborted:
             state.stop_reason = "aborted"
@@ -564,7 +598,11 @@ def install(api: Any, config: dict[str, Any]) -> None:
 
     api_key = config.get("api_key")
     base_url = config.get("base_url")
-    stream_fn = AnthropicStreamFn(api_key=api_key, base_url=base_url)
+    stream_fn = AnthropicStreamFn(
+        api_key=api_key,
+        base_url=base_url,
+        retry_policy=api.get_service("retry_policy"),
+    )
     # Optional model-spec overrides; defaults handled in ``_build_model``.
     model_kwargs: dict[str, int] = {}
     if "context_window" in config:
