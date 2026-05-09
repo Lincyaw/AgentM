@@ -21,14 +21,12 @@ Observability is **complementary** to `trajectory`, not a replacement:
 
 ## Single principle: everything goes through the bus
 
-The atom is a **pure subscriber + EventBusObserver**. Every diagnostic
-signal (extension installs, ExtensionAPI registrations, send_user_message,
-LLM request start/end, turn lifecycle) is published as a normal bus event
-by the harness/kernel. Any extension can subscribe to any of them — the
-observability atom is not privileged. The only API-level instrumentation
-that remains (and cannot be expressed by the bus) is wrapping `api.on`
-to attribute handlers to their installing extension and to optionally
-diff event mutations.
+The atom is a **pure subscriber + EventBusObserver** registered through
+`ExtensionAPI.add_observer`. Every diagnostic signal (extension installs,
+ExtensionAPI registrations, send_user_message, LLM request start/end, turn
+lifecycle) is published as a normal bus event by the harness/kernel. Any
+extension can subscribe to any of them — the observability atom is not
+privileged and does not monkey-patch the bus or `ExtensionAPI.on`.
 
 ## Architecture
 
@@ -37,8 +35,9 @@ diff event mutations.
 `core/abi/events.py` adds:
 
 - An `EventBusObserver` Protocol with three hooks (`on_emit_start`,
-  `on_handler_done`, `on_emit_end`). `EventBus._observer` is optional;
-  hooks fire inside `emit`/`emit_sync` and observer crashes are swallowed.
+  `on_handler_done`, `on_emit_end`). Observers are installed through
+  `ExtensionAPI.add_observer`; hooks fire inside `emit`/`emit_sync` and
+  observer crashes are swallowed.
 - An `emit_sync(channel, event)` method that runs only sync handlers
   (coroutine returns are skipped with a warning, then closed). Lets sync
   code paths (`ExtensionAPI.register_*`, `send_user_message`) publish
@@ -54,25 +53,20 @@ diff event mutations.
 | `LlmRequestStartEvent` | kernel | `AgentLoop` right before draining `stream_fn` | `llm_request_start` |
 | `LlmRequestEndEvent` | kernel | `AgentLoop` after `stream_fn` finishes (success or error in try/except) | `llm_request_end` |
 
-### Handler→extension attribution
+### Handler attribution
 
-`harness/extension.py` exposes a `ContextVar` `_INSTALLING_EXTENSION` set
-during `load_extension(module_path, ...)` and the public reader
-`current_installing_extension()`. The observability extension wraps its
-own `api.on` to map `id(handler) → installing extension` so per-handler
-records carry an `extension` attribute. Late registrations (handlers
-created during another handler) attribute to `"<unknown>"`.
+Per-handler spans come from the observer hook that sees the actual handler
+object after dispatch. Handler-to-extension attribution is best-effort and
+uses metadata already present on handlers; the atom no longer rewrites
+`api.on` registrations.
 
 ### The atom
 
 `extensions/builtin/observability.py`:
 
 - Opens `<cwd>/.agentm/observability/<trace_id>.jsonl`.
-- Attaches an `_Observer` to the bus → `event.dispatch` + `handler.invoke`
-  for every channel automatically.
-- Wraps `api.on` to (a) attribute handlers to their installing extension
-  and (b) optionally diff event payload before/after each handler →
-  `handler.mutated` records.
+- Attaches an `_Observer` via `api.add_observer` → `event.dispatch` +
+  `handler.invoke` for every channel automatically.
 - Subscribes to all the harness/kernel signal events listed above and
   emits a friendly OTel record per kind.
 - Subscribes to `turn_start`/`tool_call`/`tool_result`/`turn_end` to
@@ -94,7 +88,6 @@ attributes, status`.
 | `extension.install` | `extension_install` (start/end/error) |
 | `event.dispatch` | EventBus.emit/emit_sync (one per emit, parents handler.invoke) |
 | `handler.invoke` | EventBus per-handler invocation (toggle via `include_handler_records`) |
-| `handler.mutated` | `api.on` wrapper diffed event before/after (toggle via `include_mutation_diff`) |
 | `api.register` | `api_register` event |
 | `api.send_user_message` | `api_send_user_message` event |
 | `llm.request.start` / `llm.request.end` | `llm_request_start` / `llm_request_end` events |

@@ -20,6 +20,9 @@ Checks (numbered to match design §11.4):
 9. ``MANIFEST.api_version`` is within the host's
    ``[current - grace, current]`` window (self-modifiable-architecture §4).
 10. ``MANIFEST.tier`` agrees with ``core-manifest.yaml::reload.tier_2_atoms``.
+11. AST hygiene rules reject private API reflection, ExtensionAPI mutation,
+    mutable globals, dynamic ``agentm.*`` imports, and concrete harness-service
+    downcasts.
 """
 
 from __future__ import annotations
@@ -89,6 +92,17 @@ _FORBIDDEN_PREFIXES: tuple[tuple[str, str], ...] = (
         "legacy scenario tree (deleted in Phase 2.5)",
     ),
     ("langchain", "langchain is forbidden in the v2 tree"),
+)
+
+_FORBIDDEN_HARNESS_SERVICE_ISINSTANCE_NAMES: frozenset[str] = frozenset(
+    {
+        "BashOperations",
+        "FileOperations",
+        "GitBackedResourceWriter",
+        "LocalBashOperations",
+        "LocalFileOperations",
+        "_NoopResourceWriter",
+    }
 )
 
 
@@ -284,6 +298,17 @@ def _check_ast_rules(module_path: str, src_file: Path) -> list[ValidationIssue]:
                     message="dynamic f-string imports under 'agentm.' are forbidden",
                 )
             )
+        if isinstance(node, ast.Call) and _is_forbidden_harness_service_isinstance(node):
+            issues.append(
+                ValidationIssue(
+                    module_path=module_path,
+                    rule="11.4.D6-harness-service-downcast",
+                    message=(
+                        "atoms must use ExtensionAPI/Protocol methods, not "
+                        "isinstance checks against concrete harness services"
+                    ),
+                )
+            )
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if target.lineno not in ignored_lines and _is_api_attribute_target(target):
@@ -365,6 +390,24 @@ def _is_agentm_fstring_import(node: ast.Call) -> bool:
         and isinstance(prefix.value, str)
         and prefix.value.startswith("agentm.")
     )
+
+
+def _is_forbidden_harness_service_isinstance(node: ast.Call) -> bool:
+    if not isinstance(node.func, ast.Name) or node.func.id != "isinstance":
+        return False
+    if len(node.args) < 2:
+        return False
+    return _type_expr_contains_forbidden_harness_service(node.args[1])
+
+
+def _type_expr_contains_forbidden_harness_service(node: ast.expr) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in _FORBIDDEN_HARNESS_SERVICE_ISINSTANCE_NAMES
+    if isinstance(node, ast.Attribute):
+        return node.attr in _FORBIDDEN_HARNESS_SERVICE_ISINSTANCE_NAMES
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return any(_type_expr_contains_forbidden_harness_service(elt) for elt in node.elts)
+    return False
 
 
 def _is_unfinalized_mutable_global(node: ast.stmt) -> bool:

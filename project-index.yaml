@@ -44,7 +44,8 @@ requirements:
       spawning, per-session service registration, resource writer version
       lookup, and shared JSON serialization. The atom validator must reject
       private API reflection, ExtensionAPI attribute overwrites, mutable module
-      globals without Final, and f-string dynamic imports under agentm.*.
+      globals without Final, f-string dynamic imports under agentm.*, and
+      concrete harness-service downcasts.
     priority: P0
     status: tested
     confidence: confirmed
@@ -59,6 +60,7 @@ requirements:
       - path: src/agentm/extensions/validate.py
       - path: src/agentm/extensions/builtin/inherit_provider.py
     tests:
+      - path: tests/unit/extensions/test_observability.py
       - path: tests/unit/harness/test_extension_api_infra.py
       - path: tests/unit/core/lib/test_serialization.py
       - path: tests/unit/extensions/test_extension_contract.py
@@ -88,3 +90,46 @@ requirements:
       - path: .claude/designs/self-modifiable-architecture.md
       - path: .claude/tasks/2026-05-09-issue-79-atom-reloader-hardening.md
     depends_on: []
+
+  - id: REQ-087-builtin-atoms-extension-api
+    title: Builtin atoms consume ExtensionAPI C-1 capabilities
+    description: >
+      The observability, sub_agent, artifact_store, micro_compact, and
+      llm_compaction atoms must consume the additive C-1 ExtensionAPI/core.lib
+      surfaces instead of private bus mutation, harness config construction,
+      writer type checks, module-level service registries, hard-coded builtin
+      module paths, or local JSON serialization ladders. The sub_agent atom
+      remains a single file for this round; revisit splitting only at or above
+      1500 lines.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/events.py
+      - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/harness/extension.py
+      - path: src/agentm/harness/atom_reloader.py
+      - path: src/agentm/extensions/builtin/observability.py
+      - path: src/agentm/extensions/builtin/sub_agent.py
+      - path: src/agentm/extensions/builtin/artifact_store.py
+      - path: src/agentm/extensions/builtin/micro_compact.py
+      - path: src/agentm/extensions/builtin/llm_compaction.py
+      - path: contrib/scenarios/rca/src/agentm_rca/tools/hypothesis_tools.py
+    tests:
+      - path: tests/integration/test_artifact_store.py
+      - path: tests/unit/extensions/test_compaction_atoms.py
+      - path: tests/integration/test_observability_cli.py
+      - path: tests/integration/test_sub_agent_budgets.py
+      - path: tests/integration/test_sub_agent_lifecycle.py
+      - path: tests/unit/extensions/test_extension_contract.py
+      - path: tests/unit/harness/test_extension_api_infra.py
+      - path: tests/unit/extensions/test_observability.py
+      - path: tests/unit/harness/test_transactional_reload.py
+    docs:
+      - path: .claude/designs/observability.md
+      - path: .claude/designs/sub-agent-lifecycle.md
+      - path: .claude/designs/artifact-system.md
+      - path: .claude/tasks/2026-05-09-issue-87-builtin-atoms-extension-api.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
