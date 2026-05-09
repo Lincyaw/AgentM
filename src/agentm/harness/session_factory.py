@@ -369,6 +369,7 @@ async def _resolve_extensions(
     floor_atoms = discover_mod.discover_builtin()
     slash_commands_module = floor_atoms["slash_commands"].module_path
     compaction_prompts_module = floor_atoms["compaction_prompts"].module_path
+    system_prompt_module = floor_atoms["system_prompt"].module_path
     if config.no_extensions:
         to_load: list[tuple[str, dict[str, Any]]] = []
     elif config.extensions:
@@ -418,9 +419,23 @@ async def _resolve_extensions(
                 skip_label="user atom ",
             )
         )
+        ensure_floor_atom(to_load, system_prompt_module)
+        for index, (module_path, _cfg) in enumerate(to_load):
+            if module_path == system_prompt_module:
+                to_load[index] = (module_path, {"prompt": ""})
+                break
 
     if not config.no_extensions and not config.extensions and config.extra_extensions:
         to_load.extend(config.extra_extensions)
+    if not config.no_extensions:
+        loaded_modules = {module_path for module_path, _cfg in to_load}
+        sub_agent_module = floor_atoms["sub_agent"].module_path
+        if sub_agent_module in loaded_modules and system_prompt_module not in loaded_modules:
+            to_load.insert(0, (system_prompt_module, {"prompt": ""}))
+
+        from agentm.extensions.loader import sort_extensions_by_requires
+
+        to_load = sort_extensions_by_requires(to_load, source="session extensions")
     return to_load
 
 

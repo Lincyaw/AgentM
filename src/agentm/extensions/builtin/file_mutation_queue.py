@@ -25,6 +25,7 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": False,
     },
+    requires=("tool_edit", "tool_write"),
 )
 
 _PATH_KEYS = ("path", "file_path", "filepath", "target")

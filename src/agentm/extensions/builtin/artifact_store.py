@@ -44,13 +44,33 @@ MANIFEST = ExtensionManifest(
     config_schema={
         "type": "object",
         "properties": {
-            "max_inline_bytes": {"type": "integer", "minimum": 1, "default": _DEFAULT_INLINE_BYTES},
+            "inline_max_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "default": _DEFAULT_INLINE_BYTES,
+            },
+            "max_inline_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "default": _DEFAULT_INLINE_BYTES,
+            },
+            "list_max_results": {
+                "type": "integer",
+                "minimum": 1,
+                "default": _DEFAULT_LIST_LIMIT,
+            },
+            "grep_max_matches": {
+                "type": "integer",
+                "minimum": 1,
+                "default": _DEFAULT_GREP_MAX_HITS,
+            },
             "root_session_id": {"type": "string"},
             "task_id": {"type": ["string", "null"]},
             "persona": {"type": ["string", "null"]},
         },
         "additionalProperties": False,
     },
+    requires=(),  # Leaf atom: registers its own tools and service.
 )
 
 
@@ -63,6 +83,8 @@ class _StoreContext:
     task_id: str | None
     persona: str | None
     max_inline_bytes: int
+    list_max_results: int
+    grep_max_matches: int
 
     @property
     def artifacts_dir(self) -> Path:
@@ -81,7 +103,14 @@ class ArtifactStore:
             root_session_id=root_session_id,
             task_id=_maybe_str(config.get("task_id")),
             persona=_maybe_str(config.get("persona")),
-            max_inline_bytes=int(config.get("max_inline_bytes", _DEFAULT_INLINE_BYTES)),
+            max_inline_bytes=int(
+                config.get(
+                    "inline_max_bytes",
+                    config.get("max_inline_bytes", _DEFAULT_INLINE_BYTES),
+                )
+            ),
+            list_max_results=int(config.get("list_max_results", _DEFAULT_LIST_LIMIT)),
+            grep_max_matches=int(config.get("grep_max_matches", _DEFAULT_GREP_MAX_HITS)),
         )
 
     async def on_session_ready(self, event: SessionReadyEvent) -> None:
@@ -186,7 +215,7 @@ class ArtifactStore:
             tags_filter = _coerce_tags(args.get("tags"))
             created_by_task = _maybe_str(args.get("created_by_task"))
             since = _parse_since(args.get("since"))
-            limit = max(1, int(args.get("limit", _DEFAULT_LIST_LIMIT)))
+            limit = max(1, int(args.get("limit", self._ctx.list_max_results)))
         except ValueError as exc:
             return _error(str(exc))
         metas = await self._filtered_metadata(
@@ -220,7 +249,7 @@ class ArtifactStore:
         try:
             kind_filter = _maybe_str(args.get("kind"))
             tags_filter = _coerce_tags(args.get("tags"))
-            max_hits = max(1, int(args.get("max_hits", _DEFAULT_GREP_MAX_HITS)))
+            max_hits = max(1, int(args.get("max_hits", self._ctx.grep_max_matches)))
             snippet_lines = max(0, int(args.get("snippet_lines", _DEFAULT_SNIPPET_LINES)))
         except ValueError as exc:
             return _error(str(exc))

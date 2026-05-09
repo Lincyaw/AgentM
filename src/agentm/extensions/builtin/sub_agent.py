@@ -97,6 +97,7 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": True,
     },
+    requires=("system_prompt",),
 )
 
 
