@@ -335,3 +335,43 @@ def test_D5_unrelated_fstring_dynamic_import_allowed(tmp_path: Path) -> None:
     )
 
     assert not any(issue.rule == "11.4.D5-dynamic-agentm-import" for issue in issues)
+
+
+def test_issue_87_reworked_atoms_validate_cleanly() -> None:
+    from agentm.extensions.validate import validate_atom_file
+
+    root = Path("src/agentm/extensions/builtin")
+    for name in (
+        "observability",
+        "sub_agent",
+        "artifact_store",
+        "micro_compact",
+        "llm_compaction",
+    ):
+        issues = validate_atom_file(
+            root / f"{name}.py",
+            module_path=f"agentm.extensions.builtin.{name}",
+        )
+        assert issues == []
+
+
+def test_D6_concrete_harness_service_isinstance_rejected(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        "def install(api, config):\n"
+        "    isinstance(writer, GitBackedResourceWriter)\n",
+    )
+
+    assert any(issue.rule == "11.4.D6-harness-service-downcast" for issue in issues)
+
+
+def test_D6_local_class_isinstance_allowed(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        "class MyAtomClass:\n"
+        "    pass\n"
+        "def install(api, config):\n"
+        "    isinstance(x, MyAtomClass)\n",
+    )
+
+    assert not any(issue.rule == "11.4.D6-harness-service-downcast" for issue in issues)

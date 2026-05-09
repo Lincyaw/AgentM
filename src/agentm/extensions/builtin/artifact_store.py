@@ -13,6 +13,7 @@ import time
 from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.lib import _to_jsonable
 from agentm.core.lib.artifact_files import (
     artifacts_dir_for,
     find_metadata_files,
@@ -20,7 +21,7 @@ from agentm.core.lib.artifact_files import (
     scan_artifact_metadata,
 )
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import SessionReadyEvent, SessionShutdownEvent
+from agentm.harness.events import SessionReadyEvent
 from agentm.harness.extension import ExtensionAPI
 
 _DEFAULT_INLINE_BYTES = 8 * 1024
@@ -30,24 +31,6 @@ _DEFAULT_SNIPPET_LINES = 2
 _NEXT_ID_WIDTH = 3
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _KIND_RE = re.compile(r"[^A-Za-z0-9_-]+")
-_ID_LOCKS: Final[dict[str, asyncio.Lock]] = {}
-_STORES_BY_SESSION: Final[dict[str, "ArtifactStore"]] = {}
-
-
-def get_artifact_store(session_id: str) -> "ArtifactStore | None":
-    """Look up the live ``artifact_store`` instance for ``session_id``.
-
-    Other extensions and scenario tools that need shared-artifact write/read
-    access (e.g. ``hypothesis_tools`` in the RCA scenario) call this from
-    inside their own ``session_ready`` handler — by then every extension's
-    ``install()`` has run, so the registry is populated. Returns ``None`` if
-    ``artifact_store`` is not loaded for the session, so callers can fail
-    fast with a clear error instead of silently constructing a parallel,
-    state-divergent store.
-    """
-
-    return _STORES_BY_SESSION.get(session_id)
-
 MANIFEST = ExtensionManifest(
     name="artifact_store",
     description="Shared append-only filesystem artifact store for session trees.",
@@ -89,6 +72,7 @@ class _StoreContext:
 class ArtifactStore:
     def __init__(self, api: ExtensionAPI, config: dict[str, Any]) -> None:
         self._api = api
+        self._id_lock = asyncio.Lock()
         root_session_id = str(config.get("root_session_id") or api.session_id)
         self._ctx = _StoreContext(
             cwd=Path(api.cwd),
@@ -161,7 +145,7 @@ class ArtifactStore:
         await asyncio.to_thread(
             _atomic_write_text,
             meta_path,
-            json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True),
+            json.dumps(_to_jsonable(metadata), ensure_ascii=False, indent=2, sort_keys=True),
         )
         return {"artifact_id": artifact_id, "path": str(body_path)}
 
@@ -271,22 +255,8 @@ class ArtifactStore:
 
     async def _allocate_id(self) -> str:
         artifacts_dir = self._ctx.artifacts_dir
-        async with _id_lock_for(artifacts_dir):
-            await asyncio.to_thread(artifacts_dir.mkdir, parents=True, exist_ok=True)
-            next_id_path = artifacts_dir / ".next_id"
-            next_value = 1
-            if next_id_path.exists():
-                try:
-                    next_value = int(next_id_path.read_text(encoding="utf-8").strip())
-                except ValueError:
-                    next_value = 1
-            artifact_id = f"art_{next_value:0{_NEXT_ID_WIDTH}d}"
-            await asyncio.to_thread(
-                _atomic_write_text,
-                next_id_path,
-                str(next_value + 1),
-            )
-            return artifact_id
+        async with self._id_lock:
+            return await asyncio.to_thread(_allocate_id_sync, artifacts_dir)
 
     async def _filtered_metadata(
         self,
@@ -341,13 +311,27 @@ class ArtifactStore:
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     store = ArtifactStore(api, config)
-    _STORES_BY_SESSION[api.session_id] = store
+    api.set_service("artifact_store", store)
 
-    def _on_session_shutdown(_event: SessionShutdownEvent) -> None:
-        _STORES_BY_SESSION.pop(api.session_id, None)
+    def _store() -> ArtifactStore:
+        registered = api.get_service("artifact_store")
+        if not isinstance(registered, ArtifactStore):
+            raise RuntimeError("artifact_store service is not registered")
+        return registered
+
+    async def _write(args: dict[str, Any]) -> ToolResult:
+        return await _store().write(args)
+
+    async def _read(args: dict[str, Any]) -> ToolResult:
+        return await _store().read(args)
+
+    async def _list_artifacts(args: dict[str, Any]) -> ToolResult:
+        return await _store().list_artifacts(args)
+
+    async def _grep(args: dict[str, Any]) -> ToolResult:
+        return await _store().grep(args)
 
     api.on(SessionReadyEvent.CHANNEL, store.on_session_ready)
-    api.on(SessionShutdownEvent.CHANNEL, _on_session_shutdown)
     api.register_tool(
         FunctionTool(
             name="artifact_write",
@@ -367,13 +351,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "required": ["kind", "title", "body"],
                 "additionalProperties": False,
             },
-            fn=store.write,
+            fn=_write,
         )
     )
     api.register_tool(
         FunctionTool(
             name="artifact_read",
-            description="Read a shared artifact body with bounded ranges.",
+            description="Read one artifact by id, optionally with a byte/line range.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -381,65 +365,55 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "range": {
                         "type": "object",
                         "properties": {
-                            "lines": {
-                                "type": "array",
-                                "items": {"type": "integer"},
-                                "minItems": 2,
-                                "maxItems": 2,
-                            },
-                            "bytes": {
-                                "type": "array",
-                                "items": {"type": "integer"},
-                                "minItems": 2,
-                                "maxItems": 2,
-                            },
-                            "head": {"type": "integer", "minimum": 1},
-                            "tail": {"type": "integer", "minimum": 1},
+                            "mode": {"type": "string", "enum": ["bytes", "lines"]},
+                            "start": {"type": "integer", "minimum": 0},
+                            "end": {"type": "integer", "minimum": 0},
                         },
+                        "required": ["mode", "start", "end"],
                         "additionalProperties": False,
                     },
                 },
                 "required": ["artifact_id"],
                 "additionalProperties": False,
             },
-            fn=store.read,
+            fn=_read,
         )
     )
     api.register_tool(
         FunctionTool(
             name="artifact_list",
-            description="List shared artifacts without loading their bodies.",
+            description="List artifact metadata with simple filters.",
             parameters={
                 "type": "object",
                 "properties": {
                     "kind": {"type": "string"},
                     "tags": {"type": "array", "items": {"type": "string"}},
                     "created_by_task": {"type": "string"},
-                    "since": {"type": ["string", "number"]},
-                    "limit": {"type": "integer", "minimum": 1, "default": _DEFAULT_LIST_LIMIT},
+                    "since": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1},
                 },
                 "additionalProperties": False,
             },
-            fn=store.list_artifacts,
+            fn=_list_artifacts,
         )
     )
     api.register_tool(
         FunctionTool(
             name="artifact_grep",
-            description="Regex-scan shared artifacts with contextual snippets.",
+            description="Regex-search text artifacts and return snippets.",
             parameters={
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string"},
                     "kind": {"type": "string"},
                     "tags": {"type": "array", "items": {"type": "string"}},
-                    "max_hits": {"type": "integer", "minimum": 1, "default": _DEFAULT_GREP_MAX_HITS},
-                    "snippet_lines": {"type": "integer", "minimum": 0, "default": _DEFAULT_SNIPPET_LINES},
+                    "max_hits": {"type": "integer", "minimum": 1},
+                    "snippet_lines": {"type": "integer", "minimum": 0},
                 },
                 "required": ["pattern"],
                 "additionalProperties": False,
             },
-            fn=store.grep,
+            fn=_grep,
         )
     )
 
@@ -449,6 +423,34 @@ def _atomic_write_text(path: Path, text: str) -> None:
     tmp_path = path.with_name(f"{path.name}.tmp")
     tmp_path.write_text(text, encoding="utf-8")
     os.replace(tmp_path, path)
+
+
+def _allocate_id_sync(artifacts_dir: Path) -> str:
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = artifacts_dir / ".next_id.lock"
+    fd: int | None = None
+    while fd is None:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            time.sleep(0.005)
+    try:
+        next_id_path = artifacts_dir / ".next_id"
+        next_value = 1
+        if next_id_path.exists():
+            try:
+                next_value = int(next_id_path.read_text(encoding="utf-8").strip())
+            except ValueError:
+                next_value = 1
+        artifact_id = f"art_{next_value:0{_NEXT_ID_WIDTH}d}"
+        _atomic_write_text(next_id_path, str(next_value + 1))
+        return artifact_id
+    finally:
+        os.close(fd)
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _coerce_tags(value: Any) -> list[str]:
@@ -559,18 +561,10 @@ def _file_size(meta: dict[str, Any]) -> int:
         return 0
 
 
-def _id_lock_for(artifacts_dir: Path) -> asyncio.Lock:
-    key = str(artifacts_dir.resolve(strict=False))
-    lock = _ID_LOCKS.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _ID_LOCKS[key] = lock
-    return lock
-
 
 def _ok(payload: dict[str, Any]) -> ToolResult:
     return ToolResult(
-        content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))],
+        content=[TextContent(type="text", text=json.dumps(_to_jsonable(payload), ensure_ascii=False))],
         extras=payload,
     )
 
@@ -578,7 +572,7 @@ def _ok(payload: dict[str, Any]) -> ToolResult:
 def _error(message: str) -> ToolResult:
     payload = {"error": message}
     return ToolResult(
-        content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))],
+        content=[TextContent(type="text", text=json.dumps(_to_jsonable(payload), ensure_ascii=False))],
         is_error=True,
         extras=payload,
     )
@@ -588,7 +582,6 @@ __all__: Final = [
     "ArtifactStore",
     "artifacts_dir_for",
     "find_metadata_files",
-    "get_artifact_store",
     "install",
     "list_artifacts_for_task",
     "scan_artifact_metadata",
