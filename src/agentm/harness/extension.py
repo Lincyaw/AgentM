@@ -34,6 +34,7 @@ from agentm.core.abi.operations import (
     FileOperations,
     Operations,
 )
+from agentm.core.abi.project_layout import ProjectLayout
 from agentm.harness.services import (
     CatalogService,
     CompactionService,
@@ -41,6 +42,7 @@ from agentm.harness.services import (
     SkillsService,
     default_catalog_service,
     default_compaction_service,
+    default_project_layout,
     default_prompt_templates_service,
     default_skills_service,
 )
@@ -474,6 +476,7 @@ class ExtensionAPI(Protocol):
     # ``core._internal`` exclusively via these handles so the §11 import
     # contract can forbid ``agentm.core._internal`` outright.
     def get_operations(self) -> Operations: ...
+    def get_project_layout(self) -> ProjectLayout: ...
     @property
     def skills(self) -> SkillsService: ...
     @property
@@ -519,6 +522,7 @@ class _ExtensionAPIImpl:
         prompt_templates_service: PromptTemplatesService | None = None,
         catalog_service: CatalogService | None = None,
         compaction_service: CompactionService | None = None,
+        project_layout: ProjectLayout | None = None,
         child_session_factory: ChildSessionFactory | None = None,
         resource_writer: ResourceWriter | None = None,
     ) -> None:
@@ -546,6 +550,9 @@ class _ExtensionAPIImpl:
         )
         self._catalog = catalog_service or default_catalog_service()
         self._compaction = compaction_service or default_compaction_service()
+        self._project_layout: ProjectLayout = (
+            project_layout or default_project_layout(cwd)
+        )
         self._resource_writer = resource_writer or GitBackedResourceWriter(
             cwd=cwd,
             session_id=session_id,
@@ -755,6 +762,10 @@ class _ExtensionAPIImpl:
     def get_operations(self) -> Operations:
         self._assert_active()
         return self._operations
+
+    def get_project_layout(self) -> ProjectLayout:
+        self._assert_active()
+        return self._project_layout
 
     @property
     def skills(self) -> SkillsService:

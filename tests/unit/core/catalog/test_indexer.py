@@ -8,8 +8,8 @@ from typing import Any, cast
 
 import pytest
 
-from agentm.core._internal.catalog import _layout
-from agentm.core._internal.catalog.indexer import index_trace, rebuild_catalog
+from agentm.harness.catalog import _layout
+from agentm.harness.catalog.indexer import index_trace, rebuild_catalog
 from agentm.core.abi import EventBus
 from agentm.harness.atom_reloader import AtomReloader
 from agentm.harness.extension import ProviderConfig
@@ -269,7 +269,7 @@ def test_cli_rebuild_returns_zero_on_clean_run(tmp_path: Path) -> None:
         [
             sys.executable,
             "-m",
-            "agentm.core._internal.catalog.indexer",
+            "agentm.harness.catalog.indexer",
             "--root",
             str(tmp_path),
             "--observability",
@@ -300,7 +300,7 @@ async def test_shutdown_indexes_observability_trace_when_present(
     def _fake_index_trace(path: Path, *, root: Path | None = None) -> None:
         called["path"] = path
 
-    monkeypatch.setattr("agentm.core._internal.catalog.indexer.index_trace", _fake_index_trace)
+    monkeypatch.setattr("agentm.harness.catalog.indexer.index_trace", _fake_index_trace)
 
     bus = EventBus()
     resource_writer = GitBackedResourceWriter(
