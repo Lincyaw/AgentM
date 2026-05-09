@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from agentm.core._internal.catalog import freeze_current
-from agentm.core._internal.catalog.indexer import index_trace, rebuild_catalog
 from agentm.core._internal.catalog.manifest import reload_manifest
+from agentm.harness.catalog import freeze_current
+from agentm.harness.catalog.indexer import index_trace, rebuild_catalog
 from agentm.extensions import ExtensionManifest
 
 

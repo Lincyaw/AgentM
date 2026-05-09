@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-from agentm.core._internal.catalog import _layout
+# NOTE: ``_layout`` was relocated to :mod:`agentm.harness.catalog._layout`
+# (issue #74). Browse stays in core, so it computes the runs-dir path
+# inline rather than importing the harness module.
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,9 +93,12 @@ def runs_for(fingerprint: dict[str, Any] | str, root: Path | None = None) -> lis
     if not refs:
         return []
 
+    cwd_root = (root or Path.cwd())
     trace_sets: list[set[str]] = []
     for name, version in refs.items():
-        runs_dir = _layout.atom_runs_dir(name, version, root=root)
+        runs_dir = (
+            cwd_root / ".agentm" / "catalog" / "atoms" / name / version / "runs"
+        )
         if not runs_dir.exists():
             return []
         trace_sets.append({entry.name for entry in runs_dir.iterdir()})
