@@ -249,7 +249,7 @@ def find_cut_point(
     cut_index = cut_points[0]
     for index in range(end_index - 1, start_index - 1, -1):
         entry = entries[index]
-        if entry.type != "message":
+        if entry.type != ENTRY_TYPE_MESSAGE:
             continue
         if not isinstance(entry.payload, (UserMessage, AssistantMessage, ToolResultMessage)):
             continue

@@ -514,14 +514,27 @@ class AgentSession:
             # still prepend ``compaction_prompts`` so ``build_session_context``
             # works out of the box. Callers that explicitly include the atom
             # keep their first-position overrides — we skip the prepend.
+            _COMPACTION_PROMPTS_MODULE = (
+                "agentm.extensions.builtin.compaction_prompts"
+            )
             if not any(
-                module_path.endswith(".compaction_prompts")
-                or module_path == "agentm.extensions.builtin.compaction_prompts"
+                module_path == _COMPACTION_PROMPTS_MODULE
                 for module_path, _ in to_load
             ):
-                to_load.insert(
-                    0,
-                    ("agentm.extensions.builtin.compaction_prompts", {}),
+                to_load.insert(0, (_COMPACTION_PROMPTS_MODULE, {}))
+                await bus.emit(
+                    DiagnosticEvent.CHANNEL,
+                    DiagnosticEvent(
+                        level="info",
+                        source="session_bootstrap",
+                        message=(
+                            "auto-prepending kernel-floor atom "
+                            f"{_COMPACTION_PROMPTS_MODULE!r} so the "
+                            "compaction engine can materialise session "
+                            "entries; pass it explicitly in extensions= "
+                            "to override."
+                        ),
+                    ),
                 )
         elif config.scenario is not None:
             from agentm.extensions.loader import (
