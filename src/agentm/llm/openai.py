@@ -33,16 +33,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import logging
 import os
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from agentm.core.abi.messages import (
     AgentMessage,
-    AssistantContent,
     AssistantMessage,
     ImageContent,
     TextContent,
@@ -73,6 +72,8 @@ from agentm.core.abi.stream import (
     ToolCallStart,
 )
 from agentm.core.abi.tool import Tool
+
+from ._common import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from openai import AsyncOpenAI
@@ -166,7 +167,7 @@ def _encode_assistant_message(msg: AssistantMessage) -> dict[str, Any]:
                     "type": "function",
                     "function": {
                         "name": block.name,
-                        "arguments": json.dumps(block.arguments, ensure_ascii=False),
+                        "arguments": OpenAIToolSpecAdapter().encode_tool_args(block.arguments),
                     },
                 }
             )
@@ -233,20 +234,27 @@ def _to_openai_messages(
     return out
 
 
-def _to_openai_tools(tools: list[Tool]) -> list[dict[str, Any]]:
-    """Convert kernel ``Tool``s to OpenAI function-tool definitions."""
+@dataclass(frozen=True)
+class OpenAIToolSpecAdapter(ToolSpecAdapter):
+    """Convert AgentM tools to OpenAI function-tool specs."""
 
-    return [
-        {
+    def vendor_spec(self, tool: Tool) -> dict[str, Any]:
+        return {
             "type": "function",
             "function": {
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.parameters,
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
             },
         }
-        for t in tools
-    ]
+
+    def encode_tool_args(self, args: Mapping[str, Any]) -> str:
+        return encode_tool_args(args)
+
+
+def _to_openai_tools(tools: list[Tool]) -> list[dict[str, Any]]:
+    adapter = OpenAIToolSpecAdapter()
+    return [adapter.vendor_spec(t) for t in tools]
 
 
 # --- Streaming bridge -------------------------------------------------------
@@ -254,25 +262,14 @@ def _to_openai_tools(tools: list[Tool]) -> list[dict[str, Any]]:
 
 @dataclass
 class _StreamState:
-    """Mutable accumulator for one turn of streaming.
+    """Provider event mapping state for one OpenAI-compatible stream."""
 
-    OpenAI streams tool calls keyed by ``index`` (not by id), so we keep a
-    per-index scratch with the running id/name/json fragments. ``order``
-    preserves emission order for the assembled ``AssistantMessage``.
-    """
-
-    text: str = ""
-    thinking: str = ""
+    accumulator: StreamAccumulator = field(default_factory=StreamAccumulator)
     tool_scratch: dict[int, dict[str, Any]] = field(default_factory=dict)
     tool_order: list[int] = field(default_factory=list)
-    started_text: bool = False
-    started_thinking: bool = False
     usage: Usage | None = None
-    # Raw vendor finish_reason (verbatim OpenAI string) for observability.
     stop_reason: str | None = None
-    # Kernel-canonical termination hint, set when ``finish_reason`` arrives.
     termination: TerminationHint | None = None
-
 
 def _map_finish_reason(raw: str | None) -> TerminationHint | None:
     """Translate OpenAI ``finish_reason`` into a kernel ``TerminationHint``.
@@ -314,44 +311,16 @@ def _extract_usage(usage_obj: Any) -> Usage | None:
     )
 
 
-def _assemble_message(state: _StreamState) -> AssistantMessage:
-    """Materialize the kernel ``AssistantMessage`` from accumulated state."""
-
-    blocks: list[AssistantContent] = []
-    if state.thinking:
-        blocks.append(ThinkingBlock(type="thinking", text=state.thinking))
-    if state.text:
-        blocks.append(TextContent(type="text", text=state.text))
-    for index in state.tool_order:
-        scratch = state.tool_scratch.get(index)
-        if scratch is None:
-            continue
-        raw_args = scratch.get("arguments", "")
-        try:
-            args = json.loads(raw_args) if raw_args else {}
-        except json.JSONDecodeError:
-            # Mirror anthropic provider: surface arg-parse errors back to the
-            # loop layer, not the kernel. Here we hand back ``{}`` so the
-            # kernel invariant (``arguments`` is a dict) holds.
-            args = {}
-        if not isinstance(args, dict):
-            args = {}
-        blocks.append(
-            ToolCallBlock(
-                type="tool_call",
-                id=scratch.get("id", ""),
-                name=scratch.get("name", ""),
-                arguments=args,
-            )
-        )
-    return AssistantMessage(
-        role="assistant",
-        content=blocks,
-        timestamp=0.0,
-        stop_reason=state.stop_reason,
-        termination=state.termination,
-        usage=state.usage,
+def _flush_tool_call(state: _StreamState, index: int) -> None:
+    scratch = state.tool_scratch.get(index)
+    if scratch is None or scratch.get("flushed"):
+        return
+    state.accumulator.add_tool_call(
+        id=scratch.get("id", ""),
+        name=scratch.get("name", ""),
+        args_delta=scratch.get("arguments", ""),
     )
+    scratch["flushed"] = True
 
 
 # --- Public callable -------------------------------------------------------
@@ -382,6 +351,7 @@ class OpenAIStreamFn:
     default_headers: dict[str, str] | None = None
     verify_ssl: bool = True
     client: AsyncOpenAI | None = None
+    clock: Callable[[], float] = time.time
 
     def _get_client(self) -> AsyncOpenAI:
         if self.client is not None:
@@ -502,12 +472,23 @@ class OpenAIStreamFn:
             if scratch is not None and not scratch.get("ended"):
                 yield ToolCallEnd(id=scratch.get("id", ""))
                 scratch["ended"] = True
+                _flush_tool_call(state, index)
 
         if aborted:
             state.stop_reason = "aborted"
             state.termination = Aborted()
 
-        yield MessageEnd(message=_assemble_message(state))
+        for index in state.tool_order:
+            _flush_tool_call(state, index)
+        assembled = state.accumulator.assemble(
+            stop_reason=state.stop_reason,
+            termination=state.termination,
+            usage=state.usage,
+            timestamp=self.clock(),
+        )
+        for parse_error in state.accumulator.parse_errors:
+            yield parse_error
+        yield MessageEnd(message=assembled)
 
 
 _RATE_LIMIT_MAX_ATTEMPTS = int(os.environ.get("AGENTM_RATE_LIMIT_MAX_ATTEMPTS", "8"))
@@ -582,15 +563,13 @@ async def _translate_chunk(
         # 1) Reasoning content (OpenAI o-series, DeepSeek-R1, LiteLLM Kimi).
         reasoning = getattr(delta, "reasoning_content", None)
         if reasoning:
-            state.thinking += reasoning
-            state.started_thinking = True
+            state.accumulator.add_thinking(None, reasoning)
             yield ThinkingDelta(text=reasoning, signature=None)
 
         # 2) Plain text content.
         content = getattr(delta, "content", None)
         if content:
-            state.text += content
-            state.started_text = True
+            state.accumulator.add_text(None, content)
             yield TextDelta(text=content)
 
         # 3) Tool call deltas. Each entry is identified by ``index``; the
@@ -613,6 +592,7 @@ async def _translate_chunk(
                     "arguments": "",
                     "started": False,
                     "ended": False,
+                    "flushed": False,
                 }
                 state.tool_scratch[index] = scratch
                 state.tool_order.append(index)
@@ -645,6 +625,7 @@ async def _translate_chunk(
             ):
                 yield ToolCallEnd(id=scratch["id"])
                 scratch["ended"] = True
+                _flush_tool_call(state, index)
         if finish_reason is not None:
             state.stop_reason = finish_reason
             state.termination = _map_finish_reason(finish_reason)
