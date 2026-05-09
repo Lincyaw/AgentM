@@ -240,9 +240,11 @@ agent calls api.reload_atom(name, new_source)
 
 Key properties:
 - **Atomicity**: validator runs *before* any file is written. The agent never sees a half-validated state.
-- **Reversibility**: every reload freezes the previous source; rollback is mechanical, not LLM-driven.
+- **Reversibility**: every reload freezes the previous source; rollback is mechanical, not LLM-driven. If installing the new source fails and rollback activation also fails, the in-memory loaded-atom registries keep the previously live `LoadedAtom` instead of purging the operational state; the failure is surfaced as `rollback_failure_state_preserved`.
 - **Auditability**: success and failure both produce catalog records (sister doc §6).
 - **Stale-ctx safety**: the old `install(api, ...)` closures invalidate via `assert_active()` (§6 below).
+- **Async boundary discipline**: reload/install/freeze are native async in the reloader; synchronous ExtensionAPI facades are only API-boundary adapters.
+- **Lifecycle symmetry**: harness-owned EventBus subscriptions registered by the reloader are explicitly unsubscribed during `AgentSession.shutdown()` before the bus is cleared.
 
 ### 5.2 What `freeze_current` does
 
