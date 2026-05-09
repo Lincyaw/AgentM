@@ -13,6 +13,7 @@ from agentm.core.abi import AgentLoop, EventBus, LoopConfig, Model, Tool
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.extensions import discover as discover_mod
 from agentm.harness.atom_reloader import AtomReloader
+from agentm.harness.command_dispatcher import HarnessCommandDispatcher
 from agentm.harness.events import (
     ChildSessionStartEvent,
     ExtensionInstallEvent,
@@ -173,11 +174,12 @@ async def create_agent_session(
         return api
 
     reloader.set_api_factory(_make_api)
-    services["slash_commands"] = {
-        "commands": commands,
-        "owners_by_kind": reloader.owners_by_kind,
-        "apis": apis,
-    }
+    services["slash_commands"] = HarnessCommandDispatcher(
+        commands=commands,
+        owners_by_kind=reloader.owners_by_kind,
+        apis=apis,
+        fallback_owner="agentm.extensions.builtin.slash_commands",
+    )
 
     async def _install_with_events(
         module_path: str,

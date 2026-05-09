@@ -16,6 +16,7 @@ requirements:
       - path: src/agentm/harness/session_helpers.py
       - path: src/agentm/harness/session_runtime.py
       - path: src/agentm/harness/session_config.py
+      - path: src/agentm/harness/command_dispatcher.py
       - path: src/agentm/harness/provider_resolver.py
       - path: src/agentm/harness/atom_reloader.py
       - path: src/agentm/harness/session_manager.py
