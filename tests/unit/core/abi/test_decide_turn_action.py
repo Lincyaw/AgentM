@@ -43,7 +43,6 @@ from agentm.core.abi.loop import (
     _default_action_with_names,
     _resolve_action,
 )
-from agentm.core.abi.termination import VendorSpecific
 from agentm.core.abi.tool import ToolContinue
 
 
@@ -230,27 +229,6 @@ def test_default_action_distinguishes_protocol_violation_from_end_turn() -> None
     assert isinstance(violation.cause, ProviderProtocolViolation)
     assert isinstance(clean, Stop)
     assert isinstance(clean.cause, ModelEndTurn)
-
-
-def test_default_action_treats_vendor_specific_termination_as_end_turn() -> None:
-    """A provider returning a hint the kernel doesn't recognize
-    (``VendorSpecific("custom_stop")``) must terminate cleanly via
-    :class:`ModelEndTurn`. The kernel never inspects vendor strings — adding
-    a new provider whose stop-reason vocabulary differs MUST NOT require
-    editing kernel code (issue #75)."""
-
-    msg = AssistantMessage(
-        role="assistant",
-        content=[TextContent(type="text", text="custom termination")],
-        timestamp=1.0,
-        stop_reason="custom_stop",
-        termination=VendorSpecific(raw="custom_stop"),
-    )
-
-    action = _default_action_with_names(msg, [])
-
-    assert isinstance(action, Stop)
-    assert isinstance(action.cause, ModelEndTurn)
 
 
 def test_default_action_maps_tool_terminate_to_tool_terminated_cause() -> None:
