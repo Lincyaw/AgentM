@@ -15,12 +15,10 @@ import threading
 import time
 import traceback
 import uuid
-from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import IO, Any
 
 from agentm.core.abi import (
-    BusPriority,
     ContextEvent,
     EventBusObserver,
     LlmRequestEndEvent,
@@ -32,6 +30,7 @@ from agentm.core.abi import (
     TurnStartEvent,
 )
 from agentm.core.abi.messages import ToolCallBlock
+from agentm.core.lib import _to_jsonable
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
 from agentm.harness.events import (
@@ -44,12 +43,7 @@ from agentm.harness.events import (
     SessionReadyEvent,
     SessionShutdownEvent,
 )
-from agentm.harness.extension import (
-    ExtensionAPI,
-    Handler,
-    current_installing_extension,
-)
-from agentm.harness.resource_writer import GitBackedResourceWriter
+from agentm.harness.extension import ExtensionAPI, Handler
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +88,14 @@ MANIFEST = ExtensionManifest(
     config_schema={
         "type": "object",
         "properties": {
-            "path": {"type": "string"},
+            "path": {
+                "type": "string",
+                "description": (
+                    "JSONL trace path. Relative paths resolve under cwd; "
+                    "the {session_id} placeholder is replaced with the "
+                    "current session id."
+                ),
+            },
             "include_handler_records": {"type": "boolean"},
             "include_mutation_diff": {"type": "boolean"},
             "strict_sync_handlers": {"type": "boolean"},
@@ -123,25 +124,6 @@ def _new_id() -> str:
 
 def _now_ns() -> int:
     return time.time_ns()
-
-
-def _serialize(value: Any, _depth: int = 0) -> Any:
-    if _depth > 12:
-        return "<max-depth>"
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if callable(value):
-        return f"<callable {getattr(value, '__qualname__', repr(value))}>"
-    if is_dataclass(value) and not isinstance(value, type):
-        return {
-            f.name: _serialize(getattr(value, f.name), _depth + 1)
-            for f in fields(value)
-        }
-    if isinstance(value, dict):
-        return {str(key): _serialize(val, _depth + 1) for key, val in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_serialize(item, _depth + 1) for item in value]
-    return repr(value)
 
 
 def _handler_label(handler: Handler) -> str:
@@ -278,11 +260,13 @@ class _Observer(EventBusObserver):
         sink: _Sink,
         trace_id: str,
         include_handlers: bool,
+        include_diff: bool,
         exclude_channels: frozenset[str],
     ) -> None:
         self._sink = sink
         self._trace_id = trace_id
         self._include_handlers = include_handlers
+        self._include_diff = include_diff
         self._exclude_channels = exclude_channels
         # Stack frame: (channel, span_id, start_ns, suppressed). When
         # suppressed=True, on_emit_end skips the sink write and
@@ -290,10 +274,22 @@ class _Observer(EventBusObserver):
         # cycles through push/pop so parent-span bookkeeping stays consistent
         # for non-suppressed siblings.
         self._stack: list[tuple[str, str, int, bool]] = []
+        self._snapshots: list[tuple[str, Handler, Any, Any]] = []
 
     def on_emit_start(self, channel: str, event: Any) -> None:
         suppressed = channel in self._exclude_channels
         self._stack.append((channel, _new_id(), _now_ns(), suppressed))
+
+    def on_handler_start(self, channel: str, handler: Handler, event: Any) -> None:
+        if not self._include_diff or channel not in _MUTABLE_CHANNELS:
+            return
+        if self._stack and self._stack[-1][3]:
+            return
+        try:
+            before = _to_jsonable(event)
+        except Exception:
+            return
+        self._snapshots.append((channel, handler, before, event))
 
     def on_handler_done(
         self,
@@ -304,12 +300,15 @@ class _Observer(EventBusObserver):
         duration_ns: int,
     ) -> None:
         if not self._include_handlers or not self._stack:
+            self._record_mutation(channel, handler, None, error)
             return
         parent = self._stack[-1]
         if parent[3]:
+            self._record_mutation(channel, handler, None, error)
             return
         end_ns = _now_ns()
-        owner = getattr(handler, _HANDLER_OWNER_ATTR, None) or current_installing_extension()
+        owner = getattr(handler, _HANDLER_OWNER_ATTR, None)
+        self._record_mutation(channel, handler, owner, error)
         self._sink.write(
             {
                 "schema": "otel/span/v0",
@@ -324,13 +323,62 @@ class _Observer(EventBusObserver):
                     "channel": channel,
                     "handler": _handler_label(handler),
                     "extension": owner,
-                    "result": _serialize(result),
+                    "result": _to_jsonable(result),
                     "duration_ns": duration_ns,
                 },
                 "status": {
                     "code": "ERROR" if error is not None else "OK",
                     "message": repr(error) if error is not None else None,
                     "traceback": _format_traceback(error),
+                },
+            }
+        )
+
+    def _record_mutation(
+        self,
+        channel: str,
+        handler: Handler,
+        owner: str | None,
+        error: BaseException | None,
+    ) -> None:
+        if not self._include_diff or channel not in _MUTABLE_CHANNELS:
+            return
+        before: Any | None = None
+        event: Any | None = None
+        for index in range(len(self._snapshots) - 1, -1, -1):
+            snap_channel, snap_handler, snap_before, snap_event = self._snapshots[index]
+            if snap_channel == channel and snap_handler is handler:
+                before = snap_before
+                event = snap_event
+                del self._snapshots[index]
+                break
+        if before is None:
+            return
+        try:
+            after = _to_jsonable(event)
+            diff = _deep_diff(before, after)
+        except Exception:
+            return
+        if not diff:
+            return
+        self._sink.write(
+            {
+                "schema": "otel/span/v0",
+                "kind": "handler.mutated",
+                "trace_id": self._trace_id,
+                "span_id": _new_id(),
+                "name": f"mutate:{channel}",
+                "start_time_unix_nano": _now_ns(),
+                "attributes": {
+                    "channel": channel,
+                    "handler": _handler_label(handler),
+                    "extension": owner,
+                    "mutations": diff[:100],
+                    "raised": error is not None,
+                },
+                "status": {
+                    "code": "ERROR" if error is not None else "OK",
+                    "message": repr(error) if error is not None else None,
                 },
             }
         )
@@ -362,91 +410,13 @@ class _Observer(EventBusObserver):
                 "end_time_unix_nano": end_ns,
                 "attributes": {
                     "channel": ch,
-                    "event": _serialize(event),
+                    "event": _to_jsonable(event),
                     "handler_count": len(results),
                 },
                 "status": {"code": "OK"},
             }
         )
 
-
-def _wrap_handler_for_diff(
-    handler: Handler,
-    sink: _Sink,
-    trace_id: str,
-    extension: str,
-    channel: str,
-) -> Handler:
-    """Wrap a handler so we record a ``handler.mutated`` line whenever it
-    mutates the event payload in place. Diff is computed even on the
-    exception path. Skipped entirely for channels not in
-    ``_MUTABLE_CHANNELS`` to bound serialization cost.
-    """
-
-    if channel not in _MUTABLE_CHANNELS:
-        return handler
-
-    def _record(diff: list[dict[str, Any]], error: BaseException | None) -> None:
-        sink.write(
-            {
-                "schema": "otel/span/v0",
-                "kind": "handler.mutated",
-                "trace_id": trace_id,
-                "span_id": _new_id(),
-                "name": f"mutate:{channel}",
-                "start_time_unix_nano": _now_ns(),
-                "attributes": {
-                    "channel": channel,
-                    "handler": _handler_label(handler),
-                    "extension": extension,
-                    "mutations": diff[:100],
-                    "raised": error is not None,
-                },
-                "status": {
-                    "code": "ERROR" if error is not None else "OK",
-                    "message": repr(error) if error is not None else None,
-                },
-            }
-        )
-
-    def _safe_diff(before: Any, event: Any, error: BaseException | None) -> None:
-        try:
-            diff = _deep_diff(before, _serialize(event))
-        except Exception:
-            return  # diff failure must never break the handler chain
-        if diff:
-            _record(diff, error)
-
-    def _proxy(event: Any) -> Any:
-        try:
-            before = _serialize(event)
-        except Exception:
-            return handler(event)  # snapshot failed; skip diff entirely
-
-        try:
-            result = handler(event)
-        except BaseException as exc:
-            _safe_diff(before, event, exc)
-            raise
-
-        if inspect.isawaitable(result):
-
-            async def _await() -> Any:
-                try:
-                    inner = await result
-                except BaseException as exc:
-                    _safe_diff(before, event, exc)
-                    raise
-                _safe_diff(before, event, None)
-                return inner
-
-            return _await()
-        _safe_diff(before, event, None)
-        return result
-
-    _proxy.__module__ = getattr(handler, "__module__", "<unknown>")
-    _proxy.__qualname__ = getattr(handler, "__qualname__", "<handler>")
-    return _proxy
 
 
 class _TurnAggregator:
@@ -546,7 +516,7 @@ def _make_simple_writer(sink: _Sink, trace_id: str, kind: str, name: str = ""): 
                 "span_id": _new_id(),
                 "name": name or kind,
                 "start_time_unix_nano": _now_ns(),
-                "attributes": _serialize(event),
+                "attributes": _to_jsonable(event),
                 "status": {"code": "OK"},
             }
         )
@@ -555,10 +525,6 @@ def _make_simple_writer(sink: _Sink, trace_id: str, kind: str, name: str = ""): 
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    bus = api.events
-    if getattr(bus, "_observer", None) is not None:
-        return
-
     trace_id = api.session_id
     raw_path = config.get("path", ".agentm/observability/{session_id}.jsonl")
     materialized = str(raw_path).replace("{session_id}", api.session_id)
@@ -568,44 +534,15 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     include_handlers = bool(config.get("include_handler_records", True))
     include_diff = bool(config.get("include_mutation_diff", True))
-    strict_sync = bool(config.get("strict_sync_handlers", False))
     max_queue = int(config.get("max_queue", 10_000))
     user_excludes = config.get("exclude_channels")
     exclude_channels = frozenset(_DEFAULT_EXCLUDE_CHANNELS) | (
         frozenset(str(ch) for ch in user_excludes) if user_excludes else frozenset()
     )
 
-    if strict_sync:
-        bus.set_strict_sync(True)
-
     sink = _Sink(file_path, max_queue=max_queue)
-    observer = _Observer(sink, trace_id, include_handlers, exclude_channels)
-    bus.set_observer(observer)
-
-    # Wrap api.on for handler→extension attribution and (optional) mutation
-    # diff. This is the only API-level monkey-patch — every other signal
-    # flows through the bus as a normal event.
-    original_on = api.on
-
-    def _tracking_on(  # type: ignore[no-untyped-def]
-        channel: str,
-        handler: Handler,
-        *,
-        priority: int = BusPriority.NORMAL,
-    ):
-        ext = current_installing_extension()
-        wrapped = (
-            _wrap_handler_for_diff(handler, sink, trace_id, ext, channel)
-            if include_diff
-            else handler
-        )
-        try:
-            setattr(wrapped, _HANDLER_OWNER_ATTR, ext)
-        except (AttributeError, TypeError):
-            pass
-        return original_on(channel, wrapped, priority=priority)
-
-    api.on = _tracking_on  # type: ignore[method-assign]
+    observer = _Observer(sink, trace_id, include_handlers, include_diff, exclude_channels)
+    api.add_observer(observer)
 
     # session.start: emitted directly because no other extension is loaded
     # yet to receive it via the bus, and we want one anchor record.
@@ -651,8 +588,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             if source_path is None:
                 continue
             version_hash: str | None = None
-            if isinstance(writer, GitBackedResourceWriter):
-                version_hash = writer.current_version_for_path(source_path)
+            version_hash = writer.current_version_for_path(source_path)
             if version_hash is None:
                 source = inspect.getsource(entry.module)
                 version_hash = api.catalog.compute_atom_hash(source)
@@ -678,7 +614,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "end_time_unix_nano": now,
                 "attributes": {
                     "module_path": event.module_path,
-                    "config": _serialize(event.config),
+                    "config": _to_jsonable(event.config),
                     "phase": event.phase,
                     "duration_ns": event.duration_ns,
                 },
@@ -702,7 +638,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "kind": event.kind,
                     "name": event.name,
                     "extension": event.extension,
-                    "payload": _serialize(event.payload),
+                    "payload": _to_jsonable(event.payload),
                 },
                 "status": {"code": "OK"},
             }
@@ -719,7 +655,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "start_time_unix_nano": _now_ns(),
                 "attributes": {
                     "extension": event.extension,
-                    "content": _serialize(event.content),
+                    "content": _to_jsonable(event.content),
                     "content_chars": (
                         len(event.content) if isinstance(event.content, str) else None
                     ),
@@ -737,7 +673,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "span_id": _new_id(),
                 "name": "llm.request",
                 "start_time_unix_nano": _now_ns(),
-                "attributes": _serialize(event),
+                "attributes": _to_jsonable(event),
                 "status": {"code": "OK"},
             }
         )
@@ -753,7 +689,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "name": "llm.request.end",
                 "start_time_unix_nano": now - event.duration_ns,
                 "end_time_unix_nano": now,
-                "attributes": _serialize(event),
+                "attributes": _to_jsonable(event),
                 "status": {
                     "code": "ERROR" if event.error else "OK",
                     "message": event.error,
@@ -777,7 +713,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "tool_names": list(event.tool_names),
                     "command_names": list(event.command_names),
                     "extension_module_paths": list(event.extension_module_paths),
-                    "model": _serialize(event.model),
+                    "model": _to_jsonable(event.model),
                 },
                 "status": {"code": "OK"},
             }
@@ -853,17 +789,15 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         )
         sink.close()
 
-    # Use original_on so our own bookkeeping handlers don't get wrapped
-    # for mutation diffing (they don't mutate events).
-    original_on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
-    original_on(ApiRegisterEvent.CHANNEL, _on_api_register)
-    original_on(ApiSendUserMessageEvent.CHANNEL, _on_api_send)
-    original_on(LlmRequestStartEvent.CHANNEL, _on_llm_start)
-    original_on(LlmRequestEndEvent.CHANNEL, _on_llm_end)
-    original_on(ExtensionReloadEvent.CHANNEL, _on_extension_reload)
-    original_on(SessionReadyEvent.CHANNEL, _on_ready)
-    original_on(SessionShutdownEvent.CHANNEL, _on_shutdown)
-    original_on(TurnStartEvent.CHANNEL, aggregator.on_turn_start)
-    original_on(ToolCallEvent.CHANNEL, aggregator.on_tool_call)
-    original_on(ToolResultEvent.CHANNEL, aggregator.on_tool_result)
-    original_on(TurnEndEvent.CHANNEL, aggregator.on_turn_end)
+    api.on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
+    api.on(ApiRegisterEvent.CHANNEL, _on_api_register)
+    api.on(ApiSendUserMessageEvent.CHANNEL, _on_api_send)
+    api.on(LlmRequestStartEvent.CHANNEL, _on_llm_start)
+    api.on(LlmRequestEndEvent.CHANNEL, _on_llm_end)
+    api.on(ExtensionReloadEvent.CHANNEL, _on_extension_reload)
+    api.on(SessionReadyEvent.CHANNEL, _on_ready)
+    api.on(SessionShutdownEvent.CHANNEL, _on_shutdown)
+    api.on(TurnStartEvent.CHANNEL, aggregator.on_turn_start)
+    api.on(ToolCallEvent.CHANNEL, aggregator.on_tool_call)
+    api.on(ToolResultEvent.CHANNEL, aggregator.on_tool_result)
+    api.on(TurnEndEvent.CHANNEL, aggregator.on_turn_end)
