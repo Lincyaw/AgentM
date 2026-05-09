@@ -1,0 +1,21 @@
+requirements:
+  - id: REQ-079-atom-reloader-fail-stop
+    title: Atom reloader fail-stop hardening
+    description: >
+      Atom reload must preserve the previous live atom state when rollback also
+      fails, use native async reload/install/freeze boundaries, unregister
+      reloader-owned bus subscriptions during session shutdown, and track atom
+      registration ownership uniformly by kind.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/harness/atom_reloader.py
+      - path: src/agentm/harness/session.py
+    tests:
+      - path: tests/integration/test_cli_observability_reload.py
+      - path: tests/unit/harness/test_transactional_reload.py
+    docs:
+      - path: .claude/designs/self-modifiable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-79-atom-reloader-hardening.md
+    depends_on: []

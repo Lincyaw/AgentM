@@ -24,7 +24,7 @@ concepts:
     design: "designs/self-modifiable-architecture.md"
     related_concepts: [pluggable_architecture, extension_as_scenario, single_file_extension_contract, observability, evolution_substrate, git_backed_versioning]
     plans: []
-    tasks: []
+    tasks: ["tasks/2026-05-09-issue-79-atom-reloader-hardening.md"]
 
   evolution_substrate:
     description: "Constitution-owned data layer that binds every (atom, scenario) version to all observation data generated under it, so rollback / composition / optimization become evidence-driven, not error-driven. Adds .agentm/catalog/{atoms,scenarios}/<hash>/ with frozen source + manifest.yaml + metrics.jsonl + runs/ + decisions.jsonl. Active-set fingerprint in every observability session.start header binds traces to the exact loaded version set. Indexer (constitution-layer, idempotent, rebuildable from raw observability) aggregates per-(atom_hash, scenario, task_type) statistics. tool_catalog atom (tier-1 read API + propose_change as the only mediated write) exposes list_versions / get_manifest / compare / find_best / runs_for / decisions_for / propose_change to the agent. Hard problems addressed: statistical power (CI + inconclusive enforcement), confounding (experiment-mode lock), Goodhart (universal guard metrics + regressed flag), replayability (LLM response cache, Phase 3), catalog corruption (constitution-layer write-protect on .agentm/catalog/**). Phased: MVP = fingerprint + freeze + browse; Phase 2 = compare + decisions; Phase 3 = replay cache + experiment lock."
