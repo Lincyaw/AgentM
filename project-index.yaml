@@ -1,4 +1,30 @@
 requirements:
+
+  - id: REQ-095-provider-wire-policy-leaks
+    title: Provider wire policy knobs stay explicit at the core ABI boundary
+    description: >
+      LLM provider wire modules must expose provider-specific thinking and
+      reasoning round-trip policy as constructor/config options, emit diagnostics
+      when OpenAI-compatible chat completions drops assistant reasoning, and
+      depend on ProviderConfig only through agentm.core.abi rather than the
+      harness layer.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/provider.py
+      - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/harness/extension.py
+      - path: src/agentm/llm/anthropic.py
+      - path: src/agentm/llm/openai.py
+    tests:
+      - path: tests/unit/llm/test_retry_policy.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-95-wire-policy-leaks.md
+    depends_on:
+      - REQ-093-llm-provider-stream-common
+
   - id: REQ-093-llm-provider-stream-common
     title: Shared LLM provider stream accumulator and tool spec adapters
     description: >

@@ -27,7 +27,7 @@ from agentm.core.abi import (
     LoopConfig,
     Model,
     ObserverRegistration,
-    StreamFn,
+    ProviderConfig,
     Tool,
 )
 from agentm.core.abi.operations import (
@@ -216,21 +216,6 @@ class CommandDispatcher(Protocol):
     """Typed atom-facing port for registered slash command execution."""
 
     async def dispatch(self, name: str, args: str) -> CommandDispatchResult: ...
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderConfig:
-    """LLM provider registration record.
-
-    A provider extension calls ``api.register_provider(name, ProviderConfig)``
-    to publish its ``StreamFn`` and default ``Model``. The harness picks the
-    most recently registered provider as the active one. Frozen so an
-    extension cannot silently mutate another extension's registration.
-    """
-
-    stream_fn: StreamFn
-    model: Model
-    name: str
 
 
 @dataclass(frozen=True, slots=True)

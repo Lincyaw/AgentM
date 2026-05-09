@@ -52,7 +52,7 @@ from .events import (
     TurnStartEvent,
 )
 from .loop import AgentLoop, LoopConfig
-from .provider import ProviderResolver
+from .provider import ProviderConfig, ProviderManifest, ProviderResolver
 from .retry import RetryPolicy
 from .session_store import SessionState, SessionStore
 from .messages import (
@@ -104,6 +104,8 @@ __all__ = [
     "AgentLoop",
     "LoopConfig",
     # provider
+    "ProviderConfig",
+    "ProviderManifest",
     "ProviderResolver",
     # retry
     "RetryPolicy",
