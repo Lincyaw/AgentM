@@ -90,6 +90,7 @@ from .stream import (
     MessageEnd,
     Model,
     StreamFn,
+    ToolCallArgsParseError,
     TextDelta,
 )
 from .tool import (
@@ -514,6 +515,8 @@ class AgentLoop:
                             StreamDeltaEvent.CHANNEL,
                             StreamDeltaEvent(turn_index=turn_index, delta=ev),
                         )
+                        if isinstance(ev, ToolCallArgsParseError):
+                            await self._bus.emit(ev.CHANNEL, ev)
                 except Exception as exc:
                     stream_error = repr(exc)
                     await self._bus.emit(
