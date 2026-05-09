@@ -4,7 +4,7 @@ description: Review agent - verifies the artifact against issue acceptance crite
 triggers:
   - state: reviewing
 role: review
-runtime: codex
+runtime: claude-code
 policy:
   sandbox: danger-full-access
   approval: never

@@ -4,7 +4,7 @@ description: Development agent - produces artifacts satisfying issue acceptance 
 triggers:
   - state: developing
 role: dev
-runtime: codex
+runtime: claude-code
 policy:
   sandbox: danger-full-access
   approval: never
