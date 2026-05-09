@@ -8,6 +8,15 @@ Reaches into: `core/abi/events.py`, `core/abi/loop.py`, `extensions/builtin/sub_
 `decide_turn_action` handler returning `LoopAction.Inject(messages=[...])` — see
 [agent-loop.md](agent-loop.md) for the per-turn termination protocol.
 
+
+## Issue #87 C18 file-shape decision
+
+`extensions/builtin/sub_agent.py` stays a single builtin atom file in issue #87.
+The next split review threshold is **1500 LOC or more**; until then the §11
+single-file atom contract is stronger than a cosmetic decomposition. The atom
+now spawns children through `ExtensionAPI.spawn_child_session(**kwargs)` rather
+than constructing harness session config objects directly.
+
 ## Problem
 
 `extensions/builtin/sub_agent.py` already lets a parent dispatch a child `AgentSession`

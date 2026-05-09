@@ -17,7 +17,7 @@ import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal, cast
+from typing import Any, Literal, cast
 
 from agentm.core.abi import (
     DecideTurnActionEvent,
@@ -32,27 +32,30 @@ from agentm.core.abi import (
     ToolTerminated,
     UserMessage,
 )
+from agentm.core.lib import _to_jsonable
 from agentm.core.lib.artifact_files import list_artifacts_for_task
 from agentm.extensions import ExtensionManifest
+from agentm.extensions.discover import discover_builtin
 from agentm.harness.events import (
     ChildSessionEndEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
 )
 from agentm.harness.extension import ExtensionAPI, ExtensionLoadError, ProviderConfig
-from agentm.harness.session_config import AgentSessionConfig
 
 _RUNNING: Literal["running"] = "running"
 _COMPLETED: Literal["completed"] = "completed"
 _ABORTED: Literal["aborted"] = "aborted"
 _ERROR: Literal["error"] = "error"
 _Status = Literal["running", "completed", "aborted", "error"]
-_DEFAULT_INHERIT_EXTENSIONS: Final = ["permission", "dedup", "observability"]
 _SHUTDOWN_GRACE_SECONDS = 5.0
 
 MANIFEST = ExtensionManifest(
     name="sub_agent",
-    description="Spawn nested AgentSession workers without core support.",
+    description=(
+        "Spawn nested AgentSession workers without core support. C18: keep this "
+        "atom as one file until it reaches 1500 LOC; no split in issue #87."
+    ),
     registers=(
         "tool:dispatch_agent",
         "tool:check_tasks",
@@ -69,7 +72,7 @@ MANIFEST = ExtensionManifest(
             "inherit_extensions": {
                 "type": "array",
                 "items": {"type": "string"},
-                "default": _DEFAULT_INHERIT_EXTENSIONS,
+                "default": [],
                 "description": (
                     "Names of parent-side extensions the child session may "
                     "inherit. Each name listed here MUST appear as a key in "
@@ -92,7 +95,6 @@ MANIFEST = ExtensionManifest(
             },
             "max_workers": {"type": "integer", "minimum": 1, "default": 4},
         },
-        "required": ["available_inherited_extensions"],
         "additionalProperties": True,
     },
 )
@@ -207,7 +209,7 @@ def _extract_return_response_text(messages: list[Any]) -> str | None:
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
     return ToolResult(
-        content=[TextContent(type="text", text=json.dumps(payload, default=str))],
+        content=[TextContent(type="text", text=json.dumps(_to_jsonable(payload)))],
         is_error=is_error,
         extras=payload,
     )
@@ -457,11 +459,13 @@ class _ChildTaskManager:
         inherit_extensions: list[str],
         available_inherited: dict[str, Any],
         max_workers: int,
+        system_prompt_module: str,
     ) -> None:
         self._api = api
         self._inherit_extensions = inherit_extensions
         self._available_inherited = available_inherited
         self._max_workers = max_workers
+        self._system_prompt_module = system_prompt_module
         self._registry: dict[str, _ChildTask] = {}
         self._registry_lock = asyncio.Lock()
         self._reserved_slots = 0
@@ -643,7 +647,7 @@ class _ChildTaskManager:
             # response.
             persona_extensions.append(
                 (
-                    "agentm.extensions.builtin.system_prompt",
+                    self._system_prompt_module,
                     {
                         "prompt": _persona_prompt_with_budget(
                             body=persona["body"],
@@ -674,18 +678,18 @@ class _ChildTaskManager:
         # provider=None → spawn_child_session auto-wires the
         # inherit_provider builtin so the child re-uses the parent's
         # active ProviderConfig without re-authenticating.
-        child_config = AgentSessionConfig(
-            cwd=self._api.cwd,
-            extensions=persona_extensions + child_extensions + inherited_extensions,
-            provider=None,
-            loop_config=child_loop_config,
-            task_id=task_id,
-            persona=persona_name,
-            purpose=purpose,
-            tool_allowlist=persona_tool_allowlist,
-        )
+        child_config = {
+            "cwd": self._api.cwd,
+            "extensions": persona_extensions + child_extensions + inherited_extensions,
+            "provider": None,
+            "loop_config": child_loop_config,
+            "task_id": task_id,
+            "persona": persona_name,
+            "purpose": purpose,
+            "tool_allowlist": persona_tool_allowlist,
+        }
         try:
-            child = await self._api.spawn_child_session(child_config)
+            child = await self._api.spawn_child_session(**child_config)
         except Exception as exc:  # noqa: BLE001
             async with self._registry_lock:
                 self._reserved_slots -= 1
@@ -901,10 +905,8 @@ class _ChildTaskManager:
 
 
 async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    inherit_extensions = list(
-        config.get("inherit_extensions", _DEFAULT_INHERIT_EXTENSIONS)
-    )
-    available_inherited = dict(config["available_inherited_extensions"])
+    inherit_extensions = list(config.get("inherit_extensions", []))
+    available_inherited = dict(config.get("available_inherited_extensions", {}))
     missing = [name for name in inherit_extensions if name not in available_inherited]
     if missing:
         raise ExtensionLoadError(
@@ -917,11 +919,20 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             ),
         )
 
+    builtins = discover_builtin()
+    system_prompt = builtins.get("system_prompt")
+    if system_prompt is None:
+        raise ExtensionLoadError(
+            __name__,
+            ValueError("sub_agent requires the builtin system_prompt atom"),
+        )
+
     manager = _ChildTaskManager(
         api=api,
         inherit_extensions=inherit_extensions,
         available_inherited=available_inherited,
         max_workers=int(config.get("max_workers", 4)),
+        system_prompt_module=system_prompt.module_path,
     )
 
     api.on(SessionReadyEvent.CHANNEL, manager.on_session_ready)

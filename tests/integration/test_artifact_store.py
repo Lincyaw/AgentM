@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import importlib.util
 import json
 import sys
 import types
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
-import importlib.util
 
 import pytest
 
@@ -189,6 +190,83 @@ async def test_artifact_store_shares_by_root_session_and_isolates_other_roots(
         await shared_a.shutdown()
         await shared_b.shutdown()
         await isolated.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_artifact_store_concurrent_same_root_allocates_unique_ids(
+    tmp_path: Path,
+) -> None:
+    first = await _create_session(
+        tmp_path,
+        root_session_id="root-concurrent",
+        task_id="task-a",
+        extensions=[("agentm.extensions.builtin.artifact_store", {})],
+    )
+    second = await _create_session(
+        tmp_path,
+        root_session_id="root-concurrent",
+        task_id="task-b",
+        extensions=[("agentm.extensions.builtin.artifact_store", {})],
+    )
+    try:
+        first_write = _tool(first, "artifact_write")
+        second_write = _tool(second, "artifact_write")
+        writes = [
+            _tool_json(
+                first_write if index % 2 == 0 else second_write,
+                {"kind": "finding", "title": f"Concurrent {index}", "body": str(index)},
+            )
+            for index in range(12)
+        ]
+
+        payloads = await asyncio.gather(*writes)
+
+        ids = [payload["artifact_id"] for payload in payloads]
+        assert sorted(ids) == [f"art_{index:03d}" for index in range(1, 13)]
+        assert len(set(ids)) == len(ids)
+    finally:
+        await first.shutdown()
+        await second.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_artifact_store_service_is_per_session_instance(tmp_path: Path) -> None:
+    first = await _create_session(
+        tmp_path,
+        root_session_id="root-service-a",
+        extensions=[("agentm.extensions.builtin.artifact_store", {})],
+    )
+    second = await _create_session(
+        tmp_path,
+        root_session_id="root-service-b",
+        extensions=[("agentm.extensions.builtin.artifact_store", {})],
+    )
+    try:
+        first_write = _tool(first, "artifact_write")
+        second_write = _tool(second, "artifact_write")
+        second_list = _tool(second, "artifact_list")
+        first_list = _tool(first, "artifact_list")
+        written = await _tool_json(
+            first_write,
+            {"kind": "finding", "title": "First Only", "body": "alpha"},
+        )
+
+        second_written = await _tool_json(
+            second_write,
+            {"kind": "finding", "title": "Second Only", "body": "beta"},
+        )
+
+        assert written["artifact_id"] == "art_001"
+        assert second_written["artifact_id"] == "art_001"
+        assert [item["id"] for item in (await _tool_json(first_list, {}))["artifacts"]] == [
+            written["artifact_id"]
+        ]
+        assert [item["id"] for item in (await _tool_json(second_list, {}))["artifacts"]] == [
+            second_written["artifact_id"]
+        ]
+    finally:
+        await first.shutdown()
+        await second.shutdown()
 
 
 @pytest.mark.asyncio
