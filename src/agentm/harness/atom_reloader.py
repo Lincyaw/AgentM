@@ -87,6 +87,49 @@ class LoadedAtom:
     import_kind: Literal["module", "synthetic"] = "module"
 
 
+@dataclass(slots=True, frozen=True)
+class _ReloadSnapshot:
+    """Single immutable pre-reload capture used as the rollback floor.
+
+    The transactional reload contract is:
+
+    1. ``capture()`` builds a defensive deep-ish copy of every mutable
+       structure the reloader can touch: the loaded-atom registries,
+       per-atom handler/registration tracking, the owners-by-kind map,
+       all extension registries (tools/commands/providers/renderers),
+       the live ``apis`` dict, the ``sys.modules`` entry for the atom's
+       module path, and the full bus subscription map.
+    2. ``apply`` (a.k.a. ``_activate_atom_install``) is then free to
+       mutate any of those structures.
+    3. If ``apply`` raises, the reloader first attempts an in-place
+       rollback by re-installing from the original ``LoadedAtom``. If
+       *that* rollback also raises, ``restore()`` is called — a single
+       function whose only job is to overwrite every mutable structure
+       from the snapshot. Because the snapshot already holds private
+       copies, ``restore()`` cannot half-fail.
+
+    The snapshot deliberately stores list/dict instances by *reference
+    after copy* (e.g. ``list(self._tools)``) instead of trying to deep
+    copy individual ``Tool`` / ``ProviderConfig`` payloads — those are
+    treated as opaque values whose identity is what callers compare
+    against.
+    """
+
+    loaded_by_module: dict[str, LoadedAtom]
+    loaded_by_name: dict[str, LoadedAtom]
+    handlers_by_atom: dict[str, list[Callable[[], None]]]
+    registrations_by_atom: dict[str, list[tuple[str, str, Any]]]
+    owners_by_kind: dict[str, dict[str, str]]
+    tools: list[Tool]
+    commands: dict[str, CommandSpec]
+    providers: dict[str, ProviderConfig]
+    renderers: dict[str, Renderer]
+    apis: dict[str, _ExtensionAPIImpl]
+    sys_module: ModuleType | None
+    module_path: str
+    bus_channels: dict[str, list[Any]]
+
+
 def _default_manifest(name: str) -> ExtensionManifest:
     return ExtensionManifest(
         name=name,
@@ -489,6 +532,84 @@ class AtomReloader:
                 non_owner[:clamp] + owner_subs + non_owner[clamp:],
             )
 
+    def _capture_snapshot(self, module_path: str) -> _ReloadSnapshot:
+        """Take a single immutable snapshot of all reloader-mutable state.
+
+        Run this BEFORE any swap-in begins. ``restore_from_snapshot`` is
+        the sole guaranteed-safe rollback path: every list/dict in the
+        snapshot is a fresh copy, so writing those copies back into the
+        live registries cannot half-fail mid-restore.
+        """
+        return _ReloadSnapshot(
+            loaded_by_module=dict(self._loaded_by_module),
+            loaded_by_name=dict(self._loaded_by_name),
+            handlers_by_atom={
+                owner: list(unsubs)
+                for owner, unsubs in self._handlers_by_atom.items()
+            },
+            registrations_by_atom={
+                owner: list(regs) for owner, regs in self._registrations_by_atom.items()
+            },
+            owners_by_kind={
+                kind: dict(name_map) for kind, name_map in self.owners_by_kind.items()
+            },
+            tools=list(self._tools),
+            commands=dict(self._commands),
+            providers=dict(self._providers),
+            renderers=dict(self._renderers),
+            apis=dict(self._apis),
+            sys_module=sys.modules.get(module_path),
+            module_path=module_path,
+            bus_channels={
+                channel: self._bus.subscriptions_for(channel)
+                for channel in self._bus.channels()
+            },
+        )
+
+    def _restore_from_snapshot(self, snapshot: _ReloadSnapshot) -> None:
+        """Overwrite every mutable structure from ``snapshot``.
+
+        Defensive: the snapshot already holds copies, so this method
+        only does in-place ``clear() + update()`` / slice-assignment.
+        Nothing here can raise on partial state because by the time we
+        get here every value comes from immutable bookkeeping.
+        """
+        self._loaded_by_module.clear()
+        self._loaded_by_module.update(snapshot.loaded_by_module)
+        self._loaded_by_name.clear()
+        self._loaded_by_name.update(snapshot.loaded_by_name)
+        self._handlers_by_atom.clear()
+        self._handlers_by_atom.update(
+            {owner: list(unsubs) for owner, unsubs in snapshot.handlers_by_atom.items()}
+        )
+        self._registrations_by_atom.clear()
+        self._registrations_by_atom.update(
+            {owner: list(regs) for owner, regs in snapshot.registrations_by_atom.items()}
+        )
+        self.owners_by_kind.clear()
+        self.owners_by_kind.update(
+            {kind: dict(name_map) for kind, name_map in snapshot.owners_by_kind.items()}
+        )
+        self._tools[:] = list(snapshot.tools)
+        self._commands.clear()
+        self._commands.update(snapshot.commands)
+        self._providers.clear()
+        self._providers.update(snapshot.providers)
+        self._renderers.clear()
+        self._renderers.update(snapshot.renderers)
+        self._apis.clear()
+        self._apis.update(snapshot.apis)
+        if snapshot.sys_module is not None:
+            sys.modules[snapshot.module_path] = snapshot.sys_module
+        else:
+            sys.modules.pop(snapshot.module_path, None)
+        # Reset the bus subscription map to the pre-reload shape.
+        live_channels = set(self._bus.channels())
+        for channel, subs in snapshot.bus_channels.items():
+            self._bus.replace_subscriptions(channel, list(subs))
+        for channel in live_channels - set(snapshot.bus_channels):
+            self._bus.replace_subscriptions(channel, [])
+
     def _restore_git_path(self, atom: LoadedAtom, pre_sha: str) -> None:
         self._resource_writer.restore(atom.file_path, pre_sha)
 
@@ -594,8 +715,10 @@ class AtomReloader:
             old_hash = self._advisory_hash(current_source)
             new_hash = self._advisory_hash(new_source)
         event_new_hash = new_hash or self._advisory_hash(new_source)
-        previous_api = self._apis.get(atom.module_path)
-        previous_module = sys.modules.get(atom.module_path)
+        # Single transactional snapshot: every dict/list copy is taken
+        # eagerly, so the rollback floor (`_restore_from_snapshot`) is a
+        # pure write-back that cannot half-fail. See ``_ReloadSnapshot``.
+        snapshot = self._capture_snapshot(atom.module_path)
 
         try:
             await self._activate_atom_install(atom)
@@ -633,12 +756,17 @@ class AtomReloader:
                     self._restore_git_path(atom, write_result.commit_sha_before)
                 await self._activate_atom_install(atom)
             except Exception as rollback_exc:  # noqa: BLE001
-                self._loaded_by_module[atom.module_path] = atom
-                self._loaded_by_name[atom.name] = atom
-                if previous_api is not None:
-                    self._apis[atom.module_path] = previous_api
-                if previous_module is not None:
-                    sys.modules[atom.module_path] = previous_module
+                # Rollback (re-install of the original atom) itself blew
+                # up. Fall back to the immutable pre-reload snapshot —
+                # this is the only path that guarantees the live agent
+                # ends up with a consistent (entirely pre-reload) state
+                # rather than something half-new / half-old.
+                logger.exception(
+                    "atom %r rollback failed after apply failure; "
+                    "restoring from pre-reload snapshot",
+                    name,
+                )
+                self._restore_from_snapshot(snapshot)
                 self._bus.emit_sync(
                     ExtensionReloadEvent.CHANNEL,
                     ExtensionReloadEvent(
