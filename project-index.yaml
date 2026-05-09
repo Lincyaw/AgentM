@@ -428,6 +428,36 @@ requirements:
       - path: .claude/tasks/2026-05-09-issue-96-cli-provider-session-seams.md
     depends_on:
       - REQ-094-ai-provider-descriptor-registry
+
+  - id: REQ-098-textual-tui-registries
+    title: Textual TUI registries and monotone turn identity
+    description: >
+      The Textual presenter must consume single-source registries and typed
+      event metadata instead of hardcoded command lists, event ladders,
+      self-modification trigger strings, phase strings, and prompt-local turn
+      epochs. The kernel must emit a monotone turn_id across a session so
+      presenters can key streamed root turns without collisions when
+      turn_index resets per prompt.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/modes/textual_app.py
+      - path: src/agentm/core/abi/events.py
+      - path: src/agentm/core/abi/loop.py
+      - path: src/agentm/harness/events.py
+      - path: src/agentm/harness/atom_reloader.py
+      - path: src/agentm/extensions/builtin/observability.py
+    tests:
+      - path: tests/integration/test_textual_tui.py
+      - path: tests/unit/core/abi/test_turn_id.py
+    docs:
+      - path: .claude/designs/textual-tui.md
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-98-textual-tui-registries.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
   - id: REQ-097-shared-presenter-rendering
     title: CLI and TUI consume shared headless render helpers
     description: >

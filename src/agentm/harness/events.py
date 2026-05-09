@@ -214,6 +214,7 @@ class ExtensionReloadEvent:
     trigger: Literal["agent", "human", "propose_change_approved"]
     tier: int
     error: str | None = None
+    is_self_modify: bool = False
 
 
 @dataclass(slots=True)

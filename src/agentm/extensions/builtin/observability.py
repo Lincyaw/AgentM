@@ -470,6 +470,7 @@ class _TurnAggregator:
         ]
         attributes: dict[str, Any] = {
             "turn_index": event.turn_index,
+            "turn_id": event.turn_id,
             "duration_ns": end_ns - self._turn_start_ns,
             "tool_calls": tool_calls,
             "tool_call_count": len(tool_calls),
@@ -494,7 +495,7 @@ class _TurnAggregator:
                 "kind": "turn.summary",
                 "trace_id": self._trace_id,
                 "span_id": _new_id(),
-                "name": f"turn:{event.turn_index}",
+                "name": f"turn:{event.turn_id}",
                 "start_time_unix_nano": self._turn_start_ns,
                 "end_time_unix_nano": end_ns,
                 "attributes": attributes,
