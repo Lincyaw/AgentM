@@ -658,6 +658,11 @@ Discovery is **memoized per process** so production loads pay the directory walk
 6. Every tag in `MANIFEST.registers` parses as `<kind>:<id>` with a known kind.
 7. `MANIFEST.requires` and `MANIFEST.conflicts` reference names that exist (or are documented forward references for not-yet-landed atoms).
 8. If `config_schema` is set, it is a syntactically valid JSON-Schema dict.
+9. AST hygiene rejects private ExtensionAPI reflection, ExtensionAPI attribute
+   overwrites, mutable module-level dict/list/set globals without `Final`,
+   f-string dynamic imports under `agentm.*`, and `isinstance` downcasts to
+   concrete harness service classes. Atoms must consume harness capabilities
+   through ExtensionAPI and Protocol methods.
 
 Test integration: `tests/unit/extensions/test_extension_contract.py` calls `validate_builtin()` and fails the suite on any issue. **This is the gate every new extension PR must pass mechanically — an agent self-editing an extension knows it broke the contract before any human reads the diff.**
 
