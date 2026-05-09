@@ -475,13 +475,7 @@ class ExtensionAPI(Protocol):
     # See ``harness/services.py`` for the per-service Protocols. Atoms reach
     # ``core._internal`` exclusively via these handles so the §11 import
     # contract can forbid ``agentm.core._internal`` outright.
-    def get_operations(self) -> Operations:
-        """Return the session's constitution-selected operations bundle.
-
-        Operations are injectable at session construction, not replaceable by
-        atoms at runtime; there is intentionally no ``register_operations`` API.
-        """
-        ...
+    def get_operations(self) -> Operations: ...
     def get_project_layout(self) -> ProjectLayout: ...
     @property
     def skills(self) -> SkillsService: ...
@@ -769,7 +763,6 @@ class _ExtensionAPIImpl:
     # --- Service facades ----------------------------------------------------
 
     def get_operations(self) -> Operations:
-        """Return the session's construction-time operations bundle."""
         self._assert_active()
         return self._operations
 

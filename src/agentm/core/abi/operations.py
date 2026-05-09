@@ -2,10 +2,6 @@
 
 See `.claude/designs/extension-as-scenario.md` section 10b.6 for the
 `FileOperations` / `BashOperations` boundary that keeps core transport-agnostic.
-
-Operations are a constitution-level port: tool atoms consume the bundle exposed
-by ``ExtensionAPI.get_operations()``, but this ABI intentionally does not define
-a runtime registration method for atom-driven replacement.
 """
 
 from __future__ import annotations
@@ -52,9 +48,8 @@ class Operations:
     """Bundle of operation backends an extension may need.
 
     Returned from ``ExtensionAPI.get_operations()``. The default bundle wraps
-    the local stdlib-backed implementations; the harness may inject a different
-    bundle when constructing a session. Atoms can consume the active bundle but
-    cannot replace it via ``ExtensionAPI`` in v0.
+    the local stdlib-backed implementations; sessions may later swap these
+    for sandboxed / remoted backends without atoms changing shape.
     """
 
     file: FileOperations

@@ -363,17 +363,6 @@ class GitBackedResourceWriter:
         sha = result.stdout.strip()
         return sha or None
 
-    def restore(self, path: Path, version: str) -> None:
-        if self._advisory_mode or self.classify(str(path)) != "managed":
-            raise NotImplementedError("git rollback requires a versioned ResourceWriter")
-
-        resolved = self._resolve_path(str(path))
-        relative = resolved.relative_to(self._cwd)
-        relative_posix = PurePosixPath(relative).as_posix()
-        self._ensure_git_ready()
-        self._run_git_sync(("restore", "--source", version, "--", relative_posix))
-        self._run_git_sync(("reset", "--hard", version))
-
     async def _apply_batch(
         self,
         pending: list[_PendingBatchOp],
