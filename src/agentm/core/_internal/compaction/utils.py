@@ -1,25 +1,43 @@
-"""Shared utilities for LLM-driven compaction and branch summarization."""
+"""Shared utilities for LLM-driven compaction and branch summarization.
+
+The kernel keeps **zero** scenario-specific knowledge:
+
+- It does not enumerate tool names. Tool atoms self-describe via
+  ``tool.metadata[FILE_OP_METADATA_KEY]`` and the engine reads that
+  metadata through a tool registry passed in at call time.
+- It does not ship any English summarization prompt. The
+  ``compaction_prompts`` atom registers them via
+  ``ExtensionAPI.prompt_templates`` and the harness/atom callers thread the
+  resolved bodies into the engine functions as parameters.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
     TextContent,
+    Tool,
     ToolCallBlock,
     ToolResultMessage,
 )
+from agentm.core.abi.tool import (
+    FILE_OP_EDIT,
+    FILE_OP_METADATA_KEY,
+    FILE_OP_READ,
+    FILE_OP_WRITE,
+)
 
 DEFAULT_TOOL_RESULT_MAX_CHARS = 2_000
-_SUMMARIZATION_SYSTEM_PROMPT = (
-    "You are a context summarization assistant. Your task is to read a "
-    "conversation between a user and an AI coding assistant, then produce a "
-    "structured summary following the exact format specified.\n\n"
-    "Do NOT continue the conversation. Do NOT respond to any questions in the "
-    "conversation. ONLY output the structured summary."
-)
+
+
+# A flexible tool-registry shape for ``extract_file_ops_from_message``:
+# either a name->tool mapping, or any iterable of tools (we'll index by
+# ``tool.name`` ourselves).
+ToolRegistry = Mapping[str, Tool] | Sequence[Tool]
 
 
 @dataclass(slots=True)
@@ -33,8 +51,34 @@ def create_file_ops() -> FileOperations:
     return FileOperations()
 
 
-def extract_file_ops_from_message(message: AgentMessage, file_ops: FileOperations) -> None:
+def _normalize_registry(tools: ToolRegistry | None) -> Mapping[str, Tool]:
+    if tools is None:
+        return {}
+    if isinstance(tools, Mapping):
+        return tools
+    return {tool.name: tool for tool in tools}
+
+
+def extract_file_ops_from_message(
+    message: AgentMessage,
+    file_ops: FileOperations,
+    tools: ToolRegistry | None = None,
+) -> None:
+    """Inspect ``message`` for tool calls and route ``path`` arguments into
+    ``file_ops`` based on each tool's ``metadata["file_op"]`` value.
+
+    ``tools`` is the live tool registry at the call site. When the registry
+    is empty or a tool exposes no ``file_op`` metadata, the corresponding
+    tool call contributes no file-ops — this is the graceful-degradation
+    contract documented in issue #76 (compaction without the prompts/tool-
+    metadata atom installed yields empty file lists, not a crash).
+    """
+
     if not isinstance(message, AssistantMessage):
+        return
+
+    registry = _normalize_registry(tools)
+    if not registry:
         return
 
     for block in message.content:
@@ -43,11 +87,18 @@ def extract_file_ops_from_message(message: AgentMessage, file_ops: FileOperation
         path = block.arguments.get("path")
         if not isinstance(path, str) or not path:
             continue
-        if block.name == "read":
+        tool = registry.get(block.name)
+        if tool is None:
+            continue
+        metadata = getattr(tool, "metadata", None)
+        if not isinstance(metadata, Mapping):
+            continue
+        file_op = metadata.get(FILE_OP_METADATA_KEY)
+        if file_op == FILE_OP_READ:
             file_ops.read.add(path)
-        elif block.name == "write":
+        elif file_op == FILE_OP_WRITE:
             file_ops.written.add(path)
-        elif block.name == "edit":
+        elif file_op == FILE_OP_EDIT:
             file_ops.edited.add(path)
 
 
@@ -139,12 +190,9 @@ def serialize_conversation(
     return "\n\n".join(parts)
 
 
-SUMMARIZATION_SYSTEM_PROMPT = _SUMMARIZATION_SYSTEM_PROMPT
-
-
 __all__ = [
     "FileOperations",
-    "SUMMARIZATION_SYSTEM_PROMPT",
+    "ToolRegistry",
     "compute_file_lists",
     "create_file_ops",
     "extract_file_ops_from_message",

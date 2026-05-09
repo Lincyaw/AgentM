@@ -31,6 +31,8 @@ from agentm.core.abi import (
 )
 from agentm.core.abi.session import (
     CURRENT_SESSION_VERSION,
+    ENTRY_MATERIALIZERS,
+    ENTRY_TYPE_COMPACTION,
     SessionContext,
     SessionEntry,
     SessionHeader,
@@ -230,24 +232,6 @@ def _entry_text(message: AgentMessage) -> str:
         elif getattr(block, "type", None) == "tool_result":
             parts.append("tool_result")
     return " ".join(parts)
-
-
-def _branch_summary_message(summary: str, timestamp: float) -> AssistantMessage:
-    return AssistantMessage(
-        role="assistant",
-        content=[TextContent(type="text", text=f"Branch summary: {summary}")],
-        timestamp=timestamp,
-        stop_reason="end_turn",
-    )
-
-
-def _compaction_summary_message(summary: str, timestamp: float) -> AssistantMessage:
-    return AssistantMessage(
-        role="assistant",
-        content=[TextContent(type="text", text=summary)],
-        timestamp=timestamp,
-        stop_reason="end_turn",
-    )
 
 
 class SessionManager:
@@ -592,7 +576,8 @@ class SessionManager:
             current.children.sort(key=lambda child: child.entry.timestamp)
             for child in current.children:
                 child.has_compacted_ancestor = (
-                    current.has_compacted_ancestor or current.entry.type == "compaction"
+                    current.has_compacted_ancestor
+                    or current.entry.type == ENTRY_TYPE_COMPACTION
                 )
             stack.extend(current.children)
         roots.sort(key=lambda node: node.entry.timestamp)
@@ -605,30 +590,35 @@ class SessionManager:
 
         latest_compaction: SessionEntry | None = None
         for entry in path:
-            if entry.type == "compaction":
+            if entry.type == ENTRY_TYPE_COMPACTION:
                 latest_compaction = entry
 
         messages: list[AgentMessage] = []
 
         def append_materialized(entry: SessionEntry) -> None:
-            if entry.type == "message" and isinstance(entry.payload, (UserMessage, AssistantMessage, ToolResultMessage)):
-                messages.append(entry.payload)
-            elif entry.type == "branch_summary":
-                payload = entry.payload if isinstance(entry.payload, dict) else {}
-                summary = payload.get("summary")
-                if isinstance(summary, str) and summary:
-                    messages.append(_branch_summary_message(summary, entry.timestamp))
+            # Skip compaction entries here — they are handled separately
+            # below so the synthesized summary anchors the rebuilt context.
+            if entry.type == ENTRY_TYPE_COMPACTION:
+                return
+            materializer = ENTRY_MATERIALIZERS.get(entry.type)
+            if materializer is None:
+                return
+            message = materializer.to_message(entry)
+            if message is not None:
+                messages.append(message)
 
         if latest_compaction is None:
             for entry in path:
                 append_materialized(entry)
             return SessionContext(messages=messages)
 
-        details = latest_compaction.payload if isinstance(latest_compaction.payload, dict) else {}
-        summary = details.get("summary")
-        if isinstance(summary, str) and summary:
-            messages.append(_compaction_summary_message(summary, latest_compaction.timestamp))
+        materializer = ENTRY_MATERIALIZERS.get(ENTRY_TYPE_COMPACTION)
+        if materializer is not None:
+            summary_message = materializer.to_message(latest_compaction)
+            if summary_message is not None:
+                messages.append(summary_message)
 
+        details = latest_compaction.payload if isinstance(latest_compaction.payload, dict) else {}
         first_kept_id = details.get("first_kept_entry_id") or details.get("firstKeptEntryId")
         compaction_index = path.index(latest_compaction)
         first_kept_index: int | None = None
