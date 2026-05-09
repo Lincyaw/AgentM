@@ -22,9 +22,9 @@ A stronger property follows from this boundary, and the constitution split is de
 
 > **`core/abi/` + `core/lib/` + `llm/` + stdlib must be sufficient to launch a working agent loop.** No import from `agentm.harness` or `agentm.extensions` may be required.
 
-This is not just "agent cannot break core" — it is "core alone yields a usable agent". When the autonomy layer is corrupted (a self-edited atom misbehaves, a scenario YAML is malformed, an extension reload leaves harness in an inconsistent state), the operator still has a path to launch an agent: the minimal mode at `src/agentm/minimal.py`, exposed by `agentm --minimal`. That agent has only stdlib-backed tools (`read_file`, `write_file`, `bash`, `list_dir`) and no observability or session state, but it launches, accepts a prompt, calls tools, and returns — enough to inspect and repair whatever is broken above.
+This is not just "agent cannot break core" — it is "core alone yields a usable agent". When the autonomy layer is corrupted (a self-edited atom misbehaves, a scenario YAML is malformed, an extension reload leaves harness in an inconsistent state), the operator still has a path to launch an agent: invoke `agentm --no-extensions "<prompt>"` to bypass atom discovery entirely, leaving only the kernel + provider + loop. That floor has no tool environment, skills, or observability, but it launches, accepts a prompt, and returns — enough to inspect and repair whatever is broken above.
 
-The invariant is enforced structurally (the import graph of `agentm.minimal` is clean of `harness`/`extensions`) and is the load-bearing reason for keeping `core/abi/` and `core/lib/` import-closed. Future PRs that introduce a `harness` import into `core/abi/` or `core/lib/` should be rejected on this basis alone.
+The invariant is enforced structurally (no `harness`/`extensions` import in `core/abi/`, `core/lib/`, or `llm/`) and is the load-bearing reason for keeping `core/abi/` and `core/lib/` import-closed. Future PRs that introduce a `harness` import into `core/abi/` or `core/lib/` should be rejected on this basis alone.
 
 ---
 
