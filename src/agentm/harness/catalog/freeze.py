@@ -6,13 +6,12 @@ import inspect
 import threading
 from pathlib import Path
 
-from agentm.core._internal.catalog import _layout
 from agentm.core._internal.catalog.hashing import compute_atom_hash
 from agentm.core.abi import EventBus
 from agentm.core.abi.resource import ResourceWriter, WriteResult
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
-
+from agentm.harness.catalog import _layout
 
 _INDEXER_SESSION_ID = "catalog-freeze"
 
@@ -36,10 +35,8 @@ def freeze_current(
 
     if writer is None:
         # Default-impl escape hatch for the catalog freeze CLI / unit tests:
-        # constitution layer normally types only against ``ResourceWriter`` —
-        # the concrete ``GitBackedResourceWriter`` is owned by the harness.
-        # This lazy import is the one allowed reverse dependency, scoped to
-        # "no writer was injected; fall back to the harness default."
+        # the harness owns the concrete ``GitBackedResourceWriter``. This
+        # local import keeps the dependency edge inside the harness layer.
         from agentm.harness.resource_writer import GitBackedResourceWriter
 
         writer = GitBackedResourceWriter(

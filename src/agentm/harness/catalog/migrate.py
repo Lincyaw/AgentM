@@ -6,7 +6,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from agentm.core._internal.catalog import _layout
+from agentm.harness.catalog import _layout
 
 logger = logging.getLogger(__name__)
 
