@@ -6,12 +6,17 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from agentm.core.abi import AgentMessage
-from agentm.core.abi.session import SessionEntry, SessionTree
+from agentm.core.abi.session import (
+    ENTRY_TYPE_BRANCH_SUMMARY,
+    ENTRY_TYPE_COMPACTION,
+    SessionEntry,
+    SessionTree,
+)
 
 from .compaction import estimate_tokens, get_message_from_entry
 from .utils import (
     FileOperations,
-    SUMMARIZATION_SYSTEM_PROMPT,
+    ToolRegistry,
     compute_file_lists,
     create_file_ops,
     extract_file_ops_from_message,
@@ -79,14 +84,16 @@ def collect_entries_for_branch_summary(
 
 
 def prepare_branch_entries(
-    entries: list[SessionEntry], token_budget: int = 0
+    entries: list[SessionEntry],
+    token_budget: int = 0,
+    tools: ToolRegistry | None = None,
 ) -> BranchPreparation:
     messages: list[AgentMessage] = []
     file_ops = create_file_ops()
     total_tokens = 0
 
     for entry in entries:
-        if entry.type != "branch_summary":
+        if entry.type != ENTRY_TYPE_BRANCH_SUMMARY:
             continue
         payload = entry.payload if isinstance(entry.payload, dict) else {}
         read_files = payload.get("read_files") or payload.get("readFiles")
@@ -101,10 +108,10 @@ def prepare_branch_entries(
         message = get_message_from_entry(entry)
         if message is None:
             continue
-        extract_file_ops_from_message(message, file_ops)
+        extract_file_ops_from_message(message, file_ops, tools)
         tokens = estimate_tokens(message)
         if token_budget > 0 and total_tokens + tokens > token_budget:
-            if entry.type in {"compaction", "branch_summary"} and total_tokens < int(
+            if entry.type in {ENTRY_TYPE_COMPACTION, ENTRY_TYPE_BRANCH_SUMMARY} and total_tokens < int(
                 token_budget * 0.9
             ):
                 messages.insert(0, message)
@@ -121,10 +128,12 @@ async def generate_branch_summary(
     summarizer: Summarizer,
     branch_summary_prompt: str,
     branch_summary_preamble: str,
+    summarization_system_prompt: str,
     options: GenerateBranchSummaryOptions | None = None,
+    tools: ToolRegistry | None = None,
 ) -> BranchSummaryResult:
     opts = options or GenerateBranchSummaryOptions()
-    prep = prepare_branch_entries(entries)
+    prep = prepare_branch_entries(entries, tools=tools)
     if not prep.messages:
         return BranchSummaryResult(summary="No content to summarize")
 
@@ -140,7 +149,7 @@ async def generate_branch_summary(
     )
     try:
         summary = await summarizer(
-            SUMMARIZATION_SYSTEM_PROMPT,
+            summarization_system_prompt,
             prompt_text,
             2048,
         )

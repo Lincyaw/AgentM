@@ -60,6 +60,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             description="Write a UTF-8 text file to disk.",
             parameters=_PARAMETERS,
             fn=_execute,
+            metadata={"file_op": "write"},
         )
     )
 

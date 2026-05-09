@@ -1,4 +1,11 @@
-"""Pure compaction logic adapted from pi-mono's LLM-driven compaction."""
+"""Pure compaction logic adapted from pi-mono's LLM-driven compaction.
+
+Per issue #76, the kernel keeps **zero** literal English prompt text and
+**zero** string-literal entry-type dispatch. Prompts are passed in as
+parameters by callers (typically resolved via
+``ExtensionAPI.prompt_templates``); entry materialization consults the
+``ENTRY_MATERIALIZERS`` registry on ``agentm.core.abi.session``.
+"""
 
 from __future__ import annotations
 
@@ -16,15 +23,22 @@ from agentm.core.abi import (
 )
 from agentm.core.abi.compaction import (
     CompactionDetails,
+    CompactionPrompts,
     CompactionResult,
     CompactionSettings,
     ContextUsageEstimate,
 )
-from agentm.core.abi.session import SessionEntry
+from agentm.core.abi.session import (
+    ENTRY_MATERIALIZERS,
+    ENTRY_TYPE_BRANCH_SUMMARY,
+    ENTRY_TYPE_COMPACTION,
+    ENTRY_TYPE_MESSAGE,
+    SessionEntry,
+)
 
 from .utils import (
     FileOperations,
-    SUMMARIZATION_SYSTEM_PROMPT,
+    ToolRegistry,
     compute_file_lists,
     create_file_ops,
     extract_file_ops_from_message,
@@ -35,62 +49,17 @@ from .utils import (
 Summarizer = Callable[[str, str, int], Awaitable[str]]
 
 
-_UPDATE_SUMMARIZATION_PROMPT = """The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
-
-Update the existing structured summary with new information. RULES:
-- PRESERVE all existing information from the previous summary
-- ADD new progress, decisions, and context from the new messages
-- UPDATE the Progress section: move items from \"In Progress\" to \"Done\" when completed
-- UPDATE \"Next Steps\" based on what was accomplished
-- PRESERVE exact file paths, function names, and error messages
-- If something is no longer relevant, you may remove it
-
-Use this EXACT format:
-
-## Goal
-[Preserve existing goals, add new ones if the task expanded]
-
-## Constraints & Preferences
-- [Preserve existing, add new ones discovered]
-
-## Progress
-### Done
-- [x] [Include previously done items AND newly completed items]
-
-### In Progress
-- [ ] [Current work - update based on progress]
-
-### Blocked
-- [Current blockers - remove if resolved]
-
-## Key Decisions
-- **[Decision]**: [Brief rationale] (preserve all previous, add new)
-
-## Next Steps
-1. [Update based on current state]
-
-## Critical Context
-- [Preserve important context, add new if needed]
-
-Keep each section concise. Preserve exact file paths, function names, and error messages."""
-
-_TURN_PREFIX_SUMMARIZATION_PROMPT = """This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
-
-Summarize the prefix to provide context for the retained suffix:
-
-## Original Request
-[What did the user ask for in this turn?]
-
-## Early Progress
-- [Key decisions and work done in the prefix]
-
-## Context for Suffix
-- [Information needed to understand the retained recent work]
-
-Be concise. Focus on what's needed to understand the kept suffix."""
-
-
 DEFAULT_COMPACTION_SETTINGS = CompactionSettings()
+
+
+# A neutral fallback used by tests and by the graceful-degradation path when
+# no prompts atom is installed. Empty strings mean "no extra instructions";
+# the engine still serializes the conversation faithfully.
+EMPTY_COMPACTION_PROMPTS = CompactionPrompts(
+    summarization_system="",
+    update_summarization="",
+    turn_prefix_summarization="",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,44 +171,31 @@ def should_compact(
     return context_tokens > context_window - settings.reserve_tokens
 
 
-def _branch_summary_message(summary: str, timestamp: float) -> AssistantMessage:
-    return AssistantMessage(
-        role="assistant",
-        content=[TextContent(type="text", text=f"Branch summary: {summary}")],
-        timestamp=timestamp,
-        stop_reason="end_turn",
-    )
-
-
-def _compaction_summary_message(summary: str, timestamp: float) -> AssistantMessage:
-    return AssistantMessage(
-        role="assistant",
-        content=[TextContent(type="text", text=summary)],
-        timestamp=timestamp,
-        stop_reason="end_turn",
-    )
-
-
 def get_message_from_entry(entry: SessionEntry) -> AgentMessage | None:
-    if entry.type == "message" and isinstance(
-        entry.payload, (UserMessage, AssistantMessage, ToolResultMessage)
-    ):
-        return entry.payload
-    if entry.type == "branch_summary":
-        payload = entry.payload if isinstance(entry.payload, dict) else {}
-        summary = payload.get("summary")
-        if isinstance(summary, str) and summary:
-            return _branch_summary_message(summary, entry.timestamp)
-    if entry.type == "compaction":
-        payload = entry.payload if isinstance(entry.payload, dict) else {}
-        summary = payload.get("summary")
-        if isinstance(summary, str) and summary:
-            return _compaction_summary_message(summary, entry.timestamp)
-    return None
+    """Materialize a session entry into an ``AgentMessage`` via the registry.
+
+    The ``ENTRY_MATERIALIZERS`` registry is populated by atoms at install
+    time. When no materializer is registered for ``entry.type``, this
+    function returns ``None`` (graceful degradation — the missing atom
+    diagnostic is the harness's job; the pure engine layer stays
+    side-effect free).
+    """
+
+    materializer = ENTRY_MATERIALIZERS.get(entry.type)
+    if materializer is None:
+        return None
+    return materializer.to_message(entry)
 
 
 def get_message_from_entry_for_compaction(entry: SessionEntry) -> AgentMessage | None:
-    if entry.type == "compaction":
+    """Same as ``get_message_from_entry`` but skips ``compaction`` entries.
+
+    The compaction engine emits the synthesized summary itself; pre-existing
+    compaction entries on the path are intentionally elided so the new
+    summary is built only over un-summarized history.
+    """
+
+    if entry.type == ENTRY_TYPE_COMPACTION:
         return None
     return get_message_from_entry(entry)
 
@@ -250,10 +206,10 @@ def _find_valid_cut_points(
     cut_points: list[int] = []
     for index in range(start_index, end_index):
         entry = entries[index]
-        if entry.type == "branch_summary":
+        if entry.type == ENTRY_TYPE_BRANCH_SUMMARY:
             cut_points.append(index)
             continue
-        if entry.type != "message":
+        if entry.type != ENTRY_TYPE_MESSAGE:
             continue
         if isinstance(entry.payload, ToolResultMessage):
             continue
@@ -266,9 +222,9 @@ def _find_turn_start_index(
 ) -> int:
     for index in range(entry_index, start_index - 1, -1):
         entry = entries[index]
-        if entry.type == "branch_summary":
+        if entry.type == ENTRY_TYPE_BRANCH_SUMMARY:
             return index
-        if entry.type != "message":
+        if entry.type != ENTRY_TYPE_MESSAGE:
             continue
         if isinstance(entry.payload, UserMessage):
             return index
@@ -293,7 +249,7 @@ def find_cut_point(
     cut_index = cut_points[0]
     for index in range(end_index - 1, start_index - 1, -1):
         entry = entries[index]
-        if entry.type != "message":
+        if entry.type != ENTRY_TYPE_MESSAGE:
             continue
         if not isinstance(entry.payload, (UserMessage, AssistantMessage, ToolResultMessage)):
             continue
@@ -307,14 +263,14 @@ def find_cut_point(
 
     while cut_index > start_index:
         prev_entry = entries[cut_index - 1]
-        if prev_entry.type == "compaction":
+        if prev_entry.type == ENTRY_TYPE_COMPACTION:
             break
-        if prev_entry.type == "message":
+        if prev_entry.type == ENTRY_TYPE_MESSAGE:
             break
         cut_index -= 1
 
     cut_entry = entries[cut_index]
-    is_user_message = cut_entry.type == "message" and isinstance(cut_entry.payload, UserMessage)
+    is_user_message = cut_entry.type == ENTRY_TYPE_MESSAGE and isinstance(cut_entry.payload, UserMessage)
     turn_start_index = -1 if is_user_message else _find_turn_start_index(entries, cut_index, start_index)
     return CutPointResult(
         first_kept_entry_index=cut_index,
@@ -327,15 +283,16 @@ def prepare_compaction(
     path_entries: list[SessionEntry],
     settings: CompactionSettings,
     current_messages: list[AgentMessage] | None = None,
+    tools: ToolRegistry | None = None,
 ) -> CompactionPreparation | None:
     if not path_entries:
         return None
-    if path_entries[-1].type == "compaction":
+    if path_entries[-1].type == ENTRY_TYPE_COMPACTION:
         return None
 
     prev_compaction_index = -1
     for index in range(len(path_entries) - 1, -1, -1):
-        if path_entries[index].type == "compaction":
+        if path_entries[index].type == ENTRY_TYPE_COMPACTION:
             prev_compaction_index = index
             break
 
@@ -404,9 +361,9 @@ def prepare_compaction(
                 file_ops.edited.update(paths)
 
     for message in messages_to_summarize:
-        extract_file_ops_from_message(message, file_ops)
+        extract_file_ops_from_message(message, file_ops, tools)
     for message in turn_prefix_messages:
-        extract_file_ops_from_message(message, file_ops)
+        extract_file_ops_from_message(message, file_ops, tools)
 
     return CompactionPreparation(
         first_kept_entry_id=first_kept_entry.id,
@@ -425,13 +382,14 @@ async def generate_summary(
     summarizer: Summarizer,
     reserve_tokens: int,
     summarization_prompt: str,
+    prompts: CompactionPrompts,
     custom_instructions: str | None = None,
     previous_summary: str | None = None,
     *,
     tool_result_max_chars: int | None = None,
 ) -> str:
     base_prompt = (
-        _UPDATE_SUMMARIZATION_PROMPT
+        prompts.update_summarization
         if previous_summary
         else summarization_prompt
     )
@@ -451,13 +409,14 @@ async def generate_summary(
         )
     prompt_text += base_prompt
     max_tokens = max(256, int(0.8 * reserve_tokens))
-    return await summarizer(SUMMARIZATION_SYSTEM_PROMPT, prompt_text, max_tokens)
+    return await summarizer(prompts.summarization_system, prompt_text, max_tokens)
 
 
 async def _generate_turn_prefix_summary(
     messages: list[AgentMessage],
     summarizer: Summarizer,
     reserve_tokens: int,
+    prompts: CompactionPrompts,
     *,
     tool_result_max_chars: int | None = None,
 ) -> str:
@@ -469,10 +428,10 @@ async def _generate_turn_prefix_summary(
         )
     prompt_text = (
         f"<conversation>\n{conversation_text}\n</conversation>\n\n"
-        f"{_TURN_PREFIX_SUMMARIZATION_PROMPT}"
+        f"{prompts.turn_prefix_summarization}"
     )
     max_tokens = max(256, int(0.5 * reserve_tokens))
-    return await summarizer(SUMMARIZATION_SYSTEM_PROMPT, prompt_text, max_tokens)
+    return await summarizer(prompts.summarization_system, prompt_text, max_tokens)
 
 
 async def compact(
@@ -480,7 +439,19 @@ async def compact(
     summarizer: Summarizer,
     summarization_prompt: str,
     custom_instructions: str | None = None,
+    prompts: CompactionPrompts | None = None,
 ) -> CompactionResult:
+    """Run the compaction pass and return a :class:`CompactionResult`.
+
+    ``summarization_prompt`` is the body used for fresh summarizations.
+    ``prompts`` carries the system prompt + the update / turn-prefix bodies
+    used in the incremental and split-turn paths. When ``prompts`` is
+    ``None`` (the prompts atom was not installed) the engine falls back to
+    :data:`EMPTY_COMPACTION_PROMPTS` so the call still succeeds — callers
+    should emit a diagnostic in that case.
+    """
+
+    resolved_prompts = prompts if prompts is not None else EMPTY_COMPACTION_PROMPTS
     tool_result_max_chars = preparation.settings.tool_result_max_chars
     if preparation.is_split_turn and preparation.turn_prefix_messages:
         history_task = (
@@ -489,6 +460,7 @@ async def compact(
                 summarizer,
                 preparation.settings.reserve_tokens,
                 summarization_prompt,
+                resolved_prompts,
                 custom_instructions,
                 preparation.previous_summary,
                 tool_result_max_chars=tool_result_max_chars,
@@ -500,6 +472,7 @@ async def compact(
             preparation.turn_prefix_messages,
             summarizer,
             preparation.settings.reserve_tokens,
+            resolved_prompts,
             tool_result_max_chars=tool_result_max_chars,
         )
         history_summary, turn_prefix_summary = await asyncio.gather(
@@ -516,6 +489,7 @@ async def compact(
             summarizer,
             preparation.settings.reserve_tokens,
             summarization_prompt,
+            resolved_prompts,
             custom_instructions,
             preparation.previous_summary,
             tool_result_max_chars=tool_result_max_chars,
@@ -541,11 +515,12 @@ async def _immediate(value: str) -> str:
 __all__ = [
     "CompactionDetails",
     "CompactionPreparation",
+    "CompactionPrompts",
     "CompactionResult",
     "CompactionSettings",
     "ContextUsageEstimate",
     "DEFAULT_COMPACTION_SETTINGS",
-    "SUMMARIZATION_SYSTEM_PROMPT",
+    "EMPTY_COMPACTION_PROMPTS",
     "calculate_context_tokens",
     "compact",
     "estimate_context_tokens",

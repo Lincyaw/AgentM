@@ -59,6 +59,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             description="Read a UTF-8 text file from disk by line range.",
             parameters=_PARAMETERS,
             fn=_execute,
+            metadata={"file_op": "read"},
         )
     )
 
