@@ -407,9 +407,10 @@ construction.
 
 Why the noise floor is non-negotiable: with `samples_per_task=1` on 8 tasks,
 a +12.5% delta can correspond to a single coin flip. Real-LLM bring-up of
-`format_fix` produced exactly this case; the 2σ check correctly rejected it
-(see `.claude/tasks/2026-05-08-per-task-evolution-real-llm-validation.md`,
-Run 2). The `exploratory` channel exists precisely to handle "I know the eval
+`format_fix` produced exactly this case during the MVP validation run — a
+real +12.5% delta was rejected because the 2σ envelope was 0.385 wide; the
+`exploratory` channel was used to ship that change instead, with audit flag.
+The `exploratory` channel exists precisely to handle "I know the eval
 is underpowered but want to ship it anyway" without dressing it up as evidence.
 
 Policy is evaluated by `tool_propose_change` itself (reads the eval results,
