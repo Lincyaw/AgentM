@@ -119,9 +119,8 @@ Key Textual idioms used:
 - `Footer` widget auto-renders any `BINDINGS` entries with `show=True`,
   so users see `⌃C ⌃D ⌃L ⌃R ⌃E` without opening `/help`.
 - App-level theme switching via `self.theme = "textual-dark"` /
-  `"textual-light"` (Textual built-in registered themes) — no custom
-  `.theme-dark { background: #0f1115 }` overrides that fight the
-  framework.
+  `"textual-light"` (Textual built-in registered themes) with invalid
+  theme failures surfaced as warning diagnostics before falling back.
 - `Collapsible` for tool blocks (one keystroke to expand). Default
   state: collapsed if result < 20 lines, expanded if it's a code/diff
   write.
@@ -239,7 +238,8 @@ Semantic role → CSS variable:
 - subagent indent: `$accent`
 - status header: `$primary 60%` background, `$text` foreground
 
-CSS lives in `src/agentm/modes/textual_app.tcss`.
+CSS defaults to `src/agentm/modes/textual_app.tcss`; callers may inject an
+alternate Textual CSS path for tests or embedding.
 
 ### 3.8 Migration path (historical)
 
@@ -262,12 +262,13 @@ from agentm.harness import AgentSessionConfig
 class AgentMApp(App[int]):
     """Textual TUI for AgentM. Returns process exit code on exit."""
 
-    CSS_PATH = "textual_app.tcss"
+    DEFAULT_CSS_PATH = Path(__file__).with_name("textual_app.tcss")
+    CSS_PATH = str(DEFAULT_CSS_PATH)
     BINDINGS = [
-        Binding("ctrl+c", "interrupt_or_quit", show=False),
-        Binding("ctrl+d", "quit", show=True, priority=True),
+        Binding("ctrl+c", "interrupt_or_quit", show=True, priority=True),
+        Binding("ctrl+d", "force_quit", show=True, priority=True),
         Binding("ctrl+l", "clear_log", show=True),
-        Binding("ctrl+r", "open_palette", show=True),
+        Binding("ctrl+r", "open_palette_binding", show=True),
         # ... see §3.5
     ]
 
@@ -295,7 +296,8 @@ Dependencies: `textual>=0.85` is a hard requirement. Optional: `pyperclip` for `
 | ~~Keep simple mode as fallback~~ (reverted 2026-05-02) | Initially the rich-live mode stayed for environments where Textual misbehaves. In practice no such environment surfaced and maintaining two frontends doubled the test surface. Simple mode deleted. | — |
 | Outside-in dock layout (top header, bottom footer + input, 1fr middle) | Per Textual's official layout guide. Anchors fixed regions so the conversation log can never push them out of position; Footer auto-renders BINDINGS so users discover keys without /help. | Vertical-stack-with-implicit-flex (the previous approach). Rejected: status row could shift on empty/clear; readability suffered |
 | Single-source-of-truth gutters via CSS `border-left` | Previous design rendered user/subagent with `rich.Panel(border_style=...)` AND CSS `border-left` simultaneously, producing doubled borders. Now Rich Panel is gone; gutters live only in CSS. | Keep both. Rejected: double-rendered borders look broken |
-| Built-in `textual-dark` / `textual-light` themes (not custom hex) | The previous `.theme-dark { background: #0f1115 }` overrides fought the framework's theming system on every redraw and forced anyone who wanted a third theme to rewrite CSS. Built-in themes use semantic CSS variables. | Hardcoded hex per theme class. Rejected: brittle, no extension point |
+| Built-in `textual-dark` / `textual-light` themes (not custom hex), with injected theme names diagnosed on failure | The previous `.theme-dark { background: #0f1115 }` overrides fought the framework's theming system on every redraw. Invalid theme strings are presenter errors, so they emit `DiagnosticEvent(level="warning")` before falling back. | Hardcoded hex per theme class or silent fallback. Rejected: brittle and hides presenter misconfiguration |
+| Injectable CSS path and keymap | Embedders and tests need to replace terminal presentation assets without mutating class attributes or reaching into Textual internals. | Fixed `CSS_PATH` / `BINDINGS`. Rejected: no seam for presenters under test |
 | No left sidebar in MVP | Single-pane is enough to validate the framework migration; sidebar is feature creep | Build full Claude-Code-style multi-pane. Rejected: too much surface for one issue |
 | Streaming flushes at 20 Hz, not per-token | Token rate is ~50/s; per-token repaint is wasteful | Per-token. Rejected: CPU + screen flicker without visible benefit |
 | Esc cancels in-flight prompt; on idle emits explicit toast | Bare-Esc-to-exit is a documented foot-gun, but the previous silent no-op on idle made the app look stalled. The toast acknowledges the keypress. | Esc exits / Esc silent. Both rejected as user-confusing |
