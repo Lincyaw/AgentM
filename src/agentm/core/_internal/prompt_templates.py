@@ -153,6 +153,7 @@ def load_prompt_templates(
     agent_dir: str,
     prompt_paths: list[str] | tuple[str, ...] = (),
     include_defaults: bool = True,
+    project_prompt_dirs: list[str] | tuple[str, ...] | None = None,
 ) -> list[PromptTemplateRecord]:
     templates: list[PromptTemplateRecord] = []
 
@@ -160,12 +161,16 @@ def load_prompt_templates(
         templates.extend(
             _load_templates_from_dir(os.path.join(agent_dir, "prompts"), "user")
         )
-        templates.extend(
-            _load_templates_from_dir(
+        if project_prompt_dirs is None:
+            project_dirs: tuple[str, ...] = (
                 os.path.join(cwd, ".agentm", "prompts"),
-                "project",
             )
-        )
+        else:
+            project_dirs = tuple(project_prompt_dirs)
+        for project_dir in project_dirs:
+            templates.extend(
+                _load_templates_from_dir(project_dir, "project")
+            )
 
     for raw_path in prompt_paths:
         resolved_path = _normalize_path(raw_path, cwd)

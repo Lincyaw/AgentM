@@ -17,7 +17,6 @@ import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Literal, cast
 
 from agentm.core.abi import (
@@ -522,7 +521,7 @@ class _ChildTaskManager:
         state.final_messages = final_messages
         state.summary = _final_assistant_text(final_messages)
         refs = list_artifacts_for_task(
-            cwd=Path(self._api.cwd),
+            layout=self._api.get_project_layout(),
             root_session_id=self._root_session_id,
             task_id=state.task_id,
         )
