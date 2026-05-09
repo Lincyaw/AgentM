@@ -14,6 +14,9 @@ extensions:
   - module: agentm.extensions.builtin.tool_query_module_feedback
     config:
       default_scenario: format_fix
+  - module: agentm.extensions.builtin.tool_reflect
+    config:
+      default_scenario: format_fix
   - module: agentm.extensions.builtin.tool_eval_run
     config:
       target_scenario: format_fix

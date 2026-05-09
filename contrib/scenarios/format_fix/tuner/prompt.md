@@ -34,10 +34,13 @@ soon as a second mutable module joins the scenario.
 3. `read` the loaded `tool_normalize_json` atom source. Identify why
    the current implementation fails on tasks like nested objects or
    unicode.
-4. `eval_run({})` — establish the **baseline** eval score under the
+4. `reflect(failures=[<trace summaries from step 1>],
+   target_module="tool_normalize_json", target_scenario="format_fix")`
+   — receive a structured prompt scaffold. Treat the returned
+   `<MUTATION_INSTRUCTIONS>` as your in-context design brief and produce
+   the new atom source by following it.
+5. `eval_run({})` — establish the **baseline** eval score under the
    current fingerprint. Capture `eval_run_id`.
-5. Design a focused improvement to `tool_normalize_json`. Write the
-   full new source as a single Python file string.
 6. `eval_run({"atom_source_overrides": {"tool_normalize_json": <source>}})`
    — get the **proposed** eval score. Capture `eval_run_id`.
 7. If proposed primary_score - baseline primary_score >= 5% **AND** all
