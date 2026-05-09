@@ -69,7 +69,7 @@ from agentm.harness.extension import (
     _ExtensionAPIImpl,
     load_extension,
 )
-from agentm.harness.resource_writer import GitBackedResourceWriter, ResourceWriter
+from agentm.harness.resource_writer import ResourceWriter
 
 logger = logging.getLogger(__name__)
 
@@ -136,9 +136,7 @@ class AtomReloader:
         self._loaded_by_module: dict[str, LoadedAtom] = {}
         self._loaded_by_name: dict[str, LoadedAtom] = {}
         self._handlers_by_atom: dict[str, list[Callable[[], None]]] = {}
-        self._registrations_by_atom: dict[
-            str, list[tuple[str, str, Any]]
-        ] = {}
+        self._registrations_by_atom: dict[str, list[tuple[str, str, Any]]] = {}
         self.owners_by_kind: dict[str, dict[str, str]] = {}
         self._subscription_unsubs: list[Callable[[], None]] = [
             bus.on(ApiRegisterEvent.CHANNEL, self._track_registration)
@@ -149,9 +147,7 @@ class AtomReloader:
 
     # --- Lifecycle wiring --------------------------------------------------
 
-    def set_api_factory(
-        self, factory: Callable[[str], _ExtensionAPIImpl]
-    ) -> None:
+    def set_api_factory(self, factory: Callable[[str], _ExtensionAPIImpl]) -> None:
         """Inject the session's ``_make_api(owner)`` callable.
 
         Must be called before the first ``reload_atom`` call. We accept it
@@ -232,9 +228,7 @@ class AtomReloader:
     ) -> None:
         module = importlib.import_module(module_path)
         module_file = getattr(module, "__file__", None)
-        file_path = (
-            Path(module_file).resolve() if module_file else Path(".")
-        )
+        file_path = Path(module_file).resolve() if module_file else Path(".")
         manifest = _module_manifest(module)
         import_kind: Literal["module", "synthetic"] = (
             "synthetic"
@@ -263,9 +257,7 @@ class AtomReloader:
     def _remove_registrations(self, owner: str) -> None:
         for kind, name, payload in self._registrations_by_atom.pop(owner, []):
             if kind == "tool":
-                self._tools[:] = [
-                    tool for tool in self._tools if tool is not payload
-                ]
+                self._tools[:] = [tool for tool in self._tools if tool is not payload]
             elif kind == "command":
                 if self._commands.get(name) is payload:
                     self._commands.pop(name, None)
@@ -339,15 +331,14 @@ class AtomReloader:
             positional = [
                 p
                 for p in sig.parameters.values()
-                if p.kind in (
+                if p.kind
+                in (
                     inspect.Parameter.POSITIONAL_ONLY,
                     inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 )
             ]
             if len(positional) < 2:
-                raise RuntimeError(
-                    f"'install' must accept (api, config); got {sig}"
-                )
+                raise RuntimeError(f"'install' must accept (api, config); got {sig}")
 
             manifest = _module_manifest(module)
             if manifest is None and require_manifest:
@@ -470,9 +461,7 @@ class AtomReloader:
                     break
         return positions
 
-    def _restore_handler_positions(
-        self, owner: str, positions: dict[str, int]
-    ) -> None:
+    def _restore_handler_positions(self, owner: str, positions: dict[str, int]) -> None:
         """Splice ``owner``'s freshly-registered subscriptions back to
         ``positions[channel]``. Channels the new install didn't re-subscribe
         to are skipped; channels added that had no prior anchor stay at the
@@ -483,13 +472,15 @@ class AtomReloader:
             if not subs:
                 continue
             owner_subs = [
-                sub for sub in subs
+                sub
+                for sub in subs
                 if getattr(sub.handler, "_agentm_obs_owner", None) == owner
             ]
             if not owner_subs:
                 continue
             non_owner = [
-                sub for sub in subs
+                sub
+                for sub in subs
                 if getattr(sub.handler, "_agentm_obs_owner", None) != owner
             ]
             clamp = min(anchor_idx, len(non_owner))
@@ -499,17 +490,7 @@ class AtomReloader:
             )
 
     def _restore_git_path(self, atom: LoadedAtom, pre_sha: str) -> None:
-        if not isinstance(self._resource_writer, GitBackedResourceWriter):
-            raise RuntimeError("git rollback requires GitBackedResourceWriter")
-
-        relative = atom.file_path.resolve().relative_to(Path(self._cwd).resolve())
-        rel_posix = relative.as_posix()
-        self._resource_writer._run_git_sync(  # type: ignore[attr-defined]
-            ("restore", "--source", pre_sha, "--", rel_posix)
-        )
-        self._resource_writer._run_git_sync(  # type: ignore[attr-defined]
-            ("reset", "--hard", pre_sha)
-        )
+        self._resource_writer.restore(atom.file_path, pre_sha)
 
     def _advisory_hash(self, source: str) -> str:
         # Legacy fallback for git-less/advisory environments only.
@@ -561,15 +542,11 @@ class AtomReloader:
                 name=name,
                 old_hash=None,
                 new_hash=None,
-                error=(
-                    f"refusing to reload constitution layer path {atom.file_path}"
-                ),
+                error=(f"refusing to reload constitution layer path {atom.file_path}"),
             )
 
         try:
-            manifest = self._validate_reload_source(
-                name, atom.module_path, new_source
-            )
+            manifest = self._validate_reload_source(name, atom.module_path, new_source)
         except Exception as exc:  # noqa: BLE001
             return ReloadResult(
                 ok=False,
@@ -579,9 +556,7 @@ class AtomReloader:
                 error=str(exc),
             )
 
-        effective_manifest = (
-            manifest or atom.manifest or _default_manifest(name)
-        )
+        effective_manifest = manifest or atom.manifest or _default_manifest(name)
         if effective_manifest.tier == 2:
             logger.warning("tier-2 reload proceeds in MVP for %s", name)
 
@@ -721,9 +696,7 @@ class AtomReloader:
 
     def list_atoms(self) -> list[AtomInfo]:
         out: list[AtomInfo] = []
-        for atom in sorted(
-            self._loaded_by_name.values(), key=lambda item: item.name
-        ):
+        for atom in sorted(self._loaded_by_name.values(), key=lambda item: item.name):
             current_hash = self.current_version_for_path(str(atom.file_path))
             if current_hash is None and atom.file_path.exists():
                 current_hash = self._advisory_hash(
@@ -905,10 +878,7 @@ class AtomReloader:
                 error=write_result.error,
             )
 
-        new_hash = (
-            write_result.commit_sha_after
-            or self._advisory_hash(source)
-        )
+        new_hash = write_result.commit_sha_after or self._advisory_hash(source)
         effective_manifest = manifest or _default_manifest(name)
 
         # Register the module bytes synthetically so load_extension's
@@ -1027,9 +997,7 @@ class AtomReloader:
                 ok=False,
                 name=name,
                 module_path=atom.module_path,
-                error=(
-                    f"refusing to unload constitution-path atom {atom.file_path}"
-                ),
+                error=(f"refusing to unload constitution-path atom {atom.file_path}"),
             )
 
         manifest = atom.manifest or _default_manifest(name)
@@ -1142,22 +1110,16 @@ class AtomReloader:
                 target_file.unlink()
             except OSError:
                 pass
-            if (
-                isinstance(self._resource_writer, GitBackedResourceWriter)
-                and write_result.committed
-                and write_result.commit_sha_before is not None
-            ):
+            if write_result.committed and write_result.commit_sha_before is not None:
                 try:
-                    self._resource_writer._run_git_sync(  # type: ignore[attr-defined]
-                        ("reset", "--hard", write_result.commit_sha_before)
+                    self._resource_writer.restore(
+                        target_file, write_result.commit_sha_before
                     )
                 except Exception:  # noqa: BLE001
                     pass
 
     def current_version_for_path(self, path: str) -> str | None:
-        if isinstance(self._resource_writer, GitBackedResourceWriter):
-            return self._resource_writer.current_version_for_path(path)
-        return None
+        return self._resource_writer.current_version_for_path(path)
 
 
 __all__ = ["AtomReloader", "LoadedAtom"]

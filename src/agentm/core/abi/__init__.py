@@ -52,6 +52,7 @@ from .events import (
     TurnStartEvent,
 )
 from .loop import AgentLoop, LoopConfig
+from .provider import ProviderResolver
 from .messages import (
     AgentMessage,
     AssistantContent,
@@ -99,6 +100,8 @@ __all__ = [
     # loop
     "AgentLoop",
     "LoopConfig",
+    # provider
+    "ProviderResolver",
     # messages
     "AgentMessage",
     "AssistantContent",
