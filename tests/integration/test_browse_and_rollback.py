@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import subprocess
+import sys
+import threading
 import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -52,6 +57,57 @@ def install(api, config):
         ),
     )
 '''
+
+
+class _PlanModeOpenAIStubHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self) -> None:  # noqa: N802 - stdlib callback name
+        length = int(self.headers.get("content-length", "0"))
+        if length:
+            self.rfile.read(length)
+        chunks = [
+            {
+                "id": "chatcmpl-plan-mode-tool-catalog-test",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "plan-mode-stub",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": "planned"},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "chatcmpl-plan-mode-tool-catalog-test",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "plan-mode-stub",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+            {
+                "id": "chatcmpl-plan-mode-tool-catalog-test",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "plan-mode-stub",
+                "choices": [],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        ]
+        body = b"".join(
+            b"data: " + json.dumps(chunk).encode("utf-8") + b"\n\n"
+            for chunk in chunks
+        ) + b"data: [DONE]\n\n"
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return
 
 
 def _as_tool_result(result: object) -> ToolResult:
@@ -229,6 +285,82 @@ async def test_plan_mode_mounts_only_tool_catalog_browse(
         }.isdisjoint(tool_names)
     finally:
         await session.shutdown()
+
+
+def test_plan_mode_cli_trace_exposes_browse_without_mutate_tools(tmp_path: Path) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    repo_root = Path(__file__).resolve().parents[2]
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _PlanModeOpenAIStubHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        env = os.environ.copy()
+        env.update(
+            {
+                "OPENAI_API_KEY": "test-key",
+                "OPENAI_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
+            }
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from agentm.cli import main; main()",
+                "inspect the repo and prepare a plan",
+                "--cwd",
+                str(sandbox),
+                "--scenario",
+                str(repo_root / "contrib" / "scenarios" / "plan_mode" / "manifest.yaml"),
+                "--extension",
+                (
+                    'agentm.extensions.builtin.observability:{"path":".agentm/observability/'
+                    '{session_id}.jsonl","include_handler_records":false}'
+                ),
+                "--provider",
+                "openai",
+                "--model",
+                "plan-mode-stub",
+                "--quiet",
+                "--no-skills",
+                "--no-prompt-templates",
+            ],
+            cwd=Path.cwd(),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert completed.returncode == 0, completed.stderr
+    trace_files = sorted((sandbox / ".agentm" / "observability").glob("*.jsonl"))
+    assert len(trace_files) == 1
+    rows = [
+        json.loads(line)
+        for line in trace_files[0].read_text(encoding="utf-8").splitlines()
+    ]
+    ready = next(row for row in rows if row.get("kind") == "session.ready")
+    tool_names = set(ready["attributes"]["tool_names"])
+    assert {
+        "catalog_list_versions",
+        "catalog_get_manifest",
+        "catalog_runs_for",
+        "get_source_at",
+        "list_history",
+        "list_atoms",
+    }.issubset(tool_names)
+    assert {
+        "rollback_resource",
+        "install_atom",
+        "unload_atom",
+        "reload_atom",
+    }.isdisjoint(tool_names)
 
 
 def test_tool_catalog_split_manifests_are_exact() -> None:

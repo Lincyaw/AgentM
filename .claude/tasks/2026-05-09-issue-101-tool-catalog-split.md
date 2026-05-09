@@ -20,3 +20,11 @@ rollback, install, unload, or reload mutation.
 - Plan mode exposes catalog browsing and omits mutating tools.
 - Existing browse/rollback and live install/reload integration tests cover
   parity for result shapes and self-modification behavior.
+
+## Review follow-up
+
+- Added a CLI/observability E2E for plan mode that inspects the emitted
+  `session.ready` trajectory record and confirms browse tools are present while
+  mutation tools are absent.
+- Annotated tool schema globals as `Final` so direct §11 validation of the new
+  nested contrib atoms remains clean.
