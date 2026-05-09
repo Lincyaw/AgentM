@@ -12,7 +12,7 @@ from agentm.core.abi import (
     ToolResultMessage,
 )
 
-_TOOL_RESULT_MAX_CHARS = 2000
+DEFAULT_TOOL_RESULT_MAX_CHARS = 2_000
 _SUMMARIZATION_SYSTEM_PROMPT = (
     "You are a context summarization assistant. Your task is to read a "
     "conversation between a user and an AI coding assistant, then produce a "
@@ -83,7 +83,11 @@ def _truncate_for_summary(text: str, max_chars: int) -> str:
     )
 
 
-def serialize_conversation(messages: list[AgentMessage]) -> str:
+def serialize_conversation(
+    messages: list[AgentMessage],
+    *,
+    tool_result_max_chars: int = DEFAULT_TOOL_RESULT_MAX_CHARS,
+) -> str:
     parts: list[str] = []
 
     for message in messages:
@@ -129,7 +133,7 @@ def serialize_conversation(messages: list[AgentMessage]) -> str:
             if content:
                 parts.append(
                     "[Tool result]: "
-                    + _truncate_for_summary(content, _TOOL_RESULT_MAX_CHARS)
+                    + _truncate_for_summary(content, tool_result_max_chars)
                 )
 
     return "\n\n".join(parts)

@@ -62,6 +62,7 @@ from .events import (
     StreamDeltaEvent,
     TerminationCause,
     ToolCallEvent,
+    ToolErrorEvent,
     ToolResultEvent,
     ToolTerminated,
     TurnEndEvent,
@@ -593,28 +594,22 @@ class AgentLoop:
                     or "blocked by extension"
                 )
                 outcome = ToolContinue(
-                    result=ToolResult(
-                        content=[
-                            TextContent(
-                                type="text",
-                                text=f"Tool call blocked: {reason}",
-                            )
-                        ],
-                        is_error=True,
+                    result=await self._make_error_result(
+                        kind="blocked",
+                        tool_name=tc.name,
+                        reason=str(reason),
+                        exception=None,
                     )
                 )
             else:
                 tool = tool_index.get(tc.name)
                 if tool is None:
                     outcome = ToolContinue(
-                        result=ToolResult(
-                            content=[
-                                TextContent(
-                                    type="text",
-                                    text=f"Unknown tool: {tc.name}",
-                                )
-                            ],
-                            is_error=True,
+                        result=await self._make_error_result(
+                            kind="unknown_tool",
+                            tool_name=tc.name,
+                            reason=tc.name,
+                            exception=None,
                         )
                     )
                 else:
@@ -629,14 +624,11 @@ class AgentLoop:
                     except Exception as exc:  # noqa: BLE001
                         # Uniform exception → error-result conversion.
                         outcome = ToolContinue(
-                            result=ToolResult(
-                                content=[
-                                    TextContent(
-                                        type="text",
-                                        text=f"Tool execution error: {exc}",
-                                    )
-                                ],
-                                is_error=True,
+                            result=await self._make_error_result(
+                                kind="execution_failed",
+                                tool_name=tc.name,
+                                reason=str(exc),
+                                exception=exc,
                             )
                         )
                     else:
@@ -680,6 +672,50 @@ class AgentLoop:
             )
         )
         return paired
+
+    async def _make_error_result(
+        self,
+        *,
+        kind: str,
+        tool_name: str,
+        reason: str,
+        exception: BaseException | None,
+    ) -> ToolResult:
+        """Build the empty-content ``ToolResult`` for one of the three error
+        paths and let the ``tool_error`` channel populate ``content``.
+
+        The kernel deliberately does not synthesize the user-visible English
+        string itself; that policy is owned by the ``tool_error_messages``
+        builtin atom (or whatever extension replaces it). When no atom is
+        installed, the result still carries a single ``TextContent`` with a
+        bare fall-back so the trajectory remains debuggable.
+        """
+
+        # ``Literal`` already constrains the kernel call sites; the str hop
+        # here is a defensive cast for the dataclass's frozen Literal field.
+        narrowed: Any = kind
+        result = ToolResult(content=[], is_error=True)
+        await self._bus.emit(
+            ToolErrorEvent.CHANNEL,
+            ToolErrorEvent(
+                kind=narrowed,
+                tool_name=tool_name,
+                reason=reason,
+                result=result,
+                exception=exception,
+            ),
+        )
+        if not result.content:
+            # Recovery floor: no atom subscribed (or all subscribers were
+            # no-ops). Insert a minimal placeholder so observers and the
+            # provider both see *something* legible.
+            result.content.append(
+                TextContent(
+                    type="text",
+                    text=f"tool_error: {kind} ({tool_name})",
+                )
+            )
+        return result
 
     async def _dispatch_decision(
         self,

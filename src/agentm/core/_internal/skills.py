@@ -10,8 +10,8 @@ from pathlib import Path
 from agentm.core.abi.skill import SkillDiagnostic, SkillRecord
 from agentm.core.lib.frontmatter import parse_frontmatter
 
-_MAX_NAME_LENGTH = 64
-_MAX_DESCRIPTION_LENGTH = 1024
+DEFAULT_MAX_NAME_LENGTH = 64
+DEFAULT_MAX_DESCRIPTION_LENGTH = 1024
 _NAME_PATTERN = r"^[a-z0-9-]+$"
 
 
@@ -36,14 +36,16 @@ def _normalize_path(raw_path: str, cwd: str) -> str:
     return os.path.abspath(os.path.join(cwd, expanded))
 
 
-def _validate_name(name: str, parent_dir_name: str) -> list[str]:
+def _validate_name(
+    name: str, parent_dir_name: str, *, max_name_length: int
+) -> list[str]:
     issues: list[str] = []
     if name != parent_dir_name:
         issues.append(
             f'name "{name}" does not match parent directory "{parent_dir_name}"'
         )
-    if len(name) > _MAX_NAME_LENGTH:
-        issues.append(f"name exceeds {_MAX_NAME_LENGTH} characters ({len(name)})")
+    if len(name) > max_name_length:
+        issues.append(f"name exceeds {max_name_length} characters ({len(name)})")
     if not re.match(_NAME_PATTERN, name):
         issues.append(
             "name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"
@@ -55,13 +57,16 @@ def _validate_name(name: str, parent_dir_name: str) -> list[str]:
     return issues
 
 
-def _validate_description(description: str | None) -> list[str]:
+def _validate_description(
+    description: str | None, *, max_description_length: int
+) -> list[str]:
     issues: list[str] = []
     if description is None or description.strip() == "":
         issues.append("description is required")
-    elif len(description) > _MAX_DESCRIPTION_LENGTH:
+    elif len(description) > max_description_length:
         issues.append(
-            f"description exceeds {_MAX_DESCRIPTION_LENGTH} characters ({len(description)})"
+            f"description exceeds {max_description_length} characters "
+            f"({len(description)})"
         )
     return issues
 
@@ -69,6 +74,9 @@ def _validate_description(description: str | None) -> list[str]:
 def _parse_skill_file(
     file_path: str,
     source: str,
+    *,
+    max_name_length: int,
+    max_description_length: int,
 ) -> tuple[SkillRecord | None, list[SkillDiagnostic]]:
     diagnostics: list[SkillDiagnostic] = []
     try:
@@ -84,14 +92,18 @@ def _parse_skill_file(
 
     description_value = metadata.get("description")
     description = description_value if isinstance(description_value, str) else None
-    for issue in _validate_description(description):
+    for issue in _validate_description(
+        description, max_description_length=max_description_length
+    ):
         diagnostics.append(
             SkillDiagnostic(level="warning", message=issue, path=file_path)
         )
 
     raw_name = metadata.get("name")
     name = raw_name if isinstance(raw_name, str) and raw_name else parent_dir_name
-    for issue in _validate_name(name, parent_dir_name):
+    for issue in _validate_name(
+        name, parent_dir_name, max_name_length=max_name_length
+    ):
         diagnostics.append(
             SkillDiagnostic(level="warning", message=issue, path=file_path)
         )
@@ -128,6 +140,8 @@ def _load_skills_from_dir(
     source: str,
     *,
     include_root_files: bool,
+    max_name_length: int,
+    max_description_length: int,
 ) -> tuple[list[SkillRecord], list[SkillDiagnostic]]:
     skills: list[SkillRecord] = []
     diagnostics: list[SkillDiagnostic] = []
@@ -152,7 +166,12 @@ def _load_skills_from_dir(
 
         skill_path = os.path.join(dirpath, "SKILL.md")
         if "SKILL.md" in filenames and os.path.isfile(skill_path):
-            skill, skill_diags = _parse_skill_file(os.path.abspath(skill_path), source)
+            skill, skill_diags = _parse_skill_file(
+                os.path.abspath(skill_path),
+                source,
+                max_name_length=max_name_length,
+                max_description_length=max_description_length,
+            )
             if skill is not None:
                 skills.append(skill)
             diagnostics.extend(skill_diags)
@@ -171,7 +190,12 @@ def _load_skills_from_dir(
             file_path = os.path.join(dirpath, filename)
             if not os.path.isfile(file_path):
                 continue
-            skill, skill_diags = _parse_skill_file(os.path.abspath(file_path), source)
+            skill, skill_diags = _parse_skill_file(
+                os.path.abspath(file_path),
+                source,
+                max_name_length=max_name_length,
+                max_description_length=max_description_length,
+            )
             if skill is not None:
                 skills.append(skill)
             diagnostics.extend(skill_diags)
@@ -185,6 +209,8 @@ def load_skills(
     agent_dir: str,
     skill_paths: list[str] | tuple[str, ...] = (),
     include_defaults: bool = True,
+    max_name_length: int = DEFAULT_MAX_NAME_LENGTH,
+    max_description_length: int = DEFAULT_MAX_DESCRIPTION_LENGTH,
 ) -> tuple[list[SkillRecord], list[SkillDiagnostic]]:
     discovered: list[SkillRecord] = []
     diagnostics: list[SkillDiagnostic] = []
@@ -222,6 +248,8 @@ def load_skills(
                 os.path.join(agent_dir, "skills"),
                 "user",
                 include_root_files=True,
+                max_name_length=max_name_length,
+                max_description_length=max_description_length,
             )
         )
         add_batch(
@@ -229,6 +257,8 @@ def load_skills(
                 os.path.join(cwd, ".agentm", "skills"),
                 "project",
                 include_root_files=True,
+                max_name_length=max_name_length,
+                max_description_length=max_description_length,
             )
         )
 
@@ -240,6 +270,8 @@ def load_skills(
                     resolved_path,
                     "path",
                     include_root_files=True,
+                    max_name_length=max_name_length,
+                    max_description_length=max_description_length,
                 )
             )
             continue
@@ -247,6 +279,8 @@ def load_skills(
             skill, skill_diags = _parse_skill_file(
                 os.path.abspath(resolved_path),
                 "path",
+                max_name_length=max_name_length,
+                max_description_length=max_description_length,
             )
             add_batch([skill] if skill is not None else [], skill_diags)
 

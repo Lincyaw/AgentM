@@ -39,7 +39,7 @@ from agentm.core.abi import (
     LoopAction,
 )
 from agentm.core.abi.messages import TextContent, UserMessage
-from agentm.core.abi.tool import (
+from agentm.core.abi import (
     FunctionTool,
     ToolResult,
     ToolTerminate,
