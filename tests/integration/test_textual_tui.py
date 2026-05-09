@@ -595,8 +595,13 @@ async def test_T9_cli_dispatches_to_textual_runner(
 
     called: list[str] = []
 
-    async def _fake_textual(config: AgentSessionConfig, *, theme: str = "dark") -> int:
-        called.append(f"textual:{theme}:{config.cwd}")
+    async def _fake_textual(
+        config: AgentSessionConfig,
+        *,
+        theme: str = "dark",
+        css_path: Path | None = None,
+    ) -> int:
+        called.append(f"textual:{theme}:{css_path}:{config.cwd}")
         return 22
 
     monkeypatch.setattr("agentm.modes.textual_app.run", _fake_textual)
@@ -614,7 +619,7 @@ async def test_T9_cli_dispatches_to_textual_runner(
     )
 
     assert rc == 22
-    assert called == ["textual:dark:/tmp/textual"]
+    assert called == ["textual:dark:None:/tmp/textual"]
 
 
 @pytest.mark.asyncio

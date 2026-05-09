@@ -5,7 +5,7 @@ import base64
 import json
 import sys
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, Literal, Protocol, TypeVar
@@ -16,7 +16,7 @@ from rich.syntax import Syntax
 from rich.table import Table as RichTable
 from rich.text import Text
 from textual import events, on
-from textual.app import App, ComposeResult, ScreenStackError
+from textual.app import App, ComposeResult, InvalidThemeError, ScreenStackError
 from textual.binding import Binding
 from textual.containers import Container, Vertical, VerticalScroll
 from textual.css.query import NoMatches
@@ -40,27 +40,31 @@ from agentm.core.abi import (
     Usage,
     Tool,
 )
+from agentm.core.abi.events import DiagnosticEvent
 from agentm.core.lib.render import (
     assistant_text as render_assistant_text,
     tool_result_format,
     tool_result_text as render_tool_result_text,
     usage_report_from_usage,
 )
-from agentm.harness import AgentSession, AgentSessionConfig
-from agentm.harness.events import (
+from agentm.harness import (
+    AgentSession,
+    AgentSessionConfig,
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
     ChildSessionEndEvent,
     ChildSessionStartEvent,
+    CommandSpec,
     CostBudgetExceededEvent,
     ExtensionInstallEvent,
     ExtensionReloadEvent,
 )
-from agentm.harness.extension import CommandSpec
 
 
 Phase = Literal["idle", "thinking", "streaming", "tool", "subagent"]
 CommandHandler = Callable[["AgentMApp", str], Awaitable[None] | None]
+KeyMap = Sequence[Binding]
+PromptFailure = Exception
 
 
 class Theme(Protocol):
@@ -82,6 +86,12 @@ DEFAULT_THEME = DefaultTheme(
         "subagent": "↳",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ClipboardStatus:
+    ok: bool
+    message: str
 
 
 @dataclass(slots=True)
@@ -358,8 +368,7 @@ class ToolCallBlock(Collapsible):
     def toggle_collapsed(self) -> None:
         self.collapsed = not self.collapsed
 
-    def set_pending_args(self, args: dict[str, Any], args_preview: str) -> None:
-        del args_preview  # legacy param; title now derives from args directly
+    def set_pending_args(self, args: dict[str, Any]) -> None:
         self.args = dict(args)
         self.title = f"{self.tool_name}({_format_args_inline(self.args)})"
         self._render_body(None)
@@ -791,8 +800,31 @@ def default_builtin_command_registry() -> BuiltinCommandRegistry:
 
 
 
+def _copy_to_clipboard(text: str) -> ClipboardStatus:
+    if not text:
+        return ClipboardStatus(ok=False, message="No assistant text to copy.")
+    try:
+        import pyperclip  # type: ignore[import-untyped]
+    except ImportError:
+        pyperclip = None
+    if pyperclip is not None:
+        try:
+            pyperclip.copy(text)
+            return ClipboardStatus(ok=True, message="Copied assistant text to clipboard.")
+        except pyperclip.PyperclipException:
+            pass
+    try:
+        payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        sys.stdout.write(f"\033]52;c;{payload}\a")
+        sys.stdout.flush()
+        return ClipboardStatus(ok=True, message="Copied assistant text via OSC 52.")
+    except OSError as exc:
+        return ClipboardStatus(ok=False, message=f"Clipboard copy failed: {exc}")
+
+
 class AgentMApp(App[int]):
-    CSS_PATH = str(Path(__file__).with_name("textual_app.tcss"))
+    DEFAULT_CSS_PATH = Path(__file__).with_name("textual_app.tcss")
+    CSS_PATH = str(DEFAULT_CSS_PATH)
     # The built-in command palette (Ctrl+P) is disabled — we have our own
     # at Ctrl+R so atom-registered slash commands surface naturally.
     ENABLE_COMMAND_PALETTE = False
@@ -820,8 +852,14 @@ class AgentMApp(App[int]):
         extensions: dict[str, ExtensionInstallEvent] | None = None,
         tools: list[ToolEntry] | None = None,
         theme_data: Theme = DEFAULT_THEME,
+        css_path: Path | None = None,
+        keymap: KeyMap | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(css_path=css_path)
+        if keymap is not None:
+            self._bindings.key_to_bindings.clear()
+            for binding in keymap:
+                self._bindings._add_binding(binding)
         self.config = config
         self._session = session
         self._theme_name = theme
@@ -880,7 +918,25 @@ class AgentMApp(App[int]):
         theme_name = _THEME_ALIASES.get(self._theme_name, self._theme_name)
         try:
             self.theme = theme_name
-        except Exception:  # noqa: BLE001 — tolerate unknown theme strings
+        except InvalidThemeError as exc:
+            bus = self.config.bus
+            if bus is not None:
+                bus.emit_sync(
+                    DiagnosticEvent.CHANNEL,
+                    DiagnosticEvent(
+                        level="warning",
+                        source="textual_app",
+                        message=(
+                            f"Theme {theme_name!r} is unavailable; "
+                            f"using textual-dark: {exc}"
+                        ),
+                    ),
+                )
+            self.notify(
+                f"Theme {theme_name!r} is unavailable; using textual-dark.",
+                severity="warning",
+                timeout=4,
+            )
             self.theme = "textual-dark"
         # Keep one custom class on the App so existing tests (and any
         # ad-hoc scripts) can still observe the requested theme name.
@@ -939,7 +995,17 @@ class AgentMApp(App[int]):
         except asyncio.CancelledError:
             self.set_phase("idle")
             self.flush_stream_buffers()
-        except Exception as exc:  # noqa: BLE001
+        except PromptFailure as exc:
+            bus = self.config.bus
+            if bus is not None:
+                bus.emit_sync(
+                    DiagnosticEvent.CHANNEL,
+                    DiagnosticEvent(
+                        level="error",
+                        source="textual_app",
+                        message=f"Prompt failed: {exc}",
+                    ),
+                )
             self.notify(f"Prompt failed: {exc}", severity="error")
             self.set_phase("idle")
         finally:
@@ -980,21 +1046,11 @@ class AgentMApp(App[int]):
         return True
 
     def _copy_last_assistant_text(self) -> None:
-        if not self._last_assistant_text:
+        status = _copy_to_clipboard(self._last_assistant_text)
+        if status.ok:
+            self.notify(status.message, timeout=2)
             return
-        try:
-            import pyperclip  # type: ignore[import-untyped]
-
-            pyperclip.copy(self._last_assistant_text)
-            return
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            payload = base64.b64encode(self._last_assistant_text.encode("utf-8")).decode("ascii")
-            sys.stdout.write(f"\033]52;c;{payload}\a")
-            sys.stdout.flush()
-        except Exception:  # noqa: BLE001
-            return
+        self.notify(status.message, severity="warning", timeout=4)
 
     def open_command_palette(self, *, initial: str = "") -> None:
         self.push_screen(
@@ -1237,7 +1293,7 @@ class AgentMApp(App[int]):
 
         async def _apply() -> None:
             block = await turn.ensure_tool(event.tool_call_id, event.tool_name)
-            block.set_pending_args(dict(event.args), "")
+            block.set_pending_args(dict(event.args))
 
         self.run_worker(_apply(), exclusive=False)
         self._needs_scroll_end = True
@@ -1436,7 +1492,12 @@ _EVENT_SUBSCRIPTIONS: tuple[tuple[str, str], ...] = (
 
 
 async def run(
-    config: AgentSessionConfig, *, theme: str = "dark", theme_data: Theme = DEFAULT_THEME
+    config: AgentSessionConfig,
+    *,
+    css_path: Path | None = None,
+    theme: str = "dark",
+    keymap: KeyMap | None = None,
+    theme_data: Theme = DEFAULT_THEME,
 ) -> int:
     bus = config.bus
     if bus is None:
@@ -1494,6 +1555,8 @@ async def run(
         extensions=extensions,
         tools=list(tools.values()),
         theme_data=theme_data,
+        css_path=css_path,
+        keymap=keymap,
     )
 
     # Live subscriptions. Hot reloads, late tool registration, budget
@@ -1530,10 +1593,6 @@ def _render_tool_result(
     if result_format == "markdown":
         return Markdown(text)
     return Text(text)
-
-def _format_args_preview(args: dict[str, Any]) -> str:
-    return _dump_json(args)
-
 
 def _format_full_args(args: dict[str, Any]) -> str:
     return _dump_json(args, indent=2)
