@@ -1,0 +1,38 @@
+name: rca_single
+description: |
+  Single-agent variant of the rca scenario. Same diagnostic prompt, same
+  tools, same agent contract — but no sub-agent dispatch. The lead
+  investigator runs every SQL query itself. Used as an A/B comparison
+  baseline against the multi-agent rca scenario.
+extensions:
+  # Data tools live directly on the main session — no orchestrator/worker
+  # split. The agent owns the full investigation.
+  - module: agentm_rca.tools.duckdb_sql
+    config:
+      exclude:
+        - conclusion.parquet
+      row_limit: 200
+      token_limit: 5000
+  - module: agentm_rca.tools.hypothesis_tools
+  - module: agentm_rca.tools.finalize
+
+  # Skill-discovery wiring: publishes the rca scenario's skills/ dir and
+  # injects rca-worker-guide + diagnose-sql SKILL.md into the system prompt.
+  # ``tool_read`` lets the agent drill into skill body files (traces.md,
+  # metrics.md, ...) the same way workers do in the multi-agent scenario.
+  - module: agentm_rca.worker_skills
+  - module: agentm.extensions.builtin.skill_loader
+    config:
+      include_defaults: false
+      inherit_claude: false
+  - module: agentm.extensions.builtin.tool_read
+
+  # Standard housekeeping atoms — match the multi-agent scenario so any
+  # outcome difference is attributable to the orchestration topology, not
+  # to missing observability or artifact tooling.
+  - module: agentm.extensions.builtin.artifact_store
+  - module: agentm.extensions.builtin.observability
+
+  # Scenario-local prompt loader. Splices investigator.md + the
+  # rcabench-platform agent contract into the system prompt.
+  - local: setup
