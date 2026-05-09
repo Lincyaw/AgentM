@@ -750,14 +750,17 @@ async def test_end_to_end_loop_activates_known_good_replacement(
             cand = json.load(fh)
         assert set(cand.keys()) == {
             "candidate_id",
-            "parent_id",
+            "parent_ids",
             "change_spec",
             "per_task_scores",
             "holdout_scores",
             "eval_run_id",
             "created_at",
         }
-        assert cand["parent_id"] is None  # first activation in the log
+        # B-4: parent_ids is a list (was a nullable scalar before the
+        # crossover schema migration). Empty list = first activation in
+        # the log.
+        assert cand["parent_ids"] == []
         assert cand["change_spec"]["target_atom"] == "tool_normalize_json"
         assert cand["eval_run_id"] == "er_proposed"
         # Activation entry references the candidate file.

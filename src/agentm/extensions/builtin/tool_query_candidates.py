@@ -94,7 +94,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                         "change_spec": rec.get("change_spec"),
                         "win_tasks": wins,
                         "score_summary": _score_summary(rec),
-                        "parent_id": rec.get("parent_id"),
+                        "parent_ids": _coerce_parent_ids(rec),
                     }
                 )
             else:
@@ -184,6 +184,23 @@ def _compute_win_tasks(
         if len(best_holders) == 1:
             wins[best_holders[0]].append(tid)
     return wins
+
+
+def _coerce_parent_ids(rec: dict[str, Any]) -> list[str]:
+    """B-4 schema migration: candidate records emitted by Wave-Crossover
+    write ``parent_ids: list[str]``; pre-B-4 fixtures (and tests) wrote
+    ``parent_id: str | None``. Accept both shapes — the new field wins
+    when present, else fall back to the legacy single-parent field. The
+    return is always a list (possibly empty); downstream consumers
+    don't need to know which schema the record was written under.
+    """
+    raw = rec.get("parent_ids")
+    if isinstance(raw, list):
+        return [str(x) for x in raw if isinstance(x, str) and x]
+    legacy = rec.get("parent_id")
+    if isinstance(legacy, str) and legacy:
+        return [legacy]
+    return []
 
 
 def _score_summary(rec: dict[str, Any]) -> dict[str, float]:

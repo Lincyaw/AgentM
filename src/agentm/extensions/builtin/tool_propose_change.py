@@ -147,7 +147,16 @@ _PARAMETERS: dict[str, Any] = {
         "eval_run_proposed": {"type": "string"},
         "decision": {
             "type": "string",
-            "enum": ["activate", "rollback", "exploratory"],
+            "enum": ["activate", "rollback", "exploratory", "merge"],
+        },
+        "parents": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "B-4: candidate IDs (>=2) being merged. Required when "
+                "decision='merge'. Each ID must resolve to an existing "
+                "candidates/<id>.json under the target scenario."
+            ),
         },
     },
     "required": [
@@ -294,6 +303,34 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         proposed_id = str(args["eval_run_proposed"])
         decision = str(args["decision"])
 
+        # B-4: ``merge`` requires >=2 parent candidate IDs that resolve on
+        # disk. Parents are read here so the gate / candidate-record code
+        # below can branch on a validated list.
+        parents_arg = args.get("parents")
+        merge_parent_ids: list[str] = []
+        if decision == "merge":
+            if not isinstance(parents_arg, list) or len(parents_arg) < 2:
+                return _error(
+                    "evidence missing: decision='merge' requires "
+                    "'parents' (list of >=2 candidate_ids)"
+                )
+            for entry in parents_arg:
+                if not isinstance(entry, str) or not entry:
+                    return _error(
+                        "decision='merge': each parents entry must be a "
+                        "non-empty candidate_id string"
+                    )
+                merge_parent_ids.append(entry)
+            parents_check_dir = (
+                cwd / ".agentm" / "decisions" / target_scenario / "candidates"
+            )
+            for pid in merge_parent_ids:
+                if not (parents_check_dir / f"{pid}.json").is_file():
+                    return _error(
+                        f"decision='merge': unknown parent candidate {pid!r} — "
+                        f"no candidates/{pid}.json under {target_scenario!r}"
+                    )
+
         # Look up the loaded atom's tier — drives the tier-2 deferral gate.
         # Cross-session case: tuner runs in its own session and does NOT load
         # the target_scenario's atoms. Fall back to a filesystem scan under
@@ -367,7 +404,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         # increment the counter (else the constraint self-perpetuates).
         if (
             stop_after_no_improvement is not None
-            and decision == "activate"
+            and decision in {"activate", "merge"}
         ):
             decisions_path = _decisions_path(cwd, target_scenario)
             consec = _count_consecutive_rejections(decisions_path)
@@ -411,12 +448,23 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         # rejects this activation.
         decisions_path = _decisions_path(cwd, target_scenario)
         decisions_dir = decisions_path.parent
-        parent_id = _last_candidate_id(decisions_path)
+        # B-4 schema migration: candidate records now carry
+        # ``parent_ids: list[str]`` (was ``parent_id: str | None``). For
+        # non-merge decisions the list is either empty (first activation)
+        # or a 1-element list with the prior candidate; for ``merge`` it
+        # is the validated >=2 parents from args. Readers
+        # (``tool_query_candidates``) accept both shapes for back-compat
+        # with pre-B-4 fixtures.
+        if decision == "merge":
+            parent_ids: list[str] = list(merge_parent_ids)
+        else:
+            prev = _last_candidate_id(decisions_path)
+            parent_ids = [prev] if prev else []
         candidate_id = f"c_{uuid.uuid4().hex[:12]}"
         proposed_per_task = _load_eval_run_per_task(cwd, proposed_id)
         candidate_record = {
             "candidate_id": candidate_id,
-            "parent_id": parent_id,
+            "parent_ids": parent_ids,
             "change_spec": change_spec,
             "per_task_scores": _per_task_score_map(
                 proposed_per_task, holdout=False
@@ -428,7 +476,18 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "created_at": time.time(),
         }
         _write_candidate_record(decisions_dir, candidate_record)
-        _append_tree_edge(decisions_dir, child=candidate_id, parent=parent_id)
+        # tree.jsonl carries one edge per parent so the lineage graph is
+        # complete for both single-parent (activate) and multi-parent
+        # (merge) cases.
+        if parent_ids:
+            for pid in parent_ids:
+                _append_tree_edge(
+                    decisions_dir, child=candidate_id, parent=pid
+                )
+        else:
+            _append_tree_edge(
+                decisions_dir, child=candidate_id, parent=None
+            )
         # Pareto pruning: a candidate is on the frontier iff it wins on
         # >=1 task across the pool. Strictly-dominated peers get a
         # ``.pruned`` sidecar (the .json itself stays for audit).
@@ -439,10 +498,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         _bump_budget_rollouts(cwd, target_scenario)
 
         # B-1 deployment gate (formerly "promotion gate"). Skipped for
-        # rollback + exploratory. Even on rejection the candidate stays in
-        # the pool — rejection only prevents the swap.
+        # rollback + exploratory. ``merge`` (B-4) goes through the full
+        # four-floor gate exactly like ``activate`` — otherwise merge
+        # would be a back-door past the noise floor. Even on rejection
+        # the candidate stays in the pool; rejection only prevents the
+        # swap.
         gate_outcome: dict[str, Any] = {"applied": False}
-        if decision == "activate":
+        if decision in {"activate", "merge"}:
             gate_outcome = _apply_deployment_gate(
                 baseline=baseline,
                 proposed=proposed,
@@ -462,6 +524,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "rationale": rationale,
                     "change_spec": change_spec,
                     "candidate_id": candidate_id,
+                    "decision": decision,
+                    "parent_ids": parent_ids,
                     "evidence": {
                         "baseline_run": baseline_id,
                         "proposed_run": proposed_id,
@@ -532,6 +596,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "exploratory": decision == "exploratory",
             "change_spec": change_spec,
             "candidate_id": candidate_id,
+            "parent_ids": parent_ids,
             "evidence": {
                 "baseline_run": baseline_id,
                 "proposed_run": proposed_id,
