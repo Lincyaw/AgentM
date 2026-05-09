@@ -37,6 +37,8 @@ class BatchHandle(Protocol):
 
 @runtime_checkable
 class ResourceWriter(Protocol):
+    async def read(self, path: str) -> bytes: ...
+
     async def write(
         self,
         path: str,

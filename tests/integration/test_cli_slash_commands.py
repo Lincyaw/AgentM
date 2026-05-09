@@ -23,9 +23,11 @@ def test_cli_slash_command_wins_over_prompt_template_collision(tmp_path: Path) -
         "def install(api, config):\n"
         "    del config\n"
         "    async def _ship(args, owner_api):\n"
-        "        await owner_api.get_operations().file.write_file(\n"
-        "            'command_won.txt', args.encode('utf-8')\n"
+        "        result = await owner_api.get_resource_writer().write(\n"
+        "            'command_won.txt', args.encode('utf-8'), rationale='slash command output'\n"
         "        )\n"
+        "        if result.error is not None:\n"
+        "            raise RuntimeError(result.error)\n"
         "    api.register_command('ship', CommandSpec(description='ship', handler=_ship))\n",
         encoding="utf-8",
     )

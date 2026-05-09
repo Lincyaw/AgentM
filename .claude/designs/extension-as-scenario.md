@@ -286,10 +286,10 @@ Each is one Python module with `install(api, config)` doing **one thing**. The a
 
 | Module | Registers | Notes |
 |---|---|---|
-| `extensions.builtin.tool_read` | `read` | Delegates to `FileOperations` from config |
+| `extensions.builtin.tool_read` | `read` | Delegates to `FileOperations` from config / `api.get_operations().file` |
 | `extensions.builtin.tool_bash` | `bash` | Delegates to `BashOperations` from config |
-| `extensions.builtin.tool_edit` | `edit` | Delegates to `FileOperations` |
-| `extensions.builtin.tool_write` | `write` | Delegates to `FileOperations` |
+| `extensions.builtin.tool_edit` | `edit` | Delegates exclusively to `ResourceWriter` |
+| `extensions.builtin.tool_write` | `write` | Delegates exclusively to `ResourceWriter` |
 | `extensions.builtin.tool_hypothesis_store` | `add_hypothesis`, `update_hypothesis`, `list_hypotheses` | Owns an in-memory store; persists via `api.session.append_entry("hypothesis", …)` |
 | `extensions.builtin.tool_trajectory_loader` | `load_trajectory`, `summarize_trajectory`, `find_event`, `compare_trajectories` | Reads JSONL trajectory files |
 | `extensions.builtin.tool_submit_plan` | `submit_plan` | Appends a `plan` SessionEntry; emits `plan_submitted` event |
@@ -521,8 +521,9 @@ To honour `pluggable-architecture.md` §3.2 (acceptance scenario 2 — bash over
 # src/agentm/core/abi/operations.py  — Protocols (atom + harness import)
 class FileOperations(Protocol):
     async def read_file(self, path: str) -> bytes: ...
-    async def write_file(self, path: str, content: bytes) -> None: ...
-    async def access(self, path: str) -> None: ...
+    async def access(self, path: str) -> bool: ...
+    async def is_dir(self, path: str) -> bool: ...
+    async def list_dir(self, path: str) -> list[str]: ...
 
 class BashOperations(Protocol):
     async def exec(self, cmd: str, *, cwd: str, timeout: float | None = None,
@@ -531,11 +532,17 @@ class BashOperations(Protocol):
                    signal: asyncio.Event | None = None) -> ExecResult: ...
 
 # src/agentm/core/_internal/operations_impl.py — default impls
-class LocalFileOperations: ...     # stdlib-backed
+class LocalFileOperations: ...     # stdlib-backed read environment
 class LocalBashOperations: ...     # asyncio.subprocess-backed
 ```
 
-Tool atoms (`tool_read` / `tool_bash` / `tool_edit` / `tool_write`) accept the Operations objects via their config dict — `config["file_ops"]`, defaulting to `LocalFileOperations()`. Swapping to SSH = passing a different impl in the scenario YAML, no code fork.
+Tool atoms use a deliberate hybrid seam: read-only file tools (`tool_read` /
+`tool_grep` / `tool_find` / `tool_ls`) accept `config["file_ops"]` and
+default to `api.get_operations().file`; write tools (`tool_write` / `tool_edit`)
+use `api.get_resource_writer()` exclusively so managed-resource versioning and
+constitution-path rejection remain the single mutation chokepoint. Swapping read
+transport = pass a different `FileOperations`; redirecting or auditing writes =
+replace `ResourceWriter`.
 
 This is delivered by **Phase 2 Group A0** before Group D1 so the tool atoms can be built against the ports from day one.
 

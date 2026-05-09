@@ -29,9 +29,10 @@ import asyncio
 import base64
 import logging
 import os
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from agentm.core.abi.messages import (
     AgentMessage,
@@ -65,6 +66,8 @@ from agentm.core.abi.stream import (
     ToolCallStart,
 )
 from agentm.core.abi.tool import Tool
+
+from ._common import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from anthropic import AsyncAnthropic
@@ -180,11 +183,15 @@ def _to_anthropic_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]
     """
 
     out: list[dict[str, Any]] = []
+    previous_role: str | None = None
+    was_tool_result_user = False
     for msg in messages:
         if isinstance(msg, UserMessage):
             out.append(
                 {"role": "user", "content": _encode_user_content(list(msg.content))}
             )
+            previous_role = "user"
+            was_tool_result_user = False
         elif isinstance(msg, AssistantMessage):
             out.append(
                 {
@@ -192,42 +199,39 @@ def _to_anthropic_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]
                     "content": _encode_assistant_content(list(msg.content)),
                 }
             )
+            previous_role = "assistant"
+            was_tool_result_user = False
         elif isinstance(msg, ToolResultMessage):
             blocks = [_encode_tool_result_block(b) for b in msg.content]
-            # Pack into the previous message if it was also a tool-result-only
-            # user message, matching Anthropic's "results from one turn live in
-            # one user message" convention.
-            if (
-                out
-                and out[-1]["role"] == "user"
-                and all(
-                    isinstance(c, dict) and c.get("type") == "tool_result"
-                    for c in out[-1]["content"]
-                )
-            ):
+            if out and previous_role == "user" and was_tool_result_user:
                 out[-1]["content"].extend(blocks)
             else:
                 out.append({"role": "user", "content": blocks})
+            previous_role = "user"
+            was_tool_result_user = True
         else:  # pragma: no cover - exhaustive
             raise TypeError(f"unsupported message type: {type(msg)!r}")
     return out
 
 
-def _to_anthropic_tools(tools: list[Tool]) -> list[dict[str, Any]]:
-    """Convert kernel ``Tool``s to Anthropic tool definitions.
+@dataclass(frozen=True)
+class AnthropicToolSpecAdapter(ToolSpecAdapter):
+    """Convert AgentM tools to Anthropic Messages API tool specs."""
 
-    The kernel already exposes ``parameters`` as a JSON Schema dict, so this is
-    a direct field rename to ``input_schema``.
-    """
-
-    return [
-        {
-            "name": t.name,
-            "description": t.description,
-            "input_schema": t.parameters,
+    def vendor_spec(self, tool: Tool) -> dict[str, Any]:
+        return {
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": tool.parameters,
         }
-        for t in tools
-    ]
+
+    def encode_tool_args(self, args: Mapping[str, Any]) -> str:
+        return encode_tool_args(args)
+
+
+def _to_anthropic_tools(tools: list[Tool]) -> list[dict[str, Any]]:
+    adapter = AnthropicToolSpecAdapter()
+    return [adapter.vendor_spec(t) for t in tools]
 
 
 # --- Streaming bridge -------------------------------------------------------
@@ -235,28 +239,17 @@ def _to_anthropic_tools(tools: list[Tool]) -> list[dict[str, Any]]:
 
 @dataclass
 class _StreamState:
-    """Mutable accumulator for one turn of streaming.
+    """Provider event mapping state for one Anthropic stream."""
 
-    Tracks per-content-block state so we can assemble the final
-    :class:`AssistantMessage` from incremental events.
-    """
-
-    content_blocks: list[AssistantContent] = field(default_factory=list)
-    # Per-block scratch keyed by Anthropic content_block index.
+    accumulator: StreamAccumulator = field(default_factory=StreamAccumulator)
     scratch: dict[int, dict[str, Any]] = field(default_factory=dict)
     usage: Usage | None = None
-    # Raw vendor stop_reason (verbatim Anthropic string) for observability.
     stop_reason: str | None = None
-    # Kernel-canonical termination hint, set when ``stop_reason`` arrives.
     termination: TerminationHint | None = None
 
 
 def _map_stop_reason(raw: str | None) -> TerminationHint | None:
-    """Translate Anthropic ``stop_reason`` into a kernel ``TerminationHint``.
-
-    Per `.claude/designs/pluggable-architecture.md` §3.1, providers own the
-    vocabulary translation so the kernel never inspects vendor strings.
-    """
+    """Translate Anthropic ``stop_reason`` into a kernel ``TerminationHint``."""
 
     if raw is None:
         return None
@@ -284,44 +277,23 @@ def _extract_usage(message_obj: Any) -> Usage | None:
 
 
 def _finalize_block(state: _StreamState, index: int) -> None:
-    """Materialize the per-index scratch into a final ``AssistantContent``."""
+    """Flush provider scratch for one Anthropic content block."""
 
     scratch = state.scratch.pop(index, None)
     if scratch is None:
         return
     kind = scratch.get("kind")
     if kind == "text":
-        state.content_blocks.append(
-            TextContent(type="text", text=scratch.get("text", ""))
-        )
+        state.accumulator.add_text(index, scratch.get("text", ""))
     elif kind == "thinking":
-        state.content_blocks.append(
-            ThinkingBlock(
-                type="thinking",
-                text=scratch.get("text", ""),
-                signature=scratch.get("signature"),
-            )
-        )
+        state.accumulator.add_thinking(index, scratch.get("text", ""))
+        state.accumulator.set_thinking_signature(index, scratch.get("signature"))
     elif kind == "tool_use":
-        import json
-
-        raw_args = scratch.get("partial_json", "")
-        try:
-            args = json.loads(raw_args) if raw_args else {}
-        except json.JSONDecodeError:
-            # Fall back to empty dict; the loop layer is responsible for
-            # surfacing argument-parse errors back to the model. This keeps
-            # the kernel's invariant that ``arguments`` is a parsed dict.
-            args = {}
-        if not isinstance(args, dict):
-            args = {}
-        state.content_blocks.append(
-            ToolCallBlock(
-                type="tool_call",
-                id=scratch.get("id", ""),
-                name=scratch.get("name", ""),
-                arguments=args,
-            )
+        state.accumulator.add_tool_call(
+            id=scratch.get("id", ""),
+            name=scratch.get("name", ""),
+            args_delta=scratch.get("partial_json", ""),
+            index=index,
         )
 
 
@@ -343,6 +315,7 @@ class AnthropicStreamFn:
     api_key: str | None = None
     base_url: str | None = None
     client: AsyncAnthropic | None = None
+    clock: Callable[[], float] = time.time
 
     def _get_client(self) -> AsyncAnthropic:
         if self.client is not None:
@@ -430,14 +403,14 @@ class AnthropicStreamFn:
             for idx in sorted(state.scratch.keys()):
                 _finalize_block(state, idx)
 
-        assembled = AssistantMessage(
-            role="assistant",
-            content=list(state.content_blocks),
-            timestamp=0.0,
+        assembled = state.accumulator.assemble(
             stop_reason=state.stop_reason,
             termination=state.termination,
             usage=state.usage,
+            timestamp=self.clock(),
         )
+        for parse_error in state.accumulator.parse_errors:
+            yield parse_error
         yield MessageEnd(message=assembled)
 
 
