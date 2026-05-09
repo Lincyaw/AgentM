@@ -1,4 +1,30 @@
 requirements:
+  - id: REQ-093-llm-provider-stream-common
+    title: Shared LLM provider stream accumulator and tool spec adapters
+    description: >
+      Anthropic and OpenAI-compatible providers must share stream assembly,
+      tool-argument JSON encoding, tool-call argument parse-error signaling,
+      and real timestamp stamping while keeping provider-specific code limited
+      to event mapping and vendor tool-spec adaptation. Anthropic tool-result
+      message packing must remain a single linear pass.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/llm/_common.py
+      - path: src/agentm/llm/anthropic.py
+      - path: src/agentm/llm/openai.py
+      - path: src/agentm/core/abi/stream.py
+      - path: src/agentm/core/abi/loop.py
+      - path: src/agentm/core/abi/__init__.py
+    tests:
+      - path: tests/unit/core/abi/test_tool_arg_parse_error.py
+      - path: tests/unit/llm/test_common_stream_accumulator.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-93-llm-stream-common.md
+    depends_on: []
+
   - id: REQ-085-session-policy-extraction
     title: AgentSession policy extraction and typed runtime boundary
     description: >
@@ -133,7 +159,6 @@ requirements:
     depends_on:
       - REQ-086-atom-rework-infra
 
-
   - id: REQ-088-builtin-atom-hygiene
     title: Builtin atom requires, schema, and diagnostic hygiene
     description: >
@@ -158,3 +183,126 @@ requirements:
       - path: .claude/tasks/2026-05-09-issue-88-builtin-atom-hygiene.md
     depends_on:
       - REQ-086-atom-rework-infra
+
+  - id: REQ-100-cc-extension-package
+    title: Claude Code compatibility atoms share a package boundary
+    description: >
+      The Claude Code compatibility atoms must be mounted explicitly as the
+      `contrib.extensions.cc` package, with agents, commands, and plugins as
+      tier-2 single-file atoms. Markdown frontmatter parsing for command skill
+      records is shared inside the package, plugin command discovery flows
+      through the typed ResourcesDiscoverEvent contract instead of an
+      extra_skills workaround, and sub-agent availability XML rendering is
+      centralized in core.lib for reuse by RCA.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: contrib/extensions/cc/__init__.py
+      - path: contrib/extensions/cc/_md_skills.py
+      - path: contrib/extensions/cc/agents.py
+      - path: contrib/extensions/cc/commands.py
+      - path: contrib/extensions/cc/plugins.py
+      - path: src/agentm/core/lib/available_agents.py
+      - path: src/agentm/core/lib/__init__.py
+      - path: contrib/scenarios/rca/orchestrator_setup.py
+      - path: contrib/scenarios/rca/prompts/orchestrator.md
+      - path: contrib/scenarios/rca_single/setup.py
+      - path: pyproject.toml
+    tests:
+      - path: tests/unit/contrib/test_cc_extension_package.py
+      - path: tests/integration/test_cc_extension_cli.py
+      - path: contrib/scenarios/rca/tests/test_rca_orchestrator_setup.py
+    docs:
+      - path: CHANGELOG.md
+      - path: README.md
+      - path: core-manifest.yaml
+      - path: .claude/designs/extension-as-scenario.md
+      - path: .claude/designs/self-modifiable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-100-cc-package.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
+  - id: REQ-089-file-tool-io-seams
+    title: File tool atoms use documented read and write seams
+    description: >
+      Builtin file tool atoms must use the documented hybrid IO seam: read-only
+      tools consume FileOperations through ExtensionAPI operations, while write
+      tools consume ResourceWriter exclusively so scenario overrides and managed
+      resource protections intercept all file mutations consistently.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/operations.py
+      - path: src/agentm/core/abi/resource.py
+      - path: src/agentm/core/_internal/operations_impl.py
+      - path: src/agentm/harness/resource_writer.py
+      - path: src/agentm/extensions/builtin/tool_read.py
+      - path: src/agentm/extensions/builtin/tool_write.py
+      - path: src/agentm/extensions/builtin/tool_edit.py
+      - path: src/agentm/extensions/builtin/tool_grep.py
+      - path: src/agentm/extensions/builtin/tool_find.py
+      - path: src/agentm/extensions/builtin/tool_ls.py
+    tests:
+      - path: tests/unit/extensions/test_file_tool_io_seams.py
+      - path: tests/integration/test_file_tool_cli.py
+      - path: tests/unit/extensions/test_extension_contract.py
+      - path: tests/integration/test_cli_slash_commands.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/designs/extension-as-scenario.md
+      - path: .claude/designs/search-tools.md
+      - path: .claude/tasks/2026-05-09-issue-89-file-tool-io-seams.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
+  - id: REQ-101-tool-catalog-split
+    title: Tool catalog browse/mutate atom split
+    description: >
+      The contrib tool catalog must expose read-only history browsing separately
+      from mutating self-modification tools so plan-mode scenarios can mount
+      catalog introspection without enabling rollback, install, unload, or reload
+      mutation. The browse and mutate atoms must declare accurate registers lists.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: contrib/extensions/tool_catalog/__init__.py
+      - path: contrib/extensions/tool_catalog/_paths.py
+      - path: contrib/extensions/tool_catalog/_git_log.py
+      - path: contrib/extensions/tool_catalog/browse.py
+      - path: contrib/extensions/tool_catalog/mutate.py
+      - path: contrib/scenarios/plan_mode/manifest.yaml
+      - path: pyproject.toml
+    tests:
+      - path: tests/integration/test_browse_and_rollback.py
+      - path: tests/integration/test_reload_via_writer.py
+    docs:
+      - path: .claude/designs/git-backed-versioning.md
+      - path: README.md
+      - path: .claude/tasks/2026-05-09-issue-101-tool-catalog-split.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
+  - id: REQ-094-ai-provider-descriptor-registry
+    title: AI provider descriptors are the registry source of truth
+    description: >
+      The AI provider boundary must keep provider ids, API routing metadata,
+      aliases, and environment-key precedence in ProviderDescriptor records so
+      adding a provider does not require parallel Literal and env-var edits.
+      Environment API key resolution must support injected mappings for tests,
+      and runtime provider registration must use one validating wrapper with
+      shared canonical API checks for stream methods.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/ai/types.py
+      - path: src/agentm/ai/env_api_keys.py
+      - path: src/agentm/ai/api_registry.py
+      - path: src/agentm/ai/__init__.py
+    tests:
+      - path: tests/ai/test_provider_registry.py
+    docs: []
+    depends_on: []

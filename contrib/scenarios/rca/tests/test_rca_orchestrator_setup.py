@@ -33,7 +33,7 @@ def test_persona_metadata_parser_surfaces_input_schema_and_budget_defaults() -> 
     assert critic["budget_defaults"] == {"max_turns": 12}
     assert "brief_rejection" in critic["artifact_kinds"]
 
-    block = module._format_available_agents_block(personas)
+    block = module.available_agents_block(personas, include_input_schema=True)
     assert "<available_agents>" in block
     assert '<input_schema advisory="true">' in block
     assert (
