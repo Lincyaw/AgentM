@@ -46,6 +46,9 @@ class SkillsService(Protocol):
 
 
 class _DefaultSkillsService:
+    def __init__(self, layout: ProjectLayout | None = None) -> None:
+        self._layout = layout
+
     def load_skills(
         self,
         *,
@@ -56,11 +59,17 @@ class _DefaultSkillsService:
     ) -> tuple[list[SkillRecord], list[SkillDiagnostic]]:
         from agentm.core._internal.skills import load_skills as _impl
 
+        project_dirs: tuple[str, ...] | None
+        if self._layout is None:
+            project_dirs = None
+        else:
+            project_dirs = tuple(str(p) for p in self._layout.skills_dirs())
         return _impl(
             cwd=cwd,
             agent_dir=agent_dir,
             skill_paths=skill_paths,
             include_defaults=include_defaults,
+            project_skill_dirs=project_dirs,
         )
 
     def format_skills_for_prompt(self, skills: list[SkillRecord]) -> str:
@@ -93,6 +102,9 @@ class PromptTemplatesService(Protocol):
 
 
 class _DefaultPromptTemplatesService:
+    def __init__(self, layout: ProjectLayout | None = None) -> None:
+        self._layout = layout
+
     def load_prompt_templates(
         self,
         *,
@@ -105,11 +117,17 @@ class _DefaultPromptTemplatesService:
             load_prompt_templates as _impl,
         )
 
+        project_dirs: tuple[str, ...] | None
+        if self._layout is None:
+            project_dirs = None
+        else:
+            project_dirs = tuple(str(p) for p in self._layout.prompts_dirs())
         return _impl(
             cwd=cwd,
             agent_dir=agent_dir,
             prompt_paths=prompt_paths,
             include_defaults=include_defaults,
+            project_prompt_dirs=project_dirs,
         )
 
     def expand_prompt_template(
@@ -352,12 +370,16 @@ class _DefaultCompactionService:
 # --- Default builders ------------------------------------------------------
 
 
-def default_skills_service() -> SkillsService:
-    return _DefaultSkillsService()
+def default_skills_service(
+    layout: ProjectLayout | None = None,
+) -> SkillsService:
+    return _DefaultSkillsService(layout)
 
 
-def default_prompt_templates_service() -> PromptTemplatesService:
-    return _DefaultPromptTemplatesService()
+def default_prompt_templates_service(
+    layout: ProjectLayout | None = None,
+) -> PromptTemplatesService:
+    return _DefaultPromptTemplatesService(layout)
 
 
 def default_catalog_service() -> CatalogService:
