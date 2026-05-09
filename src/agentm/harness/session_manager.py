@@ -673,6 +673,38 @@ class SessionManager:
         return self.build_session_context().messages
 
 
+class JsonlSessionStore:
+    """Default presenter session store backed by JSONL SessionManager files."""
+
+    def __init__(
+        self, *, cwd: Path | None = None, session_dir: Path | None = None
+    ) -> None:
+        self._cwd = cwd
+        self._session_dir = session_dir
+
+    def open(self, id: str) -> SessionManager:
+        candidate = Path(id)
+        if candidate.is_file():
+            return SessionManager.open(candidate)
+        directory = self._session_dir or SessionManager.default_session_dir(
+            str(self._cwd or Path.cwd())
+        )
+        matches = sorted(directory.glob(f"*_{id}.jsonl"))
+        if not matches:
+            raise FileNotFoundError(id)
+        return SessionManager.open(matches[0])
+
+    def most_recent(self, cwd: Path) -> SessionManager | None:
+        directory = self._session_dir or SessionManager.default_session_dir(str(cwd))
+        latest = SessionManager._find_most_recent(directory)
+        if latest is None:
+            return None
+        return SessionManager.open(latest, session_dir=directory, cwd_override=str(cwd))
+
+    def create(self, cwd: Path) -> SessionManager:
+        return SessionManager.create(str(cwd), self._session_dir)
+
+
 class InMemorySessionManager(SessionManager):
     def __init__(
         self,
@@ -699,6 +731,7 @@ __all__ = [
     "CURRENT_SESSION_VERSION",
     "InMemorySessionManager",
     "JsonlSessionManager",
+    "JsonlSessionStore",
     "SessionContext",
     "SessionEntry",
     "SessionHeader",
