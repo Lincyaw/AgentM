@@ -54,3 +54,10 @@ markers = [
 # top-level pytest must not recurse into them — both define a ``tests``
 # package and the import paths collide.
 addopts = "-m 'not ui' --ignore=contrib/extensions/llmharness --ignore=contrib/scenarios/rca"
+
+[tool.mypy]
+exclude = [
+    "^contrib/extensions/llmharness/",
+    "^contrib/scenarios/rca/",
+    "^contrib/scenarios/rca_single/",
+]
