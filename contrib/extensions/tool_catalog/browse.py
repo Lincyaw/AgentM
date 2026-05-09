@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
@@ -33,7 +33,7 @@ MANIFEST = ExtensionManifest(
     tier=1,
 )
 
-_LIST_VERSIONS_PARAMS = {
+_LIST_VERSIONS_PARAMS: Final = {
     "type": "object",
     "properties": {
         "atom": {
@@ -45,7 +45,7 @@ _LIST_VERSIONS_PARAMS = {
     "additionalProperties": False,
 }
 
-_GET_MANIFEST_PARAMS = {
+_GET_MANIFEST_PARAMS: Final = {
     "type": "object",
     "properties": {
         "atom": {"type": "string"},
@@ -58,7 +58,7 @@ _GET_MANIFEST_PARAMS = {
     "additionalProperties": False,
 }
 
-_RUNS_FOR_PARAMS = {
+_RUNS_FOR_PARAMS: Final = {
     "type": "object",
     "properties": {
         "fingerprint": {
@@ -70,7 +70,7 @@ _RUNS_FOR_PARAMS = {
     "additionalProperties": False,
 }
 
-_GET_SOURCE_AT_PARAMS = {
+_GET_SOURCE_AT_PARAMS: Final = {
     "type": "object",
     "properties": {
         "path": {
@@ -86,7 +86,7 @@ _GET_SOURCE_AT_PARAMS = {
     "additionalProperties": False,
 }
 
-_LIST_HISTORY_PARAMS = {
+_LIST_HISTORY_PARAMS: Final = {
     "type": "object",
     "properties": {
         "path": {
@@ -104,7 +104,7 @@ _LIST_HISTORY_PARAMS = {
     "additionalProperties": False,
 }
 
-_LIST_ATOMS_PARAMS = {
+_LIST_ATOMS_PARAMS: Final = {
     "type": "object",
     "properties": {},
     "additionalProperties": False,

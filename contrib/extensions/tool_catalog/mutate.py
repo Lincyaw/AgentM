@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
@@ -38,7 +38,7 @@ MANIFEST = ExtensionManifest(
     tier=1,
 )
 
-_ROLLBACK_RESOURCE_PARAMS = {
+_ROLLBACK_RESOURCE_PARAMS: Final = {
     "type": "object",
     "properties": {
         "path": {
@@ -63,7 +63,7 @@ _ROLLBACK_RESOURCE_PARAMS = {
     "additionalProperties": False,
 }
 
-_INSTALL_ATOM_PARAMS = {
+_INSTALL_ATOM_PARAMS: Final = {
     "type": "object",
     "properties": {
         "name": {
@@ -103,7 +103,7 @@ _INSTALL_ATOM_PARAMS = {
     "additionalProperties": False,
 }
 
-_UNLOAD_ATOM_PARAMS = {
+_UNLOAD_ATOM_PARAMS: Final = {
     "type": "object",
     "properties": {
         "name": {
@@ -119,7 +119,7 @@ _UNLOAD_ATOM_PARAMS = {
     "additionalProperties": False,
 }
 
-_RELOAD_ATOM_PARAMS = {
+_RELOAD_ATOM_PARAMS: Final = {
     "type": "object",
     "properties": {
         "name": {
