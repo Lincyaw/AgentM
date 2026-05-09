@@ -607,6 +607,7 @@ class AtomReloader:
                     new_hash=event_new_hash,
                     trigger="agent" if agent_initiated else "human",
                     tier=effective_manifest.tier,
+                    is_self_modify=agent_initiated,
                 ),
             )
             return ReloadResult(
@@ -647,6 +648,7 @@ class AtomReloader:
                         trigger="agent" if agent_initiated else "human",
                         tier=effective_manifest.tier,
                         error="rollback_failure_state_preserved",
+                        is_self_modify=agent_initiated,
                     ),
                 )
                 return ReloadResult(

@@ -232,6 +232,7 @@ class TurnObservation:
     assistant_message: AssistantMessage | None
     tool_outcomes: list[ToolOutcome]
     default_action: LoopAction
+    turn_id: int = 0
 
 
 @dataclass(slots=True)
@@ -260,6 +261,7 @@ class TurnStartEvent(Event):
 
     CHANNEL: ClassVar[Literal["turn_start"]] = "turn_start"
     turn_index: int
+    turn_id: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -279,6 +281,7 @@ class TurnEndEvent(Event):
     turn_index: int
     message: AssistantMessage
     messages: tuple[AgentMessage, ...] = ()
+    turn_id: int = 0
 
 
 @dataclass(slots=True)
@@ -380,6 +383,7 @@ class LlmRequestStartEvent(Event):
     tool_count: int
     system_chars: int
     model_id: str | None
+    turn_id: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -393,6 +397,7 @@ class LlmRequestEndEvent(Event):
     chunk_count: int
     duration_ns: int
     error: str | None = None
+    turn_id: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -413,6 +418,7 @@ class StreamDeltaEvent(Event):
     turn_index: int
     delta: Any  # AssistantStreamEvent — typed Any here to avoid pulling
     # the ``stream`` module into the events surface for everyone.
+    turn_id: int = 0
 
 
 @dataclass(slots=True)
