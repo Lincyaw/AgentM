@@ -287,6 +287,29 @@ def _check_ast_rules(
 
     ignored_lines = {ignore.lineno for ignore in tree.type_ignores}
 
+    # §11.4.D7 — atoms that opt into the ``inherit_provider`` config protocol
+    # must reach for the parent-provider key via ``PARENT_PROVIDER_CONFIG_KEY``,
+    # never the bare ``"provider"`` literal. The constant is the only canonical
+    # link between the spawn factory and the atom; bare literals silently drift.
+    if _imports_parent_provider_config_key(tree):
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and node.value == "provider"
+            ):
+                issues.append(
+                    ValidationIssue(
+                        module_path=module_path,
+                        rule="11.4.D7-inherit-provider-bare-literal",
+                        message=(
+                            "use PARENT_PROVIDER_CONFIG_KEY rather than the "
+                            "bare \"provider\" string when reading the "
+                            "inherit_provider config payload"
+                        ),
+                    )
+                )
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and _is_private_api_getattr(node):
             issues.append(
@@ -536,6 +559,22 @@ def _is_api_registry_mutating_call(node: ast.Call) -> bool:
     return _is_api_registry_mutation_target(receiver)
 
 
+def _imports_parent_provider_config_key(tree: ast.Module) -> bool:
+    """True if the module imports ``PARENT_PROVIDER_CONFIG_KEY``.
+
+    Used by §11.4.D7 to scope the bare-``"provider"``-literal check to atoms
+    that are actually wired into the ``inherit_provider`` protocol; otherwise
+    any string literal containing ``"provider"`` would false-positive.
+    """
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "PARENT_PROVIDER_CONFIG_KEY":
+                    return True
+    return False
+
+
 def _is_agentm_fstring_import(node: ast.Call) -> bool:
     func = node.func
     is_dynamic_import = False
@@ -597,8 +636,19 @@ def _annotation_is_final(node: ast.expr) -> bool:
 
 
 def _dynamic_import_target(node: ast.Call) -> str | None:
-    """Return the constant module name passed to ``importlib.import_module``
-    or ``__import__``, or ``None`` if the call is unrelated or non-constant."""
+    """Return the (best-effort) module name passed to ``importlib.import_module``
+    or ``__import__``, or ``None`` if the call is unrelated or non-recognised.
+
+    Recognises:
+
+    * pure ``ast.Constant`` string arguments — returned verbatim;
+    * ``ast.JoinedStr`` (f-string) whose first segment is a constant string
+      starting with ``"agentm."`` — returned as the literal prefix so that
+      ``_classify_import`` can detect dynamic imports targeting forbidden
+      ``agentm.*`` namespaces (e.g. ``f"agentm.harness.{name}"``). The
+      remaining ``FormattedValue`` segments are conservatively treated as
+      unknown and only the static prefix is returned.
+    """
 
     func = node.func
     is_dynamic_import = False
@@ -612,6 +662,16 @@ def _dynamic_import_target(node: ast.Call) -> str | None:
     first = node.args[0]
     if isinstance(first, ast.Constant) and isinstance(first.value, str):
         return first.value
+    if isinstance(first, ast.JoinedStr) and first.values:
+        prefix = first.values[0]
+        if (
+            isinstance(prefix, ast.Constant)
+            and isinstance(prefix.value, str)
+            and prefix.value.startswith("agentm.")
+        ):
+            # Strip a trailing dot so ``_classify_import`` matches the namespace
+            # without anchoring on a partial component.
+            return prefix.value.rstrip(".")
     return None
 
 
