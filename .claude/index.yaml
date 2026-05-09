@@ -45,7 +45,7 @@ concepts:
     design: "designs/textual-tui.md"
     related_concepts: [pluggable_architecture, observability]
     plans: []
-    tasks: ["tasks/2026-05-09-issue-98-textual-tui-registries.md", "tasks/2026-05-09-issue-99-presenter-seams.md"]
+    tasks: ["tasks/2026-05-09-issue-98-textual-tui-registries.md", "tasks/2026-05-09-issue-99-presenter-seams.md", "tasks/2026-05-09-issue-121-tui-registries.md"]
 
   observability:
     description: "Per-session OTel-flavored JSONL diagnostic stream complementary to trajectory. Single principle: every signal goes through the bus. EventBus exposes EventBusObserver + emit_sync (sync handlers only, async skipped). New bus events: ApiRegisterEvent / ApiSendUserMessageEvent (harness, emit_sync from ExtensionAPI), LlmRequestStartEvent / LlmRequestEndEvent (kernel, around stream_fn drain in AgentLoop with try/except for error path), ExtensionInstallEvent (harness, around load_extension). observability builtin is a pure subscriber + Observer installed via ExtensionAPI.add_observer; no EventBus or ExtensionAPI monkey-patching. Records: session.start/ready/end, extension.install, api.register, api.send_user_message, llm.request.start/end, event.dispatch, handler.invoke, turn.summary. Writes to <cwd>/.agentm/observability/<trace_id>.jsonl, flushed per record. evolution_substrate extends session.start with active-set fingerprint binding the trace to exact (core, scenario, atom_versions) tuple."
