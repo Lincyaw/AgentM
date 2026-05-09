@@ -159,6 +159,34 @@ requirements:
     depends_on:
       - REQ-086-atom-rework-infra
 
+  - id: REQ-101-tool-catalog-split
+    title: Tool catalog browse/mutate atom split
+    description: >
+      The contrib tool catalog must expose read-only history browsing separately
+      from mutating self-modification tools so plan-mode scenarios can mount
+      catalog introspection without enabling rollback, install, unload, or reload
+      mutation. The browse and mutate atoms must declare accurate registers lists.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: contrib/extensions/tool_catalog/__init__.py
+      - path: contrib/extensions/tool_catalog/_paths.py
+      - path: contrib/extensions/tool_catalog/_git_log.py
+      - path: contrib/extensions/tool_catalog/browse.py
+      - path: contrib/extensions/tool_catalog/mutate.py
+      - path: contrib/scenarios/plan_mode/manifest.yaml
+      - path: pyproject.toml
+    tests:
+      - path: tests/integration/test_browse_and_rollback.py
+      - path: tests/integration/test_reload_via_writer.py
+    docs:
+      - path: .claude/designs/git-backed-versioning.md
+      - path: README.md
+      - path: .claude/tasks/2026-05-09-issue-101-tool-catalog-split.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
   - id: REQ-094-ai-provider-descriptor-registry
     title: AI provider descriptors are the registry source of truth
     description: >
