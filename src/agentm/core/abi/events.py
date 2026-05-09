@@ -774,6 +774,8 @@ class EventBus:
         for h in handlers:
             err: BaseException | None = None
             start_ns = time.perf_counter_ns() if observe_handlers else 0
+            if observe_handlers:
+                self._safe_observe("on_handler_start", channel, h, event)
             try:
                 value = h(event)
                 if inspect.isawaitable(value):
@@ -805,7 +807,10 @@ class EventBus:
                         channel, event = args[0], args[1]
                         callback(channel, event)
                     continue
-                getattr(callback, method)(*args)
+                observer_method = getattr(callback, method, None)
+                if observer_method is None:
+                    continue
+                observer_method(*args)
             except Exception:
                 if callable(callback):
                     logger.exception("EventBus observer callback raised; suppressing.")
@@ -815,7 +820,10 @@ class EventBus:
         if observer is None:
             return
         try:
-            getattr(observer, method)(*args)
+            observer_method = getattr(observer, method, None)
+            if observer_method is None:
+                return
+            observer_method(*args)
         except Exception:
             logger.exception("EventBus observer.%s raised; suppressing.", method)
 
@@ -845,6 +853,8 @@ class EventBus:
         for h in handlers:
             err: BaseException | None = None
             start_ns = time.perf_counter_ns() if observe_handlers else 0
+            if observe_handlers:
+                self._safe_observe("on_handler_start", channel, h, event)
             try:
                 value = h(event)
                 if inspect.isawaitable(value):

@@ -26,3 +26,9 @@ The split threshold is **at least 1500 LOC**; issue #87 does not split the atom 
 - Observer registrations created through `api.add_observer` are tracked by the atom reloader with the same owner cleanup path as `api.on`, so reload/unload cannot leave stale trace observers attached.
 - The CLI observability regression drives `agentm` through a sandbox repo and inspects `.agentm/observability/<session_id>.jsonl`, matching the identity E2E rule for trajectory-affecting atom changes.
 - Compaction sibling coverage is intentionally focused on the shared serializer boundary and provider summarizer behavior; no extra scenario E2E is added because the C10 change is an atom-local serialization substitution, not a new fail-stop position beyond §11 validator and trace identity checks.
+
+## Review Follow-up 2
+
+- Restored `include_mutation_diff` compatibility without reintroducing `api.on` monkey-patching by adding an observer-side `on_handler_start` hook to snapshot mutable event payloads before handler invocation and emit `handler.mutated` spans from `on_handler_done`.
+- Made artifact ID allocation safe for concurrent same-root session services by replacing per-process module registries with a filesystem `.next_id.lock` around `.next_id` updates.
+- Added regression coverage for mutation-diff trace records and concurrent same-root artifact writes producing unique IDs.
