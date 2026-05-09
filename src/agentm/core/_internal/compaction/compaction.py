@@ -427,6 +427,8 @@ async def generate_summary(
     summarization_prompt: str,
     custom_instructions: str | None = None,
     previous_summary: str | None = None,
+    *,
+    tool_result_max_chars: int | None = None,
 ) -> str:
     base_prompt = (
         _UPDATE_SUMMARIZATION_PROMPT
@@ -436,7 +438,12 @@ async def generate_summary(
     if custom_instructions:
         base_prompt = f"{base_prompt}\n\nAdditional focus: {custom_instructions}"
 
-    conversation_text = serialize_conversation(current_messages)
+    if tool_result_max_chars is None:
+        conversation_text = serialize_conversation(current_messages)
+    else:
+        conversation_text = serialize_conversation(
+            current_messages, tool_result_max_chars=tool_result_max_chars
+        )
     prompt_text = f"<conversation>\n{conversation_text}\n</conversation>\n\n"
     if previous_summary:
         prompt_text += (
@@ -451,8 +458,15 @@ async def _generate_turn_prefix_summary(
     messages: list[AgentMessage],
     summarizer: Summarizer,
     reserve_tokens: int,
+    *,
+    tool_result_max_chars: int | None = None,
 ) -> str:
-    conversation_text = serialize_conversation(messages)
+    if tool_result_max_chars is None:
+        conversation_text = serialize_conversation(messages)
+    else:
+        conversation_text = serialize_conversation(
+            messages, tool_result_max_chars=tool_result_max_chars
+        )
     prompt_text = (
         f"<conversation>\n{conversation_text}\n</conversation>\n\n"
         f"{_TURN_PREFIX_SUMMARIZATION_PROMPT}"
@@ -467,6 +481,7 @@ async def compact(
     summarization_prompt: str,
     custom_instructions: str | None = None,
 ) -> CompactionResult:
+    tool_result_max_chars = preparation.settings.tool_result_max_chars
     if preparation.is_split_turn and preparation.turn_prefix_messages:
         history_task = (
             generate_summary(
@@ -476,6 +491,7 @@ async def compact(
                 summarization_prompt,
                 custom_instructions,
                 preparation.previous_summary,
+                tool_result_max_chars=tool_result_max_chars,
             )
             if preparation.messages_to_summarize
             else _immediate("No prior history.")
@@ -484,6 +500,7 @@ async def compact(
             preparation.turn_prefix_messages,
             summarizer,
             preparation.settings.reserve_tokens,
+            tool_result_max_chars=tool_result_max_chars,
         )
         history_summary, turn_prefix_summary = await asyncio.gather(
             history_task,
@@ -501,6 +518,7 @@ async def compact(
             summarization_prompt,
             custom_instructions,
             preparation.previous_summary,
+            tool_result_max_chars=tool_result_max_chars,
         )
 
     read_files, modified_files = compute_file_lists(preparation.file_ops)

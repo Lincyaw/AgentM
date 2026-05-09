@@ -42,6 +42,7 @@ from .events import (
     StreamDeltaEvent,
     TerminationCause,
     ToolCallEvent,
+    ToolErrorEvent,
     ToolResultEvent,
     ToolTerminated,
     TurnEndEvent,
@@ -75,7 +76,13 @@ from .stream import (
     ToolCallEnd,
     ToolCallStart,
 )
-from .tool import FunctionTool, Tool, ToolContinue, ToolOutcome, ToolResult, ToolTerminate
+from .tool import Tool, ToolContinue, ToolOutcome, ToolResult, ToolTerminate
+
+# ``FunctionTool`` is a concrete adapter — it lives outside the ABI surface
+# proper (under ``core/_internal/tools.py``) but is re-exported here for
+# ergonomic access from atoms and tests. Importing _internal from the abi
+# __init__ is allowed: this module is itself part of the constitution.
+from agentm.core._internal.tools import FunctionTool  # noqa: E402
 
 __all__ = [
     # loop
@@ -128,6 +135,7 @@ __all__ = [
     "StreamDeltaEvent",
     "TerminationCause",
     "ToolCallEvent",
+    "ToolErrorEvent",
     "ToolResultEvent",
     "ToolTerminated",
     "TurnEndEvent",

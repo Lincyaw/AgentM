@@ -2,7 +2,11 @@
 
 Implements §3.2 (Tool Execution boundary) of
 `.claude/designs/pluggable-architecture.md` — the bare ``Tool`` Protocol the
-agent loop sees, plus a ``FunctionTool`` adapter for tests and simple cases.
+agent loop sees, plus the ``ToolResult`` / ``ToolOutcome`` data shapes.
+
+Concrete adapters such as ``FunctionTool`` live outside the ABI surface in
+``agentm.core._internal.tools``; they are re-exported from this package's
+``__init__`` for ergonomics but are not part of the boundary contract.
 
 Schemas are raw JSON Schema dicts; no pydantic in the kernel.
 
@@ -16,48 +20,26 @@ would have to compete with ``is_error`` for meaning.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from .messages import ImageContent, TextContent
 
 
-@dataclass(slots=True, init=False)
+@dataclass(slots=True)
 class ToolResult:
     """The result of one tool execution.
 
     ``content`` is the user-visible payload (text and/or images) that becomes
     a ``ToolResultBlock``. ``extras`` is opaque structured data the harness
     or extensions may use (e.g. for richer rendering); the kernel never reads
-    it. ``details`` remains as a backwards-compatible alias because earlier
-    extensions and tests already used that name.
+    it.
     """
 
     content: list[TextContent | ImageContent]
     is_error: bool = False
     extras: Any = None
-
-    def __init__(
-        self,
-        content: list[TextContent | ImageContent],
-        is_error: bool = False,
-        details: Any = None,
-        extras: Any = None,
-    ) -> None:
-        self.content = content
-        self.is_error = is_error
-        if extras is not None and details is not None and extras != details:
-            raise ValueError("ToolResult received conflicting details and extras")
-        self.extras = extras if extras is not None else details
-
-    @property
-    def details(self) -> Any:
-        return self.extras
-
-    @details.setter
-    def details(self, value: Any) -> None:
-        self.extras = value
 
 
 @dataclass(slots=True, frozen=True)
@@ -134,42 +116,7 @@ class Tool(Protocol):
     ) -> ToolResult | ToolOutcome: ...
 
 
-@dataclass(slots=True)
-class FunctionTool:
-    """Concrete ``Tool`` adapter wrapping an async callable.
-
-    Useful for tests and trivial cases where a full tool class would be
-    overkill. The wrapped ``fn`` is called with the raw ``args`` dict; if it
-    raises, the exception **propagates** — ``FunctionTool`` deliberately does
-    not convert exceptions to ``ToolResult(is_error=True)``. The agent loop is
-    responsible for that conversion so the policy is uniform across all tool
-    implementations.
-
-    ``fn`` may return either a bare :class:`ToolResult` or any
-    :class:`ToolOutcome`; the kernel handles both.
-    """
-
-    name: str
-    description: str
-    parameters: dict[str, Any]
-    fn: Callable[[dict[str, Any]], Awaitable[ToolResult | ToolOutcome]]
-    # Mirrors the Tool protocol surface; not consumed by the kernel itself.
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    async def execute(
-        self,
-        args: dict[str, Any],
-        *,
-        signal: asyncio.Event | None = None,
-        on_update: Callable[[Any], None] | None = None,
-    ) -> ToolResult | ToolOutcome:
-        """Invoke the wrapped function. Exceptions propagate unchanged."""
-
-        return await self.fn(args)
-
-
 __all__ = [
-    "FunctionTool",
     "Tool",
     "ToolContinue",
     "ToolOutcome",
