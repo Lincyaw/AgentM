@@ -253,12 +253,13 @@ def load_skills(
                 max_description_length=max_description_length,
             )
         )
-        if project_skill_dirs is None:
-            project_dirs: tuple[str, ...] = (
-                os.path.join(cwd, ".agentm", "skills"),
-            )
-        else:
-            project_dirs = tuple(project_skill_dirs)
+        # Project-scope skill directories are policy, not kernel — they MUST be
+        # supplied by the harness via ``ProjectLayout.skills_dirs()``. The
+        # kernel no longer hard-codes ``<cwd>/.agentm/skills``; minimal/no-layout
+        # sessions simply have no project skills.
+        project_dirs: tuple[str, ...] = (
+            tuple(project_skill_dirs) if project_skill_dirs is not None else ()
+        )
         for project_dir in project_dirs:
             add_batch(
                 *_load_skills_from_dir(

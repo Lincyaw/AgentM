@@ -202,9 +202,14 @@ def _outcome_result(outcome: ToolOutcome) -> ToolResult:
 
 
 def _default_action(
-    assistant_msg: AssistantMessage, tool_outcomes: list[ToolOutcome]
+    assistant_msg: AssistantMessage,
+    paired_outcomes: list[tuple[str, ToolOutcome]],
 ) -> LoopAction:
     """Compute the kernel's default :class:`LoopAction` for a turn.
+
+    ``paired_outcomes`` carries each :class:`ToolOutcome` together with the
+    name of the originating tool call so :class:`ToolTerminated` can identify
+    *which* terminal tool fired without a separate lookup.
 
     Order of precedence:
     1. Any tool returned :class:`ToolTerminate` → ``Stop(ToolTerminated(...))``
@@ -222,15 +227,11 @@ def _default_action(
     raw ``stop_reason`` string for graceful migration.
     """
 
-    for out in tool_outcomes:
+    for tool_name, out in paired_outcomes:
         if isinstance(out, ToolTerminate):
-            # Recover the tool name from the surrounding loop frame: callers
-            # in the loop pair outcomes with their originating tool_call so
-            # this helper only needs the outcomes themselves. The loop wraps
-            # the cause separately when it has the name handy.
-            return Stop(ToolTerminated(tool_name="", reason=out.reason))
+            return Stop(ToolTerminated(tool_name=tool_name, reason=out.reason))
 
-    if not tool_outcomes:
+    if not paired_outcomes:
         hint = assistant_msg.termination
         if hint is None:
             # Back-compat path: providers that haven't migrated to
@@ -276,25 +277,6 @@ def _default_action(
         return Stop(ModelEndTurn())  # pragma: no cover
 
     return Step()
-
-
-def _default_action_with_names(
-    assistant_msg: AssistantMessage,
-    paired_outcomes: list[tuple[str, ToolOutcome]],
-) -> LoopAction:
-    """Variant of :func:`_default_action` that knows each outcome's tool name.
-
-    Lifts ``tool_name`` from the loop's per-call bookkeeping into
-    :class:`ToolTerminated` so observers can identify *which* terminal tool
-    fired without a separate lookup.
-    """
-
-    for tool_name, out in paired_outcomes:
-        if isinstance(out, ToolTerminate):
-            return Stop(ToolTerminated(tool_name=tool_name, reason=out.reason))
-    return _default_action(
-        assistant_msg, [out for _, out in paired_outcomes]
-    )
 
 
 def _resolve_action(default: LoopAction, returns: list[Any]) -> LoopAction:
@@ -796,7 +778,7 @@ class AgentLoop:
     ) -> LoopAction:
         """Compute the default action, fire the hook, resolve overrides."""
 
-        default = _default_action_with_names(assistant_msg, paired_outcomes)
+        default = _default_action(assistant_msg, paired_outcomes)
         observation = TurnObservation(
             turn_index=turn_index,
             assistant_message=assistant_msg,
