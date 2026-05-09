@@ -592,7 +592,7 @@ async def test_T9_cli_dispatches_to_textual_runner(
         no_skills=True,
         no_prompt_templates=True,
         tool_allowlist=None,
-        provider="fake",
+        provider="anthropic",
         model="fake-model",
         cwd="/tmp/textual",
     )
