@@ -12,9 +12,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+from agentm.core.abi.events import DiagnosticEvent
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import ResourcesDiscoverEvent
 from agentm.harness.extension import ExtensionAPI
+
+
+_RECOGNIZED_SCOPES: frozenset[str] = frozenset({"user", "project"})
 
 
 MANIFEST = ExtensionManifest(
@@ -57,15 +61,23 @@ def _resolve_install_paths(
     registry_path: Path,
     cwd: str,
     exclude: set[str],
-) -> list[Path]:
+) -> tuple[list[Path], list[str]]:
+    """Return (install_paths, unknown_scope_keys).
+
+    Unknown scopes are silently dropped from the path list but their
+    ``<plugin>@<marketplace>`` keys are returned so the caller can surface
+    a diagnostic.
+    """
+
     if not registry_path.is_file():
-        return []
+        return [], []
     try:
         data = json.loads(registry_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
+        return [], []
     cwd_resolved = str(Path(cwd).resolve())
     result: list[Path] = []
+    unknown_scopes: list[str] = []
     for key, entries in (data.get("plugins") or {}).items():
         if key in exclude or not isinstance(entries, list):
             continue
@@ -83,19 +95,35 @@ def _resolve_install_paths(
                 if str(Path(project_path).resolve()) != cwd_resolved:
                     continue
             elif scope != "user":
+                if isinstance(scope, str) and scope not in _RECOGNIZED_SCOPES:
+                    unknown_scopes.append(f"{key}:{scope}")
                 continue
             path = Path(install_path)
             if path.is_dir():
                 result.append(path)
-    return result
+    return result, unknown_scopes
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     registry_path = Path(config.get("registry_path") or _default_registry_path())
     exclude = set(config.get("exclude") or ())
 
-    def _on_discover(_event: ResourcesDiscoverEvent) -> dict[str, Any] | None:
-        install_paths = _resolve_install_paths(registry_path, api.cwd, exclude)
+    async def _on_discover(_event: ResourcesDiscoverEvent) -> dict[str, Any] | None:
+        install_paths, unknown_scopes = _resolve_install_paths(
+            registry_path, api.cwd, exclude
+        )
+        for scope_key in unknown_scopes:
+            await api.events.emit(
+                DiagnosticEvent.CHANNEL,
+                DiagnosticEvent(
+                    level="warning",
+                    source="cc.plugins",
+                    message=(
+                        f"ignored installed plugin entry with unrecognized "
+                        f"scope: {scope_key} (expected 'user' or 'project')"
+                    ),
+                ),
+            )
         if not install_paths:
             return None
         resource_dirs: dict[str, list[str]] = {

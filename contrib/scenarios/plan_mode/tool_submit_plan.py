@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.abi.events import DiagnosticEvent
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import PlanSubmittedEvent
 from agentm.harness.extension import ExtensionAPI
@@ -32,17 +33,26 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
         plan = str(args["plan"])
+        # Narrow catch: only persistence (``append_entry``) and event-bus
+        # ``emit`` can raise here, and both surface as ``OSError`` (FS
+        # failure) or ``RuntimeError`` (bus closed / state misuse). Anything
+        # else is a programming error and should propagate so the harness
+        # diagnostic stream sees it.
         try:
             plan_id = api.session.append_entry("plan", {"text": plan})
             await api.events.emit(
                 "plan_submitted",
                 PlanSubmittedEvent(plan_id=plan_id, plan_text=plan),
             )
-            return ToolResult(
-                content=[TextContent(type="text", text="plan submitted")],
-                extras={"plan_submitted": True, "plan_id": plan_id},
+        except (OSError, RuntimeError, ValueError) as exc:
+            await api.events.emit(
+                DiagnosticEvent.CHANNEL,
+                DiagnosticEvent(
+                    level="error",
+                    source="tool_submit_plan",
+                    message=f"submit_plan persistence failed: {exc!r}",
+                ),
             )
-        except Exception as exc:
             return ToolResult(
                 content=[
                     TextContent(
@@ -52,6 +62,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 ],
                 is_error=True,
             )
+        return ToolResult(
+            content=[TextContent(type="text", text="plan submitted")],
+            extras={"plan_submitted": True, "plan_id": plan_id},
+        )
 
     api.register_tool(
         FunctionTool(
