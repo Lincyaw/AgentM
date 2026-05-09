@@ -569,7 +569,7 @@ def _id_lock_for(artifacts_dir: Path) -> asyncio.Lock:
 def _ok(payload: dict[str, Any]) -> ToolResult:
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))],
-        details=payload,
+        extras=payload,
     )
 
 
@@ -578,7 +578,7 @@ def _error(message: str) -> ToolResult:
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))],
         is_error=True,
-        details=payload,
+        extras=payload,
     )
 
 __all__ = [

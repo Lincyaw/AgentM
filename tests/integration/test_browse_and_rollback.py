@@ -204,9 +204,9 @@ async def test_G6_tool_catalog_history_source_and_forceable_rollback(
         history_tool = next(tool for tool in session.tools if tool.name == "list_history")
         history = await history_tool.execute({"path": "tool_demo", "limit": 2})
         assert history.is_error is False
-        assert [entry["sha"] for entry in history.details] == [second_sha, first_sha]
-        assert [entry["author"] for entry in history.details] == ["agent", "Test User"]
-        assert [entry["message"] for entry in history.details] == [
+        assert [entry["sha"] for entry in history.extras] == [second_sha, first_sha]
+        assert [entry["author"] for entry in history.extras] == ["agent", "Test User"]
+        assert [entry["message"] for entry in history.extras] == [
             "upgrade to v2",
             f"seed {session._test_pkg}",  # type: ignore[index]
         ]
@@ -214,7 +214,7 @@ async def test_G6_tool_catalog_history_source_and_forceable_rollback(
         source_tool = next(tool for tool in session.tools if tool.name == "get_source_at")
         old_source = await source_tool.execute({"path": "tool_demo", "sha": first_sha})
         assert old_source.is_error is False
-        assert "v1" in old_source.details
+        assert "v1" in old_source.extras
         assert _tool_result_text((await session.prompt("before rollback"))[-2]) == "v2"
 
         decisions_path = _layout.atom_decisions_path("tool_demo", first_sha, root=tmp_path)
@@ -233,8 +233,8 @@ async def test_G6_tool_catalog_history_source_and_forceable_rollback(
             }
         )
         assert blocked.is_error is True
-        assert blocked.details["error"] == "rollback_blocked"
-        assert blocked.details["decision"]["kind"] == "regressed"
+        assert blocked.extras["error"] == "rollback_blocked"
+        assert blocked.extras["decision"]["kind"] == "regressed"
 
         rolled_back = await rollback_tool.execute(
             {
@@ -245,8 +245,8 @@ async def test_G6_tool_catalog_history_source_and_forceable_rollback(
             }
         )
         assert rolled_back.is_error is False
-        assert rolled_back.details["ok"] is True
-        assert rolled_back.details["old_hash"] == second_sha
+        assert rolled_back.extras["ok"] is True
+        assert rolled_back.extras["old_hash"] == second_sha
         assert _tool_result_text((await session.prompt("after rollback"))[-2]) == "v1"
         latest_log = _git(tmp_path, "log", "--format=%an|%s", "-n", "1", "--", tool_path)
         assert latest_log == f"agent|rollback to {first_sha[:8]}: undo regression"
@@ -298,8 +298,8 @@ async def test_rollback_by_repo_relative_path_still_reloads_atom(
         # The success criterion: result is the ReloadResult shape (has 'ok'),
         # not the WriteResult shape — proving rollback dispatched through
         # reload_atom rather than degrading to plain writer.write.
-        assert result_rel.is_error is False, result_rel.details
-        assert "ok" in result_rel.details and result_rel.details["ok"] is True
+        assert result_rel.is_error is False, result_rel.extras
+        assert "ok" in result_rel.extras and result_rel.extras["ok"] is True
         # And the live session uses the reloaded code on the next turn.
         assert _tool_result_text((await session.prompt("after rel"))[-2]) == "v1"
 
@@ -317,8 +317,8 @@ async def test_rollback_by_repo_relative_path_still_reloads_atom(
                 "rationale": "undo via absolute path",
             }
         )
-        assert result_abs.is_error is False, result_abs.details
-        assert "ok" in result_abs.details and result_abs.details["ok"] is True
+        assert result_abs.is_error is False, result_abs.extras
+        assert "ok" in result_abs.extras and result_abs.extras["ok"] is True
         assert _tool_result_text((await session.prompt("after abs"))[-2]) == "v1"
     finally:
         await session.shutdown()

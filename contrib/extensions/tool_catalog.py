@@ -709,7 +709,7 @@ def _json_result(payload: Any) -> ToolResult:
                 text=json.dumps(payload, default=str, indent=2, sort_keys=True),
             )
         ],
-        details=payload,
+        extras=payload,
     )
 
 
@@ -721,7 +721,7 @@ def _json_error(payload: Any) -> ToolResult:
                 text=json.dumps(payload, default=str, indent=2, sort_keys=True),
             )
         ],
-        details=payload,
+        extras=payload,
         is_error=True,
     )
 
