@@ -4,24 +4,27 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
-from typing import Any, Final, Protocol
+from typing import Any, Final
 
 import pathspec
 
 from agentm.core.abi import TextContent, Tool, ToolResult
-from agentm.core.lib.path_utils import load_gitignore_patterns, resolve_to_cwd
+from agentm.core.abi.operations import FileOperations
+from agentm.core.lib.path_utils import (
+    load_gitignore_patterns_from_file_ops,
+    resolve_to_cwd,
+)
 from agentm.core.lib.text_truncate import DEFAULT_MAX_BYTES, format_size, truncate_head
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(
     name="tool_find",
-    description="Register the find tool backed by fd or stdlib fallback.",
+    description="Register the find tool backed by FileOperations.",
     registers=("tool:find",),
     config_schema={
         "type": "object",
-        "properties": {"ops": {"type": "object"}},
+        "properties": {"file_ops": {"type": "object"}},
         "additionalProperties": True,
     },
 )
@@ -30,7 +33,7 @@ _PARAMETERS: Final = {
     "type": "object",
     "properties": {
         "pattern": {"type": "string"},
-        "path": {"type": "string"},
+        "path": {"type": "string", "default": "."},
         "limit": {"type": "integer", "default": 1000},
     },
     "required": ["pattern"],
@@ -38,44 +41,14 @@ _PARAMETERS: Final = {
 }
 
 
-class FindOperations(Protocol):
-    async def exists(self, path: str) -> bool: ...
-
-    async def glob(
-        self,
-        pattern: str,
-        cwd: str,
-        *,
-        ignore: list[str],
-        limit: int,
-    ) -> list[str]: ...
-
-
-class _LocalFindOperations:
-    async def exists(self, path: str) -> bool:
-        return await asyncio.to_thread(os.path.exists, path)
-
-    async def glob(
-        self,
-        pattern: str,
-        cwd: str,
-        *,
-        ignore: list[str],
-        limit: int,
-    ) -> list[str]:
-        del pattern, ignore, limit
-        raise NotImplementedError
-
-
 class _FindTool(Tool):
     name = "find"
     description = "Find files and directories by glob pattern."
     parameters = _PARAMETERS
 
-    def __init__(self, cwd: str, ops: FindOperations | None) -> None:
+    def __init__(self, cwd: str, file_ops: FileOperations) -> None:
         self._cwd = cwd
-        self._ops = ops or _LocalFindOperations()
-        self._has_custom_ops = ops is not None
+        self._file_ops = file_ops
 
     async def execute(
         self,
@@ -90,21 +63,16 @@ class _FindTool(Tool):
         pattern = str(args["pattern"])
         root = resolve_to_cwd(str(args.get("path", ".")), self._cwd)
         limit = max(1, int(args.get("limit", 1000)))
-        if not await self._ops.exists(root):
+        if not await self._file_ops.access(root):
             raise Exception(f"Path not found: {root}")
 
-        if self._has_custom_ops:
-            found = await self._ops.glob(
-                pattern,
-                root,
-                ignore=[".git/", "node_modules/"],
-                limit=limit,
-            )
-            results = sorted(_normalize_custom_paths(found, root))
-            limit_hit = len(results) >= limit
-        else:
-            results, limit_hit = await _find_local(pattern, root, limit, signal)
-
+        results, limit_hit = await _find_with_file_ops(
+            self._file_ops,
+            pattern,
+            root,
+            limit,
+            signal,
+        )
         if not results:
             return ToolResult(content=[TextContent(type="text", text="No files found matching pattern")])
         joined = "\n".join(results)
@@ -120,105 +88,43 @@ class _FindTool(Tool):
         return ToolResult(content=[TextContent(type="text", text=output)])
 
 
-async def _find_local(
+async def _find_with_file_ops(
+    file_ops: FileOperations,
     pattern: str,
     root: str,
     limit: int,
     signal: asyncio.Event | None,
 ) -> tuple[list[str], bool]:
-    fd_path = shutil.which("fd")
-    if fd_path:
-        return await _find_with_fd(fd_path, pattern, root, limit, signal)
-    return await asyncio.to_thread(_find_fallback, pattern, root, limit, signal is not None and signal.is_set())
-
-
-async def _find_with_fd(
-    fd_path: str,
-    pattern: str,
-    root: str,
-    limit: int,
-    signal: asyncio.Event | None,
-) -> tuple[list[str], bool]:
-    args = [
-        fd_path,
-        "--glob",
-        "--color=never",
-        "--hidden",
-        "--no-require-git",
-        "--max-results",
-        str(limit),
-    ]
-    effective = pattern
-    if "/" in pattern:
-        args.append("--full-path")
-        if not pattern.startswith("/") and not pattern.startswith("**/") and pattern != "**":
-            effective = f"**/{pattern}"
-    args.extend([effective, root])
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    wait_task = asyncio.create_task(proc.communicate())
-    if signal is not None:
-        signal_task = asyncio.create_task(signal.wait())
-        done, _ = await asyncio.wait({wait_task, signal_task}, return_when=asyncio.FIRST_COMPLETED)
-        if signal_task in done:
-            proc.terminate()
-            await wait_task
-            raise Exception("Operation aborted")
-        signal_task.cancel()
-        await asyncio.gather(signal_task, return_exceptions=True)
-    stdout, stderr = await wait_task
-    if proc.returncode not in (0, 1):
-        message = stderr.decode("utf-8", errors="replace").strip() or "fd search failed"
-        raise Exception(message)
-    results = sorted(
-        line.strip().replace(os.sep, "/")
-        for line in stdout.decode("utf-8", errors="replace").splitlines()
-        if line.strip()
-    )
-    return results, len(results) >= limit
-
-
-def _find_fallback(
-    pattern: str,
-    root: str,
-    limit: int,
-    aborted: bool,
-) -> tuple[list[str], bool]:
-    if aborted:
-        raise Exception("Operation aborted")
-    results: list[str] = []
-    ignore = _ignore_spec(root, [".git/", "node_modules/"])
+    ignore = await _ignore_spec(file_ops, root, [".git/", "node_modules/"])
     match_spec = _compile_pattern(pattern)
-    limit_hit = False
-    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=True):
-        rel_dir = os.path.relpath(dirpath, root)
-        rel_dir_posix = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
-        kept_dirs: list[str] = []
-        for dirname in dirnames:
-            rel_path = f"{rel_dir_posix}/{dirname}".strip("/")
-            if ignore.match_file(rel_path) or ignore.match_file(rel_path + "/"):
+    results: list[str] = []
+
+    async def _walk(path: str, rel_dir: str) -> bool:
+        if signal is not None and signal.is_set():
+            raise Exception("Operation aborted")
+        for name in sorted(await file_ops.list_dir(path), key=lambda item: (item.lower(), item)):
+            rel_path = f"{rel_dir}/{name}".strip("/")
+            child = os.path.join(path, name)
+            is_dir = await file_ops.is_dir(child)
+            if ignore.match_file(rel_path) or (is_dir and ignore.match_file(rel_path + "/")):
                 continue
-            kept_dirs.append(dirname)
+            candidate = rel_path + "/" if is_dir else rel_path
             if match_spec.match_file(rel_path):
-                results.append(rel_path + "/")
+                results.append(candidate)
                 if len(results) >= limit:
-                    limit_hit = True
-                    dirnames[:] = kept_dirs
-                    return sorted(results), limit_hit
-        dirnames[:] = kept_dirs
-        for filename in filenames:
-            rel_path = f"{rel_dir_posix}/{filename}".strip("/")
-            if ignore.match_file(rel_path):
-                continue
-            if match_spec.match_file(rel_path):
-                results.append(rel_path)
-                if len(results) >= limit:
-                    limit_hit = True
-                    return sorted(results), limit_hit
-    return sorted(results), limit_hit
+                    return True
+            if is_dir and await _walk(child, rel_path):
+                return True
+        return False
+
+    root_is_dir = await file_ops.is_dir(root)
+    if not root_is_dir:
+        name = os.path.basename(root)
+        if match_spec.match_file(name):
+            return [name], False
+        return [], False
+    limit_hit = await _walk(root, "")
+    return results, limit_hit
 
 
 def _compile_pattern(pattern: str) -> pathspec.GitIgnoreSpec:
@@ -227,20 +133,22 @@ def _compile_pattern(pattern: str) -> pathspec.GitIgnoreSpec:
     return pathspec.GitIgnoreSpec.from_lines([expanded.lstrip("/")])
 
 
-def _ignore_spec(root: str, extra: list[str]) -> pathspec.PathSpec:
-    return pathspec.GitIgnoreSpec.from_lines(load_gitignore_patterns(root, extra=extra))
+async def _ignore_spec(
+    file_ops: FileOperations,
+    root: str,
+    extra: list[str],
+) -> pathspec.PathSpec:
+    patterns = await load_gitignore_patterns_from_file_ops(
+        file_ops,
+        root,
+        extra=extra,
+    )
+    return pathspec.GitIgnoreSpec.from_lines(patterns)
 
 
-def _normalize_custom_paths(paths: list[str], root: str) -> list[str]:
-    normalized: list[str] = []
-    for value in paths:
-        if os.path.isabs(value):
-            rel = os.path.relpath(value, root)
-        else:
-            rel = value
-        normalized.append(rel.replace(os.sep, "/"))
-    return normalized
+def _coerce_file_ops(api: ExtensionAPI, candidate: Any) -> FileOperations:
+    return candidate if candidate is not None else api.get_operations().file
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    api.register_tool(_FindTool(api.cwd, config.get("ops")))
+    api.register_tool(_FindTool(api.cwd, _coerce_file_ops(api, config.get("file_ops"))))
