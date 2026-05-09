@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from agentm.core.abi.project_layout import ProjectLayout
 
 
-def artifacts_dir_for(cwd: Path, root_session_id: str) -> Path:
-    return cwd / ".agentm" / "artifacts" / root_session_id
+def artifacts_dir_for(layout: "ProjectLayout", root_session_id: str) -> Path:
+    """Return the artifacts directory for ``root_session_id`` under ``layout``."""
+
+    return layout.artifacts_root(root_session_id)
 
 
 def find_metadata_files(artifacts_dir: Path, artifact_id: str) -> list[Path]:
@@ -32,12 +37,12 @@ def scan_artifact_metadata(artifacts_dir: Path) -> list[dict[str, Any]]:
 
 def list_artifacts_for_task(
     *,
-    cwd: Path,
+    layout: "ProjectLayout",
     root_session_id: str,
     task_id: str,
 ) -> list[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
-    for meta in scan_artifact_metadata(artifacts_dir_for(cwd, root_session_id)):
+    for meta in scan_artifact_metadata(artifacts_dir_for(layout, root_session_id)):
         created_by = meta.get("created_by")
         if not isinstance(created_by, dict):
             continue

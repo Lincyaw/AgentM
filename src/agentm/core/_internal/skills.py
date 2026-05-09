@@ -209,6 +209,7 @@ def load_skills(
     agent_dir: str,
     skill_paths: list[str] | tuple[str, ...] = (),
     include_defaults: bool = True,
+    project_skill_dirs: list[str] | tuple[str, ...] | None = None,
     max_name_length: int = DEFAULT_MAX_NAME_LENGTH,
     max_description_length: int = DEFAULT_MAX_DESCRIPTION_LENGTH,
 ) -> tuple[list[SkillRecord], list[SkillDiagnostic]]:
@@ -252,15 +253,22 @@ def load_skills(
                 max_description_length=max_description_length,
             )
         )
-        add_batch(
-            *_load_skills_from_dir(
+        if project_skill_dirs is None:
+            project_dirs: tuple[str, ...] = (
                 os.path.join(cwd, ".agentm", "skills"),
-                "project",
-                include_root_files=True,
-                max_name_length=max_name_length,
-                max_description_length=max_description_length,
             )
-        )
+        else:
+            project_dirs = tuple(project_skill_dirs)
+        for project_dir in project_dirs:
+            add_batch(
+                *_load_skills_from_dir(
+                    project_dir,
+                    "project",
+                    include_root_files=True,
+                    max_name_length=max_name_length,
+                    max_description_length=max_description_length,
+                )
+            )
 
     for raw_path in skill_paths:
         resolved_path = _normalize_path(raw_path, cwd)

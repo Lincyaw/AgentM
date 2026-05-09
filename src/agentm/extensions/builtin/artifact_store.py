@@ -74,6 +74,7 @@ MANIFEST = ExtensionManifest(
 @dataclass(slots=True)
 class _StoreContext:
     cwd: Path
+    layout: Any
     session_id: str
     root_session_id: str
     task_id: str | None
@@ -82,7 +83,7 @@ class _StoreContext:
 
     @property
     def artifacts_dir(self) -> Path:
-        return artifacts_dir_for(self.cwd, self.root_session_id)
+        return artifacts_dir_for(self.layout, self.root_session_id)
 
 
 class ArtifactStore:
@@ -91,6 +92,7 @@ class ArtifactStore:
         root_session_id = str(config.get("root_session_id") or api.session_id)
         self._ctx = _StoreContext(
             cwd=Path(api.cwd),
+            layout=api.get_project_layout(),
             session_id=api.session_id,
             root_session_id=root_session_id,
             task_id=_maybe_str(config.get("task_id")),

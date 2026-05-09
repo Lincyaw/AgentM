@@ -544,15 +544,18 @@ class _ExtensionAPIImpl:
             child_session_factory or _NoopChildSessionFactory()
         )
         self._operations = operations or _default_local_operations(cwd=cwd)
-        self._skills = skills_service or default_skills_service()
-        self._prompt_templates = (
-            prompt_templates_service or default_prompt_templates_service()
-        )
-        self._catalog = catalog_service or default_catalog_service()
-        self._compaction = compaction_service or default_compaction_service()
         self._project_layout: ProjectLayout = (
             project_layout or default_project_layout(cwd)
         )
+        self._skills = skills_service or default_skills_service(
+            self._project_layout
+        )
+        self._prompt_templates = (
+            prompt_templates_service
+            or default_prompt_templates_service(self._project_layout)
+        )
+        self._catalog = catalog_service or default_catalog_service()
+        self._compaction = compaction_service or default_compaction_service()
         self._resource_writer = resource_writer or GitBackedResourceWriter(
             cwd=cwd,
             session_id=session_id,
