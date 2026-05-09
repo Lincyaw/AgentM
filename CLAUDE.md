@@ -18,8 +18,7 @@ boundary contract in `.claude/designs/pluggable-architecture.md`.
 
 ```bash
 uv sync                                # install deps
-uv run agentm "<prompt>"               # full mode (loads general_purpose scenario)
-uv run agentm --minimal "<prompt>"     # recovery floor (stdlib tools only)
+uv run agentm "<prompt>"               # full mode (auto-discovers builtin atoms)
 uv run pytest                          # run tests (excludes nested workspaces, ui)
 uv run pytest -m ui                    # Textual TUI tests (opt-in)
 uv run ruff check src/                 # lint

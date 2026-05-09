@@ -192,31 +192,21 @@ final_messages = await session.prompt("explain core/abi/loop.py")
 await session.shutdown()
 ```
 
-### Minimal mode (recovery floor)
+### Recovery floor
+
+When the autonomy layer is broken (a corrupted atom, a regressing
+scenario, a harness bug), use `--no-extensions` to drive the kernel
+without any atoms loaded — the agent still launches with provider +
+loop and can be steered toward diagnosis:
 
 ```bash
-uv run agentm --minimal "list files in src/"               # all 4 stdlib tools
-uv run agentm --minimal --tools read_file,bash "..."       # subset
-uv run agentm --minimal --tools "" "summarize this idea"   # chat-only
+uv run agentm --no-extensions "explain core/abi/loop.py"
 ```
 
-Minimal mode bypasses the harness and extensions entirely — it drives
-`AgentLoop` directly with stdlib-backed tools (`read_file`, `write_file`,
-`bash`, `list_dir`). The dependency cone is exactly
-`core/abi` + `core/lib` + `llm` + stdlib. **Use it when something above
-core is broken** (a corrupted atom, a regressing scenario, a harness bug):
-the agent still launches, and you can give it instructions to diagnose
-and fix the autonomy layer.
-
-```python
-from agentm.minimal import run_minimal
-
-final = await run_minimal(
-    prompt="explain core/abi/loop.py",
-    model="claude-sonnet-4-6",
-    tool_names=["read_file"],
-)
-```
+The dependency cone in this mode is `core/abi` + `core/lib` + `llm` +
+harness. No tool environment, no skills, no observability — exactly the
+"core alone yields a usable agent" floor described in
+`.claude/designs/self-modifiable-architecture.md`.
 
 Every full-mode feature (skills, prompt templates, compaction, observability,
 permission gates, ...) is opt-in through a scenario recipe or extension config —
