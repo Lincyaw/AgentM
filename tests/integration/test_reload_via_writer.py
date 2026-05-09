@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agentm.core.abi import AssistantMessage, TextContent
+from agentm.core.abi import AssistantMessage, TextContent, ToolResult
 from agentm.core.abi.messages import ToolResultBlock, ToolResultMessage, UserMessage
 from agentm.core._internal.catalog.manifest import reload_manifest
 from agentm.harness.resource_loader import InMemoryResourceLoader
@@ -49,6 +49,11 @@ def install(api, config):
         ),
     )
 '''
+
+
+def _as_tool_result(result: object) -> ToolResult:
+    assert isinstance(result, ToolResult)
+    return result
 
 
 def _tool_result_text(message: UserMessage | AssistantMessage | ToolResultMessage) -> str:
@@ -608,7 +613,7 @@ async def test_install_then_unload_roundtrip_is_visible_to_running_session(
 
         # 2. The newly installed tool is live on the session.
         echo = next(t for t in session.tools if t.name == "echo_helper")
-        result = await echo.execute({"msg": "hello"})
+        result = _as_tool_result(await echo.execute({"msg": "hello"}))
         assert result.is_error is False
         assert result.content[0].text == "hello!"  # type: ignore[union-attr]
 
@@ -671,6 +676,7 @@ from agentm.core.abi import (
     Model,
     TextContent,
     ToolCallBlock,
+    ToolResult,
 )
 from agentm.harness.extension import ProviderConfig
 
@@ -833,7 +839,10 @@ async def test_install_atom_in_turn_n_is_dispatchable_in_turn_n_plus_one(
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),
-            extensions=[("_agentm_contrib__tool_catalog", {})],
+            extensions=[
+                ("contrib.extensions.tool_catalog.browse", {}),
+                ("contrib.extensions.tool_catalog.mutate", {}),
+            ],
             provider=(f"{pkg}.provider", {}),
             resource_loader=InMemoryResourceLoader(),
         )

@@ -74,7 +74,8 @@ class StreamFn(Protocol):
 ```
 
 - Pure boundary: takes provider-shaped messages, returns events.
-- Default implementations live in `agentm-llm` per provider.
+- Default implementations live in `agentm-llm` per provider; provider-internal stream assembly is shared by `agentm.llm._common.StreamAccumulator`, so new providers supply only event mapping plus a `ToolSpecAdapter`.
+- Tool-call argument parse failures stay observable as typed stream/bus events (`ToolCallArgsParseError`) while preserving the kernel invariant that `ToolCallBlock.arguments` is a parsed dict.
 - Extensions register additional providers via `register_provider(name, ProviderConfig)`. The harness chooses the active registration through the `ProviderResolver` port; the default `LastRegisteredWins` resolver preserves insertion-order behavior.
 - **Crucial**: `StreamFn` is the only point that touches a real LLM API. The agent loop has zero hard-coded provider knowledge.
 
@@ -106,8 +107,9 @@ class Tool(Protocol):                 # what the loop sees
 
 class FileOperations(Protocol):       # the environment port
     async def read_file(self, path: str) -> bytes: ...
-    async def write_file(self, path: str, content: bytes) -> None: ...
-    async def access(self, path: str) -> None: ...
+    async def access(self, path: str) -> bool: ...
+    async def is_dir(self, path: str) -> bool: ...
+    async def list_dir(self, path: str) -> list[str]: ...
 
 class BashOperations(Protocol):
     async def exec(self, cmd, cwd, *, on_data, signal, timeout, env) -> ExecResult: ...
@@ -116,6 +118,16 @@ class BashOperations(Protocol):
 - `ToolDefinition` is the harness/UI-facing record.
 - `Tool` is the bare execution interface used by the agent loop.
 - `XxxOperations` is the **smallest possible port** for swapping environments (local FS → SSH → sandbox → in-memory). It is replaceable by harness/session construction, not by an atom-level `register_operations` hook.
+
+**File IO seam decision (issue #89)**: AgentM uses the hybrid seam. Read-only
+file tools (`read`, `grep`, `find`, `ls`) consume `api.get_operations().file`;
+write tools (`write`, `edit`) consume `api.get_resource_writer()`. The split is
+intentional: `FileOperations` is the environment read port, while
+`ResourceWriter` is the mutation chokepoint that enforces managed-resource
+versioning and constitution-path rejection. Scenario authors that need to
+redirect reads override `FileOperations`; scenario authors that need to redirect
+or audit writes override `ResourceWriter`. Atoms must not call both seams for one
+write path.
 
 **Why three layers**: the "what" (definition), "how-to-call" (Tool), and "where-it-runs" (Operations) vary independently. Pi proves it: their `read.ts` tool body is unchanged whether running locally or over SSH; only `ReadOperations` is swapped.
 
