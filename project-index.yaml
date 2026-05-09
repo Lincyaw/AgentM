@@ -160,8 +160,10 @@ requirements:
       - path: pyproject.toml
     tests:
       - path: tests/unit/contrib/test_cc_extension_package.py
+      - path: tests/integration/test_cc_extension_cli.py
       - path: contrib/scenarios/rca/tests/test_rca_orchestrator_setup.py
     docs:
+      - path: CHANGELOG.md
       - path: README.md
       - path: core-manifest.yaml
       - path: .claude/designs/extension-as-scenario.md
