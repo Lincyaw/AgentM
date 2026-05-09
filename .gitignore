@@ -39,3 +39,6 @@ trajectory.jsonl
 
 # Subagent worktrees
 .claude/worktrees/
+
+# Local datasets (downloaded benchmarks; large)
+datasets/

@@ -1,0 +1,27 @@
+# Single-agent rca eval config — 100-case run on top of the smoke A/B baseline.
+# Run with:
+#   uv run rca llm-eval run contrib/scenarios/rca_single/eval/config_100.yaml \
+#     -a agentm -l 100 --ak scenario=rca_single
+
+exp_id: "agentm-rca-single-100"
+agent_type: "agentm"
+model_name: "Doubao-Seed-2.0-pro"
+
+data:
+  dataset: "RCABench"
+  type: "single"
+  question_field: "question"
+  gt_field: "answer"
+  tags: ["openrca2-lite"]
+
+source_path: "/home/ddq/AoyangSpace/dataset/rca"
+source_path_pattern: "{source_path}/{source}"
+
+concurrency: 5
+judge_concurrency: 5
+
+judge_model:
+  model_provider:
+    type: "chat.completions"
+    model: "Doubao-Seed-2.0-pro"
+    api_format: "anthropic"
