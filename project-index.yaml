@@ -162,9 +162,10 @@ requirements:
       - path: tests/unit/contrib/test_cc_extension_package.py
       - path: contrib/scenarios/rca/tests/test_rca_orchestrator_setup.py
     docs:
+      - path: README.md
+      - path: core-manifest.yaml
       - path: .claude/designs/extension-as-scenario.md
       - path: .claude/designs/self-modifiable-architecture.md
       - path: .claude/tasks/2026-05-09-issue-100-cc-package.md
     depends_on:
       - REQ-086-atom-rework-infra
-
