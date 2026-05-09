@@ -158,6 +158,17 @@ _PARAMETERS: dict[str, Any] = {
                 "candidates/<id>.json under the target scenario."
             ),
         },
+        "baseline_fingerprint": {
+            "type": ["string", "null"],
+            "description": (
+                "B-10: optional ``git rev-parse HEAD`` (or HEAD -- <path>) "
+                "captured by the tuner before its baseline eval. When "
+                "present, the atom re-runs ``git rev-parse HEAD -- "
+                "<change_spec.path>`` at activate time and rejects with "
+                "``stale_baseline`` if the file moved since baseline. "
+                "Absent = legacy single-tuner flow, no check."
+            ),
+        },
     },
     "required": [
         "target",
@@ -364,6 +375,47 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             }
             atom_in_session = False
             tier = 1
+
+        # B-10: optional baseline_fingerprint check. The tuner can pass the
+        # ``git rev-parse HEAD -- <path>`` SHA captured before its baseline
+        # eval; we re-run rev-parse here and reject with ``stale_baseline``
+        # if the file moved (a different tuner committed in between).
+        # Recorded as ``kind="stale_baseline"`` — operator-error class,
+        # NOT a gate ``rejected`` (must not feed the B-9 stop counter).
+        baseline_fp_arg = args.get("baseline_fingerprint")
+        if (
+            decision in {"activate", "merge"}
+            and isinstance(baseline_fp_arg, str)
+            and baseline_fp_arg
+        ):
+            current_fp = _git_head_sha_for_path(
+                loaded.get("source_path") if isinstance(loaded, dict) else None
+            )
+            if current_fp is not None and current_fp != baseline_fp_arg:
+                decisions_path = _decisions_path(cwd, target_scenario)
+                stale_record = {
+                    "at": time.time(),
+                    "kind": "stale_baseline",
+                    "scenario": target_scenario,
+                    "atom": target_atom,
+                    "tier": tier,
+                    "rationale": rationale,
+                    "change_spec": change_spec,
+                    "decision": decision,
+                    "evidence": {
+                        "baseline_run": baseline_id,
+                        "proposed_run": proposed_id,
+                        "baseline_fingerprint": baseline_fp_arg,
+                        "current_fingerprint": current_fp,
+                    },
+                    "by": "tool_propose_change",
+                }
+                _append_decision_record(decisions_path, stale_record)
+                return _error(
+                    f"stale_baseline: file changed since baseline eval "
+                    f"(was {baseline_fp_arg}, now {current_fp}); re-run "
+                    f"tool_eval_run before activating"
+                )
 
         # Tier-2 gate: refuse to auto-activate. Decision record still written
         # so the operator can manually approve later.
@@ -757,6 +809,45 @@ def _write_cross_session(
         return True, old_hash, new_hash, None
     except Exception as exc:  # noqa: BLE001
         return False, None, None, str(exc)
+
+
+def _git_head_sha_for_path(source_path: str | None) -> str | None:
+    """B-10: return ``git rev-parse HEAD`` for the repo containing
+    ``source_path``. Returns None when git is unavailable, the file is
+    not in a repo, or the rev-parse fails — the caller treats None as
+    "skip the check" (we can't enforce what we can't measure, and
+    erroring out would break non-git sandboxes).
+
+    We use bare ``HEAD`` (the repo HEAD) rather than ``HEAD -- <path>``
+    because the latter is the SHA of the last commit touching the file,
+    which only changes when the file changes. Either is sufficient for
+    detecting concurrent-tuner conflicts; HEAD is cheaper and matches
+    what tuners conventionally capture.
+    """
+    import subprocess
+
+    if not source_path:
+        return None
+    p = Path(source_path)
+    repo_dir = p.parent if p.is_file() else p
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-parse", "HEAD", "--", str(p)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    # ``git rev-parse HEAD -- <path>`` prints HEAD then the path on
+    # separate lines. Take the first non-empty line.
+    for line in result.stdout.splitlines():
+        s = line.strip()
+        if s and len(s) >= 7 and all(c in "0123456789abcdef" for c in s):
+            return s
+    return None
 
 
 def _decisions_path(cwd: Path, scenario: str) -> Path:
