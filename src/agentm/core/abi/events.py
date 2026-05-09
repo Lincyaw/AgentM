@@ -314,6 +314,39 @@ class ToolResultEvent(Event):
     result: ToolResult
 
 
+@dataclass(slots=True, frozen=True)
+class ToolErrorEvent(Event):
+    """Emitted by the loop when a tool call cannot produce a normal result.
+
+    The kernel does NOT synthesize the user-visible English error string
+    itself; it constructs an empty :class:`ToolResult` (``is_error=True``,
+    ``content=[]``) and emits this event so a default builtin atom
+    (``tool_error_messages``) can write the human-readable text into
+    ``result.content``. Extensions that want to localize, re-format, or
+    suppress error text replace the default atom on this channel.
+
+    The ``result`` field is the same instance the loop will pass through
+    :class:`ToolResultEvent` and into the message trajectory; handlers
+    mutate ``result.content`` in place. The dataclass itself is frozen
+    because the *kind* / *tool_name* / *reason* are facts the kernel has
+    already decided; they describe the cause, not a recommendation.
+
+    ``kind`` discriminates the three kernel-imposed error paths:
+    - ``"execution_failed"`` — ``tool.execute`` raised an exception.
+    - ``"unknown_tool"``     — the assistant called a name not in the
+                                 tool index.
+    - ``"blocked"``          — a ``tool_call`` handler returned
+                                 ``{"block": True, "reason": ...}``.
+    """
+
+    CHANNEL: ClassVar[Literal["tool_error"]] = "tool_error"
+    kind: Literal["execution_failed", "unknown_tool", "blocked"]
+    tool_name: str
+    reason: str
+    result: ToolResult
+    exception: BaseException | None = None
+
+
 @dataclass(slots=True)
 class BeforeSendToLlmEvent(Event):
     """Fires after context handlers have rewritten messages, immediately
@@ -845,6 +878,7 @@ __all__ = [
     "StreamDeltaEvent",
     "TerminationCause",
     "ToolCallEvent",
+    "ToolErrorEvent",
     "ToolResultEvent",
     "ToolTerminated",
     "TurnEndEvent",
