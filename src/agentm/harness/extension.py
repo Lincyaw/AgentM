@@ -205,6 +205,22 @@ class CommandSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class CommandDispatchResult:
+    """Result returned by the command-dispatch service facade."""
+
+    handled: bool
+    owner: str | None
+    messages: list[AgentMessage]
+
+
+@runtime_checkable
+class CommandDispatcher(Protocol):
+    """Typed atom-facing port for registered slash command execution."""
+
+    async def dispatch(self, name: str, args: str) -> CommandDispatchResult: ...
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderConfig:
     """LLM provider registration record.
 
@@ -918,6 +934,8 @@ def load_extension(
 
 __all__ = [
     "AtomInfo",
+    "CommandDispatcher",
+    "CommandDispatchResult",
     "CommandSpec",
     "ExtensionAPI",
     "ExtensionFactory",

@@ -16,6 +16,7 @@ from agentm.harness.extension import ProviderConfig
 from agentm.harness.resource_writer import GitBackedResourceWriter
 from agentm.harness.session import AgentSession
 from agentm.harness.session_manager import InMemorySessionManager
+from agentm.harness.session_runtime import SessionRuntime
 
 
 SHA_TOOL_LS = "a" * 40
@@ -116,7 +117,11 @@ def test_index_trace_attributes_to_all_loaded_atoms(tmp_path: Path) -> None:
         "trace-atoms",
         [
             _fingerprint_record(
-                {"tool_ls": SHA_TOOL_LS, "tool_find": SHA_FIND, "observability": SHA_OBS}
+                {
+                    "tool_ls": SHA_TOOL_LS,
+                    "tool_find": SHA_FIND,
+                    "observability": SHA_OBS,
+                }
             ),
             _record("agent_end", {"stop_reason": "stop"}),
         ],
@@ -319,12 +324,11 @@ async def test_shutdown_indexes_observability_trace_when_present(
         apis={},
         on_provider_changed=lambda: None,
     )
-    session = AgentSession(
-        cwd=str(tmp_path),
+    runtime = SessionRuntime(
         bus=bus,
         session_manager=InMemorySessionManager(cwd=str(tmp_path)),
-        resource_loader=None,  # type: ignore[arg-type]
-        loop=None,  # type: ignore[arg-type]
+        resource_loader=cast("Any", None),
+        loop=cast("Any", None),
         active_provider_box={
             "value": ProviderConfig(
                 stream_fn=cast("Any", lambda *_args, **_kwargs: None),
@@ -339,6 +343,10 @@ async def test_shutdown_indexes_observability_trace_when_present(
         apis={},
         reloader=reloader,
         pending_user_messages=[],
+    )
+    session = AgentSession(
+        cwd=str(tmp_path),
+        runtime=runtime,
         session_id="session-123",
         parent_bus=None,
         parent_session_id=None,
