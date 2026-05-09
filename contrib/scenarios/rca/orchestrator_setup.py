@@ -4,7 +4,7 @@ Two responsibilities:
 
 1. Load ``prompts/orchestrator.md`` from this scenario directory and prepend
    it to the parent agent's system prompt at ``before_agent_start``.
-2. Discover ``agents/*.md`` persona files, append an ``<available_agents>``
+2. Discover ``agents/*.md`` persona files, append a sub-agent availability
    advisory block to the orchestrator prompt, and answer ``resolve_subagent``
    so :mod:`agentm.extensions.builtin.sub_agent` can inject persona metadata
    into child sessions when ``dispatch_agent`` is called.
@@ -12,10 +12,10 @@ Two responsibilities:
 
 from __future__ import annotations
 
-import html
 from pathlib import Path
 from typing import Any
 
+from agentm.core.lib.available_agents import available_agents_block
 from agentm.core.lib.frontmatter import parse_frontmatter
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import BeforeAgentStartEvent, SessionReadyEvent
@@ -126,7 +126,7 @@ def _load_agent_contract_block() -> str:
     ``mysql-database`` when ground truth is ``mysql``.
     """
     try:
-        from rcabench_platform.v3.sdk.evaluation.v2 import (
+        from rcabench_platform.v3.sdk.evaluation.v2 import (  # type: ignore[import-not-found]
             get_agent_contract_prompt,
         )
     except ImportError:
@@ -144,40 +144,6 @@ def _load_agent_contract_block() -> str:
     )
 
 
-def _format_available_agents_block(personas: dict[str, dict[str, Any]]) -> str:
-    if not personas:
-        return ""
-    lines = ["<available_agents>"]
-    for name in sorted(personas):
-        persona = personas[name]
-        lines.append("  <agent>")
-        lines.append(f"    <name>{html.escape(name)}</name>")
-        description = str(persona.get("description", "")).strip()
-        if description:
-            lines.append(
-                f"    <description>{html.escape(description)}</description>"
-            )
-        tools = persona.get("tools")
-        if isinstance(tools, list) and tools:
-            lines.append(f"    <tools>{html.escape(', '.join(tools))}</tools>")
-        input_schema = persona.get("input_schema")
-        if isinstance(input_schema, dict):
-            lines.append("    <input_schema advisory=\"true\">")
-            required = input_schema.get("required")
-            optional = input_schema.get("optional")
-            if isinstance(required, list) and required:
-                lines.append(
-                    f"      <required>{html.escape(', '.join(str(x) for x in required))}</required>"
-                )
-            if isinstance(optional, list) and optional:
-                lines.append(
-                    f"      <optional>{html.escape(', '.join(str(x) for x in optional))}</optional>"
-                )
-            lines.append("    </input_schema>")
-        lines.append("  </agent>")
-    lines.append("</available_agents>")
-    return "\n".join(lines)
-
 
 async def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
     cached_system = ""
@@ -189,7 +155,7 @@ async def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
         if _PROMPT_PATH.is_file():
             prompt = _PROMPT_PATH.read_text(encoding="utf-8").strip()
         personas = _load_personas()
-        available_agents = _format_available_agents_block(personas)
+        available_agents = available_agents_block(personas, include_input_schema=True)
         contract_block = _load_agent_contract_block()
         sections = [s for s in (prompt, available_agents, contract_block) if s]
         cached_system = "\n\n".join(sections)
