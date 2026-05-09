@@ -1,7 +1,7 @@
 ---
 confidence: fact
-description: 'Shared operational guide for RCA worker agents (scout, deep_analyze,
-  verify): data sources, tooling quickstart, service profile protocol, tool discipline,
+description: 'Shared operational guide for RCA agents (orchestrator and critic):
+  data sources, tooling quickstart, service profile protocol, tool discipline,
   and anomaly definition.'
 name: rca-worker-guide
 tags:

@@ -31,7 +31,7 @@ MANIFEST = ExtensionManifest(
     name="orchestrator_setup",
     description=(
         "Inject the rca orchestrator prompt, advertise worker personas, and "
-        "resolve scout / verify / deep_analyze metadata for sub_agent."
+        "resolve critic metadata for sub_agent."
     ),
     registers=(
         "event:session_ready",
