@@ -25,10 +25,18 @@ The reframe has three load-bearing consequences:
 
 ## 2. Layer Position
 
-The loop sits entirely in the autonomy layer; the constitution is unchanged.
+The loop is autonomy-layer in **policy** but requires two narrow constitution
+additions — both mechanism, neither encodes scenario policy:
+
+1. `.agentm/decisions/**` added to `is_constitution_path` (one-line manifest update) so only `tool_propose_change` can write the audit log.
+2. `AgentSessionConfig.atom_source_overrides: dict[str, str]` field for §6.3 hypothesis testing (lets a sub-session run with a proposed atom source without mutating the working tree).
+
+No new event types, no new ExtensionAPI surface beyond the three atoms.
 
 ```
 constitution    core + reload primitive + ResourceWriter + observability sink
+                + atom_source_overrides hook (§6.3)
+                + .agentm/decisions/** write-protect
    ↑
 autonomy        atoms + production scenarios
                 eval/             ← NEW: pinned task suite per scenario
@@ -64,6 +72,7 @@ scenarios/<name>/eval/
 id: rca_disk_full
 description: User reports disk-full alert; root cause is log-rotation regression.
 task_class: rca
+holdout: false                  # ← if true: scored separately, NOT in primary gate
 input:
   user_message: |
     The /var partition on app-server-3 is full. The on-call alert fired at
@@ -80,7 +89,9 @@ budget:
   max_cost_usd: 0.50
 ```
 
-`expected` is intentionally loose — keyword-presence and tool-presence checks. Strict golden trajectories are too brittle for LLM-driven scenarios; the grader does the semantic work.
+`expected` is intentionally loose — keyword-presence and tool-presence checks. Strict golden trajectories are too brittle for LLM-driven scenarios; the grader does the semantic work. The `expected.*` schema is grader-consumed (not framework-fixed): `format_fix` uses `value: <dict>`; `rca` uses `root_cause_keywords: [...]`; rubric graders may use free-text. The framework only routes the dict through to `grade()`.
+
+**Holdout discipline.** Mark 10–25% of tasks as `holdout: true`. Holdout tasks are scored separately from the primary metric and are **not** part of the activation gate (§8) — they are the structural Goodhart guard. A tuner that overfits non-holdout tasks will show a primary improvement *and* a holdout regression; the gate catches the latter without trusting the tuner's prompt.
 
 ### 3.2 Grader
 
@@ -198,9 +209,11 @@ Loop:
   3. Form hypothesis: "atom X is causing Y" (e.g. "tool_read truncates parquet
      at the wrong boundary, losing the error window")
   4. tool_eval_run(fingerprint=current) → baseline eval scores
-  5. Propose a mutation: read the atom's source via get_source_at, design a
-     focused change, call tool_propose_change(...) with the new source
-  6. tool_eval_run(fingerprint=proposed) → proposed eval scores
+  5. Propose a mutation: read the atom's source via the `read` tool (atoms
+     live at contrib/scenarios/<target>/<atom>.py), design a focused change,
+     prepare the new source as a string
+  6. tool_eval_run(eval_dir=..., atom_source_overrides={"tool_read": <new_src>})
+     → proposed eval scores
   7. If proposed dominates baseline on primary AND no guard regression →
      ACTIVATE. Else → record reason, try a different angle next iteration.
 
@@ -250,12 +263,46 @@ If `target_atom.tier == 2` (`permission`, `cost_budget`, `tool_filter`, `llm_com
 
 ### 6.3 Eval execution mechanism
 
-`tool_eval_run` must execute the eval suite under a *proposed* fingerprint without permanently mutating the working tree. Two implementation strategies, decided at the Plan stage:
+`tool_eval_run` must execute the eval suite under a *proposed* fingerprint
+without permanently mutating the working tree. **Decision: sub-session source
+overrides.** `AgentSessionConfig` carries `atom_source_overrides: dict[str, str]`
+(atom name → new source text); eval spawns one child session per task with those
+overrides applied. The override is realized by the same synthetic-module pattern
+already used by `AtomReloader._AGENT_ATOM_MODULE_PREFIX` — proven mechanism, no
+new git ref to clean up.
 
-- **Sub-session with source overrides**: extend `AgentSession.create` to accept `atom_source_overrides: dict[str, bytes]`; eval spawns one child session per task with those overrides applied. No filesystem mutation. Cleanest, but adds API surface.
-- **Shadow worktree**: the new source is committed to a transient git ref (`refs/agentm/eval/<run_id>`); eval session is configured with that ref as its source root. Reuses `git-backed-versioning.md` machinery. No new API surface, but more git state to clean up.
+Shadow-worktree-via-`refs/agentm/eval/<run_id>` was considered and rejected for
+MVP: it adds cross-process git state to clean up and serializes poorly with
+concurrent tuners. Kept as a Phase-2 option if remote eval execution is ever
+needed.
 
-Both are viable; the choice belongs in the implementation Plan, not this design.
+### 6.4 Cross-session atom resolution
+
+The tuner is a separate scenario from its target — it does **NOT** load the
+production atoms. `target_atom` resolution therefore takes one of two paths:
+
+1. **In-session** (rare; only when tuner happens to compose the same atom):
+   `api.list_atoms()` finds it; `api.reload_atom()` swaps it. Transactional,
+   rollback on install failure.
+2. **Cross-session** (the normal case): `tool_propose_change` walks
+   `contrib/scenarios/<target_scenario>/` parsing each `.py` for a
+   `MANIFEST.name` match, then writes the file directly via `ResourceWriter`.
+   The next production session loads the new version on startup. "Activation
+   = git commit" per [git-backed-versioning.md](git-backed-versioning.md).
+
+The two paths produce different identifiers — record both:
+
+- `kind: "in_session_reload" | "file_commit"` distinguishes them.
+- `from_sha` / `to_sha` are the **file's** post-commit git SHAs for `file_commit`
+  (with `from_sha=null` for new files); for `in_session_reload` they are the
+  in-memory atom hashes.
+- `atom_in_session: bool` is recorded so operators can see which path produced
+  the activation without re-deriving it from `kind`.
+
+`target_scenario` in `tuner/manifest.yaml::tool_propose_change.config` names the
+scenario whose `contrib/scenarios/<name>/` is searched for `target_atom` and
+where decisions land (`.agentm/decisions/<target_scenario>/`). The tuner does
+not load the target's manifest — only its filesystem layout matters.
 
 ---
 
@@ -266,9 +313,16 @@ Both are viable; the choice belongs in the implementation Plan, not this design.
 ```jsonc
 {"at":"2026-05-10T...","kind":"activate","scenario":"rca","atom":"tool_read",
  "from_sha":"abc123","to_sha":"def456",
+ "atom_in_session":false,                          // §6.4: cross-session activation
+ "reload_kind":"file_commit",                      // "file_commit" | "in_session_reload"
+ "gate_bypass":[],                                 // [] | ["threshold"] | ["noise_floor"] | ["threshold","noise_floor"]
  "evidence":{"baseline_run":"er_001","proposed_run":"er_002",
              "primary_metric":"root_cause_hit_rate",
-             "baseline":0.62,"proposed":0.78},
+             "baseline":0.62,"proposed":0.78,
+             "delta":0.16,
+             "noise_threshold_2sigma":0.08,        // §8: independent statistical floor
+             "holdout_baseline":0.60,
+             "holdout_proposed":0.58},
  "rationale":"v2 reads parquet via row-group boundaries instead of byte offset; ...",
  "by":"rca_tuner@<tuner_session_id>"}
 ```
@@ -279,15 +333,47 @@ Append-only. The `.agentm/decisions/` directory is constitution-write-protected 
 
 ## 8. Promotion Policy
 
-Minimal MVP policy:
+Minimal MVP policy. `activate` requires **all four** to hold simultaneously:
 
-- **activate** requires: primary metric improvement ≥ `threshold_relative` AND every guard metric within `± guard_tolerance` of baseline.
-- Both knobs declared per-scenario in `tuner/manifest.yaml::promotion`. Defaults `threshold_relative=0.05`, `guard_tolerance=0.10`.
-- `decision="exploratory"` overrides the gate but tags the decision record so production regression watching is stricter.
+1. **Economic floor**: `delta >= threshold_relative * baseline` on primary
+   (default `threshold_relative=0.05`).
+2. **Statistical floor (independent)**: `delta > 2 · sqrt(stderr_b² + stderr_p²)`
+   on primary. The 2σ check is **independent of `threshold_relative`** —
+   even if `threshold_relative=0.0`, an underpowered eval cannot activate.
+   Stderr is computed from per-task scores across the eval suite (Bernoulli
+   under deterministic graders; sample variance under rubric graders).
+3. **Guard envelope**: every declared guard metric within `±guard_tolerance`
+   of baseline (default `0.10`).
+4. **Holdout non-regression**: `holdout_score_proposed >= holdout_score_baseline - guard_tolerance`.
+   Holdout tasks (§3 `holdout: true`) are **not** part of the primary signal —
+   they are the structural Goodhart guard. Tuner cannot "see" the holdout score
+   improving as a target; it can only fail by regressing on it.
 
-Policy is evaluated by `tool_propose_change` itself (reads the eval results, applies the threshold). Putting it in the atom keeps it auditable — the activation gate is one function, callable from tests, greppable.
+`decision="exploratory"` skips floors 1 and 3 only — **2σ and holdout
+non-regression still apply**. This is so "I want production signal on an
+underpowered eval" remains a legitimate channel without becoming a hole through
+which random changes get activated. The decision record's `gate_bypass` field
+lists exactly which floors were waived (`["threshold"]` for normal exploratory;
+ill-formed if it lists `noise_floor` or `holdout`).
 
-Post-MVP: Goodhart guard (auto-rollback if production traffic shows guard regression after activation), multi-objective Pareto frontier reasoning, etc. Defer until activations actually happen regularly.
+`decision="rollback"` is always allowed — rollback is the safe direction by
+construction.
+
+Why the noise floor is non-negotiable: with `samples_per_task=1` on 8 tasks,
+a +12.5% delta can correspond to a single coin flip. Real-LLM bring-up of
+`format_fix` produced exactly this case; the 2σ check correctly rejected it
+(see `.claude/tasks/2026-05-08-per-task-evolution-real-llm-validation.md`,
+Run 2). The `exploratory` channel exists precisely to handle "I know the eval
+is underpowered but want to ship it anyway" without dressing it up as evidence.
+
+Policy is evaluated by `tool_propose_change` itself (reads the eval results,
+applies the four floors). Putting it in the atom keeps it auditable — the
+activation gate is one function, callable from tests, greppable.
+
+Post-MVP: Goodhart guard via production traffic (auto-rollback if guard
+regresses after activation), multi-objective Pareto frontier reasoning,
+structural enforcement of `stop_after_no_improvement` (today the tuner's
+honor system). Defer until activations actually happen regularly.
 
 ---
 
@@ -296,11 +382,11 @@ Post-MVP: Goodhart guard (auto-rollback if production traffic shows guard regres
 1. User runs `agentm tune rca --iterations 3`. Harness loads `scenarios/rca/tuner/manifest.yaml`.
 2. Tuner agent calls `tool_query_traces(task_class="rca", n=50)`. Receives 50 trace summaries.
 3. Tuner reads 8 traces, notices: 60% failed at parquet read step (`truncated_at_boundary` error). Hypothesizes `tool_read` truncates parquet wrongly.
-4. Tuner calls `tool_eval_run(fingerprint=current)`. Result: `er_baseline`, `root_cause_hit_rate=0.62`.
-5. Tuner reads `tool_read.py` source via `read`, designs new version using row-group boundaries.
-6. Tuner calls `tool_eval_run(fingerprint={tool_read: <proposed_sha>})`. Result: `er_proposed`, `root_cause_hit_rate=0.78`.
-7. Tuner calls `tool_propose_change(target_atom="tool_read", new_source=..., rationale=..., eval_run_baseline="er_baseline", eval_run_proposed="er_proposed", decision="activate")`.
-8. `tool_propose_change` checks threshold (0.78 / 0.62 = 1.26 ≥ 1.05 ✓), guard metrics (refusal_rate Δ within ±10% ✓), tier (1 ✓). Calls `api.reload_atom`. Decision record written.
+4. Tuner calls `tool_eval_run(eval_dir="contrib/scenarios/rca/eval")`. Result: `er_baseline`, `root_cause_hit_rate=0.62`, `stderr=0.04`, `holdout=0.60`.
+5. Tuner reads `contrib/scenarios/rca/tool_read.py` source via the `read` tool, designs new version using row-group boundaries.
+6. Tuner calls `tool_eval_run(eval_dir=..., atom_source_overrides={"tool_read": <new_source_text>})`. Result: `er_proposed`, `root_cause_hit_rate=0.78`, `stderr=0.04`, `holdout=0.58`.
+7. Tuner calls `tool_propose_change(target_atom="tool_read", new_source=<text>, rationale=..., eval_run_baseline="er_baseline", eval_run_proposed="er_proposed", decision="activate")`.
+8. `tool_propose_change` checks all four floors: threshold (delta=0.16, 0.16/0.62=26% ≥ 5% ✓), 2σ (0.16 > 2·√(0.04²+0.04²)=0.113 ✓), guard envelope (refusal_rate Δ within ±10% ✓), holdout (0.58 ≥ 0.60 − 0.10 = 0.50 ✓), tier (1 ✓). §6.4 cross-session path: writes `contrib/scenarios/rca/tool_read.py` via `ResourceWriter` (auto-commit). Decision record written with `kind:"file_commit", atom_in_session:false, gate_bypass:[]`.
 9. Next production RCA session loads new `tool_read`. Observability records both old and new fingerprint runs in JSONL — future tuning iterations have richer data.
 
 ---
@@ -314,7 +400,7 @@ Post-MVP: Goodhart guard (auto-rollback if production traffic shows guard regres
 | P3 | `tool_propose_change` called without `eval_run_proposed` | Rejected; "evidence missing" |
 | P4 | Eval run on a fingerprint that requires a constitution-layer change | Rejected by ResourceWriter; tuner sees the rejection and skips |
 | P5 | Activate succeeds; subsequent production traffic shows primary regression beyond guard | (Phase 2) auto-rollback; today the tuner sees it next iteration via `tool_query_traces` |
-| P6 | Two tuners (RCA + plan_mode) propose simultaneous mutations to a *shared* atom (`tool_read`) | Writes serialize through ResourceWriter's git layer; the second proposal sees the first's change in its baseline fingerprint and must re-eval |
+| P6 | Two tuners (RCA + plan_mode) propose simultaneous mutations to a *shared* atom (`tool_read`) | Writes serialize through ResourceWriter's git layer. MVP: detection is honor-system — tuner prompts must call `tool_query_traces` (or re-eval) before each iteration to refresh baseline. Phase 2: `tool_propose_change` accepts `baseline_fingerprint` and validates `git rev-parse HEAD -- <atom_file>` is unchanged before activating; otherwise rejects with `stale_baseline` requiring re-eval. |
 | P7 | Eval run hits `max_turns` budget on a task | Task graded as failed at that task; eval result still comparable across versions |
 | P8 | Tuner tries to mutate `permission` (tier-2) | Decision recorded as `pending_human_approval`; reload not applied |
 | P9 | Production trace has `task_class="rca"`; `tool_query_traces` filter returns it | Confirmed (round-trip test) |
@@ -326,12 +412,15 @@ Post-MVP: Goodhart guard (auto-rollback if production traffic shows guard regres
 
 ### MVP
 
-- Eval set scaffolding: directory layout, task YAML schema, rubric grader.
+- Eval set scaffolding: directory layout, task YAML schema (with `holdout` flag), rubric grader.
 - `task_class` populated on `session.fingerprint` (production + eval).
+- `AgentSessionConfig.atom_source_overrides` field (§6.3, sub-session hypothesis testing).
+- `.agentm/decisions/**` write-protect (one-line `core-manifest.yaml` update).
 - Three new tier-1 atoms: `tool_query_traces`, `tool_eval_run`, `tool_propose_change`.
-- One worked tuner: `scenarios/rca/tuner/`.
-- Decision records under `.agentm/decisions/`.
-- Threshold-based promotion policy.
+- One worked tuner — start with `format_fix` as the toy lab, then `scenarios/rca/tuner/`.
+- Decision records under `.agentm/decisions/<scenario>/`.
+- Four-floor promotion gate (§8): threshold + 2σ + guards + holdout non-regression.
+- Per-eval-run cost ceiling: `max_cost_usd` knob in `tuner/manifest.yaml::tool_eval_run.config` (closes §13's "cost of eval runs" — it's a budget field, not a research question).
 
 ### Phase 2
 
@@ -363,7 +452,6 @@ Post-MVP: Goodhart guard (auto-rollback if production traffic shows guard regres
 ## 13. Open Questions
 
 - **Cross-task atom transfer**: when the RCA tuner evolves `tool_read`, should `plan_mode` automatically inherit it, eval it, and decide independently? MVP says no (each scenario manages its own atom versions via fingerprint). Phase 2 may relax.
-- **Tuner concurrency**: two tuners on different scenarios both want to mutate a shared atom. ResourceWriter serializes writes, but the eval results are computed on different baselines — the second tuner's "baseline" already includes the first's change. Does this need explicit locking? MVP says no (the race is observable in `decisions.jsonl`; fix lazily).
-- **Eval set drift**: eval tasks themselves may need to evolve as the user's real workload evolves. There is no anti-Goodhart on the eval set itself. Out of scope; user's responsibility.
-- **Cost of eval runs**: an eval suite of 50 tasks × 2 fingerprints per tuning iteration × several iterations per cycle is expensive. Quantify before MVP ships. May need a "smoke" eval (3–5 tasks) for fast gating, with the full suite reserved for the activation decision.
-- **Eval execution mechanism** (§6.3): sub-session source overrides vs. shadow worktree. Plan-stage decision.
+- **Tuner concurrency**: two tuners on different scenarios both want to mutate a shared atom. MVP detection is honor-system (tuner re-queries before each iteration); Phase 2 adds structural enforcement via `baseline_fingerprint` validation in `tool_propose_change` (see §10 P6).
+- **Eval set drift**: eval tasks themselves may need to evolve as the user's real workload evolves. The `holdout` flag (§3) catches *within-suite* Goodhart but does not catch *suite-vs-production* drift. Out of scope for this design; user's responsibility, mitigated by occasional refresh of the eval suite from production traces.
+- **Sample correlation under deterministic graders**: with a deterministic grader and a stable LLM, repeated samples on the same input are highly correlated; `samples_per_task > 1` does **not** divide stderr by √N. Stderr formula in `tool_eval_run` assumes IID across (task, sample) — accurate for rubric graders, optimistic for programmatic ones. Treat each task as one Bernoulli trial under deterministic graders; scale by adding more *tasks*, not more samples. Worth a more careful treatment before scaling to non-deterministic graders.
