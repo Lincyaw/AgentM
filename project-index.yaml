@@ -402,3 +402,38 @@ requirements:
       - path: .claude/tasks/2026-05-09-issue-96-cli-provider-session-seams.md
     depends_on:
       - REQ-094-ai-provider-descriptor-registry
+  - id: REQ-097-shared-presenter-rendering
+    title: CLI and TUI consume shared headless render helpers
+    description: >
+      CLI and Textual presenters must render assistant text, tool results,
+      final token summaries, and optional cost estimates through shared core.lib
+      helpers and ExtensionAPI services instead of duplicate block walks,
+      atom-private pricing imports, or tool-name-specific diff heuristics.
+      Tool result formatting must be declared as tool metadata or registered via
+      a tool renderer service hook, and missing cost services must degrade to a
+      token-only summary.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/lib/render.py
+      - path: src/agentm/core/abi/services.py
+      - path: src/agentm/core/abi/tool.py
+      - path: src/agentm/harness/extension.py
+      - path: src/agentm/harness/session.py
+      - path: src/agentm/harness/session_factory.py
+      - path: src/agentm/harness/session_runtime.py
+      - path: src/agentm/cli.py
+      - path: src/agentm/modes/textual_app.py
+      - path: src/agentm/extensions/builtin/cost_budget.py
+      - path: src/agentm/extensions/builtin/tool_edit.py
+    tests:
+      - path: tests/unit/core/lib/test_render.py
+      - path: tests/unit/extensions/test_issue_88_hygiene.py
+      - path: tests/integration/test_textual_tui.py
+      - path: tests/unit/core/catalog/test_indexer.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-97-shared-rendering.md
+    depends_on:
+      - REQ-086-atom-rework-infra

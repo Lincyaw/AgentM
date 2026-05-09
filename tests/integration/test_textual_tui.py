@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -29,7 +29,9 @@ from agentm.harness import AgentSessionConfig
 from agentm.harness.events import ChildSessionEndEvent, ChildSessionStartEvent, ExtensionInstallEvent
 from agentm.modes.textual_app import (
     AgentMApp,
+    PromptInput,
     SlashCommandEntry,
+    StatusHeader,
     ToolCallBlock,
     TurnContainer,
 )
@@ -57,6 +59,15 @@ class _FakeSession:
         self._scripts = scripts
         self.prompts: list[str] = []
         self.shutdown_called = False
+        self.tool_renderers: dict[str, Any] = {}
+
+    def find_tool(self, name: str) -> Any | None:
+        del name
+        return None
+
+    def get_service(self, name: str) -> Any | None:
+        del name
+        return None
 
     async def prompt(
         self,
@@ -273,7 +284,7 @@ async def test_T1_golden_path_updates_stream_and_status(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.press("h", "i", "enter")
         await pilot.pause(0.2)
-        status = app.query_one("#status-header")
+        status = cast(StatusHeader, app.query_one("#status-header"))
         assert "turn 1" in status.current_text
         assert "in 128" in status.current_text
         assert "out 32" in status.current_text
@@ -289,7 +300,7 @@ async def test_T2_escape_soft_cancels_and_keeps_partial_text(tmp_path: Path) -> 
         await pilot.pause(0.1)
         await pilot.press("escape")
         await pilot.pause(0.1)
-        status = app.query_one("#status-header")
+        status = cast(StatusHeader, app.query_one("#status-header"))
         assert "idle" in status.current_text
         assert app._last_assistant_text == "partial"
         assert app._prompt_task is None
@@ -318,7 +329,7 @@ async def test_T4_slash_palette_opens_filters_and_inserts_selection(tmp_path: Pa
         assert app.screen_stack[-1].__class__.__name__ == "CommandPaletteScreen"
         await pilot.press("h", "e", "l", "p", "enter")
         await pilot.pause(0.05)
-        prompt = app.query_one("#prompt-input")
+        prompt = cast(PromptInput, app.query_one("#prompt-input"))
         assert prompt.text == "/help"
 
 
@@ -343,7 +354,7 @@ async def test_T6_shift_enter_inserts_newline(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.press("h", "i", "shift+enter", "t", "h", "e", "r", "e")
         await pilot.pause(0.05)
-        prompt = app.query_one("#prompt-input")
+        prompt = cast(PromptInput, app.query_one("#prompt-input"))
         assert prompt.text == "hi\nthere"
 
 
@@ -576,10 +587,12 @@ async def test_T9_cli_dispatches_to_textual_runner(
 
     rc = await _run_interactive(
         scenario=None,
+        extra_extensions=[],
         no_extensions=True,
         no_skills=True,
         no_prompt_templates=True,
         tool_allowlist=None,
+        provider="fake",
         model="fake-model",
         cwd="/tmp/textual",
     )

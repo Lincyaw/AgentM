@@ -105,6 +105,7 @@ class AgentSession:
         self._providers = runtime.providers
         self._renderers = runtime.renderers
         self._apis = runtime.apis
+        self._services = runtime.services
         self._reloader = runtime.reloader
         self._extension_api = (
             next(iter(runtime.apis.values())) if runtime.apis else None
@@ -164,6 +165,23 @@ class AgentSession:
     @property
     def cwd(self) -> str:
         return self._cwd
+
+    def get_service(self, name: str) -> Any | None:
+        return self._services.get(name)
+
+    @property
+    def tool_renderers(self) -> dict[str, Any]:
+        return {
+            name.removeprefix("tool:"): renderer
+            for name, renderer in self._renderers.items()
+            if name.startswith("tool:")
+        }
+
+    def find_tool(self, name: str) -> Tool | None:
+        for tool in self._tools:
+            if tool.name == name:
+                return tool
+        return None
 
     @property
     def session_id(self) -> str:

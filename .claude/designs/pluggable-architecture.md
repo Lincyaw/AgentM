@@ -409,3 +409,20 @@ Quick lookup for implementation. All paths relative to `pi-mono/packages/`.
    c. Implement minimal `EventBus` + 6 critical events (`input`, `before_agent_start`, `tool_call`, `tool_result`, `context`, `agent_end`).
    d. Refactor existing `AgentRuntime` to be the harness orchestrator.
 3. Acceptance: a smoke-test scenario that swaps `StreamFn` (mock LLM) and constructs the session with `BashOperations` (in-memory FS) without modifying core.
+
+### 5.1 Shared Presenter Rendering
+
+CLI and Textual remain presenters, so shared display decisions live in pure
+`agentm.core.lib.render` helpers rather than in either mode. The helpers produce
+headless strings and token reports only; they do not import Rich, Textual,
+harness, filesystem state, or pricing tables.
+
+Cost is a policy concern exposed as an ExtensionAPI service named
+`cost_query`. The `cost_budget` atom owns pricing configuration and registers a
+service with `estimate(usage, provider=...)`; presenters call it opportunistically
+and fall back to token-only output when the service is absent.
+
+Tool-result display uses tool-declared metadata (`metadata["result_format"]`) or
+`api.register_tool_renderer(tool_name, renderer)`. Presenters may choose their
+surface-specific rich widget for a returned format, but they must not infer atom
+identity from exact tool-name strings.
