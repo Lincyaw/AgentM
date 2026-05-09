@@ -27,6 +27,18 @@ from typing import Any, Protocol, runtime_checkable
 from .messages import ImageContent, TextContent
 
 
+# --- File-op metadata vocabulary -------------------------------------------
+#
+# Tools that touch the filesystem self-describe via ``metadata[FILE_OP_METADATA_KEY]``
+# so kernel subsystems (notably the compaction engine) can route file
+# operations without hard-coding tool names. See issue #76.
+
+FILE_OP_METADATA_KEY = "file_op"
+FILE_OP_READ = "read"
+FILE_OP_WRITE = "write"
+FILE_OP_EDIT = "edit"
+
+
 @dataclass(slots=True)
 class ToolResult:
     """The result of one tool execution.
@@ -117,6 +129,10 @@ class Tool(Protocol):
 
 
 __all__ = [
+    "FILE_OP_EDIT",
+    "FILE_OP_METADATA_KEY",
+    "FILE_OP_READ",
+    "FILE_OP_WRITE",
     "Tool",
     "ToolContinue",
     "ToolOutcome",

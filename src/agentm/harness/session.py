@@ -507,6 +507,22 @@ class AgentSession:
             to_load = []
         elif config.extensions:
             to_load = list(config.extensions)
+            # Kernel-floor atom (issue #76): the compaction engine needs a
+            # populated ENTRY_MATERIALIZERS registry plus its prompt bodies
+            # to materialise session entries. When the caller supplies an
+            # explicit extensions= list (the most common test pattern), we
+            # still prepend ``compaction_prompts`` so ``build_session_context``
+            # works out of the box. Callers that explicitly include the atom
+            # keep their first-position overrides — we skip the prepend.
+            if not any(
+                module_path.endswith(".compaction_prompts")
+                or module_path == "agentm.extensions.builtin.compaction_prompts"
+                for module_path, _ in to_load
+            ):
+                to_load.insert(
+                    0,
+                    ("agentm.extensions.builtin.compaction_prompts", {}),
+                )
         elif config.scenario is not None:
             from agentm.extensions.loader import (
                 ScenarioLoadError,

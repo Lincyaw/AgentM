@@ -23,6 +23,18 @@ from agentm.core.abi.messages import AgentMessage
 CURRENT_SESSION_VERSION = 1
 
 
+# Canonical kernel-defined entry-type strings. The kernel itself recognises
+# only these three structural categories; any additional ``entry.type``
+# values come from atoms and are routed exclusively through
+# :data:`ENTRY_MATERIALIZERS`. Centralising the literals here removes the
+# scattered string-literal entry-type comparisons that issue #76 calls out:
+# the kernel still tests by category, but there are no scenario-name string
+# literals embedded in branching logic.
+ENTRY_TYPE_MESSAGE = "message"
+ENTRY_TYPE_BRANCH_SUMMARY = "branch_summary"
+ENTRY_TYPE_COMPACTION = "compaction"
+
+
 @dataclass(frozen=True, slots=True)
 class SessionHeader:
     type: str
@@ -66,7 +78,7 @@ def _now() -> float:
 
 def message_entry(msg: AgentMessage, parent_id: str | None) -> SessionEntry:
     return SessionEntry(
-        type="message",
+        type=ENTRY_TYPE_MESSAGE,
         id=_new_id(),
         parent_id=parent_id,
         timestamp=_now(),
@@ -82,7 +94,7 @@ def branch_summary_entry(
     details: Any = None,
 ) -> SessionEntry:
     return SessionEntry(
-        type="branch_summary",
+        type=ENTRY_TYPE_BRANCH_SUMMARY,
         id=_new_id(),
         parent_id=parent_id,
         timestamp=_now(),
@@ -96,7 +108,7 @@ def branch_summary_entry(
 
 def compaction_entry(payload: Any, parent_id: str | None) -> SessionEntry:
     return SessionEntry(
-        type="compaction",
+        type=ENTRY_TYPE_COMPACTION,
         id=_new_id(),
         parent_id=parent_id,
         timestamp=_now(),
@@ -117,8 +129,33 @@ class SessionTree(Protocol):
     def get_entry(self, entry_id: str) -> SessionEntry | None: ...
 
 
+@runtime_checkable
+class EntryMaterializer(Protocol):
+    """Convert a ``SessionEntry`` into an ``AgentMessage`` (or ``None``).
+
+    Atoms register one materializer per ``entry.type`` they own. Both
+    ``compaction.get_message_from_entry`` and the harness's
+    ``build_session_context`` consult the global ``ENTRY_MATERIALIZERS``
+    registry so the kernel does not branch on string-literal entry types.
+    """
+
+    def to_message(self, entry: SessionEntry) -> AgentMessage | None: ...
+
+
+# Mutable module-level registry — populated at atom install time. Keys are
+# ``entry.type`` strings; values are objects satisfying ``EntryMaterializer``.
+# Empty by default; atoms (typically ``extensions.builtin.compaction_prompts``)
+# register defaults for ``"message"`` / ``"branch_summary"`` / ``"compaction"``.
+ENTRY_MATERIALIZERS: dict[str, EntryMaterializer] = {}
+
+
 __all__ = [
     "CURRENT_SESSION_VERSION",
+    "ENTRY_MATERIALIZERS",
+    "ENTRY_TYPE_BRANCH_SUMMARY",
+    "ENTRY_TYPE_COMPACTION",
+    "ENTRY_TYPE_MESSAGE",
+    "EntryMaterializer",
     "SessionContext",
     "SessionEntry",
     "SessionHeader",

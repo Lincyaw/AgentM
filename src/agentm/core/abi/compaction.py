@@ -45,8 +45,24 @@ class ContextUsageEstimate:
     last_usage_index: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class CompactionPrompts:
+    """Prompt bodies threaded into the compaction engine by callers.
+
+    Atoms resolve these via ``api.prompt_templates.get_prompt(...)`` and
+    pass an instance into ``api.compaction.compact``. Empty strings are
+    legal — they represent the graceful-degradation path used when the
+    ``compaction_prompts`` atom is not installed.
+    """
+
+    summarization_system: str
+    update_summarization: str
+    turn_prefix_summarization: str
+
+
 __all__ = [
     "CompactionDetails",
+    "CompactionPrompts",
     "CompactionResult",
     "CompactionSettings",
     "ContextUsageEstimate",
