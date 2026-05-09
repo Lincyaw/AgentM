@@ -250,6 +250,7 @@ requirements:
       - path: src/agentm/harness/extension.py
     tests:
       - path: tests/unit/extensions/test_issue_102_rca_cleanup.py
+      - path: tests/integration/test_issue_102_rca_cli.py
       - path: contrib/scenarios/rca/tests/test_rca_orchestrator_setup.py
       - path: tests/integration/test_sub_agent_lifecycle.py
       - path: tests/integration/test_sub_agent_budgets.py

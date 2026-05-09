@@ -20,9 +20,14 @@ why the official contract is absent.
 - Removed scenario-local lazy wrappers and mounted `agentm_rca.tools.*` directly.
 - Moved RCA SQL row/token limits to package defaults with rationale comments;
   scenario manifests only override `exclude`.
+- Added a CLI+sandbox+observability E2E that runs the RCA manifest, dispatches
+  the critic, and verifies parent and critic `query_sql` calls see the same
+  inherited DuckDB config in the trace. The test stubs optional RCA vendor
+  modules so the fail-stop position is the AgentM config-inheritance boundary,
+  not third-party dependency availability.
 
 ## Verification
 
 - `uv run ruff check <changed-files>`
 - `uv run mypy <changed-files>`
-- `uv run pytest --tb=short tests/unit/extensions/test_issue_102_rca_cleanup.py contrib/scenarios/rca/tests/test_rca_orchestrator_setup.py tests/integration/test_sub_agent_lifecycle.py tests/integration/test_sub_agent_budgets.py`
+- `uv run pytest --tb=short tests/unit/extensions/test_issue_102_rca_cleanup.py tests/integration/test_issue_102_rca_cli.py contrib/scenarios/rca/tests/test_rca_orchestrator_setup.py tests/integration/test_sub_agent_lifecycle.py tests/integration/test_sub_agent_budgets.py`
