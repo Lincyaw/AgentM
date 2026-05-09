@@ -62,6 +62,39 @@ async def test_add_observer_fires_for_every_emitted_channel(tmp_path: Any) -> No
 
 
 @pytest.mark.asyncio
+async def test_add_observer_object_receives_handler_and_end_hooks(tmp_path: Any) -> None:
+    api = _api(tmp_path)
+    calls: list[tuple[str, str]] = []
+
+    class Observer:
+        def on_emit_start(self, channel: str, event: Any) -> None:
+            del event
+            calls.append(("start", channel))
+
+        def on_handler_done(
+            self,
+            channel: str,
+            handler: Any,
+            result: Any,
+            error: BaseException | None,
+            duration_ns: int,
+        ) -> None:
+            del handler, error, duration_ns
+            calls.append(("handler", f"{channel}:{result}"))
+
+        def on_emit_end(self, channel: str, event: Any, results: list[Any]) -> None:
+            del event
+            calls.append(("end", f"{channel}:{len(results)}"))
+
+    api.on("alpha", lambda _event: "ok")
+    api.add_observer(Observer())
+
+    await api.events.emit("alpha", {"value": 1})
+
+    assert calls == [("start", "alpha"), ("handler", "alpha:ok"), ("end", "alpha:1")]
+
+
+@pytest.mark.asyncio
 async def test_spawn_child_session_accepts_dataclass_dict_and_kwargs(tmp_path: Any) -> None:
     received: list[Any] = []
 

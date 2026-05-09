@@ -140,7 +140,10 @@ parent dispatches a child, the child's `artifact_store` install reads the
 parent's `root_session_id` from the dispatch metadata and opens the
 **same directory**. All descendants of one root share one folder.
 
-This is the only piece of cross-session coupling. Everything else is
+The live store object is per session and is exposed through
+`ExtensionAPI.set_service("artifact_store", store)`. Peer extensions resolve it
+with `api.get_service("artifact_store")`; there is no module-level session
+registry. This is the only piece of cross-session coupling. Everything else is
 read/write of files in a known directory.
 
 ## Tools registered (one extension)

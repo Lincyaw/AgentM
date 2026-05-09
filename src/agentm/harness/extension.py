@@ -26,7 +26,7 @@ from agentm.core.abi import (
     EventBus,
     LoopConfig,
     Model,
-    ObserverCallback,
+    ObserverRegistration,
     StreamFn,
     Tool,
 )
@@ -352,7 +352,7 @@ class ExtensionAPI(Protocol):
         *,
         priority: int = BusPriority.NORMAL,
     ) -> Unsubscribe: ...
-    def add_observer(self, callback: ObserverCallback) -> Unsubscribe: ...
+    def add_observer(self, callback: ObserverRegistration) -> Unsubscribe: ...
 
     # --- Registrations ------------------------------------------------------
     def register_tool(self, tool: Tool) -> None: ...
@@ -598,7 +598,7 @@ class _ExtensionAPIImpl:
         self._assert_active()
         return self._bus.on(channel, handler, priority=priority)
 
-    def add_observer(self, callback: ObserverCallback) -> Unsubscribe:
+    def add_observer(self, callback: ObserverRegistration) -> Unsubscribe:
         self._assert_active()
         return self._bus.add_observer(callback)
 
