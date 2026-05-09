@@ -210,7 +210,7 @@ def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResu
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(payload, default=str))],
         is_error=is_error,
-        details=payload,
+        extras=payload,
     )
 
 

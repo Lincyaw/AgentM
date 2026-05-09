@@ -87,7 +87,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         return ToolResult(
             content=new_content,
             is_error=event.result.is_error,
-            details=event.result.details,
+            extras=event.result.extras,
         )
 
     api.on(ToolResultEvent.CHANNEL, _on_tool_result)

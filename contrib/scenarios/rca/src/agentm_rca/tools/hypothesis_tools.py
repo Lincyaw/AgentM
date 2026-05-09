@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from agentm.core.abi.messages import TextContent
-from agentm.core.abi.tool import FunctionTool, ToolResult
+from agentm.core.abi import FunctionTool, ToolResult
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.builtin.artifact_store import (
     ArtifactStore,
@@ -161,7 +161,7 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
         )
         if artifact_listing.is_error:
             return artifact_listing
-        artifacts = artifact_listing.details.get("artifacts", [])
+        artifacts = artifact_listing.extras.get("artifacts", [])
         if not isinstance(artifacts, list):
             return _err("artifact store returned an invalid listing")
         hid_filter = _maybe_str(args.get("id"))

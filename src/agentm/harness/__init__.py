@@ -6,6 +6,7 @@ points are listed below.
 
 from __future__ import annotations
 
+from agentm.core.abi import FunctionTool
 from agentm.harness import events
 from agentm.harness.extension import (
     CommandSpec,
@@ -54,6 +55,7 @@ __all__ = [
     "DefaultResourceLoader",
     "ExtensionAPI",
     "ExtensionLoadError",
+    "FunctionTool",
     "InMemoryResourceLoader",
     "InMemorySessionManager",
     "JsonlSessionManager",
