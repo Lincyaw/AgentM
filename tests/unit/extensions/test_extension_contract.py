@@ -335,3 +335,25 @@ def test_D5_unrelated_fstring_dynamic_import_allowed(tmp_path: Path) -> None:
     )
 
     assert not any(issue.rule == "11.4.D5-dynamic-agentm-import" for issue in issues)
+
+
+def test_D6_concrete_harness_service_isinstance_rejected(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        "def install(api, config):\n"
+        "    isinstance(writer, GitBackedResourceWriter)\n",
+    )
+
+    assert any(issue.rule == "11.4.D6-harness-service-downcast" for issue in issues)
+
+
+def test_D6_local_class_isinstance_allowed(tmp_path: Path) -> None:
+    issues = _validate_source(
+        tmp_path,
+        "class MyAtomClass:\n"
+        "    pass\n"
+        "def install(api, config):\n"
+        "    isinstance(x, MyAtomClass)\n",
+    )
+
+    assert not any(issue.rule == "11.4.D6-harness-service-downcast" for issue in issues)

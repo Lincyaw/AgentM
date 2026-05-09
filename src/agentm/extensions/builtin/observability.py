@@ -49,7 +49,6 @@ from agentm.harness.extension import (
     Handler,
     current_installing_extension,
 )
-from agentm.harness.resource_writer import GitBackedResourceWriter
 
 logger = logging.getLogger(__name__)
 
@@ -650,9 +649,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             source_path = inspect.getsourcefile(entry.module)
             if source_path is None:
                 continue
-            version_hash: str | None = None
-            if isinstance(writer, GitBackedResourceWriter):
-                version_hash = writer.current_version_for_path(source_path)
+            version_hash = writer.current_version_for_path(source_path)
             if version_hash is None:
                 source = inspect.getsource(entry.module)
                 version_hash = api.catalog.compute_atom_hash(source)
