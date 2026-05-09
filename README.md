@@ -126,8 +126,8 @@ synthetic module prefix `_agentm_contrib__<name>`. Subdirectories
 deliberately skips; scenarios load them explicitly via
 `available_inherited_extensions`.
 
-- `cc_agents`, `cc_commands`, `cc_plugins` (under `contrib/extensions/cc/`)
-  — Claude Code compatibility
+- `contrib.extensions.cc` (package under `contrib/extensions/cc/`)
+  — Claude Code compatibility atoms (`agents`, `commands`, `plugins`)
   (read `~/.claude/{agents,commands,plugins}` and surface them through
   the generic `resources_discover` event).
 
