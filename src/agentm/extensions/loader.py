@@ -292,40 +292,65 @@ def _validate_module(source: str, index: int, module: str) -> None:
         )
 
 
+def _find_project_root(start: Path) -> Path | None:
+    """Locate the topmost project root above ``start``.
+
+    A scenario directory may itself be a workspace member with its own
+    ``pyproject.toml`` (e.g. ``contrib/scenarios/rca/pyproject.toml``),
+    so the *first* marker hit when ascending is not the project root —
+    it's the nested member. We want the outermost project so
+    cross-package references like ``contrib.extensions.<name>`` resolve.
+
+    Strategy: prefer the directory containing ``.git`` if any ancestor
+    has one (the canonical monorepo boundary); otherwise return the
+    highest ancestor that still carries a Python project marker.
+    """
+
+    project_markers = ("pyproject.toml", "setup.py", "setup.cfg")
+    highest_with_marker: Path | None = None
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+        if any((candidate / m).is_file() for m in project_markers):
+            highest_with_marker = candidate
+    return highest_with_marker
+
+
+def _prepend_sys_path(path: Path) -> None:
+    text = str(path)
+    if text not in sys.path:
+        sys.path.insert(0, text)
+
+
 def _ensure_scenario_import_roots(scenario_dir: Path) -> None:
-    """Make editable-style scenario packages importable during manifest load.
+    """Make in-tree scenario packages importable during manifest load.
 
-    Scenario manifests are allowed to reference modules from
-    ``<scenario_dir>/src`` (for example ``agentm_rca.tools.duckdb_sql``).
-    Tests and local dev runs load manifests straight from the repo checkout
-    without first installing each scenario package, so the loader needs to
-    surface that source root on ``sys.path`` before validating imports.
+    Scenario manifests reference modules in two ways:
 
-    Manifests may also reference ``contrib.extensions.<name>`` (per the
-    CLAUDE.md layout: nested packages under ``<root>/contrib/extensions/``).
-    Entry-point scripts run with ``sys.path[0]`` pointing at the venv
-    bin dir, not the project root, so ``import contrib`` raises
-    ``ModuleNotFoundError`` and the whole manifest load fails — silently
-    leaving the session with zero tools. Detect the canonical
-    ``<root>/contrib/scenarios/<name>/`` layout and add ``<root>`` so
-    those references resolve.
+    1. ``<scenario_dir>/src/<pkg>`` — editable-style scenario packages
+       (e.g. ``agentm_rca.tools.duckdb_sql`` under
+       ``contrib/scenarios/rca/src/agentm_rca/``).
+    2. ``<project_root>/<pkg>`` — peer packages from the same checkout
+       (e.g. ``contrib.extensions.rcabench_contract`` under
+       ``contrib/extensions/``).
+
+    Entry-point scripts launch with ``sys.path[0]`` pointing at the
+    venv bin dir rather than the project root, so neither path is on
+    ``sys.path`` by default and ``import`` fails — silently, because
+    the caller in ``session_factory`` swallows the manifest load error
+    and the session ends up with zero tools. We surface both roots
+    here so the imports resolve regardless of how the process was
+    launched. Project root is located via the standard Python project
+    markers rather than hard-coded directory names.
     """
 
     src_root = scenario_dir / "src"
     if src_root.is_dir():
-        src_str = str(src_root)
-        if src_str not in sys.path:
-            sys.path.insert(0, src_str)
+        _prepend_sys_path(src_root)
 
-    parents = scenario_dir.parents
-    if (
-        len(parents) >= 2
-        and parents[0].name == "scenarios"
-        and parents[1].name == "contrib"
-    ):
-        project_root = str(parents[2])
-        if project_root not in sys.path:
-            sys.path.insert(0, project_root)
+    project_root = _find_project_root(scenario_dir)
+    if project_root is not None:
+        _prepend_sys_path(project_root)
 
 
 def _register_local(
