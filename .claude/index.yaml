@@ -90,7 +90,7 @@ concepts:
     tasks: []
 
   prompt_templates:
-    description: "Filesystem-discovered markdown templates with YAML frontmatter. /<name> args expansion with bash-style placeholders ($1, $@, $ARGUMENTS, ${@:N:L}). Pi-mono port of core/prompt-templates.ts. Includes core/_internal/prompt_templates.py (parser + substituter + loader) and extensions/builtin/prompt_templates.py atom (input-event handler that expands before agent loop runs). Code-registered slash commands win over templates on name collision; non-matching /-prefixed text falls through verbatim."
+    description: "Filesystem-discovered markdown templates with YAML frontmatter. /<name> args expansion with bash-style placeholders ($1, $@, $ARGUMENTS, ${@:N:L}). Pi-mono port of core/prompt-templates.ts. Includes core/_internal/prompt_templates.py (parser + substituter + loader) and extensions/builtin/prompt_templates.py atom (input-event handler that expands before agent loop runs). Code-registered slash commands win over templates on name collision via the slash_commands atom and typed CommandDispatcher service facade; non-matching /-prefixed text falls through verbatim."
     design: "designs/prompt-templates.md"
     related_concepts: [skills, extension_as_scenario, pluggable_architecture]
     plans: []

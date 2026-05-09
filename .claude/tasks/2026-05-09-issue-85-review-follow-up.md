@@ -10,6 +10,9 @@ ordering fix.
 - Slash command input handling now subscribes at `BusPriority.PRE`, so command
   dispatch runs before prompt-template `input` rewrites regardless of atom
   installation order.
+- Slash command execution now crosses a typed `CommandDispatcher` service
+  facade (`src/agentm/harness/command_dispatcher.py`) instead of exposing raw
+  harness registry dictionaries to the atom.
 - Added CLI trajectory coverage for the `/cmd` vs prompt-template collision:
   `tests/integration/test_cli_slash_commands.py` drives `agentm --cwd <sandbox>
   "/ship now"`, then inspects `.agentm/observability/*.jsonl` for
