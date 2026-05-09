@@ -76,6 +76,7 @@ from .stream import (
     TextDelta,
     ThinkingDelta,
     ToolCallArgsDelta,
+    ToolCallArgsParseError,
     ToolCallEnd,
     ToolCallStart,
 )
@@ -165,6 +166,7 @@ __all__ = [
     "TextDelta",
     "ThinkingDelta",
     "ToolCallArgsDelta",
+    "ToolCallArgsParseError",
     "ToolCallEnd",
     "ToolCallStart",
     # termination
