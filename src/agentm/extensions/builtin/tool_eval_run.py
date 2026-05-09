@@ -74,6 +74,13 @@ MANIFEST = ExtensionManifest(
         "properties": {
             "target_scenario": {"type": "string"},
             "eval_dir": {"type": "string"},
+            "max_cost_usd": {
+                "type": "number",
+                "description": (
+                    "Per-tuning-session USD budget. When exceeded, the "
+                    "eval run aborts BETWEEN tasks (never mid-task)."
+                ),
+            },
         },
         "additionalProperties": True,
     },
@@ -129,6 +136,14 @@ _PARAMETERS: dict[str, Any] = {
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     target_scenario = config.get("target_scenario")
     default_eval_dir = config.get("eval_dir")
+    max_cost_usd_raw = config.get("max_cost_usd")
+    max_cost_usd: float | None
+    try:
+        max_cost_usd = (
+            float(max_cost_usd_raw) if max_cost_usd_raw is not None else None
+        )
+    except (TypeError, ValueError):
+        max_cost_usd = None
     cwd = Path(api.cwd)
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
@@ -163,9 +178,23 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         eval_run_id = f"er_{uuid.uuid4().hex[:12]}"
         task_class = _detect_task_class(tasks)
 
+        scenario_key = _scenario_key(target_scenario)
+        budget = _load_budget(cwd, scenario_key)
+        usd_used_in_run = 0.0
+        aborted_due_to_budget = False
+
         per_task_records: list[dict[str, Any]] = []
         feedback_corpus: list[dict[str, Any]] = []
         for task in tasks:
+            # A-5 budget cap: enforced BETWEEN tasks (never mid-task) so
+            # we don't stop a child session in flight. Last-writer-wins
+            # if two eval runs race; B-6 hardens this.
+            if (
+                max_cost_usd is not None
+                and budget["usd_used"] >= max_cost_usd
+            ):
+                aborted_due_to_budget = True
+                break
             task_id = str(task.get("id") or task.get("name") or "unknown")
             grades: list[float] = []
             tool_errors: list[int] = []
@@ -175,6 +204,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             # multiple samples on the same task overwrite earlier module
             # feedback. Documented here so callers don't expect joining.
             module_feedback_union: dict[str, str] = {}
+            task_cost_usd = 0.0
+            task_rollouts = 0
             for sample_idx in range(samples_per_task):
                 outcome = await _run_single_sample(
                     api=api,
@@ -186,6 +217,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     sample_idx=sample_idx,
                     overrides=overrides,
                 )
+                child_session_id = outcome.get("session_id")
+                if isinstance(child_session_id, str) and child_session_id:
+                    task_cost_usd += _read_trace_cost_usd(
+                        cwd, child_session_id
+                    )
+                task_rollouts += 1
                 raw_grade = (
                     grader(task, outcome["final_text"]) if grader else 0.0
                 )
@@ -219,8 +256,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "turns_mean": _mean([float(t) for t in turns_log]),
                     "feedback_texts": feedback_texts,
                     "module_feedback_union": module_feedback_union,
+                    "usd_used": task_cost_usd,
                 }
             )
+            usd_used_in_run += task_cost_usd
+            budget["usd_used"] = budget["usd_used"] + task_cost_usd
+            budget["rollouts_used"] = budget["rollouts_used"] + task_rollouts
+            budget["updated_at"] = time.time()
+            _save_budget(cwd, scenario_key, budget)
 
         primary_scores = [r["grade_mean"] for r in per_task_records]
         primary_stderr = _stderr_of_mean(
@@ -257,6 +300,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             per_task=per_task_records,
             samples_per_task=samples_per_task,
             feedback_corpus=feedback_corpus,
+            usd_used_in_run=usd_used_in_run,
+            aborted_due_to_budget=aborted_due_to_budget,
         )
 
         result = {
@@ -270,6 +315,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "fingerprint": args.get("fingerprint"),
             "per_task": per_task_records,
             "record_path": str(run_path),
+            "usd_used_in_run": usd_used_in_run,
+            "aborted_due_to_budget": aborted_due_to_budget,
         }
         return _ok(json.dumps(result, indent=2))
 
@@ -367,6 +414,7 @@ async def _run_single_sample(
     final_text = ""
     tool_errors = 0
     turns = 0
+    child_session_id: str | None = None
     try:
         child = await api.spawn_child_session(child_config)
     except Exception as exc:  # noqa: BLE001
@@ -374,8 +422,10 @@ async def _run_single_sample(
             "final_text": f"<spawn-failed: {exc}>",
             "tool_errors": 1,
             "turns": 0,
+            "session_id": None,
         }
     try:
+        child_session_id = getattr(child, "session_id", None)
         t0 = time.perf_counter()
         try:
             messages = await child.prompt(user_message)
@@ -384,6 +434,7 @@ async def _run_single_sample(
                 "final_text": f"<prompt-failed: {exc}>",
                 "tool_errors": 1,
                 "turns": 0,
+                "session_id": child_session_id,
             }
         for msg in messages:
             if isinstance(msg, AssistantMessage):
@@ -403,6 +454,7 @@ async def _run_single_sample(
         "final_text": final_text,
         "tool_errors": tool_errors,
         "turns": turns,
+        "session_id": child_session_id,
     }
 
 
@@ -415,6 +467,100 @@ def _extract_user_message(task: dict[str, Any]) -> str:
     if isinstance(task.get("user_message"), str):
         return str(task["user_message"])
     return json.dumps(inp) if inp else ""
+
+
+def _scenario_key(target_scenario: str | None) -> str:
+    """Map ``target_scenario`` (which may be a path or a name) to a stable
+    directory key under ``.agentm/decisions/<key>/``."""
+    if not target_scenario:
+        return "default"
+    p = Path(target_scenario)
+    # If it looks like a path (absolute or contains a separator), use the
+    # basename so the budget lands under a clean directory name.
+    if p.is_absolute() or "/" in target_scenario or "\\" in target_scenario:
+        return p.name or "default"
+    return target_scenario
+
+
+def _budget_path(cwd: Path, scenario_key: str) -> Path:
+    return cwd / ".agentm" / "decisions" / scenario_key / "budget.json"
+
+
+def _load_budget(cwd: Path, scenario_key: str) -> dict[str, Any]:
+    """Load ``budget.json`` for the scenario or return a fresh zeroed
+    record. The file is constitution-protected (.agentm/decisions/** in
+    core-manifest.yaml); only this atom + tool_propose_change write
+    here."""
+    path = _budget_path(cwd, scenario_key)
+    if not path.is_file():
+        return {
+            "scenario": scenario_key,
+            "rollouts_used": 0,
+            "usd_used": 0.0,
+            "updated_at": 0.0,
+        }
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {
+            "scenario": scenario_key,
+            "rollouts_used": 0,
+            "usd_used": 0.0,
+            "updated_at": 0.0,
+        }
+    # Coerce shape — protect against earlier writes from a different code
+    # version.
+    return {
+        "scenario": str(data.get("scenario") or scenario_key),
+        "rollouts_used": int(data.get("rollouts_used") or 0),
+        "usd_used": float(data.get("usd_used") or 0.0),
+        "updated_at": float(data.get("updated_at") or 0.0),
+    }
+
+
+def _save_budget(cwd: Path, scenario_key: str, budget: dict[str, Any]) -> None:
+    """Atomic write via temp + os.replace. Race semantics for concurrent
+    eval runs are last-writer-wins (B-6 hardens this)."""
+    import os
+
+    path = _budget_path(cwd, scenario_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        json.dump(budget, fh, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def _read_trace_cost_usd(cwd: Path, session_id: str) -> float:
+    """Sum ``cost_usd`` across all ``llm.request.end`` records in the
+    child session's observability JSONL. Returns 0.0 if the trace is
+    missing or unreadable — the budget under-counts rather than aborts."""
+    trace_path = cwd / ".agentm" / "observability" / f"{session_id}.jsonl"
+    if not trace_path.is_file():
+        return 0.0
+    total = 0.0
+    try:
+        with trace_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("kind") != "llm.request.end":
+                    continue
+                attrs = rec.get("attributes") or {}
+                cost = attrs.get("cost_usd") if isinstance(attrs, dict) else None
+                if isinstance(cost, (int, float)):
+                    total += float(cost)
+    except OSError:
+        return 0.0
+    return total
 
 
 def _normalize_grade(value: Any) -> GradeResult:
@@ -516,6 +662,8 @@ def _append_run_records(
     per_task: list[dict[str, Any]],
     samples_per_task: int,
     feedback_corpus: list[dict[str, Any]],
+    usd_used_in_run: float,
+    aborted_due_to_budget: bool,
 ) -> None:
     overrides_meta = (
         sorted(atom_source_overrides.keys())
@@ -535,6 +683,8 @@ def _append_run_records(
         "samples_per_task": samples_per_task,
         "task_count": len(per_task),
         "feedback_corpus": feedback_corpus,
+        "usd_used_in_run": usd_used_in_run,
+        "aborted_due_to_budget": aborted_due_to_budget,
         "at": time.time(),
     }
     with path.open("a", encoding="utf-8") as fh:
