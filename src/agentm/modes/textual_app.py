@@ -1280,7 +1280,7 @@ async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
     unsub_register = bus.on(ApiRegisterEvent.CHANNEL, _capture_register)
     unsub_install = bus.on(ExtensionInstallEvent.CHANNEL, _capture_extension_install)
 
-    session_cfg = AgentSessionConfig(**{**config.__dict__, "bus": bus})
+    session_cfg = config.with_bus(bus)
     try:
         session = await AgentSession.create(session_cfg)
     finally:

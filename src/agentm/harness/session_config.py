@@ -9,8 +9,8 @@ canonical case is the ``sub_agent`` builtin going through
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from agentm.core.abi import AgentMessage, EventBus, LoopConfig, ProviderResolver
@@ -89,6 +89,9 @@ class AgentSessionConfig:
     purpose: str = "root"
     """Caller-defined purpose label, e.g. ``"subagent:worker"``;
     surfaces verbatim in :class:`ChildSessionStartEvent`."""
+
+    def with_bus(self, bus: EventBus) -> "AgentSessionConfig":
+        return replace(self, bus=bus)
 
 
 __all__ = ["AgentSessionConfig", "default_child_provider_factory"]

@@ -30,13 +30,13 @@ class ApiProvider(Protocol):
 
     api: Api
 
-    def stream(self, model: Model, context: Any, options: Any | None = None) -> Awaitable[Iterable[Any]]:
-        ...
+    def stream(
+        self, model: Model, context: Any, options: Any | None = None
+    ) -> Awaitable[Iterable[Any]]: ...
 
     def stream_simple(
         self, model: Model, context: Any, options: Any | None = None
-    ) -> Awaitable[Iterable[Any]]:
-        ...
+    ) -> Awaitable[Iterable[Any]]: ...
 
 
 ProviderFactory = Callable[[], ApiProvider]
@@ -44,12 +44,17 @@ ProviderFactory = Callable[[], ApiProvider]
 
 @dataclass(frozen=True, slots=True)
 class ProviderDescriptor:
-    """Single source of truth for a provider's identity and ambient credentials."""
+    """Single source of truth for a provider's CLI and API routing metadata."""
 
     id: str
     api: Api
     env_var_precedence: tuple[str, ...]
     aliases: tuple[str, ...] = ()
+    extension_module: str | None = None
+    default_model: str | None = None
+    base_url_env: str | None = None
+    verify_ssl_env: str | None = None
+    default_query_ticket_env: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,16 +120,73 @@ class ProviderRegistry:
         return source.get(found[0])
 
     def canonical_api(self, api_or_alias: str) -> str:
-        return self._api_aliases.get(_normalize_key(api_or_alias), _normalize_key(api_or_alias))
+        return self._api_aliases.get(
+            _normalize_key(api_or_alias), _normalize_key(api_or_alias)
+        )
+
+    def default_provider(self) -> ProviderDescriptor:
+        descriptors = self.descriptors()
+        if not descriptors:
+            raise KeyError("no providers registered")
+        return descriptors[0]
+
+    def default_model(self, provider: str | None = None) -> str:
+        descriptor = (
+            self.default_provider() if provider is None else self.resolve(provider)
+        )
+        if descriptor.default_model is None:
+            raise KeyError(f"Provider {descriptor.id!r} has no default model")
+        return descriptor.default_model
+
+    def build(
+        self,
+        id_or_alias: str,
+        config: Mapping[str, Any] | None = None,
+        *,
+        env: Mapping[str, str] | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        descriptor = self.resolve(id_or_alias)
+        if descriptor.extension_module is None:
+            raise KeyError(f"Provider {descriptor.id!r} has no CLI extension module")
+        source = os.environ if env is None else env
+        values: dict[str, Any] = dict(config or {})
+        model = values.get("model") or descriptor.default_model
+        if not isinstance(model, str) or not model:
+            raise KeyError(f"Provider {descriptor.id!r} requires a model")
+        values["model"] = model
+        if descriptor.api.startswith("openai") and "name" not in values:
+            values["name"] = descriptor.id
+        if descriptor.base_url_env and source.get(descriptor.base_url_env):
+            values.setdefault("base_url", source[descriptor.base_url_env])
+        if descriptor.default_query_ticket_env and source.get(
+            descriptor.default_query_ticket_env
+        ):
+            values.setdefault(
+                "default_query",
+                {"warpgate-ticket": source[descriptor.default_query_ticket_env]},
+            )
+        if descriptor.verify_ssl_env and not _env_bool(
+            source.get(descriptor.verify_ssl_env), default=True
+        ):
+            values.setdefault("verify_ssl", False)
+        return (descriptor.extension_module, values)
 
 
 def _normalize_key(value: str) -> str:
     return value.strip().lower()
 
 
+def _env_bool(raw: str | None, *, default: bool) -> bool:
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off", "n", "f"}
+
+
 def _unavailable_provider_factory(provider_id: str) -> ProviderFactory:
     def _factory() -> ApiProvider:
-        raise NotImplementedError(f"Provider {provider_id!r} has no built-in implementation")
+        raise NotImplementedError(
+            f"Provider {provider_id!r} has no built-in implementation"
+        )
 
     return _factory
 
@@ -141,12 +203,20 @@ DEFAULT_PROVIDER_DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         id="anthropic",
         api="anthropic-messages",
         env_var_precedence=("ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
+        extension_module="agentm.llm.anthropic",
+        default_model="claude-sonnet-4-6",
+        base_url_env="ANTHROPIC_BASE_URL",
     ),
     ProviderDescriptor(
         id="openai",
         api="openai-responses",
         env_var_precedence=("OPENAI_API_KEY",),
         aliases=("openai-responses",),
+        extension_module="agentm.llm.openai",
+        default_model="gpt-4o",
+        base_url_env="OPENAI_BASE_URL",
+        verify_ssl_env="OPENAI_VERIFY_SSL",
+        default_query_ticket_env="WARPGATE_TICKET",
     ),
     ProviderDescriptor(
         id="amazon-bedrock",
@@ -178,22 +248,40 @@ DEFAULT_PROVIDER_DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         env_var_precedence=("OPENAI_API_KEY",),
         aliases=("codex",),
     ),
-    ProviderDescriptor(id="deepseek", api="openai-chat", env_var_precedence=("DEEPSEEK_API_KEY",)),
+    ProviderDescriptor(
+        id="deepseek", api="openai-chat", env_var_precedence=("DEEPSEEK_API_KEY",)
+    ),
     ProviderDescriptor(
         id="github-copilot",
         api="openai-chat",
         env_var_precedence=("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
         aliases=("copilot",),
     ),
-    ProviderDescriptor(id="xai", api="openai-chat", env_var_precedence=("XAI_API_KEY",)),
-    ProviderDescriptor(id="groq", api="openai-chat", env_var_precedence=("GROQ_API_KEY",)),
-    ProviderDescriptor(id="cerebras", api="openai-chat", env_var_precedence=("CEREBRAS_API_KEY",)),
-    ProviderDescriptor(id="openrouter", api="openai-chat", env_var_precedence=("OPENROUTER_API_KEY",)),
-    ProviderDescriptor(id="mistral", api="openai-chat", env_var_precedence=("MISTRAL_API_KEY",)),
-    ProviderDescriptor(id="huggingface", api="openai-chat", env_var_precedence=("HF_TOKEN",)),
-    ProviderDescriptor(id="fireworks", api="openai-chat", env_var_precedence=("FIREWORKS_API_KEY",)),
+    ProviderDescriptor(
+        id="xai", api="openai-chat", env_var_precedence=("XAI_API_KEY",)
+    ),
+    ProviderDescriptor(
+        id="groq", api="openai-chat", env_var_precedence=("GROQ_API_KEY",)
+    ),
+    ProviderDescriptor(
+        id="cerebras", api="openai-chat", env_var_precedence=("CEREBRAS_API_KEY",)
+    ),
+    ProviderDescriptor(
+        id="openrouter", api="openai-chat", env_var_precedence=("OPENROUTER_API_KEY",)
+    ),
+    ProviderDescriptor(
+        id="mistral", api="openai-chat", env_var_precedence=("MISTRAL_API_KEY",)
+    ),
+    ProviderDescriptor(
+        id="huggingface", api="openai-chat", env_var_precedence=("HF_TOKEN",)
+    ),
+    ProviderDescriptor(
+        id="fireworks", api="openai-chat", env_var_precedence=("FIREWORKS_API_KEY",)
+    ),
 )
 
 DEFAULT_PROVIDER_REGISTRY = _build_default_provider_registry()
 KNOWN_PROVIDERS = tuple(descriptor.id for descriptor in DEFAULT_PROVIDER_DESCRIPTORS)
-KNOWN_APIS = tuple(dict.fromkeys(descriptor.api for descriptor in DEFAULT_PROVIDER_DESCRIPTORS))
+KNOWN_APIS = tuple(
+    dict.fromkeys(descriptor.api for descriptor in DEFAULT_PROVIDER_DESCRIPTORS)
+)
