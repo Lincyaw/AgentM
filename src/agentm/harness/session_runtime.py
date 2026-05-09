@@ -5,14 +5,40 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from agentm.core.abi import TextContent
+from agentm.core.abi import AgentLoop, EventBus, TextContent, Tool
 from agentm.core.abi.session import ENTRY_TYPE_MESSAGE
-from agentm.harness.session import AgentSession
 from agentm.harness.session_cwd import assert_session_cwd_exists
+from agentm.harness.atom_reloader import AtomReloader
+from agentm.harness.extension import (
+    CommandSpec,
+    ProviderConfig,
+    Renderer,
+    _ExtensionAPIImpl,
+)
+from agentm.harness.resource_loader import ResourceLoader
 from agentm.harness.session_manager import SessionManager
-from agentm.harness.session_services import AgentSessionServices
+
+if TYPE_CHECKING:
+    from agentm.harness.session import AgentSession
+    from agentm.harness.session_services import AgentSessionServices
+
+
+@dataclass(slots=True)
+class SessionRuntime:
+    bus: EventBus
+    session_manager: SessionManager
+    resource_loader: ResourceLoader
+    loop: AgentLoop
+    active_provider_box: dict[str, ProviderConfig | None]
+    tools: list[Tool]
+    commands: dict[str, CommandSpec]
+    providers: dict[str, ProviderConfig]
+    renderers: dict[str, Renderer]
+    apis: dict[str, _ExtensionAPIImpl]
+    reloader: AtomReloader
+    pending_user_messages: list[str | list[Any]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,7 +49,7 @@ class CreateAgentSessionRuntimeResult:
 
 
 CreateAgentSessionRuntimeFactory = Callable[
-    [str, AgentSessionServices, SessionManager, str],
+    [str, "AgentSessionServices", SessionManager, str],
     Awaitable[CreateAgentSessionRuntimeResult],
 ]
 
@@ -32,7 +58,7 @@ class AgentSessionRuntime:
     def __init__(
         self,
         session: AgentSession,
-        services: AgentSessionServices,
+        services: "AgentSessionServices",
         create_runtime: CreateAgentSessionRuntimeFactory,
         diagnostics: list[Any] | None = None,
     ) -> None:
@@ -46,7 +72,7 @@ class AgentSessionRuntime:
         return self._session
 
     @property
-    def services(self) -> AgentSessionServices:
+    def services(self) -> "AgentSessionServices":
         return self._services
 
     @property
@@ -66,12 +92,16 @@ class AgentSessionRuntime:
     ) -> None:
         previous = self._session
         await previous.shutdown()
-        result = await self._create_runtime(cwd, self._services, session_manager, reason)
+        result = await self._create_runtime(
+            cwd, self._services, session_manager, reason
+        )
         self._session = result.session
         self._services = result.services
         self._diagnostics = list(result.diagnostics)
 
-    async def switch_session(self, session_path: str, *, cwd_override: str | None = None) -> None:
+    async def switch_session(
+        self, session_path: str, *, cwd_override: str | None = None
+    ) -> None:
         session_manager = SessionManager.open(session_path, cwd_override=cwd_override)
         assert_session_cwd_exists(session_manager, self.cwd)
         await self._replace(
@@ -135,5 +165,7 @@ class AgentSessionRuntime:
             if target_leaf_id is None:
                 session_manager.reset_leaf()
 
-        await self._replace(session_manager, cwd=session_manager.get_cwd(), reason="fork")
+        await self._replace(
+            session_manager, cwd=session_manager.get_cwd(), reason="fork"
+        )
         return {"selected_text": selected_text}

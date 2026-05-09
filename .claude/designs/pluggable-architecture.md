@@ -75,7 +75,7 @@ class StreamFn(Protocol):
 
 - Pure boundary: takes provider-shaped messages, returns events.
 - Default implementations live in `agentm-llm` per provider.
-- Extensions register additional providers via `register_provider(name, ProviderConfig)`.
+- Extensions register additional providers via `register_provider(name, ProviderConfig)`. The harness chooses the active registration through the `ProviderResolver` port; the default `LastRegisteredWins` resolver preserves insertion-order behavior.
 - **Crucial**: `StreamFn` is the only point that touches a real LLM API. The agent loop has zero hard-coded provider knowledge.
 
 **Reference**: pi-mono `packages/agent/src/types.ts:18-26` (`StreamFn` type), `packages/coding-agent/src/core/extensions/types.ts:1212-1245` (`registerProvider` API with `streamSimple` override).
@@ -178,7 +178,7 @@ The mechanism by which "built-in features" become "default extensions". An Event
 |---|---|---|
 | Lifecycle (passive) | `session_start`, `agent_start`, `turn_end` | None — observers only |
 | Mutating (active) | `tool_call`, `context`, `input` | Mutate payload in place; later handlers see prior changes |
-| Replaceable (`before_*`) | `before_agent_start`, `session_before_compact`, `session_before_tree` | Return `{cancel?, replacement?}` to override default flow |
+| Replaceable (`before_*`) | `before_agent_start`, `session_before_compact`, `session_before_tree` | Return `{block?, cause?, cancel?, replacement?}` to override default flow |
 
 **The killer property**: any built-in operation (compaction, fork, system-prompt assembly, tool execution) emits a `before_*` event whose handlers can `cancel: true` and supply a custom result. This is how plan-mode, sub-agent, permission gate, sandbox, sub-agent — all the things AgentM might want to add — become **default extensions** rather than core features.
 
@@ -197,6 +197,12 @@ class ExtensionAPI(Protocol):
     append_entry: Callable[[str, Any], None]
     events: EventBus                         # cross-extension comms
 ```
+
+Registered slash-command execution is itself a policy port: the
+`slash_commands` atom parses `/cmd args`, but command lookup, ownership, and
+handler execution go through the typed `CommandDispatcher` service facade. The
+harness default owns the live command registry and owner API selection; atoms do
+not read raw harness registry dictionaries.
 
 **Reference**:
 - Minimal EventBus: `packages/coding-agent/src/core/event-bus.ts` (33 lines — copy this verbatim conceptually)
@@ -223,17 +229,13 @@ class AgentSession:
         self._event_bus: EventBus
 
     async def prompt(self, text: str, *, options: PromptOptions) -> None:
-        # 1. handle /commands (extension-registered)
-        # 2. emit "input" event (extensions can transform/handle)
-        # 3. expand skill / prompt template
-        # 4. if streaming, queue via steer/followUp
-        # 5. check compaction need
-        # 6. assemble user message + injected nextTurn entries
-        # 7. emit "before_agent_start" (extensions can override system prompt)
-        # 8. await self.agent.run(...)
+        # 1. emit "input" event (slash_commands and templates transform/handle)
+        # 2. assemble user message + injected nextTurn entries
+        # 3. emit "before_agent_start" (extensions can replace system or veto)
+        # 4. await self.agent.run(...)
 ```
 
-**Design rule**: `AgentSession.prompt` and friends are 100-line **dispatchers**. Any branch with logic-content >10 lines is a smell — extract it to a service or extension.
+**Design rule**: `AgentSession.prompt` and friends are 100-line **dispatchers**. Any branch with logic-content >10 lines is a smell — extract it to a service or extension. Construction-only wiring can live beside the façade in harness factory/runtime modules; runtime dependency bundles should be passed as data (`SessionRuntime`) rather than long parameter lists.
 
 **Reference**: `packages/coding-agent/src/core/agent-session.ts:942-1050` (`prompt` method — note how mechanical it is).
 
