@@ -4,6 +4,7 @@
 **Created**: 2026-05-02
 **Builds on**: [evolution-substrate.md](evolution-substrate.md), [self-modifiable-architecture.md](self-modifiable-architecture.md), [observability.md](observability.md), [extension-as-scenario.md](extension-as-scenario.md)
 **Sister docs**: evolution-substrate (catalog substrate), self-modifiable-architecture (transactional reload)
+**Methodological reference**: [GEPA (Agrawal et al., 2026)](https://arxiv.org/abs/2507.19457) — reflective prompt evolution with Pareto-based illumination. See [`../../knowledge/summary_gepa_reflective_evolution.md`](../../knowledge/summary_gepa_reflective_evolution.md) for the mapping. MVP is single-incumbent hill climbing; Phase 2 (§11) is the GEPA-shaped reorganization with candidate pool, reflection atom, and generalized `ChangeSpec`.
 
 ---
 
@@ -95,9 +96,22 @@ budget:
 
 ### 3.2 Grader
 
-Each task is graded after the production scenario terminates. Two modes:
+Each task is graded after the production scenario terminates. The grader is a **feedback function** `μ_f` (after [GEPA](https://arxiv.org/abs/2507.19457) §3.2), not a scalar metric — it returns score *and* natural-language diagnosis so a future reflection step (§5.4) can do credit assignment without re-deriving "why" from raw traces:
 
-- **Rubric mode** (default): `grader.md` is a prompt template; an LLM call given `(task input, agent's final output, full trajectory)` returns `{ score: 0–1, dimensions: {...}, rationale: str }`. Result is appended as a `task.grade` event to the eval-run trace.
+```python
+GradeResult = TypedDict("GradeResult", {
+    "score": float,                          # in [0,1]
+    "dimensions": dict[str, float],          # optional sub-scores
+    "feedback_text": str,                    # ← required: why this score
+    "module_feedback": dict[str, str],       # ← optional: per-atom attribution
+})
+```
+
+`feedback_text` is the diagnostic signal that survives compaction into the next mutation prompt; `module_feedback` lets the reflection step round-robin through modules the grader fingered (e.g. "atom `tool_read` truncated input"). Programmatic graders fill these from compiler errors / rubric mismatches; rubric graders get them naturally from the LLM's own output.
+
+Two modes:
+
+- **Rubric mode** (default): `grader.md` is a prompt template; an LLM call given `(task input, agent's final output, full trajectory)` returns `GradeResult`. Result is appended as a `task.grade` event to the eval-run trace.
 - **Programmatic mode** (opt-in): `grader.py` exports `grade(task_yaml, trace) -> GradeResult`. Used when there is a deterministic check (e.g. trajectory_judger). Falls back to rubric on raise.
 
 ### 3.3 Why the eval lives next to the scenario
@@ -228,16 +242,25 @@ Three reasons:
 
 - **Mechanism reuse**: every primitive (tool registration, system prompt, sub-agent dispatch, observability) already works for scenarios.
 - **Per-task customization**: each task class has its own quality signal. A hardcoded mode would force a single fitness-function shape; a prompt is free-form.
-- **Tuner is itself versioned**: `scenarios/rca/tuner/` sits in the autonomy layer, so tuner improvements go through the same git-backed write path as everything else. The tuner can even tune its own prompt — meta-meta if you want it.
+- **Tuner is itself versioned**: `scenarios/rca/tuner/` sits in the autonomy layer, so tuner improvements go through the same git-backed write path as everything else. The tuner can even tune its own prompt — meta-meta if you want it. ([GEPA](https://arxiv.org/abs/2507.19457) explicitly notes this path: "search-tree nodes can be extended to the code describing the *whole* AI system" — Phase 2 generalizes `target` from atom-only to any scenario file (§6 ChangeSpec, §11), making meta-tuning a special case of the general mechanism rather than a separate construct.)
 
 ---
 
 ## 6. tool_propose_change Contract
 
 ```python
+class ChangeSpec(TypedDict):
+    kind: Literal["atom_source",          # MVP: only this kind is accepted
+                  "system_prompt",        # Phase 2: scenario system_prompt text
+                  "manifest_extensions",  # Phase 2: add/remove atoms in extension list
+                  "manifest_field",       # Phase 2: edit other manifest scalar fields
+                  "scenario_compose"]     # Phase 2: structural changes (control flow)
+    path: str          # target file relative to contrib/scenarios/<target_scenario>/
+    new_content: str   # full replacement OR structured patch (see §6.5)
+    target_atom: str | None  # name (only for kind="atom_source"), else null
+
 tool_propose_change(
-    target_atom: str,                    # e.g. "tool_read"
-    new_source: str,                     # full source for the atom file
+    target: ChangeSpec,                  # see above
     rationale: str,                      # human/agent-readable why
     eval_run_baseline: str,              # eval_run_id under current fingerprint
     eval_run_proposed: str,              # eval_run_id under proposed fingerprint
@@ -245,13 +268,15 @@ tool_propose_change(
 ) -> ProposeChangeResult
 ```
 
+**MVP scope**: only `kind="atom_source"` is accepted; other kinds reserved and rejected with `not_yet_implemented`. The signature is forward-compatible — see §11 Phase 2 for the rest.
+
 Calling semantics by `decision`:
 
-- `activate`: applies the change via existing `api.reload_atom`. Requires `eval_run_proposed` to dominate `eval_run_baseline` on the scenario's primary metric AND no guard regression. Atomic — rollback on install failure (reuses existing transactional reload).
+- `activate`: applies the change via existing `api.reload_atom` (in-session) or `ResourceWriter` + git commit (cross-session, §6.4). Requires `eval_run_proposed` to pass the §8 four-floor gate against `eval_run_baseline`. Atomic — rollback on install failure (reuses existing transactional reload).
 - `rollback`: re-activates the previous version (the baseline fingerprint's atom hash). Used when an earlier `activate` regressed in subsequent production traffic.
-- `exploratory`: applies the change but flags the decision record `exploratory: true`. For when eval is inconclusive but the tuner wants production signal. Production guard metrics get extra-strict regression watching for exploratory atoms.
+- `exploratory`: applies the change but flags the activation record `exploratory: true`. For when eval is inconclusive but the tuner wants production signal. Production guard metrics get extra-strict regression watching for exploratory activations.
 
-All three write to `.agentm/decisions/<scenario>/decisions.jsonl` (one file per target scenario, easier to grep than per-atom-version files).
+All three append to **`.agentm/decisions/<scenario>/activations.jsonl`** (renamed from `decisions.jsonl`: this file records *what is live in production*, distinct from the candidate pool tree introduced in §11 Phase 2 which records *the search frontier*). One file per target scenario, easier to grep than per-atom-version files.
 
 ### 6.1 Why eval_run_baseline AND eval_run_proposed are required
 
@@ -308,7 +333,19 @@ not load the target's manifest — only its filesystem layout matters.
 
 ## 7. Decision Records
 
-`.agentm/decisions/<scenario>/decisions.jsonl`:
+`.agentm/decisions/<scenario>/` layout:
+
+```
+.agentm/decisions/<scenario>/
+├── activations.jsonl         # one record per propose_change call (deployment log)
+├── candidates/<id>.json      # ← Phase 2: one record per pool member (search frontier)
+├── tree.jsonl                # ← Phase 2: parent → child edges in the search tree
+└── budget.json               # ← Phase 2: rollouts_used, usd_used vs budgets
+```
+
+MVP writes only `activations.jsonl`. The `candidates/` + `tree.jsonl` schema is reserved for Phase 2's Pareto pool (§11) — laid out now so adding it is a non-breaking schema extension. A single-incumbent MVP is the degenerate case `|candidates| = 1`.
+
+Example `activations.jsonl` entry:
 
 ```jsonc
 {"at":"2026-05-10T...","kind":"activate","scenario":"rca","atom":"tool_read",
@@ -332,6 +369,15 @@ Append-only. The `.agentm/decisions/` directory is constitution-write-protected 
 ---
 
 ## 8. Promotion Policy
+
+> **Scope note (MVP vs Phase 2)**: in MVP this gate is the *only* filter — it
+> decides both "is this candidate worth keeping" and "should production switch
+> to it". In Phase 2 (§11, GEPA-style Pareto pool), these split: any candidate
+> winning on at least one task enters the pool unconditionally; the four-floor
+> gate becomes the **deployment gate** that picks which pool member is live for
+> end users. The same four floors, narrower scope. Read the rest of this section
+> with that future split in mind — nothing here changes meaning, just the set
+> of decisions it governs.
 
 Minimal MVP policy. `activate` requires **all four** to hold simultaneously:
 
@@ -385,7 +431,7 @@ honor system). Defer until activations actually happen regularly.
 4. Tuner calls `tool_eval_run(eval_dir="contrib/scenarios/rca/eval")`. Result: `er_baseline`, `root_cause_hit_rate=0.62`, `stderr=0.04`, `holdout=0.60`.
 5. Tuner reads `contrib/scenarios/rca/tool_read.py` source via the `read` tool, designs new version using row-group boundaries.
 6. Tuner calls `tool_eval_run(eval_dir=..., atom_source_overrides={"tool_read": <new_source_text>})`. Result: `er_proposed`, `root_cause_hit_rate=0.78`, `stderr=0.04`, `holdout=0.58`.
-7. Tuner calls `tool_propose_change(target_atom="tool_read", new_source=<text>, rationale=..., eval_run_baseline="er_baseline", eval_run_proposed="er_proposed", decision="activate")`.
+7. Tuner calls `tool_propose_change(target={"kind":"atom_source", "path":"tool_read.py", "new_content":<text>, "target_atom":"tool_read"}, rationale=..., eval_run_baseline="er_baseline", eval_run_proposed="er_proposed", decision="activate")`.
 8. `tool_propose_change` checks all four floors: threshold (delta=0.16, 0.16/0.62=26% ≥ 5% ✓), 2σ (0.16 > 2·√(0.04²+0.04²)=0.113 ✓), guard envelope (refusal_rate Δ within ±10% ✓), holdout (0.58 ≥ 0.60 − 0.10 = 0.50 ✓), tier (1 ✓). §6.4 cross-session path: writes `contrib/scenarios/rca/tool_read.py` via `ResourceWriter` (auto-commit). Decision record written with `kind:"file_commit", atom_in_session:false, gate_bypass:[]`.
 9. Next production RCA session loads new `tool_read`. Observability records both old and new fingerprint runs in JSONL — future tuning iterations have richer data.
 
@@ -422,16 +468,37 @@ honor system). Defer until activations actually happen regularly.
 - Four-floor promotion gate (§8): threshold + 2σ + guards + holdout non-regression.
 - Per-eval-run cost ceiling: `max_cost_usd` knob in `tuner/manifest.yaml::tool_eval_run.config` (closes §13's "cost of eval runs" — it's a budget field, not a research question).
 
-### Phase 2
+### Phase 2 — GEPA-shaped reorganization
 
-- Production-traffic guard regression watching → auto-rollback.
-- Programmatic graders (replacing the rubric LLM grader for deterministic checks).
-- Cross-task transfer: when `tool_read` evolves under RCA, surface the change as a candidate for `plan_mode`'s own eval before activation.
-- Catalog `metrics.jsonl` gains schema fields the tuner has shown it actually needs (data-driven, not pre-defined).
+The MVP is single-incumbent hill climbing. Phase 2 reshapes the loop around
+[GEPA](https://arxiv.org/abs/2507.19457)'s evidence that **MAP-Elites-style
+illumination over a Pareto candidate pool** dominates greedy promotion (35×
+fewer rollouts than GRPO, +13% over MIPROv2, escapes local optima that
+greedy gets stuck in). Layered so each item is independently shippable:
+
+1. **Pareto candidate pool**. `.agentm/decisions/<scenario>/candidates/<id>.json` records each pool member with `{parent_id, change_spec, per_task_scores, holdout_scores, rollouts_consumed}`. Inclusion criterion loosens to "wins on ≥1 task vs all retained candidates"; strictly dominated members are pruned. The four-floor gate (§8) becomes the *deployment* gate, not the *inclusion* gate. New atom `tool_query_candidates(scenario) → ParetoFrontier` so the tuner can sample parents stochastically (weighted by per-task wins).
+
+2. **Reflection atom (`tool_reflect`)**. Separates diagnosis from mutation: `tool_reflect(failures: list[TraceSummary], target_module: str) → {diagnosis: str, proposed_mutation: ChangeSpec}` reads `μ_f.feedback_text` (§3.2) verbatim and emits a structured diagnosis + change. Mutation prompt template lives at `scenarios/<name>/eval/reflection_template.md` (per-scenario; itself mutable).
+
+3. **Generalized `ChangeSpec`** (§6). Lift the MVP restriction `kind="atom_source"` only — accept `system_prompt`, `manifest_extensions`, `manifest_field`, and (most ambitious) `scenario_compose`. Each kind needs its own validator. The `scenario_compose` path is what enables ARC-AGI-style whole-system evolution: a candidate can change *what tools the scenario exposes* and *which atoms compose it*, not just rewrite one atom.
+
+4. **System Aware Merge (crossover)**. New decision channel `decision="merge"` taking `parents: list[candidate_id]`. Tuner reads two non-dominated candidates (e.g. one improves tasks 1,3,5 by editing the prompt; another improves 2,4,6 by editing the atom), generates a unified `ChangeSpec` that takes lessons from both. Same gate semantics as `activate`. Lets us escape the MVP's "one mutation kills another" serial choice.
+
+5. **Per-module credit assignment**. `μ_f.module_feedback` (§3.2) drives a round-robin module-selection policy in the tuner: instead of "pick any atom to mutate", the tuner biases toward modules the grader actually fingered. Maps to GEPA §3.2 directly.
+
+6. **Rollout budget tracking**. `.agentm/decisions/<scenario>/budget.json` keeps `{rollouts_used, rollouts_budget, usd_used, usd_budget}`. Per-tuning-session caps replace the per-eval-run cost ceiling from MVP. Lets us reproduce GEPA's "X% of GRPO's budget" comparisons on our own scenarios.
+
+7. **Production-traffic guard regression watching → auto-rollback** (kept from old Phase 2).
+
+8. **Cross-task transfer**: when `tool_read` evolves under RCA, surface the change as a candidate for `plan_mode`'s own eval before activation. Phase-2-shaped: the candidate enters `plan_mode`'s pool with a parent pointer to RCA's pool — eval there decides if it deploys.
+
+9. **Structural `stop_after_no_improvement`**: today the tuner's honor system; Phase 2 wraps `tool_propose_change` with a counter that refuses further `activate` calls after N consecutive rejections, forcing the tuner to either change strategy (jump to a different Pareto member) or escalate.
+
+10. **`baseline_fingerprint` validation** for concurrent tuners (§10 P6 — closes the stale-baseline race).
 
 ### Out of scope (not Phase 2 either)
 
-- Multi-objective Pareto reasoning (single primary metric is enough until activations happen regularly).
+- Weight-space optimization (we evolve `Π`, not `Θ` — keep this boundary; if a model needs fine-tuning it's a different system).
 - Replay cache (eval set obviates it; replay value reappears only at huge scale).
 - Automated tier-2 approval (security policy, deferred indefinitely).
 
