@@ -52,6 +52,8 @@ from agentm.core.abi.messages import (
     Usage,
     UserMessage,
 )
+from agentm.core.abi.events import DiagnosticEvent
+from agentm.core.abi.retry import RetryPolicy
 from agentm.core.abi.termination import (
     Aborted,
     EndTurn,
@@ -79,6 +81,20 @@ if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
+
+
+def _is_openai_retryable(exc: BaseException) -> bool:
+    try:
+        import openai
+    except ImportError:  # pragma: no cover - SDK dependency is optional here
+        return False
+    return isinstance(exc, openai.RateLimitError)
+
+
+def _default_httpx_client(*, verify: bool) -> Any:
+    import httpx
+
+    return httpx.AsyncClient(verify=verify)
 
 
 # --- Model registry ---------------------------------------------------------
@@ -340,6 +356,9 @@ class OpenAIStreamFn:
     - ``default_headers``: extra headers forwarded on every request.
     - ``verify_ssl``: forwarded to the underlying httpx client. Set ``False``
       for self-signed cert environments. ``True`` by default.
+    - ``retry_policy``: optional policy used for retrying provider calls.
+    - ``httpx_client_factory``: optional transport factory used when a custom
+      HTTP client is needed (for example ``verify_ssl=False``).
     - ``client``: pre-configured :class:`openai.AsyncOpenAI` instance. Tests
       may inject a stub here to bypass network entirely; if provided, all the
       preceding fields are ignored on the request path.
@@ -350,6 +369,8 @@ class OpenAIStreamFn:
     default_query: dict[str, str] | None = None
     default_headers: dict[str, str] | None = None
     verify_ssl: bool = True
+    retry_policy: RetryPolicy | None = None
+    httpx_client_factory: Callable[..., Any] | None = None
     client: AsyncOpenAI | None = None
     clock: Callable[[], float] = time.time
 
@@ -369,21 +390,10 @@ class OpenAIStreamFn:
         if self.default_headers:
             kwargs["default_headers"] = dict(self.default_headers)
         if not self.verify_ssl:
-            # The SDK forwards a custom http_client wholesale; we use this
-            # only to disable cert verification for self-signed gateways.
-            import httpx
-
-            kwargs["http_client"] = httpx.AsyncClient(verify=False)
+            factory = self.httpx_client_factory or _default_httpx_client
+            kwargs["http_client"] = factory(verify=False)
         self.client = _AsyncOpenAI(**kwargs)
         return self.client
-
-    @staticmethod
-    def _is_rate_limit(exc: BaseException) -> bool:
-        # Match by class name (avoids hard import dep) and HTTP 429 text.
-        if exc.__class__.__name__ == "RateLimitError":
-            return True
-        msg = str(exc)
-        return "429" in msg or "Rate limit" in msg or "rate limit" in msg
 
     def __call__(
         self,
@@ -435,7 +445,15 @@ class OpenAIStreamFn:
         state = _StreamState()
         aborted = False
 
-        stream = await _create_with_retry(client, body, signal)
+        retry_policy = self.retry_policy or _IdentityRetryPolicy()
+
+        async def _create_stream() -> Any:
+            return await client.chat.completions.create(**body)
+
+        stream = await retry_policy.run(
+            _create_stream,
+            is_retryable=_is_openai_retryable,
+        )
         try:
             async for chunk in stream:
                 if signal is not None and signal.is_set():
@@ -491,47 +509,15 @@ class OpenAIStreamFn:
         yield MessageEnd(message=assembled)
 
 
-_RATE_LIMIT_MAX_ATTEMPTS = int(os.environ.get("AGENTM_RATE_LIMIT_MAX_ATTEMPTS", "8"))
-_RATE_LIMIT_BASE_DELAY = float(os.environ.get("AGENTM_RATE_LIMIT_BASE_DELAY", "5.0"))
-_RATE_LIMIT_MAX_DELAY = float(os.environ.get("AGENTM_RATE_LIMIT_MAX_DELAY", "60.0"))
-
-
-async def _create_with_retry(
-    client: Any,
-    body: dict[str, Any],
-    signal: asyncio.Event | None,
-) -> Any:
-    """Call ``chat.completions.create`` with backoff on 429 RateLimitError.
-
-    Configurable via ``AGENTM_RATE_LIMIT_MAX_ATTEMPTS`` /
-    ``AGENTM_RATE_LIMIT_BASE_DELAY`` / ``AGENTM_RATE_LIMIT_MAX_DELAY``. Retry
-    is bounded and aborts immediately if ``signal`` is set.
-    """
-    attempt = 0
-    delay = _RATE_LIMIT_BASE_DELAY
-    while True:
-        try:
-            return await client.chat.completions.create(**body)
-        except Exception as exc:
-            if not OpenAIStreamFn._is_rate_limit(exc):
-                raise
-            attempt += 1
-            if attempt >= _RATE_LIMIT_MAX_ATTEMPTS:
-                logger.warning(
-                    "openai: rate-limit retry exhausted after %d attempts",
-                    attempt,
-                )
-                raise
-            if signal is not None and signal.is_set():
-                raise
-            logger.warning(
-                "openai: 429 rate-limited (attempt %d/%d); sleeping %.1fs",
-                attempt,
-                _RATE_LIMIT_MAX_ATTEMPTS,
-                delay,
-            )
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, _RATE_LIMIT_MAX_DELAY)
+class _IdentityRetryPolicy:
+    async def run(
+        self,
+        fn: Callable[[], Any],
+        *,
+        is_retryable: Callable[[BaseException], bool],
+    ) -> Any:
+        del is_retryable
+        return await fn()
 
 
 async def _translate_chunk(
@@ -655,12 +641,28 @@ def install(api: Any, config: dict[str, Any]) -> None:
             "be a non-empty string (e.g. 'gpt-4o' or 'Kimi-K2')."
         )
 
+    retry_policy = api.get_service("retry_policy")
+    verify_ssl = bool(config.get("verify_ssl", True))
+    if not verify_ssl:
+        api.events.emit_sync(
+            DiagnosticEvent.CHANNEL,
+            DiagnosticEvent(
+                level="warning",
+                source="openai",
+                message=(
+                    "OpenAI provider configured with verify_ssl=False; "
+                    "TLS certificate verification is disabled for this session."
+                ),
+            ),
+        )
+
     stream_fn = OpenAIStreamFn(
         api_key=config.get("api_key"),
         base_url=config.get("base_url"),
         default_query=config.get("default_query"),
         default_headers=config.get("default_headers"),
-        verify_ssl=bool(config.get("verify_ssl", True)),
+        verify_ssl=verify_ssl,
+        retry_policy=retry_policy,
     )
 
     model_kwargs: dict[str, int] = {}
