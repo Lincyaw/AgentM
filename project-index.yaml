@@ -133,3 +133,24 @@ requirements:
     depends_on:
       - REQ-086-atom-rework-infra
 
+  - id: REQ-094-ai-provider-descriptor-registry
+    title: AI provider descriptors are the registry source of truth
+    description: >
+      The AI provider boundary must keep provider ids, API routing metadata,
+      aliases, and environment-key precedence in ProviderDescriptor records so
+      adding a provider does not require parallel Literal and env-var edits.
+      Environment API key resolution must support injected mappings for tests,
+      and runtime provider registration must use one validating wrapper with
+      shared canonical API checks for stream methods.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/ai/types.py
+      - path: src/agentm/ai/env_api_keys.py
+      - path: src/agentm/ai/api_registry.py
+      - path: src/agentm/ai/__init__.py
+    tests:
+      - path: tests/ai/test_provider_registry.py
+    docs: []
+    depends_on: []
