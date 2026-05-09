@@ -15,5 +15,6 @@ Design docs updated:
 Implementation notes:
 - Removed `write_file` from the public `FileOperations` Protocol and default local implementation.
 - Added `is_dir` / `list_dir` to `FileOperations` so read-only directory tools no longer need per-atom local filesystem operations.
+- Routed `tool_find` / `tool_grep` `.gitignore` discovery through `FileOperations` so read seam overrides intercept directory traversal and ignore-file reads.
 - Added `ResourceWriter.read` so `tool_edit` can read expected bytes and write through one write seam without touching `FileOperations`.
 - Updated `tool_write` and `tool_edit` to use `ResourceWriter` exclusively.
