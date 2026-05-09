@@ -133,3 +133,35 @@ requirements:
     depends_on:
       - REQ-086-atom-rework-infra
 
+
+  - id: REQ-089-file-tool-io-seams
+    title: File tool atoms use documented read and write seams
+    description: >
+      Builtin file tool atoms must use the documented hybrid IO seam: read-only
+      tools consume FileOperations through ExtensionAPI operations, while write
+      tools consume ResourceWriter exclusively so scenario overrides and managed
+      resource protections intercept all file mutations consistently.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/operations.py
+      - path: src/agentm/core/abi/resource.py
+      - path: src/agentm/core/_internal/operations_impl.py
+      - path: src/agentm/harness/resource_writer.py
+      - path: src/agentm/extensions/builtin/tool_read.py
+      - path: src/agentm/extensions/builtin/tool_write.py
+      - path: src/agentm/extensions/builtin/tool_edit.py
+      - path: src/agentm/extensions/builtin/tool_grep.py
+      - path: src/agentm/extensions/builtin/tool_find.py
+      - path: src/agentm/extensions/builtin/tool_ls.py
+    tests:
+      - path: tests/unit/extensions/test_file_tool_io_seams.py
+      - path: tests/unit/extensions/test_extension_contract.py
+      - path: tests/integration/test_cli_slash_commands.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/designs/extension-as-scenario.md
+      - path: .claude/tasks/2026-05-09-issue-89-file-tool-io-seams.md
+    depends_on:
+      - REQ-086-atom-rework-infra
