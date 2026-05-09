@@ -54,6 +54,7 @@ from agentm.core.abi import (
     UserMessage,
 )
 from agentm.core.abi.events import DiagnosticEvent
+from agentm.extensions.builtin.inherit_provider import PARENT_PROVIDER_CONFIG_KEY
 
 from agentm.harness.atom_reloader import AtomReloader, LoadedAtom
 from agentm.harness.events import (
@@ -299,6 +300,7 @@ class AgentSession:
         renderers: dict[str, Renderer] = {}
         pending_user_messages: list[str | list[Any]] = []
         apis: dict[str, _ExtensionAPIImpl] = {}
+        services: dict[str, Any] = {}
 
         # We need a forward reference to the picked-up active provider so the
         # api.model property reflects it once the provider extension runs.
@@ -388,9 +390,11 @@ class AgentSession:
             child; lifecycle events are emitted by ``AgentSession.create``
             via the existing ``parent_bus`` plumbing.
             """
+            if isinstance(child_config, dict):
+                child_config = AgentSessionConfig(**child_config)
             if not isinstance(child_config, AgentSessionConfig):
                 raise TypeError(
-                    "spawn_child_session expects an AgentSessionConfig; "
+                    "spawn_child_session expects an AgentSessionConfig or kwargs dict; "
                     f"got {type(child_config).__name__}"
                 )
                 # noqa: TRY004 — explicit message clearer than relying on dataclass replace
@@ -409,7 +413,7 @@ class AgentSession:
                     )
                 spec.provider = (
                     "agentm.extensions.builtin.inherit_provider",
-                    {"provider": parent_provider},
+                    {PARENT_PROVIDER_CONFIG_KEY: parent_provider},
                 )
             return await cls.create(spec)
 
@@ -430,6 +434,7 @@ class AgentSession:
                 owner_name=owner,
                 child_session_factory=_spawn_child_session,
                 resource_writer=resource_writer,
+                service_registry=services,
             )
             reloader.wrap_api_on(api, owner)
             apis[owner] = api

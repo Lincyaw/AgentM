@@ -134,6 +134,7 @@ Keep this small. Every method earns its keep. Reference: pi-mono `extensions/typ
 class ExtensionAPI(Protocol):
     # --- Event subscription (typed overloads per channel) ---
     def on(self, channel: str, handler: Handler) -> Unsubscribe: ...
+    def add_observer(self, callback: ObserverCallback) -> Unsubscribe: ...
 
     # --- Registrations ---
     def register_tool(self, tool: Tool) -> None: ...
@@ -143,7 +144,10 @@ class ExtensionAPI(Protocol):
 
     # --- Actions ---
     def send_user_message(self, content: str | list[Content]) -> None: ...
-    def append_entry(self, custom_type: str, payload: Any) -> None: ...
+    async def spawn_child_session(self, config: AgentSessionConfig | dict[str, Any]) -> Any: ...
+    def set_service(self, name: str, obj: Any) -> None: ...
+    def get_service(self, name: str) -> Any | None: ...
+    def get_resource_writer(self) -> ResourceWriter: ...
 
     # --- Read-only context (lazy properties; cwd/model/session may change) ---
     @property
@@ -155,6 +159,12 @@ class ExtensionAPI(Protocol):
     @property
     def events(self) -> EventBus: ...   # for cross-extension communication
 ```
+
+`add_observer` is the typed surface for passive event-bus observation; atoms
+must not patch `EventBus` internals. `spawn_child_session` accepts the legacy
+dataclass or a kwargs mapping so atoms do not import harness internals.
+`set_service` / `get_service` provide a per-session registry for atom-owned
+state that should not live in module globals.
 
 **Deferred (add when first extension needs them)**: shortcuts/keybindings, UI primitives (select/confirm/input), flag registration, theme management, status/footer/widget injection. These are TUI concerns; we'll add them when the interactive mode lands.
 

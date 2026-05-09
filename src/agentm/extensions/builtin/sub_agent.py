@@ -17,7 +17,7 @@ import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 
 from agentm.core.abi import (
     DecideTurnActionEvent,
@@ -47,7 +47,7 @@ _COMPLETED: Literal["completed"] = "completed"
 _ABORTED: Literal["aborted"] = "aborted"
 _ERROR: Literal["error"] = "error"
 _Status = Literal["running", "completed", "aborted", "error"]
-_DEFAULT_INHERIT_EXTENSIONS = ["permission", "dedup", "observability"]
+_DEFAULT_INHERIT_EXTENSIONS: Final = ["permission", "dedup", "observability"]
 _SHUTDOWN_GRACE_SECONDS = 5.0
 
 MANIFEST = ExtensionManifest(

@@ -26,6 +26,7 @@ from agentm.core.abi import (
     EventBus,
     LoopConfig,
     Model,
+    ObserverCallback,
     StreamFn,
     Tool,
 )
@@ -351,6 +352,7 @@ class ExtensionAPI(Protocol):
         *,
         priority: int = BusPriority.NORMAL,
     ) -> Unsubscribe: ...
+    def add_observer(self, callback: ObserverCallback) -> Unsubscribe: ...
 
     # --- Registrations ------------------------------------------------------
     def register_tool(self, tool: Tool) -> None: ...
@@ -362,7 +364,7 @@ class ExtensionAPI(Protocol):
 
     # --- Actions ------------------------------------------------------------
     def send_user_message(self, content: str | list[Any]) -> None: ...
-    async def spawn_child_session(self, config: Any) -> Any:
+    async def spawn_child_session(self, config: Any | None = None, **kwargs: Any) -> Any:
         """Create a nested ``AgentSession`` rooted at this one.
 
         ``config`` is an ``AgentSessionConfig`` (typed ``Any`` here to avoid
@@ -376,6 +378,8 @@ class ExtensionAPI(Protocol):
         bypass the §11.4.5 import contract.
         """
         ...
+    def set_service(self, name: str, obj: Any) -> None: ...
+    def get_service(self, name: str) -> Any | None: ...
     def reload_atom(
         self,
         name: str,
@@ -531,6 +535,7 @@ class _ExtensionAPIImpl:
         project_layout: ProjectLayout | None = None,
         child_session_factory: ChildSessionFactory | None = None,
         resource_writer: ResourceWriter | None = None,
+        service_registry: dict[str, Any] | None = None,
     ) -> None:
         self._bus = bus
         self._cwd = cwd
@@ -567,6 +572,7 @@ class _ExtensionAPIImpl:
             session_id=session_id,
             bus=bus,
         )
+        self._services = service_registry if service_registry is not None else {}
 
     def mark_stale(self) -> None:
         self._stale = True
@@ -591,6 +597,10 @@ class _ExtensionAPIImpl:
     ) -> Unsubscribe:
         self._assert_active()
         return self._bus.on(channel, handler, priority=priority)
+
+    def add_observer(self, callback: ObserverCallback) -> Unsubscribe:
+        self._assert_active()
+        return self._bus.add_observer(callback)
 
     # --- Registrations ----------------------------------------------------
 
@@ -655,14 +665,30 @@ class _ExtensionAPIImpl:
             ),
         )
 
-    async def spawn_child_session(self, config: Any) -> Any:
+    async def spawn_child_session(self, config: Any | None = None, **kwargs: Any) -> Any:
         """Spawn a child session via the harness-injected factory.
 
         See ``ExtensionAPI.spawn_child_session`` for the contract; the
         factory is closed-over by ``AgentSession.create``.
         """
         self._assert_active()
+        if config is not None and kwargs:
+            raise TypeError(
+                "spawn_child_session accepts either a config object or keyword args, not both"
+            )
+        if config is None:
+            config = kwargs
         return await self._child_session_factory(config)
+
+    def set_service(self, name: str, obj: Any) -> None:
+        self._assert_active()
+        if name in self._services:
+            raise KeyError(f"service {name!r} is already registered")
+        self._services[name] = obj
+
+    def get_service(self, name: str) -> Any | None:
+        self._assert_active()
+        return self._services.get(name)
 
     def reload_atom(
         self,

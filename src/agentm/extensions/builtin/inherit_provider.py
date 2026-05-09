@@ -9,7 +9,7 @@ re-authentication, no second LLM gateway handshake.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI, ExtensionLoadError, ProviderConfig
@@ -61,4 +61,4 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     api.register_provider(provider.name, provider)
 
 
-__all__ = ["MANIFEST", "PARENT_PROVIDER_CONFIG_KEY", "install"]
+__all__: Final = ["MANIFEST", "PARENT_PROVIDER_CONFIG_KEY", "install"]
