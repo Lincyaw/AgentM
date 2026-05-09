@@ -5,6 +5,7 @@ import base64
 import json
 import sys
 import time
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, Literal, Protocol, TypeVar
@@ -58,32 +59,89 @@ from agentm.harness.events import (
 from agentm.harness.extension import CommandSpec
 
 
-_QUIT_COMMANDS = frozenset({"/quit", "/exit", "/q", "exit", "quit"})
-_BUILTIN_COMMANDS: dict[str, str] = {
-    "/quit": "Quit the TUI.",
-    "/exit": "Quit the TUI.",
-    "/q": "Quit the TUI.",
-    "/clear": "Clear the visible conversation log.",
-    "/help": "Show key bindings and slash commands.",
-    "/copy-last": "Copy the most recent assistant text block.",
-    "/extensions": "List loaded extensions and their status.",
-    "/tools": "List tools registered with the agent.",
-    "/budget": "Show current cost-budget state.",
-}
+Phase = Literal["idle", "thinking", "streaming", "tool", "subagent"]
+CommandHandler = Callable[["AgentMApp", str], Awaitable[None] | None]
 
-# Reload triggers that represent self-modification — the agent (or an
-# approved propose_change) edited an atom under its own catalog. The TUI
-# highlights these so the framework's signature behavior is *visible*
-# rather than silently happening through git.
-_SELF_MODIFY_TRIGGERS = frozenset({"agent", "propose_change_approved"})
 
-_PHASE_GLYPHS: dict[str, str] = {
-    "idle": "●",
-    "thinking": "◐",
-    "streaming": "◑",
-    "tool": "▶",
-    "subagent": "↳",
-}
+class Theme(Protocol):
+    @property
+    def phase_glyphs(self) -> dict[Phase, str]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DefaultTheme:
+    phase_glyphs: dict[Phase, str]
+
+
+DEFAULT_THEME = DefaultTheme(
+    phase_glyphs={
+        "idle": "●",
+        "thinking": "◐",
+        "streaming": "◑",
+        "tool": "▶",
+        "subagent": "↳",
+    }
+)
+
+
+@dataclass(slots=True)
+class BuiltinCommand:
+    name: str
+    handler: CommandHandler
+    description: str
+    palette_label: str | None = None
+    source: str = "builtin"
+
+
+class BuiltinCommandRegistry:
+    def __init__(self, commands: Iterable[BuiltinCommand] = ()) -> None:
+        self._commands: dict[str, BuiltinCommand] = {}
+        for command in commands:
+            self.register(command)
+
+    def register(self, command: BuiltinCommand) -> None:
+        self._commands[self._normalize(command.name)] = command
+
+    def register_extension_command(
+        self, name: str, spec: CommandSpec, *, source: str
+    ) -> None:
+        slash_name = f"/{name.lstrip('/')}"
+
+        async def _dispatch(app: AgentMApp, args: str) -> None:
+            command_text = f"{slash_name} {args}".strip()
+            await app._session.prompt(command_text)
+
+        self.register(
+            BuiltinCommand(
+                name=slash_name,
+                handler=_dispatch,
+                description=spec.description,
+                source=source,
+            )
+        )
+
+    def get(self, text: str) -> tuple[BuiltinCommand, str] | None:
+        head, _, rest = text.strip().partition(" ")
+        command = self._commands.get(self._normalize(head))
+        if command is None:
+            return None
+        return command, rest.strip()
+
+    def entries(self) -> list[SlashCommandEntry]:
+        return [
+            SlashCommandEntry(
+                name=command.palette_label or command.name,
+                description=command.description,
+                source=command.source,
+            )
+            for command in self._commands.values()
+            if (command.palette_label or command.name).startswith("/")
+        ]
+
+    @staticmethod
+    def _normalize(name: str) -> str:
+        return name.strip().lower()
+
 
 _THEME_ALIASES: dict[str, str] = {
     "dark": "textual-dark",
@@ -157,10 +215,11 @@ class StatusHeader(Static):
     tokens_in: reactive[int] = reactive(0)
     tokens_out: reactive[int] = reactive(0)
     cost_usd: reactive[float] = reactive(0.0)
-    phase: reactive[str] = reactive("idle")
+    phase: reactive[Phase] = reactive("idle")
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, *, theme: Theme = DEFAULT_THEME, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        self._theme = theme
         # Plain (non-reactive) shadow state for registry counters and
         # budget. They are derived from ``AgentMApp`` dicts, so giving
         # them their own reactive setters would just create a second
@@ -208,7 +267,7 @@ class StatusHeader(Static):
         self._refresh()
 
     def _refresh(self) -> None:
-        glyph = _PHASE_GLYPHS.get(self.phase, "●")
+        glyph = self._theme.phase_glyphs.get(self.phase, "●")
         ext_segment = f"{self._extensions_loaded} ext"
         if self._extensions_failed:
             ext_segment = f"{ext_segment} ({self._extensions_failed} failed)"
@@ -664,6 +723,74 @@ class InfoModal(_DismissibleModal[None]):
             yield Static(self._body, classes="info-body")
 
 
+def _legacy_command_handler(name: str) -> CommandHandler:
+    async def _dispatch(app: AgentMApp, args: str) -> None:
+        command_text = f"{name} {args}".strip()
+        await app._session.prompt(command_text)
+
+    return _dispatch
+
+
+def _quit_command(app: AgentMApp, args: str) -> None:
+    del args
+    app.exit(0)
+
+
+async def _clear_command(app: AgentMApp, args: str) -> None:
+    del args
+    await app.action_clear_log()
+
+
+def _help_command(app: AgentMApp, args: str) -> None:
+    del args
+    app.push_screen(HelpScreen(app._all_commands()))
+
+
+def _copy_last_command(app: AgentMApp, args: str) -> None:
+    del args
+    app._copy_last_assistant_text()
+
+
+def _extensions_command(app: AgentMApp, args: str) -> None:
+    del args
+    app.push_screen(InfoModal("Extensions", _build_extensions_table(app._extensions)))
+
+
+def _tools_command(app: AgentMApp, args: str) -> None:
+    del args
+    app.push_screen(InfoModal("Tools", _build_tools_table(app._tools)))
+
+
+def _budget_command(app: AgentMApp, args: str) -> None:
+    del args
+    app.push_screen(InfoModal("Budget", _build_budget_panel(app._budget_state)))
+
+
+def default_builtin_command_registry() -> BuiltinCommandRegistry:
+    registry = BuiltinCommandRegistry()
+    for name in ("/quit", "/exit", "/q", "exit", "quit"):
+        palette_label = name if name.startswith("/") else None
+        registry.register(
+            BuiltinCommand(
+                name=name,
+                handler=_quit_command,
+                description="Quit the TUI.",
+                palette_label=palette_label,
+            )
+        )
+    for command in (
+        BuiltinCommand("/clear", _clear_command, "Clear the visible conversation log."),
+        BuiltinCommand("/help", _help_command, "Show key bindings and slash commands."),
+        BuiltinCommand("/copy-last", _copy_last_command, "Copy the most recent assistant text block."),
+        BuiltinCommand("/extensions", _extensions_command, "List loaded extensions and their status."),
+        BuiltinCommand("/tools", _tools_command, "List tools registered with the agent."),
+        BuiltinCommand("/budget", _budget_command, "Show current cost-budget state."),
+    ):
+        registry.register(command)
+    return registry
+
+
+
 class AgentMApp(App[int]):
     CSS_PATH = str(Path(__file__).with_name("textual_app.tcss"))
     # The built-in command palette (Ctrl+P) is disabled — we have our own
@@ -688,15 +815,29 @@ class AgentMApp(App[int]):
         *,
         theme: str = "dark",
         session: _SessionLike,
-        slash_commands: list[SlashCommandEntry],
+        command_registry: BuiltinCommandRegistry | None = None,
+        slash_commands: list[SlashCommandEntry] | None = None,
         extensions: dict[str, ExtensionInstallEvent] | None = None,
         tools: list[ToolEntry] | None = None,
+        theme_data: Theme = DEFAULT_THEME,
     ) -> None:
         super().__init__()
         self.config = config
         self._session = session
         self._theme_name = theme
-        self._slash_commands = slash_commands
+        self._theme = theme_data
+        self._command_registry = command_registry or default_builtin_command_registry()
+        if slash_commands:
+            for entry in slash_commands:
+                if self._command_registry.get(entry.name) is None:
+                    self._command_registry.register(
+                        BuiltinCommand(
+                            name=entry.name,
+                            handler=_legacy_command_handler(entry.name),
+                            description=entry.description,
+                            source=entry.source,
+                        )
+                    )
         # Snapshots that drive the /extensions and /tools modals. The
         # ``run()`` factory accumulates create-time events into these
         # dicts so the user can ``/extensions`` immediately after
@@ -710,17 +851,7 @@ class AgentMApp(App[int]):
         self._header: StatusHeader | None = None
         self._prompt_task: asyncio.Task[None] | None = None
         self._flush_timer: Any = None
-        # ``turn_index`` from the kernel restarts at 0 on every ``prompt()``
-        # call (loop.py: ``for turn_index in range(max_turns)``). Keying
-        # purely by ``turn_index`` collides across user messages — the
-        # second prompt's turn_index=0 events would be routed back into the
-        # first prompt's TurnContainer, so the new assistant text and tool
-        # calls render above the new user bubble. The composite key
-        # ``(prompt_epoch, turn_index)`` keeps each user-prompt's turns in
-        # their own namespace; ``_prompt_epoch`` is bumped from
-        # ``submit_input`` and ``handle_api_send_user_message``.
-        self._prompt_epoch = 0
-        self._root_turns: dict[tuple[int, int], TurnContainer] = {}
+        self._root_turns: dict[int, TurnContainer] = {}
         self._child_turns: dict[str, SubagentBlock] = {}
         self._tool_states: dict[str, ToolRenderState] = {}
         self._latest_usage: Usage | None = None
@@ -737,7 +868,7 @@ class AgentMApp(App[int]):
         # ``Footer`` was previously yielded here to surface the binding
         # legend, but it overlapped the prompt input on common terminal
         # sizes and the same legend is reachable via ``/help``.
-        yield StatusHeader(id="status-header")
+        yield StatusHeader(id="status-header", theme=self._theme)
         yield ConversationLog(id="conversation-log")
         with Container(id="input-bar"):
             yield PromptInput()
@@ -797,11 +928,6 @@ class AgentMApp(App[int]):
         self._history.append(text)
         self._history_index = None
         self._ctrl_c_armed_at = None
-        # Bump epoch BEFORE awaiting anything — once the prompt task fires
-        # the kernel will start emitting events with turn_index=0, and they
-        # must land in a fresh ``(epoch, 0)`` slot rather than the previous
-        # prompt's slot.
-        self._prompt_epoch += 1
         await self._append_user_turn(text)
         input_widget.clear()
         self.refresh_input_height()
@@ -826,7 +952,7 @@ class AgentMApp(App[int]):
         self._needs_scroll_end = True
         log.scroll_end(animate=False)
 
-    def set_phase(self, phase: str) -> None:
+    def set_phase(self, phase: Phase) -> None:
         if self._header is not None:
             self._header.phase = phase
 
@@ -844,29 +970,14 @@ class AgentMApp(App[int]):
         return True
 
     async def _handle_builtin_command(self, text: str) -> bool:
-        lowered = text.lower()
-        if lowered in _QUIT_COMMANDS:
-            self.exit(0)
-            return True
-        if lowered == "/clear":
-            await self.action_clear_log()
-            return True
-        if lowered == "/help":
-            self.push_screen(HelpScreen(self._all_commands()))
-            return True
-        if lowered == "/copy-last":
-            self._copy_last_assistant_text()
-            return True
-        if lowered == "/extensions":
-            self.push_screen(InfoModal("Extensions", _build_extensions_table(self._extensions)))
-            return True
-        if lowered == "/tools":
-            self.push_screen(InfoModal("Tools", _build_tools_table(self._tools)))
-            return True
-        if lowered == "/budget":
-            self.push_screen(InfoModal("Budget", _build_budget_panel(self._budget_state)))
-            return True
-        return False
+        match = self._command_registry.get(text)
+        if match is None:
+            return False
+        command, args = match
+        result = command.handler(self, args)
+        if isinstance(result, Awaitable):
+            await result
+        return True
 
     def _copy_last_assistant_text(self) -> None:
         if not self._last_assistant_text:
@@ -902,7 +1013,7 @@ class AgentMApp(App[int]):
         prompt.focus()
 
     def _all_commands(self) -> list[SlashCommandEntry]:
-        return sorted(self._slash_commands, key=lambda item: item.name)
+        return sorted(self._command_registry.entries(), key=lambda item: item.name)
 
     async def action_soft_cancel(self) -> None:
         prompt = self.query_one(PromptInput)
@@ -968,10 +1079,6 @@ class AgentMApp(App[int]):
         self._tool_states.clear()
         self._last_assistant_text = ""
         self._ctrl_c_armed_at = None
-        # No need to reset ``_prompt_epoch`` — its only purpose is to keep
-        # the dict keys unique across user prompts, and a monotonically
-        # growing counter does that whether or not the visual log is
-        # cleared.
 
     def action_open_palette_binding(self) -> None:
         self.open_command_palette(initial="")
@@ -1006,14 +1113,13 @@ class AgentMApp(App[int]):
             log.scroll_end(animate=False)
             self._needs_scroll_end = False
 
-    def _ensure_root_turn_sync(self, turn_index: int) -> TurnContainer:
-        key = (self._prompt_epoch, turn_index)
-        turn = self._root_turns.get(key)
+    def _ensure_root_turn_sync(self, turn_id: int) -> TurnContainer:
+        turn = self._root_turns.get(turn_id)
         if turn is not None:
             return turn
         self._turn_counter += 1
         turn = TurnContainer(logical_turn=self._turn_counter)
-        self._root_turns[key] = turn
+        self._root_turns[turn_id] = turn
         self.run_worker(self._mount_turn(turn), exclusive=False)
         if self._header is not None:
             self._header.turn_number = self._turn_counter
@@ -1028,8 +1134,6 @@ class AgentMApp(App[int]):
     def _latest_turn(self) -> TurnContainer | None:
         if not self._root_turns:
             return None
-        # Tuples sort lexicographically — newer epoch wins, and within the
-        # same epoch the higher turn_index wins. Both are what we want.
         return self._root_turns[max(self._root_turns)]
 
     def _latest_tool_block(self) -> ToolCallBlock | None:
@@ -1063,49 +1167,62 @@ class AgentMApp(App[int]):
         if not self._child_turns:
             return
         child = next(reversed(self._child_turns.values()))
-        if isinstance(delta, TextDelta):
-            child.add_line(delta.text)
-        elif isinstance(delta, ThinkingDelta):
-            child.add_line(f"[thinking] {delta.text}")
-        elif isinstance(delta, ToolCallStart):
-            child.add_line(f"→ {delta.name} …")
+        handler = _lookup_delta_handler(_CHILD_DELTA_HANDLERS, type(delta))
+        if handler is not None:
+            handler(self, child, delta)
 
     def handle_stream_delta(self, event: StreamDeltaEvent) -> None:
-        delta = event.delta
-        turn = self._ensure_root_turn_sync(event.turn_index)
-        if isinstance(delta, TextDelta):
-            turn.text_buffer += delta.text
-            self.set_phase("streaming")
-            self._needs_scroll_end = True
-            if self._child_turns:
-                self._render_child_delta(delta)
-            return
-        if isinstance(delta, ThinkingDelta):
-            turn.thinking_buffer += delta.text
-            self.set_phase("thinking")
-            self._needs_scroll_end = True
-            if self._child_turns:
-                self._render_child_delta(delta)
-            return
-        if isinstance(delta, ToolCallStart):
-            self._tool_states[delta.id] = ToolRenderState(
-                tool_name=delta.name,
-                start_ns=time.perf_counter_ns(),
-                args_json_fragments=[],
-            )
-            self.run_worker(turn.ensure_tool(delta.id, delta.name), exclusive=False)
-            self._needs_scroll_end = True
-            if self._child_turns:
-                self._render_child_delta(delta)
-            return
-        if isinstance(delta, ToolCallArgsDelta):
-            state = self._tool_states.get(delta.id)
-            if state is not None and state.args_json_fragments is not None:
-                state.args_json_fragments.append(delta.args_json_delta)
-            return
-        if isinstance(delta, MessageEnd):
-            self._latest_usage = delta.message.usage
-            self._last_assistant_text = _assistant_text(delta.message)
+        turn = self._ensure_root_turn_sync(event.turn_id)
+        handler = _lookup_delta_handler(_DELTA_HANDLERS, type(event.delta))
+        if handler is not None:
+            handler(self, turn, event.delta)
+
+    def _on_text_delta(self, turn: TurnContainer, delta: TextDelta) -> None:
+        turn.text_buffer += delta.text
+        self.set_phase("streaming")
+        self._needs_scroll_end = True
+        if self._child_turns:
+            self._render_child_delta(delta)
+
+    def _on_thinking_delta(self, turn: TurnContainer, delta: ThinkingDelta) -> None:
+        turn.thinking_buffer += delta.text
+        self.set_phase("thinking")
+        self._needs_scroll_end = True
+        if self._child_turns:
+            self._render_child_delta(delta)
+
+    def _on_tool_call_start(self, turn: TurnContainer, delta: ToolCallStart) -> None:
+        self._tool_states[delta.id] = ToolRenderState(
+            tool_name=delta.name,
+            start_ns=time.perf_counter_ns(),
+            args_json_fragments=[],
+        )
+        self.run_worker(turn.ensure_tool(delta.id, delta.name), exclusive=False)
+        self._needs_scroll_end = True
+        if self._child_turns:
+            self._render_child_delta(delta)
+
+    def _on_tool_call_args_delta(
+        self, turn: TurnContainer, delta: ToolCallArgsDelta
+    ) -> None:
+        del turn
+        state = self._tool_states.get(delta.id)
+        if state is not None and state.args_json_fragments is not None:
+            state.args_json_fragments.append(delta.args_json_delta)
+
+    def _on_message_end(self, turn: TurnContainer, delta: MessageEnd) -> None:
+        del turn
+        self._latest_usage = delta.message.usage
+        self._last_assistant_text = _assistant_text(delta.message)
+
+    def _child_text_delta(self, child: SubagentBlock, delta: TextDelta) -> None:
+        child.add_line(delta.text)
+
+    def _child_thinking_delta(self, child: SubagentBlock, delta: ThinkingDelta) -> None:
+        child.add_line(f"[thinking] {delta.text}")
+
+    def _child_tool_call_start(self, child: SubagentBlock, delta: ToolCallStart) -> None:
+        child.add_line(f"→ {delta.name} …")
 
     def handle_tool_call(self, event: ToolCallEvent) -> None:
         turn = self._latest_turn()
@@ -1152,7 +1269,7 @@ class AgentMApp(App[int]):
         self._needs_scroll_end = True
 
     def handle_llm_start(self, event: LlmRequestStartEvent) -> None:
-        self._ensure_root_turn_sync(event.turn_index)
+        self._ensure_root_turn_sync(event.turn_id)
         self.set_phase("thinking")
         if self._header is not None:
             self._header.model_name = (
@@ -1213,14 +1330,9 @@ class AgentMApp(App[int]):
             )
             self._refresh_registry_counters()
         elif event.kind == "command" and isinstance(event.payload, CommandSpec):
-            entry = SlashCommandEntry(
-                name=f"/{event.name}",
-                description=event.payload.description,
-                source=event.extension,
+            self._command_registry.register_extension_command(
+                event.name, event.payload, source=event.extension
             )
-            self._slash_commands = [
-                e for e in self._slash_commands if e.name != entry.name
-            ] + [entry]
 
     def handle_extension_reload(self, event: ExtensionReloadEvent) -> None:
         """Self-modification (``trigger=agent`` or ``propose_change_approved``)
@@ -1234,7 +1346,7 @@ class AgentMApp(App[int]):
                 timeout=6,
             )
             return
-        is_self_modify = event.trigger in _SELF_MODIFY_TRIGGERS
+        is_self_modify = event.is_self_modify
         prefix = "★ self-modify" if is_self_modify else "atom reload"
         old = (event.old_hash or "—")[:8]
         new = event.new_hash[:8]
@@ -1280,7 +1392,52 @@ class AgentMApp(App[int]):
         self._needs_scroll_end = True
 
 
-async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
+DeltaHandler = Callable[[AgentMApp, Any, Any], None]
+
+
+def _lookup_delta_handler(
+    handlers: dict[type[Any], DeltaHandler], delta_type: type[Any]
+) -> DeltaHandler | None:
+    for cls in delta_type.__mro__:
+        handler = handlers.get(cls)
+        if handler is not None:
+            return handler
+    return None
+
+
+_DELTA_HANDLERS: dict[type[Any], DeltaHandler] = {
+    TextDelta: AgentMApp._on_text_delta,
+    ThinkingDelta: AgentMApp._on_thinking_delta,
+    ToolCallStart: AgentMApp._on_tool_call_start,
+    ToolCallArgsDelta: AgentMApp._on_tool_call_args_delta,
+    MessageEnd: AgentMApp._on_message_end,
+}
+
+_CHILD_DELTA_HANDLERS: dict[type[Any], DeltaHandler] = {
+    TextDelta: AgentMApp._child_text_delta,
+    ThinkingDelta: AgentMApp._child_thinking_delta,
+    ToolCallStart: AgentMApp._child_tool_call_start,
+}
+
+_EVENT_SUBSCRIPTIONS: tuple[tuple[str, str], ...] = (
+    (StreamDeltaEvent.CHANNEL, "handle_stream_delta"),
+    (ToolCallEvent.CHANNEL, "handle_tool_call"),
+    (ToolResultEvent.CHANNEL, "handle_tool_result"),
+    (LlmRequestStartEvent.CHANNEL, "handle_llm_start"),
+    (LlmRequestEndEvent.CHANNEL, "handle_llm_end"),
+    (ChildSessionStartEvent.CHANNEL, "handle_child_start"),
+    (ChildSessionEndEvent.CHANNEL, "handle_child_end"),
+    (ExtensionInstallEvent.CHANNEL, "handle_extension_install"),
+    (ApiRegisterEvent.CHANNEL, "handle_api_register"),
+    (ExtensionReloadEvent.CHANNEL, "handle_extension_reload"),
+    (CostBudgetExceededEvent.CHANNEL, "handle_cost_budget_exceeded"),
+    (ApiSendUserMessageEvent.CHANNEL, "handle_api_send_user_message"),
+)
+
+
+async def run(
+    config: AgentSessionConfig, *, theme: str = "dark", theme_data: Theme = DEFAULT_THEME
+) -> int:
     bus = config.bus
     if bus is None:
         from agentm.core.abi import EventBus
@@ -1296,19 +1453,14 @@ async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
     # unsubscribe callable; we hold them so the live ``app.handle_*``
     # subscribers below are the only ones that keep firing.
 
-    slash_commands: dict[str, SlashCommandEntry] = {
-        name: SlashCommandEntry(name=name, description=description, source="builtin")
-        for name, description in _BUILTIN_COMMANDS.items()
-    }
+    command_registry = default_builtin_command_registry()
     tools: dict[str, ToolEntry] = {}
     extensions: dict[str, ExtensionInstallEvent] = {}
 
     def _capture_register(event: ApiRegisterEvent) -> None:
         if event.kind == "command" and isinstance(event.payload, CommandSpec):
-            slash_commands[f"/{event.name}"] = SlashCommandEntry(
-                name=f"/{event.name}",
-                description=event.payload.description,
-                source=event.extension,
+            command_registry.register_extension_command(
+                event.name, event.payload, source=event.extension
             )
         elif event.kind == "tool":
             tools[event.name] = ToolEntry(
@@ -1328,7 +1480,7 @@ async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
         session = await AgentSession.create(session_cfg)
     finally:
         # Drop the create-time accumulators no matter what — leaving
-        # them subscribed would mutate ``slash_commands`` / ``tools`` /
+        # them subscribed would mutate ``command_registry`` / ``tools`` /
         # ``extensions`` for the rest of the session even though those
         # dicts are never read again.
         unsub_register()
@@ -1338,27 +1490,18 @@ async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
         session_cfg,
         theme=theme,
         session=session,
-        slash_commands=list(slash_commands.values()),
+        command_registry=command_registry,
         extensions=extensions,
         tools=list(tools.values()),
+        theme_data=theme_data,
     )
 
     # Live subscriptions. Hot reloads, late tool registration, budget
     # overflow, and extension-injected user messages all happen after
     # create — these handlers carry the live state through.
 
-    bus.on(StreamDeltaEvent.CHANNEL, app.handle_stream_delta)
-    bus.on(ToolCallEvent.CHANNEL, app.handle_tool_call)
-    bus.on(ToolResultEvent.CHANNEL, app.handle_tool_result)
-    bus.on(LlmRequestStartEvent.CHANNEL, app.handle_llm_start)
-    bus.on(LlmRequestEndEvent.CHANNEL, app.handle_llm_end)
-    bus.on(ChildSessionStartEvent.CHANNEL, app.handle_child_start)
-    bus.on(ChildSessionEndEvent.CHANNEL, app.handle_child_end)
-    bus.on(ExtensionInstallEvent.CHANNEL, app.handle_extension_install)
-    bus.on(ApiRegisterEvent.CHANNEL, app.handle_api_register)
-    bus.on(ExtensionReloadEvent.CHANNEL, app.handle_extension_reload)
-    bus.on(CostBudgetExceededEvent.CHANNEL, app.handle_cost_budget_exceeded)
-    bus.on(ApiSendUserMessageEvent.CHANNEL, app.handle_api_send_user_message)
+    for channel, method_name in _EVENT_SUBSCRIPTIONS:
+        bus.on(channel, getattr(app, method_name))
 
     result = await app.run_async()
     return 0 if result is None else int(result)

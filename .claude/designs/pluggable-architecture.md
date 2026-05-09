@@ -279,6 +279,8 @@ Modes share **all** runtime; they only differ in:
 - how events are rendered/serialized
 - which `ExtensionUIContext` they provide (TUI / no-op / structured)
 
+Presenter-owned commands may add UI affordances, but command discovery and extension-registered command parity stay registry-driven: the Textual mode uses a `BuiltinCommandRegistry` for its local commands and mirrors `ExtensionAPI.register_command` registrations into the same palette/dispatch path. Kernel event identity uses prompt-local `turn_index` plus session-monotone `turn_id`; presenters key long-lived widgets by `turn_id`.
+
 **Reference**: `packages/coding-agent/src/modes/{print-mode.ts, rpc/, interactive/}` and `core/sdk.ts:createAgentSession` (the SDK entrypoint shared by all modes).
 
 **Design rule for AgentM**: any feature added to a mode that *cannot* also be reached via the SDK is a bug. The SDK is the contract; modes are sugar.

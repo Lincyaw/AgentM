@@ -45,6 +45,15 @@ pytestmark = pytest.mark.ui
 
 
 PromptScript = Callable[[EventBus, str], Awaitable[list[Any]]]
+_TEST_TURN_IDS: dict[int, int] = {}
+
+
+def _set_test_turn_id(bus: EventBus, turn_id: int) -> None:
+    _TEST_TURN_IDS[id(bus)] = turn_id
+
+
+def _test_turn_id(bus: EventBus) -> int:
+    return _TEST_TURN_IDS.get(id(bus), 0)
 
 
 class _FakeSession:
@@ -78,6 +87,7 @@ class _FakeSession:
     ) -> list[Any]:
         del images, signal
         self.prompts.append(text)
+        _set_test_turn_id(self.bus, len(self.prompts) - 1)
         script = self._scripts.pop(0)
         return await script(self.bus, text)
 
@@ -381,7 +391,7 @@ async def test_T8_many_turns_keep_scrollable_log(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         for turn_index in range(500):
             turn = TurnContainer(logical_turn=turn_index + 1)
-            app._root_turns[(0, turn_index)] = turn
+            app._root_turns[turn_index] = turn
             turn.text_buffer = f"turn {turn_index}"
             turn.assistant.set_text(turn.text_buffer)
             await app._mount_turn(turn)
@@ -419,12 +429,13 @@ def _make_text_script(reply: str) -> PromptScript:
     Each script emits its own ``llm_request_start`` / stream / ``llm_request_end``
     sequence with ``turn_index=0`` — that's what the real kernel does on every
     ``prompt()`` call (loop.py: ``for turn_index in range(max_turns)``). The
-    interesting thing this exercises is whether the TUI keeps the two prompts
-    in distinct ``TurnContainer``s or collapses them onto the same one.
+    interesting thing this exercises is whether the TUI keys by monotone
+    ``turn_id`` or collapses both ``turn_index=0`` prompts onto one container.
     """
 
     async def _script(bus: EventBus, text: str) -> list[Any]:
         del text
+        turn_id = _test_turn_id(bus)
         await bus.emit(
             "llm_request_start",
             LlmRequestStartEvent(
@@ -433,16 +444,18 @@ def _make_text_script(reply: str) -> PromptScript:
                 tool_count=0,
                 system_chars=0,
                 model_id="fake-model",
+                turn_id=turn_id,
             ),
         )
         await bus.emit(
             "stream_delta",
-            StreamDeltaEvent(turn_index=0, delta=TextDelta(text=reply)),
+            StreamDeltaEvent(turn_index=0, delta=TextDelta(text=reply), turn_id=turn_id),
         )
         await bus.emit(
             "stream_delta",
             StreamDeltaEvent(
                 turn_index=0,
+                turn_id=turn_id,
                 delta=MessageEnd(
                     message=AssistantMessage(
                         role="assistant",
@@ -457,7 +470,11 @@ def _make_text_script(reply: str) -> PromptScript:
         await bus.emit(
             "llm_request_end",
             LlmRequestEndEvent(
-                turn_index=0, chunk_count=2, duration_ns=1_000_000, error=None
+                turn_index=0,
+                chunk_count=2,
+                duration_ns=1_000_000,
+                error=None,
+                turn_id=turn_id,
             ),
         )
         return []
@@ -473,7 +490,7 @@ async def test_T8b_two_prompts_render_distinct_turns(tmp_path: Path) -> None:
     keying ``_root_turns`` by raw ``turn_index`` collapses the second
     prompt's response onto the first prompt's container — visually the new
     assistant text and tool calls show up *above* the new user bubble.
-    Composite ``(prompt_epoch, turn_index)`` keys keep them separate.
+    Monotone kernel ``turn_id`` keys keep them separate.
     """
 
     session = _FakeSession([_make_text_script("first"), _make_text_script("second")])
@@ -486,10 +503,9 @@ async def test_T8b_two_prompts_render_distinct_turns(tmp_path: Path) -> None:
 
         assert session.prompts == ["a", "b"]
         assert len(app._root_turns) == 2
-        epochs = sorted({epoch for epoch, _ in app._root_turns})
-        assert epochs == [1, 2]
-        first = app._root_turns[(1, 0)]
-        second = app._root_turns[(2, 0)]
+        assert sorted(app._root_turns) == [0, 1]
+        first = app._root_turns[0]
+        second = app._root_turns[1]
         assert first is not second
         assert first.assistant.text == "first"
         assert second.assistant.text == "second"
@@ -520,8 +536,8 @@ async def test_T8c_turn_height_auto_no_overlap(tmp_path: Path) -> None:
         await pilot.press("b", "enter")
         await pilot.pause(0.2)
 
-        first = app._root_turns[(1, 0)]
-        second = app._root_turns[(2, 0)]
+        first = app._root_turns[0]
+        second = app._root_turns[1]
         # ``region.y`` is the absolute screen-row of the widget's top edge;
         # ``region.bottom`` is the row just past its last line. If the
         # second turn starts before the first ends, they overlap.
@@ -546,7 +562,7 @@ async def test_T8d_pageup_pagedown_scroll_log_while_input_focused(
         # Mount enough tall turns to make the log overflow comfortably.
         for turn_index in range(40):
             turn = TurnContainer(logical_turn=turn_index + 1)
-            app._root_turns[(0, turn_index)] = turn
+            app._root_turns[turn_index] = turn
             turn.text_buffer = "\n".join(f"line {i}" for i in range(5))
             turn.assistant.set_text(turn.text_buffer)
             await app._mount_turn(turn)
@@ -663,3 +679,27 @@ async def test_light_theme_diff_rendering_and_extension_error_toast(tmp_path: Pa
         tool = app.query_one(ToolCallBlock)
         assert "theme-light" in app.classes
         assert tool.body_kind == "Syntax"
+
+
+@pytest.mark.asyncio
+async def test_builtin_command_registry_drives_palette_and_dispatch(tmp_path: Path) -> None:
+    dispatched: list[str] = []
+
+    async def _fake_handler(app: AgentMApp, args: str) -> None:
+        del app
+        dispatched.append(args)
+
+    from agentm.modes.textual_app import BuiltinCommand, BuiltinCommandRegistry
+
+    registry = BuiltinCommandRegistry(
+        [BuiltinCommand("/fake", _fake_handler, "Fake command.")]
+    )
+    app = AgentMApp(
+        AgentSessionConfig(cwd=str(tmp_path), provider=("fake", {})),
+        session=_FakeSession([]),
+        command_registry=registry,
+    )
+
+    assert [entry.name for entry in app._all_commands()] == ["/fake"]
+    assert await app._handle_builtin_command("/fake payload") is True
+    assert dispatched == ["payload"]

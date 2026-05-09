@@ -393,6 +393,7 @@ class AgentLoop:
         self._stream_fn = stream_fn
         self._bus = bus
         self._config = config if config is not None else LoopConfig()
+        self._next_turn_id = 0
 
     def set_stream_fn(self, fn: StreamFn) -> None:
         """Replace the active provider for subsequent turns.
@@ -437,6 +438,8 @@ class AgentLoop:
         try:
             for turn_index in range(max_turns):
                 last_turn_index = turn_index
+                turn_id = self._next_turn_id
+                self._next_turn_id += 1
                 # Rebuild dispatch index per turn so atoms registered mid-prompt
                 # via ``api.install_atom`` (or any other ``register_tool`` path)
                 # become callable on the very next turn within the same prompt.
@@ -447,6 +450,7 @@ class AgentLoop:
                         SignalAborted(),
                         last_assistant=last_assistant,
                         turn_index=turn_index,
+                        turn_id=turn_id,
                     )
                 if (
                     max_tool_calls is not None
@@ -457,9 +461,13 @@ class AgentLoop:
                         BudgetExhausted(detail="max_tool_calls"),
                         last_assistant=last_assistant,
                         turn_index=turn_index,
+                        turn_id=turn_id,
                     )
 
-                await self._bus.emit(TurnStartEvent.CHANNEL, TurnStartEvent(turn_index=turn_index))
+                await self._bus.emit(
+                    TurnStartEvent.CHANNEL,
+                    TurnStartEvent(turn_index=turn_index, turn_id=turn_id),
+                )
 
                 # context event — handlers may rewrite message list
                 ctx_event = ContextEvent(messages=messages)
@@ -492,6 +500,7 @@ class AgentLoop:
                         tool_count=len(tools),
                         system_chars=len(system or ""),
                         model_id=getattr(model, "id", None),
+                        turn_id=turn_id,
                     ),
                 )
                 stream_events: list[AssistantStreamEvent] = []
@@ -513,7 +522,7 @@ class AgentLoop:
                         # additive and ignored by everyone else.
                         await self._bus.emit(
                             StreamDeltaEvent.CHANNEL,
-                            StreamDeltaEvent(turn_index=turn_index, delta=ev),
+                            StreamDeltaEvent(turn_index=turn_index, delta=ev, turn_id=turn_id),
                         )
                         if isinstance(ev, ToolCallArgsParseError):
                             await self._bus.emit(ev.CHANNEL, ev)
@@ -526,6 +535,7 @@ class AgentLoop:
                             chunk_count=len(stream_events),
                             duration_ns=time.perf_counter_ns() - stream_start_ns,
                             error=stream_error,
+                            turn_id=turn_id,
                         ),
                     )
                     raise
@@ -536,6 +546,7 @@ class AgentLoop:
                         chunk_count=len(stream_events),
                         duration_ns=time.perf_counter_ns() - stream_start_ns,
                         error=None,
+                        turn_id=turn_id,
                     ),
                 )
 
@@ -550,6 +561,7 @@ class AgentLoop:
                         turn_index=turn_index,
                         message=assistant_msg,
                         messages=tuple(messages),
+                        turn_id=turn_id,
                     ),
                 )
 
@@ -571,12 +583,14 @@ class AgentLoop:
                             SignalAborted(),
                             last_assistant=last_assistant,
                             turn_index=turn_index,
+                            turn_id=turn_id,
                         )
                     paired_outcomes = raw_outcomes
                     tool_calls_used += len(paired_outcomes)
 
                 action = await self._dispatch_decision(
                     turn_index=turn_index,
+                    turn_id=turn_id,
                     assistant_msg=assistant_msg,
                     paired_outcomes=paired_outcomes,
                 )
@@ -594,6 +608,7 @@ class AgentLoop:
                 MaxTurnsExhausted(),
                 last_assistant=last_assistant,
                 turn_index=last_turn_index,
+                turn_id=max(0, self._next_turn_id - 1),
             )
 
         except asyncio.CancelledError:
@@ -776,6 +791,7 @@ class AgentLoop:
         *,
         turn_index: int,
         assistant_msg: AssistantMessage,
+        turn_id: int,
         paired_outcomes: list[tuple[str, ToolOutcome]],
     ) -> LoopAction:
         """Compute the default action, fire the hook, resolve overrides."""
@@ -786,6 +802,7 @@ class AgentLoop:
             assistant_message=assistant_msg,
             tool_outcomes=[out for _, out in paired_outcomes],
             default_action=default,
+            turn_id=turn_id,
         )
         returns = await self._bus.emit(
             DecideTurnActionEvent.CHANNEL,
@@ -816,6 +833,7 @@ class AgentLoop:
         *,
         last_assistant: AssistantMessage | None,
         turn_index: int,
+        turn_id: int,
     ) -> list[AgentMessage]:
         """Kernel-imposed termination path.
 
@@ -831,6 +849,7 @@ class AgentLoop:
             assistant_message=last_assistant,
             tool_outcomes=[],
             default_action=Stop(cause),
+            turn_id=turn_id,
         )
         await self._bus.emit(
             DecideTurnActionEvent.CHANNEL,
