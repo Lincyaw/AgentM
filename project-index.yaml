@@ -70,6 +70,7 @@ requirements:
       - path: src/agentm/core/abi/events.py
       - path: src/agentm/core/abi/__init__.py
       - path: src/agentm/harness/extension.py
+      - path: src/agentm/harness/atom_reloader.py
       - path: src/agentm/extensions/builtin/observability.py
       - path: src/agentm/extensions/builtin/sub_agent.py
       - path: src/agentm/extensions/builtin/artifact_store.py
@@ -78,10 +79,14 @@ requirements:
       - path: contrib/scenarios/rca/src/agentm_rca/tools/hypothesis_tools.py
     tests:
       - path: tests/integration/test_artifact_store.py
+      - path: tests/unit/extensions/test_compaction_atoms.py
+      - path: tests/integration/test_observability_cli.py
       - path: tests/integration/test_sub_agent_budgets.py
       - path: tests/integration/test_sub_agent_lifecycle.py
       - path: tests/unit/extensions/test_extension_contract.py
       - path: tests/unit/harness/test_extension_api_infra.py
+      - path: tests/unit/extensions/test_observability.py
+      - path: tests/unit/harness/test_transactional_reload.py
     docs:
       - path: .claude/designs/observability.md
       - path: .claude/designs/sub-agent-lifecycle.md

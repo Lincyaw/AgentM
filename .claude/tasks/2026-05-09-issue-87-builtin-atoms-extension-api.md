@@ -18,5 +18,11 @@ The split threshold is **at least 1500 LOC**; issue #87 does not split the atom 
 
 - Grep gates from the issue acceptance criteria.
 - `validate_atom_file` for `observability`, `sub_agent`, `artifact_store`, `micro_compact`, and `llm_compaction`.
-- Regression tests for observability trace shape, sub-agent spawn kwargs/config behavior, and artifact-store per-session service isolation.
+- Regression tests for observability trace shape, CLI trajectory identity, observer reload cleanup, sub-agent spawn kwargs/config behavior, artifact-store per-session service isolation, and compaction atom serializer/summarizer behavior.
 - `uv run ruff check src/`, `uv run mypy src/`, and `uv run pytest --tb=short`.
+
+## Review Follow-up
+
+- Observer registrations created through `api.add_observer` are tracked by the atom reloader with the same owner cleanup path as `api.on`, so reload/unload cannot leave stale trace observers attached.
+- The CLI observability regression drives `agentm` through a sandbox repo and inspects `.agentm/observability/<session_id>.jsonl`, matching the identity E2E rule for trajectory-affecting atom changes.
+- Compaction sibling coverage is intentionally focused on the shared serializer boundary and provider summarizer behavior; no extra scenario E2E is added because the C10 change is an atom-local serialization substitution, not a new fail-stop position beyond §11 validator and trace identity checks.
