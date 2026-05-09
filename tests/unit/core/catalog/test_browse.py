@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agentm.core._internal.catalog import _layout
+from agentm.harness.catalog import _layout
 from agentm.core._internal.catalog.browse import (
     UnparseableManifestError,
     current_version,

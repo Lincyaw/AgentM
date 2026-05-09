@@ -43,9 +43,9 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
 
-from agentm.core._internal.catalog import _layout
 from agentm.core._internal.catalog.hashing import compute_atom_hash
 from agentm.core._internal.catalog.manifest import is_constitution_path
+from agentm.harness.catalog import _layout
 from agentm.core.abi import BusPriority, EventBus, Tool
 from agentm.extensions import ExtensionManifest
 from agentm.extensions import discover as discover_mod

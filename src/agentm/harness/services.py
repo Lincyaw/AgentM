@@ -23,6 +23,7 @@ from agentm.core.abi.compaction import (
     CompactionSettings,
     ContextUsageEstimate,
 )
+from agentm.core.abi.project_layout import ProjectLayout
 from agentm.core.abi.prompt_template import PromptTemplateRecord
 from agentm.core.abi.skill import SkillDiagnostic, SkillRecord
 
@@ -238,7 +239,7 @@ class _DefaultCatalogService:
     ) -> list[dict[str, Any]]:
         import json
 
-        from agentm.core._internal.catalog import _layout
+        from agentm.harness.catalog import _layout
 
         path = _layout.atom_decisions_path(name, version_key, root=root)
         if not path.exists():
@@ -259,7 +260,7 @@ class _DefaultCatalogService:
     ) -> None:
         import json
 
-        from agentm.core._internal.catalog import _layout
+        from agentm.harness.catalog import _layout
 
         path = _layout.atom_decisions_path(name, version_key, root=root)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -367,14 +368,24 @@ def default_compaction_service() -> CompactionService:
     return _DefaultCompactionService()
 
 
+def default_project_layout(cwd: str) -> ProjectLayout:
+    """Return the harness's default :class:`ProjectLayout` for ``cwd``."""
+
+    from agentm.harness.catalog import default_project_layout as _impl
+
+    return _impl(cwd)
+
+
 __all__ = [
     "CatalogService",
     "CompactionService",
+    "ProjectLayout",
     "PromptTemplatesService",
     "SkillsService",
     "Summarizer",
     "default_catalog_service",
     "default_compaction_service",
+    "default_project_layout",
     "default_prompt_templates_service",
     "default_skills_service",
 ]

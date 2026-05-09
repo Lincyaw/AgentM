@@ -323,8 +323,30 @@ class AgentSession:
             session_id=session_id,
             bus=bus,
         )
+        # Configure the constitution-boundary manifest path. The kernel
+        # (``core/_internal/catalog/manifest.py``) defaults this to ``None``
+        # so importing core never touches the filesystem; the harness owns
+        # the resolution policy. We only set it if the global is still
+        # unconfigured: tests (and embedders that run multiple sessions
+        # against different roots) may pre-pin the path and we should not
+        # silently clobber that pin.
         try:
-            from agentm.core._internal.catalog.migrate import migrate_catalog_v2
+            from agentm.core._internal.catalog import (
+                manifest as _manifest_mod,
+            )
+
+            if _manifest_mod._MANIFEST_PATH is None:
+                manifest_path = Path(config.cwd) / "core-manifest.yaml"
+                if manifest_path.exists():
+                    _manifest_mod.configure_manifest_path(manifest_path)
+        except Exception as exc:
+            logger.warning(
+                "agentm core-manifest configuration failed during startup: %r",
+                exc,
+            )
+
+        try:
+            from agentm.harness.catalog.migrate import migrate_catalog_v2
 
             migrate_catalog_v2(root=Path(config.cwd))
         except Exception as exc:
@@ -985,7 +1007,7 @@ class AgentSession:
         self._bus.clear()
 
         try:
-            from agentm.core._internal.catalog.indexer import index_trace
+            from agentm.harness.catalog.indexer import index_trace
 
             trace_path = (
                 Path(self._cwd)

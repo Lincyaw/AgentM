@@ -10,7 +10,7 @@ import pytest
 
 from agentm.core.abi import AssistantMessage, EventBus, TextContent
 from agentm.core.abi.messages import ToolResultBlock, ToolResultMessage, UserMessage
-from agentm.core._internal.catalog import _layout
+from agentm.harness.catalog import _layout
 from agentm.core._internal.catalog.manifest import reload_manifest
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.resource_writer import GitBackedResourceWriter

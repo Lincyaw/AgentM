@@ -1,7 +1,7 @@
-"""Constitution-layer indexer for catalog metrics.
+"""Catalog indexer for atom-attribution metrics.
 
-This module is the only constitution-layer writer of `metrics.jsonl`. It never
-writes `decisions.jsonl`; that file is reserved for future decision-making
+This module is the only writer of `metrics.jsonl`. It never writes
+`decisions.jsonl`; that file is reserved for future decision-making
 layers and is not derivable from raw observability.
 """
 
@@ -17,7 +17,7 @@ from typing import Annotated, Any
 
 import typer
 
-from agentm.core._internal.catalog import _layout
+from agentm.harness.catalog import _layout
 
 logger = logging.getLogger(__name__)
 _LEGACY_FINGERPRINT_WARNED = False
@@ -365,11 +365,19 @@ app = typer.Typer(add_completion=False)
 def rebuild(
     root: Annotated[Path, typer.Option(help="Project root.")] = Path.cwd(),
     observability: Annotated[
-        Path, typer.Option(help="Observability directory.")
-    ] = Path(".agentm") / "observability",
+        Path | None,
+        typer.Option(help="Observability directory (defaults to ProjectLayout)."),
+    ] = None,
 ) -> None:
     """Re-derive catalog metrics from raw observability traces."""
     resolved_root = root.expanduser().resolve()
+    if observability is None:
+        # Resolve through the default project layout so the on-disk policy
+        # lives in one place. Constructed lazily — no filesystem touch at
+        # import time.
+        from agentm.harness.catalog import DefaultProjectLayout
+
+        observability = DefaultProjectLayout(cwd=resolved_root).observability_root()
     resolved_obs = observability.resolve()
     n_traces, n_atoms, n_warnings, failures = rebuild_catalog(
         root=resolved_root, observability=resolved_obs
