@@ -248,7 +248,7 @@ Key properties:
 
 Writes the current source + manifest to `.agentm/catalog/atoms/<name>/<content_hash>/` (constitution-owned path). See sister doc §3 for catalog schema. Idempotent: if hash already exists, no rewrite.
 
-> **Implementation note**: as of [git-backed-versioning.md](git-backed-versioning.md), this snapshot mechanism is provided by git plumbing through the harness `ResourceWriter` service. The catalog directory still exists for `metrics.jsonl` and `runs/`; source/manifest content moves into the git object store. The transactional reload flow simplifies to `writer.write(...) → on install failure: writer.restore(path, pre_sha)`.
+> **Implementation note**: as of [git-backed-versioning.md](git-backed-versioning.md), this snapshot mechanism is provided by git plumbing through the harness `ResourceWriter` service. The catalog directory still exists for `metrics.jsonl` and `runs/`; source/manifest content moves into the git object store. The transactional reload flow simplifies to `writer.write(...) → on install failure: git restore + git reset --hard <pre_sha>`.
 
 ### 5.3 What `restore_from_snapshot` does
 

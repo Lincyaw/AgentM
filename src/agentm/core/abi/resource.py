@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 WriterAuthor = Literal["agent", "human", "indexer"]
@@ -65,10 +64,6 @@ class ResourceWriter(Protocol):
     ) -> WriteResult: ...
 
     def classify(self, path: str) -> PathClass: ...
-
-    def restore(self, path: Path, version: str) -> None:
-        """Restore a managed resource to a previously recorded version."""
-        ...
 
     def batch(
         self,

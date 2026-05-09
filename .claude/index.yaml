@@ -6,24 +6,24 @@ concepts:
   # Live v2 architecture concepts. Edit these as the design evolves.
 
   pluggable_architecture:
-    description: "First-principles pluggable architecture inspired by pi-mono (badlogic/pi-mono). Three-layer package boundary (agentm-llm / agentm-core / agentm-harness / agentm-modes). Five pluggability axes as Protocol ports: StreamFn (LLM), Tool+Operations (env; Operations are constitution-only in v0 and selected at session construction), SessionManager (state), ResourceLoader (project context), EventBus+ExtensionAPI (policy). Built-in features become default extensions. Reference index to pi-mono source paths."
+    description: "First-principles pluggable architecture inspired by pi-mono (badlogic/pi-mono). Three-layer package boundary (agentm-llm / agentm-core / agentm-harness / agentm-modes). Five pluggability axes as Protocol ports: StreamFn (LLM), Tool+Operations (env), SessionManager (state), ResourceLoader (project context), EventBus+ExtensionAPI (policy). Built-in features become default extensions. Reference index to pi-mono source paths."
     design: "designs/pluggable-architecture.md"
     related_concepts: [agent_loop, extension_as_scenario, operations_ports, observability, self_modifiable_architecture, evolution_substrate, git_backed_versioning, textual_tui]
-    plans: [plans/2026-05-09-issue-80-abi-prep.md]
+    plans: []
     tasks: []
 
   agent_loop:
     description: "Per-turn termination protocol for AgentLoop.run, expressed as sum types. ToolOutcome (ToolContinue|ToolTerminate) is what tools return; TerminationCause is a sealed hierarchy describing WHO ended the loop and WHY (ModelEndTurn, ToolTerminated{tool_name,reason}, MaxTurnsExhausted, SignalAborted, ProviderTruncated{kind}, ProviderProtocolViolation{detail}, BudgetExhausted), with a class-var `final` that controls override semantics. LoopAction (Step|Stop(cause)|Inject(messages)) is what the kernel does next. Single decide_turn_action event fires every turn (including kernel-imposed terminations, for symmetric observability) carrying a TurnObservation snapshot; extensions return LoopAction|None to override. Resolution lattice: final causes shadow everything; otherwise Inject>Stop>Step with Inject messages concatenated in registration order. Replaces the old multi-flag (assistant.stop_reason + tool_calls presence + BeforeAgentEndEvent.stop_reason + cancel/append dict) protocol that silently masked provider/parser disagreements and buried multi-handler resolution rules in folklore comments. Hard-cut migration in PR #58 (no shims): tools wanting to terminate return ToolTerminate; before_agent_end handlers move to decide_turn_action returning Inject(messages=[...])."
     design: "designs/agent-loop.md"
     related_concepts: [pluggable_architecture, sub_agent_lifecycle, observability, extension_as_scenario]
-    plans: [plans/2026-05-09-issue-80-abi-prep.md]
+    plans: []
     tasks: []
 
   self_modifiable_architecture:
     description: "Boundary refinement of pluggable_architecture: core/extensions split is drawn by 'what an agent can safely self-modify' rather than mechanism vs policy. Constitution layer is uniform on the modifiability axis (none of core/ is agent-modifiable) but split on the visibility axis into core/abi/ (types & Protocols, atom + llm import), core/lib/ (pure-function utilities, atom imports as stdlib), and core/_internal/ (stateful subsystems & default impls — operations_impl, skills, prompt_templates, catalog/, compaction engine — atoms reach exclusively via ExtensionAPI services: api.get_operations / api.skills / api.prompt_templates / api.catalog / api.compaction; direct import forbidden by validator). Autonomy layer holds atoms + scenarios + skills + prompts (tier-1 free / tier-2 reviewable). Discovery layer = fs scan + reload + assert_active. Adds versioned ExtensionAPI (api_version with grace window), transactional reload (validator → snapshot → install → rollback on failure), and a new ExtensionAPI surface (reload_atom, freeze_current, list_atoms, is_constitution_path). Tier-2 atoms (permission, cost_budget, tool_filter, llm_compaction) require propose_change approval to reload. Compaction prompts are the canonical mechanism→policy split: prompt strings moved out of core into the llm_compaction atom, engine in core/_internal/compaction/ takes prompt as a required parameter. Establishes that change is safe and atomic; evolution-substrate.md establishes that change is evidence-driven."
     design: "designs/self-modifiable-architecture.md"
     related_concepts: [pluggable_architecture, extension_as_scenario, single_file_extension_contract, observability, evolution_substrate, git_backed_versioning]
-    plans: [plans/2026-05-09-issue-80-abi-prep.md]
+    plans: []
     tasks: []
 
   evolution_substrate:
@@ -34,10 +34,10 @@ concepts:
     tasks: []
 
   git_backed_versioning:
-    description: "Replaces bespoke per-atom version store with git as the version layer. Catalog keeps only what git does not provide — metrics.jsonl + runs/<trace_id> attribution. Source content, lineage (parent commits), authorship, timestamp, and rationale (commit message) all flow through git plumbing. New harness service ResourceWriter (constitution layer) is the single chokepoint for all managed writes: classifies path as constitution / managed / unmanaged from core-manifest.yaml's managed.globs section, rejects constitution writes, git-commits managed writes before mutation, passes through unmanaged writes uncommitted. tool_edit / tool_write / reload_atom retrofit to write through ResourceWriter; the freeze→tempfile→os.replace→rollback dance in atom_reloader collapses into writer.write + git restore on failure. Browse API becomes git-log/git-cat-file wrappers; version IDs become full git SHAs replacing compute_atom_hash content hashes. Rollback is ResourceWriter.restore(path, target_sha) routed through the same writer. On absent .git/ the writer auto-inits .agentm/repo/ as a shadow worktree; advisory mode if git binary missing. Skills, prompts, scenarios, and .claude/ docs all gain versioning for free. ~300 LoC deleted from freeze.py + _layout.py; parent_hash dead-code problem disappears (git provides it); direct-edit bypass closed."
+    description: "Replaces bespoke per-atom version store with git as the version layer. Catalog keeps only what git does not provide — metrics.jsonl + runs/<trace_id> attribution. Source content, lineage (parent commits), authorship, timestamp, and rationale (commit message) all flow through git plumbing. New harness service ResourceWriter (constitution layer) is the single chokepoint for all managed writes: classifies path as constitution / managed / unmanaged from core-manifest.yaml's managed.globs section, rejects constitution writes, git-commits managed writes before mutation, passes through unmanaged writes uncommitted. tool_edit / tool_write / reload_atom retrofit to write through ResourceWriter; the freeze→tempfile→os.replace→rollback dance in atom_reloader collapses into writer.write + git restore on failure. Browse API becomes git-log/git-cat-file wrappers; version IDs become full git SHAs replacing compute_atom_hash content hashes. Rollback is rollback_resource(path, target_sha, rationale) routed through the same writer. On absent .git/ the writer auto-inits .agentm/repo/ as a shadow worktree; advisory mode if git binary missing. Skills, prompts, scenarios, and .claude/ docs all gain versioning for free. ~300 LoC deleted from freeze.py + _layout.py; parent_hash dead-code problem disappears (git provides it); direct-edit bypass closed."
     design: "designs/git-backed-versioning.md"
     related_concepts: [self_modifiable_architecture, evolution_substrate, pluggable_architecture]
-    plans: [plans/2026-05-09-issue-80-abi-prep.md]
+    plans: []
     tasks: []
 
   textual_tui:
@@ -76,10 +76,10 @@ concepts:
     tasks: []
 
   operations_ports:
-    description: "FileOperations / BashOperations Protocols in src/agentm/core/abi/operations.py + LocalFileOperations / LocalBashOperations defaults in src/agentm/core/_internal/operations_impl.py. The environment boundary that lets tool atoms (tool_read, tool_bash, tool_edit, tool_write) run unchanged whether targeting local FS or remote (SSH, sandbox). In v0 this is a constitution-only axis: the harness injects the Operations bundle at session construction, and atoms consume but do not replace it at runtime. Acceptance scenario 2 of pluggable-architecture.md depends on this port."
+    description: "FileOperations / BashOperations Protocols in src/agentm/core/abi/operations.py + LocalFileOperations / LocalBashOperations defaults in src/agentm/core/_internal/operations_impl.py. The environment boundary that lets tool atoms (tool_read, tool_bash, tool_edit, tool_write) run unchanged whether targeting local FS or remote (SSH, sandbox). Acceptance scenario 2 of pluggable-architecture.md depends on this port."
     design: "designs/extension-as-scenario.md#10b6"
     related_concepts: [pluggable_architecture, extension_as_scenario]
-    plans: [plans/2026-05-09-issue-80-abi-prep.md]
+    plans: []
     tasks: []
 
   skills:
