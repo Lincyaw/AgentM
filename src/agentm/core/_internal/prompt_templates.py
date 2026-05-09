@@ -161,12 +161,14 @@ def load_prompt_templates(
         templates.extend(
             _load_templates_from_dir(os.path.join(agent_dir, "prompts"), "user")
         )
-        if project_prompt_dirs is None:
-            project_dirs: tuple[str, ...] = (
-                os.path.join(cwd, ".agentm", "prompts"),
-            )
-        else:
-            project_dirs = tuple(project_prompt_dirs)
+        # Project-scope prompt-template directories are policy, not kernel —
+        # they MUST be supplied by the harness via
+        # ``ProjectLayout.prompts_dirs()``. The kernel no longer hard-codes
+        # ``<cwd>/.agentm/prompts``; minimal/no-layout sessions simply have no
+        # project prompt templates.
+        project_dirs: tuple[str, ...] = (
+            tuple(project_prompt_dirs) if project_prompt_dirs is not None else ()
+        )
         for project_dir in project_dirs:
             templates.extend(
                 _load_templates_from_dir(project_dir, "project")

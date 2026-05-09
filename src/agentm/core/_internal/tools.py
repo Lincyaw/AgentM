@@ -48,7 +48,6 @@ class FunctionTool:
         args: dict[str, Any],
         *,
         signal: asyncio.Event | None = None,
-        on_update: Callable[[Any], None] | None = None,
     ) -> ToolResult | ToolOutcome:
         """Invoke the wrapped function. Exceptions propagate unchanged."""
 
