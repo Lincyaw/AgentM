@@ -181,16 +181,17 @@ class AtomReloader:
         self._sync_loop = None
         self._sync_loop_thread = None
 
-    # --- Subscription tracking (called from ExtensionAPI.on / register) ----
+    # --- Subscription tracking (called from ExtensionAPI.on/add_observer) ---
 
     def wrap_api_on(self, api: _ExtensionAPIImpl, owner: str) -> None:
-        """Wrap ``api.on`` so unsubscribes from ``owner`` are tracked.
+        """Wrap event registration APIs so ``owner`` cleanup is tracked.
 
         Each handler also gets a ``_agentm_obs_owner`` attribute so the
         ``observability`` atom can attribute event handlers to the
         installing extension.
         """
         original_on = api.on
+        original_add_observer = api.add_observer
 
         def tracked(
             channel: str,
@@ -206,7 +207,13 @@ class AtomReloader:
             self._handlers_by_atom.setdefault(owner, []).append(unsub)
             return unsub
 
+        def tracked_observer(callback: Any) -> Any:
+            unsub = original_add_observer(callback)
+            self._handlers_by_atom.setdefault(owner, []).append(unsub)
+            return unsub
+
         api.on = tracked  # type: ignore[method-assign]
+        api.add_observer = tracked_observer  # type: ignore[method-assign]
 
     def _track_registration(self, event: ApiRegisterEvent) -> None:
         self._registrations_by_atom.setdefault(event.extension, []).append(

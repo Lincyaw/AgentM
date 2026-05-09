@@ -149,7 +149,28 @@ def install(api):
 '''
 
 
+def _observer_source(name: str, label: str) -> str:
+    return f'''
+from __future__ import annotations
+
+from reload_state_shared import EVENTS
+
+from agentm.extensions import ExtensionManifest
+from agentm.harness.extension import ExtensionAPI
+
+MANIFEST = ExtensionManifest(name={name!r}, description="observer", registers=())
+
+
+def install(api: ExtensionAPI, config: dict[str, object]) -> None:
+    def _observe(channel, event):
+        EVENTS.append(({label!r}, channel))
+
+    api.add_observer(_observe)
+'''
+
+
 def _write_package(tmp_path: Path) -> str:
+    sys.modules.pop("reload_state_shared", None)
     pkg = f"reloadpkg_{uuid.uuid4().hex[:8]}"
     pkg_dir = tmp_path / pkg
     pkg_dir.mkdir()
@@ -290,6 +311,34 @@ async def test_reload_supports_async_install_atoms(
         assert _tool_result_text(second[-2]) == "v2"
     finally:
         await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_reload_removes_owner_observer_callbacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = await _build_session(
+        tmp_path,
+        monkeypatch,
+        atom_source=_observer_source("tool_demo", "v1"),
+    )
+    state = importlib.import_module("reload_state_shared")
+    try:
+        state.EVENTS.clear()
+        await session.bus.emit("marker", {"value": 1})
+        assert state.EVENTS == [("v1", "marker")]
+
+        result = session._apis[f"{session._test_pkg}.tool_demo"].reload_atom(  # type: ignore[attr-defined]
+            "tool_demo", _observer_source("tool_demo", "v2")
+        )
+        assert result.ok is True
+
+        state.EVENTS.clear()
+        await session.bus.emit("marker", {"value": 2})
+        assert state.EVENTS == [("v2", "marker")]
+    finally:
+        await session.shutdown()
+        state.EVENTS.clear()
 
 
 @pytest.mark.asyncio
