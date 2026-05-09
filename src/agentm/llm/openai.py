@@ -53,15 +53,6 @@ from agentm.core.abi.messages import (
     Usage,
     UserMessage,
 )
-from agentm.core.abi.termination import (
-    Aborted,
-    EndTurn,
-    MaxTokens,
-    ProviderError,
-    TerminationHint,
-    ToolUseExpected,
-    VendorSpecific,
-)
 from agentm.core.abi.stream import (
     AssistantStreamEvent,
     MessageEnd,
@@ -268,30 +259,26 @@ class _StreamState:
     started_text: bool = False
     started_thinking: bool = False
     usage: Usage | None = None
-    # Raw vendor finish_reason (verbatim OpenAI string) for observability.
-    stop_reason: str | None = None
-    # Kernel-canonical termination hint, set when ``finish_reason`` arrives.
-    termination: TerminationHint | None = None
+    stop_reason: (
+        Literal["end_turn", "tool_use", "max_tokens", "error", "aborted"] | None
+    ) = None
 
 
-def _map_finish_reason(raw: str | None) -> TerminationHint | None:
-    """Translate OpenAI ``finish_reason`` into a kernel ``TerminationHint``.
+_STOP_REASON_MAP: dict[str, Literal["end_turn", "tool_use", "max_tokens", "error"]] = {
+    "stop": "end_turn",
+    "tool_calls": "tool_use",
+    "function_call": "tool_use",
+    "length": "max_tokens",
+    "content_filter": "error",
+}
 
-    Per `.claude/designs/pluggable-architecture.md` §3.1, providers own the
-    vocabulary translation so the kernel never inspects vendor strings.
-    """
 
+def _map_stop_reason(
+    raw: str | None,
+) -> Literal["end_turn", "tool_use", "max_tokens", "error"] | None:
     if raw is None:
         return None
-    if raw == "stop":
-        return EndTurn()
-    if raw == "length":
-        return MaxTokens()
-    if raw == "tool_calls" or raw == "function_call":
-        return ToolUseExpected()
-    if raw == "content_filter":
-        return ProviderError(detail="content_filter")
-    return VendorSpecific(raw=raw)
+    return _STOP_REASON_MAP.get(raw, "error")
 
 
 def _extract_usage(usage_obj: Any) -> Usage | None:
@@ -349,7 +336,6 @@ def _assemble_message(state: _StreamState) -> AssistantMessage:
         content=blocks,
         timestamp=0.0,
         stop_reason=state.stop_reason,
-        termination=state.termination,
         usage=state.usage,
     )
 
@@ -505,7 +491,6 @@ class OpenAIStreamFn:
 
         if aborted:
             state.stop_reason = "aborted"
-            state.termination = Aborted()
 
         yield MessageEnd(message=_assemble_message(state))
 
@@ -645,9 +630,9 @@ async def _translate_chunk(
             ):
                 yield ToolCallEnd(id=scratch["id"])
                 scratch["ended"] = True
-        if finish_reason is not None:
-            state.stop_reason = finish_reason
-            state.termination = _map_finish_reason(finish_reason)
+        mapped = _map_stop_reason(finish_reason)
+        if mapped is not None:
+            state.stop_reason = mapped
 
 
 # --- Extension entrypoint --------------------------------------------------

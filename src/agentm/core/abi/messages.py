@@ -18,8 +18,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from .termination import TerminationHint
-
 
 @dataclass(slots=True, frozen=True)
 class TextContent:
@@ -104,21 +102,17 @@ class UserMessage:
 class AssistantMessage:
     """A message authored by the model.
 
-    ``termination`` is the kernel-canonical reason the model stopped streaming,
-    expressed as a :class:`TerminationHint` sum-type that providers fill in.
-    The kernel dispatches on this value (not on ``stop_reason``).
-
-    ``stop_reason`` is the raw vendor string carried through verbatim for
-    observability and debugging (e.g. ``"end_turn"`` from Anthropic, ``"stop"``
-    from OpenAI, or any vendor-specific value). It MUST NOT be inspected by
-    kernel code — providers translate it into ``termination``.
+    ``stop_reason`` reports why the model stopped streaming this turn:
+    ``end_turn`` (final answer), ``tool_use`` (more tool calls coming),
+    ``max_tokens``, ``error``, or ``aborted``.
     """
 
     role: Literal["assistant"]
     content: list[AssistantContent]
     timestamp: float
-    stop_reason: str | None = None
-    termination: TerminationHint | None = None
+    stop_reason: (
+        Literal["end_turn", "tool_use", "max_tokens", "error", "aborted"] | None
+    ) = None
     usage: Usage | None = None
 
 
@@ -179,7 +173,6 @@ __all__ = [
     "AssistantContent",
     "AssistantMessage",
     "ImageContent",
-    "TerminationHint",
     "TextContent",
     "ThinkingBlock",
     "ToolCallBlock",

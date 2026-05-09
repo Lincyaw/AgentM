@@ -35,7 +35,6 @@ from agentm.core.abi.session import (
     ENTRY_TYPE_MESSAGE,
     SessionEntry,
 )
-from agentm.core.abi.termination import Aborted, ProviderError
 
 from .utils import (
     FileOperations,
@@ -93,13 +92,7 @@ def calculate_context_tokens(usage: Usage) -> int:
 
 def _get_assistant_usage(message: AgentMessage) -> Usage | None:
     if isinstance(message, AssistantMessage):
-        # Prefer the kernel-canonical TerminationHint when both shipped
-        # adapters set it. Fall back to the raw stop_reason string only
-        # when termination is None (legacy / non-streaming code paths).
-        if message.termination is not None:
-            if not isinstance(message.termination, (Aborted, ProviderError)):
-                return message.usage
-        elif message.stop_reason not in {"aborted", "error"}:
+        if message.stop_reason not in {"aborted", "error"}:
             return message.usage
     return None
 

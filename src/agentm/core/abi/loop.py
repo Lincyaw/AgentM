@@ -77,14 +77,6 @@ from .messages import (
     ToolResultBlock,
     ToolResultMessage,
 )
-from .termination import (
-    Aborted,
-    EndTurn,
-    MaxTokens,
-    ProviderError,
-    ToolUseExpected,
-    VendorSpecific,
-)
 from .stream import (
     AssistantStreamEvent,
     MessageEnd,
@@ -208,17 +200,11 @@ def _default_action(
     Order of precedence:
     1. Any tool returned :class:`ToolTerminate` → ``Stop(ToolTerminated(...))``
        (first wins so the cause maps to the *first* terminal tool call).
-    2. No tool calls at all → dispatch on the provider's
-       :class:`TerminationHint`:
-       - :class:`MaxTokens` → ``Stop(ProviderTruncated(kind="max_tokens"))``
-       - :class:`ProviderError` → ``Stop(ProviderTruncated(kind="error"))``
-       - :class:`ToolUseExpected` → ``Stop(ProviderProtocolViolation)``
-       - :class:`EndTurn` / :class:`Aborted` / :class:`VendorSpecific` /
-         missing hint → ``Stop(ModelEndTurn())``
+    2. No tool calls at all → map the provider's ``stop_reason``:
+       - ``max_tokens`` / ``error`` → ``Stop(ProviderTruncated(kind=...))``
+       - ``tool_use`` (no calls extracted) → ``Stop(ProviderProtocolViolation)``
+       - else → ``Stop(ModelEndTurn())``
     3. Tools ran successfully and none asked to terminate → ``Step()``.
-
-    If ``termination`` is unset (legacy provider adapters), fall back to the
-    raw ``stop_reason`` string for graceful migration.
     """
 
     for out in tool_outcomes:
@@ -230,32 +216,12 @@ def _default_action(
             return Stop(ToolTerminated(tool_name="", reason=out.reason))
 
     if not tool_outcomes:
-        hint = assistant_msg.termination
-        if hint is None:
-            # Back-compat path: providers that haven't migrated to
-            # ``TerminationHint`` yet still populate ``stop_reason`` with the
-            # legacy kernel vocabulary.
-            raw = assistant_msg.stop_reason
-            if raw == "max_tokens":
-                return Stop(ProviderTruncated(kind="max_tokens"))
-            if raw == "error":
-                return Stop(ProviderTruncated(kind="error"))
-            if raw == "tool_use":
-                return Stop(
-                    ProviderProtocolViolation(
-                        detail=(
-                            "provider reported tool_use but no tool_calls were "
-                            "extracted"
-                        )
-                    )
-                )
-            return Stop(ModelEndTurn())
-
-        if isinstance(hint, MaxTokens):
+        raw = assistant_msg.stop_reason
+        if raw == "max_tokens":
             return Stop(ProviderTruncated(kind="max_tokens"))
-        if isinstance(hint, ProviderError):
+        if raw == "error":
             return Stop(ProviderTruncated(kind="error"))
-        if isinstance(hint, ToolUseExpected):
+        if raw == "tool_use":
             return Stop(
                 ProviderProtocolViolation(
                     detail=(
@@ -264,15 +230,7 @@ def _default_action(
                     )
                 )
             )
-        # EndTurn / Aborted / VendorSpecific all collapse to a clean end-turn
-        # at the kernel layer. ``Aborted`` is normally surfaced via the
-        # signal path (``SignalAborted``) before we reach this helper; if a
-        # provider reports it on the message itself we still terminate cleanly.
-        if isinstance(hint, EndTurn | Aborted | VendorSpecific):
-            return Stop(ModelEndTurn())
-        # Exhaustive over the ``TerminationHint`` union; the fall-through
-        # keeps mypy honest if a new variant is added without updating here.
-        return Stop(ModelEndTurn())  # pragma: no cover
+        return Stop(ModelEndTurn())
 
     return Step()
 
