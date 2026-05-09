@@ -19,16 +19,18 @@ MANIFEST = ExtensionManifest(
         "type": "object",
         "properties": {
             "bash_ops": {"type": "object"},
+            "default_timeout": {"type": "number", "minimum": 0, "default": 120.0},
         },
         "additionalProperties": True,
     },
+    requires=(),  # Leaf tool atom: consumes Operations via ExtensionAPI.
 )
 
-_PARAMETERS: Final = {
+_PARAMETERS: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
         "cmd": {"type": "string"},
-        "timeout": {"type": "number", "default": 120.0},
+        "timeout": {"type": "number"},
     },
     "required": ["cmd"],
     "additionalProperties": False,
@@ -37,10 +39,19 @@ _PARAMETERS: Final = {
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     bash_ops = _coerce_bash_ops(api, config.get("bash_ops"))
+    default_timeout = float(config.get("default_timeout", 120.0))
+
+    parameters = {
+        **_PARAMETERS,
+        "properties": {
+            **_PARAMETERS["properties"],
+            "timeout": {"type": "number", "default": default_timeout},
+        },
+    }
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
         cmd = str(args["cmd"])
-        timeout = float(args.get("timeout", 120.0))
+        timeout = float(args.get("timeout", default_timeout))
         try:
             result = await bash_ops.exec(cmd, cwd=api.cwd, timeout=timeout)
         except Exception as exc:
@@ -63,7 +74,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         FunctionTool(
             name="bash",
             description="Execute a shell command in the session cwd.",
-            parameters=_PARAMETERS,
+            parameters=parameters,
             fn=_execute,
         )
     )

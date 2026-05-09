@@ -43,13 +43,14 @@ MANIFEST = ExtensionManifest(
     config_schema={
         "type": "object",
         "properties": {
-            "enabled": {"type": "boolean"},
-            "reserve_tokens": {"type": "integer", "minimum": 1},
-            "keep_recent_tokens": {"type": "integer", "minimum": 1},
+            "enabled": {"type": "boolean", "default": True},
+            "reserve_tokens": {"type": "integer", "minimum": 1, "default": 16_384},
+            "keep_recent_tokens": {"type": "integer", "minimum": 1, "default": 20_000},
             "custom_instructions": {"type": "string"},
         },
         "additionalProperties": False,
     },
+    requires=("compaction_prompts",),
     tier=2,
 )
 

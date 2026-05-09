@@ -29,6 +29,9 @@ extensions:
   # answers ``resolve_subagent`` for the personas under ``agents/`` (now
   # only ``critic``).
   - local: orchestrator_setup
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: ""
   - module: agentm.extensions.builtin.sub_agent
     config:
       max_workers: 2

@@ -107,6 +107,7 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": False,
     },
+    requires=(),  # Leaf atom: observes events and discovers builtin metadata only.
 )
 
 

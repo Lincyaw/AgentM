@@ -21,6 +21,7 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": True,
     },
+    requires=(),  # Leaf tool atom: consumes ResourceWriter via ExtensionAPI.
 )
 
 _PARAMETERS: Final = {

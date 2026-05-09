@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from agentm.core.abi.events import DiagnosticEvent
 from agentm.core.abi.skill import SkillRecord
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import (
@@ -32,6 +33,7 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": True,
     },
+    requires=(),  # Leaf atom: consumes resource-discovery responses from any peer.
 )
 
 
@@ -53,14 +55,57 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             # paths are silently ignored by ``load_skills``.
             discovered_paths.append(str(Path.home() / ".claude" / "skills"))
             discovered_paths.append(str(Path(api.cwd) / ".claude" / "skills"))
-        responses = await api.events.emit(
-            ResourcesDiscoverEvent.CHANNEL,
-            ResourcesDiscoverEvent(cwd=api.cwd, reason="startup"),
-        )
+        response_owners: dict[int, str] = {}
+
+        class _ResourceResponseObserver:
+            def on_emit_start(self, channel: str, event: Any) -> None:
+                del channel, event
+
+            def on_handler_done(
+                self,
+                channel: str,
+                handler: Any,
+                value: Any,
+                err: BaseException | None,
+                duration_ns: int,
+            ) -> None:
+                del err, duration_ns
+                if channel == ResourcesDiscoverEvent.CHANNEL and isinstance(value, dict):
+                    response_owners[id(value)] = str(
+                        getattr(handler, "_agentm_obs_owner", "<unknown>")
+                    )
+
+            def on_emit_end(
+                self, channel: str, event: Any, results: list[Any]
+            ) -> None:
+                del channel, event, results
+
+        unsubscribe = api.add_observer(_ResourceResponseObserver())
+        try:
+            responses = await api.events.emit(
+                ResourcesDiscoverEvent.CHANNEL,
+                ResourcesDiscoverEvent(cwd=api.cwd, reason="startup"),
+            )
+        finally:
+            unsubscribe()
         contributed_skills: list[SkillRecord] = []
+        allowed_response_keys = {"skill_paths", "extra_skills"}
         for response in responses:
             if not isinstance(response, dict):
                 continue
+            origin = response_owners.get(id(response), "<unknown>")
+            for key in sorted(set(response) - allowed_response_keys):
+                await api.events.emit(
+                    DiagnosticEvent.CHANNEL,
+                    DiagnosticEvent(
+                        level="warning",
+                        source="skill_loader",
+                        message=(
+                            f"ignored unknown ResourcesDiscoverEvent response key {key!r} "
+                            f"from {origin}"
+                        ),
+                    ),
+                )
             extra_paths = response.get("skill_paths")
             if isinstance(extra_paths, list):
                 discovered_paths.extend(str(path) for path in extra_paths)
