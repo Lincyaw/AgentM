@@ -9,6 +9,7 @@ Layer purity: stdlib + ``agentm.core.abi`` only.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import time
@@ -53,7 +54,10 @@ def _now() -> float:
 
 def _serialize_payload(payload: Any) -> Any:
     if is_dataclass(payload) and not isinstance(payload, type):
-        return {f.name: _serialize_payload(getattr(payload, f.name)) for f in fields(payload)}
+        return {
+            f.name: _serialize_payload(getattr(payload, f.name))
+            for f in fields(payload)
+        }
     if isinstance(payload, list):
         return [_serialize_payload(item) for item in payload]
     if isinstance(payload, tuple):
@@ -133,7 +137,9 @@ def _deserialize_user_blocks(payload: Any) -> list[TextContent | ImageContent]:
     return blocks
 
 
-def _deserialize_assistant_blocks(payload: Any) -> list[TextContent | ToolCallBlock | ThinkingBlock]:
+def _deserialize_assistant_blocks(
+    payload: Any,
+) -> list[TextContent | ToolCallBlock | ThinkingBlock]:
     if not isinstance(payload, list):
         return []
     blocks: list[TextContent | ToolCallBlock | ThinkingBlock] = []
@@ -216,7 +222,9 @@ def _header_from_record(record: dict[str, Any]) -> SessionHeader:
         timestamp=float(record.get("timestamp", 0.0)),
         cwd=str(record.get("cwd", "")),
         parent_session=(
-            str(record["parent_session"]) if record.get("parent_session") is not None else None
+            str(record["parent_session"])
+            if record.get("parent_session") is not None
+            else None
         ),
     )
 
@@ -261,7 +269,11 @@ class SessionManager:
             if self._session_dir is not None:
                 self._session_dir.mkdir(parents=True, exist_ok=True)
 
-        if self._persist and self._session_file is not None and self._session_file.exists():
+        if (
+            self._persist
+            and self._session_file is not None
+            and self._session_file.exists()
+        ):
             self._load()
         else:
             self.new_session(parent_session=parent_session)
@@ -384,7 +396,9 @@ class SessionManager:
         if not self._persist or self._session_file is None or self._header is None:
             return
         records = [_header_to_record(self._header)]
-        records.extend(_entry_to_record(self._entries[entry_id]) for entry_id in self._order)
+        records.extend(
+            _entry_to_record(self._entries[entry_id]) for entry_id in self._order
+        )
         with self._session_file.open("w", encoding="utf-8") as handle:
             for record in records:
                 handle.write(json.dumps(record, default=str))
@@ -468,8 +482,8 @@ class SessionManager:
         if entry_id not in self._entries:
             raise KeyError(f"unknown entry id: {entry_id}")
         fork = self.in_memory(self._cwd)
-        fork._header = self._header
-        fork._entries = dict(self._entries)
+        fork._header = copy.deepcopy(self._header)
+        fork._entries = copy.deepcopy(self._entries)
         fork._order = list(self._order)
         fork._leaf_id = entry_id
         return fork
@@ -479,7 +493,9 @@ class SessionManager:
         if not branch:
             raise KeyError(f"unknown entry id: {leaf_id}")
 
-        fork = self.create(self._cwd, self._session_dir or self.default_session_dir(self._cwd))
+        fork = self.create(
+            self._cwd, self._session_dir or self.default_session_dir(self._cwd)
+        )
         if self._session_file is not None and fork._header is not None:
             fork._header = SessionHeader(
                 type="session",
@@ -540,7 +556,9 @@ class SessionManager:
         return self.get_entry(entry_id)
 
     def get_children(self, parent_id: str) -> list[SessionEntry]:
-        children = [entry for entry in self.get_entries() if entry.parent_id == parent_id]
+        children = [
+            entry for entry in self.get_entries() if entry.parent_id == parent_id
+        ]
         return sorted(children, key=lambda item: item.timestamp)
 
     def get_entries(self) -> list[SessionEntry]:
@@ -562,7 +580,10 @@ class SessionManager:
         return self.get_branch()
 
     def get_tree(self) -> list[SessionTreeNode]:
-        nodes = {entry.id: SessionTreeNode(entry=entry, children=[]) for entry in self.get_entries()}
+        nodes = {
+            entry.id: SessionTreeNode(entry=entry, children=[])
+            for entry in self.get_entries()
+        }
         roots: list[SessionTreeNode] = []
         for entry in self.get_entries():
             node = nodes[entry.id]
@@ -618,13 +639,23 @@ class SessionManager:
             if summary_message is not None:
                 messages.append(summary_message)
 
-        details = latest_compaction.payload if isinstance(latest_compaction.payload, dict) else {}
-        first_kept_id = details.get("first_kept_entry_id") or details.get("firstKeptEntryId")
+        details = (
+            latest_compaction.payload
+            if isinstance(latest_compaction.payload, dict)
+            else {}
+        )
+        first_kept_id = details.get("first_kept_entry_id") or details.get(
+            "firstKeptEntryId"
+        )
         compaction_index = path.index(latest_compaction)
         first_kept_index: int | None = None
         if isinstance(first_kept_id, str):
             first_kept_index = next(
-                (index for index, entry in enumerate(path[:compaction_index]) if entry.id == first_kept_id),
+                (
+                    index
+                    for index, entry in enumerate(path[:compaction_index])
+                    if entry.id == first_kept_id
+                ),
                 None,
             )
 
@@ -659,7 +690,9 @@ class InMemorySessionManager(SessionManager):
 
 class JsonlSessionManager(SessionManager):
     def __init__(self, path: Path, *, cwd: str = "") -> None:
-        super().__init__(cwd=cwd, session_dir=path.parent, session_file=path, persist=True)
+        super().__init__(
+            cwd=cwd, session_dir=path.parent, session_file=path, persist=True
+        )
 
 
 __all__ = [

@@ -12,9 +12,9 @@ import json
 from dataclasses import fields, is_dataclass
 from typing import Any, Final
 
-from agentm.core.abi import BeforeSendToLlmEvent, TurnEndEvent
+from agentm.core.abi import BeforeSendToLlmEvent, BudgetExhausted, TurnEndEvent
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import CostBudgetExceededEvent
+from agentm.harness.events import BeforeAgentStartEvent, CostBudgetExceededEvent
 from agentm.harness.extension import ExtensionAPI
 
 
@@ -22,6 +22,7 @@ MANIFEST = ExtensionManifest(
     name="cost_budget",
     description="Track estimated LLM spend and emit cost_budget_exceeded on overflow.",
     registers=(
+        "event:before_agent_start",
         "event:before_send_to_llm",
         "event:turn_end",
         "event:cost_budget_exceeded",
@@ -47,7 +48,10 @@ _PRICING: Final[dict[str, tuple[float, float]]] = {
 
 def _serialize(value: Any) -> Any:
     if is_dataclass(value) and not isinstance(value, type):
-        return {field.name: _serialize(getattr(value, field.name)) for field in fields(value)}
+        return {
+            field.name: _serialize(getattr(value, field.name))
+            for field in fields(value)
+        }
     if isinstance(value, dict):
         return {str(key): _serialize(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -85,6 +89,11 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             ),
         )
 
+    def _before_agent_start(_: BeforeAgentStartEvent) -> dict[str, object] | None:
+        if not state["overflowed"]:
+            return None
+        return {"block": True, "cause": BudgetExhausted(detail="cost")}
+
     async def _before_send(event: BeforeSendToLlmEvent) -> None:
         pricing = _PRICING.get(event.model.provider, (0.0, 0.0))
         estimated_input_tokens = _estimate_input_tokens(event.messages)
@@ -95,9 +104,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         usage = event.message.usage
         if usage is None:
             return
-        pricing = _PRICING.get(api.model.provider if api.model is not None else "", (0.0, 0.0))
+        pricing = _PRICING.get(
+            api.model.provider if api.model is not None else "", (0.0, 0.0)
+        )
         state["used"] += (usage.output_tokens / 1_000_000.0) * pricing[1]
         await _emit_if_needed()
 
+    api.on(BeforeAgentStartEvent.CHANNEL, _before_agent_start)
     api.on(BeforeSendToLlmEvent.CHANNEL, _before_send)
     api.on(TurnEndEvent.CHANNEL, _on_turn_end)
