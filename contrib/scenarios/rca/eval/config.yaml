@@ -1,9 +1,17 @@
 # LLM eval config for the AgentM rca scenario.
-# Run with: uv run rca llm-eval run contrib/scenarios/rca/eval/config.yaml -a agentm -l 1
+#
+# Path / model placeholders use shell-style ``${VAR:-default}`` syntax.
+# Expand before passing to ``rca llm-eval``:
+#
+#   RCA_DATASET_ROOT=/path/to/rca \
+#   envsubst < contrib/scenarios/rca/eval/config.yaml \
+#     | uv run rca llm-eval run - -a agentm -l 1
+#
+# See contrib/scenarios/rca/README.md for the full env-var contract.
 
 exp_id: "agentm-rca-smoke"
 agent_type: "agentm"
-model_name: "Doubao-Seed-2.0-pro"
+model_name: "${MODEL_NAME:-Doubao-Seed-2.0-pro}"
 
 data:
   # Must match a registered processer name (case-insensitive) so the
@@ -19,7 +27,7 @@ data:
 # Dataset layout: each sample lives at <source_path>/<source>/ (parquet
 # files + causal_graph.json + injection.json). Override the default
 # ".../converted" suffix.
-source_path: "/home/ddq/AoyangSpace/dataset/rca"
+source_path: "${RCA_DATASET_ROOT}"
 source_path_pattern: "{source_path}/{source}"
 
 concurrency: 5
@@ -33,5 +41,5 @@ judge_concurrency: 5
 judge_model:
   model_provider:
     type: "chat.completions"
-    model: "Doubao-Seed-2.0-pro"
+    model: "${JUDGE_MODEL:-Doubao-Seed-2.0-pro}"
     api_format: "anthropic"
