@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 import re
 import time
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.lib.artifact_files import (
@@ -30,8 +30,8 @@ _DEFAULT_SNIPPET_LINES = 2
 _NEXT_ID_WIDTH = 3
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _KIND_RE = re.compile(r"[^A-Za-z0-9_-]+")
-_ID_LOCKS: dict[str, asyncio.Lock] = {}
-_STORES_BY_SESSION: dict[str, "ArtifactStore"] = {}
+_ID_LOCKS: Final[dict[str, asyncio.Lock]] = {}
+_STORES_BY_SESSION: Final[dict[str, "ArtifactStore"]] = {}
 
 
 def get_artifact_store(session_id: str) -> "ArtifactStore | None":
@@ -583,7 +583,7 @@ def _error(message: str) -> ToolResult:
         extras=payload,
     )
 
-__all__ = [
+__all__: Final = [
     "MANIFEST",
     "ArtifactStore",
     "artifacts_dir_for",

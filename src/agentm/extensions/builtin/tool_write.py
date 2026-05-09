@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
@@ -22,7 +22,7 @@ MANIFEST = ExtensionManifest(
     },
 )
 
-_PARAMETERS = {
+_PARAMETERS: Final = {
     "type": "object",
     "properties": {
         "path": {"type": "string"},

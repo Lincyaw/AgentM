@@ -70,6 +70,10 @@ class ResourceWriter(Protocol):
         """Restore a managed resource to a previously recorded version."""
         ...
 
+    def current_version_for_path(self, path: str) -> str | None:
+        """Return the current version token for ``path`` if the writer tracks one."""
+        ...
+
     def batch(
         self,
         *,

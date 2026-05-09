@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import fields, is_dataclass
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import BeforeSendToLlmEvent, TurnEndEvent
 from agentm.extensions import ExtensionManifest
@@ -39,7 +39,7 @@ MANIFEST = ExtensionManifest(
 )
 
 
-_PRICING: dict[str, tuple[float, float]] = {
+_PRICING: Final[dict[str, tuple[float, float]]] = {
     "anthropic": (15.0, 75.0),
     "fake": (1.0, 1.0),
 }
