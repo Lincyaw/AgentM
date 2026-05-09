@@ -18,3 +18,8 @@ Implementation notes:
 - Routed `tool_find` / `tool_grep` `.gitignore` discovery through `FileOperations` so read seam overrides intercept directory traversal and ignore-file reads.
 - Added `ResourceWriter.read` so `tool_edit` can read expected bytes and write through one write seam without touching `FileOperations`.
 - Updated `tool_write` and `tool_edit` to use `ResourceWriter` exclusively.
+
+## Review follow-up
+
+- Synchronized the active `search_tools` design concept with Option C: `tool_grep`, `tool_find`, and `tool_ls` use the shared `FileOperations` read seam instead of bespoke per-tool Operations protocols or direct external-search subprocesses.
+- Added the issue #89 task note to the `search_tools` concept in `.claude/index.yaml` and added `.claude/designs/search-tools.md` to `REQ-089-file-tool-io-seams` docs.
