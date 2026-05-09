@@ -21,7 +21,7 @@ MANIFEST = ExtensionManifest(
         "tool:update_hypothesis",
         "tool:remove_hypothesis",
         "tool:list_hypotheses",
-        "event:session_ready",
+        f"event:{SessionReadyEvent.CHANNEL}",
     ),
 )
 
@@ -66,9 +66,7 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
     def _store() -> ArtifactStore:
         store = store_cell[0]
         if not isinstance(store, ArtifactStore):
-            raise RuntimeError(
-                "hypothesis_tools called before session_ready"
-            )
+            raise RuntimeError("hypothesis_tools called before session_ready")
         return store
 
     async def _write_hypothesis(
@@ -185,7 +183,7 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
             items.append(payload)
         return _ok(json.dumps({"hypotheses": items}, ensure_ascii=False, indent=2))
 
-    api.on("session_ready", _on_session_ready)
+    api.on(SessionReadyEvent.CHANNEL, _on_session_ready)
     api.register_tool(
         FunctionTool(
             name="add_hypothesis",
@@ -255,7 +253,10 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
                 "type": "object",
                 "properties": {
                     "id": {"type": ["string", "null"]},
-                    "status": {"type": ["string", "null"], "enum": [*_STATUSES, "removed", None]},
+                    "status": {
+                        "type": ["string", "null"],
+                        "enum": [*_STATUSES, "removed", None],
+                    },
                     "limit": {"type": "integer", "minimum": 1},
                 },
                 "additionalProperties": False,
