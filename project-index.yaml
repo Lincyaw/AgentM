@@ -520,6 +520,40 @@ requirements:
       - REQ-096-cli-provider-session-seams
       - REQ-098-textual-tui-registries
 
+  - id: REQ-119-core-kernel-residuals
+    title: Core kernel removes hard-coded layout literals and dead Tool surface
+    description: >
+      The core kernel must not hard-code project-scope filesystem layout: the
+      ``.agentm/skills`` and ``.agentm/prompts`` fallbacks in
+      ``core._internal.skills`` and ``core._internal.prompt_templates`` are
+      removed, with project-scope directories supplied exclusively through
+      ``ProjectLayout``. The agent loop must expose a single
+      ``_default_action`` helper that takes paired ``(tool_name, ToolOutcome)``
+      tuples — the duplicated unnamed variant is gone. The ``Tool.execute``
+      Protocol must not advertise an ``on_update`` parameter that the kernel
+      never wires; the parameter is dropped from the Protocol and from every
+      builtin/internal implementation until a real progress channel ships.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/_internal/skills.py
+      - path: src/agentm/core/_internal/prompt_templates.py
+      - path: src/agentm/core/abi/loop.py
+      - path: src/agentm/core/abi/tool.py
+      - path: src/agentm/core/_internal/tools.py
+      - path: src/agentm/extensions/builtin/tool_grep.py
+      - path: src/agentm/extensions/builtin/tool_ls.py
+      - path: src/agentm/extensions/builtin/tool_find.py
+      - path: src/agentm/extensions/builtin/file_mutation_queue.py
+    tests:
+      - path: tests/unit/core/abi/test_decide_turn_action.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-119-core-kernel-residuals.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
   - id: REQ-120-harness-reload-state-preservation
     title: Harness reload uses immutable snapshot for double-failure rollback
     description: >
@@ -544,5 +578,7 @@ requirements:
       - path: tests/unit/harness/test_transactional_reload.py
     docs:
       - path: .claude/tasks/2026-05-09-issue-120-harness-reload-dedup.md
+    depends_on:
+      - REQ-086-atom-rework-infra
     depends_on:
       - REQ-086-atom-rework-infra

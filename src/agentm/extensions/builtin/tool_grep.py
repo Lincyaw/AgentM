@@ -67,9 +67,7 @@ class _GrepTool(Tool):
         args: dict[str, Any],
         *,
         signal: asyncio.Event | None = None,
-        on_update: Any = None,
     ) -> ToolResult:
-        del on_update
         if signal is not None and signal.is_set():
             raise Exception("Operation aborted")
         pattern = str(args["pattern"])

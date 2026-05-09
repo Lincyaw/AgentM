@@ -20,7 +20,6 @@ would have to compete with ``is_error`` for meaning.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -106,11 +105,13 @@ class Tool(Protocol):
 
     - ``name`` / ``description`` / ``parameters`` (JSON Schema dict) — used
       when assembling the tool catalog passed to the LLM stream.
-    - ``execute(args, *, signal, on_update)`` — the call that runs the tool.
+    - ``execute(args, *, signal)`` — the call that runs the tool.
 
     ``signal`` is an :class:`asyncio.Event`; tools may poll it to abort
-    cooperatively. ``on_update`` lets long-running tools push progress events
-    (the kernel itself doesn't dispatch them; the harness wires it up).
+    cooperatively. Streaming progress is intentionally *not* part of the
+    kernel surface: the previous ``on_update`` parameter was never wired
+    through and has been removed. A future progress channel will be a
+    deliberate event-bus extension, not a dead Protocol parameter.
 
     Returning a bare :class:`ToolResult` is treated as ``ToolContinue(result)``;
     a tool that wants to end the loop returns :class:`ToolTerminate` instead.
@@ -125,7 +126,6 @@ class Tool(Protocol):
         args: dict[str, Any],
         *,
         signal: asyncio.Event | None = None,
-        on_update: Callable[[Any], None] | None = None,
     ) -> ToolResult | ToolOutcome: ...
 
 
