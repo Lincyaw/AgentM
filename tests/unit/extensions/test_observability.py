@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import uuid
 from pathlib import Path
 from typing import Any
@@ -89,3 +90,45 @@ async def test_observability_trace_snapshot_uses_add_observer(
         ]
     ) + "\n"
     assert (tmp_path / "trace.jsonl").read_text(encoding="utf-8") == expected
+
+
+def _mutating_handler(event: dict[str, Any]) -> str:
+    event["value"] = 8
+    event["added"] = {"nested": True}
+    return "mutated"
+
+
+@pytest.mark.asyncio
+async def test_observability_records_mutation_diff_without_api_on_patch(
+    tmp_path: Path,
+) -> None:
+    api = _api(tmp_path)
+    observability.install(
+        api,
+        {
+            "path": "trace.jsonl",
+            "include_handler_records": True,
+            "include_mutation_diff": True,
+        },
+    )
+    api.on("context", _mutating_handler)
+
+    await api.events.emit("context", {"value": 7})
+    await api.events.emit(
+        SessionShutdownEvent.CHANNEL,
+        SessionShutdownEvent(cwd=str(tmp_path)),
+    )
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    mutated = [record for record in records if record["kind"] == "handler.mutated"]
+    assert len(mutated) == 1
+    assert mutated[0]["attributes"]["handler"] == (
+        "tests.unit.extensions.test_observability._mutating_handler"
+    )
+    assert {item["path"] for item in mutated[0]["attributes"]["mutations"]} == {
+        "value",
+        "added",
+    }

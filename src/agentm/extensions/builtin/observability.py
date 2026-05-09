@@ -260,11 +260,13 @@ class _Observer(EventBusObserver):
         sink: _Sink,
         trace_id: str,
         include_handlers: bool,
+        include_diff: bool,
         exclude_channels: frozenset[str],
     ) -> None:
         self._sink = sink
         self._trace_id = trace_id
         self._include_handlers = include_handlers
+        self._include_diff = include_diff
         self._exclude_channels = exclude_channels
         # Stack frame: (channel, span_id, start_ns, suppressed). When
         # suppressed=True, on_emit_end skips the sink write and
@@ -272,10 +274,22 @@ class _Observer(EventBusObserver):
         # cycles through push/pop so parent-span bookkeeping stays consistent
         # for non-suppressed siblings.
         self._stack: list[tuple[str, str, int, bool]] = []
+        self._snapshots: list[tuple[str, Handler, Any, Any]] = []
 
     def on_emit_start(self, channel: str, event: Any) -> None:
         suppressed = channel in self._exclude_channels
         self._stack.append((channel, _new_id(), _now_ns(), suppressed))
+
+    def on_handler_start(self, channel: str, handler: Handler, event: Any) -> None:
+        if not self._include_diff or channel not in _MUTABLE_CHANNELS:
+            return
+        if self._stack and self._stack[-1][3]:
+            return
+        try:
+            before = _to_jsonable(event)
+        except Exception:
+            return
+        self._snapshots.append((channel, handler, before, event))
 
     def on_handler_done(
         self,
@@ -286,12 +300,15 @@ class _Observer(EventBusObserver):
         duration_ns: int,
     ) -> None:
         if not self._include_handlers or not self._stack:
+            self._record_mutation(channel, handler, None, error)
             return
         parent = self._stack[-1]
         if parent[3]:
+            self._record_mutation(channel, handler, None, error)
             return
         end_ns = _now_ns()
         owner = getattr(handler, _HANDLER_OWNER_ATTR, None)
+        self._record_mutation(channel, handler, owner, error)
         self._sink.write(
             {
                 "schema": "otel/span/v0",
@@ -313,6 +330,55 @@ class _Observer(EventBusObserver):
                     "code": "ERROR" if error is not None else "OK",
                     "message": repr(error) if error is not None else None,
                     "traceback": _format_traceback(error),
+                },
+            }
+        )
+
+    def _record_mutation(
+        self,
+        channel: str,
+        handler: Handler,
+        owner: str | None,
+        error: BaseException | None,
+    ) -> None:
+        if not self._include_diff or channel not in _MUTABLE_CHANNELS:
+            return
+        before: Any | None = None
+        event: Any | None = None
+        for index in range(len(self._snapshots) - 1, -1, -1):
+            snap_channel, snap_handler, snap_before, snap_event = self._snapshots[index]
+            if snap_channel == channel and snap_handler is handler:
+                before = snap_before
+                event = snap_event
+                del self._snapshots[index]
+                break
+        if before is None:
+            return
+        try:
+            after = _to_jsonable(event)
+            diff = _deep_diff(before, after)
+        except Exception:
+            return
+        if not diff:
+            return
+        self._sink.write(
+            {
+                "schema": "otel/span/v0",
+                "kind": "handler.mutated",
+                "trace_id": self._trace_id,
+                "span_id": _new_id(),
+                "name": f"mutate:{channel}",
+                "start_time_unix_nano": _now_ns(),
+                "attributes": {
+                    "channel": channel,
+                    "handler": _handler_label(handler),
+                    "extension": owner,
+                    "mutations": diff[:100],
+                    "raised": error is not None,
+                },
+                "status": {
+                    "code": "ERROR" if error is not None else "OK",
+                    "message": repr(error) if error is not None else None,
                 },
             }
         )
@@ -467,6 +533,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         file_path = Path(api.cwd) / file_path
 
     include_handlers = bool(config.get("include_handler_records", True))
+    include_diff = bool(config.get("include_mutation_diff", True))
     max_queue = int(config.get("max_queue", 10_000))
     user_excludes = config.get("exclude_channels")
     exclude_channels = frozenset(_DEFAULT_EXCLUDE_CHANNELS) | (
@@ -474,7 +541,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     )
 
     sink = _Sink(file_path, max_queue=max_queue)
-    observer = _Observer(sink, trace_id, include_handlers, exclude_channels)
+    observer = _Observer(sink, trace_id, include_handlers, include_diff, exclude_channels)
     api.add_observer(observer)
 
     # session.start: emitted directly because no other extension is loaded
