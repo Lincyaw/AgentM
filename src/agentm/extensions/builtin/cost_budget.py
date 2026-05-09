@@ -12,7 +12,7 @@ import json
 from dataclasses import fields, is_dataclass
 from typing import Any
 
-from agentm.core.abi import BeforeSendToLlmEvent, BudgetExhausted, TurnEndEvent
+from agentm.core.abi import BeforeSendToLlmEvent, BudgetExhausted, CostBreakdown, TurnEndEvent
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import BeforeAgentStartEvent, CostBudgetExceededEvent
@@ -93,6 +93,18 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         "used": 0.0,
         "overflowed": False,
     }
+
+    class _CostQueryService:
+        def estimate(self, usage: Any, *, provider: str | None = None) -> CostBreakdown:
+            selected = provider or (api.model.provider if api.model is not None else "")
+            input_price, output_price = pricing.get(selected, (0.0, 0.0))
+            amount = (
+                (getattr(usage, "input_tokens", 0) / 1_000_000.0) * input_price
+                + (getattr(usage, "output_tokens", 0) / 1_000_000.0) * output_price
+            )
+            return CostBreakdown(amount=amount, currency=currency)
+
+    api.set_service("cost_query", _CostQueryService())
 
     async def _pricing_for(provider: str) -> tuple[float, float]:
         configured = pricing.get(provider)

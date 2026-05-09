@@ -37,6 +37,7 @@ class SessionRuntime:
     providers: dict[str, ProviderConfig]
     renderers: dict[str, Renderer]
     apis: dict[str, _ExtensionAPIImpl]
+    services: dict[str, Any]
     reloader: AtomReloader
     pending_user_messages: list[str | list[Any]]
 
