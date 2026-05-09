@@ -208,9 +208,18 @@ def sort_extensions_by_requires(
         manifest = getattr(module, "MANIFEST", None)
         if not isinstance(manifest, ExtensionManifest):
             continue
+        existing = entries_by_name.get(manifest.name)
+        if existing is not None:
+            raise ScenarioLoadError(
+                source,
+                ValueError(
+                    f"extension {manifest.name!r} is loaded more than once; "
+                    "duplicate extension entries are not supported"
+                ),
+            )
         manifests[manifest.name] = manifest
         name_by_module[module_path] = manifest.name
-        entries_by_name.setdefault(manifest.name, (module_path, config))
+        entries_by_name[manifest.name] = (module_path, config)
 
     for name, manifest in manifests.items():
         for dep in manifest.requires:

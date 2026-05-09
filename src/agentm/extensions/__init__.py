@@ -33,8 +33,9 @@ class ExtensionManifest:
     ``validate.validate_builtin`` to enforce the §11 contract.
 
     Tag format for ``registers``: ``<kind>:<id>`` where ``<kind>`` ∈
-    ``{tool, event, command, provider, renderer}``. Examples:
-    ``"tool:read"``, ``"event:tool_call"``, ``"provider:anthropic"``.
+    ``{tool, event, command, provider, renderer, mutates}``. Examples:
+    ``"tool:read"``, ``"event:tool_call"``, ``"provider:anthropic"``,
+    ``"mutates:tool_catalog"``.
     """
 
     name: str
@@ -90,7 +91,7 @@ class ExtensionManifest:
 # --- Tag parsing helper (used by validator + future tooling) ----------------
 
 VALID_REGISTER_KINDS = frozenset(
-    {"tool", "event", "command", "provider", "renderer"}
+    {"tool", "event", "command", "provider", "renderer", "mutates"}
 )
 
 
