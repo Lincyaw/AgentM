@@ -23,16 +23,20 @@ def test_persona_metadata_parser_surfaces_input_schema_and_budget_defaults() -> 
     module = _load_module()
     personas = module._load_personas()
 
-    scout = personas["scout"]
-    assert scout["input_schema"]["required"] == [
+    critic = personas["critic"]
+    assert critic["input_schema"]["required"] == [
         "objective",
-        "scope_services",
+        "current_conclusion",
+        "supporting_evidence",
         "output_format",
     ]
-    assert scout["budget_defaults"] == {"max_turns": 40}
-    assert "brief_rejection" in scout["artifact_kinds"]
+    assert critic["budget_defaults"] == {"max_turns": 12}
+    assert "brief_rejection" in critic["artifact_kinds"]
 
     block = module._format_available_agents_block(personas)
     assert "<available_agents>" in block
     assert '<input_schema advisory="true">' in block
-    assert "objective, scope_services, output_format" in block
+    assert (
+        "objective, current_conclusion, supporting_evidence, output_format"
+        in block
+    )
