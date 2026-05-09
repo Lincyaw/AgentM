@@ -1,18 +1,12 @@
-"""Provider registry — port of pi-mono `api-registry.ts`.
-
-Mutable module-level map keyed by `Api` string. `register_api_provider`
-wraps `stream` / `stream_simple` so each call validates the model's
-`api` matches the provider's `api` (matches pi-mono's mismatched-api
-error). `source_id` lets a caller bulk-unregister everything one
-extension or test fixture installed.
-"""
+"""Runtime API provider registry."""
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
-from typing import Any, Awaitable, Iterable
+from typing import Any, Iterable
 
-from agentm.ai.types import Api, ApiProvider, Model
+from agentm.ai.types import DEFAULT_PROVIDER_REGISTRY, Api, ApiProvider, Model
 
 
 @dataclass(slots=True)
@@ -21,54 +15,59 @@ class _RegisteredProvider:
     source_id: str | None = None
 
 
+@dataclass(slots=True)
+class _ValidatingProvider:
+    inner: ApiProvider
+    api: Api
+
+    def _check_api(self, model: Model) -> None:
+        expected = DEFAULT_PROVIDER_REGISTRY.canonical_api(self.api)
+        actual = DEFAULT_PROVIDER_REGISTRY.canonical_api(model.api)
+        if actual != expected:
+            raise ValueError(f"Mismatched api: {model.api} expected {self.api}")
+
+    async def stream(
+        self, model: Model, context: Any, options: Any | None = None
+    ) -> Iterable[Any]:
+        self._check_api(model)
+        return await _await(self.inner.stream(model, context, options))
+
+    async def stream_simple(
+        self, model: Model, context: Any, options: Any | None = None
+    ) -> Iterable[Any]:
+        self._check_api(model)
+        return await _await(self.inner.stream_simple(model, context, options))
+
+
 _registry: dict[Api, _RegisteredProvider] = {}
 
 
-def _wrap(provider: ApiProvider) -> ApiProvider:
-    """Return a thin wrapper that enforces `model.api == provider.api`."""
-
-    expected = provider.api
-
-    class _Wrapped:
-        api = expected
-
-        async def stream(
-            self, model: Model, context: Any, options: Any | None = None
-        ) -> Iterable[Any]:
-            if model.api != expected:
-                raise ValueError(f"Mismatched api: {model.api} expected {expected}")
-            result = provider.stream(model, context, options)
-            return await _await(result)
-
-        async def stream_simple(
-            self, model: Model, context: Any, options: Any | None = None
-        ) -> Iterable[Any]:
-            if model.api != expected:
-                raise ValueError(f"Mismatched api: {model.api} expected {expected}")
-            result = provider.stream_simple(model, context, options)
-            return await _await(result)
-
-    return _Wrapped()  # type: ignore[return-value]
-
-
 async def _await(value: Any) -> Any:
-    """Await ``value`` if it is awaitable; otherwise return as-is."""
+    """Await ``value`` if it is awaitable; otherwise return it as-is."""
 
-    if isinstance(value, Awaitable):
+    if inspect.isawaitable(value):
         return await value
     return value
 
 
-def register_api_provider(provider: ApiProvider, source_id: str | None = None) -> None:
-    """Register ``provider`` under its ``api`` key. Replaces any prior entry."""
+def _canonical_api(api: Api) -> Api:
+    return DEFAULT_PROVIDER_REGISTRY.canonical_api(api)
 
-    _registry[provider.api] = _RegisteredProvider(provider=_wrap(provider), source_id=source_id)
+
+def register_api_provider(provider: ApiProvider, source_id: str | None = None) -> None:
+    """Register ``provider`` under its canonical ``api`` key."""
+
+    expected_api = _canonical_api(provider.api)
+    _registry[expected_api] = _RegisteredProvider(
+        provider=_ValidatingProvider(inner=provider, api=provider.api),
+        source_id=source_id,
+    )
 
 
 def get_api_provider(api: Api) -> ApiProvider | None:
     """Look up a registered provider by api string, or ``None`` if unknown."""
 
-    entry = _registry.get(api)
+    entry = _registry.get(_canonical_api(api))
     return entry.provider if entry is not None else None
 
 
