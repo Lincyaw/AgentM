@@ -198,6 +198,12 @@ class ExtensionAPI(Protocol):
     events: EventBus                         # cross-extension comms
 ```
 
+Registered slash-command execution is itself a policy port: the
+`slash_commands` atom parses `/cmd args`, but command lookup, ownership, and
+handler execution go through the typed `CommandDispatcher` service facade. The
+harness default owns the live command registry and owner API selection; atoms do
+not read raw harness registry dictionaries.
+
 **Reference**:
 - Minimal EventBus: `packages/coding-agent/src/core/event-bus.ts` (33 lines — copy this verbatim conceptually)
 - Event taxonomy: `packages/coding-agent/src/core/extensions/types.ts:495-960` (full event type hierarchy)
