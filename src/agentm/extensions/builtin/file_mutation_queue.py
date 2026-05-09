@@ -44,15 +44,10 @@ class _QueuedTool:
         args: dict[str, Any],
         *,
         signal: asyncio.Event | None = None,
-        on_update: Any = None,
     ) -> ToolResult | ToolOutcome:
         lock = self._locks.setdefault(_normalize_path(args), asyncio.Lock())
         async with lock:
-            return await self._wrapped.execute(
-                args,
-                signal=signal,
-                on_update=on_update,
-            )
+            return await self._wrapped.execute(args, signal=signal)
 
 
 def _normalize_path(args: dict[str, Any]) -> str:
