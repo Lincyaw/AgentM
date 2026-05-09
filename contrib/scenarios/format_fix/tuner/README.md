@@ -32,8 +32,8 @@ get without writing any code:
 - Multi-sample variance + `2σ` noise-floor gate
 - Holdout-aware eval reporting
 - Tier-2 atom protection (auto-deferred to `pending_human_approval`)
-- Constitution-protected `.agentm/decisions/<scenario>/decisions.jsonl`
-  audit log
+- Constitution-protected `.agentm/decisions/<scenario>/activations.jsonl`
+  audit log (with sibling `candidates/` pool for forward-compat)
 - Cross-session activation: tuner writes the new atom file directly,
   git commits, next production session loads the new version on startup
 
@@ -179,7 +179,7 @@ agentm --scenario <your_scenario> --cwd /tmp/sandbox "<sample input>"
 # 9. Run one tuning iteration
 agentm --scenario <your_scenario>/tuner --cwd /tmp/sandbox \
   "Run one tuning iteration on <your_scenario>."
-# → check .agentm/decisions/<your_scenario>/decisions.jsonl
+# → check .agentm/decisions/<your_scenario>/activations.jsonl
 ```
 
 ## Key knobs in `tuner/manifest.yaml`
@@ -231,7 +231,7 @@ free statistical power — run more *tasks* instead.
 **Multiple tuners on a shared atom.** If two tuners (e.g. for two
 production scenarios) target the same atom file, ResourceWriter
 serializes the writes but the second tuner's "baseline" already includes
-the first's change. Today this race is observable in `decisions.jsonl`;
+the first's change. Today this race is observable in `activations.jsonl`;
 no automatic resolution. Avoid it for now by giving each scenario its
 own atom files.
 

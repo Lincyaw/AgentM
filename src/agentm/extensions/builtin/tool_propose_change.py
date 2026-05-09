@@ -15,10 +15,12 @@ For tier-1 ``activate`` decisions, the gate runs a four-part check:
 3. Guard metrics within ``±guard_tolerance`` (relative).
 4. ``decision="rollback"`` skips gates entirely (rollback is always safe).
 
-On success, calls ``api.reload_atom`` and appends a structured decision
-record to ``.agentm/decisions/<scenario>/decisions.jsonl`` via a direct
+On success, calls ``api.reload_atom`` and appends a structured activation
+record to ``.agentm/decisions/<scenario>/activations.jsonl`` via a direct
 file-append (the path is constitution-protected against ``tool_edit`` /
-``tool_write``; only this atom may write).
+``tool_write``; only this atom may write). The file is the deployment
+log; the Phase 2 candidate pool lives in the sibling ``candidates/``
+directory.
 """
 
 from __future__ import annotations
@@ -40,8 +42,8 @@ MANIFEST = ExtensionManifest(
         "Gate-keeper for activating an atom mutation. Validates evidence "
         "(eval_run_baseline + eval_run_proposed), enforces tier-2 deferral, "
         "applies promotion threshold + guard tolerance, then calls "
-        "reload_atom on success. Decision record appended to "
-        ".agentm/decisions/<scenario>/decisions.jsonl."
+        "reload_atom on success. Activation record appended to "
+        ".agentm/decisions/<scenario>/activations.jsonl."
     ),
     registers=("tool:propose_change",),
     config_schema={
@@ -432,13 +434,13 @@ def _write_cross_session(
 
 
 def _decisions_path(cwd: Path, scenario: str) -> Path:
-    out = cwd / ".agentm" / "decisions" / scenario / "decisions.jsonl"
+    out = cwd / ".agentm" / "decisions" / scenario / "activations.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
     return out
 
 
 def _append_decision_record(path: Path, record: dict[str, Any]) -> None:
-    """Append ``record`` to ``decisions.jsonl``. Bypasses ResourceWriter
+    """Append ``record`` to ``activations.jsonl``. Bypasses ResourceWriter
     because ``.agentm/decisions/**`` is constitution-protected — only this
     atom (the mediated channel) writes here. Schema-stamped keys are
     enforced by being literal in the call sites above.

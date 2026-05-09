@@ -61,7 +61,7 @@ agentm --scenario format_fix/tuner \
         tool_normalize_json (stdlib only), eval proposed, propose_change."
 ```
 
-Decisions land in `<cwd>/.agentm/decisions/format_fix/decisions.jsonl`
+Decisions land in `<cwd>/.agentm/decisions/format_fix/activations.jsonl`
 (append-only audit log). Activations write through to
 `tool_normalize_json.py` and commit via git.
 

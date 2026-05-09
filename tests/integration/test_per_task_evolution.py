@@ -13,7 +13,7 @@ loop's value proposition fails when broken. Specifically:
    this, ``tool_eval_run`` mutates the source-of-truth tree on every call.
 5. End-to-end loop: stub-provider tuner runs query_traces -> eval_run
    (baseline) -> eval_run (proposed override) -> propose_change(activate)
-   -> verify decisions.jsonl entry + atom-on-disk swapped.
+   -> verify activations.jsonl entry + atom-on-disk swapped.
 """
 
 from __future__ import annotations
@@ -313,7 +313,7 @@ async def test_tier2_activate_is_deferred(tmp_path: Path) -> None:
 
         # Decision record exists and records the deferral.
         decisions_path = (
-            tmp_path / ".agentm" / "decisions" / "format_fix" / "decisions.jsonl"
+            tmp_path / ".agentm" / "decisions" / "format_fix" / "activations.jsonl"
         )
         assert decisions_path.is_file()
         with decisions_path.open("r", encoding="utf-8") as fh:
@@ -343,8 +343,13 @@ def test_decisions_path_is_constitution() -> None:
     )
 
     reload_manifest()
-    assert is_constitution_path(".agentm/decisions/foo/decisions.jsonl") is True
-    assert is_constitution_path(".agentm/decisions/format_fix/decisions.jsonl") is True
+    assert is_constitution_path(".agentm/decisions/foo/activations.jsonl") is True
+    assert is_constitution_path(".agentm/decisions/format_fix/activations.jsonl") is True
+    # candidates/ subdir is also constitution-protected by the same ** glob.
+    assert (
+        is_constitution_path(".agentm/decisions/format_fix/candidates/c_x.json")
+        is True
+    )
     # Sanity: eval_runs is NOT protected (only the mediated decisions log is).
     assert is_constitution_path(".agentm/eval_runs/er_x.jsonl") is False
 
@@ -505,7 +510,7 @@ async def test_end_to_end_loop_activates_known_good_replacement(
 ) -> None:
     """Stub-provider end-to-end: drive eval_run twice (baseline returns
     weak; proposed override returns canonical via stdlib json fallback),
-    then propose_change(activate). Verify decisions.jsonl entry, atom-
+    then propose_change(activate). Verify activations.jsonl entry, atom-
     on-disk swapped, and that eval_runs/<id>.jsonl exist.
 
     We do **not** drive the agent loop with hand-rolled tool calls — the
@@ -688,7 +693,7 @@ async def test_end_to_end_loop_activates_known_good_replacement(
 
         # Decision record persisted.
         decisions_path = (
-            tmp_path / ".agentm" / "decisions" / "format_fix" / "decisions.jsonl"
+            tmp_path / ".agentm" / "decisions" / "format_fix" / "activations.jsonl"
         )
         assert decisions_path.is_file()
         with decisions_path.open("r", encoding="utf-8") as fh:
