@@ -7,7 +7,8 @@ requirements:
       spawning, per-session service registration, resource writer version
       lookup, and shared JSON serialization. The atom validator must reject
       private API reflection, ExtensionAPI attribute overwrites, mutable module
-      globals without Final, and f-string dynamic imports under agentm.*.
+      globals without Final, f-string dynamic imports under agentm.*, and
+      concrete harness-service downcasts.
     priority: P0
     status: tested
     confidence: confirmed
