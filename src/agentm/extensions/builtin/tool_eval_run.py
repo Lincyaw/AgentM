@@ -27,6 +27,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import os
 import statistics
 import sys
 import time
@@ -457,6 +458,15 @@ async def _run_single_sample(
     tool_errors = 0
     turns = 0
     child_session_id: str | None = None
+    # Per-task env vars: tasks may declare top-level ``env: {KEY: VAL}`` or
+    # rely on the ``input.fixtures: [path]`` convention (rca-style scenarios
+    # consume AGENTM_RCA_DATA_DIR). Set them on os.environ around the spawn
+    # so atoms loaded by the child see them at install time, then restore.
+    env_overrides = _collect_task_env(task)
+    saved_env: dict[str, str | None] = {}
+    for k, v in env_overrides.items():
+        saved_env[k] = os.environ.get(k)
+        os.environ[k] = v
     try:
         child = await api.spawn_child_session(child_config)
     except Exception as exc:  # noqa: BLE001
@@ -491,6 +501,11 @@ async def _run_single_sample(
             await child.shutdown()
         except Exception:  # noqa: BLE001 - best effort
             pass
+        for k, prev in saved_env.items():
+            if prev is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = prev
 
     return {
         "final_text": final_text,
@@ -498,6 +513,30 @@ async def _run_single_sample(
         "turns": turns,
         "session_id": child_session_id,
     }
+
+
+def _collect_task_env(task: dict[str, Any]) -> dict[str, str]:
+    """Resolve per-task environment overrides.
+
+    Honors two sources, in this precedence:
+
+    1. Explicit ``env: {KEY: VAL}`` mapping at the top of the task YAML.
+    2. Convention: ``input.fixtures: [path, ...]`` → ``AGENTM_RCA_DATA_DIR``
+       points at the first entry. This keeps existing rca eval YAMLs
+       working without an explicit ``env`` block.
+    """
+    out: dict[str, str] = {}
+    fixtures = (task.get("input") or {}).get("fixtures") if isinstance(task.get("input"), dict) else None
+    if isinstance(fixtures, list) and fixtures:
+        first = fixtures[0]
+        if isinstance(first, str) and first:
+            out["AGENTM_RCA_DATA_DIR"] = first
+    explicit = task.get("env")
+    if isinstance(explicit, dict):
+        for k, v in explicit.items():
+            if isinstance(k, str) and isinstance(v, (str, int, float)):
+                out[k] = str(v)
+    return out
 
 
 def _extract_user_message(task: dict[str, Any]) -> str:
