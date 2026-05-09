@@ -256,21 +256,7 @@ class ArtifactStore:
     async def _allocate_id(self) -> str:
         artifacts_dir = self._ctx.artifacts_dir
         async with self._id_lock:
-            await asyncio.to_thread(artifacts_dir.mkdir, parents=True, exist_ok=True)
-            next_id_path = artifacts_dir / ".next_id"
-            next_value = 1
-            if next_id_path.exists():
-                try:
-                    next_value = int(next_id_path.read_text(encoding="utf-8").strip())
-                except ValueError:
-                    next_value = 1
-            artifact_id = f"art_{next_value:0{_NEXT_ID_WIDTH}d}"
-            await asyncio.to_thread(
-                _atomic_write_text,
-                next_id_path,
-                str(next_value + 1),
-            )
-            return artifact_id
+            return await asyncio.to_thread(_allocate_id_sync, artifacts_dir)
 
     async def _filtered_metadata(
         self,
@@ -437,6 +423,34 @@ def _atomic_write_text(path: Path, text: str) -> None:
     tmp_path = path.with_name(f"{path.name}.tmp")
     tmp_path.write_text(text, encoding="utf-8")
     os.replace(tmp_path, path)
+
+
+def _allocate_id_sync(artifacts_dir: Path) -> str:
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = artifacts_dir / ".next_id.lock"
+    fd: int | None = None
+    while fd is None:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            time.sleep(0.005)
+    try:
+        next_id_path = artifacts_dir / ".next_id"
+        next_value = 1
+        if next_id_path.exists():
+            try:
+                next_value = int(next_id_path.read_text(encoding="utf-8").strip())
+            except ValueError:
+                next_value = 1
+        artifact_id = f"art_{next_value:0{_NEXT_ID_WIDTH}d}"
+        _atomic_write_text(next_id_path, str(next_value + 1))
+        return artifact_id
+    finally:
+        os.close(fd)
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _coerce_tags(value: Any) -> list[str]:
