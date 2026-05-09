@@ -119,12 +119,11 @@ verifiable.
 
 ### Contrib atoms (`contrib/extensions/`)
 
-Flat-file `*.py` atoms at the top level (e.g. `tool_catalog`,
-`turn_reminder`) are auto-discovered alongside builtins under the
-synthetic module prefix `_agentm_contrib__<name>`. Subdirectories
-(e.g. `cc/`) hold opt-in `tier=2` atoms that auto-discovery
-deliberately skips; scenarios load them explicitly via
-`available_inherited_extensions`.
+Flat-file `*.py` atoms at the top level (e.g. `turn_reminder`) are
+auto-discovered alongside builtins under the synthetic module prefix
+`_agentm_contrib__<name>`. Nested packages (e.g. `tool_catalog/`, `cc/`)
+are opt-in and are mounted explicitly by scenario manifests or
+`agentm --extension <dotted.module.path>`.
 
 - `cc_agents`, `cc_commands`, `cc_plugins` (under `contrib/extensions/cc/`)
   — Claude Code compatibility
