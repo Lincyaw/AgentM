@@ -87,12 +87,17 @@ async def test_cost_budget_warns_once_for_unpriced_provider() -> None:
     diagnostics: list[DiagnosticEvent] = []
     bus.on(DiagnosticEvent.CHANNEL, diagnostics.append)
 
+    services: dict[str, Any] = {}
+
     class _Api:
         events = bus
         model = Model(id="m", provider="unknown", context_window=1000, max_output_tokens=10)
 
         def on(self, channel: str, handler: Callable[..., Any]) -> None:
             bus.on(channel, handler)
+
+        def set_service(self, name: str, obj: Any) -> None:
+            services[name] = obj
 
     cost_budget.install(cast(Any, _Api()), {"limit": 1.0, "pricing": {}})
     event = BeforeSendToLlmEvent(
@@ -108,6 +113,9 @@ async def test_cost_budget_warns_once_for_unpriced_provider() -> None:
     warnings = [item for item in diagnostics if item.level == "warning"]
     assert len(warnings) == 1
     assert "unknown" in warnings[0].message
+    assert (
+        services["cost_query"].estimate(event.model, provider="unknown").amount == 0.0
+    )
 
 
 @pytest.mark.asyncio
