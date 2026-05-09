@@ -1,4 +1,30 @@
 requirements:
+  - id: REQ-093-llm-provider-stream-common
+    title: Shared LLM provider stream accumulator and tool spec adapters
+    description: >
+      Anthropic and OpenAI-compatible providers must share stream assembly,
+      tool-argument JSON encoding, tool-call argument parse-error signaling,
+      and real timestamp stamping while keeping provider-specific code limited
+      to event mapping and vendor tool-spec adaptation. Anthropic tool-result
+      message packing must remain a single linear pass.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/llm/_common.py
+      - path: src/agentm/llm/anthropic.py
+      - path: src/agentm/llm/openai.py
+      - path: src/agentm/core/abi/stream.py
+      - path: src/agentm/core/abi/loop.py
+      - path: src/agentm/core/abi/__init__.py
+    tests:
+      - path: tests/unit/core/abi/test_tool_arg_parse_error.py
+      - path: tests/unit/llm/test_common_stream_accumulator.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/tasks/2026-05-09-issue-93-llm-stream-common.md
+    depends_on: []
+
   - id: REQ-085-session-policy-extraction
     title: AgentSession policy extraction and typed runtime boundary
     description: >
