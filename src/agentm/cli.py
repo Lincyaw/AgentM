@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, TextIO, cast
 
 import typer
 from dotenv import load_dotenv
@@ -21,7 +22,7 @@ from agentm.ai import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
 from agentm.core.abi.events import DiagnosticEvent, EventBus
 from agentm.core.abi.session_store import SessionState, SessionStore
 from agentm.core.lib.render import final_summary
-from agentm.harness.events import ExtensionInstallEvent
+from agentm.harness import ExtensionInstallEvent
 
 
 # Walk up from cwd to find the nearest .env. Existing env vars win
@@ -39,24 +40,26 @@ def _print_final(
     *,
     cost_service: Any | None = None,
     provider: str | None = None,
+    output: TextIO = sys.stdout,
 ) -> None:
     report = final_summary(final_messages)
-    typer.echo("\n" + "=" * 60)
-    typer.echo("AGENT FINAL OUTPUT")
-    typer.echo("=" * 60)
-    typer.echo(report.text if report.text else "<no text output>")
-    typer.echo("=" * 60)
-    typer.echo(f"messages={report.message_count} tool_calls={report.tool_calls}")
+    print("\n" + "=" * 60, file=output)
+    print("AGENT FINAL OUTPUT", file=output)
+    print("=" * 60, file=output)
+    print(report.text if report.text else "<no text output>", file=output)
+    print("=" * 60, file=output)
+    print(f"messages={report.message_count} tool_calls={report.tool_calls}", file=output)
     usage = report.usage
     if usage.assistant_turns:
         estimate = getattr(cost_service, "estimate", None)
         cost = estimate(usage, provider=provider) if callable(estimate) else None
         suffix = f" cost={cost.currency} {cost.amount:.6f}" if cost is not None else ""
         turns = "turn" if usage.assistant_turns == 1 else "turns"
-        typer.echo(
+        print(
             f"tokens: in={usage.input_tokens} out={usage.output_tokens} "
             f"cache_r={usage.cache_read} cache_w={usage.cache_write} "
-            f"(over {usage.assistant_turns} {turns}){suffix}"
+            f"(over {usage.assistant_turns} {turns}){suffix}",
+            file=output,
         )
 
 def _parse_tools(value: str | None) -> list[str] | None:
@@ -122,7 +125,7 @@ def _model_default() -> str:
 
 
 def _make_default_session_store(cwd: str) -> SessionStore:
-    from agentm.harness.session_manager import JsonlSessionStore
+    from agentm.harness import JsonlSessionStore
 
     return JsonlSessionStore(cwd=Path(cwd))
 
@@ -152,9 +155,9 @@ def _make_install_warner() -> Any:
     def _on_install(event: ExtensionInstallEvent) -> None:
         if event.phase != "error":
             return
-        typer.echo(
+        print(
             f"WARNING: [extension_install] {event.module_path}: {event.error}",
-            err=True,
+            file=sys.stderr,
         )
 
     return _on_install
@@ -169,7 +172,7 @@ def _attach_default_diagnostics(bus: EventBus) -> dict[str, bool]:
             "warning": "WARNING",
             "error": "ERROR",
         }.get(event.level, event.level.upper())
-        typer.echo(f"{prefix}: [{event.source}] {event.message}", err=True)
+        print(f"{prefix}: [{event.source}] {event.message}", file=sys.stderr)
         if event.level == "error":
             state["error_seen"] = True
 
@@ -225,7 +228,7 @@ def _build_session_config(
     )
 
 
-async def _run(
+async def run(
     *,
     prompt: str,
     scenario: str | None,
@@ -240,6 +243,7 @@ async def _run(
     quiet: bool,
     resume: str | None,
     continue_recent: bool,
+    output: TextIO = sys.stdout,
 ) -> int:
     from agentm.harness import AgentSession
 
@@ -261,8 +265,8 @@ async def _run(
         continue_recent=continue_recent,
     )
     if not quiet and session_manager.session_file is not None:
-        typer.echo(f"INFO: session log: {session_manager.session_file}", err=True)
-        typer.echo(f"INFO: session id: {session_manager.get_session_id()}", err=True)
+        print(f"INFO: session log: {session_manager.session_file}", file=sys.stderr)
+        print(f"INFO: session id: {session_manager.get_session_id()}", file=sys.stderr)
 
     session = await AgentSession.create(config)
     try:
@@ -270,15 +274,16 @@ async def _run(
         cost_service = session.get_service("cost_query")
         provider_name = session.model.provider if session.model is not None else None
         if not quiet:
-            _print_final(final, cost_service=cost_service, provider=provider_name)
+            _print_final(final, cost_service=cost_service, provider=provider_name, output=output)
     finally:
         await session.shutdown()
 
     if not quiet:
         sid = session_manager.get_session_id()
         if sid:
-            typer.echo(
-                f'session_id={sid}  (resume with: agentm --resume {sid} "<prompt>")'
+            print(
+                f'session_id={sid}  (resume with: agentm --resume {sid} "<prompt>")',
+                file=output,
             )
     return 1 if diagnostic_state["error_seen"] else 0
 
@@ -294,6 +299,8 @@ async def _run_interactive(
     provider: str,
     model: str,
     cwd: str,
+    theme: str = "dark",
+    css_path: Path | None = None,
 ) -> int:
     """Build a session config and hand off to the Textual TUI runner."""
 
@@ -314,9 +321,9 @@ async def _run_interactive(
         bus=bus,
     )
     if session_manager.session_file is not None:
-        typer.echo(f"INFO: session log: {session_manager.session_file}", err=True)
+        print(f"INFO: session log: {session_manager.session_file}", file=sys.stderr)
 
-    return await run_textual_tui(config)
+    return await run_textual_tui(config, theme=theme, css_path=css_path)
 
 
 def run_cmd(
@@ -424,6 +431,23 @@ def run_cmd(
             help="Open the Textual multi-turn TUI instead of running a single prompt.",
         ),
     ] = False,
+    theme: Annotated[
+        str,
+        typer.Option(
+            "--theme",
+            help="Textual theme name for --interactive (aliases: dark, light).",
+        ),
+    ] = "dark",
+    css_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--css-path",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="Optional Textual CSS path for --interactive.",
+        ),
+    ] = None,
     resume: Annotated[
         str | None,
         typer.Option(
@@ -464,16 +488,18 @@ def run_cmd(
                 provider=provider,
                 model=model,
                 cwd=cwd,
+                theme=theme,
+                css_path=css_path,
             )
         )
         raise typer.Exit(code=rc)
 
     if not prompt:
-        typer.echo("ERROR: prompt is required (or pass --interactive)", err=True)
+        print("ERROR: prompt is required (or pass --interactive)", file=sys.stderr)
         raise typer.Exit(code=2)
 
     rc = asyncio.run(
-        _run(
+        run(
             prompt=prompt,
             scenario=scenario,
             extra_extensions=extra_extensions,
@@ -490,6 +516,9 @@ def run_cmd(
         )
     )
     raise typer.Exit(code=rc)
+
+
+_run = run
 
 
 def main() -> None:
