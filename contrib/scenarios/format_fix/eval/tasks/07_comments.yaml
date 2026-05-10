@@ -1,0 +1,17 @@
+id: 07_comments
+task_class: format_fix
+description: |
+  JSONC-style line comments — held out, harder than the MVP target. A
+  proper normalizer would strip ``//`` line comments before parsing.
+holdout: true
+input:
+  user_message: |
+    {
+      // user record
+      'name': 'eve',
+      'age': 30
+    }
+expected:
+  value:
+    name: eve
+    age: 30

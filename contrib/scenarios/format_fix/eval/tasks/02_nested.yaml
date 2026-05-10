@@ -1,0 +1,12 @@
+id: 02_nested
+task_class: format_fix
+description: Nested object — naive replace breaks because inner quotes are not handled.
+input:
+  user_message: "{'user': {'name': 'bob', 'pref': {'tz': 'utc'}}, 'role': 'staff'}"
+expected:
+  value:
+    user:
+      name: bob
+      pref:
+        tz: utc
+    role: staff

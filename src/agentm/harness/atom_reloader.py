@@ -73,6 +73,12 @@ from agentm.harness.resource_writer import ResourceWriter
 
 logger = logging.getLogger(__name__)
 
+# Synthetic-module dotted prefix used by the scenario loader for atoms it
+# materializes as ``agentm._scenarios.<scenario>.<stem>``. Kept as a single
+# named constant so the prefix list in ``install_atom``'s synthetic branch
+# stays single-sourced as new synthetic axes are added.
+_SCENARIO_MODULE_PREFIX = "agentm._scenarios."
+
 
 @dataclass(slots=True)
 class LoadedAtom:
@@ -471,7 +477,13 @@ class AtomReloader:
         # populated cache. Builtin atoms keep their normal import-finder
         # path: they aren't synthetic, so this branch is skipped and
         # ``import_module`` resolves them via ``sys.path`` as before.
-        if atom.import_kind == "synthetic":
+        if atom.import_kind == "synthetic" or atom.module_path.startswith(_SCENARIO_MODULE_PREFIX):
+            # Scenario-local atoms (loaded by the loader under
+            # ``agentm._scenarios.<scenario>.<stem>``) are synthetic too —
+            # they have no normal import finder, so rebuild the sys.modules
+            # entry from the on-disk file (which may now point at the
+            # eval-sandbox tempdir) before delegating to
+            # ``_finish_install``.
             self._import_synthetic_module(atom.module_path, atom.file_path)
         await self._finish_install(
             atom.module_path,

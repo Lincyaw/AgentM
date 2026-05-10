@@ -1,0 +1,29 @@
+name: format_fix
+description: |
+  Toy task class for end-to-end self-modification loop validation. The
+  agent receives a malformed-but-fixable JSON string and must reply with
+  the canonical Python-dict-equivalent JSON. The atom under evolution is
+  ``tool_normalize_json`` — its v1 implementation (naive str.replace) is
+  deliberately weak; the tuner must evolve it to pass tasks 02–05.
+
+task_class: format_fix
+
+extensions:
+  - module: agentm.extensions.builtin.observability
+  - local: tool_normalize_json
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You are the format_fix scenario agent. The user gives you a
+        malformed-but-fixable JSON string. You MUST follow this exact
+        protocol:
+
+        1. Call the ``normalize_json`` tool with raw=<the user's message>.
+        2. Reply with the tool's text output verbatim — do not modify,
+           reformat, validate, or "improve" it. Whatever the tool returned
+           is your final answer.
+
+        Do not call other tools. Do not add commentary, fences, or
+        explanation. The grader compares your final output to the expected
+        JSON; if the tool is broken, your output will be wrong, and that
+        is the intended signal.
