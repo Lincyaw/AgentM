@@ -735,6 +735,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                         "type": None,
                         "difficulty": None,
                         "external_id": None,
+                        # Per-task-evolution loop fields (per-task-
+                        # evolution-loop.md §4.1). ``task_class`` ties this
+                        # session to a tunable task family; the eval pair
+                        # is non-null only for eval-run child sessions.
+                        "task_class": getattr(event, "task_class", None),
+                        "eval_run_id": getattr(event, "eval_run_id", None),
+                        "task_id": getattr(event, "eval_task_id", None),
                     },
                 },
                 "status": {"code": "OK"},

@@ -90,6 +90,32 @@ class AgentSessionConfig:
     """Caller-defined purpose label, e.g. ``"subagent:worker"``;
     surfaces verbatim in :class:`ChildSessionStartEvent`."""
 
+    # --- Per-task evolution loop (see per-task-evolution-loop.md) --------
+
+    task_class: str | None = None
+    """Task class label populated on ``session.fingerprint.task_meta`` by the
+    observability atom. Production scenarios declare this as a top-level
+    ``task_class`` field in ``manifest.yaml``; ``tool_eval_run`` sets it on
+    each child session."""
+
+    eval_run_id: str | None = None
+    """When set, this session is part of an eval run; surfaces on
+    ``task_meta.eval_run_id``."""
+
+    eval_task_id: str | None = None
+    """Identifier of the eval-suite task this session is grading (``None`` for
+    production traffic). Surfaces on ``task_meta.task_id``. Distinct from
+    ``task_id`` (sub-agent dispatch provenance)."""
+
+    atom_source_overrides: dict[str, str] | None = None
+    """Map of ``atom_name → new_source``. After normal extension load
+    completes, the session walks this map and applies each via the existing
+    reload path WITHOUT writing to the working tree — overrides are written
+    to a per-session sandbox temp dir, the atom's module file is redirected
+    there, and the reload happens against that file. Used by
+    ``tool_eval_run`` to evaluate proposed atom versions without mutating
+    the source-of-truth tree. Cleaned up on ``AgentSession.shutdown``."""
+
     def with_bus(self, bus: EventBus) -> "AgentSessionConfig":
         return replace(self, bus=bus)
 

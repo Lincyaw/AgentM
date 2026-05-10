@@ -1,0 +1,11 @@
+id: 08_deeply_nested
+task_class: format_fix
+description: Deeply nested object; same family as 02 and 05.
+input:
+  user_message: "{'l1': {'l2': {'l3': {'l4': 'leaf'}}}}"
+expected:
+  value:
+    l1:
+      l2:
+        l3:
+          l4: leaf
