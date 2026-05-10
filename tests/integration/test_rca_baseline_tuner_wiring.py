@@ -1,15 +1,15 @@
-"""Smoke test for the rca_single tuner wiring (no LLM required).
+"""Smoke test for the rca:baseline tuner wiring (no LLM required).
 
 Asserts:
 
 1. The tuner manifest loads cleanly via ``load_scenario_with_meta`` and
-   declares ``task_class: rca_single_tuner``.
+   declares ``task_class: rca_baseline_tuner``.
 2. Each atom in the tuner manifest installs against a stub ExtensionAPI
    without raising — catches config-shape regressions early.
 3. The eval ``tasks/*.yaml`` files parse and carry the schema the
    grader / ``tool_eval_run`` rely on.
 4. The programmatic grader correctly scores a synthetic trace fixture
-   that mirrors the rca_single emit shape (list_tables → query_sql →
+   that mirrors the rca:baseline emit shape (list_tables → query_sql →
    submit_final_report). Verifies both a matching verdict (score=1.0)
    and a wrong verdict (score=0.0).
 
@@ -112,7 +112,7 @@ def test_tuner_manifest_loads_cleanly() -> None:
     try:
         from agentm.extensions.loader import load_scenario_with_meta
 
-        extensions, meta = load_scenario_with_meta("rca_single/tuner")
+        extensions, meta = load_scenario_with_meta("rca/tuner")
     finally:
         os.chdir(cwd)
 
@@ -131,7 +131,7 @@ def test_tuner_manifest_loads_cleanly() -> None:
     assert expected.issubset(set(module_paths)), (
         f"missing atoms: {expected - set(module_paths)}"
     )
-    assert meta.get("task_class") == "rca_single_tuner"
+    assert meta.get("task_class") == "rca_baseline_tuner"
 
 
 def test_tuner_atoms_install_against_stub_api(tmp_path: Path) -> None:
@@ -143,7 +143,7 @@ def test_tuner_atoms_install_against_stub_api(tmp_path: Path) -> None:
     try:
         from agentm.extensions.loader import load_scenario_with_meta
 
-        extensions, _meta = load_scenario_with_meta("rca_single/tuner")
+        extensions, _meta = load_scenario_with_meta("rca/tuner")
     finally:
         os.chdir(cwd)
 
@@ -172,14 +172,16 @@ def test_tuner_atoms_install_against_stub_api(tmp_path: Path) -> None:
 
 
 def test_eval_tasks_parse_and_have_required_keys() -> None:
-    tasks_dir = _REPO_ROOT / "contrib" / "scenarios" / "rca_single" / "eval" / "tasks"
+    tasks_dir = (
+        _REPO_ROOT / "contrib" / "scenarios" / "rca" / "eval" / "baseline" / "tasks"
+    )
     files = sorted(tasks_dir.glob("*.yaml"))
     assert len(files) == 3, f"expected exactly 3 task YAMLs, got {files}"
     holdout_count = 0
     for path in files:
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert isinstance(payload, dict), f"{path} did not parse to a dict"
-        assert payload.get("task_class") == "rca_single"
+        assert payload.get("task_class") == "rca_baseline"
         assert isinstance(payload.get("id"), str) and payload["id"]
         inp = payload.get("input") or {}
         assert isinstance(inp.get("user_message"), str) and inp["user_message"].strip()
@@ -197,7 +199,13 @@ def test_eval_tasks_parse_and_have_required_keys() -> None:
 
 def _load_grader() -> Any:
     grader_path = (
-        _REPO_ROOT / "contrib" / "scenarios" / "rca_single" / "eval" / "grader.py"
+        _REPO_ROOT
+        / "contrib"
+        / "scenarios"
+        / "rca"
+        / "eval"
+        / "baseline"
+        / "grader.py"
     )
     spec = importlib.util.spec_from_file_location(
         f"_test_grader_{uuid.uuid4().hex[:6]}", grader_path
@@ -217,7 +225,7 @@ def _write_synthetic_trace(
     fault_kind: str,
     include_binder_error: bool,
 ) -> None:
-    """Compose a tiny JSONL trace mimicking the rca_single emit shape:
+    """Compose a tiny JSONL trace mimicking the rca:baseline emit shape:
     session.fingerprint (carries task_id) → emit:tool_call(list_tables) →
     [optional Binder Error tool_result] → emit:tool_call(query_sql) →
     emit:tool_call(submit_final_report root_causes=[{service, fault_kind}]).
@@ -234,7 +242,7 @@ def _write_synthetic_trace(
             "start_time_unix_nano": now_ns,
             "attributes": {
                 "task_meta": {
-                    "task_class": "rca_single",
+                    "task_class": "rca_baseline",
                     "task_id": task_id,
                     "eval_run_id": "er_test",
                 },

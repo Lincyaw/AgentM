@@ -1,5 +1,5 @@
 id: 01_mysql_corrupt
-task_class: rca_single
+task_class: rca_baseline
 holdout: false
 description: |
   NetworkCorrupt on the mysql backing service propagates as latency to

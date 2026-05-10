@@ -7,7 +7,7 @@ required by the RCABench preprocer. Idempotent — re-running only inserts
 missing rows.
 
 Run:
-    uv run python contrib/scenarios/rca_single/eval/ingest_ops_lite.py
+    uv run python contrib/scenarios/rca/eval/baseline/ingest_ops_lite.py
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ CASES_DIR = Path("datasets/ops-lite/cases").resolve()
 
 
 def main() -> None:
-    # Optional deps are imported lazily so the surrounding rca_single
+    # Optional deps are imported lazily so the surrounding rca:baseline
     # scenario stays importable for tooling that walks the contrib tree on
     # machines where rcabench-platform / sqlmodel are absent. Surface a
     # single actionable SystemExit instead of a bare ``ImportError`` at

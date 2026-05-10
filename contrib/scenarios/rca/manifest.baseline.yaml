@@ -1,4 +1,4 @@
-name: rca_single
+name: rca:baseline
 description: |
   Single-agent variant of the rca scenario. Same diagnostic prompt, same
   tools, same agent contract — but no sub-agent dispatch. The lead
@@ -6,9 +6,9 @@ description: |
   baseline against the multi-agent rca scenario.
 
 # task_class drives session.fingerprint.task_meta.task_class so production
-# traces are filterable by ``tool_query_traces(task_class="rca_single")`` —
+# traces are filterable by ``tool_query_traces(task_class="rca_baseline")`` —
 # load-bearing for the GEPA tuner under tuner/.
-task_class: rca_single
+task_class: rca_baseline
 
 extensions:
   # Data tools live directly on the main session — no orchestrator/worker

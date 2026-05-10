@@ -21,7 +21,7 @@ The root `agentm` package stays free of RCA, observability, and DuckDB concerns.
 ## Eval-config environment variables
 
 The YAML configs under `contrib/scenarios/rca/eval/` and
-`contrib/scenarios/rca_single/eval/` use shell-style ``${VAR:-default}``
+`contrib/scenarios/rca/eval/baseline/` use shell-style ``${VAR:-default}``
 placeholders for paths and model identifiers so the same config is portable
 across machines. The external `rca llm-eval` runner does **not** expand them
 itself — pre-process the file with `envsubst` (or `gettext-base`) before

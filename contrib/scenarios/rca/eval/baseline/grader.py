@@ -1,4 +1,4 @@
-"""Programmatic grader for the rca_single eval suite.
+"""Programmatic grader for the rca:baseline eval suite.
 
 Returns the μ_f feedback shape (per design §3.2). The agent terminates by
 calling ``submit_final_report`` (see ``contrib/scenarios/rca/src/.../finalize.py``)

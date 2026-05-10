@@ -1,12 +1,12 @@
 name: tuner
 description: |
-  GEPA-shaped tuner for the rca_single scenario. Mutates
+  GEPA-shaped tuner for the rca:baseline scenario. Mutates
   ``prompts/investigator.md`` (kind="system_prompt") guided by trace
   evidence, programmatic grader feedback, and per-module credit
   assignment. See ../README.md for context and
   ../../format_fix/tuner/README.md for the canonical recipe.
 
-task_class: rca_single_tuner
+task_class: rca_baseline_tuner
 
 extensions:
   # File access for inspecting the current prompt + trace bodies.
@@ -16,31 +16,31 @@ extensions:
   - module: agentm.extensions.builtin.tool_query_traces
   - module: agentm.extensions.builtin.tool_query_candidates
     config:
-      default_scenario: rca_single
+      default_scenario: rca:baseline
   - module: agentm.extensions.builtin.tool_query_module_feedback
     config:
-      default_scenario: rca_single
+      default_scenario: rca:baseline
 
   # Reflection scaffold producer; consumes the eval feedback_corpus and
   # returns the diagnosis-prompt + change-spec schema for the outer LLM.
   - module: agentm.extensions.builtin.tool_reflect
     config:
-      default_scenario: rca_single
+      default_scenario: rca:baseline
 
-  # Sandbox eval runner — spawns child sessions under rca_single, applies
+  # Sandbox eval runner — spawns child sessions under rca:baseline, applies
   # ``atom_source_overrides`` (for kind="system_prompt" the override is a
   # path-keyed map handled by tool_propose_change validation; eval_run
   # accepts the same shape).
   - module: agentm.extensions.builtin.tool_eval_run
     config:
-      target_scenario: rca_single
-      eval_dir: contrib/scenarios/rca_single/eval
+      target_scenario: rca:baseline
+      eval_dir: contrib/scenarios/rca/eval/baseline
       max_cost_usd: 0.50
 
   # Promotion gate. kind="system_prompt" landed in B-3.
   - module: agentm.extensions.builtin.tool_propose_change
     config:
-      target_scenario: rca_single
+      target_scenario: rca:baseline
       promotion:
         threshold_relative: 0.05
         guard_tolerance: 0.10
@@ -50,11 +50,11 @@ extensions:
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: |
-        You are the rca_single scenario tuner. Your job is to evolve
+        You are the rca:baseline scenario tuner. Your job is to evolve
         ``contrib/scenarios/rca/prompts/investigator.md`` (now shared with
-        the multi-agent rca scenario, but only loaded by rca_single's
+        the multi-agent rca scenario, but only loaded by rca:baseline's
         manifest) so the production scenario passes more cases in the eval
-        suite under ``contrib/scenarios/rca_single/eval/``.
+        suite under ``contrib/scenarios/rca/eval/baseline/``.
 
         Quality signal:
           primary : grade_mean (0.7 * service_hit + 0.3 * fault_kind_hit;
@@ -62,22 +62,22 @@ extensions:
           guards  : tool_error_rate, turns_mean
 
         Loop (one iteration per session):
-          1. query_traces(task_class="rca_single", n=20) — recent
+          1. query_traces(task_class="rca_baseline", n=20) — recent
              production traces, filter on ``stop_reason`` /
              ``total_turns`` to find failure or thrash patterns.
-          2. query_module_feedback(target_scenario="rca_single", n=20) —
+          2. query_module_feedback(target_scenario="rca:baseline", n=20) —
              which module did the grader most recently finger?
              ``query_sql`` getting flagged means the SQL-quoting gap is
              the load-bearing prompt-level miss; bias your mutation
              toward that.
-          3. query_candidates(target_scenario="rca_single") — read the
+          3. query_candidates(target_scenario="rca:baseline") — read the
              current Pareto frontier (likely empty on first iteration).
           4. read prompts/investigator.md to internalize the current
              contract.
           5. reflect(failures=[<trace summaries from step 1>],
              target_module="prompts/investigator.md",
-             target_scenario="rca_single") — receive the structured
-             reflection scaffold with the rca_single-specific mutation
+             target_scenario="rca:baseline") — receive the structured
+             reflection scaffold with the rca:baseline-specific mutation
              instructions.
           6. eval_run({}) — baseline; capture eval_run_id_baseline.
           7. eval_run({"atom_source_overrides":
