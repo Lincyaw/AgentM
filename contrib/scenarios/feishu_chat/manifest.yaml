@@ -32,6 +32,17 @@ extensions:
   - module: agentm.extensions.builtin.tool_write
   - module: agentm.extensions.builtin.tool_propose_change
 
+  # --- meta-tools: agent can self-extend by installing new atoms.
+  # Source lands at ``<cwd>/.agentm/atoms/<name>.py`` and the scenario
+  # loader auto-merges that directory on every session start, so the
+  # agent's installs persist across restarts without editing this
+  # manifest. ``tool_propose_change`` is still the path for *modifying*
+  # existing atoms with eval evidence; this pair is the lightweight
+  # path for adding/removing helpers on demand. ---
+  - module: agentm.extensions.builtin.tool_list_atoms
+  - module: agentm.extensions.builtin.tool_install_atom
+  - module: agentm.extensions.builtin.tool_unload_atom
+
   # --- skills: SKILL.md auto-discovery so feishu-cli (and any future
   # Feishu-shaped skill the operator drops into .claude/skills/) is
   # picked up. Rely on Claude Code-style skill format. ---
