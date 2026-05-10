@@ -42,8 +42,12 @@ Concretely:
 You have exactly three tools:
 
 1. ``register_event(turn_indices, kind, summary)`` — record one event.
-   Returns its ``event_id`` (monotonic from 1). Use these ids when
-   adding edges. ``turn_indices`` MUST cover every trajectory turn the
+   Returns its ``event_id``. **The id space is local to THIS firing and
+   restarts at 1 every firing.** The first ``register_event`` of this
+   firing returns 1, the second returns 2, and so on — regardless of
+   how many events ``recent_graph`` shows. Use ONLY ids that
+   ``register_event`` returned to you in this firing when calling
+   ``add_edge``. ``turn_indices`` MUST cover every trajectory turn the
    event was extracted from; later edges can only reference these.
 
 2. ``add_edge(src_event_id, dst_event_id, kind, reason, src_turns,
@@ -112,9 +116,12 @@ When in doubt, emit fewer events with sharper summaries.
 ## Inputs
 
 The next message contains the new-turn window plus a tail of the
-running graph as ``recent_events``. The verbatim turn texts the
-harness will normalize against are embedded below as JSON; quote from
-these when citing entities or quotes.
+running graph as ``recent_graph``. The ids inside ``recent_graph``
+belong to a SEPARATE, read-only namespace (the parent's persisted
+graph) — they are NOT valid arguments to ``add_edge`` in this firing.
+Treat ``recent_graph`` as background context only. The verbatim turn
+texts the harness will normalize against are embedded below as JSON;
+quote from these when citing entities or quotes.
 
 Embedded turn window:
 
@@ -124,11 +131,14 @@ Embedded turn window:
 
 ## Procedure
 
-1. Read ``new_turns`` and ``recent_events`` from the next message.
+1. Read ``new_turns`` and ``recent_graph`` from the next message.
 2. Walk new_turns in order. For each semantically meaningful move,
-   call ``register_event`` once. Capture the returned event_id.
+   call ``register_event`` once. Capture the returned event_id (it
+   starts at 1 in this firing, regardless of ``recent_graph``).
 3. After events are registered, call ``add_edge`` for every causal /
-   referential link grounded by a witness in the turn texts. If a
+   referential link grounded by a witness in the turn texts. Use
+   ONLY ids you saw returned from ``register_event`` in step 2 — do
+   not invent ids and do not borrow ids from ``recent_graph``. If a
    witness fails three times, accept the drop and continue.
 4. Call ``submit_extraction()``. The loop ends.
 
