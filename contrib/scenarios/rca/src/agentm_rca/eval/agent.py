@@ -56,6 +56,21 @@ _EMPTY_AGENT_RCA_OUTPUT: dict[str, list[Any]] = {
 }
 
 
+def _provider_name_from_base_url(base_url: str) -> str:
+    """Derive a stable provider registry slug from a base URL.
+
+    PR #95 requires every non-canonical OpenAI-compatible endpoint to
+    register under a unique name. The host segment is unique per gateway
+    in practice (LiteLLM, Doubao Ark, DeepSeek, etc.) and stays stable
+    across runs, which keeps observability traces comparable.
+    """
+
+    from urllib.parse import urlparse
+
+    host = urlparse(base_url).hostname or "openai-compat"
+    return host.replace(".", "-")
+
+
 def _env_bool(name: str, *, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -84,6 +99,15 @@ def _build_provider(
         base_url = os.environ.get("OPENAI_BASE_URL")
         if base_url:
             cfg["base_url"] = base_url
+            # PR #95 (8b8231e) made ``name`` mandatory whenever
+            # ``base_url`` is non-canonical, to prevent two custom
+            # endpoints from clobbering each other under the bare
+            # ``openai`` registry slot. Honor an explicit override via
+            # ``AGENTM_PROVIDER_NAME`` and otherwise derive a stable
+            # slug from the base host so eval rollouts don't crash.
+            cfg["name"] = os.environ.get(
+                "AGENTM_PROVIDER_NAME"
+            ) or _provider_name_from_base_url(base_url)
         ticket = os.environ.get("WARPGATE_TICKET")
         if ticket:
             cfg["default_query"] = {"warpgate-ticket": ticket}
