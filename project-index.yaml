@@ -314,6 +314,7 @@ requirements:
       - path: src/agentm/extensions/builtin/tool_ls.py
     tests:
       - path: tests/unit/extensions/test_file_tool_io_seams.py
+      - path: tests/unit/extensions/test_tool_read_path_gate.py
       - path: tests/integration/test_file_tool_cli.py
       - path: tests/unit/extensions/test_extension_contract.py
       - path: tests/integration/test_cli_slash_commands.py

@@ -21,6 +21,14 @@ extensions:
       include_defaults: false
       inherit_claude: false
   - module: agentm.extensions.builtin.tool_read
+    # ``read`` is exposed only to drill into the diagnose-sql / rca-worker
+    # SKILL.md body files. Lock the path scope so the agent cannot reach
+    # ground-truth labels co-located with eval data
+    # (``dataset/<case>/label.txt``, ``injection.json``, ``causal_graph.json``)
+    # via ``read("/abs/path/...")`` and shortcut the eval.
+    config:
+      allow_globs:
+        - contrib/scenarios/rca/skills/**
   - module: contrib.extensions.rcabench_contract
 
   # Multi-agent wiring. ``prompt_loader`` (shared with rca:baseline) loads
