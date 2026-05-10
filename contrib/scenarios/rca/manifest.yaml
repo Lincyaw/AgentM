@@ -23,11 +23,15 @@ extensions:
   - module: agentm.extensions.builtin.tool_read
   - module: contrib.extensions.rcabench_contract
 
-  # Multi-agent wiring. ``orchestrator_setup`` (scenario-local) loads the
-  # orchestrator system prompt, appends the available-personas block, and
-  # answers ``ResolveSubagentEvent.CHANNEL`` for the personas under ``agents/``
+  # Multi-agent wiring. ``prompt_loader`` (shared with rca_single) loads
+  # ``prompts/orchestrator.md`` into the system prompt; ``personas: true``
+  # also appends the available-agents block and answers
+  # ``ResolveSubagentEvent.CHANNEL`` for the personas under ``agents/``
   # (now only ``critic``).
-  - local: orchestrator_setup
+  - module: agentm_rca.prompt_loader
+    config:
+      prompt: orchestrator.md
+      personas: true
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: ""

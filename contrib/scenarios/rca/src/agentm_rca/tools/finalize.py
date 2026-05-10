@@ -12,7 +12,7 @@ schema is the **official rcabench-platform agent contract**
 
 We validate by handing the raw tool args to :class:`AgentRCAOutput` —
 ``service`` vocabulary alignment is enforced in the prompt (see
-``orchestrator_setup.install`` which splices in
+``rcabench_contract`` atom which splices in
 ``get_agent_contract_prompt()``); shape correctness is enforced by Pydantic
 here. A failed validation returns ``is_error=True`` so the model can retry;
 a successful validation returns :class:`ToolTerminate` so the loop exits

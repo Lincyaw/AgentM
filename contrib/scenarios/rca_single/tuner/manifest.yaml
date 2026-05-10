@@ -51,9 +51,10 @@ extensions:
     config:
       prompt: |
         You are the rca_single scenario tuner. Your job is to evolve
-        ``contrib/scenarios/rca_single/prompts/investigator.md`` so the
-        production scenario passes more cases in the eval suite under
-        ``contrib/scenarios/rca_single/eval/``.
+        ``contrib/scenarios/rca/prompts/investigator.md`` (now shared with
+        the multi-agent rca scenario, but only loaded by rca_single's
+        manifest) so the production scenario passes more cases in the eval
+        suite under ``contrib/scenarios/rca_single/eval/``.
 
         Quality signal:
           primary : grade_mean (0.7 * service_hit + 0.3 * fault_kind_hit;
@@ -98,8 +99,8 @@ extensions:
             wholesale on iteration 1.
           - Preserve the agent contract block at the bottom of
             investigator.md (the ``<agent_contract>`` block is spliced
-            in by setup.py from the rcabench-platform SDK; if you
-            delete it, runtime will reject the final report).
+            in by the ``rcabench_contract`` atom from the rcabench-platform
+            SDK; if you delete it, runtime will reject the final report).
           - Preserve all five tools listed in the prompt's "Tools"
             section (``list_tables``, ``query_sql``,
             ``add_hypothesis``/``update``/``remove``/``list``, ``read``,

@@ -1,13 +1,17 @@
-"""Scenario-local extension wiring orchestrator prompt + worker personas.
+"""Generalized prompt-loading atom shared by ``rca`` and ``rca_single``.
 
-Two responsibilities:
+Subsumes the old per-manifest setup atoms (``orchestrator_setup`` and
+``setup``). One config-driven implementation:
 
-1. Load ``prompts/orchestrator.md`` from this scenario directory and prepend
-   it to the parent agent's system prompt at ``before_agent_start``.
-2. Discover ``agents/*.md`` persona files, append a sub-agent availability
-   advisory block to the orchestrator prompt, and answer ``resolve_subagent``
-   so :mod:`agentm.extensions.builtin.sub_agent` can inject persona metadata
-   into child sessions when ``dispatch_agent`` is called.
+* ``prompt`` (required): filename under ``contrib/scenarios/rca/prompts/``.
+* ``personas`` (optional, default ``false``): when truthy, also load
+  ``contrib/scenarios/rca/agents/*.md``, append the available-agents block
+  to the system prompt, and answer ``ResolveSubagentEvent`` so
+  :mod:`agentm.extensions.builtin.sub_agent` can dispatch them. Single-agent
+  manifests leave this off.
+
+Both prompts and personas live under the canonical ``rca`` scenario
+directory so adding a new variant is a manifest-only change.
 """
 
 from __future__ import annotations
@@ -26,23 +30,31 @@ from agentm.harness.events import (
 from agentm.harness.extension import ExtensionAPI
 
 
-_SCENARIO_ROOT = Path(__file__).resolve().parent
-_PROMPT_PATH = _SCENARIO_ROOT / "prompts" / "orchestrator.md"
-_AGENTS_DIR = _SCENARIO_ROOT / "agents"
+_RCA_ROOT = Path(__file__).resolve().parent.parent.parent
+_PROMPTS_DIR = _RCA_ROOT / "prompts"
+_AGENTS_DIR = _RCA_ROOT / "agents"
 
 
 MANIFEST = ExtensionManifest(
-    name="orchestrator_setup",
+    name="prompt_loader",
     description=(
-        "Inject the rca orchestrator prompt, advertise worker personas, and "
-        "resolve critic metadata for sub_agent."
+        "Inject an rca scenario prompt; optionally also load worker personas "
+        "and answer resolve_subagent for them."
     ),
     registers=(
         f"event:{SessionReadyEvent.CHANNEL}",
         f"event:{BeforeAgentStartEvent.CHANNEL}",
         f"event:{ResolveSubagentEvent.CHANNEL}",
     ),
-    config_schema={"type": "object", "additionalProperties": False},
+    config_schema={
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string"},
+            "personas": {"type": "boolean"},
+        },
+        "required": ["prompt"],
+        "additionalProperties": False,
+    },
     tier=2,
 )
 
@@ -121,18 +133,27 @@ def _load_personas() -> dict[str, dict[str, Any]]:
     return personas
 
 
-async def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
+async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+    prompt_name = str(config["prompt"]).strip()
+    if not prompt_name:
+        raise ValueError("prompt_loader: 'prompt' config must be a non-empty filename")
+    prompt_path = _PROMPTS_DIR / prompt_name
+    enable_personas = bool(config.get("personas", False))
+
     cached_system = ""
     personas: dict[str, dict[str, Any]] = {}
 
     async def _load(_event: SessionReadyEvent) -> None:
         nonlocal cached_system, personas
         prompt = ""
-        if _PROMPT_PATH.is_file():
-            prompt = _PROMPT_PATH.read_text(encoding="utf-8").strip()
-        personas = _load_personas()
-        available_agents = available_agents_block(personas, include_input_schema=True)
-        sections = [s for s in (prompt, available_agents) if s]
+        if prompt_path.is_file():
+            prompt = prompt_path.read_text(encoding="utf-8").strip()
+        sections = [prompt] if prompt else []
+        if enable_personas:
+            personas = _load_personas()
+            block = available_agents_block(personas, include_input_schema=True)
+            if block:
+                sections.append(block)
         cached_system = "\n\n".join(sections)
 
     def _inject_prompt(event: BeforeAgentStartEvent) -> dict[str, str] | None:
@@ -144,6 +165,8 @@ async def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
         return {"system": merged}
 
     def _resolve(payload: Any) -> dict[str, Any] | None:
+        if not enable_personas:
+            return None
         if isinstance(payload, ResolveSubagentEvent):
             name = payload.name
         elif isinstance(payload, dict):
@@ -166,4 +189,5 @@ async def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
 
     api.on(SessionReadyEvent.CHANNEL, _load)
     api.on(BeforeAgentStartEvent.CHANNEL, _inject_prompt)
-    api.on(ResolveSubagentEvent.CHANNEL, _resolve)
+    if enable_personas:
+        api.on(ResolveSubagentEvent.CHANNEL, _resolve)
