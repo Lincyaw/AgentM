@@ -425,9 +425,10 @@ requirements:
       idempotent on ``(check.name, id(check))`` and fail-fast on
       non-callable input. ``run_all`` tolerates raising checks — each
       exception is captured by check name in an errors dict; other
-      checks still run. Concrete check atoms ship in commit 5 as
-      one-file extensions; the auditor wiring (CheckContext → Finding
-      → prompt block) lands in commit 4.
+      checks still run. Concrete check atoms ship as one-file
+      extensions under ``src/llmharness/extensions/`` (REQ-032 —
+      worked examples for downstream scenarios); the auditor wiring
+      (CheckContext → Finding → prompt block) landed in commit 4.
     priority: P0
     status: tested
     code:
@@ -501,6 +502,44 @@ requirements:
     tests:
       - tests/test_get_event_detail.py
     depends_on: [REQ-001]
+
+  - id: REQ-032
+    title: Reference check atoms — repeated_actions / open_branches / premature_conclusion
+    description: |
+      Issue #134 commit 5 (P1). Three §11 single-file check atoms
+      under ``src/llmharness/extensions/`` that ship as worked
+      examples of how downstream scenarios register graph checks
+      via the audit registry service (REQ-029):
+
+      - ``check_repeated_actions`` — flags ≥2 ``act`` events sharing
+        an identical summary (heuristic: the v3 extractor prompt
+        does not prescribe a fixed ``tool_name(args)`` summary
+        shape, so summary equality is the most defensible signature
+        without an inline arg-hash on Event).
+      - ``check_open_branches`` — flags ``dec`` / ``hyp`` events
+        with no outgoing ``data`` edge (the v3-graph approximation
+        of "discarded alternative without closing evidence").
+      - ``check_premature_conclusion`` — flags ``concl`` events
+        with strictly fewer than two incoming edges (data + ref
+        combined). Threshold deliberately conservative; checks are
+        advisory.
+
+      Each atom: exports MANIFEST + install(api, config); resolves
+      the audit registry via api.get_service(SERVICE_KEY) and
+      raises RuntimeError fail-fast if absent; registers a pure,
+      side-effect-free callable. §11 contract: one file per atom,
+      no atom-to-atom imports, no core._internal / harness.session
+      import.
+    priority: P1
+    status: tested
+    code:
+      - src/llmharness/extensions/__init__.py
+      - src/llmharness/extensions/check_repeated_actions.py
+      - src/llmharness/extensions/check_open_branches.py
+      - src/llmharness/extensions/check_premature_conclusion.py
+    tests:
+      - tests/test_reference_check_atoms.py
+    depends_on: [REQ-001, REQ-029]
 
   # ---------------------------------------------------------------------------
   # Removed in the 2026-05-08 SDK-native cleanup. Kept here for traceability;
