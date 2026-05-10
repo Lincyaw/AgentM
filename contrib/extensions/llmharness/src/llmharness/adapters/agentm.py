@@ -19,11 +19,19 @@ Phase 1 (extractor) on every TurnEndEvent:
   no events on a non-trivial slice), ``extractor_error`` (spawn / prompt
   / coercion crash). Cursor advances ONLY on success or partial.
 
-Phase 2 (auditor) every k turns: unchanged from v2; commit 4 will rewrite
-its prompt to consume v3 ``audit_event`` / ``audit_edge`` entries
-directly. The auditor still reads ``audit_event`` entries via the v2
-``_scan_branch`` helper — that path keeps working because v3 events use
-the same entry type.
+Phase 2 (auditor) every k turns (v3, commit 4):
+* Walk the entry tree to assemble the live event + edge graph plus the
+  most-recent verdict's continuation_notes.
+* Resolve ``llmharness.audit_registry`` from the parent ``ExtensionAPI``;
+  build a frozen ``CheckContext`` and run every registered check, folding
+  the resulting findings + check_errors into the auditor system prompt.
+* Apply the N=30 degradation rule (knob ``audit_summary_threshold``):
+  full witness fields embedded inline ≤ threshold; degraded shape +
+  ``get_event_detail([ids])`` drill-down tool above threshold.
+* Spawn the auditor child with ``compose_auditor_extensions(...)`` —
+  ``events`` / ``edges`` are bridged to the new ``get_event_detail``
+  tool atom via the ``config`` dict (commit-3 pattern).
+* Persist the verdict and (if ``surface_reminder``) queue the reminder.
 """
 
 from __future__ import annotations
@@ -67,8 +75,8 @@ from ..audit.extractor import (
     compose_extractor_extensions,
 )
 from ..audit.registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
-from ..audit.registry import AuditCheckRegistry
-from ..schema import Event, Reminder, Verdict
+from ..audit.registry import AuditCheckRegistry, CheckContext
+from ..schema import Edge, Event, Reminder, Verdict
 
 _logger = logging.getLogger(__name__)
 
@@ -103,6 +111,7 @@ MANIFEST = ExtensionManifest(
         "properties": {
             "mode": {"type": "string", "enum": ["async", "sync"]},
             "audit_interval_turns": {"type": "integer", "minimum": 1},
+            "audit_summary_threshold": {"type": "integer", "minimum": 0},
             "prompt_override_extractor": {"type": "string"},
             "prompt_override_auditor": {"type": "string"},
             "cards_tools_config": {"type": ["object", "null"]},
@@ -144,6 +153,7 @@ _DEFAULT_RECENT_VERDICTS = _et.RECENT_VERDICTS_FOR_AUDITOR
 _RECENT_GRAPH_SLICE_FOR_EXTRACTOR = _et.RECENT_GRAPH_SLICE_FOR_EXTRACTOR
 _DEFAULT_SHUTDOWN_TIMEOUT_S = 60.0
 _DEFAULT_MODE = "async"
+_DEFAULT_AUDIT_SUMMARY_THRESHOLD = 30
 
 _REMINDER_PREAMBLE = (
     "[harness advisory — meta-injection from cognitive audit, not from the human user]\n"
@@ -173,14 +183,16 @@ class _BranchState:
 
     cursor_last_turn_index: int
     graph: list[Event]
+    edges: list[Edge]
     recent_verdicts: list[dict[str, Any]]
     last_continuation_notes: list[str]
 
 
 def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _BranchState:
-    """Single-pass extraction of cursor + graph + recent verdicts + continuation_notes."""
+    """Single-pass extraction of cursor + graph + edges + verdicts + notes."""
     cursor_last_turn_index = -1
     graph: list[Event] = []
+    edges: list[Edge] = []
     verdicts: list[dict[str, Any]] = []
 
     for entry in branch:
@@ -190,6 +202,11 @@ def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _Bran
         if entry.type == _AUDIT_EVENT_ENTRY_TYPE:
             try:
                 graph.append(Event.from_dict(payload))
+            except (KeyError, ValueError, TypeError):
+                continue
+        elif entry.type == _AUDIT_EDGE_ENTRY_TYPE:
+            try:
+                edges.append(Edge.from_dict(payload))
             except (KeyError, ValueError, TypeError):
                 continue
         elif entry.type == _VERDICT_ENTRY_TYPE:
@@ -208,6 +225,7 @@ def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _Bran
     return _BranchState(
         cursor_last_turn_index=cursor_last_turn_index,
         graph=graph,
+        edges=edges,
         recent_verdicts=verdicts[-recent_verdicts_n:] if recent_verdicts_n > 0 else [],
         last_continuation_notes=last_continuation_notes,
     )
@@ -244,6 +262,16 @@ class _AuditorJob:
 
 
 @dataclass(frozen=True)
+class _AuditorSettings:
+    """Per-install knobs for assembling a per-firing auditor extension list."""
+
+    prompt_override: str | None
+    cards_tools_config: dict[str, Any] | None
+    observability_config: dict[str, Any] | None
+    summary_threshold: int
+
+
+@dataclass(frozen=True)
 class _ShutdownJob:
     """Worker-stop sentinel; consumed only by ``_drain_queue``."""
 
@@ -261,6 +289,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     k = int(config.get("audit_interval_turns", _DEFAULT_AUDIT_INTERVAL_TURNS))
     if k < 1:
         k = _DEFAULT_AUDIT_INTERVAL_TURNS
+
+    summary_threshold_raw = config.get("audit_summary_threshold", _DEFAULT_AUDIT_SUMMARY_THRESHOLD)
+    try:
+        summary_threshold = int(summary_threshold_raw)
+    except (TypeError, ValueError):
+        summary_threshold = _DEFAULT_AUDIT_SUMMARY_THRESHOLD
+    if summary_threshold < 0:
+        summary_threshold = _DEFAULT_AUDIT_SUMMARY_THRESHOLD
 
     shutdown_timeout = float(config.get("shutdown_timeout_s", _DEFAULT_SHUTDOWN_TIMEOUT_S))
     if shutdown_timeout < 0:
@@ -281,10 +317,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         cards_tools_config=cards_cfg,
         observability_config=obs_cfg,
     )
-    auditor_extensions = compose_auditor_extensions(
+    # Auditor extensions are rebuilt per firing in _drain_auditor because
+    # the v3 prompt is templated over the live event/edge graph + findings.
+    # We pass the knobs through via a lightweight settings struct.
+    auditor_settings = _AuditorSettings(
         prompt_override=prompt_auditor,
         cards_tools_config=cards_cfg,
         observability_config=obs_cfg,
+        summary_threshold=summary_threshold,
     )
 
     extractor_provider = _parse_provider_spec(config.get("extractor_provider"))
@@ -316,7 +356,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             if extractor_ok and (turn_count % k) == 0:
                 await _drain_auditor(
                     api=api,
-                    auditor_extensions=auditor_extensions,
+                    auditor_settings=auditor_settings,
                     auditor_provider=auditor_provider,
                     pending_reminders=pending_reminders,
                     messages=list(messages_snapshot),
@@ -342,7 +382,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     queue=queue,
                     pending_reminders=pending_reminders,
                     extractor_extensions=extractor_extensions,
-                    auditor_extensions=auditor_extensions,
+                    auditor_settings=auditor_settings,
                     extractor_provider=extractor_provider,
                     auditor_provider=auditor_provider,
                 ),
@@ -433,7 +473,7 @@ async def _drain_queue(
     queue: asyncio.Queue[_Job],
     pending_reminders: list[Reminder],
     extractor_extensions: list[tuple[str, dict[str, Any]]],
-    auditor_extensions: list[tuple[str, dict[str, Any]]],
+    auditor_settings: _AuditorSettings,
     extractor_provider: tuple[str, dict[str, Any]] | None,
     auditor_provider: tuple[str, dict[str, Any]] | None,
 ) -> None:
@@ -465,7 +505,7 @@ async def _drain_queue(
                 else:
                     await _drain_auditor(
                         api=api,
-                        auditor_extensions=auditor_extensions,
+                        auditor_settings=auditor_settings,
                         auditor_provider=auditor_provider,
                         pending_reminders=pending_reminders,
                         messages=list(job.messages),
@@ -724,7 +764,7 @@ def _render_message_text(msg: AgentMessage) -> str:
 async def _drain_auditor(
     *,
     api: ExtensionAPI,
-    auditor_extensions: list[tuple[str, dict[str, Any]]],
+    auditor_settings: _AuditorSettings,
     auditor_provider: tuple[str, dict[str, Any]] | None,
     pending_reminders: list[Reminder],
     messages: list[AgentMessage],
@@ -732,8 +772,38 @@ async def _drain_auditor(
     branch = api.session.get_branch()
     branch_state = _scan_branch(branch, recent_verdicts_n=_DEFAULT_RECENT_VERDICTS)
 
+    events_tuple: tuple[Event, ...] = tuple(branch_state.graph)
+    edges_tuple: tuple[Edge, ...] = tuple(branch_state.edges)
+
+    # Run scenario-registered checks. Empty registry / unset service →
+    # empty findings, no error (design §4.c).
+    findings: list[Any] = []
+    check_errors: dict[str, str] = {}
+    try:
+        registry = api.get_service(AUDIT_REGISTRY_SERVICE_KEY)
+    except Exception:  # pragma: no cover - defensive, no service registry path
+        registry = None
+    if isinstance(registry, AuditCheckRegistry):
+        try:
+            ctx = CheckContext(events=events_tuple, edges=edges_tuple)
+            findings, check_errors = registry.run_all(ctx)
+        except Exception:
+            _logger.exception("audit-check registry run_all failed; using empty findings")
+            findings, check_errors = [], {}
+
     trajectory_snapshot = _serialize_full_trajectory(messages)
-    firing_extensions = _with_trajectory_snapshot(auditor_extensions, trajectory_snapshot)
+    firing_extensions = compose_auditor_extensions(
+        prompt_override=auditor_settings.prompt_override,
+        cards_tools_config=auditor_settings.cards_tools_config,
+        observability_config=auditor_settings.observability_config,
+        trajectory_snapshot=trajectory_snapshot,
+        events=events_tuple,
+        edges=edges_tuple,
+        findings=list(findings),
+        check_errors=dict(check_errors),
+        continuation_notes=list(branch_state.last_continuation_notes),
+        summary_threshold=auditor_settings.summary_threshold,
+    )
 
     verdict = await _run_auditor(
         api=api,
@@ -823,15 +893,6 @@ def _serialize_full_trajectory(messages: list[AgentMessage]) -> list[dict[str, A
         if serialized is not None:
             out.append(serialized)
     return out
-
-
-def _with_trajectory_snapshot(
-    base_extensions: list[tuple[str, dict[str, Any]]],
-    trajectory_snapshot: list[dict[str, Any]],
-) -> list[tuple[str, dict[str, Any]]]:
-    """Return a copy of ``base_extensions`` with the get_turn module appended."""
-    _GET_TURN_MODULE = "llmharness.audit.auditor.get_turn_tool"
-    return [*base_extensions, (_GET_TURN_MODULE, {"trajectory_snapshot": trajectory_snapshot})]
 
 
 # --- phase runner -----------------------------------------------------------

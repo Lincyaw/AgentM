@@ -191,40 +191,55 @@ requirements:
     depends_on: [REQ-001, REQ-016, REQ-023]
 
   - id: REQ-021
-    title: Phase 2 auditor subpackage — every-k-turn graph audit (V2 redirect)
+    title: Phase 2 auditor subpackage — v3 prompt + degradation + findings
     description: |
-      ``audit/auditor/`` subpackage (design §2, §5, §7.1). Public
-      surface: ``AUDITOR_SYSTEM_PROMPT``, ``compose_auditor_extensions``,
-      ``RawVerdictOutput`` (with ``AuditorOutputError``),
-      ``SUBMIT_VERDICT_TOOL_NAME``. Auditor consumes the event graph +
-      recent verdicts + advisory hint block (NOT the raw trajectory).
+      ``audit/auditor/`` subpackage (design §2, §4.g, §5, §7.1, §8). Public
+      surface: ``AUDITOR_SYSTEM_PROMPT``, ``build_auditor_system_prompt``,
+      ``compose_auditor_extensions``, ``RawVerdictOutput`` (with
+      ``AuditorOutputError``), ``SUBMIT_VERDICT_TOOL_NAME``.
 
-      V2 prompt principles (issue #134 redirection, 2026-05-10):
-      - LLM is primary judge; backward continuity / forward fulfillment /
-        content correctness / branch quality are framing lenses, not
-        a sequenced rule set.
-      - Hints block (from audit/hints.py, REQ-027) is scaffolding in
-        the prompt; auditor may ignore or contradict it and may flag
-        concerns hints missed.
-      - Branch fork and merge moments receive explicit framing
-        (design §5.5).
+      V3 prompt (issue #134 commit 4, 2026-05-10):
+      - Trust-asymmetry block: thought = testimony,
+        tool_call / tool_result = evidence. Mirrors the extractor side.
+      - Inputs: GRAPH (events + edges, full or degraded form),
+        FINDINGS (advisory only — never directives) from registered
+        checks, optional CHECKS_FAILED non-blocking line,
+        CONTINUATION_NOTES (auditor's own prior-firing notes), and
+        DRILL-DOWN TOOLS instructions.
+      - Reminder bar: high; default silent; concrete trigger list.
+      - Continuation notes are written for the next auditor firing,
+        not for the main agent.
 
-      ``submit_verdict`` JSON Schema enforces V2 shape (design §6.2):
-      no drift field, no DriftType enum, no if/then clause.
+      Degradation rule (design §4.g, locked at N=30):
+      - len(events) ≤ summary_threshold → full Event.to_dict() +
+        Edge.to_dict() (with witness fields) embedded inline.
+      - len(events) > summary_threshold → degraded events
+        ``{id, kind, summary, source_turns}`` + degraded edges
+        ``{src, dst, kind, reason}``; auditor uses
+        ``get_event_detail([ids])`` to recover full records.
+      - Threshold configurable via ``audit_summary_threshold`` knob;
+        default 30.
+
+      ``submit_verdict`` JSON Schema enforces V2 shape (design §6.2 /
+      decision #9): no drift field, no DriftType enum.
       surface_reminder + continuation_notes are required fields.
 
-      ``get_turn(idx)`` tool (audit/auditor/get_turn_tool.py, REQ-028)
-      is registered in compose_auditor_extensions() for on-demand
-      raw-turn access.
+      Drill-down tools registered in compose_auditor_extensions():
+      - ``get_turn(idx)`` (REQ-028) for raw trajectory access.
+      - ``get_event_detail([event_ids])`` (REQ-031) for full event +
+        edge records when the prompt is degraded.
     priority: P0
-    status: implemented
+    status: tested
     code:
       - src/llmharness/audit/auditor/__init__.py
       - src/llmharness/audit/auditor/prompt.py
       - src/llmharness/audit/auditor/extensions.py
       - src/llmharness/audit/auditor/output.py
       - src/llmharness/audit/auditor/submit_tool.py
-    depends_on: [REQ-001, REQ-016, REQ-023]
+    tests:
+      - tests/test_auditor_degradation.py
+      - tests/test_auditor_findings.py
+    depends_on: [REQ-001, REQ-016, REQ-023, REQ-029, REQ-031]
 
   - id: REQ-022
     title: Typed failure entries — outage vs clean trajectory distinguishable
@@ -379,10 +394,10 @@ requirements:
       Out-of-range idx returns a structured tool-result error
       (is_error=True), not a crash. bool idx also rejected (bool is a
       subclass of int in Python). Snapshot captured per firing via
-      _serialize_full_trajectory in adapters/agentm.py; _with_trajectory_snapshot
-      appends the get_turn module to the static auditor_extensions list
-      inside _drain_auditor on each call — never cached, never mutates
-      the shared base list.
+      _serialize_full_trajectory in adapters/agentm.py and bridged into
+      the auditor child via the ``trajectory_snapshot`` config knob on
+      compose_auditor_extensions(...) — rebuilt fresh each firing,
+      never cached.
     priority: P1
     status: tested
     code:
@@ -453,6 +468,39 @@ requirements:
     tests:
       - tests/test_two_phase_audit_integration.py
     depends_on: [REQ-001, REQ-020, REQ-022]
+
+  - id: REQ-031
+    title: get_event_detail([ids]) drill-down tool for the auditor
+    description: |
+      Issue #134 commit 4 (P0). New §11 single-file extension at
+      ``audit/auditor/get_event_detail_tool.py`` registered in the
+      auditor child session. Returns the full ``Event.to_dict()`` plus
+      outgoing+incoming ``Edge.to_dict()`` lists (with witness fields)
+      for every requested event id. Used by the auditor when the prompt
+      is degraded (more events than ``audit_summary_threshold``,
+      design §4.g) to recover the witness fields the prompt stripped.
+
+      Contract for unknown ids: a top-level ``"missing"`` list (not
+      a per-key ``null``). Known ids appear under their stringified
+      id key. Out-of-shape input (negative id, non-int id, empty
+      event_ids list) returns a structured ``ToolResult`` with
+      ``is_error=True`` rather than raising — the auditor child loop
+      must never crash from a malformed drill-down call. bool ids are
+      rejected (bool is a subclass of int in Python).
+
+      Bridging follows the commit-3 pattern: the adapter passes
+      ``events`` and ``edges`` through
+      ``compose_auditor_extensions(events=..., edges=...)`` which
+      forwards them via the atom's ``config`` dict at install time.
+    priority: P0
+    status: tested
+    code:
+      - src/llmharness/audit/auditor/get_event_detail_tool.py
+      - src/llmharness/audit/auditor/extensions.py
+      - src/llmharness/adapters/agentm.py
+    tests:
+      - tests/test_get_event_detail.py
+    depends_on: [REQ-001]
 
   # ---------------------------------------------------------------------------
   # Removed in the 2026-05-08 SDK-native cleanup. Kept here for traceability;
