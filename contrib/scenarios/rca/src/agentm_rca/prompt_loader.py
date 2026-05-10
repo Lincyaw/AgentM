@@ -1,4 +1,4 @@
-"""Generalized prompt-loading atom shared by ``rca`` and ``rca_single``.
+"""Generalized prompt-loading atom shared by ``rca`` and ``rca:baseline``.
 
 Subsumes the old per-manifest setup atoms (``orchestrator_setup`` and
 ``setup``). One config-driven implementation:

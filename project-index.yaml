@@ -266,7 +266,7 @@ requirements:
       - path: contrib/extensions/rcabench_contract/__init__.py
       - path: contrib/scenarios/rca/manifest.yaml
       - path: contrib/scenarios/rca/src/agentm_rca/prompt_loader.py
-      - path: contrib/scenarios/rca_single/manifest.yaml
+      - path: contrib/scenarios/rca/manifest.baseline.yaml
       - path: contrib/scenarios/rca/src/agentm_rca/tools/duckdb_sql.py
       - path: contrib/scenarios/rca/src/agentm_rca/tools/hypothesis_tools.py
       - path: src/agentm/extensions/builtin/sub_agent.py
@@ -277,6 +277,8 @@ requirements:
       - path: tests/unit/extensions/test_issue_102_rca_cleanup.py
       - path: tests/integration/test_issue_102_rca_cli.py
       - path: contrib/scenarios/rca/tests/test_rca_prompt_loader.py
+      - path: tests/integration/test_rca_baseline_tuner_wiring.py
+      - path: tests/unit/extensions/test_scenario_variant_syntax.py
       - path: tests/integration/test_sub_agent_lifecycle.py
       - path: tests/integration/test_sub_agent_budgets.py
     docs:
