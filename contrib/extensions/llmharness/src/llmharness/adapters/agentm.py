@@ -478,7 +478,7 @@ async def _drain_queue(
     auditor_provider: tuple[str, dict[str, Any]] | None,
 ) -> None:
     """Serial worker. Owns all session-mutating audit writes."""
-    _last_extractor_was_invalid: bool = False
+    _last_extractor_held_cursor: bool = False
 
     while True:
         try:
@@ -495,12 +495,12 @@ async def _drain_queue(
                     extractor_extensions=extractor_extensions,
                     extractor_provider=extractor_provider,
                 )
-                _last_extractor_was_invalid = not extractor_ok
+                _last_extractor_held_cursor = not extractor_ok
             elif isinstance(job, _AuditorJob):
-                if _last_extractor_was_invalid:
+                if _last_extractor_held_cursor:
                     _logger.debug(
                         "llmharness audit worker: skipping auditor — "
-                        "preceding extractor job was invalid"
+                        "preceding extractor firing held the cursor"
                     )
                 else:
                     await _drain_auditor(
@@ -683,11 +683,6 @@ async def _spawn_extractor_child(
     except Exception as exc:
         await _safe_shutdown(child)
         raise _ExtractorSpawnError(str(exc)) from exc
-    finally:
-        # Belt-and-braces: if the prompt succeeded the shutdown below is
-        # the canonical cleanup; the except above already cleaned up on
-        # error paths.
-        pass
 
     await _safe_shutdown(child)
     return _has_tool_call(messages, SUBMIT_EXTRACTION_TOOL_NAME)
@@ -753,7 +748,7 @@ def _render_message_text(msg: AgentMessage) -> str:
                         parts.append(sub_text)
             args = getattr(block, "arguments", None)
             if isinstance(args, dict):
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(TypeError, ValueError):
                     parts.append(json.dumps(args, ensure_ascii=False, default=str))
     return " ".join(parts)
 
