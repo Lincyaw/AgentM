@@ -44,7 +44,7 @@ agentm = ["py.typed", "modes/*.tcss"]
 members = [
     "contrib/extensions/llmharness",
     "contrib/scenarios/rca",
-    "contrib/channels/feishu",
+    "contrib/channels",
 ]
 
 [tool.pytest.ini_options]

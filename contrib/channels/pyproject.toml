@@ -1,23 +1,22 @@
 [project]
-name = "agentm-feishu-channel"
+name = "agentm-channels"
 version = "0.1.0"
-description = "Feishu / Lark gateway channel for AgentM — long-running daemon that drives AgentSession from a Feishu chat."
+description = "Chat-channel gateway for AgentM — Feishu / Slack / Discord / etc. drivers behind a single message bus."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "AgentM contributors" }]
 # `agentm` is supplied by the parent workspace (path install) and intentionally
-# omitted here. `lark-oapi` is an optional dep — install via the `feishu` extra
-# when wiring against a real Feishu app; the test path uses the in-memory stub
-# source and does not need it.
+# omitted here. lark-oapi is required for the bundled Feishu channel; future
+# channel modules pull their own per-vendor SDKs as direct deps too — keeping
+# them here means `agentm-gateway` works out of the box after `uv sync`.
 dependencies = [
     "pyyaml>=6",
+    "python-dotenv>=1.0",
+    "lark-oapi>=1.6",
 ]
 
 [project.optional-dependencies]
-feishu = [
-    "lark-oapi>=1.4",
-]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -26,11 +25,11 @@ dev = [
 ]
 
 [project.scripts]
-agentm-feishu-gateway = "agentm_feishu.cli:main"
+agentm-gateway = "agentm_channels.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agentm_feishu"]
+packages = ["src/agentm_channels"]
