@@ -108,25 +108,44 @@ requirements:
   # Design: .claude/designs/llmharness-cognitive-audit.md
 
   - id: REQ-019
-    title: Two-phase orchestrator — adapter rewrite (extractor + auditor)
+    title: Two-phase orchestrator — v3 adapter (witness pipeline + partial flow)
     description: |
-      ``adapters/agentm.py`` rewritten for the two-phase split (design
-      ``llmharness-cognitive-audit.md`` §2, §6). Single TurnEndEvent
-      handler dispatches Phase 1 every turn and Phase 2 every k turns
-      (default ``audit_interval_turns=3``). Phase 1 spawns a child whose
-      extensions come from ``compose_extractor_extensions``, slices the
-      new turns since ``llmharness.extractor_cursor``, persists each
-      submitted event as an ``llmharness.audit_event`` entry, and updates
-      the cursor. Phase 2 spawns a child whose extensions come from
-      ``compose_auditor_extensions``, feeds the event graph + recent
-      verdicts (NOT the raw trajectory), and persists the resulting
-      ``Verdict`` plus a single pending Reminder in adapter closure state.
-      ``BeforeAgentStartEvent`` injection unchanged from REQ-017's design.
+      ``adapters/agentm.py`` rewired for the v3 extractor flow (design
+      §4.f, §6, §7.1). Single TurnEndEvent handler dispatches Phase 1
+      every turn and Phase 2 every k turns (default
+      ``audit_interval_turns=3``).
+
+      Phase 1 (v3, issue #134): the adapter constructs a per-firing
+      ``ExtractionState``, populates ``turn_texts`` with rendered text
+      for each turn in the new-turn window, and binds the state into
+      the extractor extension's config (state crosses the spawn
+      boundary via the ``state`` knob because child sessions get a
+      fresh service registry). The extractor child registers
+      ``register_event`` / ``add_edge`` / ``submit_extraction``
+      closed over the state; after the child loop terminates the
+      adapter snapshots ``RawExtractorOutput.from_state(state)`` and
+      writes one ``llmharness.audit_event`` per accepted event, one
+      ``llmharness.audit_edge`` per accepted edge, one
+      ``llmharness.extractor_partial`` (once) if any edges were
+      dropped after the witness retry budget, and one
+      ``llmharness.extractor_cursor`` to advance the cursor.
+
+      Cursor advances on success or partial; stays put on
+      ``extractor_no_call`` / ``extractor_empty`` / ``extractor_error``
+      so the next firing re-attempts the same window.
+
+      Phase 2 (auditor) is unchanged in this commit; commit 4 of the
+      v3 plan rewires the auditor prompt to consume v3 events + edges
+      directly. The adapter also publishes the
+      ``llmharness.audit_registry`` service on the parent session so
+      check atoms (commit 5) can register from their own ``install``.
     priority: P0
-    status: implemented
+    status: tested
     code: [src/llmharness/adapters/agentm.py]
-    tests: [tests/test_smoke.py]
-    depends_on: [REQ-001, REQ-016, REQ-020, REQ-021, REQ-022, REQ-023]
+    tests:
+      - tests/test_smoke.py
+      - tests/test_two_phase_audit_integration.py
+    depends_on: [REQ-001, REQ-016, REQ-020, REQ-021, REQ-022, REQ-023, REQ-029, REQ-030]
 
   - id: REQ-020
     title: Phase 1 extractor subpackage — v3 witness pipeline
@@ -244,19 +263,34 @@ requirements:
     depends_on: [REQ-001]
 
   - id: REQ-024
-    title: V1 fail-stop integration test — 4-turn k=3 stub-provider trajectory
+    title: V3 fail-stop integration test — Phase 1 happy/partial/no_call/empty
     description: |
-      Design §2, §4. Single integration test pinned to a 4-turn k=3 dialog
-      that asserts Phase 1 fires 4× and Phase 2 fires 1× at turn 3, with
-      the expected entry-tree shape (``llmharness.audit_event`` count,
-      ``llmharness.extractor_cursor`` final value, single ``Verdict``).
-      Owned by task 07; placeholder so the index already names the
-      requirement that the V1 fail-stop discharges.
+      ``tests/test_two_phase_audit_integration.py`` drives the v3
+      Phase 1 flow against a stub provider through the public
+      ``AgentSession`` API and asserts the four load-bearing
+      transitions of the witness pipeline:
+
+      1. Happy — ``register_event``×N + ``add_edge`` (witness passes)
+         + ``submit_extraction`` ⇒ N ``audit_event`` + 1 ``audit_edge``
+         + 1 ``extractor_cursor``, no ``extractor_partial``.
+      2. Partial — same shape but the same ``(src, dst, kind)`` tuple
+         is replayed three times with a non-witnessable quote ⇒ tuple
+         dropped, 0 ``audit_edge``, 1 ``extractor_partial`` carrying
+         the dropped tuple, cursor still advances per design §6.
+      3. No-call — child returns without calling
+         ``submit_extraction`` ⇒ 1 ``extractor_no_call`` entry, cursor
+         held.
+      4. Empty — child calls ``submit_extraction`` immediately on a
+         non-trivial window ⇒ 1 ``extractor_empty`` entry, cursor
+         held.
+
+      Phase 2 (auditor) is out of scope for this test; commit 4 of
+      the v3 plan adds matching auditor coverage.
     priority: P0
-    status: pending
-    code: []
-    tests: []
-    depends_on: [REQ-019, REQ-020, REQ-021, REQ-022]
+    status: tested
+    code: [src/llmharness/adapters/agentm.py]
+    tests: [tests/test_two_phase_audit_integration.py]
+    depends_on: [REQ-019, REQ-020, REQ-021, REQ-022, REQ-030]
 
   # ---------------------------------------------------------------------------
   # V2 redirection — issue #134 (2026-05-10). LLM-led judgment, free-text
@@ -387,6 +421,38 @@ requirements:
     tests:
       - tests/test_audit_registry.py
     depends_on: [REQ-001]
+
+  - id: REQ-030
+    title: extractor_partial + audit_edge entry types — v3 partial flow
+    description: |
+      v3 (issue #134) replaces the v2 ``extractor_invalid`` failure
+      entry with a partial-success entry. Witness validation now runs
+      inline at edge-construction time inside ``ExtractionState`` with
+      a per-tuple retry budget (3 attempts on the same
+      ``(src, dst, kind)`` tuple); the third failure drops the edge
+      and the firing still commits its events.
+
+      Two new entry-type constants in ``audit/entry_types.py``:
+
+      - ``AUDIT_EDGE = "llmharness.audit_edge"`` — one per accepted
+        edge, payload is ``Edge.to_dict()``.
+      - ``EXTRACTOR_PARTIAL = "llmharness.extractor_partial"`` —
+        written at most once per firing when any edges were dropped,
+        payload ``{"dropped_edges": list[dict], "turn_window":
+        [int, int]}``.
+
+      The adapter writes both via the orchestrator (REQ-019); the
+      integration test pins the four load-bearing transitions
+      (happy / partial / no_call / empty).
+      ``EXTRACTOR_INVALID`` is removed as part of v3 commit 2.
+    priority: P0
+    status: tested
+    code:
+      - src/llmharness/audit/entry_types.py
+      - src/llmharness/adapters/agentm.py
+    tests:
+      - tests/test_two_phase_audit_integration.py
+    depends_on: [REQ-001, REQ-020, REQ-022]
 
   # ---------------------------------------------------------------------------
   # Removed in the 2026-05-08 SDK-native cleanup. Kept here for traceability;

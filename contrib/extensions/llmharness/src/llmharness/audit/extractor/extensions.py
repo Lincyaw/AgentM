@@ -58,13 +58,23 @@ MANIFEST = ExtensionManifest(
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    del config  # no per-mount knobs in v3
-    state = api.get_service(EXTRACTOR_STATE_SERVICE_KEY)
+    # Two valid handoff channels for the per-firing ExtractionState:
+    #   1. ``config["state"]`` — the adapter wires the freshly-built state
+    #      into the child session's extensions list at spawn time. This is
+    #      the primary path under v3: child sessions get a fresh
+    #      service-registry, so a parent-side ``api.set_service`` does not
+    #      cross the spawn boundary.
+    #   2. ``api.get_service(EXTRACTOR_STATE_SERVICE_KEY)`` — fallback for
+    #      callers that pre-publish the state on the same session this
+    #      extension is being mounted onto (e.g. unit tests).
+    state = config.get("state") if isinstance(config, dict) else None
+    if not isinstance(state, ExtractionState):
+        state = api.get_service(EXTRACTOR_STATE_SERVICE_KEY)
     if not isinstance(state, ExtractionState):
         raise RuntimeError(
-            "extractor_tools.install: expected an ExtractionState at "
-            f"service key {EXTRACTOR_STATE_SERVICE_KEY!r}; the adapter "
-            "must publish one before mounting this extension."
+            "extractor_tools.install: expected an ExtractionState via "
+            f"config['state'] or service key {EXTRACTOR_STATE_SERVICE_KEY!r}; "
+            "the adapter must supply one before mounting this extension."
         )
     for tool in build_extractor_tools(state):
         api.register_tool(tool)

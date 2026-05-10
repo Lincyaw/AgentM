@@ -1,37 +1,35 @@
-"""V2 fail-stop integration test for the two-phase cognitive audit.
+"""V3 fail-stop integration test for the two-phase cognitive audit.
 
-Each scenario is tied to a realistic disaster:
+This pins Phase 1 (extractor) under the v3 witness pipeline. The four
+scenarios cover the load-bearing transitions:
 
-1. **Scenario A** (happy path, ``k=3``, 4 turns) — protects against the
-   *Phase trigger regression*. If Phase 2 fired every turn we would
-   see token blowup in production; if it never fired the watchdog is
-   silently dead. We assert exactly 1 verdict over 4 turns. It also
-   pins *cursor monotonicity* — extractor re-extracting the same
-   window or skipping a window manifests as a non-monotonic
-   ``last_turn_index`` series.
+1. **Happy** — extractor calls ``register_event`` once, ``add_edge``
+   once with a witnessable quote, then ``submit_extraction``. The
+   adapter MUST persist exactly one ``audit_event``, one ``audit_edge``
+   and one ``extractor_cursor`` (no ``extractor_partial``). Cursor
+   advances to the last absolute trajectory index in the window.
 
-2. **Scenario B** (extractor declines to call ``submit_events`` on
-   turn 2) — protects against V0's *silent-fallback regression*.
-   V0 collapsed extraction outage to a clean ``Verdict(drift=False)``;
-   V2 must surface it as exactly one ``llmharness.extractor_no_call``
-   entry, with no synthesized silent verdict from the extractor failure
-   itself.
+2. **Partial** — extractor calls ``register_event`` once, then
+   ``add_edge`` THREE times with an unwitnessable quote on the SAME
+   ``(src, dst, kind)`` tuple, then ``submit_extraction``. The third
+   failure trips the retry budget, the tuple is dropped, and the
+   adapter MUST persist one ``audit_event``, ZERO ``audit_edge``, one
+   ``extractor_partial`` (with the dropped tuple in
+   ``dropped_edges``), and one ``extractor_cursor`` — the cursor
+   advances per design §6 because the firing wrote events.
 
-3. **Scenario C** (pure imports + JSON-Schema introspection) —
-   protects against *schema contract drift* between ``submit_events`` /
-   ``submit_verdict`` and the typed payloads in ``llmharness.schema``.
-   V2: no ``if/then`` clause; V2 required fields are ``surface_reminder``,
-   ``reminder_text``, ``continuation_notes``, ``matched_event_ids``,
-   ``cited_cards``.
+3. **No-call** — child returns without ever calling
+   ``submit_extraction``. The adapter MUST persist one
+   ``extractor_no_call`` entry; cursor must NOT advance, so the next
+   firing re-attempts the same window.
 
-4. **Scenario D** (continuation_notes forwarding) — protects against the
-   new plumbing that carries the auditor's ``continuation_notes`` from
-   firing N into the payload for firing N+1. If this breaks the auditor
-   loses its cross-firing memory.
+4. **Empty** — child calls ``submit_extraction`` immediately on a
+   non-trivial window without registering any event. The adapter MUST
+   persist one ``extractor_empty`` entry; cursor unchanged.
 
-The test uses a stub provider routed through AgentM's ``inherit_provider``
-builtin. The stub branches on the system prompt to decide which canned
-response to emit.
+Phase 2 (auditor) is out of scope for this commit — commit 4 rewires
+the auditor prompt to consume v3 entries. We use ``audit_interval_turns``
+large enough that the auditor never fires here.
 """
 
 from __future__ import annotations
@@ -54,77 +52,60 @@ from agentm.core.abi import (
 from agentm.harness.extension import ProviderConfig
 from agentm.harness.session import AgentSession, AgentSessionConfig
 
-# Public-surface imports the schema-contract probe (Scenario C) pins:
-from llmharness.audit._enum_schema import EVENT_KIND_VALUES
-from llmharness.audit.auditor import (
-    SUBMIT_VERDICT_TOOL_NAME,
-    compose_auditor_extensions,
+from llmharness.audit.entry_types import (
+    AUDIT_EDGE,
+    AUDIT_EVENT,
+    EXTRACTOR_CURSOR,
+    EXTRACTOR_EMPTY,
+    EXTRACTOR_NO_CALL,
+    EXTRACTOR_PARTIAL,
 )
-from llmharness.audit.auditor.submit_tool import SUBMIT_VERDICT_PARAMETERS
-from llmharness.audit.entry_types import EXTRACTOR_INVALID
 from llmharness.audit.extractor import (
-    SUBMIT_EVENTS_TOOL_NAME,
-    compose_extractor_extensions,
+    ADD_EDGE_TOOL_NAME,
+    REGISTER_EVENT_TOOL_NAME,
+    SUBMIT_EXTRACTION_TOOL_NAME,
 )
-from llmharness.audit.extractor.submit_tool import SUBMIT_EVENTS_PARAMETERS
 
 # --- shared constants -------------------------------------------------------
-
-_AUDIT_EVENT_ENTRY = "llmharness.audit_event"
-_VERDICT_ENTRY = "llmharness.verdict"
-_EXTRACTOR_CURSOR_ENTRY = "llmharness.extractor_cursor"
-_EXTRACTOR_NO_CALL_ENTRY = "llmharness.extractor_no_call"
-_EXTRACTOR_INVALID_ENTRY = EXTRACTOR_INVALID  # "llmharness.extractor_invalid"
 
 _EXTRACTOR_PROMPT_NEEDLE = "cognitive-audit **extractor**"
 _AUDITOR_PROMPT_NEEDLE = "cognitive-audit *auditor*"
 
-# V2 silent verdict payload the stub auditor emits.
-_V2_SILENT_VERDICT = {
-    "verdict": {
-        "surface_reminder": False,
-        "reminder_text": "",
-        "continuation_notes": ["recheck event #1 next firing"],
-        "matched_event_ids": [],
-        "cited_cards": [],
-    }
-}
-
-# V2 active verdict (surface_reminder=True) for Scenario D.
-_V2_ACTIVE_VERDICT = {
-    "verdict": {
-        "surface_reminder": True,
-        "reminder_text": "consider whether the dropped branch is still open",
-        "continuation_notes": ["verify event #5 was resolved"],
-        "matched_event_ids": [1],
-        "cited_cards": [],
-    }
-}
+# Witnessable quote — main agent's parent reply is a fixed string that
+# we reuse as the cited_quote so the witness layer accepts the edge.
+_PARENT_REPLY_TEMPLATE = "main turn {n} says alpha bravo charlie"
+_GOOD_QUOTE = "alpha bravo charlie"
+_BAD_QUOTE = "this phrase will never appear in any turn xyzzy"
 
 
 # --- stub provider ----------------------------------------------------------
 
 
-class _TwoPhaseStubProvider:
-    """Routes per-session canned responses by inspecting ``system``.
+class _V3StubProvider:
+    """Stub StreamFn that branches on system prompt + extractor mode.
 
-    The audit adapter spawns child sessions with ``provider=None`` so the
-    ``inherit_provider`` builtin re-publishes the parent's ProviderConfig.
-    That means the parent's ``stream_fn`` is invoked for the parent AND
-    every extractor / auditor child.
+    The audit adapter spawns child sessions that inherit the parent's
+    provider, so this single ``__call__`` services the parent agent
+    AND every extractor child. Disambiguation is by system-prompt
+    needle. Per-firing extractor steps are tracked via
+    ``extractor_step_index`` (reset implicitly because every child
+    session creates a fresh sequence in the order: register_event →
+    add_edge(s) → submit_extraction).
 
-    Disambiguation is by system-prompt needle. Extractor behaviour is keyed
-    off the current turn count so Scenario B can selectively drop
-    ``submit_events`` on turn 2.
+    Note: each child session can stream multiple assistant messages —
+    one per (tool_call, tool_result) round trip. The stub returns ONE
+    MessageEnd per call; the AgentM kernel runs the tool, then calls
+    the StreamFn again with the tool_result appended to ``messages``.
     """
 
     def __init__(self, *, mode: str) -> None:
-        self.mode = mode  # "happy", "drop_extractor_turn_2", "active_verdict"
+        self.mode = mode
         self.parent_calls = 0
+        # Per-extractor-firing step index. Reset by detecting "new"
+        # child sessions via the absence of any extractor tool_result
+        # in the messages history fed to the stream.
         self.extractor_calls = 0
         self.auditor_calls = 0
-        # Capture the payload the auditor child received so tests can inspect it.
-        self.auditor_payloads: list[Any] = []
 
     def __call__(
         self,
@@ -139,134 +120,232 @@ class _TwoPhaseStubProvider:
         del model, tools, signal, thinking
         sys_text = system or ""
         if _EXTRACTOR_PROMPT_NEEDLE in sys_text:
+            step = _count_extractor_tool_results(messages)
             self.extractor_calls += 1
-            return self._extractor_iter(self.extractor_calls)
+            return self._extractor_iter(step=step)
         if _AUDITOR_PROMPT_NEEDLE in sys_text:
             self.auditor_calls += 1
-            # Capture the prompt message so tests can inspect the payload.
-            if messages:
-                self.auditor_payloads.append(messages[-1] if messages else None)
             return self._auditor_iter()
-        # Parent main agent: emit a plain assistant text and end the turn.
         self.parent_calls += 1
         return self._parent_iter(self.parent_calls)
 
     async def _parent_iter(self, n: int) -> AsyncIterator[AssistantStreamEvent]:
         msg = AssistantMessage(
             role="assistant",
-            content=[TextContent(type="text", text=f"main-turn-{n}")],
+            content=[TextContent(type="text", text=_PARENT_REPLY_TEMPLATE.format(n=n))],
             timestamp=float(n),
             stop_reason="end_turn",
         )
         yield MessageEnd(message=msg)
 
-    async def _extractor_iter(self, n: int) -> AsyncIterator[AssistantStreamEvent]:
-        if self.mode == "drop_extractor_turn_2" and n == 2:
-            # Skip the terminal tool call → adapter records extractor_no_call.
+    async def _extractor_iter(self, *, step: int) -> AsyncIterator[AssistantStreamEvent]:
+        """Drive the v3 extractor child loop step-by-step.
+
+        ``step`` is the count of extractor tool-results already in the
+        messages history — i.e. how many tools we've already driven
+        through.
+        """
+        if self.mode == "no_call":
             msg = AssistantMessage(
                 role="assistant",
                 content=[TextContent(type="text", text="declining to submit")],
-                timestamp=float(100 + n),
+                timestamp=300.0 + step,
                 stop_reason="end_turn",
             )
             yield MessageEnd(message=msg)
             return
-        if self.mode == "invalid_graph":
-            # Submit an event with an unresolved ref (id=9999 does not exist).
-            # The Phase 1 validator must reject this batch.
+
+        if self.mode == "empty":
             msg = AssistantMessage(
                 role="assistant",
                 content=[
                     ToolCallBlock(
                         type="tool_call",
-                        id=f"submit-events-{n}",
-                        name=SUBMIT_EVENTS_TOOL_NAME,
-                        arguments={
-                            "events": [
-                                {
-                                    "kind": EVENT_KIND_VALUES[0],  # task
-                                    "summary": f"task event turn {n}",
-                                    "source_turns": [],
-                                    "refs": [],
-                                },
-                                {
-                                    "kind": EVENT_KIND_VALUES[1],  # hypothesis
-                                    "summary": f"hypothesis with dangling ref turn {n}",
-                                    "source_turns": [],
-                                    "refs": [9999],  # unresolved — triggers violation
-                                },
-                            ]
-                        },
+                        id=f"submit-{step}",
+                        name=SUBMIT_EXTRACTION_TOOL_NAME,
+                        arguments={},
                     )
                 ],
-                timestamp=float(100 + n),
+                timestamp=300.0 + step,
                 stop_reason="tool_use",
             )
             yield MessageEnd(message=msg)
             return
-        msg = AssistantMessage(
-            role="assistant",
-            content=[
-                ToolCallBlock(
-                    type="tool_call",
-                    id=f"submit-events-{n}",
-                    name=SUBMIT_EVENTS_TOOL_NAME,
-                    arguments={
-                        "events": [
-                            {
-                                "kind": EVENT_KIND_VALUES[0],
-                                "summary": f"synthetic event for turn {n}",
-                                "source_turns": [n - 1],
-                                "refs": [],
-                            }
-                        ]
-                    },
+
+        if self.mode == "happy":
+            # Steps:
+            #   0 -> register_event #1
+            #   1 -> register_event #2
+            #   2 -> add_edge (witness passes)
+            #   3 -> submit_extraction
+            if step == 0:
+                yield MessageEnd(message=_register_event_call(step, summary="event 1"))
+                return
+            if step == 1:
+                yield MessageEnd(message=_register_event_call(step, summary="event 2"))
+                return
+            if step == 2:
+                yield MessageEnd(
+                    message=_add_edge_call(
+                        step,
+                        src=1,
+                        dst=2,
+                        cited_quote=_GOOD_QUOTE,
+                    )
                 )
-            ],
-            timestamp=float(100 + n),
-            stop_reason="tool_use",
-        )
-        yield MessageEnd(message=msg)
+                return
+            yield MessageEnd(message=_submit_call(step))
+            return
+
+        if self.mode == "partial":
+            # Steps:
+            #   0 -> register_event #1
+            #   1 -> register_event #2
+            #   2 -> add_edge (bad witness, attempt 1)
+            #   3 -> add_edge (bad witness, attempt 2)
+            #   4 -> add_edge (bad witness, attempt 3 - dropped)
+            #   5 -> submit_extraction
+            if step == 0:
+                yield MessageEnd(message=_register_event_call(step, summary="event 1"))
+                return
+            if step == 1:
+                yield MessageEnd(message=_register_event_call(step, summary="event 2"))
+                return
+            if step in (2, 3, 4):
+                yield MessageEnd(
+                    message=_add_edge_call(
+                        step,
+                        src=1,
+                        dst=2,
+                        cited_quote=_BAD_QUOTE,
+                    )
+                )
+                return
+            yield MessageEnd(message=_submit_call(step))
+            return
+
+        raise AssertionError(f"unknown stub mode {self.mode!r}")
 
     async def _auditor_iter(self) -> AsyncIterator[AssistantStreamEvent]:
-        # For "active_verdict" mode emit an active reminder on the first firing,
-        # silent on subsequent.
-        if self.mode == "active_verdict" and self.auditor_calls == 1:
-            verdict_payload = _V2_ACTIVE_VERDICT
-        else:
-            verdict_payload = _V2_SILENT_VERDICT
+        # Auditor should never fire in these tests (k is set high enough
+        # that no firing happens). If it does, terminate cleanly so the
+        # session shuts down without hanging.
         msg = AssistantMessage(
             role="assistant",
-            content=[
-                ToolCallBlock(
-                    type="tool_call",
-                    id=f"submit-verdict-{self.auditor_calls}",
-                    name=SUBMIT_VERDICT_TOOL_NAME,
-                    arguments=verdict_payload,
-                )
-            ],
-            timestamp=float(200 + self.auditor_calls),
-            stop_reason="tool_use",
+            content=[TextContent(type="text", text="(auditor stub — not exercised)")],
+            timestamp=999.0,
+            stop_reason="end_turn",
         )
         yield MessageEnd(message=msg)
 
 
-def _install_provider_module(name: str, provider: _TwoPhaseStubProvider) -> str:
+def _count_extractor_tool_results(messages: list[Any]) -> int:
+    """Count tool_result messages in the child session's history.
+
+    The kernel hands the StreamFn the running message list; counting
+    tool_result entries gives a robust per-firing step index without
+    needing to thread state through the stub.
+    """
+    count = 0
+    for msg in messages:
+        # ``ToolResultMessage`` is the canonical type, but duck-typing
+        # on tool_call_id is sufficient and avoids importing the symbol
+        # in case AgentM evolves the class layout.
+        content = getattr(msg, "content", None)
+        if isinstance(content, list):
+            for block in content:
+                if getattr(block, "tool_call_id", None) is not None:
+                    count += 1
+                    break
+        else:
+            # ToolResultMessage may carry tool_call_id at the message level.
+            if getattr(msg, "tool_call_id", None) is not None:
+                count += 1
+    return count
+
+
+def _register_event_call(step: int, *, summary: str = "synthetic event") -> AssistantMessage:
+    return AssistantMessage(
+        role="assistant",
+        content=[
+            ToolCallBlock(
+                type="tool_call",
+                id=f"reg-{step}",
+                name=REGISTER_EVENT_TOOL_NAME,
+                arguments={
+                    "turn_indices": [0, 1],
+                    "kind": "evid",
+                    "summary": summary,
+                },
+            )
+        ],
+        timestamp=400.0 + step,
+        stop_reason="tool_use",
+    )
+
+
+def _add_edge_call(
+    step: int,
+    *,
+    src: int,
+    dst: int,
+    cited_quote: str,
+) -> AssistantMessage:
+    return AssistantMessage(
+        role="assistant",
+        content=[
+            ToolCallBlock(
+                type="tool_call",
+                id=f"edge-{step}",
+                name=ADD_EDGE_TOOL_NAME,
+                arguments={
+                    "src_event_id": src,
+                    "dst_event_id": dst,
+                    "kind": "ref",
+                    "reason": "synthetic edge",
+                    "src_turns": [1],
+                    "dst_turns": [1],
+                    "cited_quote": cited_quote,
+                },
+            )
+        ],
+        timestamp=500.0 + step,
+        stop_reason="tool_use",
+    )
+
+
+def _submit_call(step: int) -> AssistantMessage:
+    return AssistantMessage(
+        role="assistant",
+        content=[
+            ToolCallBlock(
+                type="tool_call",
+                id=f"submit-{step}",
+                name=SUBMIT_EXTRACTION_TOOL_NAME,
+                arguments={},
+            )
+        ],
+        timestamp=600.0 + step,
+        stop_reason="tool_use",
+    )
+
+
+def _install_provider_module(name: str, provider: _V3StubProvider) -> str:
     """Register the stub as an AgentM provider extension module."""
     module = types.ModuleType(name)
 
     def install(api: Any, _config: dict[str, Any]) -> None:
         api.register_provider(
-            "fake-twophase",
+            "fake-v3",
             ProviderConfig(
                 stream_fn=provider,
                 model=Model(
-                    id="fake-twophase",
+                    id="fake-v3",
                     provider="fake",
                     context_window=10_000,
                     max_output_tokens=1_000,
                 ),
-                name="fake-twophase",
+                name="fake-v3",
             ),
         )
 
@@ -275,10 +354,13 @@ def _install_provider_module(name: str, provider: _TwoPhaseStubProvider) -> str:
     return name
 
 
-def _build_session_config(
-    *, cwd: str, provider_module: str, mode: str = "async"
-) -> AgentSessionConfig:
-    """Build an AgentSessionConfig wired with the V2 audit adapter."""
+def _build_session_config(*, cwd: str, provider_module: str) -> AgentSessionConfig:
+    """Build an AgentSessionConfig wired with the v3 audit adapter (sync mode).
+
+    Sync mode keeps assertions deterministic without waiting for a
+    background worker drain. ``audit_interval_turns`` is large enough
+    that the auditor never fires inside a single-turn test.
+    """
     return AgentSessionConfig(
         cwd=cwd,
         provider=(provider_module, {}),
@@ -286,8 +368,8 @@ def _build_session_config(
             (
                 "llmharness.adapters.agentm",
                 {
-                    "mode": mode,
-                    "audit_interval_turns": 3,
+                    "mode": "sync",
+                    "audit_interval_turns": 100,  # auditor never fires
                     "cards_tools_config": None,
                     "observability_config": None,
                 },
@@ -297,438 +379,142 @@ def _build_session_config(
 
 
 def _entries(session: AgentSession, entry_type: str) -> list[Any]:
-    """Return all branch entries with the given namespaced type."""
     return [e for e in session.session_manager.get_active_branch() if e.type == entry_type]
 
 
-# --- Scenario A: happy-path 4-turn dialog at k=3 ----------------------------
+# --- Scenario 1: happy path ------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_happy_path_4_turns_at_k3_fires_phase2_exactly_once(
-    tmp_path: Path,
-) -> None:
-    """4 user turns, k=3 -> Phase 1 fires 4 times, Phase 2 once at turn 3.
-
-    Disaster guarded: Phase trigger regression. ``(turn_count % k) == 0``
-    must select exactly turn 3 in a 4-turn run; firing every turn would
-    blow up token budget, firing zero times silently kills the watchdog.
-    """
-    provider = _TwoPhaseStubProvider(mode="happy")
-    provider_module = _install_provider_module("tests._fake_twophase_happy_provider", provider)
+async def test_happy_path_writes_event_edge_and_cursor(tmp_path: Path) -> None:
+    provider = _V3StubProvider(mode="happy")
+    provider_module = _install_provider_module("tests._fake_v3_happy_provider", provider)
 
     session = await AgentSession.create(
         _build_session_config(cwd=str(tmp_path), provider_module=provider_module)
     )
-
-    for i in range(4):
-        await session.prompt(f"user turn {i + 1}")
-
+    await session.prompt("user turn 1")
     await session.shutdown()
 
-    # Phase-1 cursor: one per TurnEndEvent firing → exactly 4.
-    cursors = _entries(session, _EXTRACTOR_CURSOR_ENTRY)
-    assert len(cursors) == 4
+    events = _entries(session, AUDIT_EVENT)
+    edges = _entries(session, AUDIT_EDGE)
+    partial = _entries(session, EXTRACTOR_PARTIAL)
+    cursors = _entries(session, EXTRACTOR_CURSOR)
 
-    # Cursor monotonicity: last_turn_index non-decreasing.
-    last_turn_indices = [int(c.payload["last_turn_index"]) for c in cursors]
-    assert last_turn_indices == sorted(last_turn_indices), f"cursor drift: {last_turn_indices}"
+    assert len(events) == 2, f"expected 2 audit_event, got {len(events)}: {events}"
+    assert len(edges) == 1, f"expected 1 audit_edge, got {len(edges)}: {edges}"
+    assert len(partial) == 0, f"expected 0 extractor_partial, got {len(partial)}"
+    assert len(cursors) == 1, f"expected 1 extractor_cursor, got {len(cursors)}"
 
-    # Audit events: stub emits one per Phase-1 firing → at least 4.
-    audit_events = _entries(session, _AUDIT_EVENT_ENTRY)
-    assert len(audit_events) >= 4
+    # Cursor advanced to the last absolute trajectory index of the window.
+    cursor_payload = cursors[0].payload
+    assert isinstance(cursor_payload, dict)
+    assert cursor_payload["last_turn_index"] >= 1, (
+        f"cursor must cover at least the assistant turn (>=1), got {cursor_payload}"
+    )
 
-    # Phase-2 verdict: only turn 3 satisfies % k == 0 in a 4-turn run.
-    verdicts = _entries(session, _VERDICT_ENTRY)
-    assert len(verdicts) == 1, f"expected exactly 1 verdict, got {len(verdicts)}"
-
-    # Cross-check: auditor child invoked exactly once.
-    assert provider.auditor_calls == 1
-
-    # V2 shape check: verdict payload uses surface_reminder, not drift.
-    v_payload = verdicts[0].payload
-    assert "surface_reminder" in v_payload, "V2 verdict must have surface_reminder"
-    assert "drift" not in v_payload, "V1 drift field must be absent in V2 verdict"
-    assert "continuation_notes" in v_payload, "V2 verdict must have continuation_notes"
+    # No failure entries.
+    assert _entries(session, EXTRACTOR_NO_CALL) == []
+    assert _entries(session, EXTRACTOR_EMPTY) == []
 
 
-# --- Scenario B: extractor failure-entry probe ------------------------------
+# --- Scenario 2: partial (witness retry exhausted) -------------------------
 
 
 @pytest.mark.asyncio
-async def test_extractor_no_call_on_turn_2_does_not_synthesize_silent_verdict(
+async def test_partial_path_drops_edge_and_writes_extractor_partial(
     tmp_path: Path,
 ) -> None:
-    """Extractor declines to call submit_events on turn 2.
-
-    Disaster guarded: V0's silent-fallback bug. When the extractor exits
-    without calling submit_events, V2 must record an
-    ``llmharness.extractor_no_call`` entry and must NOT synthesize a
-    silent verdict to fill the gap.
-    """
-    provider = _TwoPhaseStubProvider(mode="drop_extractor_turn_2")
-    provider_module = _install_provider_module("tests._fake_twophase_drop_provider", provider)
+    provider = _V3StubProvider(mode="partial")
+    provider_module = _install_provider_module("tests._fake_v3_partial_provider", provider)
 
     session = await AgentSession.create(
         _build_session_config(cwd=str(tmp_path), provider_module=provider_module)
     )
-
-    for i in range(4):
-        await session.prompt(f"user turn {i + 1}")
-
+    await session.prompt("user turn 1")
     await session.shutdown()
 
-    # Exactly one extractor_no_call entry, scoped to turn 2.
-    no_call_entries = _entries(session, _EXTRACTOR_NO_CALL_ENTRY)
-    assert len(no_call_entries) == 1
-    payload = no_call_entries[0].payload
+    events = _entries(session, AUDIT_EVENT)
+    edges = _entries(session, AUDIT_EDGE)
+    partial = _entries(session, EXTRACTOR_PARTIAL)
+    cursors = _entries(session, EXTRACTOR_CURSOR)
+
+    assert len(events) == 2, (
+        f"expected 2 audit_event (registered before retries), got {len(events)}"
+    )
+    assert len(edges) == 0, f"expected 0 audit_edge after dropped tuple, got {len(edges)}"
+    assert len(partial) == 1, f"expected exactly 1 extractor_partial, got {len(partial)}"
+    assert len(cursors) == 1, (
+        "cursor must advance on partial firings (design §6) so we don't loop on the same window"
+    )
+
+    # The partial entry must list the dropped (src, dst, kind) tuple
+    # and carry the turn_window.
+    partial_payload = partial[0].payload
+    assert isinstance(partial_payload, dict)
+    dropped = partial_payload.get("dropped_edges")
+    assert isinstance(dropped, list) and len(dropped) == 1, (
+        f"expected one dropped edge in extractor_partial payload, got {dropped}"
+    )
+    assert dropped[0]["src"] == 1
+    assert dropped[0]["dst"] == 2
+    assert dropped[0]["kind"] == "ref"
+    assert "turn_window" in partial_payload
+
+
+# --- Scenario 3: no-call ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_no_call_path_records_extractor_no_call_and_holds_cursor(
+    tmp_path: Path,
+) -> None:
+    provider = _V3StubProvider(mode="no_call")
+    provider_module = _install_provider_module("tests._fake_v3_no_call_provider", provider)
+
+    session = await AgentSession.create(
+        _build_session_config(cwd=str(tmp_path), provider_module=provider_module)
+    )
+    await session.prompt("user turn 1")
+    await session.shutdown()
+
+    no_call = _entries(session, EXTRACTOR_NO_CALL)
+    cursors = _entries(session, EXTRACTOR_CURSOR)
+    events = _entries(session, AUDIT_EVENT)
+    edges = _entries(session, AUDIT_EDGE)
+
+    assert len(no_call) == 1, f"expected exactly 1 extractor_no_call, got {len(no_call)}"
+    assert len(cursors) == 0, "cursor must NOT advance when submit_extraction was never called"
+    assert events == []
+    assert edges == []
+
+    payload = no_call[0].payload
+    assert isinstance(payload, dict)
     assert "turn_window" in payload
 
-    # Other turns still produce audit events (3 of 4 firings succeed).
-    audit_events = _entries(session, _AUDIT_EVENT_ENTRY)
-    assert len(audit_events) >= 3
 
-    # CRITICAL: no silent verdict synthesized from the extractor outage.
-    silent_fallbacks = [
-        v
-        for v in _entries(session, _VERDICT_ENTRY)
-        if isinstance(v.payload, dict)
-        and v.payload.get("surface_reminder") is False
-        and not v.payload.get("reminder_text")
-        and not v.payload.get("matched_event_ids")
-    ]
-    # The stub emits surface_reminder=False as its real auditor output,
-    # so the *count* is allowed to be 1 — but only if an auditor child
-    # was actually called that many times.
-    assert len(silent_fallbacks) <= provider.auditor_calls
-
-
-# --- Scenario B2: sync mode -------------------------------------------------
+# --- Scenario 4: empty (terminator called without registering) -------------
 
 
 @pytest.mark.asyncio
-async def test_sync_mode_persists_audit_inline_without_shutdown(
+async def test_empty_path_records_extractor_empty_on_non_trivial_window(
     tmp_path: Path,
 ) -> None:
-    """``mode='sync'`` -> every turn's audit is fully persisted before
-    ``session.prompt()`` returns.
-
-    Disaster guarded: a regression that re-routes sync mode through the
-    async worker would silently break the data-collection contract.
-    """
-    provider = _TwoPhaseStubProvider(mode="happy")
-    provider_module = _install_provider_module("tests._fake_twophase_sync_provider", provider)
-
-    session = await AgentSession.create(
-        _build_session_config(cwd=str(tmp_path), provider_module=provider_module, mode="sync")
-    )
-
-    for i in range(4):
-        await session.prompt(f"user turn {i + 1}")
-        cursors = _entries(session, _EXTRACTOR_CURSOR_ENTRY)
-        assert len(cursors) == i + 1, (
-            f"after prompt #{i + 1}, expected {i + 1} cursors, got {len(cursors)}"
-        )
-
-    # Phase-2 verdict at turn 3 — must also be persisted inline.
-    verdicts = _entries(session, _VERDICT_ENTRY)
-    assert len(verdicts) == 1
-    assert provider.auditor_calls == 1
-
-    await session.shutdown()
-
-
-# --- Scenario C: schema contract probe (V2) ---------------------------------
-
-
-def test_submit_events_schema_kind_enum_matches_event_kind_values() -> None:
-    """``submit_events`` ``kind`` enum tracks ``EventKind`` exactly.
-
-    Disaster guarded: schema contract drift between the JSON Schema
-    embedded in the tool registration and the ``EventKind`` enum.
-    """
-    enum_in_schema = SUBMIT_EVENTS_PARAMETERS["properties"]["events"]["items"]["properties"][
-        "kind"
-    ]["enum"]
-    assert enum_in_schema == EVENT_KIND_VALUES
-
-
-def test_submit_verdict_v2_schema_has_required_fields() -> None:
-    """V2 ``submit_verdict`` schema requires all five V2 fields.
-
-    Disaster guarded: V2 schema drift — if a field is accidentally
-    removed from ``required``, the LLM may omit it and the adapter
-    silently loses continuity_notes or reminder_text.
-    """
-    verdict_schema = SUBMIT_VERDICT_PARAMETERS["properties"]["verdict"]
-
-    # V2 must have no if/then clause.
-    assert "if" not in verdict_schema, (
-        "V2 submit_verdict schema must NOT have an 'if' clause; "
-        "that was a V1 pattern for DriftType enforcement"
-    )
-    assert "then" not in verdict_schema, "V2 submit_verdict schema must NOT have a 'then' clause"
-
-    # V2 required fields.
-    required = verdict_schema.get("required", [])
-    for field_name in (
-        "surface_reminder",
-        "reminder_text",
-        "continuation_notes",
-        "matched_event_ids",
-        "cited_cards",
-    ):
-        assert field_name in required, (
-            f"V2 submit_verdict 'required' must include {field_name!r}; got {required}"
-        )
-
-    # V1 fields must be absent.
-    props = verdict_schema.get("properties", {})
-    for v1_field in ("drift", "type", "reminder", "downstream_reaction"):
-        assert v1_field not in props, (
-            f"V1 field {v1_field!r} must be removed from V2 submit_verdict schema"
-        )
-
-
-def test_submit_verdict_tool_rejects_surface_reminder_true_without_text() -> None:
-    """Auditor child loop must let the LLM retry when surface_reminder=True
-    but reminder_text is empty.
-
-    Disaster guarded: the V2 analog of the V1 silent-drop bug — the
-    adapter must not silently accept an active verdict with no text.
-    The tool must return an is_error ToolResult so the LLM retries.
-    """
-    from llmharness.audit.auditor.submit_tool import install as _submit_install
-
-    captured: list[Any] = []
-
-    class _Capture:
-        def register_tool(self, tool: Any) -> None:
-            captured.append(tool)
-
-        @property
-        def cwd(self) -> str:
-            return "/tmp"
-
-    _submit_install(_Capture(), {})  # type: ignore[arg-type]
-    assert len(captured) == 1
-    submit = captured[0]
-
-    import asyncio
-
-    from agentm.core.abi import ToolResult, ToolTerminate
-
-    async def _drive() -> tuple[Any, Any]:
-        # Bad: surface_reminder=True but reminder_text is empty.
-        bad = await submit.fn(
-            {
-                "verdict": {
-                    "surface_reminder": True,
-                    "reminder_text": "",
-                    "continuation_notes": [],
-                    "matched_event_ids": [1],
-                    "cited_cards": [],
-                }
-            }
-        )
-        # Good: surface_reminder=False with empty text — silent verdict.
-        good = await submit.fn(
-            {
-                "verdict": {
-                    "surface_reminder": False,
-                    "reminder_text": "",
-                    "continuation_notes": [],
-                    "matched_event_ids": [],
-                    "cited_cards": [],
-                }
-            }
-        )
-        return bad, good
-
-    bad, good = asyncio.run(_drive())
-
-    # Bad call: continues the loop with an is_error ToolResult.
-    assert isinstance(bad, ToolResult), (
-        f"malformed submit_verdict must return a bare ToolResult, got {type(bad).__name__}"
-    )
-    assert bad.is_error is True
-    body = "".join(block.text for block in bad.content if hasattr(block, "text"))
-    assert "submit_verdict rejected" in body
-    assert "Reissue submit_verdict" in body
-
-    # Good call: terminates the child loop.
-    assert isinstance(good, ToolTerminate)
-
-
-def test_compose_factories_are_importable_and_callable() -> None:
-    """The two phase-extension factories survive at the documented import paths."""
-    extractor_exts = compose_extractor_extensions(
-        cards_tools_config=None, observability_config=None
-    )
-    auditor_exts = compose_auditor_extensions(cards_tools_config=None, observability_config=None)
-
-    extractor_modules = {mod for mod, _cfg in extractor_exts}
-    auditor_modules = {mod for mod, _cfg in auditor_exts}
-    assert "llmharness.audit.extractor.submit_tool" in extractor_modules
-    assert "agentm.extensions.builtin.system_prompt" in extractor_modules
-    assert "llmharness.audit.auditor.submit_tool" in auditor_modules
-    assert "agentm.extensions.builtin.system_prompt" in auditor_modules
-
-
-# --- Scenario D: continuation_notes forwarding ------------------------------
-
-
-@pytest.mark.asyncio
-async def test_continuation_notes_reach_next_auditor_firing(
-    tmp_path: Path,
-) -> None:
-    """continuation_notes from firing N are present in the auditor payload
-    at firing N+1.
-
-    Disaster guarded: the new continuation_notes plumbing. If
-    _drain_auditor fails to pass last_continuation_notes into the
-    _run_auditor payload, the auditor loses its cross-firing memory
-    silently — it just receives an empty list where its own notes
-    should be.
-
-    We run 6 turns with k=3 so the auditor fires twice (at turns 3 and 6).
-    The first firing emits active_verdict whose continuation_notes =
-    ["verify event #5 was resolved"]. The second firing must see that
-    list in its input payload as continuation_notes_from_prior_firing.
-    """
-    import json
-
-    provider = _TwoPhaseStubProvider(mode="active_verdict")
-    provider_module = _install_provider_module(
-        "tests._fake_twophase_continuation_provider", provider
-    )
+    provider = _V3StubProvider(mode="empty")
+    provider_module = _install_provider_module("tests._fake_v3_empty_provider", provider)
 
     session = await AgentSession.create(
         _build_session_config(cwd=str(tmp_path), provider_module=provider_module)
     )
-
-    for i in range(6):
-        await session.prompt(f"user turn {i + 1}")
-
-    await session.shutdown()
-
-    # Two auditor firings expected.
-    assert provider.auditor_calls == 2, f"expected 2 auditor firings, got {provider.auditor_calls}"
-
-    # The second auditor firing's payload must contain continuation_notes
-    # from the first verdict.
-    assert len(provider.auditor_payloads) >= 2, "expected at least 2 captured auditor payloads"
-    second_payload_raw = provider.auditor_payloads[1]
-    # The payload is the last message object, whose content[0].text is the
-    # JSON string sent to the child session.
-    content_blocks = getattr(second_payload_raw, "content", None) or []
-    payload_text = ""
-    for block in content_blocks:
-        text = getattr(block, "text", None)
-        if isinstance(text, str):
-            payload_text = text
-            break
-
-    assert payload_text, "second auditor payload must have text content"
-    payload_dict = json.loads(payload_text)
-    prior_notes = payload_dict.get("continuation_notes_from_prior_firing")
-    assert isinstance(prior_notes, list), (
-        "continuation_notes_from_prior_firing must be a list in the auditor payload"
-    )
-    assert "verify event #5 was resolved" in prior_notes, (
-        f"expected first-firing continuation_notes in second payload, got {prior_notes}"
-    )
-
-    # V2 shape: the verdict entries also carry continuation_notes.
-    verdicts = _entries(session, _VERDICT_ENTRY)
-    assert len(verdicts) == 2
-    first_v = verdicts[0].payload
-    assert first_v.get("surface_reminder") is True
-    assert first_v.get("reminder_text") == ("consider whether the dropped branch is still open")
-    assert "verify event #5 was resolved" in first_v.get("continuation_notes", [])
-
-
-# --- Scenario E: extractor_invalid on graph-validation failure --------------
-
-
-@pytest.mark.asyncio
-async def test_extractor_invalid_skips_auditor_and_holds_cursor(
-    tmp_path: Path,
-) -> None:
-    """Stub extractor returns events with an unresolved ref.
-
-    Assertions:
-    - One ``llmharness.extractor_invalid`` entry written with non-empty
-      ``violations`` list.
-    - Zero ``llmharness.audit_event`` entries for that (only) firing.
-    - The extractor cursor is NOT advanced (last_turn_index stays at -1
-      / no cursor entries, since each firing fails validation).
-    - The auditor is NOT spawned (auditor_calls == 0 across all turns,
-      even at the k-turn boundary).
-
-    Disaster guarded: Phase 1 graph-validation regression. If bad events
-    were committed to the graph, the auditor would reason over incoherent
-    input. If the auditor still ran on a failed extraction batch it would
-    be judging a stale graph without the new window's events — the
-    extractor_invalid entry signals that the window must be retried.
-    """
-    provider = _TwoPhaseStubProvider(mode="invalid_graph")
-    provider_module = _install_provider_module(
-        "tests._fake_twophase_invalid_graph_provider", provider
-    )
-
-    # Use k=1 so the auditor would fire every turn if validation succeeded.
-    # This makes it easy to assert it was NOT spawned.
-    session = await AgentSession.create(
-        AgentSessionConfig(
-            cwd=str(tmp_path),
-            provider=(provider_module, {}),
-            extensions=[
-                (
-                    "llmharness.adapters.agentm",
-                    {
-                        "mode": "sync",  # sync so assertions hold without shutdown wait
-                        "audit_interval_turns": 1,
-                        "cards_tools_config": None,
-                        "observability_config": None,
-                    },
-                ),
-            ],
-        )
-    )
-
-    # Drive one turn end.
     await session.prompt("user turn 1")
-
     await session.shutdown()
 
-    # Must have exactly one extractor_invalid entry.
-    invalid_entries = _entries(session, _EXTRACTOR_INVALID_ENTRY)
-    assert len(invalid_entries) == 1, (
-        f"expected 1 extractor_invalid entry, got {len(invalid_entries)}"
-    )
-    payload = invalid_entries[0].payload
-    assert isinstance(payload, dict)
-    violations = payload.get("violations")
-    assert isinstance(violations, list) and len(violations) > 0, (
-        f"extractor_invalid payload must have non-empty violations: {payload}"
-    )
-    assert "turn_window" in payload, "extractor_invalid payload must include turn_window"
+    empty = _entries(session, EXTRACTOR_EMPTY)
+    cursors = _entries(session, EXTRACTOR_CURSOR)
+    events = _entries(session, AUDIT_EVENT)
+    edges = _entries(session, AUDIT_EDGE)
 
-    # No audit_event entries must be written (graph was rejected).
-    audit_events = _entries(session, _AUDIT_EVENT_ENTRY)
-    assert len(audit_events) == 0, (
-        f"expected 0 audit_event entries after validation failure, got {len(audit_events)}"
-    )
-
-    # Cursor must NOT be advanced — extraction failed, window must be retried.
-    cursors = _entries(session, _EXTRACTOR_CURSOR_ENTRY)
-    assert len(cursors) == 0, (
-        f"cursor must not advance on validation failure, got {len(cursors)} cursor entries"
-    )
-
-    # Auditor must NOT have been spawned.
-    assert provider.auditor_calls == 0, (
-        f"auditor must not run when extractor validation fails, "
-        f"got auditor_calls={provider.auditor_calls}"
-    )
+    assert len(empty) == 1, f"expected exactly 1 extractor_empty, got {len(empty)}"
+    assert len(cursors) == 0, "cursor must NOT advance on extractor_empty"
+    assert events == []
+    assert edges == []
