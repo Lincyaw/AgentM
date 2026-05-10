@@ -211,6 +211,17 @@ def _build_session_config(
         provider_spec = provider_registry.build(provider, {"model": model})
     except KeyError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    # CLI explicitly opts in to disk-resident project context (CLAUDE.md /
+    # AGENTS.md / skills / prompt templates). Embedded SDK callers get an
+    # empty resource loader by default — see session_factory.py.
+    from agentm.harness.resource_loader import DefaultResourceLoader
+
+    resource_loader = DefaultResourceLoader(
+        cwd=Path(cwd),
+        no_skills=no_skills,
+        no_prompt_templates=no_prompt_templates,
+    )
+
     return (
         AgentSessionConfig(
             cwd=cwd,
@@ -222,6 +233,7 @@ def _build_session_config(
             no_prompt_templates=no_prompt_templates,
             tool_allowlist=tool_allowlist,
             session_manager=cast(Any, session_state),
+            resource_loader=resource_loader,
             bus=bus,
         ),
         session_state,

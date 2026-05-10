@@ -53,3 +53,9 @@ extensions:
   # Defaults: audit_interval_turns=3, recent_verdicts=5. Override here
   # if you want a tighter / looser audit cadence per eval campaign.
   - module: llmharness.adapters.agentm
+    config:
+      # DEBUG: sync mode — each turn_end blocks the main agent until the
+      # extractor (and any due auditor) child session completes. Slower
+      # per-turn but no shutdown drain backlog. Useful for measuring the
+      # v3.1 single-tool extractor's per-firing cost.
+      mode: sync
