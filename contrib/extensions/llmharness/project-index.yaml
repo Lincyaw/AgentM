@@ -129,23 +129,46 @@ requirements:
     depends_on: [REQ-001, REQ-016, REQ-020, REQ-021, REQ-022, REQ-023]
 
   - id: REQ-020
-    title: Phase 1 extractor subpackage — per-turn event extraction
+    title: Phase 1 extractor subpackage — v3 witness pipeline
     description: |
-      ``audit/extractor/`` subpackage (design §2, §4, §7.1). Public
-      surface: ``EXTRACTOR_SYSTEM_PROMPT``, ``compose_extractor_extensions``,
-      ``RawExtractorOutput`` (with ``ExtractorOutputError``),
-      ``SUBMIT_EVENTS_TOOL_NAME``. The terminal tool ``submit_events``
-      forces structured Event output; thinking blocks are kept this time
-      so causal/ref reasoning can rely on them. Stateless: the adapter
-      slices new turns and passes them in.
+      ``audit/extractor/`` subpackage (design §4.b, §4.f, §7.1). V3
+      replaces the v2 single-shot ``submit_events`` payload tool with
+      a per-firing graph-builder tool flow:
+
+      - ``register_event(turn_indices, kind, summary)`` — append an
+        Event, return its monotonic id.
+      - ``add_edge(src_event_id, dst_event_id, kind, reason,
+        src_turns, dst_turns, cited_entities=[], cited_quote="")`` —
+        validate witness + cycle + turn-subset rules in fail-fast
+        order (existence -> src!=dst -> turns subset -> cycle ->
+        per-kind witness). The witness layer runs case+whitespace
+        normalized substring checks (no edit-distance, no stemming).
+        Up to 3 attempts per ``(src, dst, kind)`` tuple; the 3rd
+        failure drops the edge with the terminal error
+        ``"giving up on this edge"`` and records the dropped edge
+        into the partial-payload buffer.
+      - ``submit_extraction()`` — terminal tool, no arguments. The
+        per-firing ``ExtractionState`` IS the output;
+        ``RawExtractorOutput.from_state(state)`` snapshots it.
+
+      Single-file extension (§11): ``extensions.py`` reads the
+      adapter-published ``ExtractionState`` from
+      ``EXTRACTOR_STATE_SERVICE_KEY`` and registers the closed-over
+      tool trio. The v2 ``validator.py`` and ``hints.py`` modules
+      are deleted (no v3 callers).
     priority: P0
-    status: implemented
+    status: tested
     code:
       - src/llmharness/audit/extractor/__init__.py
       - src/llmharness/audit/extractor/prompt.py
       - src/llmharness/audit/extractor/extensions.py
       - src/llmharness/audit/extractor/output.py
-      - src/llmharness/audit/extractor/submit_tool.py
+      - src/llmharness/audit/extractor/state.py
+      - src/llmharness/audit/extractor/tools.py
+      - src/llmharness/audit/extractor/witness.py
+    tests:
+      - tests/test_extractor_witness.py
+      - tests/test_extractor_state.py
     depends_on: [REQ-001, REQ-016, REQ-023]
 
   - id: REQ-021
@@ -270,59 +293,43 @@ requirements:
     depends_on: [REQ-001, REQ-021, REQ-023]
 
   - id: REQ-026
-    title: Phase 1 graph validator (SUPERSEDED by v3 witness pipeline)
+    title: Phase 1 graph validator (REMOVED in v3 commit 2)
     description: |
       v2 introduced a pure-Python mechanical validator that ran after
-      each ``submit_events`` call (five checks: ref resolution, no
-      cycles, kind↔source_turns rules, task and conclusion
-      reachability). Failure wrote a ``llmharness.extractor_invalid``
-      entry and skipped the auditor.
+      each ``submit_events`` call (ref resolution, no cycles,
+      kind↔source_turns rules, task / conclusion reachability).
+      Failure wrote ``llmharness.extractor_invalid`` and skipped the
+      auditor.
 
-      Superseded in v3 (issue #134, 2026-05-10). ``Event.refs`` is
-      gone; ref-graph checks no longer apply. Edges are constructed
-      via ``add_edge`` with a witness pipeline that performs case +
-      whitespace normalisation and substring/entity checks at edge-
-      build time (design §4.c, §6). The v2 validator and its
-      ``EXTRACTOR_INVALID`` entry-type are deleted in commit 2; the
-      adapter's partial-extraction flow writes ``EXTRACTOR_PARTIAL``
-      entries instead. Commit 1 keeps a no-op stub at
-      audit/extractor/validator.py to preserve the import surface.
+      Removed in v3 commit 2 (issue #134, 2026-05-10). ``Event.refs``
+      is gone; the validator was incompatible with the new edge model.
+      Witness checks now run inline at edge-construction time inside
+      ``ExtractionState.add_edge``; the adapter rewrite in commit 3
+      will switch to ``EXTRACTOR_PARTIAL`` entries.
     priority: P1
     status: deprecated
-    code:
-      - src/llmharness/audit/extractor/validator.py
-      - src/llmharness/audit/entry_types.py
-      - src/llmharness/adapters/agentm.py
-    tests:
-      - tests/test_extractor_validator.py
-      - tests/test_two_phase_audit_integration.py
+    code: []
+    tests: []
     depends_on: [REQ-020, REQ-022]
 
   - id: REQ-027
-    title: Advisory hints module (SUPERSEDED by scenario check registry)
+    title: Advisory hints module (REMOVED in v3 commit 2)
     description: |
       v2 module audit/hints.py with five pure functions over
       list[Event] (repeated_actions, convergence_ratio,
-      reachability_gaps, open_branches, multi_branch_syntheses) plus a
-      compute(graph) -> str renderer.
+      reachability_gaps, open_branches, multi_branch_syntheses) plus
+      compute(graph) -> str.
 
-      Superseded in v3 (issue #134, 2026-05-10) by REQ-029
-      (scenario-registered audit checks). All v2 hint signals walked
-      ``Event.refs``, which is removed in v3; the equivalent signals
-      now ship as one-file Check atoms under
-      ``llmharness.extensions``, registered through the
-      AuditCheckRegistry service and surfaced as Finding records to
-      the auditor. The v2 module is deleted in commit 2; commit 1
-      keeps a no-op stub to preserve the import surface.
+      Removed in v3 commit 2 (issue #134, 2026-05-10). All v2 hint
+      signals walked ``Event.refs``, which is gone. The equivalent
+      signals ship in v3 as one-file Check atoms under
+      ``llmharness.extensions`` registered through the
+      ``AuditCheckRegistry`` service (see REQ-029 in the v3 plan)
+      and surfaced as ``Finding`` records to the auditor.
     priority: P1
     status: deprecated
-    code:
-      - src/llmharness/audit/hints.py
-      - src/llmharness/audit/auditor/prompt.py
-      - src/llmharness/adapters/agentm.py
-    tests:
-      - tests/test_audit_hints.py
-      - tests/test_two_phase_audit_integration.py
+    code: []
+    tests: []
     depends_on: [REQ-021, REQ-026]
 
   - id: REQ-028

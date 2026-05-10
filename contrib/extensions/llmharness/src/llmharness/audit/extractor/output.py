@@ -1,144 +1,64 @@
-"""Typed coercion of the ``submit_events`` tool-call arguments.
+"""Frozen view over the v3 extractor's per-firing ``ExtractionState``.
 
-The extractor child terminates by calling ``submit_events(events=[...])``.
-The kernel records that call as a :class:`ToolCallBlock` whose
-``arguments`` is a ``dict[str, Any]`` already validated against the JSON
-Schema declared in :mod:`llmharness.audit.extractor.submit_tool`. This
-module gives the adapter a typed view over that dict, coerced into a
-``list[Event]`` with monotonic ids.
-
-Unlike V0's best-effort silent coercion, the extractor surface raises
-:class:`ExtractorOutputError` on malformed input so the adapter can
-classify the firing as ``extractor_error`` rather than letting bad shapes
-slip into the graph.
+V2 parsed a JSON payload off the terminal tool-call's ``arguments`` dict.
+V3 has no payload tool: the state IS the output. After the child loop
+terminates (via ``submit_extraction``), the adapter calls
+``RawExtractorOutput.from_state(state)`` to snapshot events, edges, and
+the partial-payload buffer of dropped edges (design §4.f, §6).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-from ...schema import Event, EventKind
-
-
-class ExtractorOutputError(ValueError):
-    """Raised when the ``submit_events`` payload is malformed.
-
-    The adapter catches this and writes an ``extractor_error`` entry so
-    the failure is visible in the session entry stream rather than
-    silently dropped.
-    """
-
-
-def _coerce_int_list(raw: Any, *, field_name: str) -> list[int]:
-    if raw is None:
-        return []
-    if not isinstance(raw, list):
-        raise ExtractorOutputError(
-            f"submit_events: field {field_name!r} must be array, got {type(raw).__name__}"
-        )
-    out: list[int] = []
-    for item in raw:
-        # Reject bools (int subclasses) and any non-int entries.
-        if isinstance(item, bool) or not isinstance(item, int):
-            raise ExtractorOutputError(
-                f"submit_events: field {field_name!r} contains non-integer entry {item!r}"
-            )
-        out.append(item)
-    return out
-
-
-@dataclass(frozen=True)
-class _RawExtractorEvent:
-    """One event entry, parsed from the ``events`` array, pre-id-stamping.
-
-    V3 schema break (issue #134): ``Event.refs`` is gone. Edges are
-    first-class records emitted by ``add_edge`` and persisted as
-    ``llmharness.audit_edge`` entries; the extractor's full witness
-    pipeline lands in commit 2. Until then this parser only carries
-    ``kind`` / ``summary`` / ``source_turns``.
-    """
-
-    kind: EventKind
-    summary: str
-    source_turns: list[int] = field(default_factory=list)
-
-    @classmethod
-    def from_dict(cls, raw: Any, *, index: int) -> _RawExtractorEvent:
-        if not isinstance(raw, dict):
-            raise ExtractorOutputError(
-                f"submit_events: events[{index}] must be object, got {type(raw).__name__}"
-            )
-        kind_str = raw.get("kind")
-        if not isinstance(kind_str, str):
-            raise ExtractorOutputError(f"submit_events: events[{index}].kind must be string")
-        try:
-            kind = EventKind(kind_str)
-        except ValueError as exc:
-            raise ExtractorOutputError(
-                f"submit_events: events[{index}].kind {kind_str!r} not in EventKind"
-            ) from exc
-        summary = raw.get("summary")
-        if not isinstance(summary, str):
-            raise ExtractorOutputError(f"submit_events: events[{index}].summary must be string")
-        return cls(
-            kind=kind,
-            summary=summary,
-            source_turns=_coerce_int_list(
-                raw.get("source_turns"), field_name=f"events[{index}].source_turns"
-            ),
-        )
+from ...schema import Edge, Event
+from .state import ExtractionState
 
 
 @dataclass(frozen=True)
 class RawExtractorOutput:
-    """The parsed ``{events: [...]}`` payload from a successful submit."""
+    """Frozen snapshot of one extractor firing.
 
-    events: list[_RawExtractorEvent] = field(default_factory=list)
+    ``dropped_edges`` carries any edges the LLM attempted but failed to
+    witness three times — the adapter persists them as the
+    ``llmharness.extractor_partial`` payload.
+    """
+
+    events: tuple[Event, ...]
+    edges: tuple[Edge, ...]
+    dropped_edges: tuple[dict[str, Any], ...]
+
+    @classmethod
+    def from_state(cls, state: ExtractionState) -> RawExtractorOutput:
+        events, edges, dropped = state.freeze()
+        return cls(events=events, edges=edges, dropped_edges=tuple(dropped))
 
     @classmethod
     def from_dict(cls, raw: Any) -> RawExtractorOutput:
-        """Parse and validate a ``submit_events`` arguments dict.
+        """v2-shim. v3 builds output from ExtractionState, not a tool payload.
 
-        Raises :class:`ExtractorOutputError` on any structural problem.
-        An empty ``events`` array is NOT an error here — the schema
-        permits it; the adapter classifies empty windows.
+        Kept callable so the legacy adapter path imports cleanly until
+        commit 3 rewrites the call site. Always raises — any real
+        extractor firing under v3 must go through ``from_state``.
         """
 
-        if not isinstance(raw, dict):
-            raise ExtractorOutputError(
-                f"submit_events arguments must be object, got {type(raw).__name__}"
-            )
-        events_raw = raw.get("events")
-        if events_raw is None:
-            raise ExtractorOutputError("submit_events: missing required 'events' field")
-        if not isinstance(events_raw, list):
-            raise ExtractorOutputError(
-                f"submit_events: 'events' must be array, got {type(events_raw).__name__}"
-            )
-        parsed = [_RawExtractorEvent.from_dict(item, index=i) for i, item in enumerate(events_raw)]
-        return cls(events=parsed)
+        del raw
+        raise NotImplementedError(
+            "RawExtractorOutput.from_dict is a v2 path; v3 uses "
+            "RawExtractorOutput.from_state(state). The adapter "
+            "rewrite in commit 3 deletes this call site."
+        )
 
     def to_events(self, *, next_id: int) -> list[Event]:
-        """Stamp monotonic ids onto the parsed events starting at ``next_id``.
+        """v2-shim. v3 events already carry ids assigned by ExtractionState.
 
-        The LLM never emits ``id`` (the schema forbids it); the adapter
-        owns id sequencing. Callers seed ``next_id`` from their own state
-        — typically ``max(prior_events.id, default=-1) + 1``.
+        Returns ``list(self.events)`` ignoring ``next_id`` — kept only
+        so the adapter import surface compiles until commit 3.
         """
 
-        out: list[Event] = []
-        for raw in self.events:
-            out.append(
-                Event(
-                    id=next_id,
-                    kind=raw.kind,
-                    summary=raw.summary,
-                    source_turns=list(raw.source_turns),
-                )
-            )
-            next_id += 1
-        return out
+        del next_id
+        return list(self.events)
 
 
-__all__ = ["ExtractorOutputError", "RawExtractorOutput"]
+__all__ = ["RawExtractorOutput"]

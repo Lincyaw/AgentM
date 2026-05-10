@@ -30,7 +30,6 @@ from agentm.harness.extension import ExtensionAPI
 from agentm.harness.session_config import AgentSessionConfig
 
 from ..audit import entry_types as _et
-from ..audit import hints as _hints
 from ..audit.auditor import (
     SUBMIT_VERDICT_TOOL_NAME,
     AuditorOutputError,
@@ -38,13 +37,48 @@ from ..audit.auditor import (
     compose_auditor_extensions,
 )
 from ..audit.extractor import (
-    SUBMIT_EVENTS_TOOL_NAME,
-    ExtractorOutputError,
     RawExtractorOutput,
     compose_extractor_extensions,
-    validate_graph,
 )
 from ..schema import Event, Reminder, Verdict
+
+# TODO(commit-3): the v3 extractor child does not return a coercible
+# tool-call payload — events/edges live on the per-firing
+# ExtractionState, and ``RawExtractorOutput.from_state`` is the new
+# entry point. The constants below keep the v2 call sites compiling
+# until the adapter rewrite in commit 3 wires the v3 flow through
+# end-to-end. They intentionally point at strings the kernel will
+# never see, so any real run blows up loudly rather than silently
+# half-working.
+SUBMIT_EVENTS_TOOL_NAME = "submit_extraction"  # v3 terminator name
+
+
+class ExtractorOutputError(ValueError):
+    """v2 stub kept alive for adapter import only — commit 3 deletes."""
+
+
+def validate_graph(
+    *,
+    new_events: object,
+    existing_events: object,
+    turn_index_to_kinds: object,
+) -> list[str]:
+    """v2 stub — v3 has no gating validator. Always returns []."""
+
+    del new_events, existing_events, turn_index_to_kinds
+    return []
+
+
+class _HintsModuleStub:
+    """v2 hints module stub — v3 routes through audit.registry instead."""
+
+    @staticmethod
+    def compute(graph: object) -> str:
+        del graph
+        return ""
+
+
+_hints = _HintsModuleStub()
 
 _logger = logging.getLogger(__name__)
 
