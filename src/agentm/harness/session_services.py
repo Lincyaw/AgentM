@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from agentm.core.abi import AgentMessage, LoopConfig
-from agentm.harness.resource_loader import DefaultResourceLoader, ResourceLoader
+from agentm.harness.resource_loader import InMemoryResourceLoader, ResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
 from agentm.harness.session_manager import SessionManager
 
@@ -52,7 +51,9 @@ async def create_agent_session_services(
 ) -> AgentSessionServices:
     loader = options.resource_loader
     if loader is None:
-        loader = DefaultResourceLoader(cwd=Path(options.cwd))
+        # SDK default = empty. Callers that want CLAUDE.md / skills
+        # walked from disk must pass DefaultResourceLoader explicitly.
+        loader = InMemoryResourceLoader()
     loader.reload()
     return AgentSessionServices(cwd=options.cwd, resource_loader=loader)
 
