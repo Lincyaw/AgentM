@@ -74,9 +74,10 @@ from ..audit.extractor import (
     RawExtractorOutput,
     compose_extractor_extensions,
 )
+from ..audit.phase import merge_to_phases
 from ..audit.registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
 from ..audit.registry import AuditCheckRegistry, CheckContext
-from ..schema import Edge, Event, Reminder, Verdict
+from ..schema import Edge, Event, Phase, Reminder, Verdict
 
 _logger = logging.getLogger(__name__)
 
@@ -162,6 +163,7 @@ _REMINDER_PREAMBLE = (
 # Entry-type bindings (every literal must come from entry_types.py).
 _AUDIT_EVENT_ENTRY_TYPE = _et.AUDIT_EVENT
 _AUDIT_EDGE_ENTRY_TYPE = _et.AUDIT_EDGE
+_AUDIT_PHASE_ENTRY_TYPE = _et.AUDIT_PHASE
 _VERDICT_ENTRY_TYPE = _et.VERDICT
 _EXTRACTOR_CURSOR_ENTRY_TYPE = _et.EXTRACTOR_CURSOR
 _REMINDER_DELIVERED_ENTRY_TYPE = _et.REMINDER_DELIVERED
@@ -184,15 +186,17 @@ class _BranchState:
     cursor_last_turn_index: int
     graph: list[Event]
     edges: list[Edge]
+    phases: list[Phase]
     recent_verdicts: list[dict[str, Any]]
     last_continuation_notes: list[str]
 
 
 def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _BranchState:
-    """Single-pass extraction of cursor + graph + edges + verdicts + notes."""
+    """Single-pass extraction of cursor + graph + edges + phases + verdicts."""
     cursor_last_turn_index = -1
     graph: list[Event] = []
     edges: list[Edge] = []
+    phases: list[Phase] = []
     verdicts: list[dict[str, Any]] = []
 
     for entry in branch:
@@ -207,6 +211,11 @@ def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _Bran
         elif entry.type == _AUDIT_EDGE_ENTRY_TYPE:
             try:
                 edges.append(Edge.from_dict(payload))
+            except (KeyError, ValueError, TypeError):
+                continue
+        elif entry.type == _AUDIT_PHASE_ENTRY_TYPE:
+            try:
+                phases.append(Phase.from_dict(payload))
             except (KeyError, ValueError, TypeError):
                 continue
         elif entry.type == _VERDICT_ENTRY_TYPE:
@@ -226,6 +235,7 @@ def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _Bran
         cursor_last_turn_index=cursor_last_turn_index,
         graph=graph,
         edges=edges,
+        phases=phases,
         recent_verdicts=verdicts[-recent_verdicts_n:] if recent_verdicts_n > 0 else [],
         last_continuation_notes=last_continuation_notes,
     )
@@ -630,6 +640,12 @@ async def _drain_extractor(
         api.session.append_entry(_AUDIT_EVENT_ENTRY_TYPE, ev.to_dict())
     for ed in output.edges:
         api.session.append_entry(_AUDIT_EDGE_ENTRY_TYPE, ed.to_dict())
+    # Mechanical phase merge over the just-extracted events. Phases
+    # collapse consecutive ``act`` / ``evid`` runs into one block so the
+    # auditor reads a "basic block" view; raw events stay on disk for
+    # drill-down via ``get_event_detail``.
+    for ph in merge_to_phases(output.events):
+        api.session.append_entry(_AUDIT_PHASE_ENTRY_TYPE, ph.to_dict())
     if output.dropped_edges:
         api.session.append_entry(
             _EXTRACTOR_PARTIAL_ENTRY,
@@ -769,6 +785,7 @@ async def _drain_auditor(
 
     events_tuple: tuple[Event, ...] = tuple(branch_state.graph)
     edges_tuple: tuple[Edge, ...] = tuple(branch_state.edges)
+    phases_tuple: tuple[Phase, ...] = tuple(branch_state.phases)
 
     # Run scenario-registered checks. Empty registry / unset service →
     # empty findings, no error (design §4.c).
@@ -794,6 +811,7 @@ async def _drain_auditor(
         trajectory_snapshot=trajectory_snapshot,
         events=events_tuple,
         edges=edges_tuple,
+        phases=phases_tuple,
         findings=list(findings),
         check_errors=dict(check_errors),
         continuation_notes=list(branch_state.last_continuation_notes),

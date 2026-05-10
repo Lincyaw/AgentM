@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...schema import Edge, Event, Finding
+from ...schema import Edge, Event, Finding, Phase
 from .._compose import UNSET, compose_audit_extensions
 from .prompt import AUDITOR_SYSTEM_PROMPT, build_auditor_system_prompt
 
@@ -21,6 +21,7 @@ def compose_auditor_extensions(
     trajectory_snapshot: list[dict[str, Any]] | None = None,
     events: tuple[Event, ...] | None = None,
     edges: tuple[Edge, ...] | None = None,
+    phases: tuple[Phase, ...] | None = None,
     findings: list[Finding] | None = None,
     check_errors: dict[str, str] | None = None,
     continuation_notes: list[str] | None = None,
@@ -49,6 +50,7 @@ def compose_auditor_extensions(
         prompt_text = build_auditor_system_prompt(
             events=events or (),
             edges=edges or (),
+            phases=phases or (),
             findings=findings or [],
             check_errors=check_errors or {},
             continuation_notes=continuation_notes or [],

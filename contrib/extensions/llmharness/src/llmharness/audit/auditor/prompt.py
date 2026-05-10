@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 
-from ...schema import Edge, Event, Finding
+from ...schema import Edge, Event, Finding, Phase
 
 _DRILL_DOWN_NOTE_FULL = (
     "Full event + edge records are embedded above (witness fields "
@@ -207,6 +207,7 @@ def build_auditor_system_prompt(
     *,
     events: tuple[Event, ...],
     edges: tuple[Edge, ...],
+    phases: tuple[Phase, ...] = (),
     findings: list[Finding],
     check_errors: dict[str, str],
     continuation_notes: list[str],
@@ -216,6 +217,13 @@ def build_auditor_system_prompt(
 
     See module docstring for the trust-asymmetry / degradation /
     findings semantics.
+
+    When ``phases`` is non-empty, the auditor reads the merged "basic
+    block" view as its primary structural input and the raw events
+    serve only as the drill-down anchor (member ids of each phase). The
+    raw events / edges block is still embedded in full mode so the
+    auditor can verify a phase against its underlying citations without
+    a tool round trip; degraded mode strips it as before.
     """
     degraded = len(events) > summary_threshold
 
@@ -231,6 +239,20 @@ def build_auditor_system_prompt(
     findings_payload = [f.to_dict() for f in findings]
 
     sections: list[str] = [_BASE_PROMPT.rstrip(), ""]
+
+    if phases:
+        sections.append("## PHASES (primary view — merged basic blocks)")
+        sections.append(
+            f"phases ({len(phases)} total). Each phase wraps one or more raw "
+            "events; ``member_event_ids`` lists them in order. ``act`` and "
+            "``evid`` events are coalesced into ``act_evid_run`` blocks; "
+            "``task`` / ``hyp`` / ``dec`` / ``concl`` always stay singleton. "
+            "Reason at this level by default; consult the raw events block "
+            "below (or get_event_detail) only when a specific witness needs "
+            "verification."
+        )
+        sections.append(json.dumps([p.to_dict() for p in phases], ensure_ascii=False))
+        sections.append("")
 
     sections.append("## GRAPH")
     sections.append(

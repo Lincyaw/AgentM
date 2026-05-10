@@ -33,6 +33,12 @@ AUDIT_EVENT = "llmharness.audit_event"
 # One accepted Edge record. Payload: ``Edge.to_dict()``. Persisted
 # alongside ``AUDIT_EVENT`` entries so graph traversal can replay both.
 AUDIT_EDGE = "llmharness.audit_edge"
+# One Phase record produced by the mechanical merger
+# (``audit.phase.merge_to_phases``). Persisted after the raw events of
+# a successful firing so the auditor can read a coalesced "basic block"
+# view of the trajectory and drill back to raw events via
+# ``get_event_detail``. Payload: ``Phase.to_dict()``.
+AUDIT_PHASE = "llmharness.audit_phase"
 VERDICT = "llmharness.verdict"
 EXTRACTOR_CURSOR = "llmharness.extractor_cursor"
 REMINDER_DELIVERED = "llmharness.reminder_delivered"

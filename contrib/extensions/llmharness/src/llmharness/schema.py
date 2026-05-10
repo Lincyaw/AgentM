@@ -208,12 +208,62 @@ class Reminder:
     text: str
 
 
+@dataclass(frozen=True)
+class Phase:
+    """A merged "basic block" over consecutive raw events.
+
+    Raw events are extracted one-per-turn; phases group consecutive
+    ``act`` / ``evid`` events into a single block while keeping
+    ``task`` / ``hyp`` / ``dec`` / ``concl`` as singleton phases. The
+    adapter persists phases as ``llmharness.audit_phase`` entries
+    alongside raw events; the auditor reads the phase view for
+    high-level reasoning and drills back to raw events via
+    ``get_event_detail`` when needed.
+
+    ``id`` is per-firing fresh-numbered (1, 2, 3, ...) — same convention
+    as raw event ids.
+
+    ``kind`` is one of the :class:`EventKind` values for singleton
+    phases (``task`` / ``hyp`` / ``dec`` / ``concl`` / ``act`` / ``evid``
+    when only one such event is in the run), plus the merged-run
+    sentinel ``act_evid_run`` when two or more ``act`` / ``evid`` events
+    are coalesced. Free-text rather than enum so future merge rules can
+    introduce new run types without a schema bump.
+    """
+
+    id: int
+    kind: str
+    member_event_ids: tuple[int, ...]
+    source_turns: tuple[int, ...]
+    summary: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "member_event_ids": list(self.member_event_ids),
+            "source_turns": list(self.source_turns),
+            "summary": self.summary,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Phase:
+        return cls(
+            id=int(data["id"]),
+            kind=str(data["kind"]),
+            member_event_ids=tuple(int(i) for i in (data.get("member_event_ids") or [])),
+            source_turns=tuple(int(t) for t in (data.get("source_turns") or [])),
+            summary=str(data.get("summary", "")),
+        )
+
+
 __all__ = [
     "Edge",
     "EdgeKind",
     "Event",
     "EventKind",
     "Finding",
+    "Phase",
     "Reminder",
     "Verdict",
 ]
