@@ -58,6 +58,7 @@ from agentm.core.abi.termination import (
     Aborted,
     EndTurn,
     MaxTokens,
+    PauseTurn,
     ProviderError,
     TerminationHint,
     ToolUseExpected,
@@ -350,6 +351,10 @@ def _map_finish_reason(raw: str | None) -> TerminationHint | None:
         return ToolUseExpected()
     if raw == "content_filter":
         return ProviderError(detail="content_filter")
+    if raw == "pause_turn":
+        # OpenAI-compat backends (Doubao) reuse Anthropic's pause_turn
+        # signal: the model paused mid-output and expects a resend.
+        return PauseTurn()
     return VendorSpecific(raw=raw)
 
 

@@ -43,7 +43,7 @@ from agentm.core.abi.loop import (
     _default_action,
     _resolve_action,
 )
-from agentm.core.abi.termination import VendorSpecific
+from agentm.core.abi.termination import PauseTurn, VendorSpecific
 from agentm.core.abi.tool import ToolContinue
 
 
@@ -230,6 +230,45 @@ def test_default_action_distinguishes_protocol_violation_from_end_turn() -> None
     assert isinstance(violation.cause, ProviderProtocolViolation)
     assert isinstance(clean, Stop)
     assert isinstance(clean.cause, ModelEndTurn)
+
+
+def test_default_action_pause_turn_steps_to_continue() -> None:
+    """Provider signalling :class:`PauseTurn` (Anthropic ``pause_turn``,
+    Doubao OpenAI-compat) means "I have more to say but stopped here";
+    the kernel must :class:`Step` so the next turn resends the
+    conversation (with the partial assistant message now in history)
+    and the model resumes. Stopping with :class:`ModelEndTurn` would
+    surface the truncated mid-sentence reply as the final answer —
+    the bug observed against Doubao-Seed-2.0-pro on Feishu."""
+
+    msg = AssistantMessage(
+        role="assistant",
+        content=[TextContent(type="text", text="thinking out loud, will continue")],
+        timestamp=1.0,
+        stop_reason="pause_turn",
+        termination=PauseTurn(),
+    )
+
+    action = _default_action(msg, [])
+
+    assert isinstance(action, Step)
+
+
+def test_default_action_pause_turn_legacy_string_steps_to_continue() -> None:
+    """Same as the typed-hint case but for legacy provider adapters that
+    have not migrated to ``TerminationHint`` and only set
+    ``stop_reason='pause_turn'``."""
+
+    msg = AssistantMessage(
+        role="assistant",
+        content=[TextContent(type="text", text="partial")],
+        timestamp=1.0,
+        stop_reason="pause_turn",
+    )
+
+    action = _default_action(msg, [])
+
+    assert isinstance(action, Step)
 
 
 def test_default_action_treats_vendor_specific_termination_as_end_turn() -> None:
