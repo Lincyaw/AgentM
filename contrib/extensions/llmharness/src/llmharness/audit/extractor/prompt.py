@@ -83,11 +83,58 @@ context if a card label clarifies what kind of move you're seeing.
      - ``conclusion`` covers a final answer or terminal claim.
      Pick the closest fit; do NOT invent new kinds.
 
-   - ``summary`` is one short sentence — what happened and, when a
-     later event invalidates an earlier one, the relation in free
-     text (e.g. "contradicts ev #4 by showing the file does not
-     contain what was inferred there"). There is NO preset edge-type
-     vocabulary; the auditor reads your prose.
+   - ``summary`` is one short sentence written in the per-kind
+     template below. The template is what makes the graph readable
+     at a glance and uniformly auditable; do not deviate.
+
+     - ``task``        → ``User: <one-line task description>``
+                          e.g. "User: investigate SLO violations on
+                          ts-station-service and travel endpoints."
+     - ``hypothesis``  → ``<actor> hypothesizes <claim>; basis: <ev refs or "none yet">``
+                          e.g. "Assistant hypothesizes mysql is the
+                          upstream root; basis: ev #5, #10."
+     - ``evidence``    → ``<source>: <fact>``
+                          The ``<source>`` is the tool name (e.g.
+                          ``query_parquet_files``), the file or
+                          table being read, or ``thinking`` /
+                          ``user`` when the fact was stated rather
+                          than queried. ``<fact>`` is one
+                          quantitative or qualitative observation.
+                          e.g. "abnormal_traces: 4 services emit 500
+                          (route-plan, travel2, basic, travel-plan)."
+     - ``decision``    → ``<actor> chose <X> over <Y> because <reason>``
+                          ``<Y>`` may be ``status quo`` when no
+                          alternative was named.
+                          e.g. "Assistant chose to inspect trace_id
+                          27597… over the other two because it had
+                          the most 500-status spans."
+     - ``action``      → ``<actor> <verb-phrase> → <one-line outcome>``
+                          The arrow separates intent from result. If
+                          the action errored, the outcome is the
+                          error in one phrase; otherwise it is the
+                          most relevant single fact returned. Tool
+                          arguments worth quoting go inside the
+                          verb-phrase.
+                          e.g. "Assistant queried abnormal_traces
+                          for 500-status spans → 10 rows across 4
+                          services."
+                          e.g. "Assistant called query_parquet_files
+                          on abnormal_traces.parquet → error: pytz
+                          import failure."
+     - ``reflection``  → ``<actor> reflects: <observation>``
+                          e.g. "Assistant reflects: dot-separated
+                          column names need quoting in DuckDB."
+     - ``conclusion``  → ``Final: <claim>``
+                          e.g. "Final: mysql network-corrupt is the
+                          root; failure propagates via
+                          ts-station-service to travel endpoints."
+
+     When a later event invalidates or refines an earlier one,
+     append the relation as a free-text suffix after the template,
+     prefixed with a semicolon — e.g. ``…; contradicts ev #4 by
+     showing the file does not contain what was inferred there.``
+     There is NO preset edge-type vocabulary; the auditor reads
+     your prose.
 
    - ``source_turns`` lists the trajectory ``index`` values you
      condensed into this event (1+).
