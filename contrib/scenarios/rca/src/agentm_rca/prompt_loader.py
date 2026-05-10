@@ -16,6 +16,7 @@ directory so adding a new variant is a manifest-only change.
 
 from __future__ import annotations
 
+import datetime as _dt
 from pathlib import Path
 from typing import Any
 
@@ -148,6 +149,12 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         prompt = ""
         if prompt_path.is_file():
             prompt = prompt_path.read_text(encoding="utf-8").strip()
+            # Substitute the single supported placeholder. Kept narrow on
+            # purpose — wider templating belongs in a dedicated atom.
+            if "{date}" in prompt:
+                prompt = prompt.replace(
+                    "{date}", _dt.date.today().isoformat()
+                )
         sections = [prompt] if prompt else []
         if enable_personas:
             personas = _load_personas()
