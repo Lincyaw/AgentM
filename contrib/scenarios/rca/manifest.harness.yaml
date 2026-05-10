@@ -1,0 +1,55 @@
+name: rca:harness
+description: |
+  ``rca:baseline`` + llmharness cognitive-audit adapter.
+
+  Same single-loop, ThinkDepthAI-parity tool surface and prompt as
+  ``rca:baseline`` (no drift on the investigator side), with
+  ``llmharness.adapters.agentm`` mounted on top to provide:
+
+    * Phase 1 — per-turn extractor that converts each TurnEndEvent into
+      structured ``Event`` entries on the session bus.
+    * Phase 2 — every-k-turns graph auditor that emits ``Verdict`` /
+      ``Reminder`` entries; ``drift=true`` reminders are delivered to the
+      main agent as synthetic user messages on the next
+      ``BeforeSendToLlmEvent`` (so the model picks them up between turns,
+      after tool execution, while idle).
+
+  Audit work runs on a background worker (``mode: async``, default), so
+  the main agent loop is never blocked by the extractor / auditor child
+  sessions. The adapter only registers ``event:turn_end``,
+  ``event:before_send_to_llm`` and ``event:session_shutdown`` — no tools
+  are exposed to the investigator, so the model-visible surface stays
+  identical to ``rca:baseline``. This makes ``rca:harness`` the intended
+  A/B partner for measuring the uplift from cognitive audit alone
+  (everything else held constant against baseline).
+
+# Same task_class as baseline so GEPA tuner / trace queries can compare
+# rca:baseline vs rca:harness over the same eval cases. If you need to
+# disambiguate runs, filter by trace metadata at query time rather than
+# splitting task_class.
+task_class: rca_baseline
+
+extensions:
+  # --- baseline tool surface (kept verbatim from manifest.baseline.yaml) ---
+  - module: agentm_rca.tools.thinkdepth_sql
+  - module: agentm_rca.tools.finalize
+  - module: agentm.extensions.builtin.observability
+  - module: contrib.extensions.rcabench_contract
+  - module: agentm_rca.prompt_loader
+    config:
+      prompt: investigator.md
+      personas: false
+
+  # Surface AGENTM_RCA_DATA_DIR to the model. The verbatim investigator.md
+  # talks about "this case directory" without ever naming it; without this
+  # block the model has to guess (and burns turns trying ``data``, ``/data``,
+  # ``/`` before discovering the empty-arg fallback). Not loaded by
+  # rca:baseline — keeping that path bit-identical to ThinkDepthAI.
+  - module: agentm_rca.runtime_context
+
+  # --- cognitive-audit adapter (the only addition over baseline) ---
+  # Mounted as a flat-file extension; the package is installed via
+  # ``pip install -e contrib/extensions/llmharness`` (see its CLAUDE.md).
+  # Defaults: audit_interval_turns=3, recent_verdicts=5. Override here
+  # if you want a tighter / looser audit cadence per eval campaign.
+  - module: llmharness.adapters.agentm
