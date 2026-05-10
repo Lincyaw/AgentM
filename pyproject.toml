@@ -41,7 +41,11 @@ agentm = ["py.typed", "modes/*.tcss"]
 # Explicitly list nested projects under contrib/. Other contrib/scenarios/*
 # entries are pure manifests with no pyproject.toml and must NOT be picked
 # up as workspace members.
-members = ["contrib/extensions/llmharness", "contrib/scenarios/rca"]
+members = [
+    "contrib/extensions/llmharness",
+    "contrib/scenarios/rca",
+    "contrib/channels/feishu",
+]
 
 [tool.pytest.ini_options]
 # UI tests exercise the Textual TUI; they pass but don't map to any

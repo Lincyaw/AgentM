@@ -1,0 +1,75 @@
+name: feishu_chat
+description: |
+  Interactive chat scenario driven by the Feishu / Lark gateway
+  (``contrib/channels/feishu/``).
+
+  Optimised for *conversational* interaction: the user types into a
+  Feishu chat, the agent replies one turn at a time, and tool calls
+  surface as messages / approval cards back into the same chat. This
+  is **not** a sandboxed scenario — bash and edit/write tools are
+  blocked by default because untrusted user input drives the loop;
+  scenario authors who want a power-user flow should fork this manifest
+  rather than relax the gate inline.
+
+extensions:
+  # --- read-side tooling: agent can investigate its own filesystem
+  # / memory / scratch space directly. ---
+  - module: agentm.extensions.builtin.tool_read
+  - module: agentm.extensions.builtin.tool_grep
+  - module: agentm.extensions.builtin.tool_find
+  - module: agentm.extensions.builtin.tool_ls
+
+  # --- bash: how the agent reaches `lark-cli`. Every call is gated
+  # by the Feishu gateway's approval bridge (see GatewayConfig
+  # `approval_policy.require_approval` — defaults to `["bash"]` for
+  # this scenario), so the user sees what the agent intends to run
+  # in their chat before it executes. ---
+  - module: agentm.extensions.builtin.tool_bash
+
+  # --- skills: SKILL.md auto-discovery so feishu-cli (and any future
+  # Feishu-shaped skill the operator drops into .claude/skills/) is
+  # picked up. Rely on Claude Code-style skill format. ---
+  - module: agentm.extensions.builtin.skill_loader
+
+  # --- prompt templates + system prompt suited to a chat surface ---
+  - module: agentm.extensions.builtin.prompt_templates
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You are talking to a user inside a Feishu / Lark chat. Speak
+        like a coworker: short, concrete, low ceremony. No headers or
+        bulleted lists when one or two sentences suffice. State results
+        and decisions directly; skip running summaries of your own
+        thinking.
+
+        When the user wants you to operate Feishu resources (their
+        calendar / messages / docs / bitable), invoke `lark-cli`
+        through `bash` — see the `feishu-cli` skill for usage rules,
+        identity model (`--as user` vs `--as bot`), and write-call
+        safety. Read schemas with `lark-cli schema <api>` rather than
+        guessing argument shape.
+
+        Tool calls that mutate the user's workspace go through human
+        approval cards in this chat. Surface what you intend to do
+        before approving fan-out writes; do not paste credentials or
+        token values back into the chat under any circumstance.
+
+  # --- safety gate: block destructive local tools at the scenario
+  # level. The Feishu gateway also runs its own approval bridge on
+  # write-class tool calls (configured in the gateway YAML, not here)
+  # — these denies are belt-and-suspenders for tools that should
+  # never appear, period. ---
+  - module: agentm.extensions.builtin.permission
+    config:
+      deny:
+        - edit
+        - write
+        - propose_change
+
+  # --- observability: every chat turn lands in the JSONL trace so
+  # operators can review what the agent actually did. ---
+  - module: agentm.extensions.builtin.observability
+
+# Surfaces verbatim on session.fingerprint.task_meta.task_class so
+# trace-filtering / eval pipelines can isolate Feishu-driven traffic.
+task_class: feishu_chat
