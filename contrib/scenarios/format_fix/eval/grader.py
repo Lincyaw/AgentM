@@ -30,6 +30,8 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 def grade(task: dict[str, Any], output: str) -> dict[str, Any]:
     expected = (task.get("expected") or {}).get("value")
     if expected is None:
+        # Eval-suite mis-configuration — not a runtime failure of the
+        # agent; tag as ``correctness`` (the input contract is wrong).
         return _result(
             0.0,
             feedback_text=(
@@ -37,9 +39,15 @@ def grade(task: dict[str, Any], output: str) -> dict[str, Any]:
                 "eval YAML"
             ),
             module="eval_suite",
+            failure_kind="correctness",
         )
     parsed = _parse_first_json(output)
     if parsed is None:
+        # Agent output didn't contain JSON. Could be the tool crashing
+        # (runtime) or just garbled output (correctness). We can't
+        # distinguish from output alone, so tag as ``runtime`` — that's
+        # the higher-priority signal (a tool-crash regression should
+        # surface above a soft-correctness one).
         return _result(
             0.0,
             feedback_text=(
@@ -48,8 +56,10 @@ def grade(task: dict[str, Any], output: str) -> dict[str, Any]:
                 "agent dropped the tool's reply on the floor"
             ),
             module="tool_normalize_json",
+            failure_kind="runtime",
         )
     if parsed != expected:
+        # Output parsed but doesn't match expected — a correctness miss.
         return _result(
             0.0,
             feedback_text=(
@@ -58,18 +68,25 @@ def grade(task: dict[str, Any], output: str) -> dict[str, Any]:
                 f"{json.dumps(expected, sort_keys=True)!r}"
             ),
             module="tool_normalize_json",
+            failure_kind="correctness",
         )
-    return _result(1.0, feedback_text="match", module="tool_normalize_json")
+    return _result(
+        1.0,
+        feedback_text="match",
+        module="tool_normalize_json",
+        failure_kind="ok",
+    )
 
 
 def _result(
-    score: float, *, feedback_text: str, module: str
+    score: float, *, feedback_text: str, module: str, failure_kind: str
 ) -> dict[str, Any]:
     return {
         "score": score,
         "dimensions": {},
         "feedback_text": feedback_text,
         "module_feedback": {module: feedback_text} if feedback_text else {},
+        "failure_kind": failure_kind,
     }
 
 

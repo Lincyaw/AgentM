@@ -117,6 +117,17 @@ _CHANGE_SPEC_SCHEMA: dict[str, Any] = {
         "path": {"type": "string"},
         "new_content": {"type": "string"},
         "target_atom": {"type": ["string", "null"]},
+        "asi": {
+            "type": "object",
+            "description": (
+                "Free-form proposal-time hypothesis & context. "
+                "Conventional keys: hypothesis (one-sentence I-think), "
+                "next_focus, learned. The propose_change gate does not "
+                "reject unknown keys; cross-episode learning depends on "
+                "this being populated."
+            ),
+            "additionalProperties": True,
+        },
     },
 }
 

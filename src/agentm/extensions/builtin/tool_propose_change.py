@@ -151,9 +151,22 @@ _PARAMETERS: dict[str, Any] = {
                         "otherwise."
                     ),
                 },
+                "asi": {
+                    "type": "object",
+                    "description": (
+                        "Free-form proposal-time hypothesis & context "
+                        "(typically populated by tool_reflect's prompt). "
+                        "Conventional keys: hypothesis, next_focus, "
+                        "learned. No preset enum — the tuner LLM fills "
+                        "what it considers load-bearing. Persisted into "
+                        "the activation record for cross-episode "
+                        "learning."
+                    ),
+                    "additionalProperties": True,
+                },
             },
             "required": ["kind", "path", "new_content"],
-            "additionalProperties": False,
+            "additionalProperties": True,
         },
         "rationale": {"type": "string"},
         "eval_run_baseline": {"type": "string"},
@@ -324,11 +337,22 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             target_atom = ""
         new_source = new_content
 
+        # ASI (free-form proposal-time hypothesis): pass-through. We do
+        # not type-check the inner shape — by convention keys like
+        # ``hypothesis`` / ``next_focus`` / ``learned`` are populated by
+        # the tuner LLM via tool_reflect's prompt, but anything is
+        # tolerated. Default {} so old proposals (no asi field) still
+        # validate (backward-compat, see PR-A).
+        asi_raw = target_spec.get("asi")
+        asi: dict[str, Any] = (
+            dict(asi_raw) if isinstance(asi_raw, dict) else {}
+        )
         change_spec: dict[str, Any] = {
             "kind": kind,
             "path": path_value,
             "new_content": new_content,
             "target_atom": atom_name_raw if isinstance(atom_name_raw, str) else None,
+            "asi": asi,
         }
         rationale = str(args["rationale"])
         baseline_id = str(args["eval_run_baseline"])
@@ -422,6 +446,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "tier": tier,
                     "rationale": rationale,
                     "change_spec": change_spec,
+                    "asi": asi,
+                    "failure_kind": None,
                     "decision": decision,
                     "evidence": {
                         "baseline_run": baseline_id,
@@ -450,6 +476,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "tier": tier,
                 "rationale": rationale,
                 "change_spec": change_spec,
+                "asi": asi,
+                "failure_kind": None,
                 "evidence": {
                     "baseline_run": baseline_id,
                     "proposed_run": proposed_id,
@@ -490,6 +518,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "tier": tier,
                     "rationale": rationale,
                     "change_spec": change_spec,
+                    "asi": asi,
+                    "failure_kind": None,
                     "evidence": {
                         "baseline_run": baseline_id,
                         "proposed_run": proposed_id,
@@ -512,6 +542,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         proposed = _load_eval_run_summary(cwd, proposed_id)
         if proposed is None:
             return _error(f"proposed eval run not found: {proposed_id}")
+        # Pull the grader-supplied failure_kind tag from the proposed run.
+        # Free-text by convention (see tool_eval_run / grader contract);
+        # we don't validate the value, only record it on the activation
+        # record so reflection / observers can branch on
+        # runtime-failure vs metric-regression vs ok.
+        proposed_failure_kind: str | None
+        fk_raw = proposed.get("failure_kind") if isinstance(proposed, dict) else None
+        proposed_failure_kind = fk_raw if isinstance(fk_raw, str) and fk_raw else None
 
         # B-1 inclusion phase: build the candidate record from the
         # proposed eval-run, write it under candidates/ unconditionally,
@@ -596,6 +634,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "tier": tier,
                     "rationale": rationale,
                     "change_spec": change_spec,
+                    "asi": asi,
+                    "failure_kind": proposed_failure_kind,
                     "candidate_id": candidate_id,
                     "decision": decision,
                     "parent_ids": parent_ids,
@@ -645,6 +685,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "tier": tier,
                 "rationale": rationale,
                 "change_spec": change_spec,
+                "asi": asi,
+                "failure_kind": proposed_failure_kind,
                 "candidate_id": candidate_id,
                 "evidence": {
                     "baseline_run": baseline_id,
@@ -668,6 +710,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "rationale": rationale,
             "exploratory": decision == "exploratory",
             "change_spec": change_spec,
+            "asi": asi,
+            "failure_kind": proposed_failure_kind,
             "candidate_id": candidate_id,
             "parent_ids": parent_ids,
             "evidence": {

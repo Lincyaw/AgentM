@@ -40,9 +40,20 @@ in-context design brief.
      "kind": "atom_source",
      "path": "<TARGET_MODULE>.py",
      "new_content": "<full Python source as a string>",
-     "target_atom": "<TARGET_MODULE>"
+     "target_atom": "<TARGET_MODULE>",
+     "asi": {
+       "hypothesis": "<one sentence: I think changing X will improve Y because Z>",
+       "next_focus": "<what to look at if this fails>",
+       "learned": "<what prior attempts taught — '' on first try>"
+     }
    }
    ```
+
+   `asi.hypothesis` is **required** in spirit (the gate doesn't reject
+   missing keys, but reflection across episodes goes blind without it).
+   When the prior attempt was a `discard` or `crash`, populate
+   `asi.learned` with what was tried and why it failed — that's the
+   load-bearing signal for failure-driven search.
 
    `new_content` must be the **complete** new file contents — diffs are
    not accepted. The validator under

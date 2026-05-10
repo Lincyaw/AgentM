@@ -50,12 +50,21 @@ treat the assembled text as your in-context design brief.
    {
      "kind": "system_prompt",
      "path": "prompts/investigator.md",
-     "new_content": "<full new prompt as a string>"
+     "new_content": "<full new prompt as a string>",
+     "asi": {
+       "hypothesis": "<one sentence: I think changing X will improve Y because Z>",
+       "next_focus": "<what to look at if this fails>",
+       "learned": "<what prior attempts taught — '' on first try>"
+     }
    }
    ```
 
    `new_content` must be the **complete** new file contents — diffs are
-   not accepted.
+   not accepted. `asi.hypothesis` is required in spirit (the gate
+   doesn't reject missing keys, but reflection goes blind across
+   episodes without it). When the prior attempt was `discard` or
+   `crash`, populate `asi.learned` with what was tried and why it
+   failed.
 
 5. **Cite evidence in the rationale.** When you call `propose_change`,
    the `rationale` argument must reference at least one trace_id from

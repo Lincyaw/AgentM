@@ -36,17 +36,29 @@ def grade(task: dict[str, Any], output: str) -> dict[str, Any]:
     expected_fault_kind = str(expected.get("fault_kind") or "").strip().lower()
 
     if not expected_services and not expected_fault_kind:
+        # Eval-suite gap — not the agent's fault; flag as a correctness
+        # contract violation so upstream observers don't treat it as
+        # noise.
         return _result(
             0.0,
             feedback_text="task is missing expected.expected_services and expected.fault_kind",
             module_feedback={"eval_suite": "task YAML lacks expected fields"},
+            failure_kind="correctness",
         )
 
+    trace_missing = False
     verdict = _extract_verdict_from_trace(task)
     if verdict is None:
         # Fall back to scanning the assistant's final text — better than 0.0
         # if the agent happened to summarize without the tool call (rare).
+        # Treat missing-trace as ``runtime``: the agent never produced a
+        # reachable submit_final_report tool call, which is closer to a
+        # crash/hang than a wrong answer.
+        # TODO: detect timeouts — needs tool_eval_run to surface
+        #   per-sample wall-clock; currently we cannot distinguish a
+        #   crashed sub-agent from one that hit the turn cap.
         verdict = {"services": [], "fault_kinds": [], "raw": output or ""}
+        trace_missing = True
 
     raw_blob = (verdict.get("raw") or "") + " " + " ".join(
         verdict.get("services") or []
@@ -74,20 +86,43 @@ def grade(task: dict[str, Any], output: str) -> dict[str, Any]:
     if sql_hint:
         module_feedback["query_sql"] = sql_hint
 
-    return _result(score, feedback_text=feedback_text, module_feedback=module_feedback)
+    # failure_kind taxonomy:
+    #   "ok"          full hit on services + fault_kind
+    #   "runtime"     no submit_final_report trace — agent crashed/hung
+    #   "correctness" verdict produced but missed expected
+    # We don't emit "regression" here; that's a comparison the gate
+    # would draw against a baseline run, not a single-sample property.
+    if trace_missing:
+        failure_kind = "runtime"
+    elif service_hit == 1.0 and fault_kind_hit == 1.0:
+        failure_kind = "ok"
+    else:
+        failure_kind = "correctness"
+
+    return _result(
+        score,
+        feedback_text=feedback_text,
+        module_feedback=module_feedback,
+        failure_kind=failure_kind,
+    )
 
 
 # ---------------------------------------------------------------------------
 
 
 def _result(
-    score: float, *, feedback_text: str, module_feedback: dict[str, str]
+    score: float,
+    *,
+    feedback_text: str,
+    module_feedback: dict[str, str],
+    failure_kind: str,
 ) -> dict[str, Any]:
     return {
         "score": float(score),
         "dimensions": {},
         "feedback_text": feedback_text,
         "module_feedback": module_feedback,
+        "failure_kind": failure_kind,
     }
 
 

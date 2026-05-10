@@ -48,12 +48,20 @@ class GradeResult(TypedDict):
     """mu_f feedback function output (design §3.2). Graders may return
     this dict directly or a bare ``float``; ``_normalize_grade`` wraps
     the latter so downstream aggregation always sees the full shape.
+
+    ``failure_kind`` is a free-text grader-supplied tag distinguishing
+    runtime failure from metric regression so downstream observers (the
+    4-floor gate, reflection prompts) can branch. Conventional values:
+    ``"ok" | "correctness" | "runtime" | "timeout" | "regression"`` —
+    convention only, never enforced. ``None`` means the grader did not
+    label this sample.
     """
 
     score: float
     dimensions: dict[str, float]
     feedback_text: str
     module_feedback: dict[str, str]
+    failure_kind: str | None
 
 
 # Cap on the feedback_corpus written to the eval-run summary. Without a
@@ -243,6 +251,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             tool_errors: list[int] = []
             turns_log: list[int] = []
             feedback_texts: list[str] = []
+            failure_kinds: list[str | None] = []
             # Last-write-wins union per design §3.2 / task A-3 acceptance:
             # multiple samples on the same task overwrite earlier module
             # feedback. Documented here so callers don't expect joining.
@@ -274,6 +283,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 tool_errors.append(int(outcome.get("tool_errors", 0)))
                 turns_log.append(int(outcome.get("turns", 0)))
                 feedback_texts.append(grade["feedback_text"])
+                failure_kinds.append(grade.get("failure_kind"))
                 module_feedback_union.update(grade["module_feedback"])
                 if (
                     len(feedback_corpus) < _FEEDBACK_CORPUS_CAP
@@ -298,6 +308,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     ),
                     "turns_mean": _mean([float(t) for t in turns_log]),
                     "feedback_texts": feedback_texts,
+                    "failure_kinds": failure_kinds,
                     "module_feedback_union": module_feedback_union,
                     "usd_used": task_cost_usd,
                 }
@@ -326,6 +337,27 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             ),
             "turns_mean": _mean([r["turns_mean"] for r in per_task_records]),
         }
+        # Aggregate per-sample ``failure_kind`` tags into a single
+        # summary-level signal. Convention: most-common non-"ok" tag
+        # wins; if every sample is "ok" or None, the summary tag is
+        # "ok" (when any sample was tagged "ok") or None (when no
+        # grader emitted a tag at all). This is a heuristic — observers
+        # branching on the summary tag have access to the per-task
+        # ``failure_kinds`` list for richer analysis.
+        all_kinds: list[str] = []
+        for rec in per_task_records:
+            for fk in rec.get("failure_kinds") or []:
+                if isinstance(fk, str) and fk:
+                    all_kinds.append(fk)
+        run_failure_kind: str | None
+        if not all_kinds:
+            run_failure_kind = None
+        else:
+            non_ok = [k for k in all_kinds if k != "ok"]
+            if non_ok:
+                run_failure_kind = max(set(non_ok), key=non_ok.count)
+            else:
+                run_failure_kind = "ok"
 
         eval_runs_dir = cwd / ".agentm" / "eval_runs"
         eval_runs_dir.mkdir(parents=True, exist_ok=True)
@@ -345,6 +377,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             feedback_corpus=feedback_corpus,
             usd_used_in_run=usd_used_in_run,
             aborted_due_to_budget=aborted_due_to_budget,
+            failure_kind=run_failure_kind,
         )
 
         result = {
@@ -360,6 +393,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "record_path": str(run_path),
             "usd_used_in_run": usd_used_in_run,
             "aborted_due_to_budget": aborted_due_to_budget,
+            "failure_kind": run_failure_kind,
         }
         return _ok(json.dumps(result, indent=2))
 
@@ -661,6 +695,7 @@ def _normalize_grade(value: Any) -> GradeResult:
             "dimensions": {},
             "feedback_text": "",
             "module_feedback": {},
+            "failure_kind": None,
         }
     if isinstance(value, (int, float)):
         return {
@@ -668,6 +703,7 @@ def _normalize_grade(value: Any) -> GradeResult:
             "dimensions": {},
             "feedback_text": "",
             "module_feedback": {},
+            "failure_kind": None,
         }
     if isinstance(value, dict):
         score_raw = value.get("score", 0.0)
@@ -693,17 +729,21 @@ def _normalize_grade(value: Any) -> GradeResult:
             for k, v in module_feedback_raw.items():
                 if isinstance(k, str) and isinstance(v, str):
                     module_feedback[k] = v
+        fk_raw = value.get("failure_kind")
+        failure_kind = fk_raw if isinstance(fk_raw, str) and fk_raw else None
         return {
             "score": score,
             "dimensions": dimensions,
             "feedback_text": feedback_text,
             "module_feedback": module_feedback,
+            "failure_kind": failure_kind,
         }
     return {
         "score": 0.0,
         "dimensions": {},
         "feedback_text": f"<grader returned unsupported type: {type(value).__name__}>",
         "module_feedback": {},
+        "failure_kind": None,
     }
 
 
@@ -745,6 +785,7 @@ def _append_run_records(
     feedback_corpus: list[dict[str, Any]],
     usd_used_in_run: float,
     aborted_due_to_budget: bool,
+    failure_kind: str | None,
 ) -> None:
     overrides_meta = (
         sorted(atom_source_overrides.keys())
@@ -766,6 +807,7 @@ def _append_run_records(
         "feedback_corpus": feedback_corpus,
         "usd_used_in_run": usd_used_in_run,
         "aborted_due_to_budget": aborted_due_to_budget,
+        "failure_kind": failure_kind,
         "at": time.time(),
     }
     with path.open("a", encoding="utf-8") as fh:
