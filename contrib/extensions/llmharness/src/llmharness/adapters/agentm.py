@@ -7,8 +7,8 @@ Phase 1 (extractor) on every TurnEndEvent:
 * Build a per-firing :class:`ExtractionState`, populate ``turn_texts``
   with rendered turn content (used by the witness pipeline).
 * Spawn an extractor child whose extensions list carries the state via
-  the ``state`` config knob. The child registers ``register_event`` /
-  ``add_edge`` / ``submit_extraction`` closed over that state.
+  the ``state`` config knob. The child registers ``submit_events``
+  closed over that state (single-tool flow; one shot per firing).
 * After the child loop terminates, snapshot
   :class:`RawExtractorOutput` from the state and write entries:
   ``audit_event`` per accepted event, ``audit_edge`` per accepted edge,
@@ -69,7 +69,7 @@ from ..audit.auditor import (
 )
 from ..audit.extractor import (
     EXTRACTOR_STATE_SERVICE_KEY,
-    SUBMIT_EXTRACTION_TOOL_NAME,
+    SUBMIT_EVENTS_TOOL_NAME,
     ExtractionState,
     RawExtractorOutput,
     compose_extractor_extensions,
@@ -611,7 +611,7 @@ async def _drain_extractor(
             api,
             _EXTRACTOR_NO_CALL_ENTRY,
             {
-                "reason": (f"child returned without calling {SUBMIT_EXTRACTION_TOOL_NAME}"),
+                "reason": (f"child returned without calling {SUBMIT_EVENTS_TOOL_NAME}"),
                 "turn_window": turn_window,
             },
         )
@@ -677,7 +677,7 @@ async def _spawn_extractor_child(
     payload: dict[str, Any],
     turn_window: list[int],
 ) -> bool:
-    """Run the extractor child. Returns True iff submit_extraction was called.
+    """Run the extractor child. Returns True iff submit_events was called.
 
     Raises :class:`_ExtractorSpawnError` for spawn / prompt failures so
     the caller can route them to the typed failure path.
@@ -701,7 +701,7 @@ async def _spawn_extractor_child(
         raise _ExtractorSpawnError(str(exc)) from exc
 
     await _safe_shutdown(child)
-    return _has_tool_call(messages, SUBMIT_EXTRACTION_TOOL_NAME)
+    return _has_tool_call(messages, SUBMIT_EVENTS_TOOL_NAME)
 
 
 def _has_tool_call(messages: list[AgentMessage], tool_name: str) -> bool:

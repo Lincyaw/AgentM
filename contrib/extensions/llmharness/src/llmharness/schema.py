@@ -13,9 +13,12 @@ V3 breaking changes (issue #134, 2026-05-10):
   ``dec``, ``concl``. The earlier long forms (``hypothesis``,
   ``evidence``, ``decision``, ``action``, ``conclusion``) are gone, and
   the v2 ``REFLECTION`` member is dropped — design §3 lists six kinds.
-- ``Event.refs`` is removed. Edges are now first-class records: the
-  extractor emits ``Edge`` instances via ``add_edge`` (design §7.1) and
-  the adapter persists them as ``llmharness.audit_edge`` entries.
+- ``Event.refs`` is removed at the schema level. Edges are first-class
+  records persisted as ``llmharness.audit_edge`` entries. (V3.1 lets
+  the extractor LLM submit events with embedded ``refs[]`` in a single
+  ``submit_events`` call, but those refs are validated and unrolled
+  into ``Edge`` instances inside ``ExtractionState.commit`` — the
+  schema-level wire format remains ``Event`` + separate ``Edge``.)
 - New ``Edge`` + ``EdgeKind`` dataclass / enum for those records, with
   witness fields (``cited_entities``, ``cited_quote``) and per-side
   source-turn tuples — see design §4.c, §7.1.
@@ -92,11 +95,12 @@ class Event:
 class Edge:
     """A directed witness-bearing edge between two events (design §7.1).
 
-    Mirrors the ``add_edge`` tool-call schema: the extractor must back
-    every edge with a citation — entities and/or a verbatim quote — that
-    the witness layer can verify against the source turns. The adapter
-    persists each accepted edge as a single ``llmharness.audit_edge``
-    entry whose payload is :meth:`to_dict`.
+    Mirrors the witness-bearing ref the extractor LLM emits inside an
+    event's ``refs[]`` (V3.1 ``submit_events`` payload): each ref
+    carries entities and/or a verbatim quote that the witness layer
+    verifies against the source turns. The adapter persists each
+    accepted edge as a single ``llmharness.audit_edge`` entry whose
+    payload is :meth:`to_dict`.
     """
 
     src: int

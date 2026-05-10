@@ -1,31 +1,40 @@
 """Per-firing in-memory ``ExtractionState`` for the v3 extractor.
 
-This is mechanism (not an atom): the adapter constructs one
-``ExtractionState`` per extractor firing, hands it to
-``build_extractor_tools`` so the tool callbacks close over it, and
-freezes it at the end to drive ``RawExtractorOutput``.
+V3.1 (events-only single-tool flow): one ``submit_events`` call carries
+the entire graph as a list of events with embedded ``refs[]``. The
+state IS the output: the adapter constructs one ``ExtractionState`` per
+firing, hands it to ``build_extractor_tools`` so the tool callback
+closes over it, and reads ``events`` / ``edges`` / ``dropped_edges``
+back after the child loop terminates.
 
-Validation order in ``add_edge`` mirrors design §4.f:
-existence → src≠dst → turns subset → cycle → per-kind witness.
-The retry budget (``max_retry = 2`` per ``(src, dst, kind)`` tuple,
-i.e. 3 attempts including the initial one) is enforced INSIDE
-``add_edge``: after the third failure on the same tuple the edge is
-recorded into ``dropped_edges`` and subsequent attempts on the same
-tuple short-circuit with the terminal sentinel
-``"giving up on this edge"`` without re-validating.
+The validation pipeline runs inside :meth:`ExtractionState.commit`:
+
+1. **events shape**: ``id`` must be 1..N strictly increasing, each
+   ``kind`` is a valid ``EventKind``, ``summary`` non-empty,
+   ``source_turns`` non-empty.
+2. **refs shape**: ``to`` must reference an earlier event id (``< self.id``,
+   guaranteeing no cycles + time-order); ``kind`` is a valid ``EdgeKind``;
+   ``data`` requires non-empty ``cited_entities``; ``ref`` requires
+   non-empty ``cited_quote``.
+3. **witness**: each ref's witnesses must appear (case+ws normalized
+   substring) in BOTH the source-turn text of the referenced event and
+   the source-turn text of the citing event.
+
+If any **event-shape** check fails the whole submission is rejected
+(LLM gets the error in the tool result and may retry, bounded by the
+caller's attempt budget). If shape is fine but some **refs** fail
+witness, those refs are recorded into ``dropped_edges`` and the events
++ surviving refs are accepted (design §4.f partial-success path).
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
 from ...schema import Edge, EdgeKind, Event, EventKind
+from .._enum_schema import EDGE_KIND_VALUES, EVENT_KIND_VALUES
 from .witness import witness_data, witness_ref
-
-_GIVING_UP_SENTINEL = "giving up on this edge"
-_MAX_RETRY = 2  # plus the initial attempt = up to 3 attempts per tuple
 
 
 @dataclass
@@ -38,205 +47,223 @@ class ExtractionState:
     # are the rendered text content for that turn.
     turn_texts: dict[int, str] = field(default_factory=dict)
 
-    # event_id -> Event (insertion order, monotonic ids starting at 1).
-    events: dict[int, Event] = field(default_factory=dict)
-    edges: list[Edge] = field(default_factory=list)
-    next_event_id: int = 1
-
-    # Per-(src, dst, kind) attempt counter. After the third failure the
-    # tuple is frozen and `add_edge` short-circuits on subsequent
-    # attempts.
-    failure_counts: dict[tuple[int, int, str], int] = field(default_factory=dict)
-    # Tuples that have reached the terminal "giving up" state. Keeps
-    # `add_edge` deterministic on repeat calls without re-validating.
-    terminal_tuples: set[tuple[int, int, str]] = field(default_factory=set)
-    dropped_edges: list[dict[str, Any]] = field(default_factory=list)
+    # Frozen results filled in by ``commit``.
+    events: tuple[Event, ...] = ()
+    edges: tuple[Edge, ...] = ()
+    dropped_edges: tuple[dict[str, Any], ...] = ()
+    committed: bool = False
 
     # ------------------------------------------------------------------
-    # Public mutators
+    # Public mutator: single-shot commit
 
-    def register_event(
-        self,
-        *,
-        kind: EventKind,
-        summary: str,
-        source_turns: Iterable[int],
-    ) -> int:
-        """Register a new event. Returns its monotonic id."""
+    def commit(self, events_payload: list[dict[str, Any]]) -> str | None:
+        """Validate ``events_payload`` and populate the frozen results.
 
-        event_id = self.next_event_id
-        self.events[event_id] = Event(
-            id=event_id,
-            kind=kind,
-            summary=summary,
-            source_turns=list(source_turns),
-        )
-        self.next_event_id += 1
-        return event_id
+        Returns ``None`` on (full-or-partial) success; ``ExtractionState``
+        is then populated with ``events`` / ``edges`` / ``dropped_edges``
+        and ``committed=True``.
 
-    def add_edge(
-        self,
-        *,
-        src_event_id: int,
-        dst_event_id: int,
-        kind: EdgeKind,
-        reason: str,
-        src_turns: Iterable[int],
-        dst_turns: Iterable[int],
-        cited_entities: Iterable[str] = (),
-        cited_quote: str = "",
-    ) -> str | None:
-        """Validate and append an edge. Returns None on success, error string on failure.
-
-        The retry budget is enforced here: after the third failure on
-        the same ``(src, dst, kind)`` tuple, the edge is recorded into
-        ``dropped_edges`` and the sentinel ``"giving up on this edge"``
-        error is returned. Subsequent attempts on the same tuple return
-        the same terminal error WITHOUT re-validating.
+        Returns an error string on hard rejection (event-shape errors).
+        The state is NOT mutated on hard reject — the LLM may retry by
+        re-calling ``submit_events`` with a corrected payload, subject
+        to the caller's attempt budget.
         """
 
-        src_turns_list = list(src_turns)
-        dst_turns_list = list(dst_turns)
-        cited_entities_list = list(cited_entities)
-        tuple_key = (src_event_id, dst_event_id, kind.value)
+        if self.committed:
+            return "submit_events: already committed; one submission per firing"
 
-        # Short-circuit terminal tuples — design §4.f retry policy.
-        if tuple_key in self.terminal_tuples:
-            return f"{_GIVING_UP_SENTINEL}: ({src_event_id}, {dst_event_id}, {kind.value}) frozen"
+        # Pass 1: validate event shapes + collect into a working list.
+        if not isinstance(events_payload, list):
+            return "submit_events: 'events' must be an array"
+        working: list[Event] = []
+        for idx, raw in enumerate(events_payload):
+            if not isinstance(raw, dict):
+                return f"submit_events: events[{idx}] must be an object"
+            err, ev = _validate_event_shape(idx, raw)
+            if err is not None:
+                return err
+            assert ev is not None
+            working.append(ev)
 
-        err = self._validate_edge(
-            src_event_id=src_event_id,
-            dst_event_id=dst_event_id,
-            kind=kind,
-            src_turns=src_turns_list,
-            dst_turns=dst_turns_list,
-            cited_entities=cited_entities_list,
-            cited_quote=cited_quote,
-        )
-        if err is None:
-            self.edges.append(
-                Edge(
-                    src=src_event_id,
-                    dst=dst_event_id,
-                    kind=kind,
-                    reason=reason,
-                    src_turns=tuple(src_turns_list),
-                    dst_turns=tuple(dst_turns_list),
-                    cited_entities=tuple(cited_entities_list),
-                    cited_quote=cited_quote,
+        # Pass 2: cross-event id check — strictly 1..N, no gaps, no
+        # repeats. The shape check above guarantees ``id`` is an int.
+        for idx, ev in enumerate(working, start=1):
+            if ev.id != idx:
+                return (
+                    "submit_events: event ids must be 1, 2, 3, ... in submission "
+                    f"order; got events[{idx - 1}].id={ev.id} (expected {idx})"
                 )
-            )
-            return None
 
-        # Record failure and check retry budget.
-        prev = self.failure_counts.get(tuple_key, 0)
-        attempts_used = prev + 1
-        self.failure_counts[tuple_key] = attempts_used
-        if attempts_used > _MAX_RETRY:
-            # Third (or later) failure -> terminal.
-            self.terminal_tuples.add(tuple_key)
-            self.dropped_edges.append(
-                {
-                    "src": src_event_id,
-                    "dst": dst_event_id,
-                    "kind": kind.value,
-                    "last_error": err,
-                }
-            )
-            return f"{_GIVING_UP_SENTINEL}: {err}"
-        return err
+        events_by_id = {ev.id: ev for ev in working}
 
-    def freeze(
-        self,
-    ) -> tuple[tuple[Event, ...], tuple[Edge, ...], list[dict[str, Any]]]:
-        """Snapshot the final state for the adapter."""
+        # Pass 3: validate refs and accumulate edges + dropped.
+        accepted_edges: list[Edge] = []
+        dropped: list[dict[str, Any]] = []
+        for raw_event, ev in zip(events_payload, working, strict=True):
+            refs_raw = raw_event.get("refs", [])
+            if refs_raw is None:
+                refs_raw = []
+            if not isinstance(refs_raw, list):
+                return f"submit_events: events[{ev.id - 1}].refs must be an array"
+            for ridx, raw_ref in enumerate(refs_raw):
+                if not isinstance(raw_ref, dict):
+                    return (
+                        f"submit_events: events[{ev.id - 1}].refs[{ridx}] must be "
+                        "an object"
+                    )
+                err = _validate_ref_shape(ev.id, ridx, raw_ref, events_by_id)
+                if err is not None:
+                    return err
+                # Witness: hard fields are present, validate substrings.
+                src_event = events_by_id[int(raw_ref["to"])]
+                kind = EdgeKind(raw_ref["kind"])
+                src_text = self._concat_turn_texts(src_event.source_turns)
+                dst_text = self._concat_turn_texts(ev.source_turns)
+                cited_entities = list(raw_ref.get("cited_entities", []) or [])
+                cited_quote = str(raw_ref.get("cited_quote", "") or "")
+                if kind is EdgeKind.DATA:
+                    werr = witness_data(cited_entities, src_text, dst_text)
+                else:
+                    werr = witness_ref(cited_quote, src_text, dst_text)
+                if werr is not None:
+                    dropped.append(
+                        {
+                            "src": src_event.id,
+                            "dst": ev.id,
+                            "kind": kind.value,
+                            "last_error": werr,
+                        }
+                    )
+                    continue
+                accepted_edges.append(
+                    Edge(
+                        src=src_event.id,
+                        dst=ev.id,
+                        kind=kind,
+                        reason=str(raw_ref.get("reason", "")),
+                        src_turns=tuple(src_event.source_turns),
+                        dst_turns=tuple(ev.source_turns),
+                        cited_entities=tuple(cited_entities),
+                        cited_quote=cited_quote,
+                    )
+                )
 
-        events = tuple(self.events[i] for i in sorted(self.events))
-        edges = tuple(self.edges)
-        return events, edges, list(self.dropped_edges)
+        self.events = tuple(working)
+        self.edges = tuple(accepted_edges)
+        self.dropped_edges = tuple(dropped)
+        self.committed = True
+        return None
 
-    # ------------------------------------------------------------------
-    # Internals
-
-    def _validate_edge(
-        self,
-        *,
-        src_event_id: int,
-        dst_event_id: int,
-        kind: EdgeKind,
-        src_turns: list[int],
-        dst_turns: list[int],
-        cited_entities: list[str],
-        cited_quote: str,
-    ) -> str | None:
-        # 1. Existence + src != dst.
-        if src_event_id not in self.events:
-            return f"add_edge: src_event_id {src_event_id} not registered"
-        if dst_event_id not in self.events:
-            return f"add_edge: dst_event_id {dst_event_id} not registered"
-        if src_event_id == dst_event_id:
-            return "add_edge: src_event_id must differ from dst_event_id"
-
-        # 2. Turns are subsets of the corresponding event source_turns.
-        src_event = self.events[src_event_id]
-        dst_event = self.events[dst_event_id]
-        src_allowed = set(src_event.source_turns)
-        dst_allowed = set(dst_event.source_turns)
-        bad_src = [t for t in src_turns if t not in src_allowed]
-        if bad_src:
-            return (
-                f"add_edge: src_turns {bad_src} not subset of "
-                f"events[{src_event_id}].source_turns {sorted(src_allowed)}"
-            )
-        bad_dst = [t for t in dst_turns if t not in dst_allowed]
-        if bad_dst:
-            return (
-                f"add_edge: dst_turns {bad_dst} not subset of "
-                f"events[{dst_event_id}].source_turns {sorted(dst_allowed)}"
-            )
-
-        # 3. Cycle check.
-        if self.cycle_check(src_event_id, dst_event_id):
-            return f"add_edge: edge {src_event_id}->{dst_event_id} would introduce a cycle"
-
-        # 4. Per-kind witness.
-        src_text = self._concat_turn_texts(src_turns)
-        dst_text = self._concat_turn_texts(dst_turns)
-        if kind is EdgeKind.DATA:
-            return witness_data(cited_entities, src_text, dst_text)
-        # EdgeKind.REF
-        return witness_ref(cited_quote, src_text, dst_text)
-
-    def _concat_turn_texts(self, turn_indices: list[int]) -> str:
+    def _concat_turn_texts(self, turn_indices: list[int] | tuple[int, ...]) -> str:
         # Missing turn texts contribute the empty string — the witness
         # check will then naturally fail rather than KeyError out.
         return " ".join(self.turn_texts.get(idx, "") for idx in turn_indices)
 
-    def cycle_check(self, src: int, dst: int) -> bool:
-        """Return True iff adding ``src->dst`` would create a cycle.
 
-        Treats both ``data`` and ``ref`` as directed edges (design §4.f
-        step 3). Implementation: DFS from ``dst`` in the existing edge
-        set; if we can reach ``src`` then adding ``src->dst`` closes a
-        cycle.
-        """
+def _validate_event_shape(idx: int, raw: dict[str, Any]) -> tuple[str | None, Event | None]:
+    eid_raw = raw.get("id")
+    kind_raw = raw.get("kind")
+    summary_raw = raw.get("summary")
+    source_turns_raw = raw.get("source_turns")
 
-        if src == dst:
-            return True
-        adj: dict[int, list[int]] = {}
-        for e in self.edges:
-            adj.setdefault(e.src, []).append(e.dst)
-        stack: list[int] = [dst]
-        seen: set[int] = set()
-        while stack:
-            node = stack.pop()
-            if node == src:
-                return True
-            if node in seen:
-                continue
-            seen.add(node)
-            stack.extend(adj.get(node, ()))
-        return False
+    if isinstance(eid_raw, bool) or not isinstance(eid_raw, int):
+        return f"submit_events: events[{idx}].id must be an integer", None
+    if eid_raw < 1:
+        return f"submit_events: events[{idx}].id must be >= 1; got {eid_raw}", None
+    if not isinstance(kind_raw, str):
+        return f"submit_events: events[{idx}].kind must be a string", None
+    try:
+        kind = EventKind(kind_raw)
+    except ValueError:
+        return (
+            f"submit_events: events[{idx}].kind {kind_raw!r} not in {EVENT_KIND_VALUES}",
+            None,
+        )
+    if not isinstance(summary_raw, str) or not summary_raw.strip():
+        return f"submit_events: events[{idx}].summary must be a non-empty string", None
+    if not isinstance(source_turns_raw, list) or not source_turns_raw:
+        return (
+            f"submit_events: events[{idx}].source_turns must be a non-empty "
+            "array of integers",
+            None,
+        )
+    source_turns: list[int] = []
+    for t in source_turns_raw:
+        if isinstance(t, bool) or not isinstance(t, int):
+            return (
+                f"submit_events: events[{idx}].source_turns contains "
+                f"non-integer entry {t!r}",
+                None,
+            )
+        source_turns.append(t)
+    return None, Event(id=eid_raw, kind=kind, summary=summary_raw, source_turns=source_turns)
+
+
+def _validate_ref_shape(
+    self_event_id: int,
+    ridx: int,
+    raw: dict[str, Any],
+    events_by_id: dict[int, Event],
+) -> str | None:
+    to_raw = raw.get("to")
+    kind_raw = raw.get("kind")
+
+    if isinstance(to_raw, bool) or not isinstance(to_raw, int):
+        return (
+            f"submit_events: events[{self_event_id - 1}].refs[{ridx}].to must be "
+            "an integer"
+        )
+    if to_raw not in events_by_id:
+        return (
+            f"submit_events: events[{self_event_id - 1}].refs[{ridx}].to={to_raw} "
+            "does not reference any submitted event id"
+        )
+    if to_raw >= self_event_id:
+        return (
+            f"submit_events: events[{self_event_id - 1}].refs[{ridx}].to={to_raw} "
+            f"must reference an EARLIER event (< {self_event_id}); refs only flow "
+            "forward in time"
+        )
+    if not isinstance(kind_raw, str):
+        return (
+            f"submit_events: events[{self_event_id - 1}].refs[{ridx}].kind must "
+            "be a string"
+        )
+    try:
+        kind = EdgeKind(kind_raw)
+    except ValueError:
+        return (
+            f"submit_events: events[{self_event_id - 1}].refs[{ridx}].kind "
+            f"{kind_raw!r} not in {EDGE_KIND_VALUES}"
+        )
+
+    cited_entities = raw.get("cited_entities", [])
+    cited_quote = raw.get("cited_quote", "")
+    if kind is EdgeKind.DATA:
+        if not isinstance(cited_entities, list) or not cited_entities:
+            return (
+                f"submit_events: events[{self_event_id - 1}].refs[{ridx}] kind="
+                "'data' requires non-empty cited_entities"
+            )
+        for e in cited_entities:
+            if not isinstance(e, str) or not e:
+                return (
+                    f"submit_events: events[{self_event_id - 1}].refs[{ridx}]."
+                    "cited_entities must be non-empty strings"
+                )
+    else:  # EdgeKind.REF
+        if not isinstance(cited_quote, str) or not cited_quote:
+            return (
+                f"submit_events: events[{self_event_id - 1}].refs[{ridx}] kind="
+                "'ref' requires non-empty cited_quote"
+            )
+    reason = raw.get("reason", "")
+    if not isinstance(reason, str):
+        return (
+            f"submit_events: events[{self_event_id - 1}].refs[{ridx}].reason "
+            "must be a string"
+        )
+    return None
 
 
 __all__ = ["ExtractionState"]

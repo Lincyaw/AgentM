@@ -1,11 +1,11 @@
-"""§11 single-file extension: register the v3 extractor tool trio.
+"""§11 single-file extension: register the v3.1 extractor's single tool.
 
-The adapter constructs a per-firing :class:`ExtractionState`, publishes
-it via ``api.set_service("llmharness.extractor_state", state)``, and
-mounts this module in the child session's extensions list. ``install``
-reads the state out of the service registry and registers the three
-closed-over tools (``register_event``, ``add_edge``,
-``submit_extraction``) on the child kernel.
+The adapter constructs a per-firing :class:`ExtractionState`, hands it
+to this module via ``config['state']`` at child-session-spawn time, and
+``install`` registers the closed-over ``submit_events`` tool on the
+child kernel. The fallback path uses
+``api.get_service("llmharness.extractor_state")`` for tests that
+pre-publish the state on the same session.
 
 This file also exposes :func:`compose_extractor_extensions`, which
 returns the ordered ``[(module, config), ...]`` list the adapter
@@ -13,7 +13,7 @@ mounts. Order: observability -> cards_tools -> THIS atom -> system_prompt.
 
 §11 contract: single file, no atom-to-atom imports, no
 ``core._internal`` import, no ``harness.session`` import. The state
-service handoff is the only cross-firing channel.
+config-payload handoff is the only cross-firing channel.
 """
 
 from __future__ import annotations
@@ -37,16 +37,11 @@ _EXTRACTOR_TOOLS_MODULE = "llmharness.audit.extractor.extensions"
 MANIFEST = ExtensionManifest(
     name="extractor_tools",
     description=(
-        "Register the v3 extractor tools (register_event, add_edge, "
-        "submit_extraction) bound to the per-firing ExtractionState "
-        "published by the adapter under "
-        f"{EXTRACTOR_STATE_SERVICE_KEY!r}."
+        "Register the v3.1 extractor's single ``submit_events`` tool "
+        "bound to the per-firing ExtractionState published by the "
+        f"adapter under {EXTRACTOR_STATE_SERVICE_KEY!r}."
     ),
-    registers=(
-        "tool:register_event",
-        "tool:add_edge",
-        "tool:submit_extraction",
-    ),
+    registers=("tool:submit_events",),
     config_schema={
         "type": "object",
         "properties": {},

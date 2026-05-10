@@ -1,179 +1,297 @@
-"""ExtractionState fail-stop tests: validation order + retry budget.
+"""ExtractionState fail-stop tests for v3.1 single-tool flow.
 
-A bug in any of these positions corrupts every extracted graph
-downstream. Tests follow the §4.f algorithm exactly: existence ->
-src!=dst -> turns subset -> cycle -> per-kind witness, with the retry
-budget enforced inside ``add_edge``.
+The extractor LLM submits the entire graph in ONE ``submit_events``
+call; ``ExtractionState.commit`` is the lone validation gate. Bugs
+here corrupt every extracted graph downstream, so the tests pin the
+load-bearing positions:
+
+- event-shape errors hard-reject the whole submission (state
+  unchanged → LLM may retry with the error message)
+- id ordering must be 1..N strictly increasing
+- refs may only point to EARLIER events (id < self.id) — this is the
+  cycle prevention by construction
+- per-kind witness fields are required (data → cited_entities,
+  ref → cited_quote)
+- witness substring failures DROP the failing ref into
+  ``dropped_edges`` while keeping the events accepted (partial-success
+  path, design §6)
+- commit is one-shot: a second commit on the same state returns an
+  error
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 from llmharness.audit.extractor.state import ExtractionState
-from llmharness.schema import EdgeKind, EventKind
 
 
-def _state_with_two_events() -> tuple[ExtractionState, int, int]:
-    state = ExtractionState(
+def _state() -> ExtractionState:
+    return ExtractionState(
         turn_texts={
             10: "the abnormal_traces table contains four rows",
             11: "we should query abnormal_traces next",
         }
     )
-    src = state.register_event(kind=EventKind.EVID, summary="src event", source_turns=[10])
-    dst = state.register_event(kind=EventKind.HYP, summary="dst event", source_turns=[11])
-    return state, src, dst
 
 
-def test_register_event_assigns_monotonic_ids_starting_at_one() -> None:
-    state = ExtractionState()
-    a = state.register_event(kind=EventKind.TASK, summary="a", source_turns=[0])
-    b = state.register_event(kind=EventKind.HYP, summary="b", source_turns=[1])
-    c = state.register_event(kind=EventKind.ACT, summary="c", source_turns=[2])
-    assert (a, b, c) == (1, 2, 3)
+def _evid(eid: int, *, turns: list[int], summary: str = "evt") -> dict[str, Any]:
+    return {"id": eid, "kind": "evid", "summary": summary, "source_turns": turns}
 
 
-def test_add_edge_happy_path_appends_exactly_one_edge() -> None:
-    state, src, dst = _state_with_two_events()
-    err = state.add_edge(
-        src_event_id=src,
-        dst_event_id=dst,
-        kind=EdgeKind.DATA,
-        reason="evidence supports hypothesis",
-        src_turns=[10],
-        dst_turns=[11],
-        cited_entities=["abnormal_traces"],
+# --- happy path -------------------------------------------------------------
+
+
+def test_commit_happy_path_accepts_events_and_witnessed_ref() -> None:
+    state = _state()
+    err = state.commit(
+        [
+            _evid(1, turns=[10], summary="src"),
+            {
+                **_evid(2, turns=[11], summary="dst"),
+                "refs": [
+                    {
+                        "to": 1,
+                        "kind": "data",
+                        "reason": "evidence supports next step",
+                        "cited_entities": ["abnormal_traces"],
+                    }
+                ],
+            },
+        ]
+    )
+    assert err is None
+    assert len(state.events) == 2
+    assert len(state.edges) == 1
+    assert state.edges[0].src == 1 and state.edges[0].dst == 2
+    assert state.dropped_edges == ()
+    assert state.committed is True
+
+
+def test_commit_with_empty_events_is_accepted() -> None:
+    state = _state()
+    err = state.commit([])
+    assert err is None
+    assert state.events == ()
+    assert state.edges == ()
+    assert state.committed is True
+
+
+# --- event-shape hard rejects (state unchanged) ----------------------------
+
+
+def test_commit_rejects_non_sequential_ids() -> None:
+    state = _state()
+    err = state.commit(
+        [
+            _evid(1, turns=[10]),
+            _evid(3, turns=[11]),  # gap: should have been 2
+        ]
+    )
+    assert err is not None and "1, 2, 3" in err
+    assert state.committed is False
+    assert state.events == ()
+
+
+def test_commit_rejects_unknown_event_kind() -> None:
+    state = _state()
+    err = state.commit(
+        [
+            {
+                "id": 1,
+                "kind": "not_a_real_kind",
+                "summary": "x",
+                "source_turns": [10],
+            }
+        ]
+    )
+    assert err is not None and "kind" in err
+    assert state.committed is False
+
+
+def test_commit_rejects_empty_summary() -> None:
+    state = _state()
+    err = state.commit(
+        [
+            {"id": 1, "kind": "evid", "summary": "   ", "source_turns": [10]},
+        ]
+    )
+    assert err is not None and "summary" in err
+    assert state.committed is False
+
+
+def test_commit_rejects_empty_source_turns() -> None:
+    state = _state()
+    err = state.commit([{"id": 1, "kind": "evid", "summary": "x", "source_turns": []}])
+    assert err is not None and "source_turns" in err
+    assert state.committed is False
+
+
+# --- ref-shape hard rejects ------------------------------------------------
+
+
+def test_commit_rejects_ref_to_self_or_later_event() -> None:
+    """``refs[].to`` must be < self.id — guarantees no cycles by construction."""
+    state = _state()
+    err = state.commit(
+        [
+            _evid(1, turns=[10]),
+            {
+                **_evid(2, turns=[11]),
+                "refs": [
+                    {
+                        "to": 2,  # self-ref
+                        "kind": "ref",
+                        "reason": "x",
+                        "cited_quote": "abnormal_traces",
+                    }
+                ],
+            },
+        ]
+    )
+    assert err is not None and "EARLIER" in err
+    assert state.committed is False
+
+
+def test_commit_rejects_ref_to_unknown_event_id() -> None:
+    state = _state()
+    err = state.commit(
+        [
+            _evid(1, turns=[10]),
+            {
+                **_evid(2, turns=[11]),
+                "refs": [
+                    {
+                        "to": 99,
+                        "kind": "ref",
+                        "reason": "x",
+                        "cited_quote": "abnormal_traces",
+                    }
+                ],
+            },
+        ]
+    )
+    assert err is not None and "99" in err
+    assert state.committed is False
+
+
+def test_commit_rejects_data_ref_with_empty_cited_entities() -> None:
+    state = _state()
+    err = state.commit(
+        [
+            _evid(1, turns=[10]),
+            {
+                **_evid(2, turns=[11]),
+                "refs": [
+                    {
+                        "to": 1,
+                        "kind": "data",
+                        "reason": "x",
+                        "cited_entities": [],
+                    }
+                ],
+            },
+        ]
+    )
+    assert err is not None and "cited_entities" in err
+    assert state.committed is False
+
+
+def test_commit_rejects_ref_kind_with_empty_cited_quote() -> None:
+    state = _state()
+    err = state.commit(
+        [
+            _evid(1, turns=[10]),
+            {
+                **_evid(2, turns=[11]),
+                "refs": [
+                    {
+                        "to": 1,
+                        "kind": "ref",
+                        "reason": "x",
+                        "cited_quote": "",
+                    }
+                ],
+            },
+        ]
+    )
+    assert err is not None and "cited_quote" in err
+    assert state.committed is False
+
+
+# --- witness drops (partial success) ---------------------------------------
+
+
+def test_commit_drops_ref_when_witness_substring_missing() -> None:
+    """Witness failure → ref dropped, events accepted, partial entry recorded."""
+    state = _state()
+    err = state.commit(
+        [
+            _evid(1, turns=[10]),
+            {
+                **_evid(2, turns=[11]),
+                "refs": [
+                    {
+                        "to": 1,
+                        "kind": "ref",
+                        "reason": "x",
+                        "cited_quote": "this phrase is absent xyzzy",
+                    }
+                ],
+            },
+        ]
+    )
+    assert err is None  # partial success is not a hard reject
+    assert len(state.events) == 2
+    assert state.edges == ()
+    assert len(state.dropped_edges) == 1
+    dropped = state.dropped_edges[0]
+    assert dropped["src"] == 1 and dropped["dst"] == 2 and dropped["kind"] == "ref"
+    assert "last_error" in dropped
+
+
+def test_commit_partial_keeps_witnessed_refs_and_drops_failing_ones() -> None:
+    state = ExtractionState(
+        turn_texts={
+            10: "good token here: alpha bravo charlie",
+            11: "alpha bravo charlie reappears here",
+        }
+    )
+    err = state.commit(
+        [
+            _evid(1, turns=[10]),
+            {
+                **_evid(2, turns=[11]),
+                "refs": [
+                    {
+                        "to": 1,
+                        "kind": "ref",
+                        "reason": "good ref",
+                        "cited_quote": "alpha bravo charlie",
+                    },
+                    {
+                        "to": 1,
+                        "kind": "data",
+                        "reason": "bad data ref",
+                        "cited_entities": ["nonexistent"],
+                    },
+                ],
+            },
+        ]
     )
     assert err is None
     assert len(state.edges) == 1
-    assert state.edges[0].src == src
-    assert state.edges[0].dst == dst
-
-
-def test_add_edge_unknown_endpoint_is_rejected_and_counted() -> None:
-    state, src, _dst = _state_with_two_events()
-    err = state.add_edge(
-        src_event_id=src,
-        dst_event_id=999,
-        kind=EdgeKind.DATA,
-        reason="bad",
-        src_turns=[10],
-        dst_turns=[11],
-        cited_entities=["abnormal_traces"],
-    )
-    assert err is not None
-    assert "999" in err
-    assert state.edges == []
-    assert state.failure_counts[(src, 999, "data")] == 1
-
-
-def test_add_edge_cycle_is_rejected() -> None:
-    state, a, b = _state_with_two_events()
-    # First edge a -> b: valid.
-    assert (
-        state.add_edge(
-            src_event_id=a,
-            dst_event_id=b,
-            kind=EdgeKind.DATA,
-            reason="ok",
-            src_turns=[10],
-            dst_turns=[11],
-            cited_entities=["abnormal_traces"],
-        )
-        is None
-    )
-    # Second edge b -> a would close a cycle.
-    err = state.add_edge(
-        src_event_id=b,
-        dst_event_id=a,
-        kind=EdgeKind.DATA,
-        reason="cycle",
-        src_turns=[11],
-        dst_turns=[10],
-        cited_entities=["abnormal_traces"],
-    )
-    assert err is not None
-    assert "cycle" in err.lower()
-    assert state.failure_counts[(b, a, "data")] == 1
-
-
-def test_add_edge_src_turns_must_be_subset_of_event_source_turns() -> None:
-    state, src, dst = _state_with_two_events()
-    err = state.add_edge(
-        src_event_id=src,
-        dst_event_id=dst,
-        kind=EdgeKind.DATA,
-        reason="bad",
-        src_turns=[42],  # not in events[src].source_turns = [10]
-        dst_turns=[11],
-        cited_entities=["abnormal_traces"],
-    )
-    assert err is not None
-    assert "subset" in err
-
-
-def test_retry_budget_exhaustion_emits_giving_up_sentinel() -> None:
-    """Three failures on the same (src, dst, kind) tuple -> terminal sentinel.
-
-    The first two failures return ordinary error strings; the third
-    returns a sentinel containing the literal ``giving up on this edge``
-    phrase. Subsequent attempts on the same tuple short-circuit with
-    the same terminal error WITHOUT re-validating, and ``dropped_edges``
-    contains exactly one record.
-    """
-
-    state, src, dst = _state_with_two_events()
-
-    def _try() -> str | None:
-        return state.add_edge(
-            src_event_id=src,
-            dst_event_id=dst,
-            kind=EdgeKind.DATA,
-            reason="bad",
-            src_turns=[10],
-            dst_turns=[11],
-            cited_entities=["nonexistent_token"],  # fails witness check
-        )
-
-    err1 = _try()
-    err2 = _try()
-    err3 = _try()
-    err4 = _try()
-
-    assert err1 is not None and "giving up on this edge" not in err1
-    assert err2 is not None and "giving up on this edge" not in err2
-    assert err3 is not None and "giving up on this edge" in err3
-    assert err4 is not None and "giving up on this edge" in err4
+    assert state.edges[0].kind.value == "ref"
     assert len(state.dropped_edges) == 1
-    assert state.dropped_edges[0]["src"] == src
-    assert state.dropped_edges[0]["dst"] == dst
     assert state.dropped_edges[0]["kind"] == "data"
 
 
-def test_add_edge_data_requires_non_empty_cited_entities() -> None:
-    state, src, dst = _state_with_two_events()
-    err = state.add_edge(
-        src_event_id=src,
-        dst_event_id=dst,
-        kind=EdgeKind.DATA,
-        reason="missing entities",
-        src_turns=[10],
-        dst_turns=[11],
-        cited_entities=[],
-    )
-    assert err is not None
-    assert "cited_entities" in err
+# --- one-shot commit invariant ---------------------------------------------
 
 
-def test_add_edge_ref_requires_non_empty_cited_quote() -> None:
-    state, src, dst = _state_with_two_events()
-    err = state.add_edge(
-        src_event_id=src,
-        dst_event_id=dst,
-        kind=EdgeKind.REF,
-        reason="missing quote",
-        src_turns=[10],
-        dst_turns=[11],
-        cited_quote="",
-    )
-    assert err is not None
-    assert "cited_quote" in err
+def test_commit_is_one_shot() -> None:
+    state = _state()
+    first = state.commit([_evid(1, turns=[10])])
+    assert first is None
+    second = state.commit([_evid(1, turns=[10])])
+    assert second is not None and "already committed" in second
