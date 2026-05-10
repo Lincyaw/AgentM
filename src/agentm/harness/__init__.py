@@ -48,6 +48,10 @@ from agentm.harness.session_manager import (
     SessionManager,
     SessionTreeNode,
 )
+from agentm.harness.session_bootstrap import (
+    make_default_session_store,
+    resolve_session_state,
+)
 from agentm.harness.session_runtime import AgentSessionRuntime
 from agentm.harness.session_services import (
     AgentSessionRuntimeDiagnostic,
@@ -98,5 +102,7 @@ __all__ = [
     "events",
     "GitBackedResourceWriter",
     "load_extension",
+    "make_default_session_store",
+    "resolve_session_state",
     "WriteResult",
 ]

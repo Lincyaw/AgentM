@@ -81,6 +81,7 @@ from .termination import (
     Aborted,
     EndTurn,
     MaxTokens,
+    PauseTurn,
     ProviderError,
     ToolUseExpected,
     VendorSpecific,
@@ -217,6 +218,7 @@ def _default_action(
     2. No tool calls at all → dispatch on the provider's
        :class:`TerminationHint`:
        - :class:`MaxTokens` → ``Stop(ProviderTruncated(kind="max_tokens"))``
+       - :class:`PauseTurn` → ``Step()`` (resend with partial reply in history)
        - :class:`ProviderError` → ``Stop(ProviderTruncated(kind="error"))``
        - :class:`ToolUseExpected` → ``Stop(ProviderProtocolViolation)``
        - :class:`EndTurn` / :class:`Aborted` / :class:`VendorSpecific` /
@@ -251,10 +253,21 @@ def _default_action(
                         )
                     )
                 )
+            if raw == "pause_turn":
+                # Continuation signal — see ``PauseTurn`` below.
+                return Step()
             return Stop(ModelEndTurn())
 
         if isinstance(hint, MaxTokens):
             return Stop(ProviderTruncated(kind="max_tokens"))
+        if isinstance(hint, PauseTurn):
+            # Provider paused mid-turn; the assistant message is partial.
+            # The kernel already appended it to the message list before
+            # this decision, so stepping into another turn resends the
+            # full conversation (now including the partial reply) and the
+            # model resumes from where it stopped. ``max_turns`` still
+            # caps any pathological loop.
+            return Step()
         if isinstance(hint, ProviderError):
             return Stop(ProviderTruncated(kind="error"))
         if isinstance(hint, ToolUseExpected):

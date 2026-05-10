@@ -411,6 +411,30 @@ async def _resolve_extensions(
             to_load = []
         ensure_floor_atom(to_load, compaction_prompts_module)
         ensure_floor_atom(to_load, slash_commands_module)
+        # Layer ``<cwd>/.agentm/atoms/`` agent-installed atoms on top of the
+        # scenario. Without this merge, ``api.install_atom`` calls would only
+        # take effect for the lifetime of one session — the next process
+        # start would load the scenario, see no user atoms, and forget
+        # everything the agent installed previously, even though the source
+        # files are still on disk. Skip duplicates so a scenario that
+        # explicitly lists a user-atom module wins over the auto-discovered
+        # entry (preserves config).
+        user_atoms = await collect_auto_discovered_atoms(
+            bus=bus,
+            sources=(
+                AtomSource(
+                    label="user",
+                    discover=lambda: discover_mod.discover_user_atoms(
+                        Path(config.cwd)
+                    ),
+                    skip_label="user atom ",
+                ),
+            ),
+        )
+        existing_modules = {module for module, _ in to_load}
+        for module_path, atom_config in user_atoms:
+            if module_path not in existing_modules:
+                to_load.append((module_path, atom_config))
     else:
         to_load = await collect_auto_discovered_atoms(
             bus=bus,

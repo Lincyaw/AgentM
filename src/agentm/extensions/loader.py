@@ -15,7 +15,16 @@ Path resolution:
 
 - An absolute path argument loads that file directly (or its
   ``manifest.yaml`` if a directory).
-- A bare name resolves to ``<cwd>/contrib/scenarios/<name>/manifest.yaml``.
+- A bare name is searched in this order:
+    1. ``$AGENTM_PROJECT_ROOT/contrib/scenarios/<name>/manifest.yaml``
+       when the env var is set (gives long-running daemons a stable
+       anchor independent of process cwd).
+    2. ``<cwd>/contrib/scenarios/<name>/manifest.yaml`` — the original
+       behavior; works when ``agentm`` is invoked from a project root.
+    3. ``<agentm-package-root>/contrib/scenarios/<name>/manifest.yaml``
+       — the worktree directory in editable installs, found by walking
+       up from the ``agentm`` package source. Wheel installs without a
+       sibling ``contrib/`` simply skip this candidate.
 """
 
 from __future__ import annotations
@@ -35,6 +44,75 @@ from agentm.harness.extension import ExtensionLoadError
 
 class ScenarioLoadError(ExtensionLoadError):
     """Raised when a scenario YAML cannot be resolved or validated."""
+
+
+def _candidate_roots() -> list[Path]:
+    """Return search roots for ``contrib/scenarios/...`` resolution.
+
+    Order matters: the first root that contains the requested manifest
+    wins. ``AGENTM_PROJECT_ROOT`` lets long-running daemons (e.g. the
+    Feishu gateway) anchor scenario lookup independent of process cwd;
+    cwd is preserved as the canonical default so existing
+    ``agentm --scenario X`` invocations from a project root keep
+    working unchanged. The agentm-package-relative root rescues
+    editable installs whose worktree contains a sibling ``contrib/``
+    that the user didn't ``cd`` into — common when invoking via a
+    console-script entry point.
+    """
+
+    roots: list[Path] = []
+    project_root_env = os.environ.get("AGENTM_PROJECT_ROOT")
+    if project_root_env:
+        roots.append(Path(project_root_env))
+    roots.append(Path(os.getcwd()))
+    try:
+        import agentm  # local import to dodge circular at module load time
+
+        package_dir = Path(agentm.__file__).resolve().parent  # .../src/agentm
+        # An editable install puts agentm under <worktree>/src/agentm,
+        # so the worktree root is ``parent.parent`` (skip the ``src``).
+        # We don't assume the layout — just walk up looking for a
+        # ``contrib`` sibling, capping at ``_PACKAGE_WALK_DEPTH`` levels
+        # to avoid escaping into ancestor directories on machines where
+        # the package lives deeper than expected. ``AGENTM_PROJECT_ROOT``
+        # is the canonical anchor for production deployments; this walk
+        # is a development-time best-effort fallback.
+        walker = package_dir
+        for _ in range(_PACKAGE_WALK_DEPTH):
+            if (walker / "contrib").is_dir():
+                roots.append(walker)
+                break
+            walker = walker.parent
+    except Exception:  # noqa: BLE001 — best-effort fallback
+        pass
+    return roots
+
+
+# Conservative cap: src/agentm → src → worktree-root covers the editable
+# install case in two steps; doubled to absorb wheel layouts that nest
+# the package one level deeper. Bump only when a real layout demands it.
+_PACKAGE_WALK_DEPTH = 4
+
+
+def _resolve_scenario_manifest(name_or_path: str, relative: Path) -> Path:
+    """Find ``relative`` under any of :func:`_candidate_roots`.
+
+    Raises :class:`ScenarioLoadError` listing every candidate that was
+    tried so the operator knows exactly which paths were searched.
+    """
+
+    tried: list[Path] = []
+    for root in _candidate_roots():
+        candidate = root / relative
+        if candidate.is_file():
+            return candidate
+        tried.append(candidate)
+    raise ScenarioLoadError(
+        name_or_path,
+        FileNotFoundError(
+            "scenario manifest not found. Tried: " + ", ".join(str(p) for p in tried)
+        ),
+    )
 
 
 def load_scenario(name_or_path: str) -> list[tuple[str, dict[str, Any]]]:
@@ -64,38 +142,29 @@ def load_scenario_with_meta(
         manifest_path = (
             candidate / "manifest.yaml" if candidate.is_dir() else candidate
         )
-    elif ":" in name_or_path:
-        # Variant syntax: ``<scenario>:<variant>`` -> ``contrib/scenarios/
-        # <scenario>/manifest.<variant>.yaml``. Lets one scenario directory
-        # ship multiple manifest flavors (e.g. ``rca`` + ``rca:baseline``)
-        # without spawning sibling directories that duplicate the package.
-        base, _, variant = name_or_path.rpartition(":")
-        if not base or not variant:
+        if not manifest_path.is_file():
             raise ScenarioLoadError(
-                name_or_path,
-                ValueError(
-                    f"scenario variant must be '<name>:<variant>'; got {name_or_path!r}"
+                str(manifest_path),
+                FileNotFoundError(
+                    f"scenario manifest not found at {manifest_path}"
                 ),
             )
-        manifest_path = (
-            Path(os.getcwd())
-            / "contrib"
-            / "scenarios"
-            / base
-            / f"manifest.{variant}.yaml"
-        )
     else:
-        manifest_path = (
-            Path(os.getcwd()) / "contrib" / "scenarios" / name_or_path / "manifest.yaml"
-        )
-
-    if not manifest_path.is_file():
-        raise ScenarioLoadError(
-            str(manifest_path),
-            FileNotFoundError(
-                f"scenario manifest not found at {manifest_path}"
-            ),
-        )
+        if ":" in name_or_path:
+            base, _, variant = name_or_path.rpartition(":")
+            if not base or not variant:
+                raise ScenarioLoadError(
+                    name_or_path,
+                    ValueError(
+                        f"scenario variant must be '<name>:<variant>'; got {name_or_path!r}"
+                    ),
+                )
+            relative = Path("contrib") / "scenarios" / base / f"manifest.{variant}.yaml"
+        else:
+            relative = (
+                Path("contrib") / "scenarios" / name_or_path / "manifest.yaml"
+            )
+        manifest_path = _resolve_scenario_manifest(name_or_path, relative)
 
     extensions = _load_from_path(manifest_path)
     try:
