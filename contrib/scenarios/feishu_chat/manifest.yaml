@@ -5,11 +5,13 @@ description: |
 
   Optimised for *conversational* interaction: the user types into a
   Feishu chat, the agent replies one turn at a time, and tool calls
-  surface as messages / approval cards back into the same chat. This
-  is **not** a sandboxed scenario — bash and edit/write tools are
-  blocked by default because untrusted user input drives the loop;
-  scenario authors who want a power-user flow should fork this manifest
-  rather than relax the gate inline.
+  surface as messages back into the same chat.
+
+  Power-user posture: bash, edit, write, and propose_change are all
+  enabled and pass through unchallenged. Untrusted-input scenarios
+  should fork this manifest and re-add a ``permission`` deny list or
+  configure ``GatewayConfig.approval_policy.require_approval`` so the
+  approval bridge gates write-class calls.
 
 extensions:
   # --- read-side tooling: agent can investigate its own filesystem
@@ -19,12 +21,16 @@ extensions:
   - module: agentm.extensions.builtin.tool_find
   - module: agentm.extensions.builtin.tool_ls
 
-  # --- bash: how the agent reaches `lark-cli`. Every call is gated
-  # by the Feishu gateway's approval bridge (see GatewayConfig
-  # `approval_policy.require_approval` — defaults to `["bash"]` for
-  # this scenario), so the user sees what the agent intends to run
-  # in their chat before it executes. ---
+  # --- write-side tooling: agent can mutate the workspace directly.
+  # bash for shell, edit for file diffs, write for whole-file rewrites,
+  # propose_change for evolution-substrate atom edits. The Feishu
+  # gateway's approval bridge can still gate any of these via
+  # ``GatewayConfig.approval_policy.require_approval`` — empty by
+  # default for this scenario, so calls pass through unchallenged. ---
   - module: agentm.extensions.builtin.tool_bash
+  - module: agentm.extensions.builtin.tool_edit
+  - module: agentm.extensions.builtin.tool_write
+  - module: agentm.extensions.builtin.tool_propose_change
 
   # --- skills: SKILL.md auto-discovery so feishu-cli (and any future
   # Feishu-shaped skill the operator drops into .claude/skills/) is
@@ -49,28 +55,18 @@ extensions:
         safety. Read schemas with `lark-cli schema <api>` rather than
         guessing argument shape.
 
-        Tool calls that mutate the user's workspace go through human
-        approval cards in this chat. Surface what you intend to do
-        before approving fan-out writes; do not paste credentials or
-        token values back into the chat under any circumstance.
+        You have full read and write access to the workspace via
+        bash, edit, write, and propose_change. No approval cards by
+        default — execute when the request is clear. Still: announce
+        non-trivial fan-out writes (mass renames, recursive deletes,
+        long-running scripts) before launching them, and never paste
+        credentials or token values back into the chat.
 
   # --- runtime facts: workspace cwd + host platform. Listed AFTER
   # ``system_prompt`` so its prepend runs last under EventBus FIFO,
   # placing the runtime block at the very top of the assembled
   # system prompt. See `.claude/designs/runtime-context-atom.md`. ---
   - module: agentm.extensions.builtin.runtime_context
-
-  # --- safety gate: block destructive local tools at the scenario
-  # level. The Feishu gateway also runs its own approval bridge on
-  # write-class tool calls (configured in the gateway YAML, not here)
-  # — these denies are belt-and-suspenders for tools that should
-  # never appear, period. ---
-  - module: agentm.extensions.builtin.permission
-    config:
-      deny:
-        - edit
-        - write
-        - propose_change
 
   # --- observability: every chat turn lands in the JSONL trace so
   # operators can review what the agent actually did. ---
