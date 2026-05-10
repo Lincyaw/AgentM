@@ -476,3 +476,10 @@ concepts:
     related_concepts: [pluggable_architecture, self_modifiable_architecture, tool_event_narrowing]
     plans: []
     tasks: ["tasks/2026-05-09-issue-97-shared-rendering.md"]
+
+  llmharness_cognitive_audit:
+    description: "Two-phase cognitive-audit pipeline for the llmharness contrib extension (Lincyaw/AgentM issue #134). Phase 1 extractor turns each new turn into a structured Event graph; Phase 2 auditor reads the graph + recent verdicts + an advisory hints block and emits at most one reminder. Four redirection principles (2026-05-10): (1) LLM-led judgment — auditor is the primary judge, deterministic signals are advisory hints in the prompt, never a triage queue or mandatory checklist; backward continuity / forward fulfillment / content correctness are framing lenses, not rules. (2) V2 verdict shape drops the DriftType enum (preset enum for a subjective dimension violates the project's no-preset-enum rule; replaced with surface_reminder + reminder_text + continuation_notes carrying free-text auditor memory across firings). (3) Phase 1 graph validator — deterministic mechanical checks after submit_events (refs resolve, no cycles, kind↔source_turns rules, task and conclusion reachability); failure writes extractor_invalid entry and skips auditor for that firing. (4) Branches as first-class audit objects — fork-time scrutiny (right alternatives considered, evidence-backed at fork time, no premature dismissal) and merge-time scrutiny (sufficient evidence per branch, no premature merge, no ghost merge) framed in the auditor prompt; advisory hints surface candidate fork/merge spots via open_branches and multi_branch_syntheses. Lives at contrib/extensions/llmharness/. Public surface (Verdict / Event / Reminder / EventKind in schema.py) is breaking-changed — rca-autorl backwards-compatibility explicitly waived."
+    design: "designs/llmharness-cognitive-audit.md"
+    related_concepts: [extension_as_scenario, pluggable_architecture, observability, single_file_extension_contract]
+    plans: ["plans/2026-05-10-llmharness-issue-134-redirection.md"]
+    tasks: []
