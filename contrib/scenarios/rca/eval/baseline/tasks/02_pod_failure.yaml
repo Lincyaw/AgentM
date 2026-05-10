@@ -1,5 +1,5 @@
 id: 02_pod_failure
-task_class: rca_single
+task_class: rca_baseline
 # Held out from primary score so the gate can't overfit a single fault topology.
 holdout: true
 description: |

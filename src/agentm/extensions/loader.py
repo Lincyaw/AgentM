@@ -64,6 +64,26 @@ def load_scenario_with_meta(
         manifest_path = (
             candidate / "manifest.yaml" if candidate.is_dir() else candidate
         )
+    elif ":" in name_or_path:
+        # Variant syntax: ``<scenario>:<variant>`` -> ``contrib/scenarios/
+        # <scenario>/manifest.<variant>.yaml``. Lets one scenario directory
+        # ship multiple manifest flavors (e.g. ``rca`` + ``rca:baseline``)
+        # without spawning sibling directories that duplicate the package.
+        base, _, variant = name_or_path.rpartition(":")
+        if not base or not variant:
+            raise ScenarioLoadError(
+                name_or_path,
+                ValueError(
+                    f"scenario variant must be '<name>:<variant>'; got {name_or_path!r}"
+                ),
+            )
+        manifest_path = (
+            Path(os.getcwd())
+            / "contrib"
+            / "scenarios"
+            / base
+            / f"manifest.{variant}.yaml"
+        )
     else:
         manifest_path = (
             Path(os.getcwd()) / "contrib" / "scenarios" / name_or_path / "manifest.yaml"
@@ -124,7 +144,11 @@ def _resolve_scenario_name(
         raise ScenarioLoadError(
             source, ValueError("scenario 'name' must be a non-empty string")
         )
-    if declared != dir_name:
+    # Variant manifests carry a ``<dir>:<variant>`` name (e.g. ``rca:baseline``
+    # in ``contrib/scenarios/rca/manifest.baseline.yaml``). Accept either the
+    # bare directory name or that ``<dir>:<variant>`` form.
+    base_name = declared.split(":", 1)[0] if ":" in declared else declared
+    if base_name != dir_name:
         raise ScenarioLoadError(
             source,
             ValueError(

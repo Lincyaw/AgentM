@@ -23,7 +23,7 @@ extensions:
   - module: agentm.extensions.builtin.tool_read
   - module: contrib.extensions.rcabench_contract
 
-  # Multi-agent wiring. ``prompt_loader`` (shared with rca_single) loads
+  # Multi-agent wiring. ``prompt_loader`` (shared with rca:baseline) loads
   # ``prompts/orchestrator.md`` into the system prompt; ``personas: true``
   # also appends the available-agents block and answers
   # ``ResolveSubagentEvent.CHANNEL`` for the personas under ``agents/``

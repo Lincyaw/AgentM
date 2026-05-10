@@ -1,6 +1,6 @@
 # Reflection scaffold — `<TARGET_MODULE>` (scenario: `<TARGET_SCENARIO>`)
 
-You are evolving the **rca_single investigator system prompt**
+You are evolving the **rca:baseline investigator system prompt**
 (`prompts/investigator.md`). The slots below are filled by `tool_reflect`;
 treat the assembled text as your in-context design brief.
 

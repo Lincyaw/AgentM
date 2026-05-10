@@ -1,5 +1,5 @@
 id: 03_service_stress
-task_class: rca_single
+task_class: rca_baseline
 holdout: false
 description: |
   JVMMemoryStress on ts-auth-service. JVM-level resource fault — exercises
