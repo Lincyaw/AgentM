@@ -38,6 +38,12 @@ extensions:
   - module: agentm.extensions.builtin.observability
   - module: contrib.extensions.rcabench_contract
 
-  # Scenario-local prompt loader. Splices investigator.md into the system prompt;
-  # the shared rcabench_contract atom appends the vendor contract block.
-  - local: setup
+  # Shared prompt loader (lives in agentm_rca/). Splices investigator.md
+  # — sourced from the canonical rca/prompts/ dir — into the system prompt.
+  # ``personas: false`` keeps this single-agent: no sub-agent dispatch, no
+  # ResolveSubagentEvent handler. The shared rcabench_contract atom appends
+  # the vendor contract block.
+  - module: agentm_rca.prompt_loader
+    config:
+      prompt: investigator.md
+      personas: false

@@ -247,7 +247,6 @@ def test_rca_cli_critic_inherits_parent_duckdb_config_in_trace(tmp_path: Path) -
     scenario_dir = sandbox / "contrib" / "scenarios" / "rca"
     scenario_dir.mkdir(parents=True)
     shutil.copy2(source_scenario / "manifest.yaml", scenario_dir / "manifest.yaml")
-    shutil.copy2(source_scenario / "orchestrator_setup.py", scenario_dir / "orchestrator_setup.py")
     shutil.copytree(source_scenario / "agents", scenario_dir / "agents")
     shutil.copytree(source_scenario / "prompts", scenario_dir / "prompts")
     scenario = scenario_dir / "manifest.yaml"
