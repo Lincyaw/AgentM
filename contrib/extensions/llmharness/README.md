@@ -1,95 +1,109 @@
 # llmharness
 
-Claude Code plugin that runs an out-of-band "harness agent" against the main
-agent's transcript: PostToolUse / Stop hooks fold turns into a stable event
-stream; a background worker calls AgentM to detect drift; UserPromptSubmit
-injects a one-line reminder when confidence is high.
+AgentM extension that supervises a running main agent: extract a typed
+event-and-edge graph from each turn window, then run an auditor
+periodically against that graph to surface advisory reminders.
 
-Three repos work together:
+The package is mounted onto a session via:
 
-- **AgentM** — pluggable agent SDK. Hosts the `harness_monitor` scenario we
-  drive via its CLI.
-- **llmharness** *(this repo)* — Claude Code plugin + `llmharness` Python package.
-  Hooks, file protocol (`.harness/`), worker loop, AgentM subprocess bridge.
-- **rca-autorl** — RL training. Imports `llmharness` to reuse the event-stream
-  schema and trace store as PRM training data.
+```bash
+agentm --extension llmharness.adapters.agentm
+```
+
+`--extension` is repeatable; reference check atoms (see below) stack on
+top.
 
 ## Layout
 
 ```
-.claude-plugin/plugin.json     plugin manifest
-hooks/hooks.json               PostToolUse + Stop + UserPromptSubmit
-scripts/                       hook entrypoints + worker daemon installer
-src/llmharness/                Python package (schema, store, worker, bridge)
+src/llmharness/
+  schema.py                  Event, Edge, Finding, Verdict, Reminder
+  adapters/agentm.py         orchestrator (TurnEnd → extractor → auditor)
+  audit/
+    extractor/               Phase 1: register_event / add_edge / submit_extraction
+    auditor/                 Phase 2: submit_verdict + drill-down tools
+    registry.py              AuditCheckRegistry (scenario-registered checks)
+  extensions/                reference one-file check atoms (PR5)
 ```
 
-The `harness_monitor` scenario lives as a sibling of this directory at
-`<AgentM-root>/scenarios/harness_monitor/manifest.yaml` so `agentm --scenario
-harness_monitor` resolves it directly.
-
-## Single-call architecture
+## v3 flow (issue #134)
 
 ```
-PostToolUse / Stop hook  →  inbox/<sid>.jsonl   (delta, non-blocking)
-                                   ↓
-                            background worker
-                                   ↓
-              harness_monitor (turns + history → events + verdict)
-                                   ↓
-                            events/<sid>.jsonl
-                            pending_reminders/<sid>.json
-                                   ↓
-UserPromptSubmit hook   ←  pending_reminders/<sid>.json  (inject + clear)
+TurnEndEvent  ──▶  Phase 1 extractor child
+                     register_event(...)   → Event
+                     add_edge(...)         → Edge (witness-validated)
+                     submit_extraction()   → terminate
+                  └─▶  llmharness.audit_event / audit_edge entries
+
+every k turns ──▶  Phase 2 auditor child
+                     graph + Findings (from registered checks) + drill-down tools
+                     submit_verdict(surface_reminder, reminder_text, ...)
+                  └─▶  optional one-line reminder injected before next user prompt
 ```
 
-One LLM call per tick. Throttling (skip the call entirely when the delta is
-empty or below threshold) lives in the worker, not in the scenario.
+The extractor is a graph builder: events are nodes, edges are first-
+class records carrying witness fields (cited entities + verbatim
+quote) checked at construction time. The auditor consumes the frozen
+graph plus advisory `Finding` records produced by registered checks;
+findings are signals, not directives — the auditor may ignore them.
 
-## AgentM bridge
+## Registering a scenario check
 
-`src/llmharness/agentm_bridge.py` shells out to `agentm <prompt> --scenario
-harness_monitor` with a single JSON payload as the user prompt. Configure via env:
+Scenarios extend the auditor with their own pure graph checks. A check
+is one file: a `MANIFEST` plus an `install(api, config)` that resolves
+the registry service and registers a callable. Mount it after the
+adapter:
 
-| var                       | meaning                                            |
-|---------------------------|----------------------------------------------------|
-| `LLMHARNESS_PROVIDER`     | `rule` (default) or `agentm`                       |
-| `LLMHARNESS_AGENTM_BIN`   | path to the `agentm` CLI                           |
-| `LLMHARNESS_AGENTM_CWD`   | AgentM checkout root (so `scenarios/<name>/` resolves) |
-| `LLMHARNESS_AGENTM_MODEL` | provider model id, e.g. `claude-sonnet-4-6`        |
-| `LLMHARNESS_AGENTM_TIMEOUT` | seconds (default 120)                            |
-| `LLMHARNESS_DISTILL_DIR`  | if set, dump `(input, output)` pairs per call      |
-
-Switching from a commercial model to a distilled 8B is a one-flag change:
-update `LLMHARNESS_AGENTM_MODEL` and `LLMHARNESS_AGENTM_BIN`'s provider
-config; the plugin doesn't move.
-
-## Install
-
-1. Install the plugin in Claude Code (drop this repo into a plugins dir or
-   reference it via plugin settings — Claude Code auto-loads `hooks/hooks.json`).
-2. The `harness_monitor` scenario already lives at `<AgentM-root>/scenarios/`
-   alongside this package; nothing to copy.
-3. Start the worker:
-
-   ```bash
-   LLMHARNESS_PROVIDER=agentm \
-   LLMHARNESS_AGENTM_CWD=/path/to/AgentM \
-   LLMHARNESS_AGENTM_MODEL=claude-sonnet-4-6 \
-   LLMHARNESS_DISTILL_DIR=$PWD/.harness/distill \
-     scripts/install.sh
-   ```
-
-   The default provider is `rule` (no LLM call) — useful for smoke-testing
-   the file protocol before wiring in AgentM.
-
-## Distillation
-
-When `LLMHARNESS_PROVIDER=agentm` and `LLMHARNESS_DISTILL_DIR` is set, every
-tick appends one JSONL line:
-
-```
-$LLMHARNESS_DISTILL_DIR/<sid>.monitor.jsonl   {input, output}
+```bash
+agentm \
+  --extension llmharness.adapters.agentm \
+  --extension llmharness.extensions.check_repeated_actions
 ```
 
-`output` carries `{events, verdict}` — the same shape the scenario emits.
-This is the SFT corpus for the eventual 8B replacement.
+The reference atom (abbreviated):
+
+```python
+# src/llmharness/extensions/check_repeated_actions.py
+from agentm.extensions import ExtensionManifest
+from agentm.harness.extension import ExtensionAPI
+
+from ..audit.registry import SERVICE_KEY, AuditCheckRegistry, CheckContext
+from ..schema import EventKind, Finding
+
+MANIFEST = ExtensionManifest(name="check_repeated_actions", ..., tier=1)
+
+
+class _RepeatedActionsCheck:
+    name = "repeated_actions"
+
+    def __call__(self, ctx: CheckContext) -> list[Finding]:
+        ...  # pure: same context ⇒ same findings, no I/O
+
+
+def install(api: ExtensionAPI, config: dict) -> None:
+    registry = api.get_service(SERVICE_KEY)
+    if not isinstance(registry, AuditCheckRegistry):
+        raise RuntimeError(
+            "audit registry service not published; "
+            "mount llmharness.adapters.agentm first"
+        )
+    registry.register_check(_RepeatedActionsCheck())
+```
+
+Three reference atoms ship under `llmharness.extensions.`:
+
+| Atom                            | Flags                                              |
+|---------------------------------|----------------------------------------------------|
+| `check_repeated_actions`        | ≥2 `act` events sharing an identical summary       |
+| `check_open_branches`           | `dec` / `hyp` events with no outgoing data edge    |
+| `check_premature_conclusion`    | `concl` events with <2 incoming edges              |
+
+Downstream packages (e.g. rca-autorl) typically write their own one-
+file atoms following the same shape and mount them via repeated
+`--extension` flags.
+
+## Schema stability
+
+`schema.py` is the public contract for downstream consumers. Breaking
+changes bump the package version in `pyproject.toml`. The v3 schema
+break (issue #134) is documented in `schema.py`'s module docstring.

@@ -1,13 +1,78 @@
-"""Phase 1 extractor child-session ``extensions`` list."""
+"""§11 single-file extension: register the v3.1 extractor's single tool.
+
+The adapter constructs a per-firing :class:`ExtractionState`, hands it
+to this module via ``config['state']`` at child-session-spawn time, and
+``install`` registers the closed-over ``submit_events`` tool on the
+child kernel. The fallback path uses
+``api.get_service("llmharness.extractor_state")`` for tests that
+pre-publish the state on the same session.
+
+This file also exposes :func:`compose_extractor_extensions`, which
+returns the ordered ``[(module, config), ...]`` list the adapter
+mounts. Order: observability -> cards_tools -> THIS atom -> system_prompt.
+
+§11 contract: single file, no atom-to-atom imports, no
+``core._internal`` import, no ``harness.session`` import. The state
+config-payload handoff is the only cross-firing channel.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
+from agentm.extensions import ExtensionManifest
+from agentm.harness.extension import ExtensionAPI
+
 from .._compose import UNSET, compose_audit_extensions
 from .prompt import EXTRACTOR_SYSTEM_PROMPT
+from .state import ExtractionState
+from .tools import build_extractor_tools
 
-_SUBMIT_TOOL_MODULE = "llmharness.audit.extractor.submit_tool"
+EXTRACTOR_STATE_SERVICE_KEY = "llmharness.extractor_state"
+"""Service key the adapter uses to publish the per-firing ExtractionState."""
+
+_EXTRACTOR_TOOLS_MODULE = "llmharness.audit.extractor.extensions"
+
+
+MANIFEST = ExtensionManifest(
+    name="extractor_tools",
+    description=(
+        "Register the v3.1 extractor's single ``submit_events`` tool "
+        "bound to the per-firing ExtractionState published by the "
+        f"adapter under {EXTRACTOR_STATE_SERVICE_KEY!r}."
+    ),
+    registers=("tool:submit_events",),
+    config_schema={
+        "type": "object",
+        "properties": {},
+        "additionalProperties": True,
+    },
+    api_version=1,
+    tier=1,
+)
+
+
+def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+    # Two valid handoff channels for the per-firing ExtractionState:
+    #   1. ``config["state"]`` — the adapter wires the freshly-built state
+    #      into the child session's extensions list at spawn time. This is
+    #      the primary path under v3: child sessions get a fresh
+    #      service-registry, so a parent-side ``api.set_service`` does not
+    #      cross the spawn boundary.
+    #   2. ``api.get_service(EXTRACTOR_STATE_SERVICE_KEY)`` — fallback for
+    #      callers that pre-publish the state on the same session this
+    #      extension is being mounted onto (e.g. unit tests).
+    state = config.get("state") if isinstance(config, dict) else None
+    if not isinstance(state, ExtractionState):
+        state = api.get_service(EXTRACTOR_STATE_SERVICE_KEY)
+    if not isinstance(state, ExtractionState):
+        raise RuntimeError(
+            "extractor_tools.install: expected an ExtractionState via "
+            f"config['state'] or service key {EXTRACTOR_STATE_SERVICE_KEY!r}; "
+            "the adapter must supply one before mounting this extension."
+        )
+    for tool in build_extractor_tools(state):
+        api.register_tool(tool)
 
 
 def compose_extractor_extensions(
@@ -16,13 +81,15 @@ def compose_extractor_extensions(
     cards_tools_config: dict[str, Any] | None = UNSET,
     observability_config: dict[str, Any] | None = UNSET,
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Default order: observability → cards_tools → submit_tool → system_prompt.
+    """Default order: observability -> cards_tools -> extractor_tools -> system_prompt.
 
-    Pass ``None`` for ``cards_tools_config`` / ``observability_config`` to drop
-    that extension; ``submit_tool`` and ``system_prompt`` always survive.
+    Pass ``None`` for ``cards_tools_config`` / ``observability_config``
+    to drop that extension; ``extractor_tools`` and ``system_prompt``
+    always survive.
     """
+
     return compose_audit_extensions(
-        submit_tool_module=_SUBMIT_TOOL_MODULE,
+        submit_tool_module=_EXTRACTOR_TOOLS_MODULE,
         default_prompt=EXTRACTOR_SYSTEM_PROMPT,
         prompt_override=prompt_override,
         cards_tools_config=cards_tools_config,
@@ -30,4 +97,9 @@ def compose_extractor_extensions(
     )
 
 
-__all__ = ["compose_extractor_extensions"]
+__all__ = [
+    "EXTRACTOR_STATE_SERVICE_KEY",
+    "MANIFEST",
+    "compose_extractor_extensions",
+    "install",
+]
