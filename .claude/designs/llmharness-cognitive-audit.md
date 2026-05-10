@@ -5,527 +5,461 @@
 **Last reviewed:** 2026-05-10
 
 A two-phase audit pipeline that supervises a running main agent for
-semantic-level drift. Phase 1 extracts a typed event graph from each
-new turn; Phase 2 judges drift over the graph every `k` turns and
-emits an optional reminder back into the trajectory.
+semantic-level drift. Phase 1 reconstructs a typed event graph from
+the trajectory by having an extractor LLM build it via tool calls
+with witness-verified edges. Phase 2 judges drift over the graph
+every `k` turns and emits an optional reminder.
 
-The auditor is the **primary judge** — deterministic signals are
-advisory hints in the prompt, not a triage queue and not a mandatory
-checklist. The verdict shape carries free-text continuation memory
-(`continuation_notes`) rather than a preset enum of drift types (see
-§8 for the DriftType rationale).
+The pipeline borrows a *static-analysis lens*: the trajectory is
+"source code", the extractor is "lex+parse+type-check", the graph is
+the IR (closer to a Program Dependence Graph than a CFG), and the
+auditor is the verifier. The load-bearing trust axiom: the agent's
+**thought** is testimony, **tool calls and tool results** are
+evidence — extraction must anchor on evidence.
+
+This is **v3**, replacing v2 outright. v2's `validator.py` 5-rule
+chain, SDK-fixed hint signals, and `refs: list[int]` event-internal
+edges are gone. The schema, `pyproject.toml` `version`, and downstream
+rca-autorl integration all break.
 
 ---
 
 ## 1. Goals
 
-- **Incremental extraction.** Each `TurnEndEvent` only re-reads the
-  new turns since the last firing — cost is roughly O(N) over the
-  session, not O(N²).
-- **Disjoint inputs per phase.** The extractor sees the trajectory
-  (including thinking blocks); the auditor sees only the structured
-  graph plus recent verdicts. Each consumer's prompt carries only
-  what it needs.
-- **Visible failure modes.** Spawn errors, no-call exits, empty
-  submissions, and graph-validation rejections are recorded as
-  distinct entry types instead of collapsing to a silent "no drift"
-  verdict.
-- **Reusable mid-product.** The event graph is a first-class artifact
-  on the session entry tree — readable by downstream training,
-  forensics, and dashboards without re-deriving from raw turns.
-- **LLM-led judgment with advisory hints.** The auditor LLM is the
-  primary judge. Concepts such as backward continuity, forward
-  fulfillment, and content correctness are framing lenses the auditor
-  looks through, not rules it must apply in sequence. Cheap
-  deterministic signals (§2.2, §7.5) are fed as scaffolding in the
-  prompt; the auditor may ignore them or flag concerns they missed.
+- **Inferential extraction with verifiable witnesses.** Edges between
+  events are produced by the extractor LLM via dedicated tool calls;
+  every edge carries witness fields (`cited_entities` for data flow,
+  `cited_quote` for textual reference) that are checked literally at
+  tool-call time. No mechanical entity-extraction heuristics.
+- **Mechanical event boundary.** Each event is exactly one ReAct cycle
+  (§4.a). Boundary detection is protocol-level, not LLM-decided.
+- **Trust asymmetry as an explicit axiom.** Both the extractor prompt
+  and the auditor prompt state that thought is advisory and tool
+  calls / tool results are evidence.
+- **Non-gating advisory checks.** Graph-health observations are
+  computed by scenario-registered Python checks invoked on the
+  finalized graph; their output (`list[Finding]`) is fed to the
+  auditor as advisory context, never used to block the firing.
+- **Visible failure modes.** Extractor witness retries that exhaust
+  the budget drop the offending edge but never fail-stop the firing.
+  All extractor / auditor failures land as distinct entry types so
+  outage is visible in the durable graph.
 
 ---
 
-## 2. Two phases
+## 2. Eleven design decisions (from issue #134, v3 proposal)
 
-### 2.1 Phase 1 — Extractor (per `TurnEndEvent`, incremental)
-
-Input: the new turn(s) since the last extractor firing **plus** the
-recent slice of the existing event graph (for `refs` resolution).
-Output: a list of new `Event` records, ref-linked to prior events
-and stamped with monotonic ids.
-
-- Stateless child AgentM session spawned per `TurnEndEvent`.
-- State (the event graph) lives entirely in the parent session's
-  entry tree under `llmharness.audit_event` entries. Each firing
-  reads the tail and appends.
-- Terminal tool: `submit_events(events=[...])` → `ToolTerminate`.
-- The extractor receives **everything** from the new turns,
-  including thinking blocks, tool calls, and tool results.
-- Failure of the extractor is **not silent** — see §4.
-
-After `submit_events` the adapter runs the **Phase 1 graph
-validator** (§5.4) before committing events. Validation failure
-→ `llmharness.extractor_invalid` entry; auditor skipped this
-firing.
-
-### 2.2 Phase 2 — Auditor (every `k` turns over the graph)
-
-Input: the validated event graph (full, or a configured tail)
-**plus** recent verdicts **plus** advisory hint block (§7.5).
-Notably **not** the raw trajectory — the auditor reads structured
-events plus computed signals, not free-text turns by default. The
-auditor may pull individual turns on demand via `get_turn(idx)`
-when an event's `source_turns` reference needs verification.
-
-Output: a `Verdict` (V2 shape — §6.2) plus optional `Reminder`.
-
-- Triggered on `TurnEndEvent` when `(turn_count % k) == 0`.
-  Default `k = 3`; configurable via `audit_interval_turns`.
-- Stateless child session, like Phase 1.
-- Terminal tool: `submit_verdict(verdict={...})` → `ToolTerminate`.
-- Auditor has access to `get_turn(idx)` tool (§6.3) to drill back
-  into the raw conversation when event `source_turns` refs need
-  verification.
-- Failure modes recorded as distinct entries (§4).
-
-**Auditor lenses (prompt framing, not rules):**
-- *Backward continuity* — are the agent's current actions traceable
-  to what was known at the task start?
-- *Forward fulfillment* — is the current trajectory converging on
-  the stated task?
-- *Content correctness* — are evidence citations accurate?
-- *Branch quality* — see §5.5.
-
-The auditor walks these lenses informally. There is no obligation
-to "answer" each lens; they exist to direct attention.
+| # | Decision | Rationale |
+|---|---|---|
+| 1 | **Event = one ReAct cycle.** | Mechanical boundary keeps extraction reproducible. |
+| 2 | **Parallel `tool_call`s in one assistant turn collapse to one event.** | One thought drives the action batch; splitting breaks the Markov-step semantics. |
+| 3 | **Edges are LLM-built tool calls, not regex / entity match.** | Entity matching does not generalize across tool surfaces; LLM + witness > brittle rules. |
+| 4 | **Trust asymmetry lives in the extractor prompt.** | Extractor is an external observer; the prompt instructs it to anchor on `tool_call.args` + `tool_result` and treat thought as advisory. |
+| 5 | **Edge witness is enforced at `add_edge` time.** | `data` requires `cited_entities` literally appearing in BOTH src and dst turn texts; `ref` requires `cited_quote` to be a verbatim substring of src and to appear in dst. The tool rejects mismatches. |
+| 6 | **One `add_edge(kind=...)` tool, not one tool per kind.** | Smaller surface; per-kind required-field validation at runtime. |
+| 7 | **`analyze(graph)` is non-gating.** | Returns `list[Finding]`; auditor decides whether findings matter. There is no `extractor_invalid` blocking entry in v3. |
+| 8 | **Scenario-registered checks, not SDK-fixed.** | "Problem patterns" are domain-specific. Scenarios plug in via `api.audit.register_check(...)`. |
+| 9 | **Auditor still produces J1: audit → reminder decision → reminder content.** | Single LLM, V2 `Verdict` shape preserved (§7.2). |
+| 10 | **Auditor input degrades to summaries past N=30 events.** | Default: full graph as JSON. If `len(events) > 30`: send summaries + edges only, auditor pulls details on demand. |
+| 11 | **Auditor tools: `get_turn(idx)`, `get_event_detail(ids)`, `submit_verdict`.** | Minimum viable surface, batched detail fetch. |
 
 ---
 
-## 3. Triggering
+## 3. Mathematical sketch
 
-Single `TurnEndEvent` handler, two phase invocations:
+```
+Trajectory    T = ⟨t₀, …, tₙ₋₁⟩,  tᵢ ∈ Turn
+Event         e = ⟨id, kind, summary, source_turns ⊆ [0,n)⟩
+Edge          (src, dst, kind ∈ {data, ref}, witness)
+Graph         G = (V, E)
+Abstraction   α : T → G   (extractor LLM, inferential — no soundness proof)
+
+Trust axiom:
+  trust(K(tᵢ) ∩ {tool_call, tool_result, user})
+    > trust(K(tᵢ) ∩ {thinking, text})
+```
+
+EventKind ∈ {`task`, `hyp`, `evid`, `act`, `dec`, `concl`}, classified
+by **action signature**, not by what thought claims.
+
+---
+
+## 4. Resolutions for open items
+
+### 4.a ReAct cycle boundary algorithm
+
+**Rule.** Walk turns linearly. A cycle opens at the first
+non-`tool_result` turn after the previous cycle closed (or at index 0).
+A cycle **closes** when one of:
+
+1. The next assistant turn carries `text` and/or `thinking` blocks
+   **without** any `tool_call`. The closing turn belongs to the *next*
+   cycle (it is the "next observation/thought" boundary), unless it is
+   the final turn, in which case it is absorbed into the closing cycle
+   as a `concl`-candidate.
+2. Trajectory end is reached (session end / extractor firing window
+   ends with an in-flight cycle).
+
+**Parallel `tool_call`s** in a single assistant turn stay in the same
+cycle (decision #2). All `tool_result` turns following an action batch
+belong to that batch's cycle until a fresh assistant text/thinking
+turn appears.
+
+**Pathological streams.** If the extractor's firing window contains
+only `tool_result` turns (no closing assistant message), the adapter
+treats the window as **one open cycle** and fires the extractor on it
+anyway. The extractor classifies it as a partial `evid` event with
+`source_turns` covering the entire result span. The next firing
+re-extracts the same window if the cursor was not advanced — see §6.
+
+### 4.b `ref` edge near-paraphrase rule
+
+**Rule (verbatim with case + whitespace normalization).** Both src
+and dst turn texts and `cited_quote` are lowercased and have runs of
+whitespace collapsed to a single space before substring comparison.
+No edit-distance, no stemming.
+
+**Why.** Verbatim-only is too brittle for plausible casing/quoting
+variations the extractor will produce; bounded edit-distance is
+non-deterministic to specify and review. Case+whitespace
+normalization is reproducible without an LLM, easy to test, and
+catches the realistic mismatches without inviting hallucinations.
+
+### 4.c `api.audit.register_check` precise signature
+
+**Surface.** Lives at `audit/registry.py` inside the `llmharness`
+package (SDK side). Atom files under
+`contrib/extensions/llmharness/src/llmharness/extensions/`
+implement specific checks and call `api.audit.register_check` from
+their `install(api, config)`. The §11 single-file contract is
+preserved: each check ships in its own atom file; check
+implementations are not co-located inside `audit/`.
+
+```python
+# Public Protocol (in audit/registry.py)
+class CheckContext(Protocol):
+    events: tuple[Event, ...]   # frozen snapshot, monotonic order
+    edges:  tuple[Edge, ...]    # frozen snapshot
+
+class Check(Protocol):
+    name: str                              # human-readable, used in Finding.category
+    def __call__(self, ctx: CheckContext) -> list[Finding]: ...
+
+# Registration call atoms make from inside install(api, config):
+api.audit.register_check(check)            # idempotent on (name, callable id)
+```
+
+**Semantics.**
+- Registration is **per-session** (during atom install) and **idempotent**
+  — registering the same `(name, callable)` twice is a no-op.
+- The `audit/registry.py` registry is owned by the llmharness adapter;
+  `compose_auditor_extensions()` reads `api.audit.registered_checks()`
+  at firing time, runs each check on the frozen `CheckContext`, and
+  concatenates the resulting `Finding` lists into the auditor prompt
+  block.
+- Per-firing semantics: every Phase 2 firing rebuilds the
+  `CheckContext` from the current graph snapshot; checks are pure
+  functions, no per-firing registration.
+- **Zero registered checks** → empty `findings: []` block in the
+  auditor prompt; the firing proceeds normally.
+- A check that raises is logged with its `name` as a structured
+  `extractor_check_error` payload on the verdict's metadata
+  (non-fatal); other checks still run.
+
+**SDK cleanliness.** `audit/registry.py` is mechanism only — it does
+not embed any concrete check. Concrete checks (`check_repeated_actions`,
+`check_open_branches`, `check_premature_conclusion`, …) ship as
+separate atom files under `extensions/`. This satisfies the SDK vs.
+scenario separation rule.
+
+### 4.d Migration path for v2 entry types
+
+| Entry type | v2 | v3 |
+|---|---|---|
+| `audit_event` | ✓ | ✓ (payload changes — see §7) |
+| `audit_edge` | — | **new**: one entry per witnessed edge |
+| `extractor_cursor` | ✓ | ✓ |
+| `extractor_no_call` | ✓ | ✓ |
+| `extractor_error` | ✓ | ✓ |
+| `extractor_empty` | ✓ | ✓ |
+| `extractor_invalid` | ✓ | **removed** (no gating in v3) |
+| `extractor_partial` | — | **new**: emitted when ≥1 edge dropped after retry exhaustion; payload = `{dropped_edges: [{src, dst, kind, last_error}], turn_window: [a,b]}` |
+| `verdict` | ✓ | ✓ (V2 shape preserved) |
+| `audit_no_call` | ✓ | ✓ |
+| `audit_error` | ✓ | ✓ |
+| `reminder_delivered` | ✓ | ✓ |
+
+**rca-autorl impact.** The dataset exporter must drop the
+`extractor_invalid` branch and add `extractor_partial`. `Edge`
+records become first-class — exporters that previously inferred edges
+from `Event.refs` must read `audit_edge` entries.
+
+### 4.e Design-doc / index propagation
+
+Enumerated in `_v3_propagation_notes.md`. Implementer-phase docs
+touched: `observability.md`, `extension-as-scenario.md`,
+`per-task-evolution-loop.md`, `pluggable-architecture.md`, plus
+`.claude/index.yaml` (add `audit_check_registry` concept; refresh
+`related_concepts`).
+
+### 4.f `add_edge` schema and witness algorithm
+
+```python
+add_edge(
+    src_event_id: int,
+    dst_event_id: int,
+    kind: Literal["data", "ref"],
+    reason: str,
+    src_turns: list[int],
+    dst_turns: list[int],
+    cited_entities: list[str] = [],   # required non-empty if kind="data"
+    cited_quote: str = "",            # required non-empty if kind="ref"
+) -> {"ok": True} | {"error": "<detail>"}
+```
+
+**Validation order** (fail fast, return precise error string):
+
+1. Both `src_event_id` and `dst_event_id` already registered in this
+   firing's event set; `src ≠ dst`.
+2. `src_turns ⊆ events[src].source_turns`,
+   `dst_turns ⊆ events[dst].source_turns`.
+3. Edge would not introduce a cycle in the existing data+ref edge
+   set (DFS reachability).
+4. Per-kind:
+   - `kind="data"`: `cited_entities` is non-empty; for each entity
+     `s`, `normalize(s)` is a substring of
+     `normalize(concat(turn_text(t) for t in src_turns))` AND of
+     `normalize(concat(turn_text(t) for t in dst_turns))`.
+   - `kind="ref"`: `cited_quote` is non-empty; `normalize(cited_quote)`
+     is a substring of `normalize(concat(src turns))` AND of
+     `normalize(concat(dst turns))`. (The "appears in dst" check is
+     where the case+whitespace rule from §4.b lands.)
+
+`normalize(s)` ≜ lowercase + collapse whitespace.
+
+**Turn text access for the extractor.** The full window of new turns
+is embedded in the extractor system prompt as a JSON list keyed by
+`turn_index`. The extractor does **not** need a `get_turn` tool in
+v3 — at extraction time the entire window fits in context, and any
+older-than-window text required for `ref` edges into prior events is
+served by including the prior events' `summary` plus their
+`source_turns` excerpts (≤ 800 chars each) inside the prompt header.
+This avoids the round-trip of an in-extractor drill-down tool.
+
+**Witness retry policy.** Each `add_edge` failure is reported back
+to the extractor LLM as a tool-result error message, allowing the LLM
+to retry with corrected fields. Per **(src, dst, kind)** tuple within
+a single firing: `max_retry = 2`. After the third failure, the
+adapter records the dropped edge into the `extractor_partial` payload
+and rejects further attempts on the same tuple with a terminal error
+string `"giving up on this edge"`. Other edges continue normally.
+
+### 4.g Auditor degradation rule
+
+**Rule (N = 30).** When `len(events) ≤ 30`: pass full
+`Event.to_dict()` records plus all edges into the prompt. When
+`len(events) > 30`: pass a degraded shape:
+
+```json
+{
+  "events": [{"id": ..., "kind": ..., "summary": ..., "source_turns": [...]}],
+  "edges":  [{"src": ..., "dst": ..., "kind": ..., "reason": ...}]
+}
+```
+
+Witness fields (`cited_entities`, `cited_quote`) and any per-event
+extra metadata are stripped. The auditor pulls them on demand via
+`get_event_detail([ids])`. The `30` threshold is configurable via
+`audit_summary_threshold`; default 30 chosen because at ~150 tokens
+per full event-with-edges, 30 events ≈ 4.5k tokens — fits the audit
+prompt budget without degradation.
+
+---
+
+## 5. Triggering
 
 ```
 on TurnEndEvent:
-    await run_phase_1()                       # always
-    if phase_1_graph_valid and (turn_count % k) == 0:
-        await run_phase_2()                   # graph-level audit
+    await run_phase_1()                        # always, advances cursor
+    if (turn_count % k) == 0:
+        await run_phase_2()                    # graph-level audit
 ```
 
-`turn_count` is the count of `TurnEndEvent` firings observed in
-the session, not the absolute message count. The auditor sees a
-graph that has at least `k` new turns of events extracted onto it.
+`turn_count` counts `TurnEndEvent` firings, not message indices.
+`k = audit_interval_turns`, default 3. Phase 2 runs even when Phase 1
+emitted `extractor_partial` — the auditor explicitly tolerates a
+partial graph (decision #7).
 
 ---
 
-## 4. Persistence layout
-
-All state lives on the session entry tree (no new file artifacts).
-Entry types (namespaced):
+## 6. Persistence layout
 
 | Entry type | Producer | Payload |
 |---|---|---|
 | `llmharness.audit_event` | Phase 1 success | `Event.to_dict()` |
+| `llmharness.audit_edge` | Phase 1 success | `Edge.to_dict()` |
 | `llmharness.extractor_cursor` | Phase 1 (every firing) | `{"last_turn_index": int, "extraction_run_id": str}` |
-| `llmharness.extractor_no_call` | Phase 1 failure | `{"reason": str, "turn_window": [a, b]}` |
-| `llmharness.extractor_error` | Phase 1 failure | `{"reason": str, "turn_window": [a, b]}` |
-| `llmharness.extractor_empty` | Phase 1 (zero-event submit on non-trivial window) | `{"turn_window": [a, b]}` |
-| `llmharness.extractor_invalid` | Phase 1 (graph validation failed) | `{"violations": list[str], "turn_window": [a, b]}` |
+| `llmharness.extractor_no_call` | Phase 1 failure | `{"reason": str, "turn_window": [a,b]}` |
+| `llmharness.extractor_error` | Phase 1 failure | `{"reason": str, "turn_window": [a,b]}` |
+| `llmharness.extractor_empty` | Phase 1 (zero-event submit on non-trivial window) | `{"turn_window": [a,b]}` |
+| `llmharness.extractor_partial` | Phase 1 (≥1 edge dropped after retry exhaustion) | `{"dropped_edges": [...], "turn_window": [a,b]}` |
 | `llmharness.verdict` | Phase 2 success | `Verdict.to_dict()` |
 | `llmharness.audit_no_call` | Phase 2 failure | `{"reason": str}` |
 | `llmharness.audit_error` | Phase 2 failure | `{"reason": str}` |
 | `llmharness.reminder_delivered` | Reminder injection | `{"text": str}` |
 
-The `extractor_cursor` entry is the explicit "what's the last turn
-we extracted from" pointer. Phase 1 reads it on entry, computes
-`new_turns = messages[cursor.last_turn_index + 1 :]`, runs the LLM,
-validates the graph (§5.4), appends new events on success, and
-writes a fresh cursor.
-
-Failure entries do not poison the graph (auditor filters them), but
-they make outage visible:
-
-| Scenario | Behavior |
-|---|---|
-| Child spawn raises | `extractor_error` / `audit_error` entry |
-| Child runs but never calls submit | `extractor_no_call` / `audit_no_call` entry |
-| Child submits empty events on real new turns | `extractor_empty` entry |
-| Graph validator rejects submitted events | `extractor_invalid` entry; auditor skipped |
-| Child submits valid verdict | normal `llmharness.verdict` entry |
-
-Constants for these entry-type strings live in
-`audit/entry_types.py` (single source of truth shared by the adapter
-and the dataset exporter).
+`extractor_cursor` advances on every firing that wrote at least one
+event (including `extractor_partial`). On `extractor_no_call`,
+`extractor_error`, `extractor_empty` the cursor does **not** advance —
+the next firing re-attempts the same window.
 
 ---
 
-## 5. Event graph rules
+## 7. Tool-call schemas
 
-### 5.1 Immutability
-
-Event entries are **append-only**. No `update_event`, no in-place
-mutation.
-
-### 5.2 Invalidation via refs
-
-When a later event materially contradicts or refines an earlier
-one, the new event's `refs` list points at the earlier event's id.
-The relation is described in free-form `summary` text (per
-`feedback_no_preset_subjective_labels.md`, no edge-type enum).
-Readers needing structured edges can extract them from summaries
-with a small classifier.
-
-### 5.3 Graph queries
-
-Querying the graph is a branch-walk:
+### 7.1 Extractor tools
 
 ```python
-branch = api.session.get_branch()
-events = [Event.from_dict(e.payload) for e in branch
-          if e.type == "llmharness.audit_event"]
+register_event(
+    turn_indices: list[int],
+    kind: Literal["task", "hyp", "evid", "act", "dec", "concl"],
+    summary: str,                     # ≤ 30 words
+) -> {"event_id": int}
+
+add_edge(...)  # see §4.f
+
+submit_extraction() -> ToolTerminate  # marks the firing complete
 ```
 
-No typed query API on `ReadonlySession` — promote
-`events_referencing(id)` / `events_of_kind(kind)` to the SDK only
-when a second consumer needs them.
+`submit_extraction` (replaces v2's `submit_events`) takes no
+arguments — events and edges are already accumulated through the
+prior tool calls. It exists solely to give the LLM a clean
+"I'm done" terminator.
 
-### 5.4 Phase 1 graph validator
+### 7.2 Auditor tools
 
-A mechanical validation step runs in the adapter after each
-`submit_events` call. It is **not** an LLM — it is pure Python
-logic operating on the submitted event list plus the existing graph.
+```python
+get_turn(idx: int) -> dict                       # serialized raw turn
+get_event_detail(event_ids: list[int]) -> dict   # full Event + Edge records
+submit_verdict(verdict: V2Verdict) -> ToolTerminate
+```
 
-Checks performed:
+`V2Verdict` shape (preserved from v2 §6.2):
 
-1. **Ref resolution.** Every id in `event.refs` resolves to a prior
-   event in the graph (existing + newly submitted, in monotonic
-   order — a new event may ref a prior new event from the same
-   batch but never a later one).
-2. **No cycles.** The directed ref graph has no cycles.
-3. **kind↔source_turns rules:**
-   - `evidence` events: `source_turns` must include at least one
-     turn whose role/content carries a `tool_result`, or is a
-     `user` message, or is an `assistant` thinking block.
-   - `action` events: `source_turns` must include at least one
-     turn carrying a `tool_call`.
-4. **Task reachability.** Every event traces back to a `task` event
-   via the ref chain (modulo the `task` event itself).
-5. **Conclusion reachability.** If a `conclusion` event is present,
-   it is reachable from `task` via refs.
+```python
+{
+    "surface_reminder": bool,
+    "reminder_text": str,                # non-empty iff surface_reminder
+    "continuation_notes": list[str],     # auditor's free-text memory
+    "matched_event_ids": list[int],
+    "cited_cards": list[str],
+}
+```
 
-On any violation: no new events are committed; adapter writes
-`llmharness.extractor_invalid` with a `violations` list; auditor
-is skipped for this firing. Garbage-in is the worst failure mode
-for an LLM auditor reading a graph — refusing to feed an invalid
-graph forward is cheaper than asking the LLM to be robust to it.
+### 7.3 Edge / Event records
 
-### 5.5 Branches as first-class audit objects
+```python
+@dataclass(frozen=True)
+class Edge:
+    src: int
+    dst: int
+    kind: Literal["data", "ref"]
+    reason: str
+    src_turns: tuple[int, ...]
+    dst_turns: tuple[int, ...]
+    cited_entities: tuple[str, ...]   # empty for ref
+    cited_quote: str                  # empty for data
 
-Fork and merge moments receive dedicated scrutiny in the auditor
-prompt (not a rule — a framing lens the auditor applies). Two
-sub-moments:
+@dataclass(frozen=True)
+class Finding:
+    category: str
+    description: str
+    related_event_ids: tuple[int, ...]
+```
 
-**Fork (branch creation):**
-- Did the agent consider the right alternatives at fork time?
-- Was the chosen branch supported by evidence known *at that
-  moment* (not retroactively justified by what came later)?
-- Was a discarded branch dismissed prematurely without evidence
-  that would justify ruling it out?
-
-**Merge (branch convergence):**
-- Does each contributing branch carry sufficient evidence?
-- Is the merge premature — are some hypotheses still open?
-- Is there a "ghost merge" — did the synthesis quietly skip a
-  branch whose evidence was never collected?
-
-The advisory hints module (§7.5) surfaces `open_branches(graph)`
-and `multi_branch_syntheses(graph)` as scaffolding — the auditor
-sees the candidate spots and decides whether fork/merge quality
-is a concern. "Sufficient evidence" is irreducibly semantic; only
-the LLM can weigh it.
+`Event` keeps its v2 fields **minus** `refs: list[int]` (now
+materialized as `Edge` records).
 
 ---
 
-## 6. Tool-call schemas
-
-### 6.1 `submit_events`
-
-```python
-{
-    "type": "object",
-    "properties": {
-        "events": {
-            "type": "array",
-            "items": {
-                # kind enum derived from EventKind (see §7.2)
-            },
-        },
-    },
-    "required": ["events"],
-    "additionalProperties": False,
-}
-```
-
-`events` MAY be empty. If empty for a non-trivial new-turn window,
-the adapter writes `extractor_empty` so the failure is visible.
-
-### 6.2 `submit_verdict`
-
-V2 shape — breaking change from V1:
-
-```python
-{
-    "type": "object",
-    "properties": {
-        "verdict": {
-            "type": "object",
-            "properties": {
-                "surface_reminder": {
-                    "type": "boolean",
-                    # True → reminder_text is injected before next turn
-                },
-                "reminder_text": {
-                    "type": "string",
-                    # Non-empty when surface_reminder is True;
-                    # empty string allowed when False.
-                },
-                "continuation_notes": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    # Auditor's free-text memory across firings —
-                    # what it asked itself to recheck next firing.
-                    # Replaces V1's downstream_reaction.
-                },
-                "matched_event_ids": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    # Empty array allowed when surface_reminder=false.
-                },
-                "cited_cards": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-            },
-            "required": [
-                "surface_reminder",
-                "reminder_text",
-                "continuation_notes",
-                "matched_event_ids",
-                "cited_cards",
-            ],
-            "additionalProperties": False,
-        },
-    },
-    "required": ["verdict"],
-    "additionalProperties": False,
-}
-```
-
-**Rationale for dropping `DriftType`:** the V1 enum
-`{task_drift, evidence_ignored, premature_conclusion, stuck_loop}`
-was exactly the "preset enum for subjective dimensions" the project
-forbids (saved feedback memory: `feedback_no_preset_subjective_labels.md`).
-Reasonable interpretations of "drift type" differ; an LLM-decided
-free-text judgment in `reminder_text` + `continuation_notes` is
-both more accurate and more flexible. The V1 `if/then` JSON-Schema
-clause that enforced `drift=true ⇒ type required` is removed along
-with `drift` and `type` fields.
-
-### 6.3 `get_turn(idx)` — auditor drill-down tool
-
-Read access to the raw conversation turn at index `idx`. Used when
-an event's `source_turns` reference needs verification against the
-actual trajectory text.
-
-```python
-{
-    "type": "object",
-    "properties": {
-        "idx": {"type": "integer"},
-    },
-    "required": ["idx"],
-    "additionalProperties": False,
-}
-# Returns: serialized turn dict (role, content, thinking blocks).
-# Out-of-range idx returns a structured tool-result error rather
-# than crashing the auditor child.
-```
-
-This tool is in-scope for the V2 implementation (no longer
-deferred). The adapter serializes turns on demand rather than
-bulk-loading the full trajectory into the auditor context.
-
----
-
-## 7. Implementation notes
-
-### 7.1 Module layout
+## 8. Module layout
 
 ```
 contrib/extensions/llmharness/src/llmharness/
 ├── audit/
 │   ├── extractor/
-│   │   ├── prompt.py                 EXTRACTOR_SYSTEM_PROMPT
-│   │   ├── submit_tool.py            submit_events terminal tool
-│   │   ├── extensions.py             compose_extractor_extensions()
-│   │   ├── output.py                 RawExtractorOutput coercion
-│   │   └── validator.py              Phase 1 graph validator (pure Python)
+│   │   ├── prompt.py                # v3 prompt with trust-asymmetry block
+│   │   ├── tools.py                 # register_event + add_edge + submit_extraction
+│   │   ├── witness.py               # normalize() + witness validation
+│   │   ├── extensions.py            # compose_extractor_extensions()
+│   │   └── output.py                # extractor turn-window serializer
 │   ├── auditor/
-│   │   ├── prompt.py                 AUDITOR_SYSTEM_PROMPT (graph-only, LLM-led)
-│   │   ├── submit_tool.py            submit_verdict terminal tool (V2 schema)
-│   │   ├── extensions.py             compose_auditor_extensions()
-│   │   ├── output.py                 RawVerdictOutput coercion
-│   │   └── get_turn_tool.py          get_turn(idx) drill-down tool
-│   ├── hints.py                      advisory hint signals (pure functions on graph)
-│   ├── _compose.py                   shared extension-list composer
-│   ├── _enum_schema.py               EVENT_KIND_VALUES (DriftType removed)
-│   ├── entry_types.py                shared entry-type string constants
+│   │   ├── prompt.py                # v3 prompt: trust asymmetry + degradation handling
+│   │   ├── submit_tool.py           # submit_verdict (V2 shape, unchanged)
+│   │   ├── extensions.py            # compose_auditor_extensions(): reads registered checks
+│   │   ├── get_turn_tool.py
+│   │   ├── get_event_detail_tool.py
+│   │   └── output.py
+│   ├── registry.py                  # api.audit.register_check + Check Protocol
+│   ├── _enum_schema.py              # EVENT_KIND_VALUES, EDGE_KIND_VALUES
+│   ├── entry_types.py               # constants — extractor_invalid removed, extractor_partial added
 │   └── __init__.py
-├── adapters/
-│   └── agentm.py                     orchestrates Phase 1 + Phase 2
-└── ...
+├── extensions/                      # check atoms (one file each)
+│   ├── check_repeated_actions.py
+│   ├── check_open_branches.py
+│   └── ...
+└── adapters/
+    └── agentm.py                    # orchestrates Phase 1 + Phase 2
 ```
 
-### 7.2 Schema parity
-
-The JSON-Schema enum for `EventKind` is derived from the enum
-class — single source of truth:
-
-```python
-EVENT_KIND_VALUES = [k.value for k in EventKind]
-```
-
-`DriftType` and `DRIFT_TYPE_VALUES` are removed in V2. The
-extractor's `submit_events` schema uses `EVENT_KIND_VALUES`; the
-auditor's `submit_verdict` schema no longer references a
-drift-type enum.
-
-### 7.3 Adapter
-
-```python
-async def _on_turn_end(event):
-    nonlocal turn_count, pending, last_continuation_notes
-    turn_count += 1
-
-    branch = api.session.get_branch()
-    new_events = await _run_extractor(api, branch, extractor_extensions)
-    # _run_extractor returns None on validation failure or other
-    # extractor-side failure; entry-type record is already written.
-
-    if new_events is not None and (turn_count % k) == 0:
-        verdict = await _run_auditor(
-            api,
-            graph=branch_events(branch) + new_events,
-            recent_verdicts=recent_verdicts(branch),
-            continuation_notes=last_continuation_notes,
-            hints=audit.hints.compute(graph=...),
-            extensions=auditor_extensions,
-        )
-        if verdict is not None:
-            last_continuation_notes = verdict.continuation_notes
-            if verdict.surface_reminder and verdict.reminder_text:
-                pending = Reminder(text=verdict.reminder_text)
-```
-
-`_run_extractor` runs the LLM child, calls the graph validator,
-writes the appropriate entry type, and returns the new events on
-success or `None` on any failure. `_run_auditor` builds the hint
-block via `audit.hints.compute(...)` and prepends it to the
-auditor prompt context; it also forwards the prior firing's
-`continuation_notes` so the auditor can pick up its own
-recheck list.
-
-### 7.4 Trajectory serialization
-
-`_serialize_new_turns_for_extractor` slices
-`messages[cursor.last_turn_index + 1 :]` and keeps thinking blocks
-plus structured tool-result content. The auditor receives no
-bulk trajectory — it sees the graph in `Event.to_dict()` form,
-recent verdicts, the hint block, and can pull individual turns
-on demand via `get_turn(idx)`.
-
-### 7.5 Advisory hints module — `audit/hints.py`
-
-Pure functions on the event graph. Output is rendered as a compact
-block and prepended to the auditor's context prompt. The auditor
-may ignore any signal.
-
-| Function | Signal |
-|---|---|
-| `repeated_actions(graph)` | action events with identical `(tool_name, hash(canonical(args)))` appearing ≥ N times — points at potential stuck loops |
-| `convergence_ratio(graph)` | fraction of unresolved hypotheses / open decisions vs total events; trend is a health signal |
-| `reachability_gaps(graph)` | events not connected back to `task`, or conclusions without an evidence chain |
-| `open_branches(graph)` | `decision` events whose discarded alternatives have no closing evidence downstream |
-| `multi_branch_syntheses(graph)` | conclusion / synthesis events whose `refs` reach multiple independent root paths |
-
-No new database, no async I/O — all inputs are the in-memory
-`list[Event]` the adapter already has. The auditor prompt template
-includes a `{hints}` placeholder filled by the adapter before the
-child session starts. The hints block must be phrased as
-"consider …" rather than "concern: …" to avoid anchoring the
-auditor to a binary triage stance.
+**§11 contract:** every `extensions/check_*.py` is a single file with
+`MANIFEST` + `install(api, config)`, no atom-to-atom imports, no
+`core._internal`, no `harness.session`. Checks reach the registry
+exclusively through `api.audit.register_check`.
 
 ---
 
-## 8. Public contract
+## 9. Public contract
 
-- `schema.py`: `Event`, `Verdict`, `Reminder`, `EventKind` —
-  stable public surface.
-  **Breaking changes (V2):**
-  - `DriftType` is removed.
-  - `Verdict` shape changes to V2 (§6.2): replaces
-    `{drift, type, reminder, matched_event_ids, cited_cards,
-    downstream_reaction}` with
-    `{surface_reminder, reminder_text, continuation_notes,
-    matched_event_ids, cited_cards}`.
-  - `Reminder` no longer carries a `type: DriftType`.
-  rca-autorl backwards-compatibility is explicitly **not** a
-  constraint for this change (confirmed with user 2026-05-10).
-  Bump `version` in `pyproject.toml` accordingly.
-- `cards.py` and the AFC card YAMLs ship as package data.
-- `cards_tools` atom — both extractor and auditor can load it.
-- `inherit_provider` builtin — both phase children rely on it.
-- `BeforeAgentStartEvent.system` injection for reminders.
+- `schema.py`: `Event`, `Edge`, `Verdict`, `Reminder`, `EventKind`,
+  `Finding`. **Breaking from v2:**
+  - `Event.refs` removed.
+  - `Edge` is new (top-level, witnessed).
+  - `DriftType` stays removed.
+  - Verdict shape unchanged from v2.
+- `api.audit` namespace is new public surface:
+  `register_check(check)` and `registered_checks() -> tuple[Check, ...]`.
+- `pyproject.toml` `version` bumps; downstream rca-autorl pinned
+  upgrade required.
+- `cards.py`, `cards_tools` atom, `inherit_provider`, `BeforeAgentStartEvent`
+  injection — unchanged from v2.
 
 ---
 
-## 9. Deferred (P2)
+## 10. Deferred (P2)
 
-These are deliberately deferred. Re-evaluate after PR 1–4 ship and
-the V2 pipeline runs in production for at least a week.
-
-1. **ReAct cycle-aligned extractor firing.** Today the extractor
-   fires every `TurnEndEvent`. Firing on ReAct cycle boundaries
-   (cycle close = next assistant text-only turn after a
-   `tool_result`, or session end) would reduce noise and align
-   each firing with one semantic unit of agent work. Larger
-   refactor — needs a cycle-detector heuristic plus a fallback
-   timer for pathological cases.
-2. **Two-pass extraction.** Draft → self-review → final inside
-   the extractor child. Approximately doubles extractor cost;
-   measure value first.
-3. **`get_event(id)` tool for extractor.** Pull older events with
-   full `source_turns` when refs need verification inside Phase 1
-   (the extractor counterpart of `get_turn`).
-4. **Graph-pattern triggers.** Cheap heuristics that fire the
-   auditor mid-`k`-window on graph anomalies. Needs the schema
-   and hint module to stabilize first.
-5. **Cross-session graph reuse.** Each session's graph is
-   isolated; joining across sessions for the same task / agent
-   profile is future work.
-6. **Long-running extractor session.** Today's stateless per-turn
-   spawn could become a streaming daemon once AgentM gains
-   long-lived child + stream primitives.
-7. **Ref edge typing.** A small classifier that materializes
-   typed edges from free-text `summary` relations.
+1. Per-kind edge tools (`add_data_edge` / `add_ref_edge`) — revisit if
+   the LLM struggles with the branched schema.
+2. `get_event_detail` for the extractor (drill into older-than-window
+   prior events) — added when prompt-embedded summaries prove too lossy.
+3. Cross-session graph reuse and long-running extractor daemon.
+4. Bounded-edit-distance witness rule — only if §4.b proves too strict.
+5. Auditor mid-`k`-window triggers fired by graph-pattern heuristics.
+6. Fork/merge ("branch") quality as a first-class check
+   — currently expressible as a registered check from rca / coding
+   scenarios.
 
 ---
 
-## 10. References
+## 11. References
 
-- [observability.md](observability.md) — training-data join works
-  on the same `<trace>.jsonl`.
-- [pluggable-architecture.md](pluggable-architecture.md) — the
-  `inherit_provider` builtin path used by both child sessions.
+- [observability.md](observability.md) — training-data join works on
+  the same `<trace>.jsonl`; entry-type delta in §4.d propagates here.
 - [extension-as-scenario.md](extension-as-scenario.md) — §11
-  single-file extension contract that the audit child sessions
-  follow.
+  single-file contract that check atoms follow.
+- [pluggable-architecture.md](pluggable-architecture.md) — the new
+  `api.audit` namespace is a non-Operations ExtensionAPI service.
+- [per-task-evolution-loop.md](per-task-evolution-loop.md) — verdicts +
+  graph remain the evolution-loop input.
 - [GitHub issue #134 (Lincyaw/AgentM)](https://github.com/Lincyaw/AgentM/issues/134) —
-  the design redirection this document reflects (2026-05-10).
+  v3 design proposal.

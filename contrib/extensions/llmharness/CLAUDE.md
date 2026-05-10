@@ -74,7 +74,7 @@ Secondary: simpler code that maps clearly to a requirement > clever abstractions
 - **Hook scripts**: every `scripts/*.sh` must `set -euo pipefail` at the top. No bashisms beyond what shellcheck accepts.
 - **AgentM mount point**: this package's adapter (`llmharness.adapters.agentm`) is loaded onto a session via `agentm --extension llmharness.adapters.agentm`. There is no scenario manifest under this directory — keep it as a Python package + extension only.
 - **No commits to main**: feature branches only. Use `gh` (HTTPS) for any GitHub operations — never ssh URLs.
-- **Schema stability**: `src/llmharness/schema.py` is a public contract for rca-autorl. Breaking changes require bumping `version` in `pyproject.toml` and a note in the requirement description.
+- **Schema stability**: `src/llmharness/schema.py` is a public contract for rca-autorl. Breaking changes require bumping `version` in `pyproject.toml` and a note in the requirement description. v3 (issue #134) introduced `Edge`/`EdgeKind`/`Finding` as first-class records, removed `Event.refs`, renamed `EventKind` values to short forms, and added the `llmharness.audit_registry` service — all breaking from v2.
 - **No silent failures in hooks**: hook scripts may fail-open (return 0) on unrecognized payloads, but only after `parse_hook_payload` returns `None` — never via blanket `try/except`.
 
 ## Requirements index (MANDATORY)

@@ -284,8 +284,7 @@ def _load_all() -> dict[str, CardFull]:
             continue
         if card.id in by_id:
             raise ValueError(
-                f"Duplicate card id {card.id}: {display_name} collides "
-                "with an earlier file."
+                f"Duplicate card id {card.id}: {display_name} collides with an earlier file."
             )
         by_id[card.id] = card
     return by_id

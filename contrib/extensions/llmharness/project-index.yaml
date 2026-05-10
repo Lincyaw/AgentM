@@ -12,14 +12,39 @@ requirements:
   # Core typed payloads (P0 — load-bearing for the audit loop)
 
   - id: REQ-001
-    title: Event/Verdict/Reminder schema
+    title: Event/Edge/Finding/Verdict/Reminder schema (V3 — breaking change)
     description: |
-      Closed-enum types for event kinds and drift types; serializable Event,
-      Verdict, Reminder dataclasses. Stable JSON shape — Verdict and Event
-      payloads round-trip through the AgentM session entry tree
+      Closed-enum types for event and edge kinds; serializable Event,
+      Edge, Finding, Verdict, Reminder dataclasses. Stable JSON shape —
+      every payload round-trips through the AgentM session entry tree
       (``api.session.append_entry``).
+
+      V3 schema break (issue #134, 2026-05-10):
+        - EventKind values are short-form: task / hyp / evid / act /
+          dec / concl. The v2 long-form values and the REFLECTION
+          member are gone (design §3 lists six kinds).
+        - Event.refs is REMOVED. Edges are first-class records: the
+          extractor emits Edge instances via ``add_edge`` and the
+          adapter persists each one as a ``llmharness.audit_edge``
+          entry. Edge carries witness fields (cited_entities,
+          cited_quote) plus per-side source-turn tuples.
+        - New EdgeKind enum (data | ref) and EDGE_KIND_VALUES
+          constant in audit/_enum_schema.py.
+        - New Finding dataclass — output shape for scenario-registered
+          audit checks (see audit/registry.py, design §4.c).
+
+      V2 Verdict shape (carried forward unchanged in v3, design §6.2):
+        surface_reminder: bool
+        reminder_text: str
+        continuation_notes: list[str]
+        matched_event_ids: list[int]
+        cited_cards: list[str]
+
+      DriftType / Reminder.type stay removed. Breaking changes —
+      pyproject version bump required; rca-autorl backwards-
+      compatibility explicitly waived.
     priority: P0
-    status: implemented
+    status: tested
     code: [src/llmharness/schema.py]
     tests: [tests/test_smoke.py]
 
@@ -83,66 +108,138 @@ requirements:
   # Design: .claude/designs/llmharness-cognitive-audit.md
 
   - id: REQ-019
-    title: Two-phase orchestrator — adapter rewrite (extractor + auditor)
+    title: Two-phase orchestrator — v3 adapter (witness pipeline + partial flow)
     description: |
-      ``adapters/agentm.py`` rewritten for the two-phase split (design
-      ``llmharness-cognitive-audit.md`` §2, §6). Single TurnEndEvent
-      handler dispatches Phase 1 every turn and Phase 2 every k turns
-      (default ``audit_interval_turns=3``). Phase 1 spawns a child whose
-      extensions come from ``compose_extractor_extensions``, slices the
-      new turns since ``llmharness.extractor_cursor``, persists each
-      submitted event as an ``llmharness.audit_event`` entry, and updates
-      the cursor. Phase 2 spawns a child whose extensions come from
-      ``compose_auditor_extensions``, feeds the event graph + recent
-      verdicts (NOT the raw trajectory), and persists the resulting
-      ``Verdict`` plus a single pending Reminder in adapter closure state.
-      ``BeforeAgentStartEvent`` injection unchanged from REQ-017's design.
+      ``adapters/agentm.py`` rewired for the v3 extractor flow (design
+      §4.f, §6, §7.1). Single TurnEndEvent handler dispatches Phase 1
+      every turn and Phase 2 every k turns (default
+      ``audit_interval_turns=3``).
+
+      Phase 1 (v3, issue #134): the adapter constructs a per-firing
+      ``ExtractionState``, populates ``turn_texts`` with rendered text
+      for each turn in the new-turn window, and binds the state into
+      the extractor extension's config (state crosses the spawn
+      boundary via the ``state`` knob because child sessions get a
+      fresh service registry). The extractor child registers
+      ``register_event`` / ``add_edge`` / ``submit_extraction``
+      closed over the state; after the child loop terminates the
+      adapter snapshots ``RawExtractorOutput.from_state(state)`` and
+      writes one ``llmharness.audit_event`` per accepted event, one
+      ``llmharness.audit_edge`` per accepted edge, one
+      ``llmharness.extractor_partial`` (once) if any edges were
+      dropped after the witness retry budget, and one
+      ``llmharness.extractor_cursor`` to advance the cursor.
+
+      Cursor advances on success or partial; stays put on
+      ``extractor_no_call`` / ``extractor_empty`` / ``extractor_error``
+      so the next firing re-attempts the same window.
+
+      Phase 2 (auditor) is unchanged in this commit; commit 4 of the
+      v3 plan rewires the auditor prompt to consume v3 events + edges
+      directly. The adapter also publishes the
+      ``llmharness.audit_registry`` service on the parent session so
+      check atoms (commit 5) can register from their own ``install``.
     priority: P0
-    status: implemented
+    status: tested
     code: [src/llmharness/adapters/agentm.py]
-    tests: [tests/test_smoke.py]
-    depends_on: [REQ-001, REQ-016, REQ-020, REQ-021, REQ-022, REQ-023]
+    tests:
+      - tests/test_smoke.py
+      - tests/test_two_phase_audit_integration.py
+    depends_on: [REQ-001, REQ-016, REQ-020, REQ-021, REQ-022, REQ-023, REQ-029, REQ-030]
 
   - id: REQ-020
-    title: Phase 1 extractor subpackage — per-turn event extraction
+    title: Phase 1 extractor subpackage — v3 witness pipeline
     description: |
-      ``audit/extractor/`` subpackage (design §2, §4, §7.1). Public
-      surface: ``EXTRACTOR_SYSTEM_PROMPT``, ``compose_extractor_extensions``,
-      ``RawExtractorOutput`` (with ``ExtractorOutputError``),
-      ``SUBMIT_EVENTS_TOOL_NAME``. The terminal tool ``submit_events``
-      forces structured Event output; thinking blocks are kept this time
-      so causal/ref reasoning can rely on them. Stateless: the adapter
-      slices new turns and passes them in.
+      ``audit/extractor/`` subpackage (design §4.b, §4.f, §7.1). V3
+      replaces the v2 single-shot ``submit_events`` payload tool with
+      a per-firing graph-builder tool flow:
+
+      - ``register_event(turn_indices, kind, summary)`` — append an
+        Event, return its monotonic id.
+      - ``add_edge(src_event_id, dst_event_id, kind, reason,
+        src_turns, dst_turns, cited_entities=[], cited_quote="")`` —
+        validate witness + cycle + turn-subset rules in fail-fast
+        order (existence -> src!=dst -> turns subset -> cycle ->
+        per-kind witness). The witness layer runs case+whitespace
+        normalized substring checks (no edit-distance, no stemming).
+        Up to 3 attempts per ``(src, dst, kind)`` tuple; the 3rd
+        failure drops the edge with the terminal error
+        ``"giving up on this edge"`` and records the dropped edge
+        into the partial-payload buffer.
+      - ``submit_extraction()`` — terminal tool, no arguments. The
+        per-firing ``ExtractionState`` IS the output;
+        ``RawExtractorOutput.from_state(state)`` snapshots it.
+
+      Single-file extension (§11): ``extensions.py`` reads the
+      adapter-published ``ExtractionState`` from
+      ``EXTRACTOR_STATE_SERVICE_KEY`` and registers the closed-over
+      tool trio. The v2 ``validator.py`` and ``hints.py`` modules
+      are deleted (no v3 callers).
     priority: P0
-    status: implemented
+    status: tested
     code:
       - src/llmharness/audit/extractor/__init__.py
       - src/llmharness/audit/extractor/prompt.py
       - src/llmharness/audit/extractor/extensions.py
       - src/llmharness/audit/extractor/output.py
-      - src/llmharness/audit/extractor/submit_tool.py
+      - src/llmharness/audit/extractor/state.py
+      - src/llmharness/audit/extractor/tools.py
+      - src/llmharness/audit/extractor/witness.py
+    tests:
+      - tests/test_extractor_witness.py
+      - tests/test_extractor_state.py
     depends_on: [REQ-001, REQ-016, REQ-023]
 
   - id: REQ-021
-    title: Phase 2 auditor subpackage — every-k-turn graph audit
+    title: Phase 2 auditor subpackage — v3 prompt + degradation + findings
     description: |
-      ``audit/auditor/`` subpackage (design §2, §5, §7.1). Public
-      surface: ``AUDITOR_SYSTEM_PROMPT``, ``compose_auditor_extensions``,
-      ``RawVerdictOutput`` (with ``AuditorOutputError``),
-      ``SUBMIT_VERDICT_TOOL_NAME``. Auditor consumes the event graph +
-      recent verdicts (graph form ``Event.to_dict``), NOT the raw
-      trajectory — Phase 1 already condensed that. ``submit_verdict``
-      JSON Schema enforces ``drift=true ⇒ type required`` via if/then at
-      the provider edge instead of silently dropped by the adapter.
+      ``audit/auditor/`` subpackage (design §2, §4.g, §5, §7.1, §8). Public
+      surface: ``AUDITOR_SYSTEM_PROMPT``, ``build_auditor_system_prompt``,
+      ``compose_auditor_extensions``, ``RawVerdictOutput`` (with
+      ``AuditorOutputError``), ``SUBMIT_VERDICT_TOOL_NAME``.
+
+      V3 prompt (issue #134 commit 4, 2026-05-10):
+      - Trust-asymmetry block: thought = testimony,
+        tool_call / tool_result = evidence. Mirrors the extractor side.
+      - Inputs: GRAPH (events + edges, full or degraded form),
+        FINDINGS (advisory only — never directives) from registered
+        checks, optional CHECKS_FAILED non-blocking line,
+        CONTINUATION_NOTES (auditor's own prior-firing notes), and
+        DRILL-DOWN TOOLS instructions.
+      - Reminder bar: high; default silent; concrete trigger list.
+      - Continuation notes are written for the next auditor firing,
+        not for the main agent.
+
+      Degradation rule (design §4.g, locked at N=30):
+      - len(events) ≤ summary_threshold → full Event.to_dict() +
+        Edge.to_dict() (with witness fields) embedded inline.
+      - len(events) > summary_threshold → degraded events
+        ``{id, kind, summary, source_turns}`` + degraded edges
+        ``{src, dst, kind, reason}``; auditor uses
+        ``get_event_detail([ids])`` to recover full records.
+      - Threshold configurable via ``audit_summary_threshold`` knob;
+        default 30.
+
+      ``submit_verdict`` JSON Schema enforces V2 shape (design §6.2 /
+      decision #9): no drift field, no DriftType enum.
+      surface_reminder + continuation_notes are required fields.
+
+      Drill-down tools registered in compose_auditor_extensions():
+      - ``get_turn(idx)`` (REQ-028) for raw trajectory access.
+      - ``get_event_detail([event_ids])`` (REQ-031) for full event +
+        edge records when the prompt is degraded.
     priority: P0
-    status: implemented
+    status: tested
     code:
       - src/llmharness/audit/auditor/__init__.py
       - src/llmharness/audit/auditor/prompt.py
       - src/llmharness/audit/auditor/extensions.py
       - src/llmharness/audit/auditor/output.py
       - src/llmharness/audit/auditor/submit_tool.py
-    depends_on: [REQ-001, REQ-016, REQ-023]
+    tests:
+      - tests/test_auditor_degradation.py
+      - tests/test_auditor_findings.py
+    depends_on: [REQ-001, REQ-016, REQ-023, REQ-029, REQ-031]
 
   - id: REQ-022
     title: Typed failure entries — outage vs clean trajectory distinguishable
@@ -160,33 +257,289 @@ requirements:
     depends_on: [REQ-001, REQ-020, REQ-021]
 
   - id: REQ-023
-    title: Schema enum-parity helper — single source of truth for kinds/drifts
+    title: Schema enum-parity helper — single source of truth for EventKind
     description: |
       Design §7.2. ``audit/_enum_schema.py`` derives the JSON-Schema
-      ``enum`` arrays for ``EventKind`` / ``DriftType`` directly from the
-      enum classes, so the extractor's ``submit_events`` schema and the
-      auditor's ``submit_verdict`` schema cannot drift away from
-      ``schema.py``. Replaces V0's hand-listed copies in
-      ``audit/submit_tool.py``.
+      ``enum`` array for ``EventKind`` directly from the enum class,
+      so the extractor's ``submit_events`` schema cannot drift away
+      from ``schema.py``.
+
+      DriftType and DRIFT_TYPE_VALUES are REMOVED (issue #134,
+      2026-05-10). EVENT_KIND_VALUES carries the v3 short-form values
+      (task / hyp / evid / act / dec / concl). EDGE_KIND_VALUES is
+      added in v3 (data | ref) so the extractor's ``add_edge`` schema
+      stays in lockstep with EdgeKind. The auditor's submit_verdict
+      schema uses no drift-type enum — the verdict shape is defined
+      in full in audit/auditor/submit_tool.py without referencing
+      _enum_schema.py for drift classification.
     priority: P0
     status: implemented
     code: [src/llmharness/audit/_enum_schema.py]
     depends_on: [REQ-001]
 
   - id: REQ-024
-    title: V1 fail-stop integration test — 4-turn k=3 stub-provider trajectory
+    title: V3 fail-stop integration test — Phase 1 happy/partial/no_call/empty
     description: |
-      Design §2, §4. Single integration test pinned to a 4-turn k=3 dialog
-      that asserts Phase 1 fires 4× and Phase 2 fires 1× at turn 3, with
-      the expected entry-tree shape (``llmharness.audit_event`` count,
-      ``llmharness.extractor_cursor`` final value, single ``Verdict``).
-      Owned by task 07; placeholder so the index already names the
-      requirement that the V1 fail-stop discharges.
+      ``tests/test_two_phase_audit_integration.py`` drives the v3
+      Phase 1 flow against a stub provider through the public
+      ``AgentSession`` API and asserts the four load-bearing
+      transitions of the witness pipeline:
+
+      1. Happy — ``register_event``×N + ``add_edge`` (witness passes)
+         + ``submit_extraction`` ⇒ N ``audit_event`` + 1 ``audit_edge``
+         + 1 ``extractor_cursor``, no ``extractor_partial``.
+      2. Partial — same shape but the same ``(src, dst, kind)`` tuple
+         is replayed three times with a non-witnessable quote ⇒ tuple
+         dropped, 0 ``audit_edge``, 1 ``extractor_partial`` carrying
+         the dropped tuple, cursor still advances per design §6.
+      3. No-call — child returns without calling
+         ``submit_extraction`` ⇒ 1 ``extractor_no_call`` entry, cursor
+         held.
+      4. Empty — child calls ``submit_extraction`` immediately on a
+         non-trivial window ⇒ 1 ``extractor_empty`` entry, cursor
+         held.
+
+      Phase 2 (auditor) is out of scope for this test; commit 4 of
+      the v3 plan adds matching auditor coverage.
     priority: P0
-    status: pending
+    status: tested
+    code: [src/llmharness/adapters/agentm.py]
+    tests: [tests/test_two_phase_audit_integration.py]
+    depends_on: [REQ-019, REQ-020, REQ-021, REQ-022, REQ-030]
+
+  # ---------------------------------------------------------------------------
+  # V2 redirection — issue #134 (2026-05-10). LLM-led judgment, free-text
+  # verdict shape, Phase 1 graph validator, branches as first-class audit
+  # objects. Plan: .claude/plans/2026-05-10-llmharness-issue-134-redirection.md
+
+  - id: REQ-025
+    title: V2 verdict schema — surface_reminder + continuation_notes
+    description: |
+      Issue #134 PR 1 (P0). The submit_verdict terminal tool uses the V2
+      JSON Schema shape (design §6.2): surface_reminder bool,
+      reminder_text str, continuation_notes list[str], matched_event_ids
+      list[int], cited_cards list[str]. No drift field, no DriftType
+      enum, no if/then clause. Adapter gate changes from
+      ``verdict.drift and verdict.type`` to
+      ``verdict.surface_reminder and verdict.reminder_text``.
+      continuation_notes are forwarded into the next auditor child's
+      context so the auditor can track what it asked itself to recheck.
+      Auditor prompt rewritten with backward continuity / forward
+      fulfillment / content correctness / branch quality as framing
+      lenses (not rules). pyproject version bump along with this PR.
+    priority: P0
+    status: tested
+    code:
+      - src/llmharness/schema.py
+      - src/llmharness/audit/_enum_schema.py
+      - src/llmharness/audit/auditor/submit_tool.py
+      - src/llmharness/audit/auditor/output.py
+      - src/llmharness/audit/auditor/prompt.py
+      - src/llmharness/adapters/agentm.py
+    tests:
+      - tests/test_smoke.py
+      - tests/test_two_phase_audit_integration.py
+    depends_on: [REQ-001, REQ-021, REQ-023]
+
+  - id: REQ-026
+    title: Phase 1 graph validator (REMOVED in v3 commit 2)
+    description: |
+      v2 introduced a pure-Python mechanical validator that ran after
+      each ``submit_events`` call (ref resolution, no cycles,
+      kind↔source_turns rules, task / conclusion reachability).
+      Failure wrote ``llmharness.extractor_invalid`` and skipped the
+      auditor.
+
+      Removed in v3 commit 2 (issue #134, 2026-05-10). ``Event.refs``
+      is gone; the validator was incompatible with the new edge model.
+      Witness checks now run inline at edge-construction time inside
+      ``ExtractionState.add_edge``; the adapter rewrite in commit 3
+      will switch to ``EXTRACTOR_PARTIAL`` entries.
+    priority: P1
+    status: deprecated
     code: []
     tests: []
-    depends_on: [REQ-019, REQ-020, REQ-021, REQ-022]
+    depends_on: [REQ-020, REQ-022]
+
+  - id: REQ-027
+    title: Advisory hints module (REMOVED in v3 commit 2)
+    description: |
+      v2 module audit/hints.py with five pure functions over
+      list[Event] (repeated_actions, convergence_ratio,
+      reachability_gaps, open_branches, multi_branch_syntheses) plus
+      compute(graph) -> str.
+
+      Removed in v3 commit 2 (issue #134, 2026-05-10). All v2 hint
+      signals walked ``Event.refs``, which is gone. The equivalent
+      signals ship in v3 as one-file Check atoms under
+      ``llmharness.extensions`` registered through the
+      ``AuditCheckRegistry`` service (see REQ-029 in the v3 plan)
+      and surfaced as ``Finding`` records to the auditor.
+    priority: P1
+    status: deprecated
+    code: []
+    tests: []
+    depends_on: [REQ-021, REQ-026]
+
+  - id: REQ-028
+    title: get_turn(idx) tool for auditor
+    description: |
+      Issue #134 PR 4 (P1). New tool registered in the auditor child
+      session (design §6.3). Returns the serialized raw conversation
+      turn at index idx — role, content, thinking blocks — so the
+      auditor can verify event source_turns references against the
+      actual trajectory text without bulk-loading the full trajectory
+      into the auditor context. Module: audit/auditor/get_turn_tool.py.
+      Registered via compose_auditor_extensions(trajectory_snapshot=...).
+      Out-of-range idx returns a structured tool-result error
+      (is_error=True), not a crash. bool idx also rejected (bool is a
+      subclass of int in Python). Snapshot captured per firing via
+      _serialize_full_trajectory in adapters/agentm.py and bridged into
+      the auditor child via the ``trajectory_snapshot`` config knob on
+      compose_auditor_extensions(...) — rebuilt fresh each firing,
+      never cached.
+    priority: P1
+    status: tested
+    code:
+      - src/llmharness/audit/auditor/get_turn_tool.py
+      - src/llmharness/audit/auditor/extensions.py
+      - src/llmharness/adapters/agentm.py
+    tests:
+      - tests/test_get_turn_tool.py
+      - tests/test_two_phase_audit_integration.py
+    depends_on: [REQ-021]
+
+  # ---------------------------------------------------------------------------
+  # V3 redesign — issue #134 (2026-05-10). Schema break, scenario-registered
+  # audit checks, witness-pipeline extractor, partial-extraction adapter.
+  # Plan: .claude/plans/2026-05-10-llmharness-issue-134-v3.md
+
+  - id: REQ-029
+    title: scenario-registered audit checks via llmharness.audit_registry service
+    description: |
+      Scenarios register graph-health checks that the auditor consumes
+      as advisory findings (design §4.c). Mechanism in
+      ``audit/registry.py``: ``AuditCheckRegistry`` is owned by the
+      adapter and published to ExtensionAPI under
+      ``SERVICE_KEY = "llmharness.audit_registry"``. Registration is
+      idempotent on ``(check.name, id(check))`` and fail-fast on
+      non-callable input. ``run_all`` tolerates raising checks — each
+      exception is captured by check name in an errors dict; other
+      checks still run. Concrete check atoms ship as one-file
+      extensions under ``src/llmharness/extensions/`` (REQ-032 —
+      worked examples for downstream scenarios); the auditor wiring
+      (CheckContext → Finding → prompt block) landed in commit 4.
+    priority: P0
+    status: tested
+    code:
+      - src/llmharness/audit/registry.py
+      - src/llmharness/audit/__init__.py
+    tests:
+      - tests/test_audit_registry.py
+    depends_on: [REQ-001]
+
+  - id: REQ-030
+    title: extractor_partial + audit_edge entry types — v3 partial flow
+    description: |
+      v3 (issue #134) replaces the v2 ``extractor_invalid`` failure
+      entry with a partial-success entry. Witness validation now runs
+      inline at edge-construction time inside ``ExtractionState`` with
+      a per-tuple retry budget (3 attempts on the same
+      ``(src, dst, kind)`` tuple); the third failure drops the edge
+      and the firing still commits its events.
+
+      Two new entry-type constants in ``audit/entry_types.py``:
+
+      - ``AUDIT_EDGE = "llmharness.audit_edge"`` — one per accepted
+        edge, payload is ``Edge.to_dict()``.
+      - ``EXTRACTOR_PARTIAL = "llmharness.extractor_partial"`` —
+        written at most once per firing when any edges were dropped,
+        payload ``{"dropped_edges": list[dict], "turn_window":
+        [int, int]}``.
+
+      The adapter writes both via the orchestrator (REQ-019); the
+      integration test pins the four load-bearing transitions
+      (happy / partial / no_call / empty).
+      ``EXTRACTOR_INVALID`` is removed as part of v3 commit 2.
+    priority: P0
+    status: tested
+    code:
+      - src/llmharness/audit/entry_types.py
+      - src/llmharness/adapters/agentm.py
+    tests:
+      - tests/test_two_phase_audit_integration.py
+    depends_on: [REQ-001, REQ-020, REQ-022]
+
+  - id: REQ-031
+    title: get_event_detail([ids]) drill-down tool for the auditor
+    description: |
+      Issue #134 commit 4 (P0). New §11 single-file extension at
+      ``audit/auditor/get_event_detail_tool.py`` registered in the
+      auditor child session. Returns the full ``Event.to_dict()`` plus
+      outgoing+incoming ``Edge.to_dict()`` lists (with witness fields)
+      for every requested event id. Used by the auditor when the prompt
+      is degraded (more events than ``audit_summary_threshold``,
+      design §4.g) to recover the witness fields the prompt stripped.
+
+      Contract for unknown ids: a top-level ``"missing"`` list (not
+      a per-key ``null``). Known ids appear under their stringified
+      id key. Out-of-shape input (negative id, non-int id, empty
+      event_ids list) returns a structured ``ToolResult`` with
+      ``is_error=True`` rather than raising — the auditor child loop
+      must never crash from a malformed drill-down call. bool ids are
+      rejected (bool is a subclass of int in Python).
+
+      Bridging follows the commit-3 pattern: the adapter passes
+      ``events`` and ``edges`` through
+      ``compose_auditor_extensions(events=..., edges=...)`` which
+      forwards them via the atom's ``config`` dict at install time.
+    priority: P0
+    status: tested
+    code:
+      - src/llmharness/audit/auditor/get_event_detail_tool.py
+      - src/llmharness/audit/auditor/extensions.py
+      - src/llmharness/adapters/agentm.py
+    tests:
+      - tests/test_get_event_detail.py
+    depends_on: [REQ-001]
+
+  - id: REQ-032
+    title: Reference check atoms — repeated_actions / open_branches / premature_conclusion
+    description: |
+      Issue #134 commit 5 (P1). Three §11 single-file check atoms
+      under ``src/llmharness/extensions/`` that ship as worked
+      examples of how downstream scenarios register graph checks
+      via the audit registry service (REQ-029):
+
+      - ``check_repeated_actions`` — flags ≥2 ``act`` events sharing
+        an identical summary (heuristic: the v3 extractor prompt
+        does not prescribe a fixed ``tool_name(args)`` summary
+        shape, so summary equality is the most defensible signature
+        without an inline arg-hash on Event).
+      - ``check_open_branches`` — flags ``dec`` / ``hyp`` events
+        with no outgoing ``data`` edge (the v3-graph approximation
+        of "discarded alternative without closing evidence").
+      - ``check_premature_conclusion`` — flags ``concl`` events
+        with strictly fewer than two incoming edges (data + ref
+        combined). Threshold deliberately conservative; checks are
+        advisory.
+
+      Each atom: exports MANIFEST + install(api, config); resolves
+      the audit registry via api.get_service(SERVICE_KEY) and
+      raises RuntimeError fail-fast if absent; registers a pure,
+      side-effect-free callable. §11 contract: one file per atom,
+      no atom-to-atom imports, no core._internal / harness.session
+      import.
+    priority: P1
+    status: tested
+    code:
+      - src/llmharness/extensions/__init__.py
+      - src/llmharness/extensions/check_repeated_actions.py
+      - src/llmharness/extensions/check_open_branches.py
+      - src/llmharness/extensions/check_premature_conclusion.py
+    tests:
+      - tests/test_reference_check_atoms.py
+    depends_on: [REQ-001, REQ-029]
 
   # ---------------------------------------------------------------------------
   # Removed in the 2026-05-08 SDK-native cleanup. Kept here for traceability;
@@ -346,15 +699,15 @@ requirements:
     depends_on: [REQ-001]
 
   - id: REQ-015
-    title: Verdict cited_cards / downstream_reaction (cognitive audit)
+    title: Verdict cited_cards / downstream_reaction (PARTIALLY SUPERSEDED)
     description: |
-      Two opt-in additive fields on Verdict for the cognitive-audit
-      pipeline (design: .claude/designs/llmharness-cognitive-audit.md §6).
-      ``cited_cards: list[str]`` records AFC IDs the audit chose to cite;
-      ``downstream_reaction: str | None`` is populated by the next audit
-      firing's self-monitor judgment. Both default to empty/None.
+      Superseded 2026-05-10 by REQ-025 (V2 verdict shape).
+      ``cited_cards`` field survives in V2.
+      ``downstream_reaction`` is REMOVED — its role is taken by
+      ``continuation_notes: list[str]`` in V2 (free-text recheck list
+      the auditor writes for itself across firings).
     priority: P0
-    status: implemented
-    code: [src/llmharness/schema.py]
-    tests: [tests/test_smoke.py]
+    status: deprecated
+    code: []
+    tests: []
     depends_on: [REQ-001]

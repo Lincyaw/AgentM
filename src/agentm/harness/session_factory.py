@@ -30,7 +30,7 @@ from agentm.harness.extension import (
     load_extension,
 )
 from agentm.harness.provider_resolver import LastRegisteredWins
-from agentm.harness.resource_loader import DefaultResourceLoader, ResourceLoader
+from agentm.harness.resource_loader import InMemoryResourceLoader, ResourceLoader
 from agentm.harness.resource_writer import GitBackedResourceWriter
 from agentm.harness.session_config import (
     AgentSessionConfig,
@@ -58,14 +58,16 @@ async def create_agent_session(
         if config.session_manager is not None
         else InMemorySessionManager(cwd=config.cwd)
     )
+    # SDK default is empty — no filesystem walks, no implicit context.
+    # Callers that want disk-resident skills / prompt templates /
+    # AGENTS.md / CLAUDE.md must construct ``DefaultResourceLoader(cwd=...)``
+    # explicitly. The CLI does this; embedded SDK and child sessions
+    # get a clean slate so their LLM context isn't contaminated by
+    # whatever happens to be in the parent project's ``CLAUDE.md``.
     resource_loader: ResourceLoader = (
         config.resource_loader
         if config.resource_loader is not None
-        else DefaultResourceLoader(
-            cwd=Path(config.cwd),
-            no_skills=config.no_skills,
-            no_prompt_templates=config.no_prompt_templates,
-        )
+        else InMemoryResourceLoader()
     )
 
     tools: list[Tool] = []
