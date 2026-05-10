@@ -12,27 +12,37 @@ requirements:
   # Core typed payloads (P0 — load-bearing for the audit loop)
 
   - id: REQ-001
-    title: Event/Verdict/Reminder schema (V2 — breaking change)
+    title: Event/Edge/Finding/Verdict/Reminder schema (V3 — breaking change)
     description: |
-      Closed-enum type for event kinds; serializable Event, Verdict,
-      Reminder dataclasses. Stable JSON shape — Verdict and Event
-      payloads round-trip through the AgentM session entry tree
+      Closed-enum types for event and edge kinds; serializable Event,
+      Edge, Finding, Verdict, Reminder dataclasses. Stable JSON shape —
+      every payload round-trips through the AgentM session entry tree
       (``api.session.append_entry``).
 
-      V2 Verdict shape (issue #134, 2026-05-10):
+      V3 schema break (issue #134, 2026-05-10):
+        - EventKind values are short-form: task / hyp / evid / act /
+          dec / concl. The v2 long-form values and the REFLECTION
+          member are gone (design §3 lists six kinds).
+        - Event.refs is REMOVED. Edges are first-class records: the
+          extractor emits Edge instances via ``add_edge`` and the
+          adapter persists each one as a ``llmharness.audit_edge``
+          entry. Edge carries witness fields (cited_entities,
+          cited_quote) plus per-side source-turn tuples.
+        - New EdgeKind enum (data | ref) and EDGE_KIND_VALUES
+          constant in audit/_enum_schema.py.
+        - New Finding dataclass — output shape for scenario-registered
+          audit checks (see audit/registry.py, design §4.c).
+
+      V2 Verdict shape (carried forward unchanged in v3, design §6.2):
         surface_reminder: bool
         reminder_text: str
-        continuation_notes: list[str]   # replaces V1 downstream_reaction
+        continuation_notes: list[str]
         matched_event_ids: list[int]
         cited_cards: list[str]
 
-      DriftType enum is REMOVED. It was a preset enum for a subjective
-      dimension (which "type" of drift the auditor detected), violating
-      the project's no-preset-enum-for-subjective-dimensions principle.
-      The LLM's free-text reminder_text + continuation_notes carry the
-      same information with better fidelity. Reminder.type field also
-      removed. Breaking change — pyproject version bump required;
-      rca-autorl backwards-compatibility explicitly waived.
+      DriftType / Reminder.type stay removed. Breaking changes —
+      pyproject version bump required; rca-autorl backwards-
+      compatibility explicitly waived.
     priority: P0
     status: tested
     code: [src/llmharness/schema.py]
@@ -198,10 +208,13 @@ requirements:
       from ``schema.py``.
 
       DriftType and DRIFT_TYPE_VALUES are REMOVED (issue #134,
-      2026-05-10). Only EVENT_KIND_VALUES remains. The auditor's
-      submit_verdict schema (V2) uses no drift-type enum — the
-      verdict shape is defined in full in audit/auditor/submit_tool.py
-      without referencing _enum_schema.py for drift classification.
+      2026-05-10). EVENT_KIND_VALUES carries the v3 short-form values
+      (task / hyp / evid / act / dec / concl). EDGE_KIND_VALUES is
+      added in v3 (data | ref) so the extractor's ``add_edge`` schema
+      stays in lockstep with EdgeKind. The auditor's submit_verdict
+      schema uses no drift-type enum — the verdict shape is defined
+      in full in audit/auditor/submit_tool.py without referencing
+      _enum_schema.py for drift classification.
     priority: P0
     status: implemented
     code: [src/llmharness/audit/_enum_schema.py]
@@ -257,20 +270,25 @@ requirements:
     depends_on: [REQ-001, REQ-021, REQ-023]
 
   - id: REQ-026
-    title: Phase 1 graph validator
+    title: Phase 1 graph validator (SUPERSEDED by v3 witness pipeline)
     description: |
-      Issue #134 PR 2 (P1). Pure-Python mechanical validation step that
-      runs in the adapter after each submit_events call (design §5.4).
-      Five checks: ref resolution, no cycles, kind↔source_turns rules
-      (evidence requires tool_result/user/assistant.thinking source;
-      action requires tool_call source), task reachability for every
-      event, conclusion reachability from task. Failure: no events
-      committed; ``llmharness.extractor_invalid`` entry written with
-      violations list; auditor skipped. New module
-      audit/extractor/validator.py. New entry-type constant
-      ``EXTRACTOR_INVALID`` added to audit/entry_types.py.
+      v2 introduced a pure-Python mechanical validator that ran after
+      each ``submit_events`` call (five checks: ref resolution, no
+      cycles, kind↔source_turns rules, task and conclusion
+      reachability). Failure wrote a ``llmharness.extractor_invalid``
+      entry and skipped the auditor.
+
+      Superseded in v3 (issue #134, 2026-05-10). ``Event.refs`` is
+      gone; ref-graph checks no longer apply. Edges are constructed
+      via ``add_edge`` with a witness pipeline that performs case +
+      whitespace normalisation and substring/entity checks at edge-
+      build time (design §4.c, §6). The v2 validator and its
+      ``EXTRACTOR_INVALID`` entry-type are deleted in commit 2; the
+      adapter's partial-extraction flow writes ``EXTRACTOR_PARTIAL``
+      entries instead. Commit 1 keeps a no-op stub at
+      audit/extractor/validator.py to preserve the import surface.
     priority: P1
-    status: tested
+    status: deprecated
     code:
       - src/llmharness/audit/extractor/validator.py
       - src/llmharness/audit/entry_types.py
@@ -281,21 +299,23 @@ requirements:
     depends_on: [REQ-020, REQ-022]
 
   - id: REQ-027
-    title: Advisory hints module — pure signals for auditor scaffolding
+    title: Advisory hints module (SUPERSEDED by scenario check registry)
     description: |
-      Issue #134 PR 3 (P1). New module audit/hints.py with five pure
-      functions over list[Event]: repeated_actions(graph),
-      convergence_ratio(graph), reachability_gaps(graph),
-      open_branches(graph), multi_branch_syntheses(graph), plus a
-      compute(graph) -> str renderer. Output is a compact textual
-      block injected into the auditor JSON payload as the "hints" key.
-      The auditor may ignore any signal. No async I/O; no new storage.
-      Hints are phrased as "consider …" rather than "concern: …" to
-      avoid anchoring (design §7.5). Prompt cleanup (Option A):
-      removed the dead {hints} format-placeholder from auditor prompt;
-      prompt is now a static string with no .format() calls.
+      v2 module audit/hints.py with five pure functions over
+      list[Event] (repeated_actions, convergence_ratio,
+      reachability_gaps, open_branches, multi_branch_syntheses) plus a
+      compute(graph) -> str renderer.
+
+      Superseded in v3 (issue #134, 2026-05-10) by REQ-029
+      (scenario-registered audit checks). All v2 hint signals walked
+      ``Event.refs``, which is removed in v3; the equivalent signals
+      now ship as one-file Check atoms under
+      ``llmharness.extensions``, registered through the
+      AuditCheckRegistry service and surfaced as Finding records to
+      the auditor. The v2 module is deleted in commit 2; commit 1
+      keeps a no-op stub to preserve the import surface.
     priority: P1
-    status: tested
+    status: deprecated
     code:
       - src/llmharness/audit/hints.py
       - src/llmharness/audit/auditor/prompt.py
@@ -332,6 +352,34 @@ requirements:
       - tests/test_get_turn_tool.py
       - tests/test_two_phase_audit_integration.py
     depends_on: [REQ-021]
+
+  # ---------------------------------------------------------------------------
+  # V3 redesign — issue #134 (2026-05-10). Schema break, scenario-registered
+  # audit checks, witness-pipeline extractor, partial-extraction adapter.
+  # Plan: .claude/plans/2026-05-10-llmharness-issue-134-v3.md
+
+  - id: REQ-029
+    title: scenario-registered audit checks via llmharness.audit_registry service
+    description: |
+      Scenarios register graph-health checks that the auditor consumes
+      as advisory findings (design §4.c). Mechanism in
+      ``audit/registry.py``: ``AuditCheckRegistry`` is owned by the
+      adapter and published to ExtensionAPI under
+      ``SERVICE_KEY = "llmharness.audit_registry"``. Registration is
+      idempotent on ``(check.name, id(check))`` and fail-fast on
+      non-callable input. ``run_all`` tolerates raising checks — each
+      exception is captured by check name in an errors dict; other
+      checks still run. Concrete check atoms ship in commit 5 as
+      one-file extensions; the auditor wiring (CheckContext → Finding
+      → prompt block) lands in commit 4.
+    priority: P0
+    status: tested
+    code:
+      - src/llmharness/audit/registry.py
+      - src/llmharness/audit/__init__.py
+    tests:
+      - tests/test_audit_registry.py
+    depends_on: [REQ-001]
 
   # ---------------------------------------------------------------------------
   # Removed in the 2026-05-08 SDK-native cleanup. Kept here for traceability;

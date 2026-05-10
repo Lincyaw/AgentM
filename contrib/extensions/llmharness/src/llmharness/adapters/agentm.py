@@ -134,7 +134,10 @@ _REMINDER_DELIVERED_ENTRY_TYPE = _et.REMINDER_DELIVERED
 _EXTRACTOR_NO_CALL_ENTRY = _et.EXTRACTOR_NO_CALL
 _EXTRACTOR_ERROR_ENTRY = _et.EXTRACTOR_ERROR
 _EXTRACTOR_EMPTY_ENTRY = _et.EXTRACTOR_EMPTY
-_EXTRACTOR_INVALID_ENTRY = _et.EXTRACTOR_INVALID
+# TODO(commit-3): rewire to extractor_partial. The legacy extractor_invalid
+# entry-type is gone (v3 removes the graph validator); commit 3 reroutes
+# this site to the new EXTRACTOR_PARTIAL flow tied to the witness pipeline.
+_EXTRACTOR_INVALID_ENTRY = "llmharness.extractor_invalid"
 _AUDIT_NO_CALL_ENTRY = _et.AUDIT_NO_CALL
 _AUDIT_ERROR_ENTRY = _et.AUDIT_ERROR
 

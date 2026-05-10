@@ -50,12 +50,18 @@ def _coerce_int_list(raw: Any, *, field_name: str) -> list[int]:
 
 @dataclass(frozen=True)
 class _RawExtractorEvent:
-    """One event entry, parsed from the ``events`` array, pre-id-stamping."""
+    """One event entry, parsed from the ``events`` array, pre-id-stamping.
+
+    V3 schema break (issue #134): ``Event.refs`` is gone. Edges are
+    first-class records emitted by ``add_edge`` and persisted as
+    ``llmharness.audit_edge`` entries; the extractor's full witness
+    pipeline lands in commit 2. Until then this parser only carries
+    ``kind`` / ``summary`` / ``source_turns``.
+    """
 
     kind: EventKind
     summary: str
     source_turns: list[int] = field(default_factory=list)
-    refs: list[int] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, raw: Any, *, index: int) -> _RawExtractorEvent:
@@ -81,7 +87,6 @@ class _RawExtractorEvent:
             source_turns=_coerce_int_list(
                 raw.get("source_turns"), field_name=f"events[{index}].source_turns"
             ),
-            refs=_coerce_int_list(raw.get("refs"), field_name=f"events[{index}].refs"),
         )
 
 
@@ -129,7 +134,6 @@ class RawExtractorOutput:
                     id=next_id,
                     kind=raw.kind,
                     summary=raw.summary,
-                    refs=list(raw.refs),
                     source_turns=list(raw.source_turns),
                 )
             )

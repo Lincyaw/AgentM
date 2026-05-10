@@ -113,13 +113,11 @@ def _collect(path: Path) -> tuple[list[Event], list[Verdict], int]:
 
 
 def _fmt_event(e: Event) -> str:
-    refs = ",".join(str(r) for r in e.refs) if e.refs else "-"
+    # v3: Event.refs is removed; edges are persisted as separate
+    # llmharness.audit_edge entries. CLI inspector edge rendering lands
+    # in commit 3 (adapter rewrite); for now we just drop the column.
     turns = ",".join(str(t) for t in e.source_turns) if e.source_turns else "-"
-    return (
-        f"[event {e.id:>3}] {e.kind.value:<10} "
-        f"refs=[{refs}]  turns=[{turns}]\n"
-        f"           {e.summary}"
-    )
+    return f"[event {e.id:>3}] {e.kind.value:<10} turns=[{turns}]\n           {e.summary}"
 
 
 def _fmt_verdict(idx: int, v: Verdict) -> str:
