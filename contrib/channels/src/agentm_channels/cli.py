@@ -263,7 +263,10 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     logging.getLogger("Lark").setLevel(logging.WARNING)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # ``httpx`` logs every outbound call at INFO; we keep it at INFO so
+    # operators can confirm provider traffic is happening (silencing it
+    # made it impossible to tell whether the LLM was being called when
+    # the agent appeared idle).
     _load_dotenv_files(Path(args.cwd))
     try:
         return asyncio.run(_arun(args))

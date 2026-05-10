@@ -155,13 +155,15 @@ class FeishuChannel(BaseChannel):
         if self._is_self(sender):
             return
         # Quick visual ACK so the user knows the bot got it before the
-        # LLM has had a chance to reply. Best-effort — failure is logged
-        # but does not block the inbound dispatch.
-        if message_id:
-            try:
-                await self._channel.add_reaction(message_id, self._ack_emoji())
-            except Exception:
-                logger.exception("[feishu] add_reaction failed")
+        # LLM has had a chance to reply. Best-effort, fire-and-forget —
+        # we MUST NOT await it here: if the SDK's reaction RPC hangs or
+        # holds a lock, awaiting blocks the inbound handler and the
+        # message never reaches the agent.
+        if message_id and self._ack_emoji():
+            asyncio.create_task(
+                self._safe_reaction(message_id, self._ack_emoji()),
+                name="feishu-ack",
+            )
         await self._handle_message(
             sender_id=sender,
             chat_id=chat_id,
@@ -175,6 +177,12 @@ class FeishuChannel(BaseChannel):
         if isinstance(cfg, dict):
             return str(cfg.get("ack_emoji", "OK"))
         return getattr(cfg, "ack_emoji", "OK")
+
+    async def _safe_reaction(self, message_id: str, emoji: str) -> None:
+        try:
+            await self._channel.add_reaction(message_id, emoji)
+        except Exception:
+            logger.exception("[feishu] add_reaction failed for %s", message_id)
 
     async def _on_card_action(self, event: Any) -> None:
         value = getattr(event.action, "value", None) or {}

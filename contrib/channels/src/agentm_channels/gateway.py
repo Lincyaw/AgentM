@@ -42,7 +42,8 @@ logger = logging.getLogger(__name__)
 
 
 SessionFactory = Callable[
-    [str, EventBus, str | None],  # (cwd, bus, resume_session_id)
+    [str, EventBus, str | None],
+    # (cwd, bus, resume_session_id)
     Awaitable[Any],  # → object with .prompt(text) + .shutdown(), and
                     # an optional .session_manager.get_session_id()
 ]
@@ -137,6 +138,13 @@ class Gateway:
                 logger.exception("failed to publish error reply")
 
     async def _dispatch(self, msg: InboundMessage) -> None:
+        logger.info(
+            "gateway dispatch: channel=%s session_key=%s sender=%s len=%d",
+            msg.channel,
+            msg.session_key,
+            msg.sender_id,
+            len(msg.content),
+        )
         # Approval click? Route directly to any pending bridge.
         button_value = str(msg.metadata.get("button_value") or "")
         if button_value and ":" in button_value:
@@ -153,7 +161,9 @@ class Gateway:
             )
             return
 
+        logger.info("gateway: getting route for %s", msg.session_key)
         route = await self._get_or_create_route(msg)
+        logger.info("gateway: prompting session=%s", msg.session_key)
         async with route.lock:
             route.approval_ctx = ApprovalContext(
                 channel=msg.channel,

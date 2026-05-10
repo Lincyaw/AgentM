@@ -84,20 +84,59 @@ class MessageBus:
     consumers. Both queues are unbounded — backpressure is the channel
     implementation's responsibility (a slow Feishu user shouldn't be
     able to drop Slack traffic).
+
+    Cross-loop publish is supported. ``lark_oapi.channel.FeishuChannel``
+    dispatches inbound events on its own background loop (running in a
+    separate thread); the queue, however, is created on the gateway's
+    main loop. ``await queue.put()`` from a foreign loop *appears* to
+    succeed but the consumer's waiter on the home loop never wakes —
+    silent message loss / hang. ``publish_inbound`` and
+    ``publish_outbound`` therefore detect a foreign caller loop and
+    bridge through ``loop.call_soon_threadsafe`` onto the home loop.
     """
 
     def __init__(self) -> None:
         self.inbound: asyncio.Queue[InboundMessage] = asyncio.Queue()
         self.outbound: asyncio.Queue[OutboundMessage] = asyncio.Queue()
+        try:
+            self._home_loop: asyncio.AbstractEventLoop | None = (
+                asyncio.get_running_loop()
+            )
+        except RuntimeError:
+            # Allow construction outside an async context (test setup);
+            # the first publish/consume from the home loop will retry.
+            self._home_loop = None
+
+    def _ensure_home_loop(self) -> asyncio.AbstractEventLoop:
+        if self._home_loop is None:
+            self._home_loop = asyncio.get_running_loop()
+        return self._home_loop
+
+    async def _publish(self, queue: asyncio.Queue[Any], msg: Any) -> None:
+        home = self._ensure_home_loop()
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+        if current is None or current is home:
+            await queue.put(msg)
+            return
+        # Foreign loop: schedule the put on the home loop. Unbounded
+        # queue → ``put_nowait`` never blocks or raises; we don't need
+        # to await its completion (the queue's consumer will pick it up
+        # whenever the home loop next runs).
+        home.call_soon_threadsafe(queue.put_nowait, msg)
 
     async def publish_inbound(self, msg: InboundMessage) -> None:
-        await self.inbound.put(msg)
+        await self._publish(self.inbound, msg)
 
     async def consume_inbound(self) -> InboundMessage:
+        self._ensure_home_loop()
         return await self.inbound.get()
 
     async def publish_outbound(self, msg: OutboundMessage) -> None:
-        await self.outbound.put(msg)
+        await self._publish(self.outbound, msg)
 
     async def consume_outbound(self) -> OutboundMessage:
+        self._ensure_home_loop()
         return await self.outbound.get()
