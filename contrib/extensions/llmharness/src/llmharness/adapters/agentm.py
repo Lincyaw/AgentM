@@ -30,6 +30,7 @@ from agentm.harness.extension import ExtensionAPI
 from agentm.harness.session_config import AgentSessionConfig
 
 from ..audit import entry_types as _et
+from ..audit import hints as _hints
 from ..audit.auditor import (
     SUBMIT_VERDICT_TOOL_NAME,
     AuditorOutputError,
@@ -41,6 +42,7 @@ from ..audit.extractor import (
     ExtractorOutputError,
     RawExtractorOutput,
     compose_extractor_extensions,
+    validate_graph,
 )
 from ..schema import Event, Reminder, Verdict
 
@@ -121,8 +123,7 @@ _DEFAULT_MODE = "async"
 # the model treats it as out-of-band advisory rather than as a fresh user
 # instruction that supersedes the current task.
 _REMINDER_PREAMBLE = (
-    "[harness advisory — meta-injection from cognitive audit, not from the "
-    "human user]\n"
+    "[harness advisory — meta-injection from cognitive audit, not from the human user]\n"
 )
 
 _AUDIT_EVENT_ENTRY_TYPE = _et.AUDIT_EVENT
@@ -133,6 +134,7 @@ _REMINDER_DELIVERED_ENTRY_TYPE = _et.REMINDER_DELIVERED
 _EXTRACTOR_NO_CALL_ENTRY = _et.EXTRACTOR_NO_CALL
 _EXTRACTOR_ERROR_ENTRY = _et.EXTRACTOR_ERROR
 _EXTRACTOR_EMPTY_ENTRY = _et.EXTRACTOR_EMPTY
+_EXTRACTOR_INVALID_ENTRY = _et.EXTRACTOR_INVALID
 _AUDIT_NO_CALL_ENTRY = _et.AUDIT_NO_CALL
 _AUDIT_ERROR_ENTRY = _et.AUDIT_ERROR
 
@@ -147,10 +149,11 @@ class _BranchState:
     cursor_last_turn_index: int
     graph: list[Event]
     recent_verdicts: list[dict[str, Any]]
+    last_continuation_notes: list[str]
 
 
 def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _BranchState:
-    """Single-pass extraction of cursor + graph + recent verdicts."""
+    """Single-pass extraction of cursor + graph + recent verdicts + continuation_notes."""
     cursor_last_turn_index = -1
     graph: list[Event] = []
     verdicts: list[dict[str, Any]] = []
@@ -171,19 +174,25 @@ def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _Bran
             if isinstance(raw, int) and not isinstance(raw, bool):
                 cursor_last_turn_index = raw
 
+    # Extract continuation_notes from the most recent verdict (if any).
+    last_continuation_notes: list[str] = []
+    if verdicts:
+        raw_notes = verdicts[-1].get("continuation_notes")
+        if isinstance(raw_notes, list):
+            last_continuation_notes = [n for n in raw_notes if isinstance(n, str)]
+
     return _BranchState(
         cursor_last_turn_index=cursor_last_turn_index,
         graph=graph,
         recent_verdicts=verdicts[-recent_verdicts_n:] if recent_verdicts_n > 0 else [],
+        last_continuation_notes=last_continuation_notes,
     )
 
 
 # --- failure recording ------------------------------------------------------
 
 
-def _record_failure(
-    api: ExtensionAPI, entry_type: str, payload: dict[str, Any]
-) -> None:
+def _record_failure(api: ExtensionAPI, entry_type: str, payload: dict[str, Any]) -> None:
     """Single chokepoint for typed failure entries. Append-only; never raises."""
     api.session.append_entry(entry_type, payload)
 
@@ -195,9 +204,7 @@ def _window_is_non_trivial(messages_slice: list[AgentMessage]) -> bool:
     expected to produce events from user messages alone, so an empty events
     array on such a window is normal, not a failure (design §4).
     """
-    return any(
-        isinstance(msg, (AssistantMessage, ToolResultMessage)) for msg in messages_slice
-    )
+    return any(isinstance(msg, (AssistantMessage, ToolResultMessage)) for msg in messages_slice)
 
 
 # --- install ----------------------------------------------------------------
@@ -212,11 +219,16 @@ class _ExtractorJob:
 
 @dataclass(frozen=True)
 class _AuditorJob:
-    """Marker that an auditor pass should run after the most recent extractor.
+    """Trajectory snapshot taken at TurnEndEvent time; consumed by the worker.
 
     The worker reads the up-to-date branch state when this job fires, so it
     sees every extractor entry already appended by prior jobs in this queue.
+    The ``messages`` snapshot is used to build the per-firing ``get_turn``
+    tool so the auditor child can drill back into individual raw turns without
+    bulk-loading the full trajectory into its context (design §6.3, §7.4).
     """
+
+    messages: tuple[AgentMessage, ...]
 
 
 @dataclass(frozen=True)
@@ -235,9 +247,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     if k < 1:
         k = _DEFAULT_AUDIT_INTERVAL_TURNS
 
-    shutdown_timeout = float(
-        config.get("shutdown_timeout_s", _DEFAULT_SHUTDOWN_TIMEOUT_S)
-    )
+    shutdown_timeout = float(config.get("shutdown_timeout_s", _DEFAULT_SHUTDOWN_TIMEOUT_S))
     if shutdown_timeout < 0:
         shutdown_timeout = _DEFAULT_SHUTDOWN_TIMEOUT_S
 
@@ -248,12 +258,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     prompt_extractor_raw = config.get("prompt_override_extractor")
     prompt_auditor_raw = config.get("prompt_override_auditor")
-    prompt_extractor = (
-        prompt_extractor_raw if isinstance(prompt_extractor_raw, str) else None
-    )
-    prompt_auditor = (
-        prompt_auditor_raw if isinstance(prompt_auditor_raw, str) else None
-    )
+    prompt_extractor = prompt_extractor_raw if isinstance(prompt_extractor_raw, str) else None
+    prompt_auditor = prompt_auditor_raw if isinstance(prompt_auditor_raw, str) else None
 
     extractor_extensions = compose_extractor_extensions(
         prompt_override=prompt_extractor,
@@ -273,21 +279,25 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     turn_count = 0
 
     if mode == "sync":
+
         async def _on_turn_end_sync(event: TurnEndEvent) -> None:
             nonlocal turn_count
             turn_count += 1
-            await _drain_extractor(
+            messages_snapshot = tuple(event.messages)
+            extractor_ok = await _drain_extractor(
                 api=api,
-                job=_ExtractorJob(messages=tuple(event.messages)),
+                job=_ExtractorJob(messages=messages_snapshot),
                 extractor_extensions=extractor_extensions,
                 extractor_provider=extractor_provider,
             )
-            if (turn_count % k) == 0:
+            # Auditor is skipped when extractor validation failed (design §3).
+            if extractor_ok and (turn_count % k) == 0:
                 await _drain_auditor(
                     api=api,
                     auditor_extensions=auditor_extensions,
                     auditor_provider=auditor_provider,
                     pending_reminders=pending_reminders,
+                    messages=list(messages_snapshot),
                 )
 
         api.on(TurnEndEvent.CHANNEL, _on_turn_end_sync)
@@ -324,9 +334,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         nonlocal turn_count
         turn_count += 1
         _ensure_worker()
-        queue.put_nowait(_ExtractorJob(messages=tuple(event.messages)))
+        messages_snapshot = tuple(event.messages)
+        queue.put_nowait(_ExtractorJob(messages=messages_snapshot))
         if (turn_count % k) == 0:
-            queue.put_nowait(_AuditorJob())
+            # Carry the trajectory snapshot into the auditor job so the worker
+            # can build the per-firing get_turn tool (design §6.3).
+            queue.put_nowait(_AuditorJob(messages=messages_snapshot))
 
     _on_before_send_to_llm = _make_reminder_injector(api, pending_reminders)
 
@@ -403,14 +416,12 @@ def _make_reminder_injector(
         while pending_reminders:
             reminder = pending_reminders.pop(0)
             event.messages.append(
-                text_message(
-                    _REMINDER_PREAMBLE + reminder.text, timestamp=time.time()
-                )
+                text_message(_REMINDER_PREAMBLE + reminder.text, timestamp=time.time())
             )
             try:
                 api.session.append_entry(
                     _REMINDER_DELIVERED_ENTRY_TYPE,
-                    {"type": reminder.type.value, "text": reminder.text},
+                    {"text": reminder.text},
                 )
             except Exception:
                 _logger.exception("failed to persist reminder_delivered entry")
@@ -433,7 +444,19 @@ async def _drain_queue(
     Single-consumer keeps invariants simple: cursor advances monotonically,
     auditor jobs see every extractor entry queued before them, and there is
     never a race between two extractor passes over the same window.
+
+    ``_last_extractor_was_invalid`` is a worker-local flag updated by each
+    _ExtractorJob result.  When an _AuditorJob is dequeued, it checks the
+    flag: if the immediately preceding extractor job failed graph validation,
+    the auditor is skipped for that firing (design §3).  The flag resets on
+    the next successful extractor run.
     """
+    # Worker-local flag: True when the most recent extractor job returned
+    # False (validation failure or other extraction error).  The _AuditorJob
+    # handler reads this to honour "skip auditor when extractor invalid"
+    # (design §3 / §5.4).
+    _last_extractor_was_invalid: bool = False
+
     while True:
         try:
             job = await queue.get()
@@ -443,19 +466,30 @@ async def _drain_queue(
             if isinstance(job, _ShutdownJob):
                 return
             if isinstance(job, _ExtractorJob):
-                await _drain_extractor(
+                extractor_ok = await _drain_extractor(
                     api=api,
                     job=job,
                     extractor_extensions=extractor_extensions,
                     extractor_provider=extractor_provider,
                 )
+                # Track whether this extractor firing produced valid events.
+                _last_extractor_was_invalid = not extractor_ok
             elif isinstance(job, _AuditorJob):
-                await _drain_auditor(
-                    api=api,
-                    auditor_extensions=auditor_extensions,
-                    auditor_provider=auditor_provider,
-                    pending_reminders=pending_reminders,
-                )
+                if _last_extractor_was_invalid:
+                    # The preceding extractor job failed validation —
+                    # skip the auditor for this firing (design §3).
+                    _logger.debug(
+                        "llmharness audit worker: skipping auditor — "
+                        "preceding extractor job was invalid"
+                    )
+                else:
+                    await _drain_auditor(
+                        api=api,
+                        auditor_extensions=auditor_extensions,
+                        auditor_provider=auditor_provider,
+                        pending_reminders=pending_reminders,
+                        messages=list(job.messages),
+                    )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -473,10 +507,22 @@ async def _drain_extractor(
     job: _ExtractorJob,
     extractor_extensions: list[tuple[str, dict[str, Any]]],
     extractor_provider: tuple[str, dict[str, Any]] | None,
-) -> None:
+) -> bool:
+    """Run one extractor firing and commit valid events.
+
+    Returns ``True`` when events were successfully validated and committed
+    (including the empty-events case on a trivial window).  Returns ``False``
+    when any failure entry was written, so callers can skip the auditor.
+    """
     branch = api.session.get_branch()
     state = _scan_branch(branch, recent_verdicts_n=_DEFAULT_RECENT_VERDICTS)
     messages = list(job.messages)
+
+    # Build turn_index_to_kinds for the Phase 1 validator (check 3).
+    # We walk the same message slice the extractor sees and record what
+    # kinds of content appear at each absolute trajectory index.
+    window_lo = max(state.cursor_last_turn_index + 1, 0)
+    turn_index_to_kinds = _build_turn_index_to_kinds(messages, window_lo)
 
     new_events = await _run_extractor(
         api=api,
@@ -488,7 +534,28 @@ async def _drain_extractor(
         next_event_id=_next_event_id(state.graph),
     )
     if new_events is None:
-        return  # typed failure already recorded; cursor stays put
+        return False  # typed failure already recorded; cursor stays put
+
+    # Phase 1 graph validator (design §5.4).
+    if new_events:  # no point validating an empty list
+        violations = validate_graph(
+            new_events=new_events,
+            existing_events=state.graph,
+            turn_index_to_kinds=turn_index_to_kinds,
+        )
+        if violations:
+            window_lo_final = max(state.cursor_last_turn_index + 1, 0)
+            window_hi_final = len(messages) - 1
+            _record_failure(
+                api,
+                _EXTRACTOR_INVALID_ENTRY,
+                {
+                    "violations": violations,
+                    "turn_window": [window_lo_final, window_hi_final],
+                },
+            )
+            # Do NOT advance the cursor — the window must be retried.
+            return False
 
     for ev in new_events:
         api.session.append_entry(_AUDIT_EVENT_ENTRY_TYPE, ev.to_dict())
@@ -500,6 +567,7 @@ async def _drain_extractor(
             "extraction_run_id": uuid.uuid4().hex,
         },
     )
+    return True
 
 
 async def _drain_auditor(
@@ -508,25 +576,34 @@ async def _drain_auditor(
     auditor_extensions: list[tuple[str, dict[str, Any]]],
     auditor_provider: tuple[str, dict[str, Any]] | None,
     pending_reminders: list[Reminder],
+    messages: list[AgentMessage],
 ) -> None:
     branch = api.session.get_branch()
     state = _scan_branch(branch, recent_verdicts_n=_DEFAULT_RECENT_VERDICTS)
 
+    # Build per-firing extensions: append get_turn tool with a fresh snapshot.
+    # The static ``auditor_extensions`` list carries the base modules
+    # (observability, cards_tools, submit_tool, system_prompt); we extend it
+    # here with the trajectory snapshot captured at TurnEndEvent time so the
+    # auditor child can drill into individual turns on demand (design §6.3).
+    # A fresh snapshot list is built on each call — never cache it.
+    trajectory_snapshot = _serialize_full_trajectory(messages)
+    firing_extensions = _with_trajectory_snapshot(auditor_extensions, trajectory_snapshot)
+
     verdict = await _run_auditor(
         api=api,
-        auditor_extensions=auditor_extensions,
+        auditor_extensions=firing_extensions,
         provider=auditor_provider,
         graph_events=state.graph,
         recent_verdicts=state.recent_verdicts,
+        continuation_notes_from_prior_firing=state.last_continuation_notes,
     )
     if verdict is None:
         return
 
     api.session.append_entry(_VERDICT_ENTRY_TYPE, verdict.to_dict())
-    if verdict.drift and verdict.reminder and verdict.type is not None:
-        pending_reminders.append(
-            Reminder(type=verdict.type, text=verdict.reminder)
-        )
+    if verdict.surface_reminder and verdict.reminder_text:
+        pending_reminders.append(Reminder(text=verdict.reminder_text))
 
 
 def _next_event_id(prior_events: list[Event]) -> int:
@@ -534,6 +611,42 @@ def _next_event_id(prior_events: list[Event]) -> int:
 
 
 # --- trajectory slicing -----------------------------------------------------
+
+
+def _build_turn_index_to_kinds(messages: list[AgentMessage], window_lo: int) -> dict[int, set[str]]:
+    """Map absolute trajectory index → set of content kinds for the extractor window.
+
+    Walks ``messages[window_lo:]`` and inspects each message's role and
+    content blocks to collect the kinds present.  Content kinds recorded:
+    ``"tool_call"``, ``"tool_result"``, ``"thinking"``, ``"text"``, plus
+    the message role (``"user"`` / ``"assistant"``).
+
+    Used by the Phase 1 graph validator's kind↔source_turns checks
+    (design §5.4 check 3).
+    """
+    result: dict[int, set[str]] = {}
+    for i, msg in enumerate(messages[window_lo:], start=window_lo):
+        kinds: set[str] = set()
+        role = getattr(msg, "role", None)
+        if isinstance(role, str):
+            kinds.add(role)
+        content = getattr(msg, "content", None)
+        if isinstance(content, list):
+            for block in content:
+                block_type = getattr(block, "type", None)
+                if isinstance(block_type, str):
+                    kinds.add(block_type)
+                # Also check structural attributes for duck-typed detection.
+                if (
+                    getattr(block, "name", None) is not None
+                    and getattr(block, "arguments", None) is not None
+                ):
+                    kinds.add("tool_call")
+                if getattr(block, "tool_call_id", None) is not None:
+                    kinds.add("tool_result")
+        if kinds:
+            result[i] = kinds
+    return result
 
 
 def _slice_new_turns(
@@ -554,9 +667,7 @@ def _slice_new_turns(
     return out
 
 
-def _serialize_message_for_extractor(
-    msg: AgentMessage, *, index: int
-) -> dict[str, Any] | None:
+def _serialize_message_for_extractor(msg: AgentMessage, *, index: int) -> dict[str, Any] | None:
     """Best-effort dict view of one message.
 
     Walks blocks via duck-typing on public attrs so the serializer survives
@@ -583,7 +694,10 @@ def _serialize_block(block: Any) -> dict[str, Any] | None:
     text = getattr(block, "text", None)
     if isinstance(text, str) and text:
         block_type = getattr(block, "type", None)
-        return {"type": block_type if isinstance(block_type, str) and block_type else "text", "text": text}
+        return {
+            "type": block_type if isinstance(block_type, str) and block_type else "text",
+            "text": text,
+        }
 
     name = getattr(block, "name", None)
     arguments = getattr(block, "arguments", None)
@@ -618,6 +732,41 @@ def _serialize_block(block: Any) -> dict[str, Any] | None:
         }
 
     return {"type": getattr(block, "type", block.__class__.__name__), "repr": repr(block)}
+
+
+def _serialize_full_trajectory(messages: list[AgentMessage]) -> list[dict[str, Any]]:
+    """Serialize the entire trajectory into the same shape as ``_slice_new_turns``.
+
+    Distinct from the cursor-based ``_slice_new_turns`` (which only serializes
+    new turns since the last extractor cursor): this function serializes ALL
+    messages from index 0, producing the snapshot the auditor's ``get_turn``
+    tool closes over (design §6.3, §7.4).
+
+    The output format is identical — ``{"index": i, "role": ..., "content": [...]}``
+    — so the auditor can look up any turn by its absolute trajectory index.
+    Messages that fail ``_serialize_message_for_extractor`` (e.g. bare strings
+    with no content blocks) are silently dropped; the auditor's out-of-range
+    guard covers any resulting index gaps.
+    """
+    out: list[dict[str, Any]] = []
+    for i, msg in enumerate(messages):
+        serialized = _serialize_message_for_extractor(msg, index=i)
+        if serialized is not None:
+            out.append(serialized)
+    return out
+
+
+def _with_trajectory_snapshot(
+    base_extensions: list[tuple[str, dict[str, Any]]],
+    trajectory_snapshot: list[dict[str, Any]],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Return a copy of ``base_extensions`` with the get_turn module appended.
+
+    Called once per auditor firing inside ``_drain_auditor``; never mutates
+    the shared ``auditor_extensions`` list that lives in the install closure.
+    """
+    _GET_TURN_MODULE = "llmharness.audit.auditor.get_turn_tool"
+    return [*base_extensions, (_GET_TURN_MODULE, {"trajectory_snapshot": trajectory_snapshot})]
 
 
 # --- phase runner -----------------------------------------------------------
@@ -746,10 +895,13 @@ async def _run_auditor(
     provider: tuple[str, dict[str, Any]] | None,
     graph_events: list[Event],
     recent_verdicts: list[dict[str, Any]],
+    continuation_notes_from_prior_firing: list[str],
 ) -> Verdict | None:
     payload = {
         "graph": [e.to_dict() for e in graph_events],
         "recent_verdicts": list(recent_verdicts),
+        "continuation_notes_from_prior_firing": list(continuation_notes_from_prior_firing),
+        "hints": _hints.compute(graph_events),
     }
     raw = await _run_phase(
         api=api,

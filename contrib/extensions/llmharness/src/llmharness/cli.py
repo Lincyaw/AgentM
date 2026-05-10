@@ -57,9 +57,7 @@ def _resolve_session_file(arg: str | None, cwd: Path) -> Path:
         return p
     directory = _default_sessions_root() / _cwd_slug(cwd)
     if not directory.is_dir():
-        raise FileNotFoundError(
-            f"no session directory for cwd {cwd} (looked in {directory})"
-        )
+        raise FileNotFoundError(f"no session directory for cwd {cwd} (looked in {directory})")
     files = sorted(
         (p for p in directory.glob("*.jsonl") if p.is_file()),
         key=lambda p: p.stat().st_mtime,
@@ -125,14 +123,13 @@ def _fmt_event(e: Event) -> str:
 
 
 def _fmt_verdict(idx: int, v: Verdict) -> str:
-    head = f"[verdict #{idx}] drift={v.drift}"
-    if v.drift:
-        head += f"  type={v.type.value if v.type else '?'}"
+    head = f"[verdict #{idx}] surface_reminder={v.surface_reminder}"
+    if v.surface_reminder:
         matched = ",".join(str(i) for i in v.matched_event_ids)
         head += f"  matched=[{matched}]"
     body = ""
-    if v.drift and v.reminder:
-        body = f"\n           reminder: {v.reminder}"
+    if v.surface_reminder and v.reminder_text:
+        body = f"\n           reminder: {v.reminder_text}"
     return head + body
 
 
@@ -145,7 +142,7 @@ def _render_text(
     skip_events: bool,
     skip_verdicts: bool,
 ) -> None:
-    drift_n = sum(1 for v in verdicts if v.drift)
+    drift_n = sum(1 for v in verdicts if v.surface_reminder)
     out.write(f"session: {session_file}\n")
     out.write(
         f"events={len(events)}  verdicts={len(verdicts)} (drift={drift_n})  "
@@ -265,36 +262,40 @@ def _walk_dataset(
                 shaped = _to_extractor_msg(messages[idx], idx)
                 if shaped is not None:
                     new_turns.append(shaped)
-            yield "extractor", {
-                "input": {
-                    "new_turns": new_turns,
-                    "recent_graph": audit_events[-_RECENT_GRAPH_SLICE_FOR_EXTRACTOR:],
+            yield (
+                "extractor",
+                {
+                    "input": {
+                        "new_turns": new_turns,
+                        "recent_graph": audit_events[-_RECENT_GRAPH_SLICE_FOR_EXTRACTOR:],
+                    },
+                    "output": {"events": pending_extractor_events},
+                    "meta": {
+                        "turn_window": [last_cursor_turn_index + 1, this_turn_index],
+                        "extraction_run_id": payload.get("extraction_run_id"),
+                    },
                 },
-                "output": {"events": pending_extractor_events},
-                "meta": {
-                    "turn_window": [last_cursor_turn_index + 1, this_turn_index],
-                    "extraction_run_id": payload.get("extraction_run_id"),
-                },
-            }
+            )
             audit_events.extend(pending_extractor_events)
             pending_extractor_events = []
             last_cursor_turn_index = this_turn_index
             continue
         if t == _VERDICT_ENTRY_TYPE:
-            yield "auditor", {
-                "input": {
-                    "graph": list(audit_events),
-                    "recent_verdicts": verdicts[-_RECENT_VERDICTS_FOR_AUDITOR:],
+            yield (
+                "auditor",
+                {
+                    "input": {
+                        "graph": list(audit_events),
+                        "recent_verdicts": verdicts[-_RECENT_VERDICTS_FOR_AUDITOR:],
+                    },
+                    "output": {"verdict": payload},
                 },
-                "output": {"verdict": payload},
-            }
+            )
             verdicts.append(payload)
             continue
 
 
-def _stream_dataset_to_files(
-    path: Path, out_dir: Path
-) -> tuple[int, int]:
+def _stream_dataset_to_files(path: Path, out_dir: Path) -> tuple[int, int]:
     """Stream ``_walk_dataset`` straight to extractor.jsonl + auditor.jsonl.
 
     Returns ``(extractor_count, auditor_count)``. Memory stays O(running
@@ -303,9 +304,10 @@ def _stream_dataset_to_files(
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     ext_count = aud_count = 0
-    with (out_dir / "extractor.jsonl").open("w", encoding="utf-8") as ext_fh, (
-        out_dir / "auditor.jsonl"
-    ).open("w", encoding="utf-8") as aud_fh:
+    with (
+        (out_dir / "extractor.jsonl").open("w", encoding="utf-8") as ext_fh,
+        (out_dir / "auditor.jsonl").open("w", encoding="utf-8") as aud_fh,
+    ):
         for kind, case in _walk_dataset(path):
             line = json.dumps(case, ensure_ascii=False, default=str)
             if kind == "extractor":
@@ -322,9 +324,7 @@ def _stream_dataset_to_files(
 # --- dataset review ---------------------------------------------------------
 
 
-def _resolve_dataset_files(
-    path: Path, kind_filter: str | None
-) -> list[tuple[str, Path]]:
+def _resolve_dataset_files(path: Path, kind_filter: str | None) -> list[tuple[str, Path]]:
     """Return [(kind, file)] in display order for review-dataset.
 
     Single-file PATH: kind is inferred from the filename stem; ``--kind``
@@ -355,9 +355,7 @@ def _resolve_dataset_files(
         if candidate.is_file():
             out.append((kind, candidate))
     if not out:
-        raise FileNotFoundError(
-            f"no extractor.jsonl/auditor.jsonl under {path}"
-        )
+        raise FileNotFoundError(f"no extractor.jsonl/auditor.jsonl under {path}")
     return out
 
 
@@ -378,14 +376,14 @@ def _summarize_case(kind: str, case: dict[str, Any]) -> str:
     graph = inp.get("graph") or []
     rv = inp.get("recent_verdicts") or []
     verdict = out.get("verdict") or {}
-    drift = verdict.get("drift")
-    reminder = (verdict.get("reminder") or "").replace("\n", " ")
-    if len(reminder) > 80:
-        reminder = reminder[:77] + "..."
-    tail = f"  reminder={reminder!r}" if reminder else ""
+    surface_reminder = verdict.get("surface_reminder")
+    reminder_text = (verdict.get("reminder_text") or "").replace("\n", " ")
+    if len(reminder_text) > 80:
+        reminder_text = reminder_text[:77] + "..."
+    tail = f"  reminder={reminder_text!r}" if reminder_text else ""
     return (
         f"graph={len(graph)}  recent_verdicts={len(rv)}  "
-        f"→ drift={drift}{tail}"
+        f"→ surface_reminder={surface_reminder}{tail}"
     )
 
 
@@ -397,8 +395,7 @@ def _run_review_dataset(args: argparse.Namespace) -> int:
         return 2
     if args.case is not None and len(files) > 1:
         print(
-            "error: --case requires --kind when PATH is a directory "
-            "with both files.",
+            "error: --case requires --kind when PATH is a directory with both files.",
             file=sys.stderr,
         )
         return 2
@@ -458,15 +455,9 @@ def main(argv: list[str] | None = None) -> int:
         default=os.getcwd(),
         help="Working directory whose latest session is loaded when SESSION is omitted.",
     )
-    review.add_argument(
-        "--json", action="store_true", help="Emit JSON instead of pretty text."
-    )
-    review.add_argument(
-        "--events-only", action="store_true", help="Hide verdicts."
-    )
-    review.add_argument(
-        "--verdicts-only", action="store_true", help="Hide events."
-    )
+    review.add_argument("--json", action="store_true", help="Emit JSON instead of pretty text.")
+    review.add_argument("--events-only", action="store_true", help="Hide verdicts.")
+    review.add_argument("--verdicts-only", action="store_true", help="Hide events.")
 
     dataset = sub.add_parser(
         "dataset",

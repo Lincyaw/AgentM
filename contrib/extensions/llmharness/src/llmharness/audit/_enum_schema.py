@@ -1,23 +1,26 @@
-"""Single source-of-truth enum value lists for audit JSON-Schema payloads.
+"""Single source-of-truth enum value list for audit JSON-Schema payloads.
 
-The extractor and auditor both need to embed the set of valid ``EventKind``
-and ``DriftType`` values in their tool schemas. Deriving them from the enum
-classes here keeps the two consumers in lockstep with ``schema.py`` and
-removes the V0 hand-listed copies that can silently drift.
+The extractor needs to embed the set of valid ``EventKind`` values in its
+tool schema. Deriving them from the enum class here keeps the schema in
+lockstep with ``schema.py`` and removes hand-listed copies that can
+silently drift.
+
+``DriftType`` and ``DRIFT_TYPE_VALUES`` are removed in V2 (issue #134,
+2026-05-10). The auditor's ``submit_verdict`` schema (V2, design §6.2)
+uses no drift-type enum; the verdict shape is free-text
+(``reminder_text`` + ``continuation_notes``).
 
 This module is audit-internal: it is *not* part of the public schema
-contract exported to downstream consumers (rca-autorl). Keep it under
-``audit/`` for that reason.
+contract. Keep it under ``audit/`` for that reason.
 """
 
 from __future__ import annotations
 
 from typing import Final
 
-from llmharness.schema import DriftType, EventKind
+from ..schema import EventKind
 
 EVENT_KIND_VALUES: Final[list[str]] = [k.value for k in EventKind]
 """All ``EventKind`` string values, in declaration order."""
 
-DRIFT_TYPE_VALUES: Final[list[str | None]] = [t.value for t in DriftType] + [None]
-"""All ``DriftType`` string values plus a trailing ``None`` for "no drift"."""
+__all__ = ["EVENT_KIND_VALUES"]

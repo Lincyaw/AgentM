@@ -4,6 +4,14 @@ Both the runtime adapter (``llmharness.adapters.agentm``) and the offline
 inspector / dataset exporter (``llmharness.cli``) read and write these
 ``SessionEntry.type`` strings. Centralising them prevents silent drift
 between the writer and the readers.
+
+Entry types:
+- ``AUDIT_EVENT`` / ``VERDICT`` / ``EXTRACTOR_CURSOR`` / ``REMINDER_DELIVERED``
+  — successful-path entries that form the durable audit graph.
+- ``EXTRACTOR_NO_CALL`` / ``EXTRACTOR_ERROR`` / ``EXTRACTOR_EMPTY``
+  / ``EXTRACTOR_INVALID`` — Phase 1 typed-failure entries.
+- ``AUDIT_NO_CALL`` / ``AUDIT_ERROR`` — Phase 2 typed-failure entries.
+- ``MESSAGE`` — echoed message-record type from the AgentM session JSONL.
 """
 
 from __future__ import annotations
@@ -18,6 +26,10 @@ REMINDER_DELIVERED = "llmharness.reminder_delivered"
 EXTRACTOR_NO_CALL = "llmharness.extractor_no_call"
 EXTRACTOR_ERROR = "llmharness.extractor_error"
 EXTRACTOR_EMPTY = "llmharness.extractor_empty"
+# Phase 1 graph validator rejected the submitted events (design §5.4).
+# Payload: {"violations": list[str], "turn_window": [int, int]}.
+# Auditor is skipped for this firing; cursor is NOT advanced.
+EXTRACTOR_INVALID = "llmharness.extractor_invalid"
 AUDIT_NO_CALL = "llmharness.audit_no_call"
 AUDIT_ERROR = "llmharness.audit_error"
 

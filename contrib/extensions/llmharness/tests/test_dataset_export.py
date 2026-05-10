@@ -71,19 +71,18 @@ def _cursor(last_turn_index: int) -> dict:
     }
 
 
-def _verdict(drift: bool, reminder: str = "") -> dict:
+def _verdict(surface_reminder: bool, reminder_text: str = "") -> dict:
     return {
         "type": "llmharness.verdict",
-        "id": f"v-{drift}-{reminder}",
+        "id": f"v-{surface_reminder}-{reminder_text}",
         "parent_id": None,
         "timestamp": 0.0,
         "payload": {
-            "drift": drift,
-            "type": "stuck_loop" if drift else None,
-            "reminder": reminder,
-            "matched_event_ids": [],
+            "surface_reminder": surface_reminder,
+            "reminder_text": reminder_text,
+            "continuation_notes": [],
+            "matched_event_ids": [1] if surface_reminder else [],
             "cited_cards": [],
-            "downstream_reaction": None,
         },
     }
 
@@ -111,7 +110,7 @@ def test_dataset_export_handles_messages_appended_at_end(tmp_path: Path) -> None
             _audit_event(1, "action", "Assistant did X"),
             _audit_event(2, "evidence", "tool: result"),
             _cursor(3),
-            _verdict(drift=True, reminder="loop detected"),
+            _verdict(surface_reminder=True, reminder_text="loop detected"),
             # Messages 1-3 land here, after every audit entry — this mirrors
             # AgentSession.prompt's batch flush at end-of-loop.
             _msg("assistant", "ok"),
@@ -153,7 +152,7 @@ def test_dataset_export_pairs_inputs_with_outputs(tmp_path: Path) -> None:
             _audit_event(1, "action", "Assistant did X"),
             _audit_event(2, "evidence", "tool: result"),
             _cursor(3),
-            _verdict(drift=True, reminder="loop detected"),
+            _verdict(surface_reminder=True, reminder_text="loop detected"),
         ],
     )
 
@@ -184,5 +183,5 @@ def test_dataset_export_pairs_inputs_with_outputs(tmp_path: Path) -> None:
     a0 = json.loads(auditor_lines[0])
     assert [ev["id"] for ev in a0["input"]["graph"]] == [0, 1, 2]
     assert a0["input"]["recent_verdicts"] == []
-    assert a0["output"]["verdict"]["drift"] is True
-    assert a0["output"]["verdict"]["reminder"] == "loop detected"
+    assert a0["output"]["verdict"]["surface_reminder"] is True
+    assert a0["output"]["verdict"]["reminder_text"] == "loop detected"

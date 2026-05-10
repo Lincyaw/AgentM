@@ -58,8 +58,7 @@ _GET_PARAMETERS: dict[str, Any] = {
         "card_id": {
             "type": "string",
             "description": (
-                "AFC card id, e.g. 'AFC-0016'. Must match an id surfaced "
-                "by cards_list."
+                "AFC card id, e.g. 'AFC-0016'. Must match an id surfaced by cards_list."
             ),
         },
     },
@@ -91,8 +90,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             card = _cards_get(card_id)
         except KeyError:
             return _error(
-                f"Unknown card id: {card_id!r}. Call cards_list to see "
-                "every available id."
+                f"Unknown card id: {card_id!r}. Call cards_list to see every available id."
             )
         except Exception as exc:  # pragma: no cover - surfaces to agent
             return _error(f"cards_get failed: {exc}")

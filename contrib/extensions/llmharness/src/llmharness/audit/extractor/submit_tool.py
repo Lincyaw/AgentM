@@ -110,9 +110,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     async def _submit(args: dict[str, Any]) -> ToolTerminate:
         del args  # adapter reads args off the ToolCallBlock; no echo needed
         return ToolTerminate(
-            result=ToolResult(
-                content=[TextContent(type="text", text="events submitted")]
-            ),
+            result=ToolResult(content=[TextContent(type="text", text="events submitted")]),
             reason="llmharness:submit_events",
         )
 

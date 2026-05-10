@@ -42,8 +42,7 @@ def _coerce_int_list(raw: Any, *, field_name: str) -> list[int]:
         # Reject bools (int subclasses) and any non-int entries.
         if isinstance(item, bool) or not isinstance(item, int):
             raise ExtractorOutputError(
-                f"submit_events: field {field_name!r} contains non-integer entry "
-                f"{item!r}"
+                f"submit_events: field {field_name!r} contains non-integer entry {item!r}"
             )
         out.append(item)
     return out
@@ -62,14 +61,11 @@ class _RawExtractorEvent:
     def from_dict(cls, raw: Any, *, index: int) -> _RawExtractorEvent:
         if not isinstance(raw, dict):
             raise ExtractorOutputError(
-                f"submit_events: events[{index}] must be object, got "
-                f"{type(raw).__name__}"
+                f"submit_events: events[{index}] must be object, got {type(raw).__name__}"
             )
         kind_str = raw.get("kind")
         if not isinstance(kind_str, str):
-            raise ExtractorOutputError(
-                f"submit_events: events[{index}].kind must be string"
-            )
+            raise ExtractorOutputError(f"submit_events: events[{index}].kind must be string")
         try:
             kind = EventKind(kind_str)
         except ValueError as exc:
@@ -78,9 +74,7 @@ class _RawExtractorEvent:
             ) from exc
         summary = raw.get("summary")
         if not isinstance(summary, str):
-            raise ExtractorOutputError(
-                f"submit_events: events[{index}].summary must be string"
-            )
+            raise ExtractorOutputError(f"submit_events: events[{index}].summary must be string")
         return cls(
             kind=kind,
             summary=summary,
@@ -117,10 +111,7 @@ class RawExtractorOutput:
             raise ExtractorOutputError(
                 f"submit_events: 'events' must be array, got {type(events_raw).__name__}"
             )
-        parsed = [
-            _RawExtractorEvent.from_dict(item, index=i)
-            for i, item in enumerate(events_raw)
-        ]
+        parsed = [_RawExtractorEvent.from_dict(item, index=i) for i, item in enumerate(events_raw)]
         return cls(events=parsed)
 
     def to_events(self, *, next_id: int) -> list[Event]:

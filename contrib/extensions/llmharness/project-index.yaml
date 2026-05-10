@@ -12,14 +12,29 @@ requirements:
   # Core typed payloads (P0 — load-bearing for the audit loop)
 
   - id: REQ-001
-    title: Event/Verdict/Reminder schema
+    title: Event/Verdict/Reminder schema (V2 — breaking change)
     description: |
-      Closed-enum types for event kinds and drift types; serializable Event,
-      Verdict, Reminder dataclasses. Stable JSON shape — Verdict and Event
+      Closed-enum type for event kinds; serializable Event, Verdict,
+      Reminder dataclasses. Stable JSON shape — Verdict and Event
       payloads round-trip through the AgentM session entry tree
       (``api.session.append_entry``).
+
+      V2 Verdict shape (issue #134, 2026-05-10):
+        surface_reminder: bool
+        reminder_text: str
+        continuation_notes: list[str]   # replaces V1 downstream_reaction
+        matched_event_ids: list[int]
+        cited_cards: list[str]
+
+      DriftType enum is REMOVED. It was a preset enum for a subjective
+      dimension (which "type" of drift the auditor detected), violating
+      the project's no-preset-enum-for-subjective-dimensions principle.
+      The LLM's free-text reminder_text + continuation_notes carry the
+      same information with better fidelity. Reminder.type field also
+      removed. Breaking change — pyproject version bump required;
+      rca-autorl backwards-compatibility explicitly waived.
     priority: P0
-    status: implemented
+    status: tested
     code: [src/llmharness/schema.py]
     tests: [tests/test_smoke.py]
 
@@ -124,16 +139,31 @@ requirements:
     depends_on: [REQ-001, REQ-016, REQ-023]
 
   - id: REQ-021
-    title: Phase 2 auditor subpackage — every-k-turn graph audit
+    title: Phase 2 auditor subpackage — every-k-turn graph audit (V2 redirect)
     description: |
       ``audit/auditor/`` subpackage (design §2, §5, §7.1). Public
       surface: ``AUDITOR_SYSTEM_PROMPT``, ``compose_auditor_extensions``,
       ``RawVerdictOutput`` (with ``AuditorOutputError``),
       ``SUBMIT_VERDICT_TOOL_NAME``. Auditor consumes the event graph +
-      recent verdicts (graph form ``Event.to_dict``), NOT the raw
-      trajectory — Phase 1 already condensed that. ``submit_verdict``
-      JSON Schema enforces ``drift=true ⇒ type required`` via if/then at
-      the provider edge instead of silently dropped by the adapter.
+      recent verdicts + advisory hint block (NOT the raw trajectory).
+
+      V2 prompt principles (issue #134 redirection, 2026-05-10):
+      - LLM is primary judge; backward continuity / forward fulfillment /
+        content correctness / branch quality are framing lenses, not
+        a sequenced rule set.
+      - Hints block (from audit/hints.py, REQ-027) is scaffolding in
+        the prompt; auditor may ignore or contradict it and may flag
+        concerns hints missed.
+      - Branch fork and merge moments receive explicit framing
+        (design §5.5).
+
+      ``submit_verdict`` JSON Schema enforces V2 shape (design §6.2):
+      no drift field, no DriftType enum, no if/then clause.
+      surface_reminder + continuation_notes are required fields.
+
+      ``get_turn(idx)`` tool (audit/auditor/get_turn_tool.py, REQ-028)
+      is registered in compose_auditor_extensions() for on-demand
+      raw-turn access.
     priority: P0
     status: implemented
     code:
@@ -160,14 +190,18 @@ requirements:
     depends_on: [REQ-001, REQ-020, REQ-021]
 
   - id: REQ-023
-    title: Schema enum-parity helper — single source of truth for kinds/drifts
+    title: Schema enum-parity helper — single source of truth for EventKind
     description: |
       Design §7.2. ``audit/_enum_schema.py`` derives the JSON-Schema
-      ``enum`` arrays for ``EventKind`` / ``DriftType`` directly from the
-      enum classes, so the extractor's ``submit_events`` schema and the
-      auditor's ``submit_verdict`` schema cannot drift away from
-      ``schema.py``. Replaces V0's hand-listed copies in
-      ``audit/submit_tool.py``.
+      ``enum`` array for ``EventKind`` directly from the enum class,
+      so the extractor's ``submit_events`` schema cannot drift away
+      from ``schema.py``.
+
+      DriftType and DRIFT_TYPE_VALUES are REMOVED (issue #134,
+      2026-05-10). Only EVENT_KIND_VALUES remains. The auditor's
+      submit_verdict schema (V2) uses no drift-type enum — the
+      verdict shape is defined in full in audit/auditor/submit_tool.py
+      without referencing _enum_schema.py for drift classification.
     priority: P0
     status: implemented
     code: [src/llmharness/audit/_enum_schema.py]
@@ -187,6 +221,117 @@ requirements:
     code: []
     tests: []
     depends_on: [REQ-019, REQ-020, REQ-021, REQ-022]
+
+  # ---------------------------------------------------------------------------
+  # V2 redirection — issue #134 (2026-05-10). LLM-led judgment, free-text
+  # verdict shape, Phase 1 graph validator, branches as first-class audit
+  # objects. Plan: .claude/plans/2026-05-10-llmharness-issue-134-redirection.md
+
+  - id: REQ-025
+    title: V2 verdict schema — surface_reminder + continuation_notes
+    description: |
+      Issue #134 PR 1 (P0). The submit_verdict terminal tool uses the V2
+      JSON Schema shape (design §6.2): surface_reminder bool,
+      reminder_text str, continuation_notes list[str], matched_event_ids
+      list[int], cited_cards list[str]. No drift field, no DriftType
+      enum, no if/then clause. Adapter gate changes from
+      ``verdict.drift and verdict.type`` to
+      ``verdict.surface_reminder and verdict.reminder_text``.
+      continuation_notes are forwarded into the next auditor child's
+      context so the auditor can track what it asked itself to recheck.
+      Auditor prompt rewritten with backward continuity / forward
+      fulfillment / content correctness / branch quality as framing
+      lenses (not rules). pyproject version bump along with this PR.
+    priority: P0
+    status: tested
+    code:
+      - src/llmharness/schema.py
+      - src/llmharness/audit/_enum_schema.py
+      - src/llmharness/audit/auditor/submit_tool.py
+      - src/llmharness/audit/auditor/output.py
+      - src/llmharness/audit/auditor/prompt.py
+      - src/llmharness/adapters/agentm.py
+    tests:
+      - tests/test_smoke.py
+      - tests/test_two_phase_audit_integration.py
+    depends_on: [REQ-001, REQ-021, REQ-023]
+
+  - id: REQ-026
+    title: Phase 1 graph validator
+    description: |
+      Issue #134 PR 2 (P1). Pure-Python mechanical validation step that
+      runs in the adapter after each submit_events call (design §5.4).
+      Five checks: ref resolution, no cycles, kind↔source_turns rules
+      (evidence requires tool_result/user/assistant.thinking source;
+      action requires tool_call source), task reachability for every
+      event, conclusion reachability from task. Failure: no events
+      committed; ``llmharness.extractor_invalid`` entry written with
+      violations list; auditor skipped. New module
+      audit/extractor/validator.py. New entry-type constant
+      ``EXTRACTOR_INVALID`` added to audit/entry_types.py.
+    priority: P1
+    status: tested
+    code:
+      - src/llmharness/audit/extractor/validator.py
+      - src/llmharness/audit/entry_types.py
+      - src/llmharness/adapters/agentm.py
+    tests:
+      - tests/test_extractor_validator.py
+      - tests/test_two_phase_audit_integration.py
+    depends_on: [REQ-020, REQ-022]
+
+  - id: REQ-027
+    title: Advisory hints module — pure signals for auditor scaffolding
+    description: |
+      Issue #134 PR 3 (P1). New module audit/hints.py with five pure
+      functions over list[Event]: repeated_actions(graph),
+      convergence_ratio(graph), reachability_gaps(graph),
+      open_branches(graph), multi_branch_syntheses(graph), plus a
+      compute(graph) -> str renderer. Output is a compact textual
+      block injected into the auditor JSON payload as the "hints" key.
+      The auditor may ignore any signal. No async I/O; no new storage.
+      Hints are phrased as "consider …" rather than "concern: …" to
+      avoid anchoring (design §7.5). Prompt cleanup (Option A):
+      removed the dead {hints} format-placeholder from auditor prompt;
+      prompt is now a static string with no .format() calls.
+    priority: P1
+    status: tested
+    code:
+      - src/llmharness/audit/hints.py
+      - src/llmharness/audit/auditor/prompt.py
+      - src/llmharness/adapters/agentm.py
+    tests:
+      - tests/test_audit_hints.py
+      - tests/test_two_phase_audit_integration.py
+    depends_on: [REQ-021, REQ-026]
+
+  - id: REQ-028
+    title: get_turn(idx) tool for auditor
+    description: |
+      Issue #134 PR 4 (P1). New tool registered in the auditor child
+      session (design §6.3). Returns the serialized raw conversation
+      turn at index idx — role, content, thinking blocks — so the
+      auditor can verify event source_turns references against the
+      actual trajectory text without bulk-loading the full trajectory
+      into the auditor context. Module: audit/auditor/get_turn_tool.py.
+      Registered via compose_auditor_extensions(trajectory_snapshot=...).
+      Out-of-range idx returns a structured tool-result error
+      (is_error=True), not a crash. bool idx also rejected (bool is a
+      subclass of int in Python). Snapshot captured per firing via
+      _serialize_full_trajectory in adapters/agentm.py; _with_trajectory_snapshot
+      appends the get_turn module to the static auditor_extensions list
+      inside _drain_auditor on each call — never cached, never mutates
+      the shared base list.
+    priority: P1
+    status: tested
+    code:
+      - src/llmharness/audit/auditor/get_turn_tool.py
+      - src/llmharness/audit/auditor/extensions.py
+      - src/llmharness/adapters/agentm.py
+    tests:
+      - tests/test_get_turn_tool.py
+      - tests/test_two_phase_audit_integration.py
+    depends_on: [REQ-021]
 
   # ---------------------------------------------------------------------------
   # Removed in the 2026-05-08 SDK-native cleanup. Kept here for traceability;
@@ -346,15 +491,15 @@ requirements:
     depends_on: [REQ-001]
 
   - id: REQ-015
-    title: Verdict cited_cards / downstream_reaction (cognitive audit)
+    title: Verdict cited_cards / downstream_reaction (PARTIALLY SUPERSEDED)
     description: |
-      Two opt-in additive fields on Verdict for the cognitive-audit
-      pipeline (design: .claude/designs/llmharness-cognitive-audit.md §6).
-      ``cited_cards: list[str]`` records AFC IDs the audit chose to cite;
-      ``downstream_reaction: str | None`` is populated by the next audit
-      firing's self-monitor judgment. Both default to empty/None.
+      Superseded 2026-05-10 by REQ-025 (V2 verdict shape).
+      ``cited_cards`` field survives in V2.
+      ``downstream_reaction`` is REMOVED — its role is taken by
+      ``continuation_notes: list[str]`` in V2 (free-text recheck list
+      the auditor writes for itself across firings).
     priority: P0
-    status: implemented
-    code: [src/llmharness/schema.py]
-    tests: [tests/test_smoke.py]
+    status: deprecated
+    code: []
+    tests: []
     depends_on: [REQ-001]

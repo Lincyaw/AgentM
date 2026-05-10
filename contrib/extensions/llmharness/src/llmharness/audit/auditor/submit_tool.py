@@ -1,4 +1,4 @@
-"""§11 single-file extension: register the ``submit_verdict`` terminal tool.
+"""§11 single-file extension: register the ``submit_verdict`` terminal tool (V2).
 
 The auditor child session terminates by calling ``submit_verdict(verdict=...)``.
 The kernel records the call as a :class:`ToolCallBlock`, executes the tool,
@@ -6,17 +6,13 @@ sees the returned :class:`ToolTerminate`, and ends the loop. The adapter
 reads the structured payload directly off the assistant message — no JSON
 extraction from free text.
 
-The verdict schema includes a JSON Schema ``if/then`` block that enforces
-``drift == true ⇒ type required AND non-null``. This closes the V0 bug
-where a model could emit ``drift=true, type=null`` and the adapter would
-silently drop the reminder. With ``if/then`` declared at the verdict level,
-the provider-side schema validation rejects the malformed call before it
-reaches the adapter — so a non-conforming auditor surfaces as
-``audit_no_call`` (a visible failure) rather than a silent no-op.
-
-The drift-type enum is sourced from
-:data:`llmharness.audit._enum_schema.DRIFT_TYPE_VALUES` so the schema and
-:class:`llmharness.schema.DriftType` cannot drift apart silently.
+V2 schema (design §6.2): ``surface_reminder``, ``reminder_text``,
+``continuation_notes``, ``matched_event_ids``, ``cited_cards``.
+No ``drift`` field, no ``DriftType`` enum, no ``if/then`` clause.
+The ``surface_reminder=True ⇒ non-empty reminder_text`` invariant is
+enforced at the adapter-side coercer (:class:`RawVerdictOutput`), not at
+the JSON schema level, so the LLM sees a friendly retry error rather than
+a provider-side rejection that may be invisible in the tool result.
 
 Tier 1, api_version 1, single tool registration.
 """
@@ -29,7 +25,6 @@ from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
-from .._enum_schema import DRIFT_TYPE_VALUES
 from .output import AuditorOutputError, RawVerdictOutput
 
 MANIFEST = ExtensionManifest(
@@ -52,105 +47,65 @@ MANIFEST = ExtensionManifest(
 SUBMIT_VERDICT_TOOL_NAME = "submit_verdict"
 
 
-# The drift-type enum value list contains string members plus a trailing
-# None. JSON Schema accepts ``null`` in ``enum`` directly, so we forward
-# the list as-is. The ``type`` field declares ``["string", "null"]`` so
-# Python ``None`` lands as JSON ``null`` on the wire.
+# V2 verdict schema (design §6.2).
+# No if/then: provider-side schema complexity is avoided; the adapter-side
+# coercer (RawVerdictOutput.from_dict) enforces surface_reminder=True ⇒
+# non-empty reminder_text and returns a visible tool-result error on
+# violation so the auditor LLM can retry.
 _VERDICT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "drift": {
+        "surface_reminder": {
             "type": "boolean",
-            "description": "True iff a concrete cognitive drift has been identified.",
-        },
-        "type": {
-            "type": ["string", "null"],
-            "enum": DRIFT_TYPE_VALUES,
             "description": (
-                "Drift category when drift=true; null otherwise. Pick the "
-                "closest enum member."
+                "True if a concrete concern warrants surfacing a reminder to "
+                "the main agent before its next turn. False for a silent verdict."
             ),
         },
-        "reminder": {
-            "type": ["object", "null"],
+        "reminder_text": {
+            "type": "string",
             "description": (
-                "Advisory payload to inject on the next user prompt. Null "
-                "when drift=false. When drift=true, MUST be an object with "
-                "a non-empty ``text`` field — that exact string is what the "
-                "main agent will see. Do NOT prepend '[harness] '; the "
-                "adapter handles that."
+                "The advisory the main agent will read on its next turn. "
+                "Must be non-empty when surface_reminder=true; empty string "
+                "when surface_reminder=false. Do NOT prepend '[harness] ' — "
+                "the adapter handles that."
             ),
-            "properties": {
-                "text": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        "The verbatim advisory the main agent will read on "
-                        "its next turn. Be specific about what to do next."
-                    ),
-                },
-            },
-            "additionalProperties": False,
+        },
+        "continuation_notes": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Free-text notes to yourself across firings — what you asked "
+                "yourself to recheck next time. May be empty. These are "
+                "forwarded into your context at the next auditor firing as "
+                "'continuation_notes_from_prior_firing'."
+            ),
         },
         "matched_event_ids": {
-            "type": ["array", "null"],
+            "type": "array",
             "items": {"type": "integer"},
             "description": (
                 "IDs of the audit graph events that materially supported "
-                "the drift call. Required (non-empty) when drift=true so "
-                "the finding is traceable; null or omitted when "
-                "drift=false."
+                "this verdict. Non-empty when surface_reminder=true so the "
+                "finding is traceable; may be empty when surface_reminder=false."
             ),
         },
         "cited_cards": {
-            "type": ["array", "null"],
+            "type": "array",
             "items": {"type": "string"},
             "description": (
-                "AFC card ids that materially shaped the finding. Free-text "
-                "ids; null when no card was decisive."
-            ),
-        },
-        "downstream_reaction": {
-            "type": ["string", "null"],
-            "description": (
-                "Free-text note about whether the prior reminder in "
-                "recent_verdicts was heeded. Null only on the first "
-                "auditor firing of a session."
+                "AFC card ids that materially shaped the finding. Empty "
+                "array when no card was decisive."
             ),
         },
     },
-    "required": ["drift"],
-    # Closes V0's "drift=true with type=null silently dropped" bug AND the
-    # follow-on "reminder shaped wrong / matched_event_ids missing" gap at
-    # the provider edge. With this clause, a non-conforming auditor
-    # surfaces as a tool-side error (the agent retries) or audit_no_call
-    # (visible failure) rather than a silent no-op.
-    "if": {
-        "properties": {"drift": {"const": True}},
-        "required": ["drift"],
-    },
-    "then": {
-        "required": ["type", "reminder", "matched_event_ids"],
-        "properties": {
-            "type": {
-                "type": "string",
-                "enum": [v for v in DRIFT_TYPE_VALUES if v is not None],
-            },
-            "reminder": {
-                "type": "object",
-                "required": ["text"],
-                "properties": {
-                    "text": {"type": "string", "minLength": 1},
-                },
-                "additionalProperties": False,
-            },
-            "matched_event_ids": {
-                "type": "array",
-                "items": {"type": "integer"},
-                "minItems": 1,
-            },
-        },
-    },
+    "required": [
+        "surface_reminder",
+        "reminder_text",
+        "continuation_notes",
+        "matched_event_ids",
+        "cited_cards",
+    ],
     "additionalProperties": False,
 }
 
@@ -168,7 +123,9 @@ SUBMIT_VERDICT_PARAMETERS: dict[str, Any] = {
 _SUBMIT_VERDICT_DESCRIPTION = (
     "Submit the cognitive-audit verdict. Call this exactly ONCE per "
     "auditor firing as your final action — the loop terminates the moment "
-    "this tool returns. To stay silent, pass verdict={drift:false, type:null}."
+    "this tool returns. To stay silent, pass "
+    'verdict={surface_reminder:false, reminder_text:"", '
+    "continuation_notes:[], matched_event_ids:[], cited_cards:[]}."
 )
 
 
@@ -180,10 +137,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         # a visible tool-result error inside the auditor child loop. The
         # LLM sees the error message and gets another turn to retry; only
         # on a well-shaped payload do we ToolTerminate the child loop.
-        # Without this, providers that strip the if/then clause let bad
-        # payloads through and the adapter has to fall back to recording
-        # an audit_error entry without giving the auditor a chance to
-        # correct itself.
         try:
             RawVerdictOutput.from_dict(args).to_verdict()
         except AuditorOutputError as exc:
@@ -200,9 +153,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 is_error=True,
             )
         return ToolTerminate(
-            result=ToolResult(
-                content=[TextContent(type="text", text="verdict submitted")]
-            ),
+            result=ToolResult(content=[TextContent(type="text", text="verdict submitted")]),
             reason="llmharness:submit_verdict",
         )
 

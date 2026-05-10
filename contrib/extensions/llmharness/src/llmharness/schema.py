@@ -6,6 +6,17 @@ session entry tree (``api.session.append_entry``); this module is just
 the typed contract between the audit prompt schemas, the phase parsers
 (``audit.extractor.RawExtractorOutput`` /
 ``audit.auditor.RawVerdictOutput``), and the adapter.
+
+V2 breaking changes (issue #134, 2026-05-10):
+- ``DriftType`` enum removed (preset enum for a subjective dimension —
+  violates the project's no-preset-enum rule; free-text
+  ``reminder_text`` + ``continuation_notes`` carry the information with
+  better fidelity).
+- ``Verdict`` shape changed to V2 (design §6.2): ``surface_reminder``,
+  ``reminder_text``, ``continuation_notes``, ``matched_event_ids``,
+  ``cited_cards``. Fields ``drift``, ``type``, ``reminder``, and
+  ``downstream_reaction`` are removed.
+- ``Reminder.type`` field removed.
 """
 
 from __future__ import annotations
@@ -23,13 +34,6 @@ class EventKind(str, Enum):
     ACTION = "action"
     REFLECTION = "reflection"
     CONCLUSION = "conclusion"
-
-
-class DriftType(str, Enum):
-    TASK_DRIFT = "task_drift"
-    EVIDENCE_IGNORED = "evidence_ignored"
-    PREMATURE_CONCLUSION = "premature_conclusion"
-    STUCK_LOOP = "stuck_loop"
 
 
 @dataclass(frozen=True)
@@ -60,35 +64,36 @@ class Event:
 
 @dataclass(frozen=True)
 class Verdict:
-    """Drift detector output. ``drift=False`` means stay silent."""
+    """Auditor output (V2 shape — design §6.2).
 
-    drift: bool
-    type: DriftType | None = None
-    reminder: str = ""
+    ``surface_reminder=False`` means stay silent. When ``True``,
+    ``reminder_text`` must be non-empty and will be injected before the
+    next agent turn.
+    """
+
+    surface_reminder: bool
+    reminder_text: str = ""
+    continuation_notes: list[str] = field(default_factory=list)
     matched_event_ids: list[int] = field(default_factory=list)
     cited_cards: list[str] = field(default_factory=list)
-    downstream_reaction: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "drift": self.drift,
-            "type": self.type.value if self.type is not None else None,
-            "reminder": self.reminder,
+            "surface_reminder": self.surface_reminder,
+            "reminder_text": self.reminder_text,
+            "continuation_notes": list(self.continuation_notes),
             "matched_event_ids": list(self.matched_event_ids),
             "cited_cards": list(self.cited_cards),
-            "downstream_reaction": self.downstream_reaction,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Verdict:
-        type_str = data.get("type")
         return cls(
-            drift=bool(data.get("drift", False)),
-            type=DriftType(type_str) if type_str else None,
-            reminder=str(data.get("reminder", "")),
+            surface_reminder=bool(data.get("surface_reminder", False)),
+            reminder_text=str(data.get("reminder_text", "")),
+            continuation_notes=[str(n) for n in (data.get("continuation_notes") or [])],
             matched_event_ids=list(data.get("matched_event_ids") or []),
-            cited_cards=list(data.get("cited_cards") or []),
-            downstream_reaction=data.get("downstream_reaction"),
+            cited_cards=[str(c) for c in (data.get("cited_cards") or [])],
         )
 
 
@@ -96,5 +101,12 @@ class Verdict:
 class Reminder:
     """A pending reminder waiting to be injected on the next user prompt."""
 
-    type: DriftType
     text: str
+
+
+__all__ = [
+    "Event",
+    "EventKind",
+    "Reminder",
+    "Verdict",
+]
