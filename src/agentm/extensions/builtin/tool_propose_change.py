@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Any
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.lib.mad import mad_confidence
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
 
@@ -604,6 +605,24 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         # ``.pruned`` sidecar (the .json itself stays for audit).
         _prune_dominated_candidates(decisions_dir)
 
+        # PR-B: MAD-confidence advisory signal. Computed AGAINST the
+        # existing pool (excluding the new candidate just written) so
+        # the tier reflects how the proposed score sits relative to
+        # historical noise. Strictly advisory — no effect on the
+        # accept/reject decision below; only attached to the record so
+        # reflection / observers can see the tier distribution. Returns
+        # None when len(pool) < 3 or pool MAD == 0; we record the None
+        # explicitly (not absent) so consumers can distinguish
+        # "below-floor" from "this code path didn't compute it".
+        baseline_primary = float(baseline.get("primary_score") or 0.0)
+        proposed_primary = float(proposed.get("primary_score") or 0.0)
+        pool_values = _collect_pool_scores(
+            decisions_dir, exclude_candidate_id=candidate_id
+        )
+        mad_conf = mad_confidence(
+            pool_values, baseline_primary, proposed_primary
+        )
+
         # B-6: increment rollouts_used (one per call). usd_used is
         # incremented by tool_eval_run; we don't double-count cost here.
         _bump_budget_rollouts(cwd, target_scenario)
@@ -636,6 +655,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "change_spec": change_spec,
                     "asi": asi,
                     "failure_kind": proposed_failure_kind,
+                    "mad_confidence": mad_conf,
                     "candidate_id": candidate_id,
                     "decision": decision,
                     "parent_ids": parent_ids,
@@ -687,6 +707,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "change_spec": change_spec,
                 "asi": asi,
                 "failure_kind": proposed_failure_kind,
+                "mad_confidence": mad_conf,
                 "candidate_id": candidate_id,
                 "evidence": {
                     "baseline_run": baseline_id,
@@ -712,6 +733,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "change_spec": change_spec,
             "asi": asi,
             "failure_kind": proposed_failure_kind,
+            "mad_confidence": mad_conf,
             "candidate_id": candidate_id,
             "parent_ids": parent_ids,
             "evidence": {
@@ -1413,6 +1435,41 @@ def _count_consecutive_rejections(activations_path: Path) -> int:
         # merge / pending_human_approval) breaks the chain.
         break
     return consec
+
+
+def _collect_pool_scores(
+    decisions_dir: Path, *, exclude_candidate_id: str | None = None
+) -> list[float]:
+    """Flatten ``per_task_scores`` across all candidates in the pool
+    into a single list of floats. Used by PR-B's MAD-confidence
+    advisory. ``exclude_candidate_id`` drops the freshly-written
+    candidate so the MAD reflects the pool *before* the proposed
+    addition (a measure against historical noise, not a self-comparison).
+    """
+    candidates_dir = decisions_dir / "candidates"
+    if not candidates_dir.is_dir():
+        return []
+    out: list[float] = []
+    for p in candidates_dir.glob("c_*.json"):
+        try:
+            with p.open("r", encoding="utf-8") as fh:
+                rec = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(rec, dict):
+            continue
+        if (
+            exclude_candidate_id is not None
+            and rec.get("candidate_id") == exclude_candidate_id
+        ):
+            continue
+        scores = rec.get("per_task_scores")
+        if not isinstance(scores, dict):
+            continue
+        for v in scores.values():
+            if isinstance(v, (int, float)):
+                out.append(float(v))
+    return out
 
 
 def _ok(text: str) -> ToolResult:
