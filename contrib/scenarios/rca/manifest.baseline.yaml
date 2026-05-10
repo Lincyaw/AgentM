@@ -1,35 +1,40 @@
 name: rca:baseline
 description: |
-  Single-agent variant of the rca scenario. Same diagnostic prompt, same
-  tools, same agent contract — but no sub-agent dispatch. The lead
-  investigator runs every SQL query itself. Used as an A/B comparison
-  baseline against the multi-agent rca scenario.
+  ThinkDepthAI-parity baseline. Tracks
+  ``/home/ddq/AoyangSpace/ThinkDepthAI/src/thinkdepthai/`` exactly:
+
+    * Prompt = RCA_ANALYSIS_SP (prompts/investigator.md, verbatim).
+    * Tools  = the four tools from ThinkDepthAI:
+                 query_parquet_files, get_schema,
+                 list_tables_in_directory, think_tool.
+    * No hypothesis-management tools, no skill loader, no
+      worker-style tooling — those are AgentM-rca-specific extras
+      that would diverge from the reference implementation.
+
+  Used as the strict A/B comparison floor against the multi-agent rca
+  scenario. Any uplift the production rca scenario shows on the same
+  evals must be attributable to its extra atoms or topology, not to
+  prompt or tool drift in this baseline.
 
 # task_class drives session.fingerprint.task_meta.task_class so production
-# traces are filterable by ``tool_query_traces(task_class="rca_baseline")`` —
-# load-bearing for the GEPA tuner under tuner/.
+# traces are filterable by ``tool_query_traces(task_class="rca_baseline")``
+# — load-bearing for the GEPA tuner under tuner/.
 task_class: rca_baseline
 
 extensions:
-  # Data tools live directly on the main session — no orchestrator/worker
-  # split. The agent owns the full investigation.
-  - module: agentm_rca.tools.duckdb_sql
-    config:
-      exclude:
-        - conclusion.parquet
-  - module: agentm_rca.tools.hypothesis_tools
-  - module: agentm_rca.tools.finalize
+  # The single tool surface — four tools whose names, signatures, and
+  # behavior mirror ThinkDepthAI's ``QueryParquetFilesToolkit`` plus
+  # ``think_tool``. AGENTM_RCA_DATA_DIR is set per-case by the eval
+  # adapter, so bare filenames like ``abnormal_traces.parquet`` resolve
+  # against the case directory the same way the reference implementation
+  # behaves under ThinkDepthAI's runtime.
+  - module: agentm_rca.tools.thinkdepth_sql
 
-  # Skill-discovery wiring: publishes the rca scenario's skills/ dir and
-  # injects rca-worker-guide + diagnose-sql SKILL.md into the system prompt.
-  # ``tool_read`` lets the agent drill into skill body files (traces.md,
-  # metrics.md, ...) the same way workers do in the multi-agent scenario.
-  - module: agentm_rca.worker_skills
-  - module: agentm.extensions.builtin.skill_loader
-    config:
-      include_defaults: false
-      inherit_claude: false
-  - module: agentm.extensions.builtin.tool_read
+  # Required by the rcabench-platform eval contract: the agent must call
+  # ``submit_final_report`` to return a validated AgentRCAOutput payload.
+  # ThinkDepthAI does this with a separate synthesizer LLM step; we keep
+  # it as one tool to stay inside AgentM's single-loop runtime.
+  - module: agentm_rca.tools.finalize
 
   # Standard housekeeping atoms — match the multi-agent scenario so any
   # outcome difference is attributable to the orchestration topology, not
@@ -38,11 +43,9 @@ extensions:
   - module: agentm.extensions.builtin.observability
   - module: contrib.extensions.rcabench_contract
 
-  # Shared prompt loader (lives in agentm_rca/). Splices investigator.md
-  # — sourced from the canonical rca/prompts/ dir — into the system prompt.
-  # ``personas: false`` keeps this single-agent: no sub-agent dispatch, no
-  # ResolveSubagentEvent handler. The shared rcabench_contract atom appends
-  # the vendor contract block.
+  # Inject investigator.md verbatim. ``rcabench_contract`` appends the
+  # vendor contract / submit_final_report schema below the prompt at
+  # ``before_agent_start``.
   - module: agentm_rca.prompt_loader
     config:
       prompt: investigator.md
