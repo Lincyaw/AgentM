@@ -20,28 +20,35 @@ concepts:
     tasks: ["tasks/2026-05-09-issue-86-atom-rework-infra.md", "tasks/2026-05-09-issue-119-core-kernel-residuals.md"]
 
   self_modifiable_architecture:
-    description: "Boundary refinement of pluggable_architecture: core/extensions split is drawn by 'what an agent can safely self-modify' rather than mechanism vs policy. Constitution layer is uniform on the modifiability axis (none of core/ is agent-modifiable) but split on the visibility axis into core/abi/ (types & Protocols, atom + llm import), core/lib/ (pure-function utilities, atom imports as stdlib), and core/_internal/ (stateful subsystems & default impls — operations_impl, skills, prompt_templates, catalog/, compaction engine — atoms reach exclusively via ExtensionAPI services: api.get_operations / api.skills / api.prompt_templates / api.catalog / api.compaction; direct import forbidden by validator). Autonomy layer holds atoms + scenarios + skills + prompts (tier-1 free / tier-2 reviewable). Discovery layer = fs scan + reload + assert_active. Adds versioned ExtensionAPI (api_version with grace window), transactional reload (validator → snapshot → install → rollback on failure), and a new ExtensionAPI surface (reload_atom, freeze_current, list_atoms, is_constitution_path). Tier-2 atoms (permission, cost_budget, tool_filter, llm_compaction) require propose_change approval to reload. Compaction prompts are the canonical mechanism→policy split: prompt strings moved out of core into the llm_compaction atom, engine in core/_internal/compaction/ takes prompt as a required parameter. Establishes that change is safe and atomic; evolution-substrate.md establishes that change is evidence-driven."
+    description: "Boundary refinement of pluggable_architecture: core/extensions split is drawn by 'what an agent can safely self-modify' rather than mechanism vs policy. Constitution layer is uniform on the modifiability axis (none of core/ is agent-modifiable) but split on the visibility axis into core/abi/ (types & Protocols, atom + llm import), core/lib/ (pure-function utilities, atom imports as stdlib), and core/_internal/ (stateful subsystems & default impls — operations_impl, skills, prompt_templates, catalog/, compaction engine — atoms reach exclusively via ExtensionAPI services: api.get_operations / api.skills / api.prompt_templates / api.catalog / api.compaction; direct import forbidden by validator). Autonomy layer holds atoms + scenarios + skills + prompts (tier-1 free / tier-2 reviewable). Discovery layer = fs scan + reload + assert_active. Adds versioned ExtensionAPI (api_version with grace window), transactional reload (validator → snapshot → install → rollback on failure), and a new ExtensionAPI surface (reload_atom, freeze_current, list_atoms, is_constitution_path). Tier-2 atoms (permission, cost_budget, tool_filter, llm_compaction) require propose_change approval to reload. Compaction prompts are the canonical mechanism→policy split: prompt strings moved out of core into the llm_compaction atom, engine in core/_internal/compaction/ takes prompt as a required parameter. Establishes that change is safe and atomic; evolution-substrate.md establishes that change is evidence-driven; per_task_evolution_loop establishes WHO drives the change (a tuner meta-scenario optimizing for a specific task class)."
     design: "designs/self-modifiable-architecture.md"
-    related_concepts: [pluggable_architecture, extension_as_scenario, single_file_extension_contract, observability, evolution_substrate, git_backed_versioning]
+    related_concepts: [pluggable_architecture, extension_as_scenario, single_file_extension_contract, observability, evolution_substrate, git_backed_versioning, per_task_evolution_loop]
     plans: [plans/2026-05-09-issue-80-abi-prep.md]
     tasks: ["tasks/2026-05-09-issue-79-atom-reloader-hardening.md", "tasks/2026-05-09-issue-86-atom-rework-infra.md", "tasks/2026-05-09-issue-89-file-tool-io-seams.md", "tasks/2026-05-09-issue-101-tool-catalog-split.md", "tasks/2026-05-09-issue-120-harness-reload-dedup.md"]
 
   evolution_substrate:
-    description: "Constitution-owned data layer that binds every (atom, scenario) version to all observation data generated under it, so rollback / composition / optimization become evidence-driven, not error-driven. Adds .agentm/catalog/{atoms,scenarios}/<hash>/ with frozen source + manifest.yaml + metrics.jsonl + runs/ + decisions.jsonl. Active-set fingerprint in every observability session.start header binds traces to the exact loaded version set. Indexer (constitution-layer, idempotent, rebuildable from raw observability) aggregates per-(atom_hash, scenario, task_type) statistics. tool_catalog atom (tier-1 read API + propose_change as the only mediated write) exposes list_versions / get_manifest / compare / find_best / runs_for / decisions_for / propose_change to the agent. Hard problems addressed: statistical power (CI + inconclusive enforcement), confounding (experiment-mode lock), Goodhart (universal guard metrics + regressed flag), replayability (LLM response cache, Phase 3), catalog corruption (constitution-layer write-protect on .agentm/catalog/**). Phased: MVP = fingerprint + freeze + browse; Phase 2 = compare + decisions; Phase 3 = replay cache + experiment lock."
+    description: "Constitution-owned data layer that binds every (atom, scenario) version to all observation data generated under it, so rollback / composition / optimization become evidence-driven, not error-driven. Adds .agentm/catalog/{atoms,scenarios}/<hash>/ with frozen source + manifest.yaml + metrics.jsonl + runs/ + decisions.jsonl. Active-set fingerprint in every observability session.start header binds traces to the exact loaded version set. Indexer (constitution-layer, idempotent, rebuildable from raw observability) aggregates per-(atom_hash, scenario, task_type) statistics. tool_catalog atom (tier-1 read API) exposes list_versions / get_manifest / runs_for / get_source_at / list_history / rollback_resource. Hard problems addressed: statistical power (CI + inconclusive enforcement), confounding (experiment-mode lock), Goodhart (universal guard metrics + regressed flag), replayability (LLM response cache, Phase 3), catalog corruption (constitution-layer write-protect on .agentm/catalog/**). Phased: MVP = fingerprint + freeze + browse; Phase 2 = compare + decisions; Phase 3 = replay cache + experiment lock. NOTE: per per_task_evolution_loop (2026-05-02), §6 compare/find_best are demoted to optional — the tuner agent in that loop does its own LLM-native analysis on raw observability JSONL; catalog metrics.jsonl stays as cross-scenario browsing index, not on the decision path."
     design: "designs/evolution-substrate.md"
-    related_concepts: [self_modifiable_architecture, observability, pluggable_architecture, extension_as_scenario, git_backed_versioning]
+    related_concepts: [self_modifiable_architecture, observability, pluggable_architecture, extension_as_scenario, git_backed_versioning, per_task_evolution_loop]
+    plans: []
+    tasks: []
+
+  per_task_evolution_loop:
+    description: "Operational shape of self-modification: optimization target is a task class, not a user. A production agent runs the task; a separate tuner agent (a meta-scenario at scenarios/<name>/tuner/) reads observability JSONL traces filtered by (task_class, fingerprint), proposes mutations to atoms / prompts / scenario composition, validates them against a pinned eval set, and activates winners that beat the baseline on the scenario's primary metric without guard regression. Three load-bearing reframes: (1) JSONL is the source of truth — tuner reads raw .agentm/observability/<trace>.jsonl directly; catalog metrics.jsonl is demoted to optional cross-scenario browsing index, NOT decision input; (2) no predefined stats API — compare/find_best from evolution-substrate.md §6 are downgraded to optional because the tuner is itself an LLM agent that does LLM-native trace analysis (which counts as success is policy in the tuner's system prompt, not a stats library; analysis quality scales with model capability automatically); (3) confounding killed by an eval set, not by sample size — production user inputs vary, so any compare on production traces conflates atom effect with task difficulty; a pinned scenarios/<name>/eval/ task suite gives a fixed input distribution. New autonomy-layer pieces: scenarios/<name>/eval/ directory (task YAMLs + grader.md/grader.py); scenarios/<name>/tuner/ meta-scenario (manifest.yaml + prompt.md); three new tier-1 atoms tool_query_traces (filter trace_id by task_class+fingerprint, lightweight summaries; agent reads bodies on demand via existing read tool), tool_eval_run (run eval suite under a proposed fingerprint without permanently mutating worktree — sub-session source overrides OR shadow worktree, Plan-stage decision), tool_propose_change (signature requires eval_run_baseline + eval_run_proposed + decision in {activate, rollback, exploratory}; activate gate is four-floor: economic threshold (≥+5%) AND statistical 2σ noise floor AND guard envelope (±10%) AND holdout non-regression — all four independent; exploratory channel waives only the first two. Tier-2 atoms still pending_human_approval; thin policy wrapper over reload_atom. ChangeSpec generalizes target beyond atom_source — Phase 2 unlocks system_prompt/manifest_extensions/manifest_field/scenario_compose). Activations land in .agentm/decisions/<scenario>/activations.jsonl (constitution-write-protected; renamed from decisions.jsonl to make room for Phase 2 candidates/ pool directory). task_class field on session.fingerprint becomes populated (was schema-defined but unfilled). Phase 2 reshapes around GEPA (Agrawal et al. 2026, arxiv 2507.19457): MAP-Elites Pareto candidate pool replaces single-incumbent hill climbing; tool_reflect atom separates diagnosis from mutation reading μ_f.feedback_text natural-language signal; System Aware Merge crossover combines non-dominated parents; per-module credit assignment via μ_f.module_feedback drives round-robin selection; rollout budget tracking via .agentm/decisions/<scenario>/budget.json; the four-floor gate's role narrows from inclusion-gate to deployment-gate. Production agent does not know it is being optimized — tuner is async sibling, not parent. Reuses all existing constitution mechanism: reload_atom, ResourceWriter, observability sink, transactional rollback. Acceptance scenarios P1-P10 cover missing eval/, null task_class, evidence-missing rejection, ResourceWriter constitution rejection, post-activate production regression watching, tuner concurrency on shared atoms, eval budget exhaustion, tier-2 deferral, trace round-trip filtering, and git-backed activation history. Phase 2 IMPLEMENTED (2026-05-09): all 10 Layer B tasks shipped — Pareto candidate pool (B-1) with split inclusion/deployment gates, generalized ChangeSpec validators (B-3), rollout budget (B-6), tool_reflect diagnosis atom (B-2), per-module credit assignment (B-5), System Aware Merge (B-4) with parent_ids: list[str] schema, structural stop_after_no_improvement counter persisted via activations.jsonl (B-9), production-traffic auto-rollback via tool_guard_watch passive observer (B-7), opt-in cross-task transfer (B-8), baseline_fingerprint concurrent-tuner-race fix (B-10). Five new fail-stop test classes added: pareto inclusion correctness, stop-counter persistence, merge gate noise floor, stale-baseline rejection, auto-rollback evidence floor. No agentm.core.* modifications; §11 contract clean."
+    design: "designs/per-task-evolution-loop.md"
+    related_concepts: [evolution_substrate, self_modifiable_architecture, observability, extension_as_scenario, git_backed_versioning]
     plans: []
     tasks: ["tasks/2026-05-09-issue-101-tool-catalog-split.md"]
 
   git_backed_versioning:
     description: "Replaces bespoke per-atom version store with git as the version layer. Catalog keeps only what git does not provide — metrics.jsonl + runs/<trace_id> attribution. Source content, lineage (parent commits), authorship, timestamp, and rationale (commit message) all flow through git plumbing. New harness service ResourceWriter (constitution layer) is the single chokepoint for all managed writes: classifies path as constitution / managed / unmanaged from core-manifest.yaml's managed.globs section, rejects constitution writes, git-commits managed writes before mutation, passes through unmanaged writes uncommitted. tool_edit / tool_write / reload_atom retrofit to write through ResourceWriter; the freeze→tempfile→os.replace→rollback dance in atom_reloader collapses into writer.write + git restore on failure. Browse API becomes git-log/git-cat-file wrappers; version IDs become full git SHAs replacing compute_atom_hash content hashes. Rollback is ResourceWriter.restore(path, target_sha) routed through the same writer. On absent .git/ the writer auto-inits .agentm/repo/ as a shadow worktree; advisory mode if git binary missing. Skills, prompts, scenarios, and .claude/ docs all gain versioning for free. ~300 LoC deleted from freeze.py + _layout.py; parent_hash dead-code problem disappears (git provides it); direct-edit bypass closed."
     design: "designs/git-backed-versioning.md"
-    related_concepts: [self_modifiable_architecture, evolution_substrate, pluggable_architecture]
+    related_concepts: [self_modifiable_architecture, evolution_substrate, pluggable_architecture, per_task_evolution_loop]
     plans: [plans/2026-05-09-issue-80-abi-prep.md]
     tasks: ["tasks/2026-05-09-issue-85-session-refactor.md", "tasks/2026-05-09-issue-89-file-tool-io-seams.md", "tasks/2026-05-09-issue-101-tool-catalog-split.md"]
 
   textual_tui:
-    description: "Sole interactive frontend at modes/textual_app.py serving two roles simultaneously — conversation surface AND control+observability surface for AgentM's runtime (legacy rich.live mode deleted 2026-05-02; layout rebuilt outside-in same day; control modals + live subscriptions added 2026-05-02). Outside-in dock layout per Textual's design-a-layout guide: StatusHeader docks top (h:1, model · turn · N ext (M failed) · K tools · in/out tokens · $cost ⚠ if budget exceeded · phase glyph), Footer docks bottom auto-rendering BINDINGS with show=True (⌃C ⌃D ⌃L ⌃R ⌃E), InputBar containing PromptInput TextArea docks bottom above Footer, ConversationLog fills the 1fr middle. Conversation widgets: UserTurn (markdown body, blue $primary border-left gutter; injected variant from api.send_user_message uses yellow $warning gutter + 'system → you (from <ext>)' label), TurnContainer for assistant turns (●-assistant label + ThinkingBlock Collapsible + AssistantTextBlock streaming + ToolCallBlock Collapsible with single yellow gutter and 'tool_name ✓ Nms' title format + SubagentBlock Vertical with cyan gutter). Control modals via generic InfoModal with Rich tables: /extensions (every ExtensionInstallEvent phase tracked, ⏳ start / ✓ end / ✗ error), /tools (every ApiRegisterEvent kind=tool tracked: name + source ext + description), /budget (current CostBudgetExceededEvent state). Live observability subscriptions: extension_install (track all phases + error toast), extension_reload (toast; trigger=agent or propose_change_approved → '★ self-modify' warning toast — framework's headline behavior made visible), api_register (live tool/command capture for post-create reloads), cost_budget_exceeded (latch state + header ⚠ indicator + error toast warning next prompt halts), api_send_user_message (synthetic UserTurn with injected styling). Two-phase bus subscription in run(): pre-AgentSession.create accumulators populate snapshot dicts handed to AgentMApp.__init__ (because api_register and extension_install fire DURING create, before the app exists); post-create live handlers cover hot reloads. Single-source-of-truth gutters: CSS border-left only — Rich Panel rendering removed because doubling with CSS produced visibly broken borders. Theming: self.theme = 'textual-dark'/'textual-light' (Textual built-in registered themes); CLI --theme accepts 'dark'/'light' as aliases; CSS uses semantic variables ($primary/$surface/$boost/$text/$accent/$warning/$error/$text-muted) instead of hardcoded hex. Maps each public bus event to one widget mutation. 20 Hz batched stream flush via set_interval; no per-token repaint. Key bindings: Esc soft-cancels in-flight prompt then on idle emits explicit 'Nothing to cancel.' toast (replaces previous silent no-op); Ctrl+C cancels then escalates to quit on second press within 1.5s window (replaces 'never quits while prompt runs' behavior); Ctrl+D unconditional quit; Ctrl+L clear visual log (not session); Ctrl+R command palette; Shift+Enter newline; PromptInput tab_behavior='focus' so Tab leaves input naturally (App-level Tab binding removed because TextArea ate the key). Slash commands open a CommandPalette modal listing ExtensionAPI-registered commands plus TUI-built-ins (/quit, /clear, /help, /copy-last, /extensions, /tools, /budget); unknown slashes pass through as raw text. Built-in command palette (Ctrl+P) disabled via ENABLE_COMMAND_PALETTE=False so atom-registered commands surface naturally at Ctrl+R. Mode-layer contract from pluggable-architecture.md §5 unchanged: run(config) owns session lifecycle, subscribes to public bus channels only. Permission-prompt UX still deferred (no permission_request event yet); gracefully degrades to red tool-result errors."
+    description: "Replaces the minimal rich.live interactive mode (modes/interactive.py, ~150 lines) with a Textual-based TUI mirroring Claude Code's interaction style: scrollable ConversationLog of TurnContainers (ThinkingBlock + AssistantTextBlock + Collapsible ToolCallBlock), multi-line PromptInput TextArea with slash command palette, persistent StatusLine showing model/turn/tokens/cost/phase. Maps each public bus event to one widget mutation (stream_delta → text/tool block; tool_call/tool_result → fill + status glyph; llm_request_start/end → status phase + token totals; child_session_start/end → nested SubagentBlock; extension_install error → toast). 20 Hz batched stream flush via set_interval; no per-token repaint. Key bindings: Esc soft-cancels in-flight prompt (never exits), Ctrl+C interrupts then quits, Ctrl+L clear visual log (not session), Ctrl+R command palette, Shift+Enter newline. Slash commands open a CommandPalette modal listing ExtensionAPI-registered commands plus TUI-built-ins (/quit, /clear, /help, /copy-last); unknown slashes pass through as raw text. Theming via CSS file textual_app.tcss with dark/light themes. Migration: keep modes/interactive.py as 'simple' fallback; new mode at modes/textual_app.py selected via CLI --tui textual; default flips after stabilization. Mode-layer contract from pluggable-architecture.md §5 unchanged: run(config) owns session lifecycle, subscribes to public bus channels only. Permission-prompt UX deferred (no permission_request event yet); gracefully degrades to red tool-result errors."
     design: "designs/textual-tui.md"
     related_concepts: [pluggable_architecture, observability]
     plans: []
@@ -50,14 +57,7 @@ concepts:
   observability:
     description: "Per-session OTel-flavored JSONL diagnostic stream complementary to trajectory. Single principle: every signal goes through the bus. EventBus exposes EventBusObserver + emit_sync (sync handlers only, async skipped). New bus events: ApiRegisterEvent / ApiSendUserMessageEvent (harness, emit_sync from ExtensionAPI), LlmRequestStartEvent / LlmRequestEndEvent (kernel, around stream_fn drain in AgentLoop with try/except for error path), ExtensionInstallEvent (harness, around load_extension). observability builtin is a pure subscriber + Observer installed via ExtensionAPI.add_observer; no EventBus or ExtensionAPI monkey-patching. Records: session.start/ready/end, extension.install, api.register, api.send_user_message, llm.request.start/end, event.dispatch, handler.invoke, turn.summary. Writes to <cwd>/.agentm/observability/<trace_id>.jsonl, flushed per record. evolution_substrate extends session.start with active-set fingerprint binding the trace to exact (core, scenario, atom_versions) tuple."
     design: "designs/observability.md"
-    related_concepts: [pluggable_architecture, extension_as_scenario, evolution_substrate, self_modifiable_architecture, textual_tui]
-    plans: []
-    tasks: []
-
-  handler_priority:
-    description: "Per-channel dispatch-order knob on api.on. Three symbolic tiers (BusPriority.PRE=100, NORMAL=500, POST=900) mapped to integers; numeric values legal but discouraged. EventBus._handlers upgrades to list[_Subscription{priority, seq, handler}], bisect.insort on (priority, seq). Existing 'last non-None wins' replacement semantics unchanged — dispatch order IS authority order under last-wins. Block/veto contracts (tool_call block, before_install/unload_atom veto) use first-refusal-wins, priority only controls who decides first. Backward compatible: api.on without priority lands at NORMAL, registration order within tier preserved. Reload-position-preservation (atom_reloader._capture/_restore) still in place as fallback for un-prioritized handlers; prioritized ones land in the right slot via bisect. No depends_on / before / after constraint graph in v0."
-    design: "designs/handler-priority.md"
-    related_concepts: [pluggable_architecture, agent_loop, self_modifiable_architecture, observability]
+    related_concepts: [pluggable_architecture, extension_as_scenario, evolution_substrate, self_modifiable_architecture, textual_tui, per_task_evolution_loop]
     plans: []
     tasks: []
 
@@ -72,8 +72,8 @@ concepts:
     description: "§11 hard rule: one new built-in extension = one new .py file under extensions/builtin/<name>.py with module-level MANIFEST: ExtensionManifest plus install(api, config). Auto-discovery (extensions.discover) and a mechanical validator (extensions.validate, 8 checks keyed to design §11.4) gate the catalog. Designed so future agent self-edits have a tiny, verifiable surface — atom-to-atom imports forbidden, harness.session import forbidden, allow-listed imports only, private ExtensionAPI reflection/attribute overwrites/mutable globals/dynamic agentm.* imports/concrete harness-service downcasts and undeclared peer-name string literals rejected. Phase 2.0c scaffolding landed; A/B/C/D1 atoms must conform. self_modifiable_architecture grows the manifest with api_version (integer ABI + grace window), affects (declared metric surface for catalog), tier (1 free / 2 reviewable). Validator gains api_version compatibility check and constitution-path rejection. Contrib package atoms keep the same per-atom contract while package-internal helpers handle shared parsing/rendering."
     design: "designs/extension-as-scenario.md#11-single-file-self-contained-extension-contract"
     related_concepts: [extension_as_scenario, pluggable_architecture, self_modifiable_architecture, evolution_substrate]
-    plans: []
-    tasks: []
+    plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
+    tasks: ["tasks/2026-04-30-phase2-group-0c.md"]
 
   operations_ports:
     description: "FileOperations / BashOperations Protocols in src/agentm/core/abi/operations.py + LocalFileOperations / LocalBashOperations defaults in src/agentm/core/_internal/operations_impl.py. The environment boundary is hybrid after issue #89: read-only file atoms (tool_read, tool_grep, tool_find, tool_ls) consume FileOperations through ExtensionAPI operations, write atoms (tool_write, tool_edit) consume ResourceWriter as the single mutation chokepoint, and tool_bash consumes BashOperations. In v0 Operations is a constitution-only axis: the harness injects the bundle at session construction, and atoms consume but do not replace it at runtime."
@@ -86,14 +86,14 @@ concepts:
     description: "Filesystem-discovered SKILL.md files (YAML frontmatter + body) advertised in the system prompt as a compact <available_skills> XML index; LLM loads any specific skill on demand via the `read` tool. Implements progressive disclosure. Pi-mono port of core/skills.ts. Includes core/_internal/skills.py (loader + validator + diagnostics), core/lib/frontmatter.py (in-house parser, promoted from resource_loader._split_frontmatter), and extensions/builtin/skill_loader.py atom that injects the index via before_agent_start."
     design: "designs/skills.md"
     related_concepts: [prompt_templates, pluggable_architecture, extension_as_scenario, search_tools]
-    plans: []
+    plans: ["plans/2026-05-01-pi-mono-migration.md"]
     tasks: []
 
   prompt_templates:
     description: "Filesystem-discovered markdown templates with YAML frontmatter. /<name> args expansion with bash-style placeholders ($1, $@, $ARGUMENTS, ${@:N:L}). Pi-mono port of core/prompt-templates.ts. Includes core/_internal/prompt_templates.py (parser + substituter + loader) and extensions/builtin/prompt_templates.py atom (input-event handler that expands before agent loop runs). Code-registered slash commands win over templates on name collision via the slash_commands atom and typed CommandDispatcher service facade; non-matching /-prefixed text falls through verbatim."
     design: "designs/prompt-templates.md"
     related_concepts: [skills, extension_as_scenario, pluggable_architecture]
-    plans: []
+    plans: ["plans/2026-05-01-pi-mono-migration.md"]
     tasks: []
 
   search_tools:
@@ -107,14 +107,14 @@ concepts:
     description: "Pure-function module core/lib/edit_diff.py owning the edit-application algorithm: line-ending detection/restoration, UTF-8 BOM handling, NFKC + smart-quote/dash/space fuzzy normalization, and multi-edit application pipeline (Edit{old,new} sequences). Pi-mono port of tools/edit-diff.ts. Consumed by the upgraded tool_edit atom in Tier 2."
     design: "designs/edit-diff.md"
     related_concepts: [search_tools, tool_event_narrowing, extension_as_scenario, operations_ports]
-    plans: []
+    plans: ["plans/2026-05-01-pi-mono-migration.md"]
     tasks: []
 
   tool_event_narrowing:
     description: "Per-tool typed event subclasses (BashToolCallEvent, ReadToolCallEvent, GrepToolCallEvent, ...) + isinstance-based TypeGuard helpers (is_bash_tool_call, ...) replacing the single ToolCallEvent with stringly-typed tool_name. Recommends Python match-statement dispatch as the idiomatic style. Custom user tools fall through to the base ToolCallEvent. Pi-mono port of the typed-event/type-guard pattern from extensions/types.ts:740-940. Coordinated single-PR migration across all atoms that branch on tool_name."
     design: "designs/tool-event-narrowing.md"
     related_concepts: [search_tools, edit_diff, pluggable_architecture, extension_as_scenario]
-    plans: []
+    plans: ["plans/2026-05-01-pi-mono-migration.md"]
     tasks: []
 
   sub_agent_lifecycle:
@@ -138,13 +138,6 @@ concepts:
     plans: []
     tasks: []
 
-  cognitive_audit:
-    description: "Two-phase audit pipeline supervising a running main agent for semantic-level drift. Phase 1 (Extractor) runs per TurnEndEvent: a stateless child session reads the new-turn slice (including thinking blocks) plus a recent-graph slice for refs resolution and submits new Event records via submit_events; state lives on the parent session entry tree under llmharness.audit_event entries plus an llmharness.extractor_cursor pointer that records last_turn_index. Phase 2 (Auditor) runs every k turns (default 3, configurable via audit_interval_turns): a stateless child session sees the event graph + recent verdicts (not the raw trajectory) and submits a Verdict + optional Reminder via submit_verdict. Failure modes are visible — extractor_no_call / extractor_error / extractor_empty / audit_no_call / audit_error entries replace silent no-drift fallbacks. Event graph is append-only; invalidation carried as free-text relation in new event's summary + refs pointing at superseded id (per feedback_no_preset_subjective_labels.md). JSON-Schema enums for EventKind/DriftType derived from the enum classes; drift=true ⇒ type required enforced at the provider edge via if/then. Public contract preserved: schema.py Event/Verdict/Reminder/EventKind/DriftType + cards.py + cards_tools atom + inherit_provider builtin + BeforeAgentStartEvent injection. AFC card corpus at contrib/extensions/llmharness/references/papers/cards/ (42 cards) is the LLM judge's reference material, exposed via the cards_tools atom (cards_list / cards_get) — not a static prompt."
-    design: "designs/llmharness-cognitive-audit.md"
-    related_concepts: [extension_as_scenario, observability, sub_agent_lifecycle, self_modifiable_architecture, pluggable_architecture, agent_team]
-    plans: []
-    tasks: []
-
   # === HISTORICAL ===
   # Pre-v2 architecture. Code deleted in Phase 2.5 (2026-04-30).
   # Designs preserved under designs/historical/ for archival reference only.
@@ -154,7 +147,7 @@ concepts:
     description: "[HISTORICAL — superseded by extension_as_scenario; code deleted in Phase 2.5] SDK semantic consistency refactoring: unified Tool type (@tool decorator, no StructuredTool), Scenario protocol (setup() -> ScenarioWiring), single ScenarioRegistry (replaces 4 global registries), dead code removal, langchain boundary convergence (HumanMessage/StructuredTool removed from SDK internals)."
     design: "designs/historical/sdk-consistency.md"
     related_concepts: [agent_harness, system_architecture, scenario_protocol, middleware_system]
-    plans: []
+    plans: ["plans/2026-03-15-library-antipattern-fixes.md"]
     tasks: []
 
   agent_harness:
@@ -191,15 +184,24 @@ concepts:
     description: "Pure Python multi-agent orchestration system. SimpleAgentLoop-based ReAct cycle, AgentRuntime for worker management, WorkerLoopFactory for config-driven worker creation, build_agent_system() single canonical builder, Scenario protocol for domain logic, Middleware protocol (3 hooks) for cross-cutting concerns. Config-driven design, trajectory recording, monitoring, and failure recovery."
     design: "designs/historical/system-design-overview.md"
     related_concepts: [agent_harness, orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner, scenario_protocol, middleware_system, storage_backend, trajectory_analysis]
-    plans: []
-    tasks: []
+    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-08-stub-implementation.md"]
+    tasks:
+      - "tasks/2026-03-08-design-audit-findings.md"
+      - "tasks/2026-03-08-impl-builder.md"
+      - "tasks/2026-03-08-impl-config-loader.md"
+      - "tasks/2026-03-08-impl-config-validator-phase-manager.md"
+      - "tasks/2026-03-08-impl-orchestrator-agent.md"
+      - "tasks/2026-03-08-impl-orchestrator-tools.md"
+      - "tasks/2026-03-08-impl-prompt-tool-registry.md"
+      - "tasks/2026-03-08-impl-task-manager.md"
+      - "tasks/2026-03-08-snapshot-tests.md"
 
   orchestrator:
     status: historical
     description: "SimpleAgentLoop-based orchestrator with DynamicContextMiddleware for state injection. Dispatches workers via AgentRuntime. Monitors/injects/aborts via dispatch_agent/check_tasks/inject_instruction/abort_task tools. RCA scenario uses HypothesisStore for hypothesis reasoning."
     design: "designs/historical/orchestrator.md"
     related_concepts: [system_architecture, sub_agent, trajectory_system, memory_system, execution_runner]
-    plans: []
+    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
 
   sub_agent:
@@ -207,15 +209,16 @@ concepts:
     description: "Worker agents built by WorkerLoopFactory as SimpleAgentLoop instances. Config-driven tools/prompts, middleware stack (budget, compression, dedup, trajectory). Data-only constraint in RCA mode. Launched as asyncio.Tasks by AgentRuntime."
     design: "designs/historical/sub-agent.md"
     related_concepts: [system_architecture, orchestrator, configuration_system, execution_runner, service_profile]
-    plans: []
-    tasks: []
+    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
+    tasks:
+      - "tasks/2026-03-08-impl-hooks-sub-agent.md"
 
   generic_state_wrapper:
     status: historical
     description: "[HISTORICAL — superseded by extension_as_scenario (scenario = YAML composition of atoms); code deleted in Phase 2.5] Scenario Protocol architecture: Scenario protocol (setup() -> ScenarioWiring), SetupContext (platform resources), ScenarioRegistry (register/discover), build_agent_system() 4-phase pipeline integration. 3 built-in scenarios: RCA (hypothesis_driven), trajectory_analysis, general_purpose."
     design: "designs/historical/generic-state-wrapper.md"
     related_concepts: [agent_harness, orchestrator, configuration_system, memory_system, scenario_protocol, middleware_system, builder]
-    plans: []
+    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
     tests:
       - file: "tests/unit/test_generic_sdk.py"
@@ -227,7 +230,7 @@ concepts:
     design: "designs/historical/orchestrator.md"
     related_concepts: [orchestrator, trajectory_system, memory_vault, trajectory_analysis]
     related_designs: ["designs/historical/trajectory-analysis.md"]
-    plans: []
+    plans: ["plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
 
   trajectory_analysis:
@@ -235,15 +238,21 @@ concepts:
     description: "Skill-driven trajectory analysis scenario. Agent Skills spec (SKILL.md + references/ + examples/) in vault under skill/trajectory-analysis/. Three-tier progressive disclosure: catalog → SKILL.md → references/. Model-driven or config-driven skill activation. Uses generic state via Scenario protocol, two phases (analyze → synthesize)."
     design: "designs/historical/trajectory-analysis.md"
     related_concepts: [system_architecture, memory_system, memory_vault, scenario_protocol, configuration_system]
-    plans: []
-    tasks: []
+    plans: ["plans/2026-03-24-trajectory-analysis.md"]
+    tasks:
+      - "tasks/2026-03-24-ta-state-strategy.md"
+      - "tasks/2026-03-24-ta-schemas-registry.md"
+      - "tasks/2026-03-24-ta-config.md"
+      - "tasks/2026-03-24-ta-vault-skills.md"
+      - "tasks/2026-03-24-ta-integration.md"
+      - "tasks/2026-03-24-ta-tests.md"
 
   configuration_system:
     status: historical
     description: "Config system: system.yaml (global), tools/*.yaml (reusable tool defs), scenarios/<name>/ (scenario.yaml + prompts/*.j2). Pydantic schema validation + cross-reference validation at startup. Environment variable substitution"
     design: "designs/historical/system-design-overview.md"
     related_concepts: [system_architecture, sub_agent, orchestrator]
-    plans: []
+    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
     tasks: []
     tests:
       - file: "tests/unit/test_config_validation.py"
@@ -316,7 +325,7 @@ concepts:
     status: historical
     description: "build_agent_system() — single canonical 4-phase builder (platform resources -> worker infra -> orch tools -> orch loop). Scenario-driven, no legacy wrappers. Factory closure DI for tools, trajectory wiring."
     related_concepts: [system_architecture, orchestrator, sub_agent, trajectory, configuration_system, scenario_protocol, middleware_system, storage_backend]
-    plans: []
+    plans: ["plans/2026-03-09-compression-recall-memory.md"]
     tasks: []
 
   scenario_protocol:
@@ -332,7 +341,9 @@ concepts:
     description: "[HISTORICAL — replaced by EventBus + atomic extensions; code deleted in Phase 2.5] Middleware protocol with 3 hooks: on_llm_start, on_llm_end, on_tool_call. Chain pattern for composing multiple middlewares. Concrete implementations: DynamicContextMiddleware, LoopDetectionMiddleware, CompressionMiddleware, BudgetMiddleware, DedupMiddleware, SkillMiddleware, TrajectoryMiddleware, PermissionMiddleware, MemoryMiddleware, plus loop-resilience additions (ToolResultBudgetMiddleware, SystemReminderMiddleware, MicroCompactMiddleware, CostBudgetMiddleware). All middleware code is in harness/middleware.py."
     related_concepts: [agent_harness, builder, sub_agent, tool_dedup, loop_resilience]
     plans: []
-    tasks: []
+    tasks:
+      - "tasks/2026-03-08-impl-compression.md"
+      - "tasks/2026-03-08-impl-notebook.md"
     tests:
       - file: "tests/unit/test_generic_sdk.py"
         covers:
@@ -353,8 +364,16 @@ concepts:
     description: "Markdown + YAML frontmatter persistent knowledge vault with SQLite-backed three-layer index (structural, link graph, FTS5 + sqlite-vec). Replaces JSON-based KnowledgeStore. [[wikilink]] bidirectional linking, atomic write flow, vault_edit with 4 incremental edit primitives (replace_string, set_frontmatter, replace_section, append_section), rebuildable index."
     design: "designs/historical/memory-vault.md"
     related_concepts: [memory_system, agent_harness, storage_backend, configuration_system]
-    plans: []
-    tasks: []
+    plans: ["plans/2026-03-16-memory-vault.md"]
+    tasks:
+      - "tasks/2026-03-16-vault-parser.md"
+      - "tasks/2026-03-16-vault-schema.md"
+      - "tasks/2026-03-16-vault-store.md"
+      - "tasks/2026-03-16-vault-search.md"
+      - "tasks/2026-03-16-vault-graph.md"
+      - "tasks/2026-03-16-vault-tools.md"
+      - "tasks/2026-03-16-vault-migration.md"
+      - "tasks/2026-03-16-vault-integration.md"
 
   tool_dedup:
     status: historical

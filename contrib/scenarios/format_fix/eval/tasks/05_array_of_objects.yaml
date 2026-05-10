@@ -1,0 +1,11 @@
+id: 05_array_of_objects
+task_class: format_fix
+description: Array of nested objects — same nesting pitfall as task 02.
+input:
+  user_message: "[{'id': 1, 'name': 'a'}, {'id': 2, 'name': 'b'}]"
+expected:
+  value:
+    - id: 1
+      name: a
+    - id: 2
+      name: b

@@ -13,6 +13,7 @@ from agentm.core.abi import AgentLoop, EventBus, LoopConfig, Model, Tool
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.extensions import discover as discover_mod
 from agentm.harness.atom_reloader import AtomReloader
+from agentm.harness.atom_sandbox import apply_atom_source_overrides
 from agentm.harness.command_dispatcher import HarnessCommandDispatcher
 from agentm.harness.events import (
     ChildSessionStartEvent,
@@ -274,6 +275,20 @@ async def create_agent_session(
     for msg in config.initial_messages:
         session_manager.append_message(msg)
 
+    # Apply ``atom_source_overrides`` BEFORE building the AgentSession
+    # façade so the running atoms reflect the overridden source by the
+    # time the loop is invoked. The helper redirects each atom's
+    # ``file_path`` to ``.agentm/eval-sandbox/<id>/`` (classified as
+    # ``unmanaged`` by ResourceWriter — no git mutation). Cleaned up by
+    # ``AgentSession.shutdown``.
+    eval_sandbox = await apply_atom_source_overrides(
+        reloader=reloader,
+        bus=bus,
+        cwd=config.cwd,
+        session_id=session_id,
+        overrides=config.atom_source_overrides or {},
+    )
+
     runtime = SessionRuntime(
         bus=bus,
         session_manager=session_manager,
@@ -296,6 +311,7 @@ async def create_agent_session(
         parent_bus=config.parent_bus,
         parent_session_id=config.parent_session_id,
         purpose=config.purpose,
+        eval_sandbox=eval_sandbox,
     )
 
     await bus.emit(

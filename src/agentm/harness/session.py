@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +94,7 @@ class AgentSession:
         parent_bus: EventBus | None,
         parent_session_id: str | None,
         purpose: str,
+        eval_sandbox: Path | None = None,
     ) -> None:
         self._cwd = cwd
         self._bus = runtime.bus
@@ -115,6 +117,15 @@ class AgentSession:
         self._parent_bus = parent_bus
         self._parent_session_id = parent_session_id
         self._purpose = purpose
+        # Set by the cost_budget extension via the cost_budget_exceeded
+        # channel; checked at the top of ``prompt`` so the next turn
+        # short-circuits cleanly with stop_reason="budget".
+        self._budget_exceeded: bool = False
+        # Per-session sandbox for ``atom_source_overrides`` (per-task-evolution
+        # loop §6.3). Populated by ``AgentSession.create`` when the config
+        # supplies overrides; cleaned up on ``shutdown``. ``None`` for
+        # ordinary sessions — no filesystem cost.
+        self._eval_sandbox: Path | None = eval_sandbox
 
     # --- Compatibility aliases (legacy attribute access) ------------------
     # Tests and a few internal callers used to read these dicts off the
@@ -375,6 +386,19 @@ class AgentSession:
                 index_trace(trace_path)
         except Exception as exc:
             logger.warning("agentm catalog indexer post-shutdown failed: %r", exc)
+
+        # Tear down the eval sandbox dir if this session created one for
+        # ``atom_source_overrides``. Best-effort: any failure is logged but
+        # never raised (shutdown must not error on stale FS state).
+        if self._eval_sandbox is not None:
+            try:
+                shutil.rmtree(self._eval_sandbox, ignore_errors=True)
+            except Exception as exc:  # noqa: BLE001 - shutdown best-effort
+                logger.warning(
+                    "failed to clean eval sandbox %s: %r",
+                    self._eval_sandbox,
+                    exc,
+                )
 
     # --- Helpers ----------------------------------------------------------
 

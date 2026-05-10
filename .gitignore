@@ -43,3 +43,7 @@ trajectory.jsonl
 
 # Local datasets (downloaded benchmarks; large)
 datasets/
+
+# Ephemeral planning/task artifacts (kept locally, not shipped)
+.claude/tasks/
+.claude/plans/
