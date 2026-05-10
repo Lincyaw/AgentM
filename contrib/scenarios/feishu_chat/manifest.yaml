@@ -54,6 +54,12 @@ extensions:
         before approving fan-out writes; do not paste credentials or
         token values back into the chat under any circumstance.
 
+  # --- runtime facts: workspace cwd + host platform. Listed AFTER
+  # ``system_prompt`` so its prepend runs last under EventBus FIFO,
+  # placing the runtime block at the very top of the assembled
+  # system prompt. See `.claude/designs/runtime-context-atom.md`. ---
+  - module: agentm.extensions.builtin.runtime_context
+
   # --- safety gate: block destructive local tools at the scenario
   # level. The Feishu gateway also runs its own approval bridge on
   # write-class tool calls (configured in the gateway YAML, not here)
