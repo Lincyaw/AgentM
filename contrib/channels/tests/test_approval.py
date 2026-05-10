@@ -49,7 +49,7 @@ async def test_approve_flow_publishes_card_then_resolves() -> None:
             if bus.outbound.qsize() > 0:
                 msg = await bus.consume_outbound()
                 if msg.metadata.get("kind") == "approval_request":
-                    approve_value = msg.buttons[0][1]  # ["Approve", "<id>:approve"]
+                    approve_value = msg.buttons[0].value  # Button(label, value, …)
                     approval_id = approve_value.split(":", 1)[0]
                     await bridge.resolve(
                         approval_id, value=approve_value, sender_id="u"
@@ -78,7 +78,7 @@ async def test_deny_flow_blocks() -> None:
             if bus.outbound.qsize() > 0:
                 msg = await bus.consume_outbound()
                 if msg.metadata.get("kind") == "approval_request":
-                    deny_value = msg.buttons[1][1]
+                    deny_value = msg.buttons[1].value
                     approval_id = deny_value.split(":", 1)[0]
                     await bridge.resolve(approval_id, value=deny_value, sender_id="u")
                     return
@@ -117,7 +117,7 @@ async def test_other_user_click_is_ignored_until_rightful_user_acts() -> None:
                 msg = await bus.consume_outbound()
                 if msg.metadata.get("kind") != "approval_request":
                     continue
-                approve_value = msg.buttons[0][1]
+                approve_value = msg.buttons[0].value
                 approval_id = approve_value.split(":", 1)[0]
                 # Outsider — must NOT consume.
                 ok = await bridge.resolve(

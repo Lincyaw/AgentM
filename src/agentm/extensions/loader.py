@@ -72,9 +72,13 @@ def _candidate_roots() -> list[Path]:
         # An editable install puts agentm under <worktree>/src/agentm,
         # so the worktree root is ``parent.parent`` (skip the ``src``).
         # We don't assume the layout — just walk up looking for a
-        # ``contrib`` sibling, capping at 4 levels to avoid escaping.
+        # ``contrib`` sibling, capping at ``_PACKAGE_WALK_DEPTH`` levels
+        # to avoid escaping into ancestor directories on machines where
+        # the package lives deeper than expected. ``AGENTM_PROJECT_ROOT``
+        # is the canonical anchor for production deployments; this walk
+        # is a development-time best-effort fallback.
         walker = package_dir
-        for _ in range(4):
+        for _ in range(_PACKAGE_WALK_DEPTH):
             if (walker / "contrib").is_dir():
                 roots.append(walker)
                 break
@@ -82,6 +86,12 @@ def _candidate_roots() -> list[Path]:
     except Exception:  # noqa: BLE001 — best-effort fallback
         pass
     return roots
+
+
+# Conservative cap: src/agentm → src → worktree-root covers the editable
+# install case in two steps; doubled to absorb wheel layouts that nest
+# the package one level deeper. Bump only when a real layout demands it.
+_PACKAGE_WALK_DEPTH = 4
 
 
 def _resolve_scenario_manifest(name_or_path: str, relative: Path) -> Path:

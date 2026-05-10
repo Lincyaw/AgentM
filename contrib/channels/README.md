@@ -29,7 +29,7 @@ src/agentm_channels/
 ├── registry.py          # auto-discover via pkgutil + entry_points
 ├── manager.py           # ChannelManager — lifecycle + outbound dispatch
 ├── gateway.py           # MessageBus ↔ AgentSession bridge
-├── approval.py          # channel-agnostic ApprovalBridge (uses OutboundMessage.buttons)
+├── approval.py          # channel-agnostic ApprovalBridge (typed Button + button_value round-trip)
 ├── chat_session_map.py  # session_key → session_id persistence
 ├── cli.py               # `agentm-gateway` console entry
 └── channels/
@@ -102,16 +102,33 @@ discord = "my_pkg.discord:DiscordChannel"
 ## Approval flow
 
 `ToolCallEvent` for any tool listed in `approval.require_approval` is
-intercepted. The bridge publishes an `OutboundMessage` with two buttons
-(`Approve` / `Deny`); each channel renders these in its native UI
-(Feishu interactive card, Slack action block, …). When the user
-clicks, the channel publishes an `InboundMessage` whose
-`metadata.button_value` carries `<approval_id>:approve|deny`. The
-gateway routes it to the bridge instead of the agent — the bridge
-resolves the pending Future and the agent's loop unblocks.
+intercepted. The bridge publishes an `OutboundMessage` carrying two
+typed `Button`s (`Approve` / `Deny`, with `style` set so each channel
+can render the visual hint without label-string heuristics). Each
+channel renders the buttons in its native UI (Feishu schema-2.0
+interactive card with markdown body, Slack action block, …). When the
+user clicks, the channel publishes an `InboundMessage` whose
+`button_value` field carries the typed button payload — the encoding
+of approval id + decision is private to the bridge. The gateway hands
+every inbound with a `button_value` to
+`ApprovalBridge.try_resolve_inbound`; the bridge resolves the pending
+Future when the click matches a live request and the agent's loop
+unblocks.
 
 Identity is checked: only the user who triggered the tool call may
 approve their own call.
+
+## What lands in the chat
+
+- **Assistant text** (every `TurnEndEvent`) — rendered as a markdown
+  card so Chinese, code fences, lists, and inline emphasis all show up.
+- **Diagnostics** (`warning` / `error`) — surfaced as plain markdown
+  cards so the user sees infrastructure problems instead of a silent
+  hang.
+- **Tool calls / tool results** — *not* echoed to chat. Tool I/O is
+  noisy and exposes raw payloads; the agent's next assistant turn
+  summarises whatever the user actually needs to know. Operators can
+  always inspect the trajectory JSONL for the full picture.
 
 ## Tests
 

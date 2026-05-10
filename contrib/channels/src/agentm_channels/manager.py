@@ -36,13 +36,23 @@ from .registry import discover_all
 logger = logging.getLogger(__name__)
 
 
-_SEND_RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0)
+DEFAULT_SEND_RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0)
+"""Backoff schedule between outbound retries. The number of entries is
+the number of *retries* after the initial attempt (so 3 entries → up to
+4 sends total). Override at :class:`ChannelManager` construction time."""
 
 
 class ChannelManager:
-    def __init__(self, channels_config: dict[str, Any], bus: MessageBus) -> None:
+    def __init__(
+        self,
+        channels_config: dict[str, Any],
+        bus: MessageBus,
+        *,
+        send_retry_delays: tuple[float, ...] = DEFAULT_SEND_RETRY_DELAYS,
+    ) -> None:
         self._config = channels_config
         self._bus = bus
+        self._send_retry_delays = send_retry_delays
         self._channels: dict[str, BaseChannel] = {}
         self._tasks: list[asyncio.Task[Any]] = []
         self._dispatch_task: asyncio.Task[Any] | None = None
@@ -112,7 +122,7 @@ class ChannelManager:
 
     async def _send_with_retry(self, ch: BaseChannel, msg: OutboundMessage) -> None:
         last: BaseException | None = None
-        for delay in (0.0, *_SEND_RETRY_DELAYS):
+        for delay in (0.0, *self._send_retry_delays):
             if delay:
                 await asyncio.sleep(delay)
             try:

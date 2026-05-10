@@ -167,7 +167,7 @@ async def test_approval_card_round_trip_lets_tool_through(tmp_path: Path) -> Non
             for _ in range(400):
                 for entry in list(stub.outbox):  # type: ignore[attr-defined]
                     if entry.metadata.get("kind") == "approval_request":
-                        approve_value = entry.buttons[0][1]
+                        approve_value = entry.buttons[0].value
                         await stub.push(  # type: ignore[attr-defined]
                             sender_id="u1",
                             chat_id="c1",

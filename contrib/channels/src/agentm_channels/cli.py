@@ -9,7 +9,7 @@ Minimal config (``gateway.yaml``)::
     cwd: ./workspace
     scenario: feishu_chat
     provider: openai
-    model: Doubao-Seed-2.0-pro
+    model: <provider-default>
 
     approval:
       require_approval: [bash]
@@ -24,7 +24,7 @@ Minimal config (``gateway.yaml``)::
 
 Env-var convenience: when no ``--config`` is passed, the CLI builds a
 minimal config from ``LARK_APP_ID`` / ``LARK_APP_SECRET`` so a one-line
-launch works:
+launch works::
 
     LARK_APP_ID=… LARK_APP_SECRET=… agentm-gateway --cwd ./work
 
@@ -43,12 +43,21 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from agentm.ai import DEFAULT_PROVIDER_REGISTRY
 from agentm.core.abi import EventBus
 
 from .approval import ApprovalPolicy
 from .bus import MessageBus
 from .gateway import Gateway, GatewayConfig
 from .manager import ChannelManager
+
+
+def _default_provider() -> str:
+    return DEFAULT_PROVIDER_REGISTRY.default_provider().id
+
+
+def _default_model(provider: str) -> str:
+    return DEFAULT_PROVIDER_REGISTRY.default_model(provider)
 
 
 logger = logging.getLogger(__name__)
@@ -101,6 +110,17 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return _expand_env(data)
 
 
+def _retry_delays(spec: Any) -> tuple[float, ...] | None:
+    if spec is None:
+        return None
+    if not isinstance(spec, list):
+        raise SystemExit("send_retry_delays must be a list of seconds (floats)")
+    try:
+        return tuple(float(x) for x in spec)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"send_retry_delays: invalid entry: {exc}") from exc
+
+
 def _approval_policy(spec: Any) -> ApprovalPolicy:
     if not isinstance(spec, dict):
         return ApprovalPolicy()
@@ -120,16 +140,16 @@ def _build_session_factory(
 ) -> Callable[[str, EventBus, str | None], Awaitable[Any]]:
     from typing import cast as _cast
 
-    from agentm.cli import (
-        DEFAULT_PROVIDER_REGISTRY,
-        _make_default_session_store,
-        _resolve_session_state,
+    from agentm.harness import (
+        AgentSession,
+        AgentSessionConfig,
+        make_default_session_store,
+        resolve_session_state,
     )
-    from agentm.harness import AgentSession, AgentSessionConfig
 
     async def factory(cwd: str, bus: EventBus, resume: str | None) -> Any:
-        store = _make_default_session_store(cwd)
-        state = _resolve_session_state(
+        store = make_default_session_store(cwd)
+        state = resolve_session_state(
             cwd=cwd, resume=resume, continue_recent=False, session_store=store
         )
         provider_spec = DEFAULT_PROVIDER_REGISTRY.build(provider, {"model": model})
@@ -166,13 +186,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--provider",
         default=os.environ.get("AGENTM_GATEWAY_PROVIDER")
-        or os.environ.get("AGENTM_PROVIDER", "anthropic"),
+        or os.environ.get("AGENTM_PROVIDER")
+        or _default_provider(),
     )
-    p.add_argument(
-        "--model",
-        default=os.environ.get("AGENTM_GATEWAY_MODEL")
-        or os.environ.get("AGENTM_MODEL", "claude-sonnet-4-5-20250929"),
-    )
+    # Resolved against the *chosen* provider in :func:`_arun` once the
+    # provider is final (config + env + CLI all merged); the bare
+    # default here is None so an explicit ``--model`` still wins.
+    p.add_argument("--model", default=None)
     p.add_argument(
         "--log-level", default=os.environ.get("AGENTM_GATEWAY_LOG_LEVEL", "INFO")
     )
@@ -214,8 +234,22 @@ async def _arun(args: argparse.Namespace) -> int:
             "Feishu mode."
         )
 
+    provider = args.provider or cfg.get("provider") or _default_provider()
+    model = (
+        args.model
+        or os.environ.get("AGENTM_GATEWAY_MODEL")
+        or os.environ.get("AGENTM_MODEL")
+        or cfg.get("model")
+        or _default_model(provider)
+    )
+
     bus = MessageBus()
-    manager = ChannelManager(channels_cfg, bus)
+    retry_delays = _retry_delays(cfg.get("send_retry_delays"))
+    manager = (
+        ChannelManager(channels_cfg, bus, send_retry_delays=retry_delays)
+        if retry_delays is not None
+        else ChannelManager(channels_cfg, bus)
+    )
     gateway = Gateway(
         bus=bus,
         config=GatewayConfig(
@@ -229,8 +263,8 @@ async def _arun(args: argparse.Namespace) -> int:
         ),
         session_factory=_build_session_factory(
             scenario=args.scenario or cfg.get("scenario"),
-            provider=args.provider or cfg.get("provider", "anthropic"),
-            model=args.model or cfg.get("model", "claude-sonnet-4-5-20250929"),
+            provider=provider,
+            model=model,
         ),
     )
 
@@ -262,11 +296,11 @@ def main(argv: list[str] | None = None) -> int:
         level=getattr(logging, str(args.log_level).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    logging.getLogger("Lark").setLevel(logging.WARNING)
-    # ``httpx`` logs every outbound call at INFO; we keep it at INFO so
-    # operators can confirm provider traffic is happening (silencing it
-    # made it impossible to tell whether the LLM was being called when
-    # the agent appeared idle).
+    # ``httpx`` is left at the configured level so operators can confirm
+    # provider traffic is happening — silencing it made it impossible to
+    # tell whether the LLM was being called when the agent appeared
+    # idle. Per-channel libraries (Lark/Slack/…) tune their own loggers
+    # in their channel modules if needed.
     _load_dotenv_files(Path(args.cwd))
     try:
         return asyncio.run(_arun(args))

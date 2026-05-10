@@ -60,7 +60,7 @@ markers = [
 # Nested workspace projects own their own tests/ trees and pyproject. The
 # top-level pytest must not recurse into them — both define a ``tests``
 # package and the import paths collide.
-addopts = "-m 'not ui' --ignore=contrib/extensions/llmharness --ignore=contrib/scenarios/rca"
+addopts = "-m 'not ui' --ignore=contrib/extensions/llmharness --ignore=contrib/scenarios/rca --ignore=contrib/channels"
 
 [tool.mypy]
 python_version = "3.12"

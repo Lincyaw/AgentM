@@ -16,7 +16,48 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from enum import Enum
+from typing import Any, Literal
+
+
+class OutboundKind(str, Enum):
+    """What an :class:`OutboundMessage` represents on the wire.
+
+    Channels dispatch on this instead of sniffing ``metadata`` keys.
+    The string values are stable so traces and debug logs read cleanly.
+    """
+
+    MESSAGE = "message"
+    """Normal chat message. ``content`` (and optionally ``buttons``) is
+    rendered to the user."""
+
+    TURN_COMPLETE = "turn_complete"
+    """Control signal: the agent finished a turn. Channels use it to
+    tear down "thinking" affordances (e.g. ACK reactions). Carries no
+    user-visible content."""
+
+
+ButtonStyle = Literal["primary", "danger", "default"]
+
+
+@dataclass(frozen=True, slots=True)
+class Button:
+    """Human-in-the-loop action button on an :class:`OutboundMessage`.
+
+    Channels translate the typed shape into their native UI: Feishu
+    interactive card, Slack action block, Telegram inline keyboard,
+    plaintext numbered list as last resort. ``value`` round-trips back
+    on the inbound side as :attr:`InboundMessage.button_value` so
+    listeners (e.g. the approval bridge) can match the click without
+    parsing rendered text.
+
+    ``style`` is the hint, not the demand: channels that don't
+    distinguish styles may render every button identically.
+    """
+
+    label: str
+    value: str
+    style: ButtonStyle = "default"
 
 
 @dataclass(slots=True)
@@ -44,6 +85,12 @@ class InboundMessage:
     """Channel-specific extras (Feishu thread_id, Slack ts, etc.).
     Opaque to the gateway except for keys it explicitly documents."""
 
+    button_value: str | None = None
+    """Set when this inbound is the round-trip of a click on an
+    :class:`Button` previously sent out. Carries the button's typed
+    ``value`` verbatim — listeners (gateway, approval bridge) match on
+    this rather than reaching into ``metadata``."""
+
     session_key_override: str | None = None
     """Set when a channel scopes sessions tighter than ``chat_id``
     (e.g. one session per Feishu thread). Defaults to
@@ -56,25 +103,22 @@ class InboundMessage:
 
 @dataclass(slots=True)
 class OutboundMessage:
-    """A message the agent wants delivered through a channel.
+    """A message (or control signal) the agent wants delivered.
 
-    Buttons are the abstraction for human-in-the-loop UI. Each button
-    is ``[label, value]``; the channel chooses how to render them
-    (Feishu interactive card, Slack action blocks, Telegram inline
-    keyboard, plaintext numbered list as last resort). When the user
-    interacts with a button, the channel publishes an
-    :class:`InboundMessage` whose ``metadata`` carries
-    ``{"button_value": <value>, "in_reply_to": <chat_id_of_card>}``
-    — the approval bridge keys on those.
+    The :attr:`kind` field tells the channel what to do:
+    :attr:`OutboundKind.MESSAGE` renders ``content`` (+ ``buttons``);
+    :attr:`OutboundKind.TURN_COMPLETE` is a control signal (channels
+    that don't need it treat it as a no-op).
     """
 
     channel: str
     chat_id: str
-    content: str
+    content: str = ""
     reply_to: str | None = None
     media: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
-    buttons: list[list[str]] = field(default_factory=list)
+    buttons: list[Button] = field(default_factory=list)
+    kind: OutboundKind = OutboundKind.MESSAGE
 
 
 class MessageBus:

@@ -45,14 +45,11 @@ class StubChannel(BaseChannel):
         session_key: str | None = None,
     ) -> None:
         """Test helper. Mirrors what a real channel does on inbound."""
-        meta: dict[str, Any] = {}
-        if button_value is not None:
-            meta["button_value"] = button_value
         await self._handle_message(
             sender_id=sender_id,
             chat_id=chat_id,
             content=content,
-            metadata=meta,
+            button_value=button_value,
             session_key=session_key,
         )
 

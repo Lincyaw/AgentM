@@ -2,8 +2,8 @@
 
 Wraps :class:`lark_oapi.channel.FeishuChannel` behind the
 :class:`agentm_channels.base.BaseChannel` interface. Everything Feishu-
-specific (lark_oapi import, WSS quirks, card schema, button-value
-encoding) lives in this one file — the gateway, manager, and other
+specific (lark_oapi import, WSS quirks, card schema 2.0, button value
+round-trip) lives in this one file — the gateway, manager, and other
 channels stay oblivious.
 
 Inbound mapping:
@@ -13,15 +13,18 @@ Inbound mapping:
   multi-topic group chat doesn't collapse all threads into one
   AgentSession.
 - ``cardAction`` event → an :class:`InboundMessage` whose
-  ``metadata`` carries ``{"button_value": "<approval_id>:approve|deny"}``.
-  The gateway routes those to the approval bridge.
+  ``button_value`` carries the typed value the original
+  :class:`agentm_channels.bus.Button` was sent with. The gateway hands
+  every such inbound to the approval bridge.
 
 Outbound mapping:
 
-- :class:`OutboundMessage` with no ``buttons`` → plain Feishu text.
-- :class:`OutboundMessage` with ``buttons`` → Feishu interactive card
-  whose buttons carry ``value={"button_value": <pair[1]>}``. The
-  ``cardAction`` callback echoes that back, closing the loop.
+- :attr:`OutboundKind.MESSAGE` → Feishu interactive card with one
+  schema-2.0 markdown element (so Chinese, code fences, lists, etc.
+  all render). When ``buttons`` is non-empty an action block is
+  appended; each :class:`Button.style` maps to a Feishu button type.
+- :attr:`OutboundKind.TURN_COMPLETE` → tear down ACK reactions; nothing
+  goes on the wire.
 
 Config (under ``channels.feishu`` in the gateway YAML)::
 
@@ -40,7 +43,7 @@ import logging
 from typing import Any
 
 from ..base import BaseChannel
-from ..bus import OutboundMessage
+from ..bus import Button, ButtonStyle, OutboundKind, OutboundMessage
 
 
 logger = logging.getLogger(__name__)
@@ -59,6 +62,10 @@ def _patch_ws_loop_once() -> None:
     module-level reference with a fresh loop dedicated to the WS client
     makes ``run_until_complete`` legal again — the WS client is the
     only consumer of that module global.
+
+    TODO: drop this once an upstream fix lands. File the issue on
+    https://github.com/larksuite/oapi-sdk-python with a reproducer and
+    delete this helper plus its caller in :meth:`FeishuChannel.start`.
     """
     import lark_oapi.ws.client as _ws_client
 
@@ -253,7 +260,9 @@ class FeishuChannel(BaseChannel):
         value = getattr(event.action, "value", None) or {}
         button_value: str | None = None
         if isinstance(value, dict):
-            button_value = value.get("button_value")
+            raw = value.get("button_value")
+            if raw is not None:
+                button_value = str(raw)
         if not button_value:
             return
         operator = getattr(event, "operator", None)
@@ -262,11 +271,11 @@ class FeishuChannel(BaseChannel):
         await self._handle_message(
             sender_id=str(sender),
             chat_id=chat_id,
-            # The gateway only inspects ``metadata.button_value`` for
-            # approval routing; ``content`` is informational.
+            # The gateway routes on ``button_value``; ``content`` is
+            # informational only (shows up in observability traces).
             content=f"[card click: {button_value}]",
+            button_value=button_value,
             metadata={
-                "button_value": str(button_value),
                 "feishu_card_message_id": getattr(event, "message_id", None),
             },
         )
@@ -276,19 +285,18 @@ class FeishuChannel(BaseChannel):
     async def send(self, msg: OutboundMessage) -> None:
         if self._channel is None:
             raise RuntimeError("FeishuChannel.start() has not completed")
-        # Generic gateway → channel control signal: when a turn ends,
-        # tear down any visual "received" markers. ``content`` is empty
-        # in this case; nothing goes on the wire as a chat message.
-        if msg.metadata.get("kind") == "turn_complete":
+        if msg.kind is OutboundKind.TURN_COMPLETE:
+            # Control signal — clear ACK reactions, nothing on the wire.
             await self._clear_pending_acks(msg.chat_id)
             return
-        if msg.buttons:
-            await self._channel.send(
-                msg.chat_id,
-                {"card": _buttons_card(msg.content, msg.buttons)},
-            )
-            return
-        await self._channel.send(msg.chat_id, {"text": msg.content})
+        # Render every chat message as a schema-2.0 interactive card so
+        # Chinese, markdown (code fences, lists, headings) and action
+        # buttons all use the same path. Lark's plain ``text`` message
+        # type does not render markdown.
+        await self._channel.send(
+            msg.chat_id,
+            {"card": _markdown_card(msg.content, buttons=msg.buttons)},
+        )
 
     # -- helpers -------------------------------------------------------
 
@@ -319,46 +327,42 @@ class FeishuChannel(BaseChannel):
         }
 
 
-def _buttons_card(text: str, buttons: list[list[str]]) -> dict[str, Any]:
-    """Construct a minimal Feishu interactive card with action buttons.
+_BUTTON_STYLE_MAP: dict[ButtonStyle, str] = {
+    "primary": "primary",
+    "danger": "danger",
+    "default": "default",
+}
 
-    Each button's ``value.button_value`` carries the second element of
-    ``[label, value]`` so the ``cardAction`` callback can round-trip
-    cleanly. The first button styles as ``primary``, the rest as
-    ``default`` (or ``danger`` if the label looks negative); this keeps
-    the rendering predictable without forcing callers to think in
-    Feishu schema.
+
+def _markdown_card(text: str, *, buttons: list[Button]) -> dict[str, Any]:
+    """Construct a Lark schema-2.0 interactive card.
+
+    The body is one ``markdown`` element so Chinese, code fences, lists,
+    and inline formatting all render. When ``buttons`` is non-empty an
+    ``action`` block is appended; each :class:`Button.value` round-trips
+    through Lark's ``cardAction`` callback as the typed inbound
+    ``button_value``. Style mapping is mechanical — no label-string
+    heuristics — so the caller fully controls visual emphasis via
+    :attr:`Button.style`.
     """
-    return {
-        "schema": "2.0",
-        "header": {
-            "title": {"tag": "plain_text", "content": "Approval"}
-        },
-        "body": {
-            "elements": [
-                {"tag": "markdown", "content": text or "*(no body)*"},
-                {
-                    "tag": "action",
-                    "actions": [
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": label},
-                            "type": _button_style(label, idx),
-                            "name": label.lower(),
-                            "value": {"button_value": value},
-                        }
-                        for idx, (label, value) in enumerate(buttons)
-                    ],
-                },
-            ]
-        },
-    }
 
-
-def _button_style(label: str, idx: int) -> str:
-    low = label.strip().lower()
-    if low in {"deny", "reject", "no", "cancel"}:
-        return "danger"
-    if idx == 0:
-        return "primary"
-    return "default"
+    elements: list[dict[str, Any]] = [
+        {"tag": "markdown", "content": text or "*(empty)*"}
+    ]
+    if buttons:
+        elements.append(
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": btn.label},
+                        "type": _BUTTON_STYLE_MAP.get(btn.style, "default"),
+                        "name": btn.label.lower(),
+                        "value": {"button_value": btn.value},
+                    }
+                    for btn in buttons
+                ],
+            }
+        )
+    return {"schema": "2.0", "body": {"elements": elements}}

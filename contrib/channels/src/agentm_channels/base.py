@@ -105,8 +105,14 @@ class BaseChannel(ABC):
         media: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         session_key: str | None = None,
+        button_value: str | None = None,
     ) -> None:
-        """Concrete channels call this from their inbound callback."""
+        """Concrete channels call this from their inbound callback.
+
+        ``button_value`` is set when the inbound is the round-trip of a
+        previously-sent :class:`Button`; the gateway routes those to
+        the approval bridge instead of the agent.
+        """
         if not self.is_allowed(sender_id):
             return
         meta = metadata or {}
@@ -120,6 +126,7 @@ class BaseChannel(ABC):
                 content=content,
                 media=media or [],
                 metadata=meta,
+                button_value=button_value,
                 session_key_override=session_key,
             )
         )

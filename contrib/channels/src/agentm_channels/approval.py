@@ -1,22 +1,23 @@
 """Channel-agnostic approval bridge.
 
 Hooks ``ToolCallEvent`` and, for tools the operator has flagged as
-write-class, posts an :class:`OutboundMessage` with two buttons
-(``Approve`` / ``Deny``) and awaits the user's reply. The handler is an
-async coroutine; the kernel's :class:`agentm.core.abi.EventBus` awaits
-awaitable handlers, so the agent's loop pauses at the gate without
-polling.
+write-class, posts an :class:`OutboundMessage` with two
+:class:`Button`s (``Approve`` / ``Deny``) and awaits the user's reply.
+The handler is an async coroutine; the kernel's
+:class:`agentm.core.abi.EventBus` awaits awaitable handlers, so the
+agent's loop pauses at the gate without polling.
 
 How replies come back:
 
-- The channel converts buttons into its native UI (Feishu interactive
-  card, Slack action block, Telegram inline keyboard, plaintext "reply
-  with ``approve``" as last resort).
-- When the user clicks / replies, the channel publishes an
-  :class:`InboundMessage` whose ``metadata`` contains
-  ``{"button_value": "<value>", "in_reply_to": "<approval_id>"}``.
-  The gateway routes it to :meth:`ApprovalBridge.resolve` instead of
-  feeding it to the agent.
+- The channel converts each :class:`Button` into its native UI (Feishu
+  interactive card, Slack action block, Telegram inline keyboard,
+  plaintext "reply with ``approve``" as last resort) and round-trips
+  ``button.value`` into :attr:`InboundMessage.button_value` when the
+  user clicks.
+- The gateway hands every inbound with a ``button_value`` to
+  :meth:`ApprovalBridge.try_resolve_inbound`; the bridge owns the
+  encoding (``"<approval_id>:approve|deny"``) and tells the gateway
+  whether the click was claimed.
 
 This means **no Feishu-specific code lives here** — every channel
 participates the same way.
@@ -33,7 +34,7 @@ from typing import Any
 
 from agentm.core.abi import ToolCallEvent
 
-from .bus import MessageBus, OutboundMessage
+from .bus import Button, InboundMessage, MessageBus, OutboundMessage
 
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 _APPROVE = "approve"
 _DENY = "deny"
+_VALUE_SEP = ":"  # "<approval_id>:<approve|deny>" — internal to this module.
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,17 +123,26 @@ class ApprovalBridge:
             self._pending[approval_id] = future
 
         body = self._format_request(event, requested_by=ctx.sender_id)
-        # ``buttons`` carries [label, value] pairs; channels split on the
-        # second element to identify the click. We encode our approval_id
-        # in the value so the click round-trips cleanly even when several
-        # approval cards are open in the same chat.
+        # We encode the approval_id into each button's typed ``value``
+        # so the click round-trips cleanly even when several approval
+        # cards are open in the same chat. The encoding is private to
+        # this module; the gateway uses :meth:`try_resolve_inbound`
+        # rather than parsing it itself.
         msg = OutboundMessage(
             channel=ctx.channel,
             chat_id=ctx.chat_id,
             content=body,
             buttons=[
-                ["Approve", f"{approval_id}:{_APPROVE}"],
-                ["Deny", f"{approval_id}:{_DENY}"],
+                Button(
+                    label="Approve",
+                    value=f"{approval_id}{_VALUE_SEP}{_APPROVE}",
+                    style="primary",
+                ),
+                Button(
+                    label="Deny",
+                    value=f"{approval_id}{_VALUE_SEP}{_DENY}",
+                    style="danger",
+                ),
             ],
             metadata={
                 "kind": "approval_request",
@@ -168,18 +179,46 @@ class ApprovalBridge:
             "reason": f"tool '{event.tool_name}' was denied by {by_user}",
         }
 
-    async def resolve(self, approval_id: str, *, value: str, sender_id: str) -> bool:
-        """Called by the gateway when an inbound message looks like an
-        approval reply. ``value`` is the second element of the button
-        pair (``"<approval_id>:approve"`` / ``":deny"``). Returns True if
-        the approval was matched (and consumed) — caller can then drop
-        the inbound rather than forwarding to the agent.
+    async def try_resolve_inbound(self, msg: InboundMessage) -> bool:
+        """Claim ``msg`` if it is the round-trip of one of our buttons.
+
+        Returns True when the inbound carried a valid approval click and
+        was consumed — the caller should drop it rather than forwarding
+        to the agent. Returns False otherwise (no ``button_value``,
+        unrecognized prefix, malformed decision, or a stale id whose
+        future already expired).
+
+        The encoding (``"<approval_id>:<decision>"``) is intentionally
+        opaque outside this module — gateways must not parse
+        ``button_value`` themselves.
         """
-        if not value.startswith(approval_id + ":"):
+        value = msg.button_value
+        if not value or _VALUE_SEP not in value:
             return False
-        decision = value.split(":", 1)[1]
+        approval_id, _, decision = value.partition(_VALUE_SEP)
+        if not approval_id or decision not in {_APPROVE, _DENY}:
+            return False
+        return await self._resolve(
+            approval_id, decision=decision, sender_id=msg.sender_id
+        )
+
+    async def resolve(self, approval_id: str, *, value: str, sender_id: str) -> bool:
+        """Direct resolve path for tests and embedders that already
+        decoded the value. Production code paths through
+        :meth:`try_resolve_inbound`.
+        """
+        if not value.startswith(approval_id + _VALUE_SEP):
+            return False
+        decision = value.split(_VALUE_SEP, 1)[1]
         if decision not in {_APPROVE, _DENY}:
             return False
+        return await self._resolve(
+            approval_id, decision=decision, sender_id=sender_id
+        )
+
+    async def _resolve(
+        self, approval_id: str, *, decision: str, sender_id: str
+    ) -> bool:
         async with self._lock:
             future = self._pending.pop(approval_id, None)
         if future is None or future.done():

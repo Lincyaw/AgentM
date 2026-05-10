@@ -29,12 +29,11 @@ from agentm.core.abi import (
     EventBus,
     TextContent,
     ToolCallEvent,
-    ToolResultEvent,
 )
 from agentm.core.abi.events import DiagnosticEvent, TurnEndEvent
 
 from .approval import ApprovalBridge, ApprovalContext, ApprovalPolicy
-from .bus import InboundMessage, MessageBus, OutboundMessage
+from .bus import InboundMessage, MessageBus, OutboundKind, OutboundMessage
 from .chat_session_map import ChatSessionMap
 
 
@@ -131,7 +130,11 @@ class Gateway:
                     OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content="Internal error handling your message; the operator has been notified.",
+                        content=(
+                            "Sorry — your message could not be processed. "
+                            "The error has been logged; please retry or contact "
+                            "the operator if it keeps happening."
+                        ),
                     )
                 )
             except Exception:
@@ -145,19 +148,17 @@ class Gateway:
             msg.sender_id,
             len(msg.content),
         )
-        # Approval click? Route directly to any pending bridge.
-        button_value = str(msg.metadata.get("button_value") or "")
-        if button_value and ":" in button_value:
-            approval_id = button_value.split(":", 1)[0]
+        # Button click? Hand it to every active bridge; the one that
+        # owns the approval id (if any) consumes it. The bridge owns
+        # the encoding — gateway must not parse ``button_value`` itself.
+        if msg.button_value:
             async with self._routes_lock:
                 routes = list(self._routes.values())
             for route in routes:
-                if await route.bridge.resolve(
-                    approval_id, value=button_value, sender_id=msg.sender_id
-                ):
+                if await route.bridge.try_resolve_inbound(msg):
                     return
             logger.info(
-                "approval reply %r matched no pending request", button_value
+                "button click %r matched no pending request", msg.button_value
             )
             return
 
@@ -174,16 +175,15 @@ class Gateway:
                 await route.session.prompt(msg.content)
             finally:
                 route.approval_ctx = None
-                # Tell the channel the turn is done. Channels use this
-                # to tear down any visual "I'm thinking" indicators
+                # Typed control signal: the agent finished a turn.
+                # Channels use it to tear down "thinking" affordances
                 # (e.g. the Feishu ACK emoji). Channels that don't care
-                # treat it as a no-op via the metadata kind dispatch.
+                # ignore it.
                 await self._bus.publish_outbound(
                     OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content="",
-                        metadata={"kind": "turn_complete"},
+                        kind=OutboundKind.TURN_COMPLETE,
                     )
                 )
 
@@ -215,14 +215,15 @@ class Gateway:
             ),
         )
 
-        # ``handle_tool_call`` is the ONLY tool_call subscriber the gateway
-        # registers — a separate "calling X" render would leak the intent
-        # before the bridge has resolved a block. Tool outcomes surface
-        # through tool_result (or the synthetic block-error rendered by
-        # the tool_error_messages builtin atom).
+        # ``handle_tool_call`` is the ONLY tool_call subscriber: a
+        # separate "calling X" render would leak the intent before the
+        # bridge has resolved a block. Tool *results* are intentionally
+        # not relayed to the chat — they land in the trajectory for
+        # operators, but pushing them back into the chat clutters the
+        # conversation and exposes raw payloads. The agent's next
+        # assistant turn summarizes whatever the user needs to know.
         bus.on(ToolCallEvent.CHANNEL, route.bridge.handle_tool_call)
         bus.on(TurnEndEvent.CHANNEL, self._make_turn_end_handler(route))
-        bus.on(ToolResultEvent.CHANNEL, self._make_tool_result_handler(route))
         bus.on(DiagnosticEvent.CHANNEL, self._make_diagnostic_handler(route))
 
         async with self._routes_lock:
@@ -270,23 +271,6 @@ class Gateway:
 
         return _h
 
-    def _make_tool_result_handler(
-        self, route: _Route
-    ) -> Callable[[ToolResultEvent], Awaitable[None]]:
-        async def _h(event: ToolResultEvent) -> None:
-            text = _tool_result_text(event.result)
-            preview = text if len(text) <= 800 else text[:800] + "\n…(truncated)"
-            icon = "❗" if event.result.is_error else "↩"
-            await self._bus.publish_outbound(
-                OutboundMessage(
-                    channel=route.channel,
-                    chat_id=route.chat_id,
-                    content=f"{icon} `{event.tool_name}` →\n```\n{preview}\n```",
-                )
-            )
-
-        return _h
-
     def _make_diagnostic_handler(
         self, route: _Route
     ) -> Callable[[DiagnosticEvent], Awaitable[None]]:
@@ -312,12 +296,3 @@ def _assistant_text(message: AssistantMessage) -> str:
     return "\n".join(
         block.text for block in message.content if isinstance(block, TextContent) and block.text
     )
-
-
-def _tool_result_text(result: Any) -> str:
-    parts: list[str] = []
-    for block in getattr(result, "content", ()) or ():
-        text = getattr(block, "text", None)
-        if isinstance(text, str):
-            parts.append(text)
-    return "\n".join(parts)
