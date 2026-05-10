@@ -36,10 +36,11 @@ extensions:
   # it as one tool to stay inside AgentM's single-loop runtime.
   - module: agentm_rca.tools.finalize
 
-  # Standard housekeeping atoms — match the multi-agent scenario so any
-  # outcome difference is attributable to the orchestration topology, not
-  # to missing observability or artifact tooling.
-  - module: agentm.extensions.builtin.artifact_store
+  # Observability tracks tool calls + LLM turns into the JSONL trace
+  # store; doesn't add any tool surface visible to the model. Required
+  # for post-hoc analysis. (artifact_store is intentionally NOT loaded —
+  # ThinkDepthAI has no equivalent shared note-taking surface, so adding
+  # the four ``artifact_*`` tools would diverge from the reference.)
   - module: agentm.extensions.builtin.observability
   - module: contrib.extensions.rcabench_contract
 
