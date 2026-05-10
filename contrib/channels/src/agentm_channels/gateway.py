@@ -174,6 +174,18 @@ class Gateway:
                 await route.session.prompt(msg.content)
             finally:
                 route.approval_ctx = None
+                # Tell the channel the turn is done. Channels use this
+                # to tear down any visual "I'm thinking" indicators
+                # (e.g. the Feishu ACK emoji). Channels that don't care
+                # treat it as a no-op via the metadata kind dispatch.
+                await self._bus.publish_outbound(
+                    OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="",
+                        metadata={"kind": "turn_complete"},
+                    )
+                )
 
     async def _get_or_create_route(self, msg: InboundMessage) -> _Route:
         key = msg.session_key

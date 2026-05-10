@@ -73,6 +73,13 @@ class FeishuChannel(BaseChannel):
         super().__init__(config, bus)
         self._channel: Any = None
         self._connect_task: asyncio.Task[Any] | None = None
+        # Pending ACK reactions keyed by chat_id. Each entry is the task
+        # that's currently adding (or has added) a reaction to a recent
+        # inbound message; when the gateway signals turn_complete for
+        # the chat, we await the task and remove the reaction so the
+        # visual "received" indicator only sticks around while the
+        # agent is actually thinking.
+        self._pending_acks: dict[str, list[asyncio.Task[Any]]] = {}
 
     # -- lifecycle -----------------------------------------------------
 
@@ -160,10 +167,11 @@ class FeishuChannel(BaseChannel):
         # holds a lock, awaiting blocks the inbound handler and the
         # message never reaches the agent.
         if message_id and self._ack_emoji():
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self._safe_reaction(message_id, self._ack_emoji()),
                 name="feishu-ack",
             )
+            self._pending_acks.setdefault(chat_id, []).append(task)
         await self._handle_message(
             sender_id=sender,
             chat_id=chat_id,
@@ -178,11 +186,68 @@ class FeishuChannel(BaseChannel):
             return str(cfg.get("ack_emoji", "OK"))
         return getattr(cfg, "ack_emoji", "OK")
 
-    async def _safe_reaction(self, message_id: str, emoji: str) -> None:
+    async def _safe_reaction(
+        self, message_id: str, emoji: str
+    ) -> tuple[str, str] | None:
+        """Add an ACK reaction; return ``(message_id, reaction_id)`` on
+        success so the turn-complete cleanup can remove it.
+        """
         try:
-            await self._channel.add_reaction(message_id, emoji)
+            result = await self._channel.add_reaction(message_id, emoji)
         except Exception:
             logger.exception("[feishu] add_reaction failed for %s", message_id)
+            return None
+        raw = getattr(result, "raw", None) or {}
+        data = raw.get("data") if isinstance(raw, dict) else None
+        reaction_id: str | None = None
+        if isinstance(data, dict):
+            # Feishu's response shape: {"data": {"reaction_id": "..."}}.
+            inner = data.get("reaction_id")
+            if isinstance(inner, str):
+                reaction_id = inner
+            else:
+                # Some SDK versions wrap one level deeper under "reaction".
+                reaction = data.get("reaction")
+                if isinstance(reaction, dict):
+                    rid = reaction.get("reaction_id")
+                    if isinstance(rid, str):
+                        reaction_id = rid
+        if not reaction_id:
+            logger.warning(
+                "[feishu] add_reaction succeeded but reaction_id missing in %r",
+                raw,
+            )
+            return None
+        return message_id, reaction_id
+
+    async def _clear_pending_acks(self, chat_id: str) -> None:
+        """Remove every ACK reaction we attached for ``chat_id``.
+
+        Called when the gateway signals turn_complete: agent has
+        finished replying so the "received" emoji should disappear.
+        Awaits each in-flight add task before deleting — otherwise the
+        delete races the add and the reaction lingers.
+        """
+        tasks = self._pending_acks.pop(chat_id, None)
+        if not tasks:
+            return
+        for task in tasks:
+            try:
+                pair = await task
+            except Exception:
+                logger.exception("[feishu] ack-add task raised")
+                continue
+            if not pair:
+                continue
+            message_id, reaction_id = pair
+            try:
+                await self._channel.remove_reaction(message_id, reaction_id)
+            except Exception:
+                logger.exception(
+                    "[feishu] remove_reaction failed (msg=%s reaction=%s)",
+                    message_id,
+                    reaction_id,
+                )
 
     async def _on_card_action(self, event: Any) -> None:
         value = getattr(event.action, "value", None) or {}
@@ -211,6 +276,12 @@ class FeishuChannel(BaseChannel):
     async def send(self, msg: OutboundMessage) -> None:
         if self._channel is None:
             raise RuntimeError("FeishuChannel.start() has not completed")
+        # Generic gateway → channel control signal: when a turn ends,
+        # tear down any visual "received" markers. ``content`` is empty
+        # in this case; nothing goes on the wire as a chat message.
+        if msg.metadata.get("kind") == "turn_complete":
+            await self._clear_pending_acks(msg.chat_id)
+            return
         if msg.buttons:
             await self._channel.send(
                 msg.chat_id,
