@@ -233,13 +233,13 @@ def _install_provider_module(
 
 
 def _build_session_config(
-    *, cwd: str, provider_module: str
+    *, cwd: str, provider_module: str, mode: str = "async"
 ) -> AgentSessionConfig:
     """Build an ``AgentSessionConfig`` wired with the V1 audit adapter.
 
     Cards-tools and observability are explicitly disabled (config=None)
     to keep the child-session machinery minimal — the test only exercises
-    the orchestration loop.
+    the orchestration loop. ``mode`` selects sync vs async dispatch.
     """
 
     return AgentSessionConfig(
@@ -249,6 +249,7 @@ def _build_session_config(
             (
                 "llmharness.adapters.agentm",
                 {
+                    "mode": mode,
                     "audit_interval_turns": 3,
                     "cards_tools_config": None,
                     "observability_config": None,
@@ -295,6 +296,10 @@ async def test_happy_path_4_turns_at_k3_fires_phase2_exactly_once(
     for i in range(4):
         await session.prompt(f"user turn {i + 1}")
 
+    # Audit work runs on a background worker; persisted state is settled
+    # only after ``session.shutdown()`` drains the queue.
+    await session.shutdown()
+
     # Phase-1 cursor: one per TurnEndEvent firing → exactly 4.
     cursors = _entries(session, _EXTRACTOR_CURSOR_ENTRY)
     assert len(cursors) == 4
@@ -320,8 +325,6 @@ async def test_happy_path_4_turns_at_k3_fires_phase2_exactly_once(
     # provider — cheap cross-check that the verdict count above isn't
     # an entry-tree artifact.
     assert provider.auditor_calls == 1
-
-    await session.shutdown()
 
 
 # --- Scenario B: extractor failure-entry probe ------------------------------
@@ -355,6 +358,10 @@ async def test_extractor_no_call_on_turn_2_does_not_synthesize_silent_verdict(
     for i in range(4):
         await session.prompt(f"user turn {i + 1}")
 
+    # Audit work runs on a background worker; persisted state is settled
+    # only after ``session.shutdown()`` drains the queue.
+    await session.shutdown()
+
     # Exactly one extractor_no_call entry, scoped to turn 2.
     no_call_entries = _entries(session, _EXTRACTOR_NO_CALL_ENTRY)
     assert len(no_call_entries) == 1
@@ -386,6 +393,50 @@ async def test_extractor_no_call_on_turn_2_does_not_synthesize_silent_verdict(
     # *count* is allowed to be 1 — but only if the auditor child was
     # actually called that many times.
     assert len(silent_fallbacks) <= provider.auditor_calls
+
+
+# --- Scenario B2: sync mode runs audit inline (dataset-collection use) ------
+
+
+@pytest.mark.asyncio
+async def test_sync_mode_persists_audit_inline_without_shutdown(
+    tmp_path: Path,
+) -> None:
+    """``mode='sync'`` -> every turn's audit is fully persisted before
+    ``session.prompt()`` returns, so dataset-collection runs can read the
+    paired audit data immediately without awaiting shutdown.
+
+    Disaster guarded: a regression that re-routes sync mode through the
+    async worker would silently break the data-collection contract — the
+    main agent would race ahead and the harness would lose pairings.
+    """
+
+    provider = _TwoPhaseStubProvider(mode="happy")
+    provider_module = _install_provider_module(
+        "tests._fake_twophase_sync_provider", provider
+    )
+
+    session = await AgentSession.create(
+        _build_session_config(
+            cwd=str(tmp_path), provider_module=provider_module, mode="sync"
+        )
+    )
+
+    for i in range(4):
+        await session.prompt(f"user turn {i + 1}")
+        # Sync contract: after each prompt() returns, that turn's extractor
+        # entry MUST already be persisted. We assert mid-loop so a
+        # regression to async-via-shutdown-drain would be caught here.
+        cursors = _entries(session, _EXTRACTOR_CURSOR_ENTRY)
+        assert len(cursors) == i + 1, (
+            f"after prompt #{i + 1}, expected {i + 1} cursors, got "
+            f"{len(cursors)}"
+        )
+
+    # Phase-2 verdict at turn 3 — must also be persisted inline.
+    verdicts = _entries(session, _VERDICT_ENTRY)
+    assert len(verdicts) == 1
+    assert provider.auditor_calls == 1
 
     await session.shutdown()
 

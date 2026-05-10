@@ -5,25 +5,31 @@ See `.claude/designs/llmharness-cognitive-audit.md` for the full design.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+import logging
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
-from agentm.core.abi import TurnEndEvent
+from agentm.core.abi import BeforeSendToLlmEvent, TurnEndEvent
 from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
     ToolCallBlock,
     ToolResultMessage,
+    text_message,
 )
 from agentm.core.abi.session import SessionEntry
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import BeforeAgentStartEvent
+from agentm.harness.events import SessionShutdownEvent
 from agentm.harness.extension import ExtensionAPI
 from agentm.harness.session_config import AgentSessionConfig
 
+from ..audit import entry_types as _et
 from ..audit.auditor import (
     SUBMIT_VERDICT_TOOL_NAME,
     AuditorOutputError,
@@ -38,31 +44,67 @@ from ..audit.extractor import (
 )
 from ..schema import Event, Reminder, Verdict
 
+_logger = logging.getLogger(__name__)
+
 MANIFEST = ExtensionManifest(
     name="agentm",
     description=(
         "Two-phase cognitive-audit adapter: per-turn extractor (Phase 1) and "
-        "every-k-turns graph auditor (Phase 2); injects pending reminders on "
-        "BeforeAgentStartEvent."
+        "every-k-turns graph auditor (Phase 2). ``mode='async'`` (default) "
+        "runs audit on a background worker so the main agent loop is never "
+        "blocked; verdicts arrive as synthetic user messages on the next "
+        "before_send_to_llm and the session_shutdown handler drains the "
+        "queue. ``mode='sync'`` runs audit inline at turn_end — slower but "
+        "guarantees every turn has paired audit data, suitable for dataset "
+        "collection / offline distillation."
     ),
     registers=(
         "event:turn_end",
-        "event:before_agent_start",
+        "event:before_send_to_llm",
+        "event:session_shutdown",
     ),
     config_schema={
         "type": "object",
         "properties": {
+            "mode": {"type": "string", "enum": ["async", "sync"]},
             "audit_interval_turns": {"type": "integer", "minimum": 1},
             "prompt_override_extractor": {"type": "string"},
             "prompt_override_auditor": {"type": "string"},
             "cards_tools_config": {"type": ["object", "null"]},
             "observability_config": {"type": ["object", "null"]},
+            "shutdown_timeout_s": {"type": "number", "minimum": 0},
+            # Per-role provider override. ``module`` is the dotted path to
+            # a StreamFn module (e.g. ``agentm.llm.anthropic``); ``config``
+            # is forwarded as the provider's kwargs (e.g. ``{"model":
+            # "claude-haiku-4-5"}``). Omit to inherit the parent session's
+            # provider — the v0 behaviour. Use this to point extractor /
+            # auditor at a smaller / cheaper model so the main agent and
+            # the audit pipeline don't share a rate-limit pool.
+            "extractor_provider": {
+                "type": ["object", "null"],
+                "properties": {
+                    "module": {"type": "string"},
+                    "config": {"type": "object"},
+                },
+                "required": ["module"],
+                "additionalProperties": False,
+            },
+            "auditor_provider": {
+                "type": ["object", "null"],
+                "properties": {
+                    "module": {"type": "string"},
+                    "config": {"type": "object"},
+                },
+                "required": ["module"],
+                "additionalProperties": False,
+            },
         },
         "additionalProperties": False,
     },
     affects=(
         "event:turn_end",
-        "event:before_agent_start",
+        "event:before_send_to_llm",
+        "event:session_shutdown",
     ),
     api_version=1,
     tier=1,
@@ -70,19 +112,29 @@ MANIFEST = ExtensionManifest(
 
 
 _DEFAULT_AUDIT_INTERVAL_TURNS = 3
-_DEFAULT_RECENT_VERDICTS = 5
-_RECENT_GRAPH_SLICE_FOR_EXTRACTOR = 20
-_REMINDER_PREFIX = "\n\n[harness] "
+_DEFAULT_RECENT_VERDICTS = _et.RECENT_VERDICTS_FOR_AUDITOR
+_RECENT_GRAPH_SLICE_FOR_EXTRACTOR = _et.RECENT_GRAPH_SLICE_FOR_EXTRACTOR
+_DEFAULT_SHUTDOWN_TIMEOUT_S = 60.0
+_DEFAULT_MODE = "async"
 
-_AUDIT_EVENT_ENTRY_TYPE = "llmharness.audit_event"
-_VERDICT_ENTRY_TYPE = "llmharness.verdict"
-_EXTRACTOR_CURSOR_ENTRY_TYPE = "llmharness.extractor_cursor"
+# The reminder body the model sees. Explicitly framed as a meta-injection so
+# the model treats it as out-of-band advisory rather than as a fresh user
+# instruction that supersedes the current task.
+_REMINDER_PREAMBLE = (
+    "[harness advisory — meta-injection from cognitive audit, not from the "
+    "human user]\n"
+)
 
-_EXTRACTOR_NO_CALL_ENTRY = "llmharness.extractor_no_call"
-_EXTRACTOR_ERROR_ENTRY = "llmharness.extractor_error"
-_EXTRACTOR_EMPTY_ENTRY = "llmharness.extractor_empty"
-_AUDIT_NO_CALL_ENTRY = "llmharness.audit_no_call"
-_AUDIT_ERROR_ENTRY = "llmharness.audit_error"
+_AUDIT_EVENT_ENTRY_TYPE = _et.AUDIT_EVENT
+_VERDICT_ENTRY_TYPE = _et.VERDICT
+_EXTRACTOR_CURSOR_ENTRY_TYPE = _et.EXTRACTOR_CURSOR
+_REMINDER_DELIVERED_ENTRY_TYPE = _et.REMINDER_DELIVERED
+
+_EXTRACTOR_NO_CALL_ENTRY = _et.EXTRACTOR_NO_CALL
+_EXTRACTOR_ERROR_ENTRY = _et.EXTRACTOR_ERROR
+_EXTRACTOR_EMPTY_ENTRY = _et.EXTRACTOR_EMPTY
+_AUDIT_NO_CALL_ENTRY = _et.AUDIT_NO_CALL
+_AUDIT_ERROR_ENTRY = _et.AUDIT_ERROR
 
 
 # --- branch state -----------------------------------------------------------
@@ -151,10 +203,43 @@ def _window_is_non_trivial(messages_slice: list[AgentMessage]) -> bool:
 # --- install ----------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _ExtractorJob:
+    """Snapshot taken synchronously at TurnEndEvent; consumed by worker."""
+
+    messages: tuple[AgentMessage, ...]
+
+
+@dataclass(frozen=True)
+class _AuditorJob:
+    """Marker that an auditor pass should run after the most recent extractor.
+
+    The worker reads the up-to-date branch state when this job fires, so it
+    sees every extractor entry already appended by prior jobs in this queue.
+    """
+
+
+@dataclass(frozen=True)
+class _ShutdownJob:
+    """Worker-stop sentinel; consumed only by ``_drain_queue``."""
+
+
+_Job = _ExtractorJob | _AuditorJob | _ShutdownJob
+
+
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+    mode_raw = config.get("mode", _DEFAULT_MODE)
+    mode = mode_raw if mode_raw in ("async", "sync") else _DEFAULT_MODE
+
     k = int(config.get("audit_interval_turns", _DEFAULT_AUDIT_INTERVAL_TURNS))
     if k < 1:
         k = _DEFAULT_AUDIT_INTERVAL_TURNS
+
+    shutdown_timeout = float(
+        config.get("shutdown_timeout_s", _DEFAULT_SHUTDOWN_TIMEOUT_S)
+    )
+    if shutdown_timeout < 0:
+        shutdown_timeout = _DEFAULT_SHUTDOWN_TIMEOUT_S
 
     cards_cfg_raw = config.get("cards_tools_config", {})
     obs_cfg_raw = config.get("observability_config", {})
@@ -181,76 +266,267 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         observability_config=obs_cfg,
     )
 
+    extractor_provider = _parse_provider_spec(config.get("extractor_provider"))
+    auditor_provider = _parse_provider_spec(config.get("auditor_provider"))
+
+    pending_reminders: list[Reminder] = []
     turn_count = 0
-    pending: Reminder | None = None
 
-    async def _on_turn_end(event: TurnEndEvent) -> None:
-        nonlocal turn_count, pending
+    if mode == "sync":
+        async def _on_turn_end_sync(event: TurnEndEvent) -> None:
+            nonlocal turn_count
+            turn_count += 1
+            await _drain_extractor(
+                api=api,
+                job=_ExtractorJob(messages=tuple(event.messages)),
+                extractor_extensions=extractor_extensions,
+                extractor_provider=extractor_provider,
+            )
+            if (turn_count % k) == 0:
+                await _drain_auditor(
+                    api=api,
+                    auditor_extensions=auditor_extensions,
+                    auditor_provider=auditor_provider,
+                    pending_reminders=pending_reminders,
+                )
 
-        turn_count += 1
-        branch = api.session.get_branch()
-        # Use the event's live snapshot, not ``api.session.get_messages()``
-        # — the kernel persists messages to the SessionManager only after
-        # ``prompt()`` returns, so a mid-loop session-view read is stale
-        # (returns just the initial user message). The event carries the
-        # authoritative trajectory up through this turn's assistant_msg.
-        messages = list(event.messages)
-        state = _scan_branch(branch, recent_verdicts_n=_DEFAULT_RECENT_VERDICTS)
-
-        # --- Phase 1: extractor (always) ---
-        new_events = await _run_extractor(
-            api=api,
-            extractor_extensions=extractor_extensions,
-            messages=messages,
-            cursor_last_turn_index=state.cursor_last_turn_index,
-            recent_graph_slice=state.graph[-_RECENT_GRAPH_SLICE_FOR_EXTRACTOR:],
-            next_event_id=_next_event_id(state.graph),
+        api.on(TurnEndEvent.CHANNEL, _on_turn_end_sync)
+        api.on(
+            BeforeSendToLlmEvent.CHANNEL,
+            _make_reminder_injector(api, pending_reminders),
         )
-        if new_events is None:
-            return  # typed failure already recorded; cursor stays put
+        return
 
-        for ev in new_events:
-            api.session.append_entry(_AUDIT_EVENT_ENTRY_TYPE, ev.to_dict())
+    # Async path: queue + background worker.
+    queue: asyncio.Queue[_Job] = asyncio.Queue()
+    worker_task: asyncio.Task[None] | None = None
 
-        api.session.append_entry(
-            _EXTRACTOR_CURSOR_ENTRY_TYPE,
-            {
-                "last_turn_index": len(messages) - 1,
-                "extraction_run_id": uuid.uuid4().hex,
-            },
-        )
-
-        # --- Phase 2: auditor (every k turns) ---
-        if (turn_count % k) != 0:
-            return
-
-        verdict = await _run_auditor(
-            api=api,
-            auditor_extensions=auditor_extensions,
-            graph_events=state.graph + new_events,
-            recent_verdicts=state.recent_verdicts,
-        )
-        if verdict is None:
-            return
-
-        api.session.append_entry(_VERDICT_ENTRY_TYPE, verdict.to_dict())
-
-        if verdict.drift and verdict.reminder and verdict.type is not None:
-            pending = Reminder(
-                type=verdict.type,
-                text=verdict.reminder,
+    def _ensure_worker() -> None:
+        # Lazy-spawn the worker on first turn_end so we capture the active
+        # event loop. Doing it at install time would bind to whichever loop
+        # the loader ran on, which may differ from the agent's loop.
+        nonlocal worker_task
+        if worker_task is None or worker_task.done():
+            worker_task = asyncio.create_task(
+                _drain_queue(
+                    api=api,
+                    queue=queue,
+                    pending_reminders=pending_reminders,
+                    extractor_extensions=extractor_extensions,
+                    auditor_extensions=auditor_extensions,
+                    extractor_provider=extractor_provider,
+                    auditor_provider=auditor_provider,
+                ),
+                name="llmharness-audit-worker",
             )
 
-    def _on_before_agent_start(event: BeforeAgentStartEvent) -> None:
-        nonlocal pending
-        if pending is None:
+    def _on_turn_end(event: TurnEndEvent) -> None:
+        nonlocal turn_count
+        turn_count += 1
+        _ensure_worker()
+        queue.put_nowait(_ExtractorJob(messages=tuple(event.messages)))
+        if (turn_count % k) == 0:
+            queue.put_nowait(_AuditorJob())
+
+    _on_before_send_to_llm = _make_reminder_injector(api, pending_reminders)
+
+    async def _on_session_shutdown(_event: SessionShutdownEvent) -> None:
+        # Never raise: session shutdown must complete even if audit drain hangs.
+        if worker_task is None or worker_task.done():
             return
-        reminder, pending = pending, None
-        existing = event.system or ""
-        event.system = existing + _REMINDER_PREFIX + reminder.text
+        queue.put_nowait(_ShutdownJob())
+        try:
+            await asyncio.wait_for(worker_task, timeout=shutdown_timeout)
+        except asyncio.TimeoutError:
+            _logger.warning(
+                "llmharness audit drain exceeded %.1fs; cancelling worker; "
+                "%d jobs may be unpersisted",
+                shutdown_timeout,
+                queue.qsize(),
+            )
+            worker_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await worker_task
+        except Exception:
+            _logger.exception("llmharness audit worker raised on shutdown")
 
     api.on(TurnEndEvent.CHANNEL, _on_turn_end)
-    api.on(BeforeAgentStartEvent.CHANNEL, _on_before_agent_start)
+    api.on(BeforeSendToLlmEvent.CHANNEL, _on_before_send_to_llm)
+    api.on(SessionShutdownEvent.CHANNEL, _on_session_shutdown)
+
+
+def _parse_provider_spec(
+    raw: Any,
+) -> tuple[str, dict[str, Any]] | None:
+    """Coerce ``{"module": "...", "config": {...}}`` to ``AgentSessionConfig.provider``.
+
+    When ``module`` resolves to an entry in AgentM's provider registry, route
+    through ``DEFAULT_PROVIDER_REGISTRY.build`` so the child picks up the same
+    env-derived enrichment (``base_url``, warpgate ticket, ``verify_ssl``)
+    that the parent CLI honours. For dotted-path module names that aren't
+    registered, fall back to the raw ``(module, config)`` tuple — the v0
+    contract for hand-written StreamFn modules.
+
+    Returns ``None`` if the spec is missing/empty so the child inherits the
+    parent session's provider.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return None
+    module = raw.get("module")
+    if not isinstance(module, str) or not module.strip():
+        return None
+    cfg = raw.get("config", {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    try:
+        from agentm.ai.types import DEFAULT_PROVIDER_REGISTRY
+    except ImportError:
+        return module, dict(cfg)
+    try:
+        return DEFAULT_PROVIDER_REGISTRY.build(module, cfg)
+    except KeyError:
+        return module, dict(cfg)
+
+
+def _make_reminder_injector(
+    api: ExtensionAPI, pending_reminders: list[Reminder]
+) -> Callable[[BeforeSendToLlmEvent], None]:
+    """Build the ``before_send_to_llm`` handler shared by both modes.
+
+    Drains every reminder ready as of this turn boundary. Multiple may
+    accumulate if the worker (async mode) stayed busy across several turns;
+    the model sees them as a sequence of advisories before its next call.
+    """
+
+    def _inject(event: BeforeSendToLlmEvent) -> None:
+        while pending_reminders:
+            reminder = pending_reminders.pop(0)
+            event.messages.append(
+                text_message(
+                    _REMINDER_PREAMBLE + reminder.text, timestamp=time.time()
+                )
+            )
+            try:
+                api.session.append_entry(
+                    _REMINDER_DELIVERED_ENTRY_TYPE,
+                    {"type": reminder.type.value, "text": reminder.text},
+                )
+            except Exception:
+                _logger.exception("failed to persist reminder_delivered entry")
+
+    return _inject
+
+
+async def _drain_queue(
+    *,
+    api: ExtensionAPI,
+    queue: asyncio.Queue[_Job],
+    pending_reminders: list[Reminder],
+    extractor_extensions: list[tuple[str, dict[str, Any]]],
+    auditor_extensions: list[tuple[str, dict[str, Any]]],
+    extractor_provider: tuple[str, dict[str, Any]] | None,
+    auditor_provider: tuple[str, dict[str, Any]] | None,
+) -> None:
+    """Serial worker. Owns all session-mutating audit writes.
+
+    Single-consumer keeps invariants simple: cursor advances monotonically,
+    auditor jobs see every extractor entry queued before them, and there is
+    never a race between two extractor passes over the same window.
+    """
+    while True:
+        try:
+            job = await queue.get()
+        except asyncio.CancelledError:
+            raise
+        try:
+            if isinstance(job, _ShutdownJob):
+                return
+            if isinstance(job, _ExtractorJob):
+                await _drain_extractor(
+                    api=api,
+                    job=job,
+                    extractor_extensions=extractor_extensions,
+                    extractor_provider=extractor_provider,
+                )
+            elif isinstance(job, _AuditorJob):
+                await _drain_auditor(
+                    api=api,
+                    auditor_extensions=auditor_extensions,
+                    auditor_provider=auditor_provider,
+                    pending_reminders=pending_reminders,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Audit failures must never poison the main agent. Worst-case
+            # we lose one job's persistence; cursor is only advanced on
+            # success so the next firing re-covers the same window.
+            _logger.exception("llmharness audit worker job failed")
+        finally:
+            queue.task_done()
+
+
+async def _drain_extractor(
+    *,
+    api: ExtensionAPI,
+    job: _ExtractorJob,
+    extractor_extensions: list[tuple[str, dict[str, Any]]],
+    extractor_provider: tuple[str, dict[str, Any]] | None,
+) -> None:
+    branch = api.session.get_branch()
+    state = _scan_branch(branch, recent_verdicts_n=_DEFAULT_RECENT_VERDICTS)
+    messages = list(job.messages)
+
+    new_events = await _run_extractor(
+        api=api,
+        extractor_extensions=extractor_extensions,
+        provider=extractor_provider,
+        messages=messages,
+        cursor_last_turn_index=state.cursor_last_turn_index,
+        recent_graph_slice=state.graph[-_RECENT_GRAPH_SLICE_FOR_EXTRACTOR:],
+        next_event_id=_next_event_id(state.graph),
+    )
+    if new_events is None:
+        return  # typed failure already recorded; cursor stays put
+
+    for ev in new_events:
+        api.session.append_entry(_AUDIT_EVENT_ENTRY_TYPE, ev.to_dict())
+
+    api.session.append_entry(
+        _EXTRACTOR_CURSOR_ENTRY_TYPE,
+        {
+            "last_turn_index": len(messages) - 1,
+            "extraction_run_id": uuid.uuid4().hex,
+        },
+    )
+
+
+async def _drain_auditor(
+    *,
+    api: ExtensionAPI,
+    auditor_extensions: list[tuple[str, dict[str, Any]]],
+    auditor_provider: tuple[str, dict[str, Any]] | None,
+    pending_reminders: list[Reminder],
+) -> None:
+    branch = api.session.get_branch()
+    state = _scan_branch(branch, recent_verdicts_n=_DEFAULT_RECENT_VERDICTS)
+
+    verdict = await _run_auditor(
+        api=api,
+        auditor_extensions=auditor_extensions,
+        provider=auditor_provider,
+        graph_events=state.graph,
+        recent_verdicts=state.recent_verdicts,
+    )
+    if verdict is None:
+        return
+
+    api.session.append_entry(_VERDICT_ENTRY_TYPE, verdict.to_dict())
+    if verdict.drift and verdict.reminder and verdict.type is not None:
+        pending_reminders.append(
+            Reminder(type=verdict.type, text=verdict.reminder)
+        )
 
 
 def _next_event_id(prior_events: list[Event]) -> int:
@@ -354,6 +630,7 @@ async def _run_phase(
     *,
     api: ExtensionAPI,
     extensions: list[tuple[str, dict[str, Any]]],
+    provider: tuple[str, dict[str, Any]] | None,
     purpose: str,
     payload: dict[str, Any],
     terminal_tool: str,
@@ -371,7 +648,7 @@ async def _run_phase(
     """
     child_config = AgentSessionConfig(
         cwd=api.cwd,
-        provider=None,
+        provider=provider,
         extensions=extensions,
         purpose=purpose,
     )
@@ -406,6 +683,7 @@ async def _run_extractor(
     *,
     api: ExtensionAPI,
     extractor_extensions: list[tuple[str, dict[str, Any]]],
+    provider: tuple[str, dict[str, Any]] | None,
     messages: list[AgentMessage],
     cursor_last_turn_index: int,
     recent_graph_slice: list[Event],
@@ -428,6 +706,7 @@ async def _run_extractor(
     parsed = await _run_phase(
         api=api,
         extensions=extractor_extensions,
+        provider=provider,
         purpose="cognitive_audit_extractor",
         payload=payload,
         terminal_tool=SUBMIT_EVENTS_TOOL_NAME,
@@ -464,6 +743,7 @@ async def _run_auditor(
     *,
     api: ExtensionAPI,
     auditor_extensions: list[tuple[str, dict[str, Any]]],
+    provider: tuple[str, dict[str, Any]] | None,
     graph_events: list[Event],
     recent_verdicts: list[dict[str, Any]],
 ) -> Verdict | None:
@@ -474,6 +754,7 @@ async def _run_auditor(
     raw = await _run_phase(
         api=api,
         extensions=auditor_extensions,
+        provider=provider,
         purpose="cognitive_audit_auditor",
         payload=payload,
         terminal_tool=SUBMIT_VERDICT_TOOL_NAME,
