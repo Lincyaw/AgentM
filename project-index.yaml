@@ -267,6 +267,8 @@ requirements:
       - path: contrib/scenarios/rca/manifest.yaml
       - path: contrib/scenarios/rca/src/agentm_rca/prompt_loader.py
       - path: contrib/scenarios/rca/manifest.baseline.yaml
+      - path: contrib/scenarios/rca/prompts/investigator.md
+      - path: contrib/scenarios/rca/src/agentm_rca/tools/thinkdepth_sql.py
       - path: contrib/scenarios/rca/src/agentm_rca/tools/duckdb_sql.py
       - path: contrib/scenarios/rca/src/agentm_rca/tools/hypothesis_tools.py
       - path: src/agentm/extensions/builtin/sub_agent.py
@@ -279,6 +281,7 @@ requirements:
       - path: contrib/scenarios/rca/tests/test_rca_prompt_loader.py
       - path: tests/integration/test_rca_baseline_tuner_wiring.py
       - path: tests/unit/extensions/test_scenario_variant_syntax.py
+      - path: contrib/scenarios/rca/tests/test_thinkdepth_sql.py
       - path: tests/integration/test_sub_agent_lifecycle.py
       - path: tests/integration/test_sub_agent_budgets.py
     docs:

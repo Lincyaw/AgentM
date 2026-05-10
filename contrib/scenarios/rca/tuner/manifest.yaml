@@ -67,8 +67,8 @@ extensions:
              ``total_turns`` to find failure or thrash patterns.
           2. query_module_feedback(target_scenario="rca:baseline", n=20) —
              which module did the grader most recently finger?
-             ``query_sql`` getting flagged means the SQL-quoting gap is
-             the load-bearing prompt-level miss; bias your mutation
+             ``query_parquet_files`` getting flagged means the SQL-quoting
+             gap is the load-bearing prompt-level miss; bias your mutation
              toward that.
           3. query_candidates(target_scenario="rca:baseline") — read the
              current Pareto frontier (likely empty on first iteration).
@@ -101,10 +101,14 @@ extensions:
             investigator.md (the ``<agent_contract>`` block is spliced
             in by the ``rcabench_contract`` atom from the rcabench-platform
             SDK; if you delete it, runtime will reject the final report).
-          - Preserve all five tools listed in the prompt's "Tools"
-            section (``list_tables``, ``query_sql``,
-            ``add_hypothesis``/``update``/``remove``/``list``, ``read``,
-            ``submit_final_report``).
+          - Preserve all four tools listed in the prompt's "Tools"
+            section (``query_parquet_files``, ``get_schema``,
+            ``list_tables_in_directory``, ``think_tool``). The
+            ``submit_final_report`` tool is described separately by the
+            agent contract block — do not move it into the tools list.
+            These four tool names mirror ThinkDepthAI's reference
+            implementation; renaming them in the prompt would diverge
+            from the registered tools and break tool_call dispatch.
           - Stop after 3 consecutive no-improvement iterations
             (enforced structurally by tool_propose_change.B-9).
 
