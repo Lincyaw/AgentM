@@ -125,9 +125,9 @@ def _model_default() -> str:
 
 
 def _make_default_session_store(cwd: str) -> SessionStore:
-    from agentm.harness import JsonlSessionStore
+    from agentm.harness import make_default_session_store
 
-    return JsonlSessionStore(cwd=Path(cwd))
+    return make_default_session_store(cwd)
 
 
 def _resolve_session_state(
@@ -137,18 +137,21 @@ def _resolve_session_state(
     continue_recent: bool,
     session_store: SessionStore,
 ) -> SessionState:
-    if resume:
-        try:
-            return session_store.open(resume)
-        except FileNotFoundError as exc:
-            raise typer.BadParameter(
-                f"--resume {resume!r}: no session found for cwd {cwd!r}"
-            ) from exc
-    if continue_recent:
-        state = session_store.most_recent(Path(cwd))
-        if state is not None:
-            return state
-    return session_store.create(Path(cwd))
+    from agentm.harness import resolve_session_state
+
+    try:
+        return resolve_session_state(
+            cwd=cwd,
+            resume=resume,
+            continue_recent=continue_recent,
+            session_store=session_store,
+        )
+    except FileNotFoundError as exc:
+        # Translate into Typer's parameter-validation error so the CLI
+        # surfaces it as "bad --resume" instead of an opaque traceback.
+        raise typer.BadParameter(
+            f"--resume {resume!r}: no session found for cwd {cwd!r}"
+        ) from exc
 
 
 def _make_install_warner() -> Any:

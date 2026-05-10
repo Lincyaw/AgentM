@@ -2,10 +2,10 @@
 
 The kernel must decide what a turn's end means without speaking any specific
 vendor's stop-reason vocabulary. ``TerminationHint`` is the kernel-canonical
-shape that LLM provider adapters (e.g. ``agentm.llm.anthropic``,
-``agentm.llm.openai``) translate their raw ``stop_reason`` /
-``finish_reason`` strings into. The agent loop dispatches on this sum-type
-(see ``agentm.core.abi.loop._default_action``); providers MUST set the
+shape that LLM provider adapters translate their raw ``stop_reason`` /
+``finish_reason`` strings into; the mapping table for each provider lives in
+that adapter's module. The agent loop dispatches on this sum-type (see
+``agentm.core.abi.loop._default_action``); providers MUST set the
 ``AssistantMessage.termination`` field on the final ``MessageEnd`` event.
 
 Variants are intentionally narrow:
@@ -13,6 +13,10 @@ Variants are intentionally narrow:
 * :class:`EndTurn` — the model finished its turn cleanly.
 * :class:`ToolUseExpected` — the model wants to call tools (next turn).
 * :class:`MaxTokens` — output truncated by the provider's token cap.
+* :class:`PauseTurn` — provider paused mid-turn and expects the caller to
+  resend the same input to continue. The kernel treats this as a
+  continuation signal: append the partial assistant message to history
+  and step into another turn so the model can finish.
 * :class:`ProviderError` — provider reported a non-recoverable error
   (e.g. content filter); ``detail`` carries a short human-readable tag.
 * :class:`Aborted` — the request was aborted by the caller (signal).
@@ -39,6 +43,19 @@ class ToolUseExpected:
 @dataclass(slots=True, frozen=True)
 class MaxTokens:
     """Output was truncated by the provider's max-output-tokens cap."""
+
+
+@dataclass(slots=True, frozen=True)
+class PauseTurn:
+    """Provider paused mid-turn; resend the same input to continue.
+
+    The model is signalling "I have more to say but stopped here" — the
+    kernel responds by stepping into another turn with the partial
+    assistant message in history so the next request resumes the
+    response. Distinct from :class:`MaxTokens`, which is a hard
+    truncation by the token budget. Concrete vendor strings that map to
+    this variant are documented in each provider adapter, not here.
+    """
 
 
 @dataclass(slots=True, frozen=True)
@@ -73,6 +90,7 @@ TerminationHint = (
     EndTurn
     | ToolUseExpected
     | MaxTokens
+    | PauseTurn
     | ProviderError
     | Aborted
     | VendorSpecific
@@ -83,6 +101,7 @@ __all__ = [
     "Aborted",
     "EndTurn",
     "MaxTokens",
+    "PauseTurn",
     "ProviderError",
     "TerminationHint",
     "ToolUseExpected",

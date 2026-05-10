@@ -51,6 +51,7 @@ from agentm.core.abi.termination import (
     Aborted,
     EndTurn,
     MaxTokens,
+    PauseTurn,
     TerminationHint,
     ToolUseExpected,
     VendorSpecific,
@@ -294,6 +295,11 @@ def _map_stop_reason(raw: str | None) -> TerminationHint | None:
         return ToolUseExpected()
     if raw == "max_tokens":
         return MaxTokens()
+    if raw == "pause_turn":
+        # Anthropic streams ``pause_turn`` when the response paused mid-
+        # turn (e.g. extended thinking budget, server-side checkpoint).
+        # Caller must resend the same input to continue.
+        return PauseTurn()
     return VendorSpecific(raw=raw)
 
 
