@@ -48,7 +48,6 @@ from agentm.core.abi import (
     Tool,
     UserMessage,
 )
-from agentm.harness.atom_reloader import LoadedAtom
 from agentm.harness.events import (
     BeforeAgentStartEvent,
     ChildSessionEndEvent,
@@ -64,8 +63,6 @@ from agentm.harness.session_runtime import SessionRuntime
 from agentm.harness.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
-
-_LoadedAtom = LoadedAtom
 
 
 # --- Config -----------------------------------------------------------------
@@ -93,7 +90,6 @@ class AgentSession:
         session_id: str,
         parent_bus: EventBus | None,
         parent_session_id: str | None,
-        purpose: str,
         eval_sandbox: Path | None = None,
     ) -> None:
         self._cwd = cwd
@@ -116,7 +112,6 @@ class AgentSession:
         self._session_id = session_id
         self._parent_bus = parent_bus
         self._parent_session_id = parent_session_id
-        self._purpose = purpose
         # Set by the cost_budget extension via the cost_budget_exceeded
         # channel; checked at the top of ``prompt`` so the next turn
         # short-circuits cleanly with stop_reason="budget".
@@ -126,19 +121,6 @@ class AgentSession:
         # supplies overrides; cleaned up on ``shutdown``. ``None`` for
         # ordinary sessions — no filesystem cost.
         self._eval_sandbox: Path | None = eval_sandbox
-
-    # --- Compatibility aliases (legacy attribute access) ------------------
-    # Tests and a few internal callers used to read these dicts off the
-    # session itself; they now live on the reloader. Keeping the attribute
-    # surface stable avoids a fan-out test churn.
-
-    @property
-    def _loaded_atoms_by_name(self) -> dict[str, LoadedAtom]:
-        return self._reloader.loaded_by_name
-
-    @property
-    def _owners_by_kind(self) -> dict[str, dict[str, str]]:
-        return self._reloader.owners_by_kind
 
     # --- Construction -----------------------------------------------------
 
@@ -164,8 +146,6 @@ class AgentSession:
 
     @property
     def tools(self) -> list[Tool]:
-        # v0: no allowlist filtering yet; that lands when tool_filter is
-        # ported as a builtin extension in Phase 2.
         return list(self._tools)
 
     @property

@@ -1,7 +1,7 @@
 """Median-absolute-deviation (MAD) confidence helper.
 
-Pure utility belonging to ``core/lib/`` alongside ``text_truncate`` /
-``frontmatter`` — no I/O, no harness imports, no atom dependencies.
+Pure utility belonging to ``core/lib/`` alongside ``frontmatter`` — no
+I/O, no harness imports, no atom dependencies.
 
 Used by ``tool_propose_change`` (B-PRB) as an *advisory* signal layered
 on top of the existing 2-sigma noise floor in the 4-floor deployment

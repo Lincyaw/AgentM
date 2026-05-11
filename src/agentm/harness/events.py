@@ -2,7 +2,7 @@
 
 Implements §10b.1 of ``.claude/designs/extension-as-scenario.md``. These
 events are emitted on an ``AgentSession``'s ``EventBus`` (or a parent's bus
-for child-session events) and consumed by Phase 2 extensions:
+for child-session events) and consumed by extensions:
 
 - ``before_compact`` / ``after_compact``: compaction extensions
   (``micro_compact``, ``agent_memory``)
@@ -16,10 +16,10 @@ for child-session events) and consumed by Phase 2 extensions:
   first ``prompt`` runs — the only timing point where every extension can
   observe the *final* tool list, command set, and model
 
-Phase 2.0 defines the dataclasses; emission lives in the extension that
-owns each event (cost_budget, plan_submitted) or in ``AgentSession``
-itself (child_session_*, session_ready, before/after_compact when the
-default compaction extension is loaded).
+Emission lives in the extension that owns each event (cost_budget,
+plan_submitted) or in ``AgentSession`` itself (child_session_*,
+session_ready, before/after_compact when the default compaction
+extension is loaded).
 
 Layer purity: imports only stdlib + ``agentm.core.abi``.
 """
@@ -65,12 +65,10 @@ class SessionShutdownEvent:
 class BeforeCompactEvent:
     """Fires before an extension performs context compaction.
 
-    This is currently an observation-only channel: emitters (``llm_compaction``,
-    ``micro_compact``) discard handler return values. Subscribers may inspect
-    or mutate ``messages`` in place to influence the buffer that compaction
-    will see, but cannot cancel or replace the compaction itself. Adding a
-    cancel/replacement contract is on the backlog (PR #65 follow-up) and
-    would require both emitters to opt in.
+    Observation-only channel: emitters (``llm_compaction``, ``micro_compact``)
+    discard handler return values. Subscribers may inspect or mutate
+    ``messages`` in place to influence the buffer that compaction will see,
+    but cannot cancel or replace the compaction itself.
 
     Mutability: ``messages`` is intentionally mutable (not frozen) so a
     handler can adjust the in-flight buffer before compaction kicks off.

@@ -9,7 +9,6 @@ import pytest
 
 from agentm.core.abi import AssistantMessage, TextContent, ToolResult
 from agentm.core.abi.messages import ToolResultBlock, ToolResultMessage, UserMessage
-from agentm.core._internal.catalog.manifest import reload_manifest
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.session import AgentSession, AgentSessionConfig
 
@@ -127,7 +126,7 @@ def _init_repo(root: Path) -> None:
     _git(root, "commit", "-m", "initial", "--quiet")
 
 
-def _write_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _write_manifest(tmp_path: Path) -> None:
     from agentm.core._internal.catalog import manifest as manifest_mod
 
     manifest_path = tmp_path / "core-manifest.yaml"
@@ -148,8 +147,7 @@ def _write_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         "  tier_2_atoms: []\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(manifest_mod, "_MANIFEST_PATH", manifest_path)
-    reload_manifest()
+    manifest_mod.configure_manifest_path(manifest_path)
 
 
 def _write_package(tmp_path: Path, source: str) -> str:
@@ -168,7 +166,7 @@ async def _build_session(
     *,
     atom_source: str,
 ) -> AgentSession:
-    _write_manifest(tmp_path, monkeypatch)
+    _write_manifest(tmp_path)
     pkg = _write_package(tmp_path, atom_source)
     _git(tmp_path, "add", pkg)
     _git(tmp_path, "commit", "-m", f"seed {pkg}", "--quiet")
@@ -333,7 +331,7 @@ async def test_reload_preserves_handler_position_in_channel(
     the front-running atom.
     """
     _init_repo(tmp_path)
-    _write_manifest(tmp_path, monkeypatch)
+    _write_manifest(tmp_path)
 
     pkg = f"reloadpkg_{uuid.uuid4().hex[:8]}"
     pkg_dir = tmp_path / pkg
@@ -415,7 +413,7 @@ async def test_handler_priority_orders_dispatch_across_install_and_reload(
     reload silently moving handlers to the tail of every channel.
     """
     _init_repo(tmp_path)
-    _write_manifest(tmp_path, monkeypatch)
+    _write_manifest(tmp_path)
 
     pkg = f"reloadpkg_{uuid.uuid4().hex[:8]}"
     pkg_dir = tmp_path / pkg
@@ -823,7 +821,7 @@ async def test_install_atom_in_turn_n_is_dispatchable_in_turn_n_plus_one(
     """
 
     _init_repo(tmp_path)
-    _write_manifest(tmp_path, monkeypatch)
+    _write_manifest(tmp_path)
     pkg = f"reloadpkg_{uuid.uuid4().hex[:8]}"
     pkg_dir = tmp_path / pkg
     pkg_dir.mkdir()

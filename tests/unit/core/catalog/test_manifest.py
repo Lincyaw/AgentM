@@ -10,11 +10,11 @@ Drives the public surface of `agentm.core._internal.catalog.manifest`:
 These tests intentionally fail until the module is implemented; the file
 itself does not exist yet — that is the RED phase of TDD.
 
-Convention used by `test_S10_manifest_change_moves_constitution_boundary`:
-the loader resolves the manifest path from the module-level attribute
-`_MANIFEST_PATH` (a `pathlib.Path`). Tests redirect the loader by
-monkeypatching that attribute, then calling `reload_manifest()` to bust
-the cache. Production code never needs to touch `_MANIFEST_PATH`.
+Convention: the loader resolves the manifest path from
+:data:`_MANIFEST_PATH_VAR` (a :class:`ContextVar`). Tests redirect the
+loader by entering :func:`override_manifest_path`; the cache is busted
+automatically on enter and the binding is restored on exit. Production
+code uses :func:`configure_manifest_path` once at session startup.
 """
 
 from __future__ import annotations
@@ -128,7 +128,6 @@ def test_manifest_yaml_is_self_referential() -> None:
 
 def test_S10_manifest_change_moves_constitution_boundary(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Acceptance scenario S10: removing a path from the manifest moves
     the constitution boundary so paths previously protected become
@@ -156,17 +155,17 @@ def test_S10_manifest_change_moves_constitution_boundary(
         encoding="utf-8",
     )
 
-    # Redirect the loader at the temp manifest, then bust the cache.
-    monkeypatch.setattr(manifest_mod, "_MANIFEST_PATH", tmp_manifest)
-    cm = reload_manifest()
+    # Redirect the loader at the temp manifest for the scope of this test.
+    with manifest_mod.override_manifest_path(tmp_manifest):
+        cm = load_core_manifest()
 
-    # Sanity: the new manifest is what the loader sees.
-    assert "src/agentm/core/lib/**" in cm.constitution_paths
-    assert "core-manifest.yaml" in cm.constitution_paths
-    assert "src/agentm/core/abi/**" not in cm.constitution_paths
+        # Sanity: the new manifest is what the loader sees.
+        assert "src/agentm/core/lib/**" in cm.constitution_paths
+        assert "core-manifest.yaml" in cm.constitution_paths
+        assert "src/agentm/core/abi/**" not in cm.constitution_paths
 
-    # The boundary moved: the kernel (abi) file is now autonomy-layer.
-    assert is_constitution_path(KERNEL_PATH) is False
-    # ...but lib/ paths and the manifest itself are still protected.
-    assert is_constitution_path("src/agentm/core/lib/path_utils.py") is True
-    assert is_constitution_path(MANIFEST_FILENAME) is True
+        # The boundary moved: the kernel (abi) file is now autonomy-layer.
+        assert is_constitution_path(KERNEL_PATH) is False
+        # ...but lib/ paths and the manifest itself are still protected.
+        assert is_constitution_path("src/agentm/core/lib/path_utils.py") is True
+        assert is_constitution_path(MANIFEST_FILENAME) is True

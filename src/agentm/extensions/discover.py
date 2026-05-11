@@ -205,6 +205,40 @@ def _discover_flat_atoms(
     return entries
 
 
+def discover_by_role() -> dict[str, BuiltinEntry]:
+    """Return ``role → BuiltinEntry`` over every builtin + contrib atom.
+
+    Each atom may claim zero or more roles via ``MANIFEST.provides_role``;
+    every role string maps to exactly one entry. A second atom claiming a
+    role already taken raises :class:`RuntimeError` — the harness expects
+    unambiguous resolution at session start, and a silent last-wins would
+    let a contrib atom hijack a floor slot without anyone noticing.
+
+    User-discovered atoms (``.agentm/atoms/``) are intentionally excluded:
+    a user atom hijacking the floor would mean session boot for that cwd
+    silently disagrees with the SDK contract. Such conflicts surface as
+    "role X has no provider" rather than a hijack.
+    """
+
+    entries: dict[str, BuiltinEntry] = {}
+    sources: tuple[dict[str, BuiltinEntry], ...] = (
+        discover_builtin(),
+        discover_contrib_atoms(),
+    )
+    for source in sources:
+        for entry in source.values():
+            for role in entry.manifest.provides_role:
+                existing = entries.get(role)
+                if existing is not None and existing.name != entry.name:
+                    raise RuntimeError(
+                        f"role {role!r} is claimed by both "
+                        f"{existing.module_path!r} and {entry.module_path!r}; "
+                        "at most one atom may fulfil each role"
+                    )
+                entries[role] = entry
+    return entries
+
+
 def discover_user_atoms(cwd: Path) -> dict[str, BuiltinEntry]:
     """Atoms previously committed by ``api.install_atom`` to
     ``<cwd>/.agentm/atoms/<name>.py``. Auto-loaded so the catalog and the
@@ -260,6 +294,7 @@ __all__ = [
     "CONTRIB_ATOM_MODULE_PREFIX",
     "USER_ATOM_MODULE_PREFIX",
     "discover_builtin",
+    "discover_by_role",
     "discover_contrib_atoms",
     "discover_user_atoms",
     "reset_cache",

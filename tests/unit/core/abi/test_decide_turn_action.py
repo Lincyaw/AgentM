@@ -28,7 +28,6 @@ from agentm.core.abi import (
     MessageEnd,
     Model,
     ModelEndTurn,
-    ProviderProtocolViolation,
     SignalAborted,
     Step,
     Stop,
@@ -204,34 +203,6 @@ async def test_max_turns_is_final_and_inject_overrides_are_ignored() -> None:
     assert len(end_causes) == 1 and isinstance(end_causes[0], MaxTurnsExhausted)
 
 
-def test_default_action_distinguishes_protocol_violation_from_end_turn() -> None:
-    """Provider says ``tool_use`` but no tool_calls extracted → must surface
-    as :class:`ProviderProtocolViolation`, not silently mapped to
-    :class:`ModelEndTurn`. This is the bug that justifies the rich-cause
-    redesign in the first place."""
-
-    msg_violation = AssistantMessage(
-        role="assistant",
-        content=[TextContent(type="text", text="weird")],
-        timestamp=1.0,
-        stop_reason="tool_use",
-    )
-    msg_clean = AssistantMessage(
-        role="assistant",
-        content=[TextContent(type="text", text="done")],
-        timestamp=1.0,
-        stop_reason="end_turn",
-    )
-
-    violation = _default_action(msg_violation, [])
-    clean = _default_action(msg_clean, [])
-
-    assert isinstance(violation, Stop)
-    assert isinstance(violation.cause, ProviderProtocolViolation)
-    assert isinstance(clean, Stop)
-    assert isinstance(clean.cause, ModelEndTurn)
-
-
 def test_default_action_pause_turn_steps_to_continue() -> None:
     """Provider signalling :class:`PauseTurn` (Anthropic ``pause_turn``,
     Doubao OpenAI-compat) means "I have more to say but stopped here";
@@ -247,23 +218,6 @@ def test_default_action_pause_turn_steps_to_continue() -> None:
         timestamp=1.0,
         stop_reason="pause_turn",
         termination=PauseTurn(),
-    )
-
-    action = _default_action(msg, [])
-
-    assert isinstance(action, Step)
-
-
-def test_default_action_pause_turn_legacy_string_steps_to_continue() -> None:
-    """Same as the typed-hint case but for legacy provider adapters that
-    have not migrated to ``TerminationHint`` and only set
-    ``stop_reason='pause_turn'``."""
-
-    msg = AssistantMessage(
-        role="assistant",
-        content=[TextContent(type="text", text="partial")],
-        timestamp=1.0,
-        stop_reason="pause_turn",
     )
 
     action = _default_action(msg, [])

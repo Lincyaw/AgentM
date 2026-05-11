@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 
 from agentm.core.abi import EventBus
 from agentm.core.abi.events import DiagnosticEvent
+from agentm.core.abi.resource import ResourceWriter
 from agentm.harness.atom_reloader import AtomReloader
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ async def apply_atom_source_overrides(
     *,
     reloader: AtomReloader,
     bus: EventBus,
+    resource_writer: ResourceWriter,
     cwd: str,
     session_id: str,
     overrides: Mapping[str, str],
@@ -72,7 +74,17 @@ async def apply_atom_source_overrides(
             )
             continue
         sandbox_path = sandbox / f"{atom_name}.py"
-        sandbox_path.write_text(new_source, encoding="utf-8")
+        # Seed the sandbox file through the writer so custom ResourceWriter
+        # impls (e.g. a Docker sandbox or remote FS) can intercept this side
+        # of the eval-sandbox path the same way they see normal atom writes.
+        # Sandbox lives under .agentm/eval-sandbox/** which is unmanaged —
+        # the writer no-ops the git side and just performs the file write.
+        await resource_writer.write(
+            str(sandbox_path),
+            new_source.encode("utf-8"),
+            rationale="atom_source_override seed",
+            author="indexer",
+        )
         # Redirect the atom's file_path so reload_atom routes its write
         # to the sandbox (path_class=unmanaged → no git).
         atom.file_path = sandbox_path.resolve()

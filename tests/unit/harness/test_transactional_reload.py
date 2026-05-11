@@ -17,7 +17,8 @@ from agentm.core.abi.messages import (
 from agentm.harness.events import ExtensionReloadEvent
 from agentm.harness.extension import ExtensionStaleError
 from agentm.harness.resource_loader import InMemoryResourceLoader
-from agentm.harness.session import AgentSession, AgentSessionConfig, _LoadedAtom
+from agentm.harness.atom_reloader import LoadedAtom as _LoadedAtom
+from agentm.harness.session import AgentSession, AgentSessionConfig
 
 
 def _tool_result_text(message: UserMessage | AssistantMessage | ToolResultMessage) -> str:
@@ -418,7 +419,7 @@ async def test_reload_path_check_rejects_constitution(tmp_path: Path, monkeypatc
         monkeypatch,
         atom_source=_tool_source("tool_demo", "v1"),
     )
-    session._loaded_atoms_by_name["kernel_loop"] = _LoadedAtom(
+    session._reloader.loaded_by_name["kernel_loop"] = _LoadedAtom(
         name="kernel_loop",
         module_path="agentm.harness.session",
         file_path=Path("src/agentm/harness/session.py"),
@@ -469,7 +470,7 @@ async def test_reload_double_failure_preserves_loaded_atom_state(
         atom_source=_tool_source("tool_demo", "stable"),
     )
     module_path = f"{session._test_pkg}.tool_demo"  # type: ignore[attr-defined]
-    original_atom = session._loaded_atoms_by_name["tool_demo"]
+    original_atom = session._reloader.loaded_by_name["tool_demo"]
     original_api = session._apis[module_path]  # type: ignore[attr-defined]
     original_module = sys.modules[module_path]
     original_activate = session._reloader._activate_atom_install  # type: ignore[attr-defined]
@@ -496,7 +497,7 @@ async def test_reload_double_failure_preserves_loaded_atom_state(
         )
         assert result.ok is False
         assert "rollback_failure_state_preserved" in (result.error or "")
-        assert session._loaded_atoms_by_name["tool_demo"] is original_atom
+        assert session._reloader.loaded_by_name["tool_demo"] is original_atom
         assert session._reloader.loaded_by_module[module_path] is original_atom  # type: ignore[attr-defined]
         assert session._apis[module_path] is original_api  # type: ignore[attr-defined]
         assert sys.modules[module_path] is original_module
@@ -643,10 +644,10 @@ async def test_registration_owners_are_tracked_for_every_kind(
     )
     owner = f"{session._test_pkg}.tool_demo"  # type: ignore[attr-defined]
     try:
-        assert session._owners_by_kind["tool"]["demo"] == owner  # type: ignore[attr-defined]
-        assert session._owners_by_kind["command"]["demo_cmd"] == owner  # type: ignore[attr-defined]
-        assert session._owners_by_kind["provider"]["demo_provider"] == owner  # type: ignore[attr-defined]
-        assert session._owners_by_kind["renderer"]["demo_renderer"] == owner  # type: ignore[attr-defined]
+        assert session._reloader.owners_by_kind["tool"]["demo"] == owner  # type: ignore[attr-defined]
+        assert session._reloader.owners_by_kind["command"]["demo_cmd"] == owner  # type: ignore[attr-defined]
+        assert session._reloader.owners_by_kind["provider"]["demo_provider"] == owner  # type: ignore[attr-defined]
+        assert session._reloader.owners_by_kind["renderer"]["demo_renderer"] == owner  # type: ignore[attr-defined]
     finally:
         await session.shutdown()
 
@@ -719,6 +720,6 @@ async def test_agent_installed_atom_records_synthetic_import_kind(
             source=_tool_source("helper_atom", "helper", registers=("tool:helper",)).replace('name="demo"', 'name="helper"'),
         )
         assert result.ok is True
-        assert session._loaded_atoms_by_name["helper_atom"].import_kind == "synthetic"
+        assert session._reloader.loaded_by_name["helper_atom"].import_kind == "synthetic"
     finally:
         await session.shutdown()

@@ -8,26 +8,32 @@ Layer purity: this module imports only stdlib + ``yaml``. It does **not**
 touch the filesystem at import time and does not reach into the
 extensions / harness packages.
 
-Path resolution policy lives in the harness. The harness sets
-:data:`_MANIFEST_PATH` (typically to ``<cwd>/core-manifest.yaml``) before
-the predicate is consulted. Tests monkeypatch the same module attribute
-and call :func:`reload_manifest` to repoint the loader at a temp file.
+Path resolution policy lives in the harness. The harness pushes a
+manifest path onto :data:`_MANIFEST_PATH_VAR` (a :class:`ContextVar`) at
+session start. A ``ContextVar`` rather than a module global so concurrent
+sessions in different cwds don't race on a process-wide write — each
+asyncio task / thread sees the path bound by its own session.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path, PurePosixPath
 
 import yaml
 
-# Test/harness seam — initially ``None`` so importing this module never
-# touches the filesystem. Callers (typically the harness during session
-# start-up, or tests via monkeypatch) assign a concrete path before any
-# constitution-boundary check runs.
-_MANIFEST_PATH: Path | None = None
+# Test/harness seam — default ``None`` so importing this module never
+# touches the filesystem. The harness binds this per-session via
+# :func:`configure_manifest_path`; tests use :func:`override_manifest_path`
+# for scoped overrides.
+_MANIFEST_PATH_VAR: ContextVar[Path | None] = ContextVar(
+    "agentm_core_manifest_path", default=None
+)
 
 
 class CoreManifestPathUnsetError(RuntimeError):
@@ -44,21 +50,28 @@ class CoreManifest:
     managed_globs: tuple[str, ...] = ()
 
 
+def current_manifest_path() -> Path | None:
+    """Return the manifest path bound to the current context, if any."""
+
+    return _MANIFEST_PATH_VAR.get()
+
+
 def load_core_manifest(manifest_path: Path | None = None) -> CoreManifest:
-    """Load the manifest from ``manifest_path`` or the configured seam.
+    """Load the manifest from ``manifest_path`` or the current context.
 
     Passing ``manifest_path`` explicitly is preferred — the harness owns
     the policy of where ``core-manifest.yaml`` lives. The fall-back to
-    :data:`_MANIFEST_PATH` exists so existing test seams (monkeypatching
-    the module attribute) keep working without sprinkling explicit paths
-    through every caller.
+    :data:`_MANIFEST_PATH_VAR` exists for callers that don't have a
+    handle (atoms reading the manifest indirectly via
+    ``is_constitution_path``).
     """
 
-    path = manifest_path if manifest_path is not None else _MANIFEST_PATH
+    path = manifest_path if manifest_path is not None else _MANIFEST_PATH_VAR.get()
     if path is None:
         raise CoreManifestPathUnsetError(
-            "core-manifest.yaml path not configured: assign "
-            "agentm.core._internal.catalog.manifest._MANIFEST_PATH or pass "
+            "core-manifest.yaml path not configured: call "
+            "configure_manifest_path() during harness startup, use "
+            "override_manifest_path() for scoped overrides, or pass "
             "manifest_path explicitly."
         )
     return _load_cached(path)
@@ -120,10 +133,11 @@ def _load_cached(manifest_path: Path) -> CoreManifest:
 
 def _normalize_to_repo_relative(path: str) -> str:
     candidate = Path(path)
-    if _MANIFEST_PATH is None:
+    manifest_path = _MANIFEST_PATH_VAR.get()
+    if manifest_path is None:
         # No repo root configured — best-effort relative normalization.
         return PurePosixPath(candidate).as_posix()
-    repo_root = _MANIFEST_PATH.resolve().parent
+    repo_root = manifest_path.resolve().parent
     if candidate.is_absolute():
         try:
             rel = candidate.resolve().relative_to(repo_root)
@@ -173,25 +187,47 @@ def _compile_glob(pattern: str) -> re.Pattern[str]:
     return re.compile("".join(parts))
 
 
-def configure_manifest_path(manifest_path: Path) -> None:
-    """Convenience setter for the harness/CLI startup path.
+def configure_manifest_path(manifest_path: Path) -> Token[Path | None]:
+    """Bind ``manifest_path`` to the current async/thread context.
 
-    Equivalent to assigning :data:`_MANIFEST_PATH` and calling
-    :func:`reload_manifest`. Provided so harness code does not need to
-    touch a private-named attribute.
+    Returns the :class:`Token` so the caller can reset the binding on
+    teardown. The harness uses this at session construction and resets in
+    ``AgentSession.shutdown``; tests prefer :func:`override_manifest_path`
+    which wraps the same call in a context manager.
     """
 
-    global _MANIFEST_PATH
-    _MANIFEST_PATH = Path(manifest_path)
-    reload_manifest()
+    token = _MANIFEST_PATH_VAR.set(Path(manifest_path))
+    _load_cached.cache_clear()
+    return token
+
+
+def reset_manifest_path(token: Token[Path | None]) -> None:
+    """Undo a :func:`configure_manifest_path` call."""
+
+    _MANIFEST_PATH_VAR.reset(token)
+    _load_cached.cache_clear()
+
+
+@contextmanager
+def override_manifest_path(manifest_path: Path) -> Iterator[None]:
+    """Scoped override for tests and short-lived tooling."""
+
+    token = configure_manifest_path(manifest_path)
+    try:
+        yield
+    finally:
+        reset_manifest_path(token)
 
 
 __all__ = [
     "CoreManifest",
     "CoreManifestPathUnsetError",
     "configure_manifest_path",
+    "current_manifest_path",
     "is_constitution_path",
     "load_core_manifest",
     "matches_manifest_glob",
+    "override_manifest_path",
     "reload_manifest",
+    "reset_manifest_path",
 ]

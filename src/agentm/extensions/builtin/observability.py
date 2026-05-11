@@ -30,7 +30,7 @@ from agentm.core.abi import (
     TurnStartEvent,
 )
 from agentm.core.abi.messages import ToolCallBlock
-from agentm.core.lib import _to_jsonable
+from agentm.core.lib import to_jsonable
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
 from agentm.harness.events import (
@@ -287,7 +287,7 @@ class _Observer(EventBusObserver):
         if self._stack and self._stack[-1][3]:
             return
         try:
-            before = _to_jsonable(event)
+            before = to_jsonable(event)
         except Exception:
             return
         self._snapshots.append((channel, handler, before, event))
@@ -324,7 +324,7 @@ class _Observer(EventBusObserver):
                     "channel": channel,
                     "handler": _handler_label(handler),
                     "extension": owner,
-                    "result": _to_jsonable(result),
+                    "result": to_jsonable(result),
                     "duration_ns": duration_ns,
                 },
                 "status": {
@@ -356,7 +356,7 @@ class _Observer(EventBusObserver):
         if before is None:
             return
         try:
-            after = _to_jsonable(event)
+            after = to_jsonable(event)
             diff = _deep_diff(before, after)
         except Exception:
             return
@@ -411,7 +411,7 @@ class _Observer(EventBusObserver):
                 "end_time_unix_nano": end_ns,
                 "attributes": {
                     "channel": ch,
-                    "event": _to_jsonable(event),
+                    "event": to_jsonable(event),
                     "handler_count": len(results),
                 },
                 "status": {"code": "OK"},
@@ -518,7 +518,7 @@ def _make_simple_writer(sink: _Sink, trace_id: str, kind: str, name: str = ""): 
                 "span_id": _new_id(),
                 "name": name or kind,
                 "start_time_unix_nano": _now_ns(),
-                "attributes": _to_jsonable(event),
+                "attributes": to_jsonable(event),
                 "status": {"code": "OK"},
             }
         )
@@ -616,7 +616,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "end_time_unix_nano": now,
                 "attributes": {
                     "module_path": event.module_path,
-                    "config": _to_jsonable(event.config),
+                    "config": to_jsonable(event.config),
                     "phase": event.phase,
                     "duration_ns": event.duration_ns,
                 },
@@ -640,7 +640,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "kind": event.kind,
                     "name": event.name,
                     "extension": event.extension,
-                    "payload": _to_jsonable(event.payload),
+                    "payload": to_jsonable(event.payload),
                 },
                 "status": {"code": "OK"},
             }
@@ -657,7 +657,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "start_time_unix_nano": _now_ns(),
                 "attributes": {
                     "extension": event.extension,
-                    "content": _to_jsonable(event.content),
+                    "content": to_jsonable(event.content),
                     "content_chars": (
                         len(event.content) if isinstance(event.content, str) else None
                     ),
@@ -675,7 +675,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "span_id": _new_id(),
                 "name": "llm.request",
                 "start_time_unix_nano": _now_ns(),
-                "attributes": _to_jsonable(event),
+                "attributes": to_jsonable(event),
                 "status": {"code": "OK"},
             }
         )
@@ -691,7 +691,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "name": "llm.request.end",
                 "start_time_unix_nano": now - event.duration_ns,
                 "end_time_unix_nano": now,
-                "attributes": _to_jsonable(event),
+                "attributes": to_jsonable(event),
                 "status": {
                     "code": "ERROR" if event.error else "OK",
                     "message": event.error,
@@ -715,7 +715,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "tool_names": list(event.tool_names),
                     "command_names": list(event.command_names),
                     "extension_module_paths": list(event.extension_module_paths),
-                    "model": _to_jsonable(event.model),
+                    "model": to_jsonable(event.model),
                 },
                 "status": {"code": "OK"},
             }

@@ -13,7 +13,7 @@ import time
 from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.lib import _to_jsonable
+from agentm.core.lib import to_jsonable
 from agentm.core.lib.artifact_files import (
     artifacts_dir_for,
     find_metadata_files,
@@ -174,7 +174,7 @@ class ArtifactStore:
         await asyncio.to_thread(
             _atomic_write_text,
             meta_path,
-            json.dumps(_to_jsonable(metadata), ensure_ascii=False, indent=2, sort_keys=True),
+            json.dumps(to_jsonable(metadata), ensure_ascii=False, indent=2, sort_keys=True),
         )
         return {"artifact_id": artifact_id, "path": str(body_path)}
 
@@ -593,7 +593,7 @@ def _file_size(meta: dict[str, Any]) -> int:
 
 def _ok(payload: dict[str, Any]) -> ToolResult:
     return ToolResult(
-        content=[TextContent(type="text", text=json.dumps(_to_jsonable(payload), ensure_ascii=False))],
+        content=[TextContent(type="text", text=json.dumps(to_jsonable(payload), ensure_ascii=False))],
         extras=payload,
     )
 
@@ -601,7 +601,7 @@ def _ok(payload: dict[str, Any]) -> ToolResult:
 def _error(message: str) -> ToolResult:
     payload = {"error": message}
     return ToolResult(
-        content=[TextContent(type="text", text=json.dumps(_to_jsonable(payload), ensure_ascii=False))],
+        content=[TextContent(type="text", text=json.dumps(to_jsonable(payload), ensure_ascii=False))],
         is_error=True,
         extras=payload,
     )
