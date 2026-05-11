@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from agentm.harness.extension import AtomInfo, ExtensionAPI
+from agentm.core.abi.extension import AtomInfo, ExtensionAPI
 
 
 class ResolvedCatalogPath:

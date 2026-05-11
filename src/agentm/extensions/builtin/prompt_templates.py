@@ -18,8 +18,8 @@ from agentm.core.abi.prompt_template import PromptRegistry, PromptTemplateRecord
 from agentm.core.abi.roles import PROMPT_REGISTRY
 from agentm.core.lib.frontmatter import parse_frontmatter
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import ResourcesDiscoverEvent, SessionReadyEvent
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.events import ResourcesDiscoverEvent, SessionReadyEvent
+from agentm.core.abi.extension import ExtensionAPI
 
 
 # --- Module-level helpers (private) ----------------------------------------

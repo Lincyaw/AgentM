@@ -59,7 +59,7 @@ Removed from catalog:
 
 ### 3.2 ResourceWriter — the chokepoint for all managed writes
 
-A new harness service (per `pluggable-architecture.md` §7 service-style components) sitting in `agentm/harness/resource_writer.py`. It is the **single API** for autonomy-layer writes to managed resources, and lives at the constitution layer (cannot be self-modified).
+A new harness service (per `pluggable-architecture.md` §7 service-style components) sitting in `agentm/core/runtime/resource_writer.py`. It is the **single API** for autonomy-layer writes to managed resources, and lives at the constitution layer (cannot be self-modified).
 
 ```python
 WriterAuthor = Literal["agent", "human", "indexer"]
@@ -287,7 +287,7 @@ This is acceptable because the catalog is a derived index, not a system of recor
 ## 4. Interface Definition
 
 ```python
-# agentm/harness/resource_writer.py
+# agentm/core/runtime/resource_writer.py
 
 WriterAuthor = Literal["agent", "human", "indexer"]
 PathClass    = Literal["managed", "unmanaged", "constitution"]

@@ -25,7 +25,7 @@ from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 
 MANIFEST = ExtensionManifest(
@@ -63,7 +63,7 @@ _INSTALL_PARAMETERS: Final = {
                 "``MANIFEST = ExtensionManifest(...)`` and an "
                 "``install(api, config)`` function. §11 single-file "
                 "contract applies — no imports of other atom modules, "
-                "no agentm.core._internal, no agentm.harness.session."
+                "no agentm.core._internal, no agentm.core.runtime.session."
             ),
         },
         "rationale": {

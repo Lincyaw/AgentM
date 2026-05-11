@@ -22,7 +22,7 @@ from agentm.ai import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
 from agentm.core.abi.events import DiagnosticEvent, EventBus
 from agentm.core.abi.session_store import SessionState, SessionStore
 from agentm.core.lib.render import final_summary
-from agentm.harness import ExtensionInstallEvent
+from agentm.core.abi.events import ExtensionInstallEvent
 
 
 # Walk up from cwd to find the nearest .env. Existing env vars win
@@ -125,7 +125,7 @@ def _model_default() -> str:
 
 
 def _make_default_session_store(cwd: str) -> SessionStore:
-    from agentm.harness import make_default_session_store
+    from agentm.core.runtime.session_bootstrap import make_default_session_store
 
     return make_default_session_store(cwd)
 
@@ -137,7 +137,7 @@ def _resolve_session_state(
     continue_recent: bool,
     session_store: SessionStore,
 ) -> SessionState:
-    from agentm.harness import resolve_session_state
+    from agentm.core.runtime.session_bootstrap import resolve_session_state
 
     try:
         return resolve_session_state(
@@ -201,7 +201,7 @@ def _build_session_config(
     session_store: SessionStore | None = None,
     provider_registry: ProviderRegistry = DEFAULT_PROVIDER_REGISTRY,
 ) -> tuple[Any, SessionState]:
-    from agentm.harness import AgentSessionConfig
+    from agentm.core.abi.session_config import AgentSessionConfig
 
     store = session_store or _make_default_session_store(cwd)
     session_state = _resolve_session_state(
@@ -217,7 +217,7 @@ def _build_session_config(
     # CLI explicitly opts in to disk-resident project context (CLAUDE.md /
     # AGENTS.md / skills / prompt templates). Embedded SDK callers get an
     # empty resource loader by default — see session_factory.py.
-    from agentm.harness.resource_loader import DefaultResourceLoader
+    from agentm.core.runtime.resource_loader import DefaultResourceLoader
 
     resource_loader = DefaultResourceLoader(
         cwd=Path(cwd),
@@ -260,7 +260,7 @@ async def run(
     continue_recent: bool,
     output: TextIO = sys.stdout,
 ) -> int:
-    from agentm.harness import AgentSession
+    from agentm.core.runtime.session import AgentSession
 
     bus = EventBus()
     diagnostic_state = _attach_default_diagnostics(bus)

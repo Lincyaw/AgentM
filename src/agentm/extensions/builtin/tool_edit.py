@@ -7,7 +7,7 @@ from typing import Any, Final
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.tool import TOOL_RESULT_FORMAT_METADATA_KEY
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 
 MANIFEST = ExtensionManifest(

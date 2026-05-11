@@ -27,7 +27,7 @@ def test_persona_metadata_parser_surfaces_input_schema_and_budget_defaults() -> 
 def test_resolve_handler_accepts_typed_subagent_event() -> None:
     import asyncio
 
-    from agentm.harness.events import ResolveSubagentEvent, SessionReadyEvent
+    from agentm.core.abi.events import ResolveSubagentEvent, SessionReadyEvent
     from agentm_rca import prompt_loader
 
     handlers: dict[str, object] = {}
@@ -64,7 +64,7 @@ def test_resolve_handler_accepts_typed_subagent_event() -> None:
 def test_personas_disabled_skips_resolve_handler() -> None:
     import asyncio
 
-    from agentm.harness.events import ResolveSubagentEvent, SessionReadyEvent
+    from agentm.core.abi.events import ResolveSubagentEvent, SessionReadyEvent
     from agentm_rca import prompt_loader
 
     handlers: dict[str, object] = {}

@@ -8,7 +8,7 @@ from typing import Any
 
 from agentm.core.abi import TextContent, ToolCallBlock
 from agentm.core.abi.tool import Tool
-from agentm.llm._common import StreamAccumulator, ToolSpecAdapter, encode_tool_args
+from agentm.core.lib.stream import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 
 
 @dataclass

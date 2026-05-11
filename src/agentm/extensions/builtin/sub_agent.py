@@ -37,13 +37,13 @@ from agentm.core.lib import to_jsonable
 from agentm.core.lib.artifact_files import list_artifacts_for_task
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
-from agentm.harness.events import (
+from agentm.core.abi.events import (
     ChildSessionEndEvent,
     ResolveSubagentEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
 )
-from agentm.harness.extension import ExtensionAPI, ExtensionLoadError, ProviderConfig
+from agentm.core.abi.extension import ExtensionAPI, ExtensionLoadError, ProviderConfig
 
 _RUNNING: Literal["running"] = "running"
 _COMPLETED: Literal["completed"] = "completed"

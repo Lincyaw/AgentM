@@ -8,7 +8,7 @@ import pytest
 from agentm.core.abi import AssistantMessage, MessageEnd, Model, TextContent
 from agentm.core.abi.messages import UserMessage
 from agentm.extensions.builtin import llm_compaction, micro_compact
-from agentm.harness.extension import ProviderConfig
+from agentm.core.abi.extension import ProviderConfig
 
 
 def test_micro_compact_safe_string_uses_shared_json_serializer() -> None:

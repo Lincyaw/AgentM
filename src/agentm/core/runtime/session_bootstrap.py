@@ -29,7 +29,7 @@ from agentm.core.abi.session_store import SessionState, SessionStore
 def make_default_session_store(cwd: str) -> SessionStore:
     """Return the canonical JSONL-backed :class:`SessionStore` for ``cwd``."""
 
-    from agentm.harness.session_manager import JsonlSessionStore
+    from agentm.core.runtime.session_manager import JsonlSessionStore
 
     return JsonlSessionStore(cwd=Path(cwd))
 

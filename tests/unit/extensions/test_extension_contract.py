@@ -362,7 +362,7 @@ def test_D6_concrete_harness_service_isinstance_rejected(tmp_path: Path) -> None
         "    isinstance(writer, GitBackedResourceWriter)\n",
     )
 
-    assert any(issue.rule == "11.4.D6-harness-service-downcast" for issue in issues)
+    assert any(issue.rule == "11.4.D6-service-downcast" for issue in issues)
 
 
 def test_D6_local_class_isinstance_allowed(tmp_path: Path) -> None:
@@ -374,7 +374,7 @@ def test_D6_local_class_isinstance_allowed(tmp_path: Path) -> None:
         "    isinstance(x, MyAtomClass)\n",
     )
 
-    assert not any(issue.rule == "11.4.D6-harness-service-downcast" for issue in issues)
+    assert not any(issue.rule == "11.4.D6-service-downcast" for issue in issues)
 
 
 def test_D4_peer_literal_requires_manifest_entry(tmp_path: Path) -> None:

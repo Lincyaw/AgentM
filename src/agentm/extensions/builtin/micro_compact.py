@@ -12,8 +12,8 @@ from agentm.core.abi import (
 )
 from agentm.core.lib import to_jsonable
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import AfterCompactEvent, BeforeCompactEvent
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.events import AfterCompactEvent, BeforeCompactEvent
+from agentm.core.abi.extension import ExtensionAPI
 
 
 MANIFEST = ExtensionManifest(

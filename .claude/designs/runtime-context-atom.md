@@ -91,8 +91,8 @@ MANIFEST = ExtensionManifest(
 
 - One file under `src/agentm/extensions/builtin/`.
 - Allowed imports only: stdlib (`platform`, `pathlib`), `agentm.extensions`
-  (`ExtensionManifest`), `agentm.harness.events` (`BeforeAgentStartEvent`),
-  `agentm.harness.extension` (`ExtensionAPI`).
+  (`ExtensionManifest`), `agentm.core.abi.events` (`BeforeAgentStartEvent`),
+  `agentm.core.abi.extension` (`ExtensionAPI`).
 - No atom-to-atom imports, no `harness.session`, no `core._internal`.
 - Config schema declared.
 

@@ -45,7 +45,8 @@ from agentm.core.abi.messages import (
     Usage,
     UserMessage,
 )
-from agentm.core.abi.provider import ProviderConfig, ProviderManifest
+from agentm.core.abi.provider import ProviderConfig
+from agentm.extensions import ExtensionManifest
 from agentm.core.abi.retry import RetryPolicy
 from agentm.core.abi.termination import (
     Aborted,
@@ -68,7 +69,7 @@ from agentm.core.abi.stream import (
 )
 from agentm.core.abi.tool import Tool
 
-from ._common import StreamAccumulator, ToolSpecAdapter, encode_tool_args
+from agentm.core.lib.stream import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from anthropic import AsyncAnthropic
@@ -76,14 +77,18 @@ if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
 logger = logging.getLogger(__name__)
 
 
-MANIFEST = ProviderManifest(
-    name="anthropic",
+MANIFEST = ExtensionManifest(
+    name="llm_anthropic",
     description="Register an Anthropic Messages API LLM stream provider.",
     registers=("provider:anthropic",),
     config_schema={
         "type": "object",
         "properties": {
-            "model": {"type": "string", "minLength": 1},
+            "model": {
+                "type": "string",
+                "minLength": 1,
+                "default": "claude-sonnet-4-6",
+            },
             "api_key": {"type": "string"},
             "base_url": {"type": "string"},
             "context_window": {"type": "integer", "minimum": 1},
@@ -96,6 +101,7 @@ MANIFEST = ProviderManifest(
         "required": ["model"],
         "additionalProperties": True,
     },
+    requires=("retry_policy",),
 )
 
 
@@ -623,7 +629,7 @@ def install(api: Any, config: dict[str, Any]) -> None:
     model_id = config.get("model")
     if not model_id or not isinstance(model_id, str):
         raise ValueError(
-            "agentm.llm.anthropic.install: config['model'] is required and must "
+            "agentm.extensions.builtin.llm_anthropic.install: config['model'] is required and must "
             "be a non-empty string (e.g. 'claude-opus-4-7')."
         )
 
@@ -649,4 +655,4 @@ def install(api: Any, config: dict[str, Any]) -> None:
     )
 
 
-__all__ = ["AnthropicStreamFn", "MANIFEST", "install"]
+__all__ = ("AnthropicStreamFn", "MANIFEST", "install")

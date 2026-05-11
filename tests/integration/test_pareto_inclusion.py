@@ -37,8 +37,9 @@ from agentm.core.abi import (
     TextContent,
 )
 from agentm.core.abi.messages import AssistantMessage
-from agentm.harness.extension import ProviderConfig
-from agentm.harness.session import AgentSession, AgentSessionConfig
+from agentm.core.abi.extension import ProviderConfig
+from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.runtime.session import AgentSession
 
 
 _PROVIDER_MODULE = "agentm._tests.pareto_provider"
@@ -157,6 +158,8 @@ async def test_pareto_inclusion_retains_niche_winner(tmp_path: Path) -> None:
             cwd=str(tmp_path),
             provider=(provider_module, {}),
             extensions=[
+
+                ("agentm.extensions.builtin.operations_local", {}),
                 (
                     "agentm.extensions.builtin.tool_query_candidates",
                     {"default_scenario": scenario},
@@ -222,6 +225,8 @@ async def test_pareto_dominated_candidate_excluded(tmp_path: Path) -> None:
             cwd=str(tmp_path),
             provider=(provider_module, {}),
             extensions=[
+
+                ("agentm.extensions.builtin.operations_local", {}),
                 (
                     "agentm.extensions.builtin.tool_query_candidates",
                     {"default_scenario": scenario},

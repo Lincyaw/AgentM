@@ -39,7 +39,7 @@ from typing import Any
 import yaml
 
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionLoadError
+from agentm.core.abi.extension import ExtensionLoadError
 
 
 class ScenarioLoadError(ExtensionLoadError):

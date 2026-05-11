@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-# NOTE: ``_layout`` was relocated to :mod:`agentm.harness.catalog._layout`
+# NOTE: ``_layout`` was relocated to :mod:`agentm.core.runtime.catalog._layout`
 # (issue #74). Browse stays in core, so it computes the runs-dir path
 # inline rather than importing the harness module.
 

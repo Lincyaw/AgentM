@@ -36,7 +36,7 @@ from typing import Any, Final, Protocol, runtime_checkable
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 
 PEER_MESSAGING_SERVICE: Final[str] = "peer_messaging"

@@ -14,11 +14,12 @@ from agentm.core.abi.messages import (
     ToolResultMessage,
     UserMessage,
 )
-from agentm.harness.events import ExtensionReloadEvent
-from agentm.harness.extension import ExtensionStaleError
-from agentm.harness.resource_loader import InMemoryResourceLoader
-from agentm.harness.atom_reloader import LoadedAtom as _LoadedAtom
-from agentm.harness.session import AgentSession, AgentSessionConfig
+from agentm.core.abi.events import ExtensionReloadEvent
+from agentm.core.abi.extension import ExtensionStaleError
+from agentm.core.runtime.resource_loader import InMemoryResourceLoader
+from agentm.core.runtime.atom_reloader import LoadedAtom as _LoadedAtom
+from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.runtime.session import AgentSession
 
 
 def _tool_result_text(message: UserMessage | AssistantMessage | ToolResultMessage) -> str:
@@ -38,7 +39,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from agentm.core.abi import AssistantMessage, MessageEnd, Model, TextContent, ToolCallBlock
-from agentm.harness.extension import ProviderConfig
+from agentm.core.abi.extension import ProviderConfig
 
 
 class _Stream:
@@ -92,7 +93,7 @@ from __future__ import annotations
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 {state_import}
 
 MANIFEST = ExtensionManifest(
@@ -126,7 +127,7 @@ def _raising_source(name: str) -> str:
 from __future__ import annotations
 
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(name={name!r}, description="boom", registers=("tool:demo",))
 
@@ -157,7 +158,7 @@ from __future__ import annotations
 from reload_state_shared import EVENTS
 
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(name={name!r}, description="observer", registers=())
 
@@ -191,6 +192,7 @@ async def _build_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, ato
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[
+                ("agentm.extensions.builtin.operations_local", {}),
                 *((extra_extensions or [])),
                 (f"{pkg}.tool_demo", {}),
             ],
@@ -374,7 +376,11 @@ async def test_M4_per_atom_api_instances_distinct_and_owner_name_set(tmp_path: P
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),
-            extensions=[(f"{pkg}.atom_a", {}), (f"{pkg}.atom_b", {})],
+            extensions=[
+                ("agentm.extensions.builtin.operations_local", {}),
+                (f"{pkg}.atom_a", {}),
+                (f"{pkg}.atom_b", {}),
+            ],
             provider=(f"{pkg}.provider", {}),
             resource_loader=InMemoryResourceLoader(),
         )
@@ -590,7 +596,7 @@ from typing import Any
 
 from agentm.core.abi import FunctionTool, MessageEnd, Model, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import CommandSpec, ExtensionAPI, ProviderConfig
+from agentm.core.abi.extension import CommandSpec, ExtensionAPI, ProviderConfig
 
 MANIFEST = ExtensionManifest(
     name="tool_demo",
@@ -682,7 +688,10 @@ async def test_session_shutdown_unsubscribes_reloader_registration_handler(
         AgentSessionConfig(
             cwd=str(tmp_path),
             bus=bus,
-            extensions=[(f"{pkg}.tool_demo", {})],
+            extensions=[
+                ("agentm.extensions.builtin.operations_local", {}),
+                (f"{pkg}.tool_demo", {}),
+            ],
             provider=(f"{pkg}.provider", {}),
             resource_loader=InMemoryResourceLoader(),
         )

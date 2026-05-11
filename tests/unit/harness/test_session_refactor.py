@@ -9,9 +9,10 @@ from typing import Any
 import pytest
 
 from agentm.core.abi import AssistantMessage, MessageEnd, Model, TextContent
-from agentm.harness.extension import ProviderConfig
-from agentm.harness.session import AgentSession, AgentSessionConfig
-from agentm.harness.session_manager import SessionEntry, SessionManager
+from agentm.core.abi.extension import ProviderConfig
+from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.runtime.session import AgentSession
+from agentm.core.runtime.session_manager import SessionEntry, SessionManager
 
 
 async def _stream_fn(
@@ -82,7 +83,9 @@ async def test_custom_provider_resolver_selects_named_provider(tmp_path: Path) -
                 cwd=str(tmp_path),
                 provider=(module_name, {}),
                 provider_resolver=_PickFirstResolver(),
-                no_extensions=True,
+                extensions=[
+                    ("agentm.extensions.builtin.operations_local", {}),
+                ],
             )
         )
         assert session.model is not None
@@ -146,6 +149,8 @@ async def test_cost_budget_veto_emits_budget_exhausted_agent_end(
                 cwd=str(tmp_path),
                 provider=(module_name, {}),
                 extensions=[
+
+                    ("agentm.extensions.builtin.operations_local", {}),
                     (
                         "agentm.extensions.builtin.cost_budget",
                         {"limit": 0, "pricing": {"fake": (1.0, 1.0)}},

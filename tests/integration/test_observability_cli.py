@@ -69,7 +69,7 @@ def test_cli_observability_trace_contains_identity_events(tmp_path: Path) -> Non
     manifest = scenario_dir / "manifest.yaml"
     manifest.write_text(
         "name: obs_cli\n"
-        "extensions:\n"
+        "extensions:\n  - module: agentm.extensions.builtin.operations_local\n"
         "  - module: agentm.extensions.builtin.observability\n"
         "    config:\n"
         "      path: .agentm/observability/{session_id}.jsonl\n"
@@ -148,7 +148,7 @@ def test_cli_retry_policy_composition_is_visible_in_observability(
     manifest = scenario_dir / "manifest.yaml"
     manifest.write_text(
         "name: retry_obs\n"
-        "extensions:\n"
+        "extensions:\n  - module: agentm.extensions.builtin.operations_local\n"
         "  - module: agentm.extensions.builtin.observability\n"
         "    config:\n"
         "      path: .agentm/observability/{session_id}.jsonl\n"

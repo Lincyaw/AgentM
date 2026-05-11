@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 from .._compose import UNSET, compose_audit_extensions
 from .prompt import EXTRACTOR_SYSTEM_PROMPT

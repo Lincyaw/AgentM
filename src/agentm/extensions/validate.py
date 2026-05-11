@@ -21,7 +21,7 @@ Checks (numbered to match design §11.4):
    ``[current - grace, current]`` window (self-modifiable-architecture §4).
 10. ``MANIFEST.tier`` agrees with ``core-manifest.yaml::reload.tier_2_atoms``.
 11. AST hygiene rules reject private API reflection, ExtensionAPI mutation,
-    mutable globals, dynamic ``agentm.*`` imports, concrete harness-service
+    mutable globals, dynamic ``agentm.*`` imports, concrete runtime-service
     downcasts, undeclared peer-name string references, and undeclared direct
     mutation of ExtensionAPI-owned registries.
 """
@@ -41,15 +41,14 @@ from agentm.extensions import ExtensionManifest, parse_register_tag
 from agentm.extensions.discover import discover_builtin
 
 # Modules an extension is allowed to import. See design §11.1 rule 4.
+# `agentm.ai` holds provider descriptors / env-key registry — pure read-only
+# metadata that adapter atoms (e.g. llmharness) consume when wiring child
+# sessions. It is conceptually substrate-facing ABI even though it lives in
+# its own package for CLI discovery reasons.
 _ALLOWED_PREFIXES: tuple[str, ...] = (
     "agentm.core.abi",
     "agentm.core.lib",
-    "agentm.harness.extension",
-    "agentm.harness.events",
-    "agentm.harness.session_manager",
-    "agentm.harness.session_config",
-    "agentm.harness.resource_loader",
-    "agentm.harness.resource_writer",
+    "agentm.ai",
     "agentm.extensions",
 )
 
@@ -62,8 +61,9 @@ _FORBIDDEN_PREFIXES: tuple[tuple[str, str], ...] = (
         "api.catalog / api.get_operations() instead",
     ),
     (
-        "agentm.harness.session",
-        "extensions never reach inside the orchestrator",
+        "agentm.core.runtime",
+        "extensions never reach inside the runtime substrate — "
+        "atoms import from agentm.core.abi.* + agentm.core.lib.* only",
     ),
     (
         "agentm.extensions.builtin.",
@@ -79,28 +79,14 @@ _FORBIDDEN_PREFIXES: tuple[tuple[str, str], ...] = (
         "scenario-local atom-to-atom coupling forbidden — depend via "
         "events / api only",
     ),
-    (
-        "agentm.harness.middleware",
-        "legacy middleware tree (deleted in Phase 2.5)",
-    ),
-    (
-        "agentm.harness.runtime",
-        "legacy runtime tree (deleted in Phase 2.5)",
-    ),
-    (
-        "agentm.harness.scenario",
-        "legacy scenario tree (deleted in Phase 2.5)",
-    ),
     ("langchain", "langchain is forbidden in the v2 tree"),
 )
 
-_FORBIDDEN_HARNESS_SERVICE_ISINSTANCE_NAMES: frozenset[str] = frozenset(
+_FORBIDDEN_SERVICE_ISINSTANCE_NAMES: frozenset[str] = frozenset(
     {
         "BashOperations",
         "FileOperations",
         "GitBackedResourceWriter",
-        "LocalBashOperations",
-        "LocalFileOperations",
     }
 )
 
@@ -250,8 +236,8 @@ def _check_imports(
             if node.module is not None and node.level == 0:
                 names = [node.module]
         elif isinstance(node, ast.Call):
-            # Catch ``importlib.import_module("agentm.harness.session")``
-            # and ``__import__("agentm.harness.session")`` — dynamic imports
+            # Catch ``importlib.import_module("agentm.core.runtime.session")``
+            # and ``__import__("agentm.core.runtime.session")`` — dynamic imports
             # bypass the static check above and have been used in the past
             # (sub_agent before A2) to silently slip past the §11.4.5
             # forbidden list. We only flag *constant* arguments; expressions
@@ -325,14 +311,14 @@ def _check_ast_rules(
                     message="dynamic f-string imports under 'agentm.' are forbidden",
                 )
             )
-        if isinstance(node, ast.Call) and _is_forbidden_harness_service_isinstance(node):
+        if isinstance(node, ast.Call) and _is_forbidden_service_isinstance(node):
             issues.append(
                 ValidationIssue(
                     module_path=module_path,
-                    rule="11.4.D6-harness-service-downcast",
+                    rule="11.4.D6-service-downcast",
                     message=(
                         "atoms must use ExtensionAPI/Protocol methods, not "
-                        "isinstance checks against concrete harness services"
+                        "isinstance checks against concrete runtime services"
                     ),
                 )
             )
@@ -593,21 +579,21 @@ def _is_agentm_fstring_import(node: ast.Call) -> bool:
     )
 
 
-def _is_forbidden_harness_service_isinstance(node: ast.Call) -> bool:
+def _is_forbidden_service_isinstance(node: ast.Call) -> bool:
     if not isinstance(node.func, ast.Name) or node.func.id != "isinstance":
         return False
     if len(node.args) < 2:
         return False
-    return _type_expr_contains_forbidden_harness_service(node.args[1])
+    return _type_expr_contains_forbidden_service(node.args[1])
 
 
-def _type_expr_contains_forbidden_harness_service(node: ast.expr) -> bool:
+def _type_expr_contains_forbidden_service(node: ast.expr) -> bool:
     if isinstance(node, ast.Name):
-        return node.id in _FORBIDDEN_HARNESS_SERVICE_ISINSTANCE_NAMES
+        return node.id in _FORBIDDEN_SERVICE_ISINSTANCE_NAMES
     if isinstance(node, ast.Attribute):
-        return node.attr in _FORBIDDEN_HARNESS_SERVICE_ISINSTANCE_NAMES
+        return node.attr in _FORBIDDEN_SERVICE_ISINSTANCE_NAMES
     if isinstance(node, (ast.Tuple, ast.List)):
-        return any(_type_expr_contains_forbidden_harness_service(elt) for elt in node.elts)
+        return any(_type_expr_contains_forbidden_service(elt) for elt in node.elts)
     return False
 
 
@@ -643,7 +629,7 @@ def _dynamic_import_target(node: ast.Call) -> str | None:
     * ``ast.JoinedStr`` (f-string) whose first segment is a constant string
       starting with ``"agentm."`` — returned as the literal prefix so that
       ``_classify_import`` can detect dynamic imports targeting forbidden
-      ``agentm.*`` namespaces (e.g. ``f"agentm.harness.{name}"``). The
+      ``agentm.*`` namespaces (e.g. ``f"agentm.core.runtime.{name}"``). The
       remaining ``FormattedValue`` segments are conservatively treated as
       unknown and only the static prefix is returned.
     """
@@ -804,8 +790,8 @@ def _classify_import(
     for forbidden, reason in _FORBIDDEN_PREFIXES:
         bare = forbidden.rstrip(".")
         # Match the exact module OR a subpackage of it (boundary on '.').
-        # Without the dot, ``agentm.harness.session`` would also reject the
-        # legitimate ``agentm.harness.session_config`` and ``session_manager``.
+        # Without the dot, ``agentm.core.runtime`` would also reject the
+        # legitimate ``agentm.core.runtime_helpers``-style sibling names.
         if imported == bare or imported.startswith(bare + "."):
             return [
                 ValidationIssue(

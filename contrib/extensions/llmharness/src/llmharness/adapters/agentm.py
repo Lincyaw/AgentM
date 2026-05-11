@@ -76,9 +76,9 @@ from agentm.core.abi.messages import (
 )
 from agentm.core.abi.session import SessionEntry
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import SessionShutdownEvent
-from agentm.harness.extension import ExtensionAPI
-from agentm.harness.session_config import AgentSessionConfig
+from agentm.core.abi.events import SessionShutdownEvent
+from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi.session_config import AgentSessionConfig
 
 from ..audit import entry_types as _et
 from ..audit.auditor import (

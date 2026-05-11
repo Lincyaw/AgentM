@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from agentm.core.abi import EventBus
-from agentm.harness.events import ResourcesDiscoverEvent, SessionReadyEvent
+from agentm.core.abi.events import ResourcesDiscoverEvent, SessionReadyEvent
 from contrib.extensions import cc
 from contrib.extensions.cc import agents, commands, plugins
 from contrib.extensions.cc._md_skills import parse_md_skill_records

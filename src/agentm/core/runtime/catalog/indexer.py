@@ -17,7 +17,7 @@ from typing import Annotated, Any
 
 import typer
 
-from agentm.harness.catalog import _layout
+from agentm.core.runtime.catalog import _layout
 
 logger = logging.getLogger(__name__)
 _LEGACY_FINGERPRINT_WARNED = False
@@ -375,7 +375,7 @@ def rebuild(
         # Resolve through the default project layout so the on-disk policy
         # lives in one place. Constructed lazily — no filesystem touch at
         # import time.
-        from agentm.harness.catalog import DefaultProjectLayout
+        from agentm.core.runtime.catalog import DefaultProjectLayout
 
         observability = DefaultProjectLayout(cwd=resolved_root).observability_root()
     resolved_obs = observability.resolve()

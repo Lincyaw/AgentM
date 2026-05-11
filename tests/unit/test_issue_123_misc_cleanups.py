@@ -27,7 +27,7 @@ from agentm.extensions.validate import (
     _dynamic_import_target,
     _imports_parent_provider_config_key,
 )
-from agentm.llm.openai import DuplicateProviderError
+from agentm.extensions.builtin.llm_openai import DuplicateProviderError
 
 
 # --- C13 -------------------------------------------------------------------
@@ -141,11 +141,14 @@ class _StubApi:
     def register_provider(self, name: str, config: Any) -> None:
         self._providers[name] = config
 
+    def has_provider(self, name: str) -> bool:
+        return name in self._providers
+
 
 def test_openai_install_rejects_default_name_for_non_canonical_base_url() -> None:
     """Two custom endpoints would both default to ``"openai"`` — refuse."""
 
-    from agentm.llm import openai as openai_mod
+    from agentm.extensions.builtin import llm_openai as openai_mod
 
     api = _StubApi()
     with pytest.raises(DuplicateProviderError):
@@ -159,7 +162,7 @@ def test_openai_install_rejects_default_name_for_non_canonical_base_url() -> Non
 
 
 def test_openai_install_accepts_explicit_name_for_non_canonical_base_url() -> None:
-    from agentm.llm import openai as openai_mod
+    from agentm.extensions.builtin import llm_openai as openai_mod
 
     api = _StubApi()
     openai_mod.install(
@@ -174,7 +177,7 @@ def test_openai_install_accepts_explicit_name_for_non_canonical_base_url() -> No
 
 
 def test_openai_install_detects_duplicate_name_in_session() -> None:
-    from agentm.llm import openai as openai_mod
+    from agentm.extensions.builtin import llm_openai as openai_mod
 
     api = _StubApi()
     openai_mod.install(

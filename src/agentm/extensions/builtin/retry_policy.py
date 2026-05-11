@@ -12,8 +12,8 @@ from agentm.core.abi import AssistantStreamEvent, Model, RetryPolicy
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.core.abi.tool import Tool
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import ApiRegisterEvent
-from agentm.harness.extension import ExtensionAPI, ProviderConfig
+from agentm.core.abi.events import ApiRegisterEvent
+from agentm.core.abi.extension import ExtensionAPI, ProviderConfig
 
 T = TypeVar("T")
 

@@ -35,8 +35,9 @@ from agentm.core.abi import (
     TextContent,
 )
 from agentm.core.abi.messages import AssistantMessage
-from agentm.harness.extension import ProviderConfig
-from agentm.harness.session import AgentSession, AgentSessionConfig
+from agentm.core.abi.extension import ProviderConfig
+from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.runtime.session import AgentSession
 
 
 _PROVIDER_MODULE = "agentm._tests.stop_provider"
@@ -181,6 +182,8 @@ async def test_stop_counter_persists_across_session_restart(
             cwd=str(tmp_path),
             provider=(provider_module, {}),
             extensions=[
+
+                ("agentm.extensions.builtin.operations_local", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {
@@ -298,6 +301,8 @@ async def test_stop_counter_resets_after_successful_activate(
             cwd=str(tmp_path),
             provider=(provider_module, {}),
             extensions=[
+
+                ("agentm.extensions.builtin.operations_local", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {

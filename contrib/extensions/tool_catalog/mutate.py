@@ -9,13 +9,13 @@ from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import (
+from agentm.core.abi.extension import (
     ExtensionAPI,
     InstallAtomResult,
     ReloadResult,
     UnloadAtomResult,
 )
-from agentm.harness.resource_writer import WriteResult
+from agentm.core.abi.resource import WriteResult
 
 from ._paths import catalog_root, resolve_catalog_path
 
@@ -332,9 +332,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
 
 def _decisions_path(atom_name: str, target_sha: str, root: Any) -> Any:
-    from agentm.harness.catalog import _layout
+    from agentm.core.abi.catalog import atom_decisions_path
 
-    return _layout.atom_decisions_path(atom_name, target_sha, root=root)
+    return atom_decisions_path(atom_name, target_sha, root=root)
 
 
 def _regression_decision(

@@ -9,45 +9,43 @@ See `.claude/designs/pluggable-architecture.md` for the boundary contract.
 
 ## Architecture at a glance
 
-Four layers, dependency arrows point downward only.
+Three layers, dependency arrows point downward only.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │  agentm.cli  /  embedded SDK  /  (future: HTTP, RPC)                     │  presenters
 │  thin: load scenario → prompt → print                                    │
 ├──────────────────────────────────────────────────────────────────────────┤
-│  agentm.harness                                                          │
-│    AgentSession  ── orchestrator façade (no business logic)              │  harness
-│    EventBus      ── before_agent_start / tool events / observability     │
-│    SessionManager · ResourceLoader · ExtensionAPI · load_extension       │
+│  agentm.extensions.builtin / contrib/extensions                          │  atoms
+│    one-file atoms — including default policies (operations_local,        │
+│    llm_<provider>, resource_writer_git, skills, prompt assembly, …)      │
 ├──────────────────────────────────────────────────────────────────────────┤
-│  agentm.core   (constitution — write-protected; split by visibility)     │
-│    abi/        AgentLoop · Tool · Message · StreamFn · events            │  pure SDK
-│                FileOperations / BashOperations / Operations Protocols    │
-│                SkillRecord · PromptTemplateRecord · CompactionSettings   │
-│                → atoms AND llm provider import directly                  │
-│    lib/        edit_diff · frontmatter · path_utils · text_truncate      │
-│                → atoms import as stdlib                                  │
-│    _internal/  default impls (LocalFileOperations / LocalBashOperations) │
-│                loaders (skills, prompt_templates) · catalog/ · compaction│
-│                → atoms reach via ExtensionAPI services only              │
-├──────────────────────────────────────────────────────────────────────────┤
-│  agentm.llm  (provider layer)                                            │  provider
-│    anthropic StreamFn · ai/api_registry · OAuth / env keys               │
+│  agentm.core   (constitution — unreplaceable substrate)                  │
+│    abi/      AgentLoop · Tool · Message · StreamFn · events ·            │  pure SDK
+│              ExtensionAPI / ExtensionManifest · AgentSessionConfig ·     │
+│              ResourceWriter / WriteResult · Catalog Protocols            │
+│              → atoms speak in these types                                │
+│    lib/      edit_diff · frontmatter · path_utils · text_truncate ·      │
+│              stream accumulator                                          │
+│              → atoms import as stdlib                                    │
+│    runtime/  AgentSession · EventBus impl · SessionManager · catalog/ ·  │
+│              extension loader · GitBackedResourceWriter                  │
+│              → atoms reach via ExtensionAPI / `api.*` hooks only         │
+│    _internal/  reload-time helpers; atoms never touch                    │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-`agentm.core` must be importable in a Jupyter notebook with no harness, no CLI,
-no filesystem touched. The ABI knows nothing about sessions, files, or scenarios;
-the harness knows nothing about concrete scenarios or UI.
+`agentm.core` must be importable in a Jupyter notebook with no CLI and no
+filesystem touched. The ABI knows nothing about sessions, files, or scenarios;
+the runtime substrate knows nothing about concrete scenarios or UI.
 
-The three-way split inside `core/` is a **visibility** boundary, not a
-modifiability boundary — none of `core/` is agent-modifiable. `abi/` is the
-typed contract atoms and the LLM provider speak in; `lib/` is a stdlib-style
-shelf of pure functions; `_internal/` holds stateful subsystems and default
-impls that atoms reach exclusively through ExtensionAPI services
-(`api.get_operations()`, `api.skills`, `api.prompt_templates`, `api.catalog`,
-`api.compaction`). The validator rejects any atom that imports `core._internal.*`
+The split inside `core/` is a **visibility** boundary, not a modifiability
+boundary — none of `core/` is agent-modifiable. `abi/` is the typed contract
+atoms speak in; `lib/` is a stdlib-style shelf of pure functions; `runtime/`
+holds the stateful substrate (sessions, catalog, writers) that atoms reach
+exclusively through ExtensionAPI services (`api.get_operations()`,
+`api.skills`, `api.prompt_templates`, `api.catalog`, `api.compaction`). The
+validator rejects any atom that imports `core.runtime.*` or `core._internal.*`
 directly.
 
 ---
@@ -62,7 +60,7 @@ do not register a replacement operations bundle at runtime.
 
 | # | Axis                | Protocol / Port          | Default impl                       |
 |---|---------------------|--------------------------|------------------------------------|
-| 1 | LLM stream          | `StreamFn`               | `agentm.llm.anthropic`             |
+| 1 | LLM stream          | `StreamFn`               | `agentm.extensions.builtin.llm_anthropic` |
 | 2 | Tool environment    | `Tool` + `*Operations`   | `LocalFileOperations`, `LocalBashOperations` (atoms obtain via `api.get_operations()`) |
 | 3 | Session state       | `SessionManager`         | `InMemorySessionManager`           |
 | 4 | Project context     | `ResourceLoader`         | `DefaultResourceLoader`            |
@@ -178,14 +176,15 @@ uv run agentm "list files in src/"    # full mode — loads general_purpose scen
 Programmatic use (full mode):
 
 ```python
-from agentm.harness import AgentSession, AgentSessionConfig
+from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.runtime.session import AgentSession
 from agentm.extensions.loader import load_scenario
 
 extensions = load_scenario("general_purpose")
 session = await AgentSession.create(AgentSessionConfig(
     cwd=".",
     extensions=extensions,
-    provider=("agentm.llm.anthropic", {"model": "claude-sonnet-4-6"}),
+    provider=("agentm.extensions.builtin.llm_anthropic", {"model": "claude-sonnet-4-6"}),
 ))
 final_messages = await session.prompt("explain core/abi/loop.py")
 await session.shutdown()
@@ -236,23 +235,21 @@ uv run mypy src/
 src/agentm/
 ├── cli.py                    # thin presenter
 ├── core/                     # constitution — write-protected
-│   ├── abi/                  # ABI surface (atom + llm import)
+│   ├── abi/                  # ABI surface (atom-facing Protocols + data types)
 │   │   ├── loop.py · tool.py · messages.py · stream.py · events.py
 │   │   ├── operations.py     # FileOperations / BashOperations Protocols + Operations bundle
-│   │   ├── skill.py · prompt_template.py · compaction.py    # pure data types
+│   │   ├── extension.py · session_config.py · resource.py · catalog.py
+│   │   ├── skill.py · prompt_template.py · compaction.py
 │   ├── lib/                  # pure-function utility shelf (atom imports as stdlib)
-│   │   └── edit_diff.py · frontmatter.py · path_utils.py · text_truncate.py
-│   └── _internal/            # stateful subsystems — atoms reach via ExtensionAPI services
-│       ├── operations_impl.py    # LocalFileOperations, LocalBashOperations
-│       ├── skills.py · prompt_templates.py
-│       ├── catalog/              # evolution-substrate write side
-│       └── compaction/           # engine (prompts moved out to llm_compaction atom)
-├── llm/                      # StreamFn implementations (anthropic)
+│   │   └── edit_diff.py · frontmatter.py · path_utils.py · text_truncate.py · stream.py
+│   ├── runtime/              # stateful substrate — atoms reach via ExtensionAPI only
+│   │   ├── session.py · session_manager.py · session_factory.py · session_bootstrap.py
+│   │   ├── extension.py · atom_reloader.py · resource_writer.py · catalog/
+│   └── _internal/            # reload-time helpers (atoms never touch)
 ├── ai/                       # provider/api registry, OAuth, env keys
-├── harness/                  # AgentSession, EventBus, SessionManager, services.py
 └── extensions/
     ├── loader.py · discover.py · validate.py
-    ├── builtin/<atom>.py     # one file per atom (§11 contract)
+    ├── builtin/<atom>.py     # one file per atom (§11 contract; includes llm_<provider>)
     └── scenarios/<name>.yaml # composition recipes
 
 .claude/

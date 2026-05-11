@@ -5,8 +5,8 @@ from typing import Any
 import pytest
 
 from agentm.core.abi import EventBus
-from agentm.harness.extension import _ExtensionAPIImpl
-from agentm.harness.session_config import AgentSessionConfig
+from agentm.core.runtime.extension import _ExtensionAPIImpl
+from agentm.core.abi.session_config import AgentSessionConfig
 
 
 class _SessionView:
@@ -32,7 +32,7 @@ class _SessionView:
 
 
 def _api(tmp_path: Any, *, child_factory: Any | None = None) -> _ExtensionAPIImpl:
-    from agentm.harness.extension import build_extension_api_scope
+    from agentm.core.runtime.extension import build_extension_api_scope
 
     scope = build_extension_api_scope(
         bus=EventBus(),

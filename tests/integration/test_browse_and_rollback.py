@@ -10,10 +10,11 @@ import pytest
 
 from agentm.core.abi import AssistantMessage, EventBus, TextContent, ToolResult
 from agentm.core.abi.messages import ToolResultBlock, ToolResultMessage, UserMessage
-from agentm.harness.catalog import _layout
-from agentm.harness.resource_loader import InMemoryResourceLoader
-from agentm.harness.resource_writer import GitBackedResourceWriter
-from agentm.harness.session import AgentSession, AgentSessionConfig
+from agentm.core.runtime.catalog import _layout
+from agentm.core.runtime.resource_loader import InMemoryResourceLoader
+from agentm.core.runtime.resource_writer import GitBackedResourceWriter
+from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.runtime.session import AgentSession
 
 
 _PROVIDER_SOURCE = '''
@@ -23,7 +24,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from agentm.core.abi import AssistantMessage, MessageEnd, Model, TextContent, ToolCallBlock
-from agentm.harness.extension import ProviderConfig
+from agentm.core.abi.extension import ProviderConfig
 
 
 class _Stream:
@@ -73,7 +74,7 @@ from __future__ import annotations
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(
     name={name!r},
@@ -171,6 +172,8 @@ async def _build_session(
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[
+
+                ("agentm.extensions.builtin.operations_local", {}),
                 (f"{pkg}.tool_demo", {}),
                 ("contrib.extensions.tool_catalog.browse", {}),
                 ("contrib.extensions.tool_catalog.mutate", {}),

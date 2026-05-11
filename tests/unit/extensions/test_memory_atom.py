@@ -16,7 +16,7 @@ from typing import Any, cast
 import pytest
 
 from agentm.extensions.builtin import memory as memory_atom
-from agentm.harness.events import BeforeAgentStartEvent
+from agentm.core.abi.events import BeforeAgentStartEvent
 
 
 class _DiskFileOps:
