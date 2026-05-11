@@ -6,8 +6,31 @@
 in-process design shipped in PR #137).
 
 This is a **design-only** document. Implementation lands in subsequent
-PRs guided by `plans/2026-05-11-gateway-client-server.md`. Open
-questions that need user sign-off are tagged `[OPEN]`.
+PRs guided by `plans/2026-05-11-gateway-client-server.md`. Decisions
+reached during design review are recorded in §10.
+
+## 0. Design discipline
+
+Standing constraint (applies to everything below): **smallest correct
+surface + few well-defined extension points**. Easier to add a kind
+than to remove one; easier to keep a default opinionated than to
+delete a config knob that an operator has come to depend on. Concrete
+applications:
+
+* **Wire kinds**: only those v1 explicitly uses are in the protocol.
+  Plausible-future kinds (broadcast addressing, control-plane event
+  streams) are listed under §9 as v2 candidates.
+* **Configuration**: opinionated defaults over knobs. Each knob in
+  this doc names the concrete operator scenario that justifies it;
+  knobs without one are deleted before Phase 1.
+* **Extension points**: two Protocols (`OutboxStore`, `InboxLog`),
+  one routing-policy function, one auth method enum. That's it.
+  Not "everything is a plugin".
+
+When future review wants to add a feature: first ask whether the
+existing wire already supports the use case as a degenerate combination
+of current kinds + fields. If yes, document the recipe; do not add
+a kind.
 
 ---
 
@@ -197,48 +220,58 @@ workers translate to/from an `AgentSession`), not protocol-shape.
 
 | kind | Purpose |
 |---|---|
-| `hello` | First message. Carries `peer_kind` (`chat_client` / `agent_worker` / `control`), `peer_name`, version, capabilities, optional auth. Server replies `welcome` or `error`. |
-| `inbound` | A message the peer wants the gateway to route. Body shape unchanged from v0 `InboundMessage`. New optional `to` field on the envelope (§4.3.1) lets a peer specify a destination peer for a2a; absence means "router policy decides". |
-| `presence` | Advisory: "user is typing", "agent is thinking", "worker drained". Server may relay to interested subscribers. |
+| `hello` | First message. Carries `peer_kind` (`chat_client` / `agent_worker`), `peer_name`, version, capabilities, optional auth. Server replies `welcome` or `error`. |
+| `inbound` | A message the peer wants the gateway to route. Body shape unchanged from v0 `InboundMessage`. Optional `to` field on the envelope (§4.3.1) specifies a destination peer for a2a; absence means "router policy decides". |
 | `ack` | Confirms receipt of one server-originated message id. |
-| `ack_batch` | Confirms receipt of a `delivery_batch` (§4.5.3) — single round-trip for a batch instead of N individual acks. |
+| `ack_batch` | Confirms receipt of a `delivery_batch` (§4.5.3). |
 | `bye` | Graceful shutdown. Server flushes pending outbound for this peer, then closes. |
-| `subscribe` | (control / agent-worker) Subscribe to a routing event stream — peer connect/disconnect, session migrations, approval gates. |
 
 **Server → Peer**
 
 | kind | Purpose |
 |---|---|
-| `welcome` | Reply to `hello`. Carries server version, negotiated wire version, the peer's assigned `peer_id`, optional `session_resume` list (§4.4), and an optional `pending_summary` (per-session counts of outbox depth at reconnect time, so the peer can prepare for catch-up). |
-| `outbound` | Render-and-send-this. For `chat_client` peers, body is `OutboundMessage` to render in the chat. For `agent_worker` peers, body is the same shape — what the worker's local code paths would have received as inbound for the session. |
-| `delivery_batch` | Catch-up envelope: multiple `outbound` items grouped for one round-trip (§4.5.3). Used automatically on reconnect when outbox depth > 1 for a session. |
-| `error` | Protocol-level error (bad hello, auth failure, malformed payload, unknown routing target). Code + message + whether the connection survives. |
+| `welcome` | Reply to `hello`. Carries server version, negotiated wire version, peer's assigned `peer_id`, optional `session_resume` list. |
+| `outbound` | Render-and-send-this. For `chat_client` peers, body is `OutboundMessage`. For `agent_worker` peers, body is the same shape — what the worker's local code paths would have received as inbound. |
+| `delivery_batch` | Catch-up envelope: multiple `outbound` items grouped for one round-trip (§4.5.3). |
+| `error` | Protocol-level error. Code + message + whether the connection survives. |
 | `ping` | Liveness check. Peer replies `pong`. |
-| `event` | Streaming routing event for `subscribe`d peers — peer-up / peer-down / session-migrated / dead_letter. |
 
 `pong` is the symmetric reply to `ping`.
+
+**What's deliberately not here**:
+
+* No `subscribe` / `event` kinds — operators tail gateway logs for
+  peer-up/down/dead-letter notifications in v1. If a real control
+  plane consumer appears (live dashboard, autoscaler), we add the
+  pair then.
+* No `presence` advisory channel — "typing indicators" / "worker
+  drained" are optimisations chat platforms or operators rarely
+  block on; defer until needed.
+* `control` peer kind reserved in the field but not implemented in
+  v1. Admin actions go through the operator-facing CLI hitting the
+  gateway's local API surface (the same one `--check` uses); they
+  don't need a wire surface yet.
 
 ### 4.3.1 Addressing
 
 Every `inbound`/`outbound` envelope may carry an optional `to`
-address:
+address. Three schemes in v1, all point-to-point:
 
 * `chat://<channel_name>/<chat_id>` — deliver to the chat client
   servicing that chat (e.g. `chat://feishu/oc_xxx`).
 * `session://<session_id>` — deliver to whichever peer currently owns
-  this session. Used by the gateway internally; peers don't usually
-  set this.
+  this session. Used by the gateway internally; peers rarely set this.
 * `peer://<peer_id>` — deliver directly to a named peer. The receiver
   sees an `inbound` whose `metadata.from_peer = <sender_peer_id>`.
   This is the a2a primitive.
-* `kind://<peer_kind>` — broadcast to every peer of that kind. Used
-  by control plane operations ("drain all agent_workers"). Gated
-  behind `control` permission.
 
 If `to` is absent, the gateway falls back to the v0 routing policy:
 chat inbound → owning agent worker; agent outbound → originating
-chat client. This means everything in PR #137 keeps working without
-the new fields touched.
+chat client. PR #137 behaviour is preserved.
+
+Broadcast addressing (`kind://`, `*`) deliberately omitted from v1 —
+no v1 feature uses it. If a future "drain all agent workers" admin
+op appears, we add it then.
 
 ### 4.4 hello / welcome handshake
 
@@ -487,9 +520,9 @@ Considered and rejected for v1, kept on the table for v2 plug-in:
   comfortably. The number of chat messages an organisation
   generates is small relative to that.
 
-`[OPEN]` Should we ship a **pluggable outbox backend** interface in
+**Decided** (§10): Should we ship a **pluggable outbox backend** interface in
 Phase 1 (so an operator can swap SQLite for Redis Streams / NATS
-JetStream later without modifying gateway core)? Recommend **yes**
+JetStream later without modifying gateway core)? See §10
 — it's two extra interfaces (`OutboxStore` + `InboxLog`) and a
 factory; the default implementation is SQLite, alternatives are
 contrib. Keeps the door open without committing to a broker dep.
@@ -586,7 +619,7 @@ Unchanged from v0: `inbound.sender_id` is the platform user id. The
 client is responsible for canonicalising. The gateway never
 authenticates the *user*, only the *client*.
 
-`[OPEN]` Do we want per-user ACL at the gateway? Today `allow_from`
+**Decided** (§10): Do we want per-user ACL at the gateway? Today `allow_from`
 is per-channel. v1 keeps that — but in the future we may want
 "these sender_ids may use atom commands" etc. Defer to a follow-up.
 
@@ -618,7 +651,7 @@ sidecar.
 
 ### 7.3 Multi-client to the same chat
 
-`[OPEN]` This is the hardest semantic question. Two reasonable
+**Decided** (§10): This is the hardest semantic question. Two reasonable
 behaviours:
 
 **(A) Single-writer per chat (recommended)**: at any moment, exactly
@@ -791,9 +824,9 @@ envelope, increments on each a2a forward, and refuses to forward
 beyond `max_a2a_hops` (default 5). Stops infinite agent ping-pong
 in one place.
 
-`[OPEN]` Should the *sender* peer's identity (`from_peer`) be
+**Decided** (§10): Should the *sender* peer's identity (`from_peer`) be
 forwarded verbatim, or rewritten by the gateway to hide identities
-across security boundaries? Recommend verbatim within an
+across security boundaries? Resolved §10 #6 — verbatim within an
 operator-managed cluster; rewrite-only behind a future "untrusted
 worker" boundary.
 
@@ -854,9 +887,9 @@ the peer-mesh extension. Each phase is meant to be one PR.
   flag becomes "start `agentm-terminal` as a subprocess and connect
   to the gateway". Operators who used the old `--terminal` get a
   deprecation warning and a translation note.
-* `[OPEN]` Should `--terminal` keep working as a single-process
+* **Decided** (§10): Should `--terminal` keep working as a single-process
   convenience (spawn both as a subprocess pair from one command)?
-  Recommend yes; it's the smoke-test path.
+  Resolved §10 #2 — kept.
 
 ### Phase 3 — Feishu extracted to `agentm-feishu`
 
@@ -908,7 +941,7 @@ the peer-mesh extension. Each phase is meant to be one PR.
 * Documents the "agent calls another agent through the bus" pattern
   as a first-class scenario; ships an example multi-agent scenario
   YAML.
-* `[OPEN]` Should `from_peer` identity be exposed verbatim or
+* **Decided** (§10): Should `from_peer` identity be exposed verbatim or
   rewritten across security boundaries? See §7.6.
 
 ---
@@ -927,45 +960,37 @@ the peer-mesh extension. Each phase is meant to be one PR.
 
 ---
 
-## 10. Open questions for review
+## 10. Decisions recorded (2026-05-11 design review)
 
-Each marked `[OPEN]` above. Summarised here for the design PR
-checkout:
+All ten open questions resolved toward the simplest viable answer
+consistent with §0 design discipline. Phase 1 implementation works
+from this list as the contract.
 
-1. **Multi-client to same chat (§7.3).** Recommend (A) single-writer
-   per channel name. Confirm or argue for (B).
-2. **`--terminal` convenience wrapper (Phase 2).** Recommend keeping
-   it as a "spawn pair" convenience. Confirm or remove.
-3. **Per-user ACL (§6.3).** Defer to a follow-up — confirm OK.
-4. **Token rotation / cred refresh** for TCP mode. Today `hello`
-   carries the static token. Live rotation needs a kind like
-   `reauth`. Defer to v2 unless explicitly needed.
-5. **Worker death policy (§7.5).** Default (A) Strict — session is
-   lost when its worker dies. (B) Re-dispatch via serializable
-   transcript is opt-in and deferred from v1 minimum. Confirm
-   Strict as default.
-6. **A2A `from_peer` identity (§7.6).** Recommend verbatim within
-   one operator-managed cluster; "rewrite across boundaries" hook
-   reserved for future. Confirm verbatim default.
-7. **Approval forwarding to root chat (§7.7).** Recommend approvals
-   only at the root chat; if no root chat exists,
-   `require_approval` is an error at session creation. Confirm.
-8. **Wire fields added Day 1.** Phase 1 should land
-   `peer_kind`/`to`/`correlation_id`/`hops`/`root_session_key` even
-   though Phases 5–6 are when they get *used* — retrofitting the
-   envelope later is cheap, but rolling out a v0→v0.1 mid-cluster
-   is not. Confirm the "all envelope fields shipped in Phase 1"
-   approach.
-9. **Pluggable outbox backend (§4.5.3).** Recommend shipping
-   `OutboxStore` / `InboxLog` interfaces in Phase 1 with the
-   default being SQLite, so a future operator can swap in NATS
-   JetStream / Redis Streams without modifying gateway core.
-   Confirm.
-10. **Outbox defaults (§4.5).** Recommend `ack_timeout=30s`,
-    `max_attempts=12` (~12 min of exponential backoff with jitter),
-    `peer_outbox_high_water=1000` for slow-consumer detection,
-    7-day retention of acked messages for trace inspection.
-    Confirm or argue for different numbers.
+| # | Decision | Rationale |
+|---|---|---|
+| 1 | **Single-writer per channel name** (§7.3 option A) | Chat platforms are one-bot-per-credential; pool semantics fight the platform itself. HA = leader-elect two gateways, not pool one channel. |
+| 2 | **Keep `--terminal` convenience** in Phase 2 | One-line smoke test path stays. ~50 LoC of subprocess management — cheap. |
+| 3 | **Per-user ACL deferred** | `allow_from` per channel + approval-bridge identity check cover real threats today. Add when a concrete need appears, not before. |
+| 4 | **TCP token rotation deferred** | Disconnect-reconnect with new token works. `reauth` kind only when ops actually demands it. |
+| 5 | **Worker death = Strict** (§7.5 option A) | "Bot crashed, start over" matches user mental model. `redispatch` requires a transcript-resume sub-protocol; out of scope for v1. |
+| 6 | **A2A `from_peer` verbatim** (§7.6) | Cluster-internal transparency is correct default. `rewrite_across_boundary` config knob reserved as future hook, not implemented. |
+| 7 | **Approvals only at root chat** (§7.7) | Multiple approval surfaces = user confusion. No root chat + `require_approval` = config error at session start. Forces explicit operator choice. |
+| 8 | **All envelope fields ship Day 1** | Mid-cluster wire bumps are expensive; ~100 LoC of upfront parsing is cheap. Phase 1 lands `peer_kind`/`to`/`correlation_id`/`hops`/`root_session_key` even where unused. |
+| 9 | **Pluggable outbox: `OutboxStore` + `InboxLog` Protocols, SQLite default** | ~150 LoC interface, zero runtime overhead. Operators with existing JetStream / Redis can swap later. In-memory mock for tests. |
+| 10 | **Outbox defaults** | `ack_timeout=30s`, `max_attempts=12` (~12 min total), `peer_outbox_high_water=1000`, `peer_in_flight_max=64`, `batch_max_items=64`, `acked_retention=7d`, `dead_letter_retention=30d`. Reviewed after 1-2 weeks of production data. |
+
+Decisions worth flagging for **future review** (not blockers for
+Phase 1):
+
+* Decision 6 leaves a hook for `rewrite_across_boundary`; the wire
+  field exists, the rewrite policy doesn't. When/if a hosted
+  multi-tenant scenario appears, design the rewriter.
+* Decision 1's "single writer per channel name" assumes a chat
+  platform has one bot identity. If a future platform requires
+  multiple shards per bot, revisit.
+* Decision 5 (Strict worker death) becomes painful for long-running
+  agent tasks. When that pressure appears, Phase 5+1 ships
+  serializable-transcript opt-in.
 
 ---
 
