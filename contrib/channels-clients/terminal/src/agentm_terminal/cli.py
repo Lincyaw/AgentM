@@ -106,11 +106,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--format",
-        choices=("text", "json"),
+        choices=("text", "json", "textual"),
         default=None,
         help=(
-            "Output format. Default: 'text' when stdout is a TTY, else 'json'. "
-            "Use 'json' explicitly when a script or another agent is driving."
+            "Output format / frontend. Default: 'text' when stdout is a TTY, "
+            "else 'json'. Use 'json' for scripts / agent drivers. Use "
+            "'textual' for the rich TUI (requires the `textual` package)."
         ),
     )
     p.add_argument(
@@ -198,7 +199,14 @@ def _parse_connect_url(url: str) -> str:
 async def _arun(args: argparse.Namespace) -> int:
     fmt = _resolve_format(args.format)
     color = _resolve_color(args.no_color, fmt)
-    renderer = Renderer(fmt=fmt, color=color)
+    # The textual frontend has its own render path; the text/json
+    # renderer is only constructed for the line-based modes.
+    renderer = (
+        Renderer(fmt=fmt, color=color) if fmt in ("text", "json") else None
+    )
+    textual_outbound: asyncio.Queue[dict[str, Any]] | None = (
+        asyncio.Queue() if fmt == "textual" else None
+    )
 
     socket_path = _parse_connect_url(args.connect)
 
@@ -216,7 +224,11 @@ async def _arun(args: argparse.Namespace) -> int:
         # handle the single-item case here.
         if env.kind == KIND_OUTBOUND:
             body = env.body if isinstance(env.body, dict) else {}
+            if textual_outbound is not None:
+                await textual_outbound.put(body)
+                return
             try:
+                assert renderer is not None
                 renderer.render_outbound(body)
             except Exception:  # noqa: BLE001
                 log.exception("renderer failed on envelope id=%s", env.id)
@@ -279,12 +291,37 @@ async def _arun(args: argparse.Namespace) -> int:
         )
         return EXIT_CONNECT
 
-    # Handshake succeeded. Announce ready.
-    renderer.ready()
+    # Handshake succeeded. Announce ready (text/json modes only — the
+    # textual app shows readiness via the title bar).
+    if renderer is not None:
+        renderer.ready()
 
     if args.no_input:
         await client.close()
         return EXIT_OK
+
+    # Textual UI takes over the terminal — it owns stdin/stdout and
+    # the event loop until the user quits. The shared stop_event /
+    # signal handlers / stdin reader path is skipped entirely.
+    if fmt == "textual":
+        assert textual_outbound is not None
+        from .ui.textual import run_textual
+
+        async def _send_inbound(body: dict[str, Any]) -> None:
+            await client.send_inbound(
+                body, env_id=f"in-{int(time.time() * 1_000_000)}"
+            )
+
+        try:
+            code = await run_textual(
+                send_inbound=_send_inbound,
+                outbound_queue=textual_outbound,
+                sender_id=args.sender_id,
+                chat_id=args.chat_id,
+            )
+        finally:
+            await client.close()
+        return int(code)
 
     # Install a SIGINT handler that flips to the EXIT_SIGINT code so a
     # piped user (Ctrl-C while reading stdin) gets a stable exit code.
@@ -316,7 +353,8 @@ async def _arun(args: argparse.Namespace) -> int:
         for t in pending:
             t.cancel()
     finally:
-        renderer.stopped()
+        if renderer is not None:
+            renderer.stopped()
         await client.close()
 
     if sigint_seen:

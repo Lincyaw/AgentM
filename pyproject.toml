@@ -12,7 +12,6 @@ dependencies = [
     "python-frontmatter>=1.1.0",
     "pathspec>=1.0.4",
     "typer>=0.25.1",
-    "textual>=0.85",
     "python-dotenv>=1.0",
 ]
 
@@ -35,7 +34,7 @@ requires = ["uv_build>=0.10.9,<0.11.0"]
 build-backend = "uv_build"
 
 [tool.setuptools.package-data]
-agentm = ["py.typed", "modes/*.tcss"]
+agentm = ["py.typed"]
 
 [tool.uv.workspace]
 # Explicitly list nested projects under contrib/. Other contrib/scenarios/*
