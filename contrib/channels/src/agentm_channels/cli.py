@@ -585,6 +585,14 @@ async def _arun(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Load .env *before* parsing arguments so that AGENTM_PROVIDER,
+    # AGENTM_MODEL, AGENTM_GATEWAY_*, etc. are visible to argparse
+    # defaults. Use the cwd default (cwd or env) for the first load;
+    # after parsing we re-load with the resolved cwd to pick up any
+    # project-local .env that may differ from the shell's pwd.
+    _preliminary_cwd = os.environ.get("AGENTM_GATEWAY_CWD") or str(Path.cwd())
+    _load_dotenv_files(Path(_preliminary_cwd))
+
     args = _parse_args(list(argv) if argv is not None else sys.argv[1:])
     logging.basicConfig(
         level=getattr(logging, str(args.log_level).upper(), logging.INFO),
