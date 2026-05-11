@@ -152,11 +152,6 @@ def _make_worker_inbound(
 # -- tests -------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason="Phase 6: hangs — error-envelope back to source peer not delivered via outbox. "
-    "Investigate in follow-up: WireBridge needs to enqueue KIND_ERROR to source peer's outbox, "
-    "not just log."
-)
 async def test_hop_limit_enforced(
     socket_path: str, db_path: str
 ) -> None:
@@ -287,10 +282,6 @@ async def test_root_session_key_propagated(
         inbox.close()
 
 
-@pytest.mark.skip(
-    reason="Phase 6: hangs — same root cause as test_hop_limit_enforced (error envelope not "
-    "delivered back to source peer). Investigate in follow-up PR."
-)
 async def test_missing_root_session_key_rejected(
     socket_path: str, db_path: str
 ) -> None:

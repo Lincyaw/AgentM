@@ -76,12 +76,6 @@ class _GatedWriter:
         await self._real.wait_closed()
 
 
-@pytest.mark.skip(
-    reason="Regression from housekeeping Event-wakeup change (#143): a fresh server with "
-    "pre-existing outbox rows does not wake its delivery worker until LEASE_REFRESH_INTERVAL "
-    "(5s) expires, racing the test's 5s wait_for. Real bug — fix is to fire the wakeup event "
-    "once at worker start if outbox.pending_count(peer)>0. Tracked for follow-up PR."
-)
 async def test_durability_across_restart(socket_path: str, db_path: str) -> None:
     # Pre-enqueue 5 envelopes for peer A.
     outbox = SqliteOutbox(db_path, lease_ttl=0.3)

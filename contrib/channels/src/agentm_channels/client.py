@@ -223,7 +223,16 @@ class WireClient:
         if env.kind == KIND_PONG:
             return
         if env.kind == KIND_ERROR:
+            # Errors land on both surfaces: the queue is what
+            # ``next_error()`` consumes (auth path uses it during
+            # handshake); the on_outbound callback lets agent_worker
+            # peers observe envelope-level errors (hop_limit_exceeded,
+            # missing_root_session_key, …) alongside their normal
+            # inbound/outbound stream — without it, a peer_send waiting
+            # on correlation_id would never learn the dispatch failed.
             await self._errors.put(env)
+            if self._on_outbound is not None:
+                await self._on_outbound(env)
             return
         # ping from server (future use): reply pong
         if env.kind == KIND_PING:

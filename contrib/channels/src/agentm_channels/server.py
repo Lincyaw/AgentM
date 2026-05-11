@@ -175,6 +175,15 @@ class WireServer:
         self._backoff: Callable[[int], float] = (
             outbox_backoff if callable(outbox_backoff) else exponential_backoff
         )
+        # Duck-typed: SqliteOutbox exposes next_retry_at_min for tighter
+        # delivery-loop wakeups when pending rows are under backoff.
+        # Alternate backends that don't implement it fall through to
+        # the safety-net LEASE_REFRESH_INTERVAL only — correctness is
+        # unaffected, just slightly higher latency on retry-only wakes.
+        _next_retry_at_min = getattr(outbox, "next_retry_at_min", None)
+        self._next_retry_at_min: Callable[[str], float | None] = (
+            _next_retry_at_min if callable(_next_retry_at_min) else lambda _peer_id: None
+        )
         self._registry = PeerRegistry()
         self._server: asyncio.base_events.Server | None = None
         self._stopped = False
@@ -446,11 +455,26 @@ class WireServer:
                     # the wake event; the LEASE_REFRESH_INTERVAL timeout
                     # backs up crash recovery (expired leases without a
                     # fresh enqueue event).
+                    #
+                    # If there are pending rows whose ``next_retry_at``
+                    # is still in the future (post-nack backoff), cap
+                    # the wait at the earliest retry instant so we
+                    # don't sit blind on the safety-net interval. The
+                    # MIN query is cheap; this turns the empty-drain
+                    # branch from "wait 5 s blind" into "wake exactly
+                    # when the next row becomes leasable".
                     in_catchup = False
-                    try:
-                        await asyncio.wait_for(
-                            wake.wait(), timeout=LEASE_REFRESH_INTERVAL
+                    next_retry = await asyncio.to_thread(
+                        self._next_retry_at_min, peer_id
+                    )
+                    if next_retry is not None and next_retry > now:
+                        timeout = min(
+                            max(next_retry - now, 0.0), LEASE_REFRESH_INTERVAL
                         )
+                    else:
+                        timeout = LEASE_REFRESH_INTERVAL
+                    try:
+                        await asyncio.wait_for(wake.wait(), timeout=timeout)
                     except asyncio.TimeoutError:
                         pass
                     continue

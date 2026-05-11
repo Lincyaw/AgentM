@@ -258,6 +258,27 @@ class SqliteOutbox:
             ).fetchone()
             return int(row[0])
 
+    def next_retry_at_min(self, peer_id: str) -> float | None:
+        """Earliest ``next_retry_at`` for any non-leased pending row.
+
+        Returned to the delivery worker so it can sleep just long
+        enough for the soonest retryable row to come due, rather than
+        waiting the full ``LEASE_REFRESH_INTERVAL`` safety-net. Rows
+        currently under an active lease are ignored — they're someone
+        else's responsibility until the lease expires.
+
+        Returns ``None`` when no pending row exists for the peer.
+        """
+        with self._lock:
+            c = self._c()
+            row = c.execute(
+                "SELECT MIN(next_retry_at) FROM outbox WHERE peer_id = ?",
+                (peer_id,),
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return float(row[0])
+
     def dead_letter_count(self, peer_id: str) -> int:
         """Test/observability helper — count dead-lettered rows for a peer."""
         with self._lock:
