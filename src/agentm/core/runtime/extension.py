@@ -77,6 +77,24 @@ class _OperationsHolder:
         self.bundle: Operations | None = None
 
 
+class _ResourceWriterHolder:
+    """Mutable single-slot container for the session's ``ResourceWriter``.
+
+    Pre-populated by the substrate with a default (``GitBackedResourceWriter``)
+    so the writer is always available before any atom installs. An atom may
+    overwrite the slot once via :meth:`ExtensionAPI.register_resource_writer`
+    to redirect writes (e.g. into a sandbox). Sharing the holder across every
+    :class:`_ExtensionAPIImpl` instance for a session means the override is
+    visible to every downstream consumer, including ``AtomReloader``.
+    """
+
+    __slots__ = ("writer", "_replaced")
+
+    def __init__(self, writer: ResourceWriter) -> None:
+        self.writer: ResourceWriter = writer
+        self._replaced: bool = False
+
+
 class _NoopSessionGateway:
     def reload_atom(
         self,
@@ -164,7 +182,7 @@ class ExtensionAPIScope:
     project_layout: ProjectLayout
     catalog: CatalogService
     child_session_factory: ChildSessionFactory
-    resource_writer: ResourceWriter
+    resource_writer: _ResourceWriterHolder
     service_registry: dict[str, Any]
 
 
@@ -214,8 +232,10 @@ def build_extension_api_scope(
         project_layout=resolved_layout,
         catalog=catalog or default_catalog_service(),
         child_session_factory=child_session_factory or _NoopChildSessionFactory(),
-        resource_writer=resource_writer
-        or GitBackedResourceWriter(cwd=cwd, session_id=session_id, bus=bus),
+        resource_writer=_ResourceWriterHolder(
+            resource_writer
+            or GitBackedResourceWriter(cwd=cwd, session_id=session_id, bus=bus)
+        ),
         service_registry=service_registry if service_registry is not None else {},
     )
 
@@ -250,7 +270,7 @@ class _ExtensionAPIImpl:
         self._operations_holder: _OperationsHolder = scope.operations
         self._project_layout: ProjectLayout = scope.project_layout
         self._catalog = scope.catalog
-        self._resource_writer = scope.resource_writer
+        self._resource_writer_holder: _ResourceWriterHolder = scope.resource_writer
         self._services = scope.service_registry
 
     def mark_stale(self) -> None:
@@ -443,7 +463,19 @@ class _ExtensionAPIImpl:
 
     def get_resource_writer(self) -> ResourceWriter:
         self._assert_active()
-        return self._resource_writer
+        return self._resource_writer_holder.writer
+
+    def register_resource_writer(self, writer: ResourceWriter) -> None:
+        """Replace the session's :class:`ResourceWriter` (see ExtensionAPI docs)."""
+        self._assert_active()
+        if self._resource_writer_holder._replaced:
+            raise KeyError(
+                "ResourceWriter is already replaced for this session; "
+                "an earlier atom called api.register_resource_writer(...). "
+                "Only one ResourceWriter atom per scenario."
+            )
+        self._resource_writer_holder.writer = writer
+        self._resource_writer_holder._replaced = True
 
     # --- Read-only context -------------------------------------------------
 
