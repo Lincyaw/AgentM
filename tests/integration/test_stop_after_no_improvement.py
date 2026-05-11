@@ -184,6 +184,7 @@ async def test_stop_counter_persists_across_session_restart(
             extensions=[
 
                 ("agentm.extensions.builtin.operations_local", {}),
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {
@@ -303,6 +304,7 @@ async def test_stop_counter_resets_after_successful_activate(
             extensions=[
 
                 ("agentm.extensions.builtin.operations_local", {}),
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {

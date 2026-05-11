@@ -210,6 +210,7 @@ async def test_asi_and_failure_kind_propagate_to_activation(
             provider=(provider_module, {}),
             extensions=scenario_extensions
             + [
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {
@@ -314,6 +315,7 @@ async def test_changespec_without_asi_still_validates(tmp_path: Path) -> None:
             provider=(provider_module, {}),
             extensions=scenario_extensions
             + [
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {

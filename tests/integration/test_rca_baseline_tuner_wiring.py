@@ -128,6 +128,7 @@ def test_tuner_manifest_loads_cleanly() -> None:
         "agentm.extensions.builtin.tool_query_module_feedback",
         "agentm.extensions.builtin.tool_reflect",
         "agentm.extensions.builtin.tool_eval_run",
+        "contrib.extensions.changespec_validators",
         "agentm.extensions.builtin.tool_propose_change",
         "agentm.extensions.builtin.system_prompt",
         "agentm.extensions.builtin.observability",

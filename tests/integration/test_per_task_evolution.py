@@ -193,6 +193,7 @@ async def _create_tuner_session(
                         "eval_dir": str(eval_dir),
                     },
                 ),
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {
@@ -227,6 +228,7 @@ async def test_propose_change_rejects_without_evidence(tmp_path: Path) -> None:
             extensions=[
 
                 ("agentm.extensions.builtin.operations_local", {}),
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {"target_scenario": "format_fix"},
@@ -301,6 +303,7 @@ async def test_tier2_activate_is_deferred(tmp_path: Path) -> None:
 
                 ("agentm.extensions.builtin.operations_local", {}),
                 ("agentm.extensions.builtin.permission", {}),
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {"target_scenario": "format_fix"},
@@ -701,6 +704,7 @@ async def test_end_to_end_loop_activates_known_good_replacement(
                         "eval_dir": str(eval_dir),
                     },
                 ),
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {
