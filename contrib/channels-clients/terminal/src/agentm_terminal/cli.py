@@ -11,8 +11,7 @@ CLI design follows ``autoharness:cli-design``:
 * Errors are reported as
   ``agentm-terminal: error: <type>: <root cause>. <suggested fix>.``
 * Format auto-detection: ``--format`` defaults to ``text`` when stdout
-  is a TTY, ``json`` otherwise. Document explicitly in --help so the
-  contract is discoverable.
+  is a TTY, ``json`` otherwise.
 
 Example::
 
@@ -25,7 +24,6 @@ Example::
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import logging
 import os
@@ -33,12 +31,12 @@ import signal
 import sys
 import time
 import uuid
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlparse
 
-from pathlib import Path
+import typer
 
-from agentm_channels import DEFAULT_SOCKET_URL, load_dotenv_files
+from agentm_channels import DEFAULT_SOCKET_URL, autoload_dotenv
 from agentm_channels.client import AuthError, WireClient
 from agentm_channels.wire import (
     KIND_BYE,
@@ -52,6 +50,9 @@ from agentm_channels.wire import (
 
 from . import __version__
 from .renderer import Renderer
+
+# Pull ``.env`` into ``os.environ`` before typer parses argv. Idempotent.
+autoload_dotenv()
 
 # -- Exit codes (cli-design rule group 3) ------------------------------
 
@@ -76,88 +77,20 @@ def _err(kind: str, root: str, fix: str) -> None:
     sys.stderr.flush()
 
 
-# -- argv --------------------------------------------------------------
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"{PROG} {__version__}")
+        raise typer.Exit(code=EXIT_OK)
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    epilog = (
-        "Examples:\n"
-        "  Interactive (TTY auto-selects text format):\n"
-        f"    {PROG} --connect unix:///tmp/gw.sock\n"
-        "\n"
-        "  Piped (auto-selects JSON format):\n"
-        f"    printf '/help\\n' | {PROG} --connect unix:///tmp/gw.sock\n"
-    )
-    p = argparse.ArgumentParser(
-        prog=PROG,
-        description=(
-            "Terminal client for the AgentM channels gateway. Connects "
-            "over the v1 wire protocol (Unix socket) and renders outbound "
-            "messages on stdout."
-        ),
-        epilog=epilog,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p.add_argument(
-        "--connect",
-        default=DEFAULT_SOCKET_URL,
-        metavar="URL",
-        help=(
-            "Gateway socket URL. v1 supports only unix:///abs/path/to/sock; "
-            "other schemes are rejected with exit 2. "
-            f"Default: ``{DEFAULT_SOCKET_URL}`` "
-            "($XDG_RUNTIME_DIR/agentm-gw.sock if set, else "
-            "/tmp/agentm-gw-<uid>.sock — matches `agentm-gateway`'s default)."
-        ),
-    )
-    p.add_argument(
-        "--format",
-        choices=("text", "json", "textual"),
-        default=None,
-        help=(
-            "Output format / frontend. Default: 'text' when stdout is a TTY, "
-            "else 'json'. Use 'json' for scripts / agent drivers. Use "
-            "'textual' for the rich TUI (requires the `textual` package)."
-        ),
-    )
-    p.add_argument(
-        "--no-color",
-        action="store_true",
-        help=(
-            "Disable ANSI color in text mode. Also honoured via the "
-            "NO_COLOR environment variable (https://no-color.org)."
-        ),
-    )
-    p.add_argument(
-        "--sender-id",
-        default="local",
-        help="Inbound sender id (default: 'local').",
-    )
-    p.add_argument(
-        "--chat-id",
-        default="terminal",
-        help="Chat / session id (default: 'terminal').",
-    )
-    p.add_argument(
-        "--no-input",
-        action="store_true",
-        help=(
-            "Exit immediately after the gateway handshake. Useful for "
-            "liveness probes; not the default — the client normally reads "
-            "stdin."
-        ),
-    )
-    p.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Raise log level on stderr to INFO (default: WARNING).",
-    )
-    p.add_argument(
-        "--version",
-        action="version",
-        version=f"{PROG} {__version__}",
-    )
-    return p
+# -- typer app ---------------------------------------------------------
+
+app = typer.Typer(
+    name=PROG,
+    add_completion=False,
+    rich_markup_mode=None,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 
 
 def _resolve_format(arg: str | None) -> str:
@@ -177,7 +110,7 @@ def _resolve_color(no_color_flag: bool, fmt: str) -> bool:
 
 
 def _parse_connect_url(url: str) -> str:
-    """Return the absolute socket path. Raises ``SystemExit(2)`` on
+    """Return the absolute socket path. Raises ``typer.Exit(2)`` on
     invalid input (scheme, missing path)."""
     parsed = urlparse(url)
     if parsed.scheme != "unix":
@@ -186,8 +119,7 @@ def _parse_connect_url(url: str) -> str:
             f"--connect scheme {parsed.scheme!r} is not supported",
             "use unix:///abs/path/to/sock (only unix:// is available in v1)",
         )
-        raise SystemExit(EXIT_USAGE)
-    # urlparse on ``unix:///abs/path`` → netloc="", path="/abs/path".
+        raise typer.Exit(code=EXIT_USAGE)
     socket_path = parsed.path or parsed.netloc
     if not socket_path or not socket_path.startswith("/"):
         _err(
@@ -195,18 +127,141 @@ def _parse_connect_url(url: str) -> str:
             f"--connect URL {url!r} has no absolute socket path",
             "use unix:///abs/path/to/sock",
         )
-        raise SystemExit(EXIT_USAGE)
+        raise typer.Exit(code=EXIT_USAGE)
     return socket_path
+
+
+@app.command()
+def cli(
+    connect: Annotated[
+        str,
+        typer.Option(
+            "--connect",
+            envvar="AGENTM_SOCKET",
+            metavar="URL",
+            help=(
+                "Gateway socket URL. v1 supports only unix:///abs/path/to/sock; "
+                "other schemes are rejected with exit 2. Default: shared with "
+                "`agentm-gateway` ($XDG_RUNTIME_DIR/agentm-gw.sock if set, else "
+                "/tmp/agentm-gw-<uid>.sock). Env: AGENTM_SOCKET."
+            ),
+        ),
+    ] = DEFAULT_SOCKET_URL,
+    output_format: Annotated[
+        str | None,
+        typer.Option(
+            "--format",
+            envvar="AGENTM_FORMAT",
+            help=(
+                "Output format / frontend. Choices: text, json, textual. "
+                "Default: 'text' on a TTY, 'json' otherwise. Use 'json' for "
+                "scripts / agent drivers; 'textual' for the rich TUI."
+            ),
+        ),
+    ] = None,
+    no_color: Annotated[
+        bool,
+        typer.Option(
+            "--no-color",
+            help=(
+                "Disable ANSI color in text mode. Also honoured via the "
+                "NO_COLOR environment variable (https://no-color.org)."
+            ),
+        ),
+    ] = False,
+    sender_id: Annotated[
+        str,
+        typer.Option("--sender-id", help="Inbound sender id (default: 'local')."),
+    ] = "local",
+    chat_id: Annotated[
+        str,
+        typer.Option("--chat-id", help="Chat / session id (default: 'terminal')."),
+    ] = "terminal",
+    no_input: Annotated[
+        bool,
+        typer.Option(
+            "--no-input",
+            help=(
+                "Exit immediately after the gateway handshake. Useful for "
+                "liveness probes; not the default — the client normally "
+                "reads stdin."
+            ),
+        ),
+    ] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose",
+            help="Raise log level on stderr to INFO (default: WARNING).",
+        ),
+    ] = False,
+    _version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            is_eager=True,
+            callback=_version_callback,
+            help="Print version and exit.",
+        ),
+    ] = False,
+) -> None:
+    """Terminal client for the AgentM channels gateway.
+
+    Connects over the v1 wire protocol (Unix socket) and renders
+    outbound messages on stdout.
+
+    Examples:
+
+      Interactive (TTY auto-selects text format):
+        agentm-terminal --connect unix:///tmp/gw.sock
+
+      Piped (auto-selects JSON format):
+        printf '/help\\n' | agentm-terminal --connect unix:///tmp/gw.sock
+    """
+    if output_format is not None and output_format not in ("text", "json", "textual"):
+        _err(
+            "bad-argument",
+            f"--format {output_format!r} is not one of text/json/textual",
+            "choose one of text, json, textual",
+        )
+        raise typer.Exit(code=EXIT_USAGE)
+
+    logging.basicConfig(
+        level=logging.INFO if verbose else logging.WARNING,
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    try:
+        rc = asyncio.run(
+            _arun(
+                connect=connect,
+                output_format=output_format,
+                no_color=no_color,
+                sender_id=sender_id,
+                chat_id=chat_id,
+                no_input=no_input,
+            )
+        )
+    except KeyboardInterrupt:
+        rc = EXIT_SIGINT
+    raise typer.Exit(code=rc)
 
 
 # -- async run loop ----------------------------------------------------
 
 
-async def _arun(args: argparse.Namespace) -> int:
-    fmt = _resolve_format(args.format)
-    color = _resolve_color(args.no_color, fmt)
-    # The textual frontend has its own render path; the text/json
-    # renderer is only constructed for the line-based modes.
+async def _arun(
+    *,
+    connect: str,
+    output_format: str | None,
+    no_color: bool,
+    sender_id: str,
+    chat_id: str,
+    no_input: bool,
+) -> int:
+    fmt = _resolve_format(output_format)
+    color = _resolve_color(no_color, fmt)
     renderer = (
         Renderer(fmt=fmt, color=color) if fmt in ("text", "json") else None
     )
@@ -214,7 +269,7 @@ async def _arun(args: argparse.Namespace) -> int:
         asyncio.Queue() if fmt == "textual" else None
     )
 
-    socket_path = _parse_connect_url(args.connect)
+    socket_path = _parse_connect_url(connect)
 
     # Peer id: stable-ish within a single run. The gateway uses this as
     # the synthetic channel name registered on the bus; pairing it with
@@ -239,8 +294,6 @@ async def _arun(args: argparse.Namespace) -> int:
             except Exception:  # noqa: BLE001
                 log.exception("renderer failed on envelope id=%s", env.id)
             return
-        # WireClient's _dispatch handles delivery_batch → outbound itself,
-        # but defensive branches keep the contract explicit.
         if env.kind == KIND_DELIVERY_BATCH:  # pragma: no cover — handled upstream
             return
         if env.kind == KIND_PING:
@@ -284,31 +337,25 @@ async def _arun(args: argparse.Namespace) -> int:
     except (FileNotFoundError, ConnectionRefusedError) as exc:
         _err(
             "connect-failed",
-            f"cannot connect to {args.connect!r} ({exc.__class__.__name__})",
+            f"cannot connect to {connect!r} ({exc.__class__.__name__})",
             "is the gateway running with --bind on that path",
         )
         return EXIT_CONNECT
     except OSError as exc:
-        # ENOENT / ECONNREFUSED / EACCES on the socket path.
         _err(
             "connect-failed",
-            f"cannot connect to {args.connect!r}: {exc.strerror or exc}",
+            f"cannot connect to {connect!r}: {exc.strerror or exc}",
             "check the socket path and gateway state",
         )
         return EXIT_CONNECT
 
-    # Handshake succeeded. Announce ready (text/json modes only — the
-    # textual app shows readiness via the title bar).
     if renderer is not None:
         renderer.ready()
 
-    if args.no_input:
+    if no_input:
         await client.close()
         return EXIT_OK
 
-    # Textual UI takes over the terminal — it owns stdin/stdout and
-    # the event loop until the user quits. The shared stop_event /
-    # signal handlers / stdin reader path is skipped entirely.
     if fmt == "textual":
         assert textual_outbound is not None
         from .ui.textual import run_textual
@@ -322,15 +369,13 @@ async def _arun(args: argparse.Namespace) -> int:
             code = await run_textual(
                 send_inbound=_send_inbound,
                 outbound_queue=textual_outbound,
-                sender_id=args.sender_id,
-                chat_id=args.chat_id,
+                sender_id=sender_id,
+                chat_id=chat_id,
             )
         finally:
             await client.close()
         return int(code)
 
-    # Install a SIGINT handler that flips to the EXIT_SIGINT code so a
-    # piped user (Ctrl-C while reading stdin) gets a stable exit code.
     sigint_seen = False
 
     def _on_sigint() -> None:
@@ -341,12 +386,14 @@ async def _arun(args: argparse.Namespace) -> int:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, _on_sigint if sig == signal.SIGINT else stop_event.set)
+            loop.add_signal_handler(
+                sig, _on_sigint if sig == signal.SIGINT else stop_event.set
+            )
         except (NotImplementedError, RuntimeError):  # pragma: no cover — Windows
             pass
 
     reader_task = asyncio.create_task(
-        _stdin_reader(client, args.sender_id, args.chat_id, stop_event),
+        _stdin_reader(client, sender_id, chat_id, stop_event),
         name="terminal-stdin",
     )
     stop_task = asyncio.create_task(stop_event.wait(), name="terminal-stop")
@@ -384,7 +431,6 @@ async def _stdin_reader(
             stop_event.set()
             return
         if not line:
-            # EOF (Ctrl-D / piped input exhausted). Clean shutdown.
             stop_event.set()
             return
         content = line.rstrip("\n")
@@ -392,8 +438,6 @@ async def _stdin_reader(
             continue
         button_value: str | None = None
         if content.startswith("="):
-            # Round-trip escape for approval-button clicks. Matches the
-            # legacy TerminalChannel format byte-for-byte.
             button_value = content[1:].strip() or None
             display = f"[button click: {button_value or ''}]"
         else:
@@ -419,35 +463,10 @@ async def _stdin_reader(
 # -- entrypoint --------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
-    # Match agentm-gateway: pull .env vars (e.g. AGENTM_TERMINAL_SENDER_ID
-    # or auth tokens for future wire-side extensions) from cwd / workspace
-    # root before arg parsing so the user doesn't have to re-export.
-    load_dotenv_files(Path.cwd())
-    parser = _build_parser()
-    try:
-        args = parser.parse_args(list(argv) if argv is not None else sys.argv[1:])
-    except SystemExit as exc:
-        # argparse already printed to stderr. Map to canonical usage code.
-        if isinstance(exc.code, int):
-            return EXIT_USAGE if exc.code == 2 else int(exc.code)
-        return EXIT_USAGE
-
-    logging.basicConfig(
-        level=logging.INFO if args.verbose else logging.WARNING,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
-    try:
-        return asyncio.run(_arun(args))
-    except KeyboardInterrupt:
-        return EXIT_SIGINT
-    except SystemExit as exc:
-        if isinstance(exc.code, int):
-            return exc.code
-        return EXIT_GENERIC
+def main() -> None:
+    """Entry point referenced by the ``agentm-terminal`` console script."""
+    app()
 
 
 if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())
+    main()

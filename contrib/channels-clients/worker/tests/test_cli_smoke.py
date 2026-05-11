@@ -1,66 +1,54 @@
-"""argparse-level smoke tests for ``agentm-worker``.
+"""CLI smoke tests for ``agentm-worker``.
 
-No subprocess, no real socket, no LLM. Mirrors the contract the
-terminal/feishu CLIs already enforce in their own smoke suites.
+No subprocess, no real socket, no LLM.
 """
 
 from __future__ import annotations
 
-import pytest
+import os
 
-from agentm_worker import cli as worker_cli
+from typer.testing import CliRunner
+
+os.environ.setdefault("AGENTM_SKIP_DOTENV", "1")
+
+from agentm_worker import cli as worker_cli  # noqa: E402
+
+runner = CliRunner()
 
 
-def test_help_exits_zero(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with pytest.raises(SystemExit) as exc:
-        worker_cli._build_parser().parse_args(["--help"])
-    assert exc.value.code == 0
-    out = capsys.readouterr().out
-    assert "agentm-worker" in out
-    assert "--connect" in out
-    assert "--scenario" in out
-    assert "--cwd" in out
-    assert "--max-concurrency" in out
+def test_help_exits_zero() -> None:
+    result = runner.invoke(worker_cli.app, ["--help"])
+    assert result.exit_code == 0
+    assert "agentm-worker" in result.stdout
+    assert "--connect" in result.stdout
+    assert "--scenario" in result.stdout
+    assert "--cwd" in result.stdout
+    assert "--max-concurrency" in result.stdout
     # Examples section keeps the contract discoverable from --help alone.
-    assert "Examples" in out
+    assert "Examples" in result.stdout
 
 
-def test_version_prints_and_exits_zero(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with pytest.raises(SystemExit) as exc:
-        worker_cli._build_parser().parse_args(["--version"])
-    assert exc.value.code == 0
-    out = capsys.readouterr().out
-    assert "0.1.0" in out
+def test_version_prints_and_exits_zero() -> None:
+    result = runner.invoke(worker_cli.app, ["--version"])
+    assert result.exit_code == 0
+    assert "0.1.0" in result.stdout
 
 
-def test_missing_connect_uses_default_socket(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    # --connect now defaults to the conventional gateway socket; with no
-    # gateway running the CLI returns exit 7 (connect-failed), not 2.
-    rc = worker_cli.main([])
-    assert rc == 7
-    err = capsys.readouterr().err
-    assert "connect-failed" in err
+def test_connect_to_missing_socket_exits_seven(tmp_path) -> None:
+    sock = tmp_path / "nope.sock"
+    result = runner.invoke(worker_cli.app, ["--connect", f"unix://{sock}"])
+    assert result.exit_code == 7
+    assert "connect-failed" in result.stderr
 
 
-def test_bad_connect_scheme_exits_two(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    rc = worker_cli.main(["--connect", "tcp://127.0.0.1:7000"])
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "agentm-worker: error" in err
-    assert "unix://" in err
+def test_bad_connect_scheme_exits_two() -> None:
+    result = runner.invoke(worker_cli.app, ["--connect", "tcp://127.0.0.1:7000"])
+    assert result.exit_code == 2
+    assert "agentm-worker: error" in result.stderr
+    assert "unix://" in result.stderr
 
 
-def test_empty_connect_path_exits_two(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_empty_connect_path_exits_two() -> None:
     # ``unix://`` with no netloc and no path → bad-argument.
-    rc = worker_cli.main(["--connect", "unix://"])
-    assert rc == 2
+    result = runner.invoke(worker_cli.app, ["--connect", "unix://"])
+    assert result.exit_code == 2

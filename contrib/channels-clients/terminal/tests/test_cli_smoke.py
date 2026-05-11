@@ -1,58 +1,54 @@
-"""argparse-level smoke tests — no subprocess, no real socket."""
+"""CLI smoke tests — no subprocess, no real socket."""
 
 from __future__ import annotations
 
 import io
+import os
 
 import pytest
+from typer.testing import CliRunner
 
-from agentm_terminal import cli as terminal_cli
+# Disable the import-time .env autoload so the repo's own .env doesn't
+# leak provider keys into the test's environment.
+os.environ.setdefault("AGENTM_SKIP_DOTENV", "1")
+
+from agentm_terminal import cli as terminal_cli  # noqa: E402
+
+runner = CliRunner()
 
 
-def test_help_exits_zero(
-    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    with pytest.raises(SystemExit) as exc:
-        terminal_cli._build_parser().parse_args(["--help"])
-    assert exc.value.code == 0
-    out = capsys.readouterr().out
-    assert "agentm-terminal" in out
-    assert "--connect" in out
+def test_help_exits_zero() -> None:
+    result = runner.invoke(terminal_cli.app, ["--help"])
+    assert result.exit_code == 0
+    assert "agentm-terminal" in result.stdout
+    assert "--connect" in result.stdout
     # Examples section is mandated by the brief — keeps the contract
     # discoverable from --help alone.
-    assert "Examples" in out
+    assert "Examples" in result.stdout
 
 
-def test_version_prints_and_exits_zero(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with pytest.raises(SystemExit) as exc:
-        terminal_cli._build_parser().parse_args(["--version"])
-    assert exc.value.code == 0
-    out = capsys.readouterr().out
-    assert "0.1.0" in out
+def test_version_prints_and_exits_zero() -> None:
+    result = runner.invoke(terminal_cli.app, ["--version"])
+    assert result.exit_code == 0
+    assert "0.1.0" in result.stdout
 
 
-def test_bad_connect_scheme_exits_two(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    rc = terminal_cli.main(["--connect", "tcp://127.0.0.1:7000"])
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "agentm-terminal: error" in err
-    assert "unix://" in err
+def test_bad_connect_scheme_exits_two() -> None:
+    result = runner.invoke(terminal_cli.app, ["--connect", "tcp://127.0.0.1:7000"])
+    assert result.exit_code == 2
+    assert "agentm-terminal: error" in result.stderr
+    assert "unix://" in result.stderr
 
 
-def test_missing_connect_uses_default_socket(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    # --connect now has a default (matches agentm-gateway's default socket),
-    # so the CLI proceeds past argparse and fails with the "connect-failed"
-    # exit code 7 because no gateway is listening on the conventional path.
-    rc = terminal_cli.main([])
-    assert rc == 7
-    err = capsys.readouterr().err
-    assert "connect-failed" in err
+def test_connect_to_missing_socket_exits_seven(tmp_path) -> None:
+    # --connect has a default (matches agentm-gateway). Aim at a tmp
+    # path that doesn't exist so the connect path is exercised
+    # regardless of whether a real gateway is running on the conventional
+    # XDG socket.
+    sock = tmp_path / "nope.sock"
+    result = runner.invoke(terminal_cli.app, ["--connect", f"unix://{sock}"])
+    assert result.exit_code == 7
+    assert "connect-failed" in result.stderr
 
 
 def test_resolve_format_defaults_text_for_tty(

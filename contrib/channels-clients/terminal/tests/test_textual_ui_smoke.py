@@ -34,8 +34,13 @@ def test_css_file_ships_next_to_module() -> None:
 
 
 def test_cli_accepts_textual_format() -> None:
-    from agentm_terminal.cli import _build_parser
+    from typer.testing import CliRunner
 
-    parser = _build_parser()
-    args = parser.parse_args(["--connect", "unix:///tmp/x.sock", "--format", "textual"])
-    assert args.format == "textual"
+    from agentm_terminal import cli as terminal_cli
+
+    # --help renders the --format option's docstring, which lists the
+    # 'textual' choice. We don't try to actually drive the TUI from a
+    # test (it grabs the terminal).
+    result = CliRunner().invoke(terminal_cli.app, ["--help"])
+    assert result.exit_code == 0
+    assert "textual" in result.stdout

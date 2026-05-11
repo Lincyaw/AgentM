@@ -21,22 +21,20 @@ Example::
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import logging
-import os
 import signal
 import sys
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlparse
 
-from agentm.core.abi import EventBus
-from pathlib import Path
+import typer
 
-from agentm_channels import DEFAULT_SOCKET_URL, load_dotenv_files
+from agentm.core.abi import EventBus
+from agentm_channels import DEFAULT_SOCKET_URL, autoload_dotenv
 from agentm_channels.client import AuthError, WireClient
 from agentm_channels.wire import (
     KIND_BYE,
@@ -48,6 +46,9 @@ from agentm_channels.wire import (
 
 from . import __version__
 from .runner import WorkerRunner
+
+# Pull ``.env`` into ``os.environ`` before typer parses argv. Idempotent.
+autoload_dotenv()
 
 # -- Exit codes (cli-design rule group 3) ------------------------------
 
@@ -68,96 +69,10 @@ def _err(kind: str, root: str, fix: str) -> None:
     sys.stderr.flush()
 
 
-# -- argv --------------------------------------------------------------
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    epilog = (
-        "Examples:\n"
-        f"  {PROG} --connect unix:///tmp/gw.sock --scenario general_purpose\n"
-        "\n"
-        "Note: every session this worker hosts shares --cwd. To serve\n"
-        "multiple project roots, start more workers.\n"
-    )
-    p = argparse.ArgumentParser(
-        prog=PROG,
-        description=(
-            "Agent-side worker for the AgentM channels gateway. Connects "
-            "over the v1 wire protocol (Unix socket), advertises a "
-            "scenario list, and drives one AgentSession per chat for "
-            "forwarded inbound messages."
-        ),
-        epilog=epilog,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p.add_argument(
-        "--connect",
-        default=DEFAULT_SOCKET_URL,
-        metavar="URL",
-        help=(
-            "Gateway socket URL. v1 supports only unix:///abs/path/to/sock; "
-            "other schemes are rejected with exit 2. "
-            f"Default: ``{DEFAULT_SOCKET_URL}`` "
-            "(matches `agentm-gateway`'s default)."
-        ),
-    )
-    p.add_argument(
-        "--scenario",
-        action="append",
-        metavar="NAME",
-        default=None,
-        help=(
-            "Scenario this worker can handle. Repeatable. Advertised at "
-            "hello as capabilities.scenarios. Default: ['general_purpose']."
-        ),
-    )
-    p.add_argument(
-        "--cwd",
-        default=os.environ.get("AGENTM_WORKER_CWD") or str(Path.cwd()),
-        metavar="PATH",
-        help=(
-            "Working directory passed to AgentSession.create for every "
-            "session this worker hosts. Default: $PWD. All sessions on "
-            "this worker share this cwd — start a separate worker for "
-            "another project root."
-        ),
-    )
-    p.add_argument(
-        "--provider",
-        default=os.environ.get("AGENTM_WORKER_PROVIDER")
-        or os.environ.get("AGENTM_PROVIDER"),
-        help=(
-            "LLM provider id (anthropic / openai / …). Default: read "
-            "AGENTM_WORKER_PROVIDER or AGENTM_PROVIDER, else SDK default."
-        ),
-    )
-    p.add_argument(
-        "--model",
-        default=os.environ.get("AGENTM_WORKER_MODEL")
-        or os.environ.get("AGENTM_MODEL"),
-        help="LLM model id. Default: provider default.",
-    )
-    p.add_argument(
-        "--max-concurrency",
-        type=int,
-        default=4,
-        metavar="N",
-        help=(
-            "Maximum in-flight session.prompt calls across all sessions "
-            "on this worker. Default: 4."
-        ),
-    )
-    p.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Raise log level on stderr to INFO (default: WARNING).",
-    )
-    p.add_argument(
-        "--version",
-        action="version",
-        version=f"{PROG} {__version__}",
-    )
-    return p
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"{PROG} {__version__}")
+        raise typer.Exit(code=EXIT_OK)
 
 
 def _parse_connect_url(url: str) -> str:
@@ -168,7 +83,7 @@ def _parse_connect_url(url: str) -> str:
             f"--connect scheme {parsed.scheme!r} is not supported",
             "use unix:///abs/path/to/sock (only unix:// is available in v1)",
         )
-        raise SystemExit(EXIT_USAGE)
+        raise typer.Exit(code=EXIT_USAGE)
     socket_path = parsed.path or parsed.netloc
     if not socket_path or not socket_path.startswith("/"):
         _err(
@@ -176,7 +91,7 @@ def _parse_connect_url(url: str) -> str:
             f"--connect URL {url!r} has no absolute socket path",
             "use unix:///abs/path/to/sock",
         )
-        raise SystemExit(EXIT_USAGE)
+        raise typer.Exit(code=EXIT_USAGE)
     return socket_path
 
 
@@ -229,19 +144,164 @@ def _build_session_factory(
     return factory
 
 
-# -- async run loop ---------------------------------------------------
+# -- typer app ---------------------------------------------------------
+
+app = typer.Typer(
+    name=PROG,
+    add_completion=False,
+    rich_markup_mode=None,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 
 
-async def _arun(args: argparse.Namespace) -> int:
-    socket_path = _parse_connect_url(args.connect)
-    scenarios: list[str] = list(args.scenario or ["general_purpose"])
+@app.command()
+def cli(
+    connect: Annotated[
+        str,
+        typer.Option(
+            "--connect",
+            envvar="AGENTM_SOCKET",
+            metavar="URL",
+            help=(
+                "Gateway socket URL. v1 supports only unix:///abs/path/to/sock; "
+                "other schemes are rejected with exit 2. Default: shared with "
+                "`agentm-gateway`. Env: AGENTM_SOCKET."
+            ),
+        ),
+    ] = DEFAULT_SOCKET_URL,
+    scenario: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--scenario",
+            envvar="AGENTM_SCENARIO",
+            metavar="NAME",
+            help=(
+                "Scenario this worker can handle. Repeatable. Advertised "
+                "at hello as capabilities.scenarios. "
+                "Default: ['general_purpose']. Env: AGENTM_SCENARIO "
+                "(single scenario only via env)."
+            ),
+        ),
+    ] = None,
+    cwd: Annotated[
+        str,
+        typer.Option(
+            "--cwd",
+            envvar="AGENTM_CWD",
+            metavar="PATH",
+            help=(
+                "Working directory passed to AgentSession.create for every "
+                "session this worker hosts. Default: $PWD. All sessions on "
+                "this worker share this cwd — start a separate worker for "
+                "another project root. Env: AGENTM_CWD."
+            ),
+        ),
+    ] = "",
+    provider: Annotated[
+        str | None,
+        typer.Option(
+            "--provider",
+            envvar="AGENTM_PROVIDER",
+            help=(
+                "LLM provider id (anthropic / openai / …). "
+                "Default: SDK default. Env: AGENTM_PROVIDER."
+            ),
+        ),
+    ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            envvar="AGENTM_MODEL",
+            help="LLM model id. Default: provider default. Env: AGENTM_MODEL.",
+        ),
+    ] = None,
+    max_concurrency: Annotated[
+        int,
+        typer.Option(
+            "--max-concurrency",
+            metavar="N",
+            help=(
+                "Maximum in-flight session.prompt calls across all sessions "
+                "on this worker. Default: 4."
+            ),
+        ),
+    ] = 4,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose",
+            help="Raise log level on stderr to INFO (default: WARNING).",
+        ),
+    ] = False,
+    _version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            is_eager=True,
+            callback=_version_callback,
+            help="Print version and exit.",
+        ),
+    ] = False,
+) -> None:
+    """Agent-side worker for the AgentM channels gateway.
+
+    Connects over the v1 wire protocol (Unix socket), advertises a
+    scenario list, and drives one AgentSession per chat for forwarded
+    inbound messages.
+
+    Examples:
+
+      agentm-worker --connect unix:///tmp/gw.sock --scenario general_purpose
+
+    Note: every session this worker hosts shares --cwd. To serve
+    multiple project roots, start more workers.
+    """
+    resolved_cwd = cwd or str(Path.cwd())
+    scenarios: list[str] = list(scenario) if scenario else ["general_purpose"]
     if not scenarios:
         _err(
             "bad-argument",
             "--scenario list is empty",
             "pass at least one --scenario NAME",
         )
-        return EXIT_USAGE
+        raise typer.Exit(code=EXIT_USAGE)
+
+    logging.basicConfig(
+        level=logging.INFO if verbose else logging.WARNING,
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    try:
+        rc = asyncio.run(
+            _arun(
+                connect=connect,
+                scenarios=scenarios,
+                cwd=resolved_cwd,
+                provider=provider,
+                model=model,
+                max_concurrency=max_concurrency,
+            )
+        )
+    except KeyboardInterrupt:
+        rc = EXIT_SIGINT
+    raise typer.Exit(code=rc)
+
+
+# -- async run loop ---------------------------------------------------
+
+
+async def _arun(
+    *,
+    connect: str,
+    scenarios: list[str],
+    cwd: str,
+    provider: str | None,
+    model: str | None,
+    max_concurrency: int,
+) -> int:
+    socket_path = _parse_connect_url(connect)
 
     peer_id = f"worker-{uuid.uuid4().hex[:8]}"
 
@@ -250,11 +310,6 @@ async def _arun(args: argparse.Namespace) -> int:
     runner_ref: dict[str, WorkerRunner] = {}
 
     async def on_outbound(env: Envelope) -> None:
-        # The gateway forwards inbound work as ``KIND_INBOUND``. With
-        # Phase 6 A2A support, the gateway *also* routes
-        # ``KIND_OUTBOUND`` envelopes back to this worker when a peer
-        # delivers a reply to one of our ``peer_send`` calls — match by
-        # ``correlation_id`` in the runner's pending-replies map.
         if env.kind == KIND_INBOUND:
             runner = runner_ref.get("r")
             if runner is None:
@@ -285,14 +340,12 @@ async def _arun(args: argparse.Namespace) -> int:
             exit_code = EXIT_GENERIC
             stop_event.set()
 
-    # Workers advertise scenarios + cwd in capabilities — the gateway's
-    # WorkerRegistry uses this for routing decisions.
     client = WireClient(
         socket_path=socket_path,
         peer_id=peer_id,
         peer_kind="agent_worker",
         on_outbound=on_outbound,
-        capabilities={"scenarios": scenarios, "cwd": args.cwd},
+        capabilities={"scenarios": scenarios, "cwd": cwd},
     )
 
     try:
@@ -307,29 +360,29 @@ async def _arun(args: argparse.Namespace) -> int:
     except (FileNotFoundError, ConnectionRefusedError) as exc:
         _err(
             "connect-failed",
-            f"cannot connect to {args.connect!r} ({exc.__class__.__name__})",
+            f"cannot connect to {connect!r} ({exc.__class__.__name__})",
             "is the gateway running with --bind on that path",
         )
         return EXIT_CONNECT
     except OSError as exc:
         _err(
             "connect-failed",
-            f"cannot connect to {args.connect!r}: {exc.strerror or exc}",
+            f"cannot connect to {connect!r}: {exc.strerror or exc}",
             "check the socket path and gateway state",
         )
         return EXIT_CONNECT
 
     factory = _build_session_factory(
         scenario=scenarios[0],
-        provider=args.provider,
-        model=args.model,
+        provider=provider,
+        model=model,
     )
     runner = WorkerRunner(
         client=client,
-        cwd=args.cwd,
+        cwd=cwd,
         scenario=scenarios[0],
         session_factory=factory,
-        max_concurrency=int(args.max_concurrency),
+        max_concurrency=int(max_concurrency),
     )
     runner_ref["r"] = runner
     await runner.start()
@@ -354,7 +407,7 @@ async def _arun(args: argparse.Namespace) -> int:
         "worker ready peer_id=%s scenarios=%s cwd=%s",
         peer_id,
         scenarios,
-        args.cwd,
+        cwd,
     )
 
     try:
@@ -371,33 +424,10 @@ async def _arun(args: argparse.Namespace) -> int:
 # -- entrypoint --------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
-    # Match agentm-gateway: pull .env vars (provider API keys, custom
-    # scenario knobs) from cwd / workspace root before arg parsing.
-    load_dotenv_files(Path.cwd())
-    parser = _build_parser()
-    try:
-        args = parser.parse_args(list(argv) if argv is not None else sys.argv[1:])
-    except SystemExit as exc:
-        if isinstance(exc.code, int):
-            return EXIT_USAGE if exc.code == 2 else int(exc.code)
-        return EXIT_USAGE
-
-    logging.basicConfig(
-        level=logging.INFO if args.verbose else logging.WARNING,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
-    try:
-        return asyncio.run(_arun(args))
-    except KeyboardInterrupt:
-        return EXIT_SIGINT
-    except SystemExit as exc:
-        if isinstance(exc.code, int):
-            return exc.code
-        return EXIT_GENERIC
+def main() -> None:
+    """Entry point referenced by the ``agentm-worker`` console script."""
+    app()
 
 
 if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())
+    main()

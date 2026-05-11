@@ -35,6 +35,36 @@ uv run mypy <changed-files>
 For `mypy` issues on dynamic/duck-typed parameters, prefer targeted
 `# type: ignore[attr-defined]` over broad suppression.
 
+## CLI environment variables
+
+All four CLIs (`agentm`, `agentm-gateway`, `agentm-worker`, `agentm-feishu`,
+`agentm-terminal`) are typer-based and share a single `AGENTM_*` namespace.
+`.env` is autoloaded at module-import time from `<cwd>/.env` and the
+workspace-root `.env`; existing env vars win (override=False). Set
+`AGENTM_SKIP_DOTENV=1` to disable autoload (tests do this).
+
+Precedence per option: **CLI flag > env var > `.env` file > built-in default.**
+
+| Variable | Consumed by | Equivalent flag |
+|---|---|---|
+| `AGENTM_PROVIDER` | gateway, worker, agentm | `--provider` |
+| `AGENTM_MODEL` | gateway, worker, agentm | `--model` |
+| `AGENTM_SCENARIO` | gateway, worker | `--scenario` |
+| `AGENTM_CWD` | gateway, worker | `--cwd` |
+| `AGENTM_SOCKET` | gateway, terminal, worker, feishu | `--bind` / `--connect` |
+| `AGENTM_CONFIG` | gateway | `--config` |
+| `AGENTM_STATE_DIR` | gateway | `--state-dir` |
+| `AGENTM_LOG_LEVEL` | gateway | `--log-level` |
+| `AGENTM_FORMAT` | terminal | `--format` |
+| `AGENTM_SKIP_DOTENV` | all | (disables `.env` autoload) |
+| `LARK_APP_ID` | feishu | `--app-id` |
+| `LARK_APP_SECRET` | feishu | (reads from env; not a flag — secrets stay out of argv) |
+| `NO_COLOR` | terminal | `--no-color` |
+
+CLI-specific per-prefix variables (`AGENTM_GATEWAY_*`, `AGENTM_WORKER_*`) are
+**not** supported — set the unified `AGENTM_*` form and pass an explicit flag
+when CLIs need to differ on the same host.
+
 ## Architecture (three layers, dependency arrows down only)
 
 ```
