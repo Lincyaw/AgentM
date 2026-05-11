@@ -905,6 +905,26 @@ the peer-mesh extension. Each phase is meant to be one PR.
   convenience (spawn both as a subprocess pair from one command)?
   Resolved §10 #2 — kept.
 
+#### Phase 2 — landed (2026-05-11)
+
+The two-process invocation pattern is the real shape after PR #142.
+The gateway and each chat client run as separate processes communicating
+over a Unix-domain socket using the v1 wire protocol (§4):
+
+    # Terminal 1 — long-running daemon
+    agentm-gateway --bind unix:///tmp/agentm/gw.sock
+
+    # Terminal 2 — user-facing CLI
+    agentm-terminal --connect unix:///tmp/agentm/gw.sock
+
+The gateway no longer hosts in-process channels in this mode; each
+chat platform is a peer process speaking the wire (§4.4 handshake).
+
+The in-process `channels:` config block in `gateway.yaml` is
+deprecated. Each platform's in-process channel emits a
+`DeprecationWarning` on start (StubChannel exempted — it remains the
+test fixture). Phase 4 removes the in-process path entirely.
+
 ### Phase 3 — Feishu extracted to `agentm-feishu`
 
 * New process: `agentm-feishu`. Holds the `lark_oapi` dep. Reads

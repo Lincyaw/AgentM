@@ -69,7 +69,13 @@ log = logging.getLogger("agentm_channels.server")
 
 SERVER_VERSION: str = "0.1.0"
 MAX_DELIVERY_ATTEMPTS: int = 5
-DELIVERY_IDLE_POLL_SECONDS: float = 0.05
+# Safety-net poll: the delivery worker waits on an asyncio.Event woken by
+# outbox.enqueue, but it also re-checks every LEASE_REFRESH_INTERVAL
+# seconds so leases that expired without a fresh enqueue (crash recovery)
+# eventually get re-leased. See §4.5.3 of the design.
+LEASE_REFRESH_INTERVAL: float = 5.0
+# Reason strings for delivery_batch envelopes (§4.5.3).
+BATCH_REASON_RECONNECT_CATCHUP: str = "reconnect_catchup"
 
 InboundHandler = Callable[[PeerSession, Envelope], Awaitable[None]]
 
@@ -141,11 +147,27 @@ class WireServer:
         self._high_water = slow_consumer_high_water
         self._low_water = max(1, slow_consumer_high_water // 2)
         self._max_attempts = max_delivery_attempts
+        # Retry-delay policy. Outbox stores may expose ``backoff_delay``
+        # (the default :class:`SqliteOutbox` does, and accepts an
+        # injected callable via its constructor); fall back to the
+        # module-level ``exponential_backoff``. No dedicated knob on
+        # the server — the outbox already owns this for ``set_notifier``
+        # symmetry.
+        outbox_backoff = getattr(outbox, "backoff_delay", None)
+        self._backoff: Callable[[int], float] = (
+            outbox_backoff if callable(outbox_backoff) else exponential_backoff
+        )
         self._registry = PeerRegistry()
         self._server: asyncio.base_events.Server | None = None
         self._stopped = False
         self._conn_tasks: set[asyncio.Task[None]] = set()
         self._delivery_tasks: dict[str, asyncio.Task[None]] = {}
+        # Per-peer wakeup events: outbox.enqueue calls our notifier, which
+        # sets the peer's Event so the delivery worker drains immediately
+        # instead of polling. Steady-state latency for an enqueue is now
+        # bounded by writer.drain(), not the old 50 ms poll.
+        self._wake_events: dict[str, asyncio.Event] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     # -- lifecycle ----------------------------------------------------
 
@@ -156,6 +178,7 @@ class WireServer:
         with contextlib.suppress(FileNotFoundError):
             if os.path.exists(self._socket_path):
                 os.unlink(self._socket_path)
+        self._loop = asyncio.get_running_loop()
         self._server = await asyncio.start_unix_server(
             self._handle_connection, path=self._socket_path
         )
@@ -231,8 +254,14 @@ class WireServer:
                 _make_env(KIND_WELCOME, {"server_version": SERVER_VERSION, "peer_id_echo": peer_id}),
             )
 
+            wake = asyncio.Event()
+            self._wake_events[peer_id] = wake
+            self._register_outbox_notifier(peer_id, wake)
+            # An enqueue may have landed before we registered: prime
+            # the event so the first drain pass runs.
+            wake.set()
             delivery = asyncio.create_task(
-                self._delivery_loop(session), name=f"deliver:{peer_id}"
+                self._delivery_loop(session, wake), name=f"deliver:{peer_id}"
             )
             self._delivery_tasks[peer_id] = delivery
             try:
@@ -242,6 +271,8 @@ class WireServer:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await delivery
                 self._delivery_tasks.pop(peer_id, None)
+                self._wake_events.pop(peer_id, None)
+                self._unregister_outbox_notifier(peer_id)
         except (ConnectionResetError, BrokenPipeError):
             pass
         except asyncio.CancelledError:
@@ -307,8 +338,23 @@ class WireServer:
 
     # -- delivery worker ---------------------------------------------
 
-    async def _delivery_loop(self, session: PeerSession) -> None:
+    async def _delivery_loop(
+        self, session: PeerSession, wake: asyncio.Event
+    ) -> None:
         """Drain outbox rows for ``session.peer_id`` until cancelled.
+
+        Wakeup model: blocks on ``wake`` (set by ``outbox.enqueue`` via
+        the registered notifier) with a ``LEASE_REFRESH_INTERVAL``
+        timeout. The timeout is the safety net for crash recovery —
+        leases that expired without an enqueue event still get retried.
+
+        Batching policy: while in the *catch-up window* — every drain
+        from (re)connection until the first empty drain — multi-record
+        leases ship as one ``delivery_batch`` envelope per §4.5.3.
+        After that we are in steady state: subsequent drains push
+        single ``outbound`` envelopes one-by-one. The design contract
+        is that batches mean "catch up after gap", not "spool whatever
+        happens to be queued right now".
 
         Slow-consumer accounting is observational: we *log a diagnostic*
         when the pending queue crosses ``slow_consumer_high_water`` and
@@ -319,6 +365,12 @@ class WireServer:
         simplicity, no ``slow_consumer`` wire event.
         """
         peer_id = session.peer_id
+        # ``in_catchup`` starts True and stays True until we see an
+        # empty drain — i.e. we've fully consumed whatever was queued
+        # at the moment the peer (re)connected. After the first empty
+        # drain we are in steady state and single enqueues should
+        # arrive as ``outbound``, not wrapped in a single-item batch.
+        in_catchup = True
         try:
             while True:
                 pending = await asyncio.to_thread(self._outbox.pending_count, peer_id)
@@ -333,14 +385,26 @@ class WireServer:
                     session.backpressure = True
                 elif session.backpressure and pending <= self._low_water:
                     session.backpressure = False
+                wake.clear()
                 now = time.time()
                 records = await asyncio.to_thread(
                     self._outbox.lease, peer_id, self._delivery_batch_max, now
                 )
                 if not records:
-                    await asyncio.sleep(DELIVERY_IDLE_POLL_SECONDS)
+                    # Empty drain → catch-up window closes; any later
+                    # enqueues will ship as single envelopes. Sleep on
+                    # the wake event; the LEASE_REFRESH_INTERVAL timeout
+                    # backs up crash recovery (expired leases without a
+                    # fresh enqueue event).
+                    in_catchup = False
+                    try:
+                        await asyncio.wait_for(
+                            wake.wait(), timeout=LEASE_REFRESH_INTERVAL
+                        )
+                    except asyncio.TimeoutError:
+                        pass
                     continue
-                await self._deliver(session, records)
+                await self._deliver(session, records, in_catchup=in_catchup)
         except _ConnectionLost:
             # Socket dead — stop draining. The connection task will
             # close the reader side and trigger reconnect logic peer-side.
@@ -355,9 +419,23 @@ class WireServer:
             log.exception("delivery loop for peer=%s crashed", peer_id)
 
     async def _deliver(
-        self, session: PeerSession, records: list[OutboxRecord]
+        self,
+        session: PeerSession,
+        records: list[OutboxRecord],
+        *,
+        in_catchup: bool,
     ) -> None:
         """Write one batch (or single envelope) to the peer.
+
+        Frame shape:
+
+        * ``in_catchup and len(records) > 1`` → one ``delivery_batch``
+          envelope carrying ``items`` plus ``reason`` and (when all
+          records share one) ``session_key`` (§4.5.3).
+        * Otherwise → individual ``outbound`` envelopes, one wire
+          write per record. Includes the case where the catch-up
+          drain finds exactly one ready row — no reason to wrap one
+          item.
 
         On socket write/drain failure: account the records (nack or
         dead-letter per attempts) and *re-raise* a sentinel so the
@@ -368,14 +446,19 @@ class WireServer:
         """
         writer = session.transport_writer
         try:
-            if len(records) == 1:
-                env = records[0].envelope
-                writer.write(encode(env))
+            if in_catchup and len(records) > 1:
+                items = [r.envelope.to_dict() for r in records]
+                body: dict[str, Any] = {
+                    "items": items,
+                    "reason": BATCH_REASON_RECONNECT_CATCHUP,
+                    "session_key": _common_session_key(records),
+                }
+                batch = _make_env(KIND_DELIVERY_BATCH, body)
+                writer.write(encode(batch))
                 await writer.drain()
             else:
-                items = [r.envelope.to_dict() for r in records]
-                batch = _make_env(KIND_DELIVERY_BATCH, {"items": items})
-                writer.write(encode(batch))
+                for r in records:
+                    writer.write(encode(r.envelope))
                 await writer.drain()
         except asyncio.CancelledError:
             await self._nack_records(records)
@@ -392,7 +475,7 @@ class WireServer:
     async def _nack_records(self, records: list[OutboxRecord]) -> None:
         now = time.time()
         for r in records:
-            delay = exponential_backoff(r.attempts)
+            delay = self._backoff(r.attempts)
             await asyncio.to_thread(self._outbox.nack, [r.id], now + delay)
 
     async def _handle_delivery_failure(
@@ -417,11 +500,62 @@ class WireServer:
                         session.peer_id, r.envelope.id, reason,
                     )
             else:
-                delay = exponential_backoff(r.attempts)
+                delay = self._backoff(r.attempts)
                 await asyncio.to_thread(self._outbox.nack, [r.id], now + delay)
 
 
+    # -- outbox notifier wiring --------------------------------------
+
+    def _register_outbox_notifier(self, peer_id: str, event: asyncio.Event) -> None:
+        """Register a per-peer wakeup with the outbox if it supports it.
+
+        Outbox implementations may expose ``set_notifier(peer_id, fn)``
+        as an optional protocol method. The default :class:`SqliteOutbox`
+        does; alternative stores can omit it and fall back to the
+        timeout-based safety-net poll. Missing method is *not* an
+        error — the loop still makes progress, just at
+        ``LEASE_REFRESH_INTERVAL`` granularity.
+        """
+        loop = self._loop
+        if loop is None:
+            return
+        set_notifier = getattr(self._outbox, "set_notifier", None)
+        if set_notifier is None:
+            return
+
+        def notify(_pid: str) -> None:
+            # outbox.enqueue is called from worker threads (via
+            # asyncio.to_thread). Bounce the set() through the loop.
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(event.set)
+
+        set_notifier(peer_id, notify)
+
+    def _unregister_outbox_notifier(self, peer_id: str) -> None:
+        set_notifier = getattr(self._outbox, "set_notifier", None)
+        if set_notifier is None:
+            return
+        set_notifier(peer_id, None)
+
+
 # -- helpers ---------------------------------------------------------
+
+def _common_session_key(records: list[OutboxRecord]) -> str | None:
+    """Return the session key shared by all records, or ``None``.
+
+    Used to annotate ``delivery_batch`` envelopes (§4.5.3) so clients
+    that fan out per-session can route the batch in one hop. We read
+    :attr:`Envelope.root_session_key` — the only session-scoped field
+    on the wire today.
+    """
+    first = records[0].envelope.root_session_key
+    if first is None:
+        return None
+    for r in records[1:]:
+        if r.envelope.root_session_key != first:
+            return None
+    return first
+
 
 async def _read_one_frame(reader: asyncio.StreamReader) -> Envelope | None:
     """Read exactly one framed envelope. Returns None on EOF/parse error."""
