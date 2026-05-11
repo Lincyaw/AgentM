@@ -29,8 +29,14 @@ from agentm.core.abi import (
     EventBus,
     TextContent,
     ToolCallEvent,
+    ToolResultEvent,
 )
-from agentm.core.abi.events import DiagnosticEvent, TurnEndEvent
+from agentm.core.abi.events import (
+    DiagnosticEvent,
+    StreamDeltaEvent,
+    TurnEndEvent,
+)
+from agentm.core.abi.stream import TextDelta
 
 from .approval import ApprovalBridge, ApprovalContext, ApprovalPolicy
 from .bus import InboundMessage, MessageBus, OutboundKind, OutboundMessage
@@ -85,6 +91,40 @@ class GatewayConfig:
 
 
 @dataclass
+class _TurnStreamState:
+    """Per-turn streaming state for the "one reflowing card per turn" UX.
+
+    Tool calls and (debounced) assistant token deltas are merged into a
+    single :class:`OutboundMessage` stream keyed by ``stream_id``. Channels
+    that understand ``stream_id`` (Feishu) patch a single card; channels
+    that don't (terminal) see a series of MESSAGE outbounds, throttled to
+    ~6/s by ``TEXT_DEBOUNCE_S``.
+
+    The state is **not** an atom — it lives on the gateway because the
+    composition decision ("tool call + token stream → one logical
+    message") is a channel-presentation policy, not a kernel-level
+    primitive.
+    """
+
+    stream_id: str
+    channel: str
+    chat_id: str
+    lines: list[str] = field(default_factory=list)
+    tool_idx: dict[str, int] = field(default_factory=dict)
+    assistant_buf: str = ""
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Token-delta coalescer: TextDelta handlers set ``dirty`` instead of
+    # publishing directly; a background flusher publishes at most every
+    # ``TEXT_DEBOUNCE_S`` so terminal renderers don't drown in updates.
+    dirty: asyncio.Event = field(default_factory=asyncio.Event)
+    flusher: asyncio.Task[None] | None = None
+    closed: bool = False
+
+
+TEXT_DEBOUNCE_S: float = 0.15
+
+
+@dataclass
 class _Route:
     session_key: str
     channel: str
@@ -96,6 +136,7 @@ class _Route:
     approval_ctx: ApprovalContext | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     turn_count: int = 0
+    stream: _TurnStreamState | None = None
 
 
 class Gateway:
@@ -230,10 +271,24 @@ class Gateway:
                 sender_id=msg.sender_id,
             )
             route.turn_count += 1
+            route.stream = _TurnStreamState(
+                stream_id=f"{route.session_key}#{route.turn_count}",
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+            )
+            route.stream.flusher = asyncio.create_task(
+                self._stream_flusher(route.stream),
+                name=f"gw-stream-{route.session_key}-{route.turn_count}",
+            )
             try:
                 await route.session.prompt(msg.content)
             finally:
                 route.approval_ctx = None
+                # Final flush: stop the debouncer, push one last frame with
+                # final=True so stream-aware channels release the card.
+                # ``_finalize_stream`` is a no-op if a TurnEnd handler
+                # already sent the final frame.
+                await self._finalize_stream(route)
                 # Typed control signal: the agent finished a turn.
                 # Channels use it to tear down "thinking" affordances
                 # (e.g. the Feishu ACK emoji). Channels that don't care
@@ -369,14 +424,16 @@ class Gateway:
             ),
         )
 
-        # ``handle_tool_call`` is the ONLY tool_call subscriber: a
-        # separate "calling X" render would leak the intent before the
-        # bridge has resolved a block. Tool *results* are intentionally
-        # not relayed to the chat — they land in the trajectory for
-        # operators, but pushing them back into the chat clutters the
-        # conversation and exposes raw payloads. The agent's next
-        # assistant turn summarizes whatever the user needs to know.
+        # Order matters: render the "🔧 calling X(…)" line BEFORE the
+        # approval bridge so the user sees the intent immediately;
+        # otherwise the approval bridge would ``await`` on the button
+        # future and block emit-loop progress for several seconds.
+        # The renderer's return value is ignored by the loop, so it
+        # cannot pre-empt the bridge's ``{"block": …}`` short-circuit.
+        bus.on(ToolCallEvent.CHANNEL, self._make_tool_call_renderer(route))
         bus.on(ToolCallEvent.CHANNEL, route.bridge.handle_tool_call)
+        bus.on(ToolResultEvent.CHANNEL, self._make_tool_result_renderer(route))
+        bus.on(StreamDeltaEvent.CHANNEL, self._make_stream_delta_handler(route))
         bus.on(TurnEndEvent.CHANNEL, self._make_turn_end_handler(route))
         bus.on(DiagnosticEvent.CHANNEL, self._make_diagnostic_handler(route))
 
@@ -408,20 +465,96 @@ class Gateway:
 
     # --- per-session EventBus → MessageBus.outbound -------------------
 
+    def _make_tool_call_renderer(
+        self, route: _Route
+    ) -> Callable[[ToolCallEvent], Awaitable[None]]:
+        async def _h(event: ToolCallEvent) -> None:
+            state = route.stream
+            if state is None:
+                return
+            async with state.lock:
+                line = f"🔧 {event.tool_name}({_args_brief(event.args)})"
+                state.tool_idx[event.tool_call_id] = len(state.lines)
+                state.lines.append(line)
+                content = _render(state)
+            await self._publish_stream_frame(state, content, final=False)
+
+        return _h
+
+    def _make_tool_result_renderer(
+        self, route: _Route
+    ) -> Callable[[ToolResultEvent], Awaitable[None]]:
+        async def _h(event: ToolResultEvent) -> None:
+            state = route.stream
+            if state is None:
+                return
+            preview = _result_preview(event.result)
+            mark = "✗" if event.result.is_error else "✓"
+            async with state.lock:
+                idx = state.tool_idx.get(event.tool_call_id)
+                line = f"{mark} {event.tool_name} → {preview}"
+                if idx is not None and 0 <= idx < len(state.lines):
+                    state.lines[idx] = line
+                else:
+                    state.lines.append(line)
+                content = _render(state)
+            await self._publish_stream_frame(state, content, final=False)
+
+        return _h
+
+    def _make_stream_delta_handler(
+        self, route: _Route
+    ) -> Callable[[StreamDeltaEvent], Awaitable[None]]:
+        async def _h(event: StreamDeltaEvent) -> None:
+            state = route.stream
+            if state is None:
+                return
+            delta = event.delta
+            # Only TextDelta contributes to the visible assistant buffer.
+            # ThinkingDelta is suppressed on purpose — chat surfaces
+            # should not expose internal reasoning by default. Tool-call
+            # frames are emitted via the dedicated ToolCallEvent handler.
+            if not isinstance(delta, TextDelta):
+                return
+            if not delta.text:
+                return
+            async with state.lock:
+                state.assistant_buf += delta.text
+            # Mark dirty; the flusher coalesces to ~6 frames/sec.
+            state.dirty.set()
+
+        return _h
+
     def _make_turn_end_handler(
         self, route: _Route
     ) -> Callable[[TurnEndEvent], Awaitable[None]]:
         async def _h(event: TurnEndEvent) -> None:
+            state = route.stream
             text = _assistant_text(event.message)
-            if not text.strip():
-                return
-            await self._bus.publish_outbound(
-                OutboundMessage(
-                    channel=route.channel,
-                    chat_id=route.chat_id,
-                    content=text,
+            if state is None:
+                # Stream lifecycle missed (test fixtures driving the
+                # session bus directly outside a _dispatch). Preserve
+                # the legacy one-shot behaviour so test_gateway_e2e
+                # still sees its "echo: …" outbound.
+                if not text.strip():
+                    return
+                await self._bus.publish_outbound(
+                    OutboundMessage(
+                        channel=route.channel,
+                        chat_id=route.chat_id,
+                        content=text,
+                    )
                 )
-            )
+                return
+            async with state.lock:
+                # The fully-assembled assistant text from TurnEndEvent
+                # is authoritative; replace any partial we accumulated
+                # from StreamDelta. Empty assistant text is normal for
+                # tool-only turns — render whatever tool lines we have.
+                state.assistant_buf = text
+                state.closed = True
+                content = _render(state)
+            await self._publish_stream_frame(state, content, final=True)
 
         return _h
 
@@ -445,8 +578,143 @@ class Gateway:
 
         return _h
 
+    # --- streaming card lifecycle ------------------------------------
+
+    async def _publish_stream_frame(
+        self, state: _TurnStreamState, content: str, *, final: bool
+    ) -> None:
+        if not content and not final:
+            return
+        await self._bus.publish_outbound(
+            OutboundMessage(
+                channel=state.channel,
+                chat_id=state.chat_id,
+                content=content,
+                stream_id=state.stream_id,
+                final=final,
+            )
+        )
+
+    async def _stream_flusher(self, state: _TurnStreamState) -> None:
+        """Coalesce TextDelta-driven dirty marks into ≤1 frame per
+        ``TEXT_DEBOUNCE_S`` window.
+
+        Tool-call/result handlers publish synchronously and **do not**
+        go through the flusher — token streams are the only producer
+        dense enough to need throttling. The flusher exits as soon as
+        the turn closes; TurnEnd is responsible for the final frame.
+        """
+        try:
+            while not state.closed:
+                await state.dirty.wait()
+                state.dirty.clear()
+                if state.closed:
+                    return
+                await asyncio.sleep(TEXT_DEBOUNCE_S)
+                async with state.lock:
+                    if state.closed:
+                        return
+                    content = _render(state)
+                await self._publish_stream_frame(state, content, final=False)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception(
+                "stream flusher crashed (stream_id=%s)", state.stream_id
+            )
+
+    async def _finalize_stream(self, route: _Route) -> None:
+        """Tear down the per-turn stream state.
+
+        TurnEnd is the normal "final frame" producer; we only get here
+        from the ``_dispatch`` finally, so by the time this runs the
+        TurnEnd handler has either fired (and already pushed final=True)
+        or the turn aborted before it could. In the abort path we still
+        push one explicit final frame so stream-aware channels release
+        the card lock.
+        """
+        state = route.stream
+        route.stream = None
+        if state is None:
+            return
+        async with state.lock:
+            had_content = bool(state.assistant_buf) or bool(state.lines)
+            already_finalized = state.closed
+            state.closed = True
+        state.dirty.set()  # unblock the flusher if parked
+        if state.flusher is not None and not state.flusher.done():
+            state.flusher.cancel()
+            try:
+                await state.flusher
+            except (asyncio.CancelledError, Exception):
+                pass
+        if already_finalized or not had_content:
+            return
+        async with state.lock:
+            content = _render(state)
+        await self._publish_stream_frame(state, content, final=True)
+
 
 def _assistant_text(message: AssistantMessage) -> str:
     return "\n".join(
         block.text for block in message.content if isinstance(block, TextContent) and block.text
     )
+
+
+def _render(state: _TurnStreamState) -> str:
+    """Assemble the streamed-card body from per-turn state.
+
+    Tool lines come first (in arrival order), then a blank-line
+    separator, then the assistant text. Either half may be empty
+    (pre-first-token turn, tool-only turn).
+    """
+    head = "\n".join(state.lines)
+    tail = state.assistant_buf
+    if head and tail:
+        return f"{head}\n\n{tail}"
+    return head or tail
+
+
+def _args_brief(args: dict[str, Any], *, limit: int = 60) -> str:
+    """Best-effort one-liner for a tool call's args.
+
+    Avoids dumping multi-KB blobs (file contents, diffs) into chat;
+    keeps the dict-shape so the user can see *what* the agent is
+    calling without scrolling.
+    """
+    if not args:
+        return ""
+    parts: list[str] = []
+    for k, v in args.items():
+        s = repr(v) if not isinstance(v, str) else v
+        if len(s) > 40:
+            s = s[:37] + "…"
+        parts.append(f"{k}={s}")
+        if sum(len(p) for p in parts) > limit:
+            break
+    out = ", ".join(parts)
+    if len(out) > limit:
+        out = out[: limit - 1] + "…"
+    return out
+
+
+def _result_preview(result: Any, *, limit: int = 100) -> str:
+    """First-line, length-capped textual preview of a ToolResult.
+
+    Non-text content (images) collapses to ``<image>``. Multi-line
+    text keeps just the first non-empty line so the stream card
+    stays compact.
+    """
+    blocks = getattr(result, "content", None) or []
+    for block in blocks:
+        text = getattr(block, "text", None)
+        if isinstance(text, str) and text.strip():
+            first = text.strip().splitlines()[0]
+            if len(first) > limit:
+                first = first[: limit - 1] + "…"
+            return first
+        if getattr(block, "type", None) == "image":
+            return "<image>"
+    return "(empty)"
+
+
