@@ -51,6 +51,69 @@ project roots, start more workers.
 | 6    | SIGINT (Ctrl-C). |
 | 7    | Cannot connect to the gateway socket. |
 
+## Multi-agent (A2A) example
+
+Phase 6 ships an opt-in `tool_peer_send` atom that lets one agent
+delegate to another worker via the gateway. Layout for a
+`researcher → coder → reviewer` chain:
+
+```
+                      +--------------------+
+   user (terminal) -->|     gateway        |
+                      +--------------------+
+                       |        |        |
+                       v        v        v
+                  worker-     worker-   worker-
+                  researcher  coder     reviewer
+```
+
+```bash
+# 1) Gateway: allow `tool_peer_send` to be /atom:install'd from chat.
+cat > /tmp/gw.yaml <<'YAML'
+commands:
+  atoms:
+    enabled: true
+    allow: ["tool_peer_send"]
+YAML
+
+agentm-gateway \
+    --bind unix:///tmp/gw.sock \
+    --no-inproc-worker \
+    --scenario general_purpose \
+    --config /tmp/gw.yaml \
+    --max-a2a-hops 10 \
+    --cwd /path/to/workspace
+
+# 2) Three workers. Each gets an auto-generated peer_id of the form
+#    "worker-<8-hex>"; record those from the worker startup log lines
+#    (`worker ready peer_id=worker-…`) and pass them as the `to`
+#    argument when calling peer_send from the LLM. (A future revision
+#    will add an explicit --peer-id flag for stable identifiers.)
+agentm-worker --connect unix:///tmp/gw.sock \
+    --scenario general_purpose --cwd /path/to/workspace &
+agentm-worker --connect unix:///tmp/gw.sock \
+    --scenario general_purpose --cwd /path/to/workspace &
+agentm-worker --connect unix:///tmp/gw.sock \
+    --scenario general_purpose --cwd /path/to/workspace &
+
+# 3) Terminal client. From the chat, the researcher agent calls
+#    /atom:install tool_peer_send, then uses peer_send to delegate:
+#       peer_send(to="worker-<id>", content="implement X")
+#       peer_send(to="worker-<id>", content="review the diff")
+agentm-terminal --connect unix:///tmp/gw.sock
+```
+
+Approval requests emitted by `worker-coder` are routed back to the
+terminal chat (the *root* of the dispatch chain) via the
+`root_session_key` propagated on every forwarded envelope; the
+user's click flows back to `worker-coder` through the existing
+synthetic-channel path — see `.claude/designs/client-server-architecture.md`
+§7.7 + §8 Phase 6.
+
+The gateway-level hop limit (`--max-a2a-hops`, default 10) breaks
+runaway delegation loops with a `hop_limit_exceeded` error sent
+back to the originating worker.
+
 ## Out of scope (Phase 5b candidates)
 
 * Load-balanced worker pools.
