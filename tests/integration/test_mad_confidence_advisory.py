@@ -33,7 +33,7 @@ from agentm.core.abi import (
     TextContent,
 )
 from agentm.core.abi.messages import AssistantMessage
-from agentm.core.lib.mad import mad_confidence
+from agentm.extensions.builtin.tool_propose_change import mad_confidence
 from agentm.harness.extension import ProviderConfig
 from agentm.harness.session import AgentSession, AgentSessionConfig
 
