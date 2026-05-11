@@ -1,7 +1,7 @@
 """Builtin LLM-driven compaction extension.
 
 Per issue #76 the compaction kernel owns no English prompt text; this atom
-resolves the active bodies via ``api.prompt_templates.get_prompt`` (populated
+resolves the active bodies via ``api.get_service("prompt_templates").get_prompt`` (populated
 by the ``compaction_prompts`` atom) and threads them into the engine. When
 the prompts atom is not installed, this atom falls back to neutral empty
 strings and emits a diagnostic so users see the configuration drift.
@@ -82,7 +82,7 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": False,
     },
-    requires=("compaction_prompts",),
+    requires=("compaction_prompts", "prompt_templates"),
     tier=2,
 )
 
@@ -91,7 +91,7 @@ MANIFEST = ExtensionManifest(
 #
 # Per issue #76, the engine keeps **zero** literal English prompt text and
 # **zero** string-literal entry-type dispatch. Prompts are passed in as
-# parameters by the caller (resolved via ``ExtensionAPI.prompt_templates``);
+# parameters by the caller (resolved via ``api.get_service("prompt_templates")``);
 # entry materialization consults the ``ENTRY_MATERIALIZERS`` registry on
 # ``agentm.core.abi.session``.
 
@@ -810,10 +810,14 @@ async def _resolve_prompts(api: ExtensionAPI) -> tuple[CompactionPrompts, str]:
     degrades quality but avoids a hard crash.
     """
 
-    system = api.prompt_templates.get_prompt(_PROMPT_SUMMARIZATION_SYSTEM)
-    summarization = api.prompt_templates.get_prompt(_PROMPT_SUMMARIZATION)
-    update = api.prompt_templates.get_prompt(_PROMPT_UPDATE_SUMMARIZATION)
-    turn_prefix = api.prompt_templates.get_prompt(_PROMPT_TURN_PREFIX_SUMMARIZATION)
+    registry = api.get_service("prompt_templates")
+    if registry is None:
+        system = summarization = update = turn_prefix = None
+    else:
+        system = registry.get_prompt(_PROMPT_SUMMARIZATION_SYSTEM)
+        summarization = registry.get_prompt(_PROMPT_SUMMARIZATION)
+        update = registry.get_prompt(_PROMPT_UPDATE_SUMMARIZATION)
+        turn_prefix = registry.get_prompt(_PROMPT_TURN_PREFIX_SUMMARIZATION)
 
     missing = [
         name

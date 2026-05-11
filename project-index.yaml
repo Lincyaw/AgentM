@@ -543,7 +543,7 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/core/_internal/skills.py
-      - path: src/agentm/core/_internal/prompt_templates.py
+      - path: src/agentm/extensions/builtin/prompt_templates.py
       - path: src/agentm/core/abi/loop.py
       - path: src/agentm/core/abi/tool.py
       - path: src/agentm/core/_internal/tools.py

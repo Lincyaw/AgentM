@@ -353,9 +353,23 @@ class _StubPromptTemplatesService:
         return self._registry.get(name)
 
 
-@dataclass
 class _StubExtensionAPI:
-    prompt_templates: Any = field(default_factory=_StubPromptTemplatesService)
+    def __init__(self) -> None:
+        self._services: dict[str, Any] = {
+            "prompt_templates": _StubPromptTemplatesService()
+        }
+
+    def set_service(self, name: str, obj: Any) -> None:
+        self._services[name] = obj
+
+    def get_service(self, name: str) -> Any:
+        return self._services.get(name)
+
+    @property
+    def prompt_templates(self) -> Any:
+        # Back-compat shim for tests that still read api.prompt_templates
+        # directly to inspect the registered bodies.
+        return self._services.get("prompt_templates")
 
 
 # Ensure async tests run.

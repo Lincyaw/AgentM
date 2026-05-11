@@ -239,8 +239,7 @@ class _InstallApi:
         self.provider = None
         self.session = _DummySession()
         self.catalog = _DummyCatalog()
-        self.prompt_templates = _DummyPromptTemplates()
-        self._services: dict[str, Any] = {}
+        self._services: dict[str, Any] = {"prompt_templates": _DummyPromptTemplates()}
         self._writer = _DummyWriter()
         self._layout = DefaultProjectLayout(tmp_path)
         self.registered_providers: dict[str, Any] = {}
