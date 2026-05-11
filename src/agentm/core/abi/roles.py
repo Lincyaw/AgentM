@@ -27,7 +27,8 @@ COMPACTION_PROMPTS: Final = "compaction_prompts"
 """Atom that registers compaction prompt bodies + entry materializers.
 
 Floor atom: present in every session even when not listed in a scenario
-manifest so ``api.compaction`` always finds the default English prompts.
+manifest so the ``llm_compaction`` atom always finds the default English
+prompts.
 Default fulfiller: ``agentm.extensions.builtin.compaction_prompts``."""
 
 SYSTEM_PROMPT_PROVIDER: Final = "system_prompt_provider"

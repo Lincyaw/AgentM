@@ -13,16 +13,9 @@ changing shape.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from agentm.core.abi import AgentMessage, Tool
-from agentm.core.abi.compaction import (
-    CompactionResult,
-    CompactionSettings,
-    ContextUsageEstimate,
-)
 from agentm.core.abi.project_layout import ProjectLayout
 from agentm.core.abi.prompt_template import PromptTemplateRecord
 from agentm.core.abi.skill import SkillDiagnostic, SkillRecord
@@ -249,94 +242,6 @@ class _DefaultCatalogService:
 
         return _impl(loaded, scenario, core_hash)
 
-# --- Compaction service ----------------------------------------------------
-
-Summarizer = Callable[[str, str, int], Awaitable[str]]
-
-
-@runtime_checkable
-class CompactionService(Protocol):
-    def estimate_context_tokens(
-        self, messages: list[AgentMessage]
-    ) -> ContextUsageEstimate: ...
-
-    def should_compact(
-        self,
-        context_tokens: int,
-        context_window: int,
-        settings: CompactionSettings,
-    ) -> bool: ...
-
-    def prepare_compaction(
-        self,
-        path_entries: list[Any],
-        settings: CompactionSettings,
-        current_messages: list[AgentMessage] | None = None,
-        tools: list[Tool] | None = None,
-    ) -> Any | None: ...
-
-    async def compact(
-        self,
-        preparation: Any,
-        summarizer: Summarizer,
-        summarization_prompt: str,
-        custom_instructions: str | None = None,
-        prompts: Any | None = None,
-    ) -> CompactionResult: ...
-
-
-class _DefaultCompactionService:
-    def estimate_context_tokens(
-        self, messages: list[AgentMessage]
-    ) -> ContextUsageEstimate:
-        from agentm.core._internal.compaction import (
-            estimate_context_tokens as _impl,
-        )
-
-        return _impl(messages)
-
-    def should_compact(
-        self,
-        context_tokens: int,
-        context_window: int,
-        settings: CompactionSettings,
-    ) -> bool:
-        from agentm.core._internal.compaction import should_compact as _impl
-
-        return _impl(context_tokens, context_window, settings)
-
-    def prepare_compaction(
-        self,
-        path_entries: list[Any],
-        settings: CompactionSettings,
-        current_messages: list[AgentMessage] | None = None,
-        tools: list[Tool] | None = None,
-    ) -> Any | None:
-        from agentm.core._internal.compaction import (
-            prepare_compaction as _impl,
-        )
-
-        return _impl(path_entries, settings, current_messages, tools)
-
-    async def compact(
-        self,
-        preparation: Any,
-        summarizer: Summarizer,
-        summarization_prompt: str,
-        custom_instructions: str | None = None,
-        prompts: Any | None = None,
-    ) -> CompactionResult:
-        from agentm.core._internal.compaction import compact as _impl
-
-        return await _impl(
-            preparation,
-            summarizer,
-            summarization_prompt,
-            custom_instructions,
-            prompts,
-        )
-
-
 # --- Default builders ------------------------------------------------------
 
 
@@ -356,10 +261,6 @@ def default_catalog_service() -> CatalogService:
     return _DefaultCatalogService()
 
 
-def default_compaction_service() -> CompactionService:
-    return _DefaultCompactionService()
-
-
 def default_project_layout(cwd: str) -> ProjectLayout:
     """Return the harness's default :class:`ProjectLayout` for ``cwd``."""
 
@@ -370,13 +271,10 @@ def default_project_layout(cwd: str) -> ProjectLayout:
 
 __all__ = [
     "CatalogService",
-    "CompactionService",
     "ProjectLayout",
     "PromptTemplatesService",
     "SkillsService",
-    "Summarizer",
     "default_catalog_service",
-    "default_compaction_service",
     "default_project_layout",
     "default_prompt_templates_service",
     "default_skills_service",

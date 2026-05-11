@@ -66,7 +66,6 @@ class _StubAPI:
         self.skills = _NoopService()
         self.prompt_templates = _NoopService()
         self.catalog = _NoopService()
-        self.compaction = _NoopService()
 
     def on(self, channel: str, handler: Any, *, priority: int = 0) -> Any:
         self.handlers.setdefault(channel, []).append(handler)
