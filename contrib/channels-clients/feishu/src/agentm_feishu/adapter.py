@@ -38,6 +38,41 @@ _BUTTON_STYLE_MAP: dict[str, str] = {
 }
 
 
+async def _cancel_lark_tasks() -> None:
+    """Cancel pending tasks on lark's private event loop (best-effort).
+
+    lark-oapi's WS client schedules ``_ping_loop`` / ``_receive_message_loop``
+    / ``ExpiringCache._start_clear_cron`` via ``loop.create_task`` on a
+    separate loop installed by :func:`apply_ws_patch` and run in a
+    daemon thread. lark's own teardown stops that loop after closing
+    the WebSocket — but the tasks scheduled on it are left pending,
+    and the stopped loop can't process ``task.cancel()`` callbacks
+    from our main thread. The asyncio garbage collector then logs
+    "Task was destroyed but it is pending" at process exit.
+
+    Trying to restart that loop from our main thread fights both
+    ``asyncio.run`` (only one loop per thread) and the bg thread that
+    used to drive it. The pragmatic move is to (a) flag the tasks
+    cancelled for hygiene, then (b) silence the asyncio warning for
+    coroutines that live in ``lark_oapi.*`` — those tasks are owned by
+    a daemon thread that dies with the process anyway, so the warning
+    has no remediation value. See :func:`_install_lark_warning_filter`.
+    """
+    try:
+        import lark_oapi.ws.client as _ws_client  # noqa: PLC0415
+    except ImportError:
+        return
+    lark_loop = getattr(_ws_client, "loop", None)
+    if lark_loop is None or lark_loop.is_closed():
+        return
+    try:
+        pending = [t for t in asyncio.all_tasks(loop=lark_loop) if not t.done()]
+    except RuntimeError:
+        return
+    for task in pending:
+        task.cancel()
+
+
 @dataclass(slots=True)
 class FeishuConfig:
     """Adapter config — derived from CLI flags / env in ``cli.py``."""
@@ -60,11 +95,21 @@ class FeishuAdapter:
         self._client = client
         self._config = config
         self._channel: Any = None
-        self._connect_task: asyncio.Task[Any] | None = None
         # Pending ACK reactions keyed by chat_id — same lifetime contract
         # as the legacy implementation. Cleared on turn_complete.
         self._pending_acks: dict[str, list[asyncio.Task[Any]]] = {}
         self._running = False
+        # Signalled by stop() to wake start() out of its idle wait. We
+        # used to ``await asyncio.create_task(channel.connect())`` here,
+        # but lark-oapi 1.6.x made ``connect()`` a thin alias for
+        # ``start_background()`` — it returns once the WebSocket handshake
+        # completes, instead of blocking for the lifetime of the
+        # connection. That made adapter.start() exit ~0.4 s after handshake,
+        # the cli's asyncio.wait fall through, and the finally block
+        # ``adapter.stop()`` tear the WS down with code 1000 (mis-logged
+        # as ERROR by lark). An explicit stop event makes the intended
+        # "block until somebody tells me to stop" lifetime obvious.
+        self._stop_event: asyncio.Event = asyncio.Event()
 
     # -- lifecycle -----------------------------------------------------
 
@@ -92,22 +137,24 @@ class FeishuAdapter:
         # ``(name, handler)`` call form — the decorator form raises.
         channel.on("message", self._on_message)
         channel.on("cardAction", self._on_card_action)
-        self._connect_task = asyncio.create_task(
-            channel.connect(), name="feishu-channel"
-        )
         try:
+            # start_background spawns the WS receive loop, returns once
+            # the handshake is ready.
             await channel.connect_until_ready(timeout=20.0)
         except Exception:
             log.exception("feishu connect_until_ready failed")
             raise
         self._running = True
-        # Stay alive until stop() is invoked from outside.
-        await self._connect_task
+        # Block until stop() is invoked. The lark client keeps its own
+        # background reader / ping tasks alive in the meantime.
+        await self._stop_event.wait()
 
     async def stop(self) -> None:
         if not self._running and self._channel is None:
+            self._stop_event.set()
             return
         self._running = False
+        self._stop_event.set()
         if self._channel is not None:
             try:
                 await self._channel.disconnect()
@@ -117,12 +164,15 @@ class FeishuAdapter:
                 await self._channel.stop_background()
             except Exception:
                 log.exception("FeishuAdapter.stop_background raised")
-        if self._connect_task is not None and not self._connect_task.done():
-            self._connect_task.cancel()
-            try:
-                await self._connect_task
-            except (asyncio.CancelledError, Exception):
-                pass
+        # lark's ws client spawns its own ``_ping_loop`` /
+        # ``_receive_message_loop`` / ``ExpiringCache._start_clear_cron``
+        # tasks via ``loop.create_task`` and never tracks them. After our
+        # disconnect closes the WS, ``auto_reconnect=True`` (lark's
+        # default) keeps the recv loop alive waiting to reconnect. Find
+        # any task whose coroutine lives under lark_oapi and cancel it
+        # so the process can exit clean without "Task was destroyed but
+        # it is pending" warnings.
+        await _cancel_lark_tasks()
 
     # -- inbound (Feishu → gateway) -----------------------------------
 
