@@ -289,6 +289,36 @@ def test_commit_partial_keeps_witnessed_refs_and_drops_failing_ones() -> None:
 # --- one-shot commit invariant ---------------------------------------------
 
 
+# --- refs presence rule (genesis exception) --------------------------------
+
+
+def test_commit_rejects_non_genesis_event_with_empty_refs() -> None:
+    """id>=2 events MUST cite at least one earlier event in this firing.
+
+    Empty / missing refs on non-genesis events leave the auditor without
+    a causal trace across the window — see schema description on
+    ``_EVENT_SCHEMA.refs``.
+    """
+    state = _state()
+    err = state.commit(
+        [
+            _evid(1, turns=[10]),
+            _evid(2, turns=[11]),  # no refs — rejected
+        ]
+    )
+    assert err is not None
+    assert "events[1].refs must be non-empty" in err
+    assert state.committed is False
+
+
+def test_commit_accepts_genesis_event_with_empty_refs() -> None:
+    """id=1 has no in-window predecessor; empty refs is allowed."""
+    state = _state()
+    err = state.commit([_evid(1, turns=[10])])
+    assert err is None
+    assert state.events[0].id == 1
+
+
 def test_commit_is_one_shot() -> None:
     state = _state()
     first = state.commit([_evid(1, turns=[10])])
