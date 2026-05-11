@@ -38,6 +38,7 @@ extensions:
       max_cost_usd: 0.50
 
   # Promotion gate. kind="system_prompt" landed in B-3.
+  - module: contrib.extensions.changespec_validators
   - module: agentm.extensions.builtin.tool_propose_change
     config:
       target_scenario: rca:baseline

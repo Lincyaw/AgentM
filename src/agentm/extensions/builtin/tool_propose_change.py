@@ -358,7 +358,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 f"harness compose-graph reload; out of scope for Phase 2 "
                 f"(design §11)"
             )
-        validator = _load_validator(kind, cwd=cwd)
+        validator = _load_validator(api, kind)
         if validator is None:
             return _error(
                 f"not_yet_implemented: no validator registered for "
@@ -737,7 +737,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             new_hash = reload_result.new_hash
             error = reload_result.error
         else:
-            ok, old_hash, new_hash, error = _write_cross_session(
+            ok, old_hash, new_hash, error = await _write_cross_session(
                 api, loaded["source_path"], new_source, rationale
             )
         if not ok:
@@ -923,64 +923,42 @@ def _find_atom_on_disk(
     return None
 
 
-def _write_cross_session(
+async def _write_cross_session(
     api: ExtensionAPI,
     source_path: str | None,
     new_source: str,
     rationale: str,
 ) -> tuple[bool, str | None, str | None, str | None]:
-    """Write ``new_source`` to ``source_path`` via the resource writer the
-    api exposes (or a fallback file write). Returns (ok, old_hash, new_hash,
-    error). ``old_hash`` and ``new_hash`` are best-effort: when running on
-    git-backed cwd the harness commits the write and the post-image SHA is
-    discoverable via ``git log -1 --format=%H -- <path>``.
+    """Write ``new_source`` to ``source_path`` through the api's
+    ``ResourceWriter`` seam. Returns (ok, old_hash, new_hash, error).
+
+    All file mutation goes through ``api.get_resource_writer()`` so the
+    write barrier (constitution path check, git commit) runs uniformly
+    in-session and cross-session. The writer's ``WriteResult`` carries
+    ``commit_sha_before`` / ``commit_sha_after`` when the path is managed
+    and a repo is available; we fall back to a content-hash digest only
+    when those are absent (e.g. unmanaged path on advisory-mode writer).
     """
     import hashlib
-    import subprocess
 
     if not source_path:
         return False, None, None, "missing source_path"
-    p = Path(source_path)
+    writer = api.get_resource_writer()
+    new_bytes = new_source.encode("utf-8")
     try:
-        old_bytes = p.read_bytes() if p.is_file() else b""
-        old_hash = hashlib.sha256(old_bytes).hexdigest()[:12] if old_bytes else None
-
-        # Prefer ResourceWriter via api if exposed; else direct write.
-        write_async = getattr(api, "resource_writer_write", None)
-        if callable(write_async):  # pragma: no cover - opt-in writer surface
-            import asyncio
-
-            asyncio.get_event_loop().run_until_complete(
-                write_async(str(p), new_source.encode("utf-8"), rationale=rationale)
-            )
-        else:
-            p.write_text(new_source, encoding="utf-8")
-            cwd = p.parent
-            try:
-                subprocess.run(
-                    ["git", "add", str(p)], cwd=cwd, check=False, capture_output=True
-                )
-                subprocess.run(
-                    [
-                        "git",
-                        "-c",
-                        "user.email=agent@agentm",
-                        "-c",
-                        "user.name=tool_propose_change",
-                        "commit",
-                        "-m",
-                        f"propose_change: {rationale}",
-                        "--",
-                        str(p),
-                    ],
-                    cwd=cwd,
-                    check=False,
-                    capture_output=True,
-                )
-            except FileNotFoundError:
-                pass
-
-        new_hash = hashlib.sha256(new_source.encode("utf-8")).hexdigest()[:12]
+        try:
+            old_bytes = await writer.read(source_path)
+        except FileNotFoundError:
+            old_bytes = b""
+        result = await writer.write(
+            source_path, new_bytes, rationale=rationale, author="agent"
+        )
+        if result.error:
+            return False, None, None, result.error
+        old_hash = result.commit_sha_before or (
+            hashlib.sha256(old_bytes).hexdigest()[:12] if old_bytes else None
+        )
+        new_hash = result.commit_sha_after or hashlib.sha256(new_bytes).hexdigest()[:12]
         return True, old_hash, new_hash, None
     except Exception as exc:  # noqa: BLE001
         return False, None, None, str(exc)
@@ -1234,42 +1212,27 @@ def _apply_deployment_gate(
     }
 
 
-def _load_validator(kind: str, cwd: Path | None = None) -> Any:
-    """Load the per-kind validator from
-    ``contrib/extensions/changespec_validators/<kind>.py`` and return its
-    ``validate`` callable. Returns ``None`` when no module is registered.
+def _load_validator(api: ExtensionAPI, kind: str) -> Any:
+    """Look up the per-kind ``ChangeSpec`` validator on the
+    ``changespec_validators`` service. Returns ``None`` when no validator
+    is registered for ``kind``.
 
-    Validators live under ``contrib/`` (not ``src/agentm/``) because they
-    encode scenario-shape policy, not core mechanism. They are not atoms
-    (no MANIFEST), so the §11 contract does not apply. We load by file
-    path rather than ``importlib.import_module`` because ``contrib`` is
-    not a regular Python package on ``sys.path`` when ``agentm`` is
-    invoked as a console script — only when run via ``python -c`` from
-    the repo root.
+    Validators register themselves via ``api.set_service`` at install time
+    (see ``contrib/extensions/changespec_validators/__init__.py``). Scenarios
+    that load ``tool_propose_change`` must also mount the validators
+    extension; otherwise every ChangeSpec.kind dispatches to ``None`` and
+    the caller surfaces a ``not_yet_implemented`` error. Looking up via
+    the service decouples the builtin from the on-disk layout of
+    ``contrib/`` — new validator kinds plug in by mounting another
+    extension that augments the same service entry.
     """
-    import importlib.util
-
     safe_kind = kind.strip().lower()
     if not safe_kind.replace("_", "").isalnum():
         return None
-    rel = Path("contrib") / "extensions" / "changespec_validators" / f"{safe_kind}.py"
-    candidates: list[Path] = []
-    if cwd is not None:
-        candidates.append(cwd / rel)
-    candidates.append(Path(__file__).resolve().parents[4] / rel)
-    file_path: Path | None = next((p for p in candidates if p.is_file()), None)
-    if file_path is None:
+    registry = api.get_service("changespec_validators")
+    if not isinstance(registry, dict):
         return None
-    module_name = f"_agentm_changespec_validator__{safe_kind}"
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    if spec is None or spec.loader is None:
-        return None
-    module = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        return None
-    fn = getattr(module, "validate", None)
+    fn = registry.get(safe_kind)
     return fn if callable(fn) else None
 
 

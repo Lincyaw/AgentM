@@ -21,6 +21,7 @@ extensions:
     config:
       target_scenario: format_fix
       eval_dir: contrib/scenarios/format_fix/eval
+  - module: contrib.extensions.changespec_validators
   - module: agentm.extensions.builtin.tool_propose_change
     config:
       target_scenario: format_fix

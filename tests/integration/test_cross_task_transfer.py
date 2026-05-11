@@ -154,6 +154,7 @@ async def test_transfer_plants_candidate_in_sibling_scenario(
             extensions=[
 
                 ("agentm.extensions.builtin.operations_local", {}),
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {
@@ -275,6 +276,7 @@ async def test_transfer_skipped_for_non_atom_source(tmp_path: Path) -> None:
             extensions=[
 
                 ("agentm.extensions.builtin.operations_local", {}),
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {

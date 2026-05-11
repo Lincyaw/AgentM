@@ -192,6 +192,7 @@ async def test_stale_baseline_fingerprint_rejected(tmp_path: Path) -> None:
             extensions=[
 
                 ("agentm.extensions.builtin.operations_local", {}),
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {"target_scenario": "format_fix"},
@@ -272,6 +273,7 @@ async def test_omitted_baseline_fingerprint_skips_check(tmp_path: Path) -> None:
             extensions=[
 
                 ("agentm.extensions.builtin.operations_local", {}),
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {"target_scenario": "format_fix"},
