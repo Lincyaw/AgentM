@@ -24,6 +24,41 @@ from pathlib import Path
 __version__ = "0.1.0"
 
 
+def load_dotenv_files(cwd: Path) -> None:
+    """Best-effort ``.env`` autoload for any channels CLI.
+
+    Loads (in order, never overriding existing env): ``<cwd>/.env``, then
+    the ``.env`` next to the nearest ``[tool.uv.workspace]`` pyproject
+    walking up at most 8 levels — same convention the gateway has used
+    since v0, now shared so terminal/feishu/worker clients also see
+    `LARK_APP_ID`, `OPENAI_API_KEY`, etc. without manual exports.
+
+    No-op when ``python-dotenv`` isn't installed; the import is local
+    so this stays import-safe even in minimal client environments.
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    candidates: list[Path] = [cwd / ".env"]
+    walker = cwd.resolve()
+    for _ in range(8):
+        manifest = walker / "pyproject.toml"
+        if manifest.exists():
+            try:
+                if "[tool.uv.workspace]" in manifest.read_text(encoding="utf-8"):
+                    candidates.append(walker / ".env")
+                    break
+            except OSError:
+                pass
+        if walker.parent == walker:
+            break
+        walker = walker.parent
+    for path in candidates:
+        if path.exists():
+            load_dotenv(path, override=False)
+
+
 def default_socket_url() -> str:
     """Conventional ``unix://`` URL shared by gateway and clients.
 

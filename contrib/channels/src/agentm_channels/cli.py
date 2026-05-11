@@ -51,7 +51,7 @@ from urllib.parse import urlparse
 
 from agentm.ai import DEFAULT_PROVIDER_REGISTRY
 
-from . import DEFAULT_SOCKET_URL
+from . import DEFAULT_SOCKET_URL, load_dotenv_files as _load_dotenv_files
 from agentm.core.abi import EventBus
 
 from .approval import ApprovalPolicy
@@ -79,28 +79,8 @@ logger = logging.getLogger(__name__)
 # -------- config loading ------------------------------------------------
 
 
-def _load_dotenv_files(cwd: Path) -> None:
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        return
-    candidates: list[Path] = [cwd / ".env"]
-    walker = cwd.resolve()
-    for _ in range(8):
-        manifest = walker / "pyproject.toml"
-        if manifest.exists():
-            try:
-                if "[tool.uv.workspace]" in manifest.read_text(encoding="utf-8"):
-                    candidates.append(walker / ".env")
-                    break
-            except OSError:
-                pass
-        if walker.parent == walker:
-            break
-        walker = walker.parent
-    for path in candidates:
-        if path.exists():
-            load_dotenv(path, override=False)
+# `_load_dotenv_files` is imported from agentm_channels.__init__ so
+# every CLI (gateway, terminal, feishu, worker) shares one autoload rule.
 
 
 def _expand_env(obj: Any) -> Any:
