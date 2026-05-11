@@ -207,15 +207,6 @@ class _DummyPromptTemplates:
         return text
 
 
-class _DummySkills:
-    def load_skills(self, **_: Any) -> tuple[list[Any], list[Any]]:
-        return [], []
-
-    def format_skills_for_prompt(self, skills: list[Any]) -> str:
-        assert skills == []
-        return ""
-
-
 class _DummySession:
     def get_branch(self) -> list[Any]:
         return []
@@ -249,7 +240,6 @@ class _InstallApi:
         self.session = _DummySession()
         self.catalog = _DummyCatalog()
         self.prompt_templates = _DummyPromptTemplates()
-        self.skills = _DummySkills()
         self._services: dict[str, Any] = {}
         self._writer = _DummyWriter()
         self._layout = DefaultProjectLayout(tmp_path)
