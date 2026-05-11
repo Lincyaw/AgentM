@@ -32,6 +32,13 @@ class _StubClient:
         self.sent.append(env)
 
 
+class _FakeSendResult:
+    """Minimal stand-in for ``lark_oapi.channel.SendResult``."""
+
+    def __init__(self, message_id: str | None) -> None:
+        self.message_id = message_id
+
+
 class _FakeLarkChannel:
     """Minimal stand-in for ``lark_oapi.channel.FeishuChannel``."""
 
@@ -39,10 +46,22 @@ class _FakeLarkChannel:
         self.sent: list[tuple[str, dict[str, Any]]] = []
         self.reactions_added: list[tuple[str, str]] = []
         self.reactions_removed: list[tuple[str, str]] = []
+        self.patched: list[tuple[str, dict[str, Any]]] = []
         self._bot = None  # so adapter._is_self() is always False
+        self._send_counter = 0
 
-    async def send(self, chat_id: str, payload: dict[str, Any]) -> None:
+    async def send(
+        self, chat_id: str, payload: dict[str, Any]
+    ) -> _FakeSendResult:
         self.sent.append((chat_id, payload))
+        self._send_counter += 1
+        return _FakeSendResult(message_id=f"msg-{self._send_counter}")
+
+    async def update_card(
+        self, message_id: str, card: dict[str, Any]
+    ) -> _FakeSendResult:
+        self.patched.append((message_id, card))
+        return _FakeSendResult(message_id=message_id)
 
     async def add_reaction(self, message_id: str, emoji: str) -> Any:
         self.reactions_added.append((message_id, emoji))
@@ -57,7 +76,11 @@ class _FakeLarkChannel:
         self.reactions_removed.append((message_id, reaction_id))
 
 
-def _make_adapter(allow: list[str] | None = None) -> tuple[FeishuAdapter, _StubClient, _FakeLarkChannel]:
+def _make_adapter(
+    allow: list[str] | None = None,
+    *,
+    stream_debounce_s: float = 0.3,
+) -> tuple[FeishuAdapter, _StubClient, _FakeLarkChannel]:
     client = _StubClient()
     cfg = FeishuConfig(
         app_id="cli_xxxx",
@@ -66,6 +89,7 @@ def _make_adapter(allow: list[str] | None = None) -> tuple[FeishuAdapter, _StubC
         chat_id_prefix="feishu",
         channel_name="feishu",
         ack_emoji="OK",
+        stream_debounce_s=stream_debounce_s,
     )
     adapter = FeishuAdapter(client=client, config=cfg)  # type: ignore[arg-type]
     fake_channel = _FakeLarkChannel()
@@ -288,3 +312,186 @@ def test_markdown_card_empty_text_is_placeholder() -> None:
 def test_markdown_card_no_buttons_has_one_element() -> None:
     card = _markdown_card("hi", buttons=[])
     assert len(card["body"]["elements"]) == 1
+
+
+# -- streaming (stream_id) --------------------------------------------
+
+
+async def test_stream_first_frame_sends_and_remembers_message_id() -> None:
+    adapter, _client, fake = _make_adapter(stream_debounce_s=0.01)
+    env = _outbound_env(
+        {
+            "channel": "feishu",
+            "chat_id": "oc_chat",
+            "content": "thinking...",
+            "kind": "message",
+            "stream_id": "tool_call_42",
+        }
+    )
+    await adapter.handle_outbound(env)
+    assert len(fake.sent) == 1
+    assert fake.patched == []
+    # State retained until final / turn_complete.
+    assert ("oc_chat", "tool_call_42") in adapter._streams
+
+
+async def test_stream_subsequent_frames_patch_via_update_card() -> None:
+    adapter, _client, fake = _make_adapter(stream_debounce_s=0.01)
+
+    async def frame(content: str, *, final: bool = False) -> None:
+        await adapter.handle_outbound(
+            _outbound_env(
+                {
+                    "channel": "feishu",
+                    "chat_id": "oc_chat",
+                    "content": content,
+                    "kind": "message",
+                    "stream_id": "s1",
+                    "final": final,
+                }
+            )
+        )
+
+    await frame("thinking...")
+    await frame("reading file foo.py")
+    await frame("running tests")
+    # Let the debounce + flush task drain.
+    await asyncio.sleep(0.05)
+    # One real send, then one or more patches with the latest content.
+    assert len(fake.sent) == 1
+    assert len(fake.patched) >= 1
+    last_card = fake.patched[-1][1]
+    assert last_card["body"]["elements"][0]["content"] == "running tests"
+
+
+async def test_stream_intermediate_frames_are_coalesced() -> None:
+    adapter, _client, fake = _make_adapter(stream_debounce_s=0.02)
+    # Burst-fire four frames before the debounce window expires.
+    for i, content in enumerate(["a", "b", "c", "d"]):
+        await adapter.handle_outbound(
+            _outbound_env(
+                {
+                    "channel": "feishu",
+                    "chat_id": "oc_chat",
+                    "content": content,
+                    "kind": "message",
+                    "stream_id": "burst",
+                    "final": i == 3,
+                }
+            )
+        )
+    # Wait long enough for the debounce sleep to finish + flush to run.
+    await asyncio.sleep(0.1)
+    # First send is the initial frame; remaining frames must collapse
+    # into a single patch (the last value wins).
+    assert len(fake.sent) == 1
+    assert len(fake.patched) == 1
+    assert fake.patched[0][1]["body"]["elements"][0]["content"] == "d"
+
+
+async def test_stream_final_flushes_immediately_and_drops_state() -> None:
+    adapter, _client, fake = _make_adapter(stream_debounce_s=10.0)
+    # First frame — initial send.
+    await adapter.handle_outbound(
+        _outbound_env(
+            {
+                "channel": "feishu",
+                "chat_id": "oc_chat",
+                "content": "step 1",
+                "kind": "message",
+                "stream_id": "s2",
+            }
+        )
+    )
+    # Final frame — must NOT wait the 10 s debounce.
+    await adapter.handle_outbound(
+        _outbound_env(
+            {
+                "channel": "feishu",
+                "chat_id": "oc_chat",
+                "content": "all done",
+                "kind": "message",
+                "stream_id": "s2",
+                "final": True,
+            }
+        )
+    )
+    await asyncio.sleep(0.01)
+    assert len(fake.sent) == 1
+    assert len(fake.patched) == 1
+    assert fake.patched[0][1]["body"]["elements"][0]["content"] == "all done"
+    assert ("oc_chat", "s2") not in adapter._streams
+
+
+async def test_stream_distinct_ids_get_distinct_cards() -> None:
+    adapter, _client, fake = _make_adapter(stream_debounce_s=0.01)
+    # Two streams interleaved in the same chat — each must get its own
+    # initial send.
+    for sid, content in [("a", "A1"), ("b", "B1")]:
+        await adapter.handle_outbound(
+            _outbound_env(
+                {
+                    "channel": "feishu",
+                    "chat_id": "oc_chat",
+                    "content": content,
+                    "kind": "message",
+                    "stream_id": sid,
+                }
+            )
+        )
+    assert len(fake.sent) == 2
+    # Each subsequent same-id frame becomes a patch of *that* card.
+    await adapter.handle_outbound(
+        _outbound_env(
+            {
+                "channel": "feishu",
+                "chat_id": "oc_chat",
+                "content": "A2",
+                "kind": "message",
+                "stream_id": "a",
+                "final": True,
+            }
+        )
+    )
+    await asyncio.sleep(0.01)
+    assert len(fake.patched) == 1
+    # Stream "a" was sent first → message_id "msg-1"; stream "b" → "msg-2".
+    assert fake.patched[0][0] == "msg-1"
+
+
+async def test_stream_turn_complete_finalizes_open_streams() -> None:
+    adapter, _client, fake = _make_adapter(stream_debounce_s=10.0)
+    # Open a stream, queue a second frame that would normally wait
+    # 10 s for the debounce.
+    await adapter.handle_outbound(
+        _outbound_env(
+            {
+                "channel": "feishu",
+                "chat_id": "oc_chat",
+                "content": "frame 1",
+                "kind": "message",
+                "stream_id": "s3",
+            }
+        )
+    )
+    await adapter.handle_outbound(
+        _outbound_env(
+            {
+                "channel": "feishu",
+                "chat_id": "oc_chat",
+                "content": "frame 2",
+                "kind": "message",
+                "stream_id": "s3",
+            }
+        )
+    )
+    # turn_complete must drain the pending frame without waiting.
+    await adapter.handle_outbound(
+        _outbound_env(
+            {"channel": "feishu", "chat_id": "oc_chat", "kind": "turn_complete"}
+        )
+    )
+    await asyncio.sleep(0.01)
+    assert len(fake.patched) == 1
+    assert fake.patched[0][1]["body"]["elements"][0]["content"] == "frame 2"
+    assert ("oc_chat", "s3") not in adapter._streams
