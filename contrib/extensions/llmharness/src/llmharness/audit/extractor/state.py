@@ -111,11 +111,22 @@ class ExtractionState:
             # the auditor cannot trace causal structure across this
             # firing's window.
             if ev.id >= 2 and not refs_raw:
+                candidates = ", ".join(
+                    f"{{id:{c.id}, kind:{c.kind.value}, summary:{c.summary[:60]!r}}}"
+                    for c in working
+                    if c.id < ev.id
+                )
                 return (
-                    f"submit_events: events[{ev.id - 1}].refs must be "
-                    "non-empty for non-genesis events (id>=2). The "
-                    f"event id={ev.id} must cite at least one earlier "
-                    "event in this firing with a witness."
+                    f"submit_events: events[{ev.id - 1}].refs is empty but "
+                    f"id={ev.id} is non-genesis (id>=2) and must cite at least "
+                    "one earlier event from THIS submission.\n"
+                    f"Candidates you can cite: [{candidates}].\n"
+                    f"Each ref needs: {{to:<earlier_id>, kind:'data'|'ref', "
+                    "reason:<short>, and EITHER cited_entities:[...] (for "
+                    "kind='data', e.g. table/column/service names) OR "
+                    "cited_quote:'...' (for kind='ref', a literal substring). "
+                    "The witness must appear in BOTH the cited event's "
+                    "source_turns text and this event's source_turns text."
                 )
             for ridx, raw_ref in enumerate(refs_raw):
                 if not isinstance(raw_ref, dict):
