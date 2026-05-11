@@ -1,4 +1,4 @@
-"""ChannelManager — instantiates enabled channels and fans out outbound messages.
+"""ChannelManager — fans out outbound messages to wire-bridge channels.
 
 The manager is the *channel-side* half of the gateway; the *agent-side*
 half lives in :mod:`agentm_channels.gateway`. Together they own the
@@ -6,26 +6,19 @@ half lives in :mod:`agentm_channels.gateway`. Together they own the
 outbound, manager consumes outbound and dispatches to the right
 channel by ``msg.channel``.
 
-Config shape (under any larger config; the manager only reads the
-``channels`` section)::
+The only built-in channel is the test-only ``stub`` (see
+``channels/stub.py``); real platforms (Feishu, terminal, worker) run as
+separate client processes and inject themselves via :meth:`inject_channel`
+through the wire bridge.
 
-    channels:
-      feishu:
-        enabled: true
-        app_id: cli_xxx
-        app_secret: xxxx
-        allow_from: ['*']
-      slack:
-        enabled: false
-
-Channels not present in the config are simply not started.
+Config shape — only used by the in-tree test stub. Production gateways
+always pass ``{}`` and rely on ``inject_channel``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import warnings
 from typing import Any
 
 from .base import BaseChannel
@@ -85,23 +78,6 @@ class ChannelManager:
         self._tasks: list[asyncio.Task[Any]] = []
         self._dispatch_task: asyncio.Task[Any] | None = None
         self._init_channels()
-        # Phase 4: warn when the yaml-driven v0 path is in use. The
-        # wire bridge does not go through __init__ with a config — it
-        # uses inject_channel — so this only fires on the legacy
-        # ``channels:`` yaml block. "stub" is the test fixture.
-        legacy = [n for n in self._channels if n != "stub"]
-        if legacy:
-            warnings.warn(
-                (
-                    "agentm_channels.ChannelManager: v0 in-process channels "
-                    f"{sorted(legacy)} are deprecated. Run "
-                    "`agentm-gateway --bind unix:///path/to/sock` and "
-                    "connect each platform as a separate client process "
-                    "(agentm-terminal, agentm-feishu)."
-                ),
-                DeprecationWarning,
-                stacklevel=2,
-            )
 
     @property
     def channels(self) -> dict[str, BaseChannel]:
