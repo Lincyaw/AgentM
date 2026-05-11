@@ -104,6 +104,63 @@ async def test_timeout_blocks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_index_carries_pending_request_and_clears_on_resolve() -> None:
+    """Approval bridges with an index register/unregister so the
+    gateway can route clicks in O(1). Two invariants:
+
+    1. While a request is pending, ``index[approval_id]`` points at
+       the bridge that owns it.
+    2. After resolve, the entry is gone.
+    """
+    ctx = ApprovalContext(channel="stub", chat_id="c", sender_id="u")
+    index: dict[str, ApprovalBridge] = {}
+    bus = MessageBus()
+    bridge = ApprovalBridge(
+        bus,
+        ApprovalPolicy(require_approval=frozenset({"bash"}), timeout_seconds=2.0),
+        get_context=lambda: ctx,
+        index=index,
+    )
+
+    async def click_approve() -> None:
+        for _ in range(200):
+            if bus.outbound.qsize() > 0:
+                msg = await bus.consume_outbound()
+                if msg.metadata.get("kind") == "approval_request":
+                    # The index now knows about this approval_id.
+                    approval_id = msg.metadata["approval_id"]
+                    assert index[approval_id] is bridge
+                    approve_value = msg.buttons[0].value
+                    await bridge.resolve(
+                        approval_id, value=approve_value, sender_id="u"
+                    )
+                    return
+            await asyncio.sleep(0.01)
+
+    clicker = asyncio.create_task(click_approve())
+    result = await bridge.handle_tool_call(_tc())
+    await clicker
+    assert result is None
+    # After resolution the index is empty.
+    assert index == {}
+
+
+@pytest.mark.asyncio
+async def test_index_clears_on_timeout() -> None:
+    ctx = ApprovalContext(channel="stub", chat_id="c", sender_id="u")
+    index: dict[str, ApprovalBridge] = {}
+    bus = MessageBus()
+    bridge = ApprovalBridge(
+        bus,
+        ApprovalPolicy(require_approval=frozenset({"bash"}), timeout_seconds=0.05),
+        get_context=lambda: ctx,
+        index=index,
+    )
+    await bridge.handle_tool_call(_tc())
+    assert index == {}  # cleared on timeout path too
+
+
+@pytest.mark.asyncio
 async def test_other_user_click_is_ignored_until_rightful_user_acts() -> None:
     ctx = ApprovalContext(channel="stub", chat_id="c", sender_id="u")
     bridge, bus = _make(

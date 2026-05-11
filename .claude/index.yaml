@@ -497,3 +497,17 @@ concepts:
     related_concepts: [llmharness_cognitive_audit, extension_as_scenario, pluggable_architecture, single_file_extension_contract]
     plans: ["plans/2026-05-10-llmharness-issue-134-v3.md"]
     tasks: []
+
+  gateway_channels:
+    description: "Long-running daemon (contrib/channels/) that mediates between chat platforms (Feishu today; Slack/Telegram/WeChat tomorrow) and per-(channel, chat_id) AgentSessions. Two-queue MessageBus decouples channels from gateway: channels publish InboundMessage, gateway publishes OutboundMessage, ChannelManager dispatches. Typed wire format — OutboundKind enum (MESSAGE / TURN_COMPLETE) replaces nanobot's magic metadata-string dispatch; typed Button dataclass replaces nanobot's list[list[str]] + label string-matching. Cross-loop safety centralized in MessageBus._publish (lark_oapi WS client dispatches on a foreign asyncio loop in a background thread — naive queue.put silently drops; bridge via call_soon_threadsafe). BaseChannel ABC contract is small (start/stop/send + opt-in send_delta) with _handle_message helper enforcing allow_from. ApprovalBridge is the channel-agnostic HITL gate: hooks ToolCallEvent, posts typed Buttons, identity-checks sender_id, owns private encoding of button value. Gateway routes by session_key (defaults to channel:chat_id; channels can override for thread scoping). Per-inbound asyncio.create_task so a route blocked on an approval future cannot stall button-click routing. Deliberate non-features (vs nanobot): streaming (pending SDK delta events), ASR, tool-hint cards, multi-replica. ~1.5k lines vs nanobot's 14.6k channels/ — feature parity is not the goal, replaceability is."
+    design: "designs/gateway-channels.md"
+    related_concepts: [pluggable_architecture, command_routing, extension_as_scenario]
+    plans: ["plans/2026-05-11-gateway-command-layer.md"]
+    tasks: []
+
+  command_routing:
+    description: "Slash command layer for the gateway. User-typed messages starting with '/' are intercepted before reaching the LLM — control commands mutate gateway/session state, prompt commands expand a template and fall through to session.prompt(). Unknown commands are rejected (never forwarded to model). Four handler kinds under one CommandHandler Protocol: BuiltinControl (Python in commands/builtins/), MarkdownPrompt (cwd/.agentm/commands/*.md with frontmatter+$ARGUMENTS), SkillCommand (auto-generated from skill directories; expands SKILL.md as one-turn injection), AtomCommand (PR #2; MANIFEST opt-in via mountable_via_command + gateway whitelist; mounts/unmounts atoms against a per-session runtime scenario overlay copied from contrib/scenarios/<name>/manifest.yaml into <state_dir>/scenarios/<session_key>/ so kernel mutations never touch source files). Namespacing: /name for builtin/markdown, /skill:name and /atom:name for the others — provenance visible in /help. Discovery is data-driven for non-builtin kinds (filesystem walk, MANIFEST lookup). Parallels Claude Code's slash-command + skill + plugin design but keeps AgentM's atom concept explicit and auditable (every mount produces a catalog event via self_modifiable_architecture's existing reload primitive)."
+    design: "designs/command-routing.md"
+    related_concepts: [gateway_channels, pluggable_architecture, self_modifiable_architecture, single_file_extension_contract]
+    plans: ["plans/2026-05-11-gateway-command-layer.md"]
+    tasks: []
