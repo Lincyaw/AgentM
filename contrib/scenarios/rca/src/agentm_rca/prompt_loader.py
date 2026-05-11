@@ -24,12 +24,12 @@ from xml.sax.saxutils import escape
 
 from agentm.core.lib.frontmatter import parse_frontmatter
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import (
+from agentm.core.abi.events import (
     BeforeAgentStartEvent,
     ResolveSubagentEvent,
     SessionReadyEvent,
 )
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 
 _RCA_ROOT = Path(__file__).resolve().parent.parent.parent

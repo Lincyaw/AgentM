@@ -49,7 +49,11 @@ def atom_metrics_path(
 def atom_decisions_path(
     name: str, version_key: str, *, root: Path | None = None
 ) -> Path:
-    return atom_version_dir(name, version_key, root=root) / "decisions.jsonl"
+    # Single source of truth lives in core.abi.catalog so atoms and runtime
+    # agree on the shape without atoms having to reach into ``_layout``.
+    from agentm.core.abi.catalog import atom_decisions_path as _abi_impl
+
+    return _abi_impl(name, version_key, root=root)
 
 
 # --- Indexer helpers -----------------------------------------------------

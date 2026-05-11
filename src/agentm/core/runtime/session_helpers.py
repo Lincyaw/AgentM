@@ -10,8 +10,8 @@ from typing import Any
 
 from agentm.core.abi import AgentMessage, EventBus, LoopConfig, TerminationCause
 from agentm.core.abi.events import DiagnosticEvent
-from agentm.harness.extension import ExtensionLoadError, ProviderConfig, ReadonlySession
-from agentm.harness.session_manager import SessionEntry, SessionManager
+from agentm.core.runtime.extension import ExtensionLoadError, ProviderConfig, ReadonlySession
+from agentm.core.runtime.session_manager import SessionEntry, SessionManager
 
 
 @dataclass(frozen=True, slots=True)

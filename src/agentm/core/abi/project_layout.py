@@ -8,7 +8,7 @@ Atoms reach their on-disk neighbours via this Protocol so that policy
 Layer purity: this module is part of ``core.abi``. It defines a Protocol
 only — it does not import any harness/extension code and does not touch
 the filesystem at import time. The default implementation lives in
-``agentm.harness.catalog``.
+``agentm.core.runtime.catalog``.
 """
 
 from __future__ import annotations

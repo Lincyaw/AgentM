@@ -14,8 +14,8 @@ from typing import Any
 
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import ResourcesDiscoverEvent
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.events import ResourcesDiscoverEvent
+from agentm.core.abi.extension import ExtensionAPI
 
 
 _RECOGNIZED_SCOPES: frozenset[str] = frozenset({"user", "project"})

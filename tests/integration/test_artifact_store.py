@@ -13,8 +13,9 @@ import pytest
 
 from agentm.core.abi import AssistantStreamEvent, MessageEnd, Model, TextContent
 from agentm.core.abi.messages import AssistantMessage
-from agentm.harness.extension import ProviderConfig
-from agentm.harness.session import AgentSession, AgentSessionConfig
+from agentm.core.abi.extension import ProviderConfig
+from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.runtime.session import AgentSession
 
 _PROVIDER_MODULE = "agentm._tests.artifact_store_provider"
 _HYPOTHESIS_MODULE = "agentm._tests.rca_hypothesis_tools"
@@ -113,7 +114,11 @@ async def _tool_json(tool: Any, args: dict[str, Any]) -> dict[str, Any]:
 async def test_artifact_write_is_append_only_for_same_title(tmp_path: Path) -> None:
     session = await _create_session(
         tmp_path,
-        extensions=[("agentm.extensions.builtin.artifact_store", {})],
+        extensions=[
+
+            ("agentm.extensions.builtin.operations_local", {}),
+
+            ("agentm.extensions.builtin.artifact_store", {})],
     )
     try:
         write = _tool(session, "artifact_write")
@@ -144,19 +149,31 @@ async def test_artifact_store_shares_by_root_session_and_isolates_other_roots(
         tmp_path,
         root_session_id="root-shared",
         task_id="task-a",
-        extensions=[("agentm.extensions.builtin.artifact_store", {})],
+        extensions=[
+
+            ("agentm.extensions.builtin.operations_local", {}),
+
+            ("agentm.extensions.builtin.artifact_store", {})],
     )
     shared_b = await _create_session(
         tmp_path,
         root_session_id="root-shared",
         task_id="task-b",
-        extensions=[("agentm.extensions.builtin.artifact_store", {})],
+        extensions=[
+
+            ("agentm.extensions.builtin.operations_local", {}),
+
+            ("agentm.extensions.builtin.artifact_store", {})],
     )
     isolated = await _create_session(
         tmp_path,
         root_session_id="root-isolated",
         task_id="task-c",
-        extensions=[("agentm.extensions.builtin.artifact_store", {})],
+        extensions=[
+
+            ("agentm.extensions.builtin.operations_local", {}),
+
+            ("agentm.extensions.builtin.artifact_store", {})],
     )
     try:
         shared_a_write = _tool(shared_a, "artifact_write")
@@ -200,13 +217,21 @@ async def test_artifact_store_concurrent_same_root_allocates_unique_ids(
         tmp_path,
         root_session_id="root-concurrent",
         task_id="task-a",
-        extensions=[("agentm.extensions.builtin.artifact_store", {})],
+        extensions=[
+
+            ("agentm.extensions.builtin.operations_local", {}),
+
+            ("agentm.extensions.builtin.artifact_store", {})],
     )
     second = await _create_session(
         tmp_path,
         root_session_id="root-concurrent",
         task_id="task-b",
-        extensions=[("agentm.extensions.builtin.artifact_store", {})],
+        extensions=[
+
+            ("agentm.extensions.builtin.operations_local", {}),
+
+            ("agentm.extensions.builtin.artifact_store", {})],
     )
     try:
         first_write = _tool(first, "artifact_write")
@@ -234,12 +259,20 @@ async def test_artifact_store_service_is_per_session_instance(tmp_path: Path) ->
     first = await _create_session(
         tmp_path,
         root_session_id="root-service-a",
-        extensions=[("agentm.extensions.builtin.artifact_store", {})],
+        extensions=[
+
+            ("agentm.extensions.builtin.operations_local", {}),
+
+            ("agentm.extensions.builtin.artifact_store", {})],
     )
     second = await _create_session(
         tmp_path,
         root_session_id="root-service-b",
-        extensions=[("agentm.extensions.builtin.artifact_store", {})],
+        extensions=[
+
+            ("agentm.extensions.builtin.operations_local", {}),
+
+            ("agentm.extensions.builtin.artifact_store", {})],
     )
     try:
         first_write = _tool(first, "artifact_write")
@@ -273,7 +306,11 @@ async def test_artifact_store_service_is_per_session_instance(tmp_path: Path) ->
 async def test_artifact_read_truncates_large_body_without_range(tmp_path: Path) -> None:
     session = await _create_session(
         tmp_path,
-        extensions=[("agentm.extensions.builtin.artifact_store", {})],
+        extensions=[
+
+            ("agentm.extensions.builtin.operations_local", {}),
+
+            ("agentm.extensions.builtin.artifact_store", {})],
     )
     try:
         write = _tool(session, "artifact_write")
@@ -298,13 +335,21 @@ async def test_artifact_list_filters_by_kind_and_created_by_task(tmp_path: Path)
         tmp_path,
         root_session_id="root-filter",
         task_id="task-1",
-        extensions=[("agentm.extensions.builtin.artifact_store", {})],
+        extensions=[
+
+            ("agentm.extensions.builtin.operations_local", {}),
+
+            ("agentm.extensions.builtin.artifact_store", {})],
     )
     second = await _create_session(
         tmp_path,
         root_session_id="root-filter",
         task_id="task-2",
-        extensions=[("agentm.extensions.builtin.artifact_store", {})],
+        extensions=[
+
+            ("agentm.extensions.builtin.operations_local", {}),
+
+            ("agentm.extensions.builtin.artifact_store", {})],
     )
     try:
         first_write = _tool(first, "artifact_write")
@@ -344,6 +389,8 @@ async def test_hypothesis_tools_persist_append_only_artifacts(tmp_path: Path) ->
         root_session_id="root-hypothesis",
         task_id="task-hypothesis",
         extensions=[
+
+            ("agentm.extensions.builtin.operations_local", {}),
             ("agentm.extensions.builtin.artifact_store", {}),
             (hypothesis_module, {}),
         ],
@@ -388,6 +435,8 @@ async def test_hypothesis_tools_preserve_legacy_add_and_list_api(tmp_path: Path)
         root_session_id="root-hypothesis-legacy",
         task_id="task-hypothesis-legacy",
         extensions=[
+
+            ("agentm.extensions.builtin.operations_local", {}),
             ("agentm.extensions.builtin.artifact_store", {}),
             (hypothesis_module, {}),
         ],

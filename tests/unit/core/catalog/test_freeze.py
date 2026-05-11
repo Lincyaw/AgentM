@@ -5,8 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from agentm.harness.catalog import freeze_current, list_atoms
-from agentm.harness.catalog._layout import atom_runs_dir, atom_version_dir
+from agentm.core.runtime.catalog import freeze_current, list_atoms
+from agentm.core.runtime.catalog._layout import atom_runs_dir, atom_version_dir
 from agentm.extensions import ExtensionManifest
 
 

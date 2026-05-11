@@ -8,15 +8,15 @@ from typing import Any, cast
 
 import pytest
 
-from agentm.harness.catalog import _layout
-from agentm.harness.catalog.indexer import index_trace, rebuild_catalog
+from agentm.core.runtime.catalog import _layout
+from agentm.core.runtime.catalog.indexer import index_trace, rebuild_catalog
 from agentm.core.abi import EventBus
-from agentm.harness.atom_reloader import AtomReloader
-from agentm.harness.extension import ProviderConfig
-from agentm.harness.resource_writer import GitBackedResourceWriter
-from agentm.harness.session import AgentSession
-from agentm.harness.session_manager import InMemorySessionManager
-from agentm.harness.session_runtime import SessionRuntime
+from agentm.core.runtime.atom_reloader import AtomReloader
+from agentm.core.abi.extension import ProviderConfig
+from agentm.core.runtime.resource_writer import GitBackedResourceWriter
+from agentm.core.runtime.session import AgentSession
+from agentm.core.runtime.session_manager import InMemorySessionManager
+from agentm.core.runtime.session_runtime import SessionRuntime
 
 
 SHA_TOOL_READ = "a" * 40
@@ -274,7 +274,7 @@ def test_cli_rebuild_returns_zero_on_clean_run(tmp_path: Path) -> None:
         [
             sys.executable,
             "-m",
-            "agentm.harness.catalog.indexer",
+            "agentm.core.runtime.catalog.indexer",
             "--root",
             str(tmp_path),
             "--observability",
@@ -305,7 +305,7 @@ async def test_shutdown_indexes_observability_trace_when_present(
     def _fake_index_trace(path: Path, *, root: Path | None = None) -> None:
         called["path"] = path
 
-    monkeypatch.setattr("agentm.harness.catalog.indexer.index_trace", _fake_index_trace)
+    monkeypatch.setattr("agentm.core.runtime.catalog.indexer.index_trace", _fake_index_trace)
 
     bus = EventBus()
     resource_writer = GitBackedResourceWriter(

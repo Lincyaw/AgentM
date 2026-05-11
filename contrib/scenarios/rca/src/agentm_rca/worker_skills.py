@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import ResourcesDiscoverEvent
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.events import ResourcesDiscoverEvent
+from agentm.core.abi.extension import ExtensionAPI
 
 
 _SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills"

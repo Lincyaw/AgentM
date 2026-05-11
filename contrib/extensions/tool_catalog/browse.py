@@ -7,7 +7,7 @@ from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 from ._git_log import list_history
 from ._paths import catalog_root, resolve_catalog_path

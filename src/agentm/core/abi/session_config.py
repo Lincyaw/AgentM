@@ -1,21 +1,34 @@
-"""``AgentSessionConfig`` — extracted so extensions can build it.
+"""``AgentSessionConfig`` — atom-facing session construction contract.
 
-Lives in its own module (rather than ``agentm.harness.session``) because
-``harness.session`` is on the §11 forbidden-import list for extensions.
-Extensions that legitimately need to construct a child session config (the
-canonical case is the ``sub_agent`` builtin going through
-``api.spawn_child_session``) import the dataclass from here.
+Lives in the ABI layer so atoms (e.g. ``tool_eval_run``, llmharness adapter)
+can build child-session configs without importing anything in
+``agentm.core.runtime``. Runtime-typed fields (:class:`SessionManager`,
+:class:`ResourceLoader`) are referenced via TYPE_CHECKING imports — atoms
+construct them via CLI helpers or leave them ``None``.
+
+Pluggability hard rule: this module imports only stdlib + sibling ABI
+submodules at import time. Runtime references are lazy / TYPE_CHECKING.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agentm.core.abi import AgentMessage, EventBus, LoopConfig, ProviderResolver
-from agentm.harness.resource_loader import ResourceLoader
-from agentm.harness.session_manager import SessionManager
+from agentm.core.abi.resource import ResourceWriter
+
+if TYPE_CHECKING:
+    # Forward-referenced under TYPE_CHECKING to keep `agentm.core.abi` free of
+    # `core.runtime` imports (the layering rule). Field annotations stay as
+    # forward-reference strings — combined with `from __future__ import
+    # annotations` above, dataclass class-creation never resolves them. NOTE:
+    # `typing.get_type_hints(AgentSessionConfig)` is intentionally NOT supported
+    # — it would NameError because ABI cannot import runtime. Callers that need
+    # the resolved types should reach into `agentm.core.runtime` directly.
+    from agentm.core.runtime.resource_loader import ResourceLoader
+    from agentm.core.runtime.session_manager import SessionManager
 
 
 def default_child_provider_factory(parent_provider: Any) -> tuple[str, dict[str, Any]]:
@@ -64,8 +77,14 @@ class AgentSessionConfig:
     no_prompt_templates: bool = False
     tool_allowlist: list[str] | None = None
     initial_messages: list[AgentMessage] = field(default_factory=list)
-    session_manager: SessionManager | None = None
-    resource_loader: ResourceLoader | None = None
+    session_manager: "SessionManager | None" = None
+    resource_loader: "ResourceLoader | None" = None
+    resource_writer: ResourceWriter | None = None
+    """Override the session's `ResourceWriter`. Defaults to
+    `GitBackedResourceWriter(cwd, session_id, bus)`. Substrate-injected
+    (pre-atom-install) policy: `AtomReloader` and write-path tool atoms
+    consume it via `api.get_resource_writer()`, but atoms cannot replace
+    it via `register_*` because it must exist before atoms install."""
     loop_config: LoopConfig | None = None
     bus: EventBus | None = None
 

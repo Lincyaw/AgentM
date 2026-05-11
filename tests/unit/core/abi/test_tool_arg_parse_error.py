@@ -28,7 +28,7 @@ from agentm.core.abi import (
     text_message,
 )
 from agentm.core.abi.stream import AssistantStreamEvent
-from agentm.llm._common import StreamAccumulator
+from agentm.core.lib.stream import StreamAccumulator
 
 
 class _MalformedJsonStream:

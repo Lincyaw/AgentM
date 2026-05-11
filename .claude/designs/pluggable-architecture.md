@@ -9,51 +9,69 @@
 
 > **AgentM core is a mechanism, not a policy. Every policy is a port; every port has a default; every default is replaceable.**
 
+**Corollary — the unreplaceable-substrate test.** The only thing that cannot be a replaceable extension is *the act of loading replacements itself*. Anything else — including all "defaults" — must live as an atom that the substrate loads. The judgement rule is:
+
+> **"If it were replaceable, who would execute the replacement?"** Whatever has no answer is substrate; everything else is policy and belongs in `extensions/`.
+
 Concrete consequences:
 
 1. The SDK never imports scenario code. Scenarios import the SDK.
 2. The SDK never assumes a delivery surface (CLI / Web / RPC / embedded). Each is a presenter on top of the same runtime.
 3. Anything an extension can do, the user can do via the SDK with the same interface — there is no "private" path.
-4. The SDK ships sensible defaults so a zero-config user gets a working agent. Defaults are themselves implementations of public ports, never special-cased.
+4. Defaults are themselves atoms (`extensions/builtin/<name>.py`) listed in the default scenario manifest. They are never special-cased by the substrate. A zero-config user gets a working agent because the default scenario enumerates a working set, not because the substrate hides defaults.
+5. The substrate (formerly "harness") does **not** pick policy bundles. It loads the extension list and asserts the required services have been registered when freeze happens; if a scenario omits, say, an `Operations` provider, freeze fails loudly rather than the substrate silently filling in.
 
-This document is the **boundary contract**: which things are in core, which things are ports, and what each port's interface is. Everything else (`agent-harness.md`, `system-design-overview.md`, scenario designs) refines pieces under this contract.
+This document is the **boundary contract**: which things are substrate, which things are ports, and what each port's interface is. Everything else (scenario designs, atom designs) refines pieces under this contract.
 
 ---
 
 ## 2. Layered Package Boundary
 
-AgentM is organized as four layers, with dependency arrows pointing downward only:
+AgentM collapses to **three layers**. The historical four-layer split (`core` / `harness` / `llm` / `presenters`) carved harness out of core to protect "Jupyter clean import", but that constraint is really about **no side effects at import time**, not about which classes are allowed to exist. With defaults moved to atoms, the harness shrinks to pure substrate and merges back into core.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  agentm-modes/  CLI │ JSON │ RPC │ embedded SDK                  │ presenters
+│  agentm.cli  /  embedded SDK  /  (future HTTP, RPC)              │  presenters
 ├──────────────────────────────────────────────────────────────────┤
-│  agentm-harness/                                                 │
-│    AgentSession (orchestrator) · ExtensionRunner · EventBus      │ harness
-│    SessionManager · ResourceLoader · SettingsManager             │
+│  agentm.extensions.builtin/  +  contrib/extensions/              │  atoms (policy)
+│    operations_local  · llm_anthropic · session_state_memory      │
+│    read_file · write_file · edit · bash · skills · ...           │
 ├──────────────────────────────────────────────────────────────────┤
-│  agentm-core/                                                    │
-│    AgentLoop · Tool · Message · StreamFn · ToolOperations ports  │ pure SDK
-├──────────────────────────────────────────────────────────────────┤
-│  agentm-llm/  (provider layer)                                   │ provider
-│    Model registry · StreamFn implementations · OAuth             │
+│  agentm.core (unreplaceable substrate, write-protected)          │  substrate
+│    abi/      Protocols + dataclasses + typed events              │
+│    runtime/  AgentSession · EventBus · SessionManager · Loader   │
+│              · catalog freeze · reload transaction               │
+│    lib/      pure helpers (edit_diff · frontmatter · path_utils) │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Dependency rule**: arrows point downward only. `agentm-core` must be importable in a Jupyter notebook with no harness, no CLI, no filesystem touched.
+**Dependency rule**: arrows point downward only. `agentm.core` must be importable in a Jupyter notebook **with zero side effects at import time**. That property is module-load-time, not subpackage-content: `agentm.core.abi` and `agentm.core.lib` are pure types + pure functions; `agentm.core.runtime` *contains* stateful classes (`AgentSession`, `GitBackedResourceWriter`, `JsonlSessionStore`) but its modules perform no I/O at `import agentm.core.runtime` time. Side effects only happen when a session is **constructed**.
 
 | Layer | What it knows | What it does NOT know |
 |---|---|---|
-| `agentm-llm` | HTTP, OAuth, provider quirks | tools, agents, sessions |
-| `agentm-core` | message turns, tool execution, streaming | sessions, files, scenarios, UI |
-| `agentm-harness` | persistence, extensions, resource discovery | concrete scenarios, UI rendering |
-| `agentm-modes` | I/O surface (stdin/stdout/TUI/HTTP) | LLM protocol, agent loop |
+| `agentm.core` | how to load extensions, run the agent loop, emit events, freeze a catalog, persist a session | any concrete provider, any concrete tool, any scenario |
+| `agentm.extensions.builtin` (and `contrib/`) | concrete policy — how to read a file locally, how to talk to Anthropic, how to compact | how the substrate works internally; atom-to-atom imports forbidden (§11) |
+| `agentm.cli` / embedded SDK | I/O surface (stdin/stdout/TUI/HTTP), CLI argument parsing, exit codes | LLM protocol, agent loop |
+
+**There is no `agentm.harness` package and no `agentm.llm` package.** Provider stream implementations are atoms (`extensions/builtin/llm_<provider>.py`); session orchestration lives in `core.runtime/`; the validator forbids atoms from importing `core.runtime.*`.
 
 ---
 
 ## 3. Five Pluggability Axes
 
-Every axis below is a `typing.Protocol` in `agentm-core`. The harness ships a default implementation; extensions/users can substitute. **All five must be replaceable without forking.** In v0, Operations replacement is constitution-only: the harness selects the operations bundle when constructing a session, and atoms only consume it through `ExtensionAPI.get_operations()`.
+Every axis below is a `typing.Protocol` in `agentm.core.abi`. **All five must be replaceable without forking.** Replacement happens through one of two mechanisms, decided by the **pre / post-atom-install criterion**:
+
+| Criterion | Replacement mechanism | Reason |
+|---|---|---|
+| The substrate needs the value to **construct or run the loader itself** — i.e. it's consumed pre-atom-install | **Config-time injection** via `AgentSessionConfig.<field>`; substrate falls back to a documented default if `None` | An atom can't supply something the atom-loader needs before any atom has installed |
+| The value is consumed **only after atoms install** | **Atom-registered** via `api.register_<axis>(...)`; substrate fails loud at freeze if nothing was registered | Atoms are the natural home for runtime policy; the default scenario manifest enumerates the working set |
+
+Concretely:
+
+- **Atom-registered** (post-install): `Operations` (read by every tool atom), `StreamFn` (read by AgentLoop). Defaults live in `extensions/builtin/operations_local.py`, `extensions/builtin/llm_<provider>.py`. The substrate has no fallback — if a scenario manifest omits them, freeze raises.
+- **Config-injected** (pre-install): `SessionManager` (CLI resumes/forks need it before session construction), `ResourceLoader` (atoms read its content but the substrate constructs it from `cwd`), `ResourceWriter` (`AtomReloader` consumes it during scope wiring). Defaults: `InMemorySessionManager`, `InMemoryResourceLoader`, `GitBackedResourceWriter`. SDK consumers swap by passing alternatives through `AgentSessionConfig`.
+
+Both mechanisms preserve the axiom — the substrate never holds an unreplaceable concrete implementation. The split is mechanical (timing of first use), not philosophical.
 
 ### 3.1 LLM Stream (the model boundary)
 
@@ -71,16 +89,16 @@ class StreamFn(Protocol):
 ```
 
 - Pure boundary: takes provider-shaped messages, returns events.
-- Default implementations live in `agentm-llm` per provider; provider-internal stream assembly is shared by `agentm.llm._common.StreamAccumulator`, so new providers supply only event mapping plus a `ToolSpecAdapter`.
+- Default implementations live as atoms (`agentm.extensions.builtin.llm_<provider>`); provider-internal stream assembly is shared by `agentm.core.lib.stream.StreamAccumulator`, so new providers supply only event mapping plus a `ToolSpecAdapter`.
 - Retry, transport, and reasoning round-trip behavior are policy, not provider folklore: providers may accept an injected `RetryPolicy`, expose security-relevant transport overrides such as `verify_ssl=False` via diagnostics, and surface provider-specific thinking/reasoning choices as constructor/config options.
 - Tool-call argument parse failures stay observable as typed stream/bus events (`ToolCallArgsParseError`) while preserving the kernel invariant that `ToolCallBlock.arguments` is a parsed dict.
-- Extensions register additional providers via `register_provider(name, ProviderConfig)`. `ProviderConfig` lives in `agentm.core.abi.provider` so provider modules do not import the harness; the harness re-exports it for extension compatibility. The harness chooses the active registration through the `ProviderResolver` port; the default `LastRegisteredWins` resolver preserves insertion-order behavior.
+- Extensions register additional providers via `register_provider(name, ProviderConfig)`. `ProviderConfig` lives in `agentm.core.abi.provider` so provider atoms speak the same ABI as everyone else. The runtime substrate chooses the active registration through the `ProviderResolver` port; the default `LastRegisteredWins` resolver preserves insertion-order behavior.
 - Presenter-side provider selection goes through `ProviderRegistry.build(provider, config)`: descriptors own CLI extension module paths, default model ids, aliases, and ambient env-var conventions, so adding a provider descriptor does not require editing CLI branches.
 - **Crucial**: `StreamFn` is the only point that touches a real LLM API. The agent loop has zero hard-coded provider knowledge.
 
 ### 3.2 Tool Execution (the environment boundary)
 
-Three-layer split. `ToolDefinition` and `Tool` are extension/runtime surfaces; `Operations` are a constitution-selected environment port in v0:
+Three-layer split. `ToolDefinition` and `Tool` are extension/runtime surfaces; `Operations` is the environment port, registered by an atom like any other axis:
 
 ```python
 @dataclass
@@ -114,7 +132,7 @@ class BashOperations(Protocol):
 
 - `ToolDefinition` is the harness/UI-facing record.
 - `Tool` is the bare execution interface used by the agent loop.
-- `XxxOperations` is the **smallest possible port** for swapping environments (local FS → SSH → sandbox → in-memory). It is replaceable by harness/session construction, not by an atom-level `register_operations` hook.
+- `XxxOperations` is the **smallest possible port** for swapping environments (local FS → SSH → sandbox → in-memory). It is replaceable through `api.register_operations(file=..., bash=...)`, called by an early atom in the scenario manifest (default: `operations_local`). The substrate enforces "registered at most once before freeze" and "must be registered by freeze time, else fail loud".
 
 **File IO seam decision (issue #89)**: AgentM uses the hybrid seam. Read-only
 file tools (`read`, `grep`, `find`, `ls`) consume `api.get_operations().file`;
@@ -214,7 +232,7 @@ sniffing wire errors.
 
 ## 4. AgentSession: the Orchestrator Façade
 
-The orchestrator is intentionally fat-but-thin: it holds references to every subsystem and wires events, but every actual decision lives in a subsystem.
+`AgentSession` lives in `agentm.core.runtime` (not in a separate harness package). It is the substrate's session-orchestration entry point — fat-but-thin: it holds references to every subsystem and wires events, but every actual decision lives in an atom-registered service. The orchestrator is part of substrate because it answers the unreplaceable-substrate test with "the runtime itself" (cf. §1 corollary).
 
 ```python
 class AgentSession:
@@ -234,7 +252,7 @@ class AgentSession:
         # 4. await self.agent.run(...)
 ```
 
-**Design rule**: `AgentSession.prompt` and friends are 100-line **dispatchers**. Any branch with logic-content >10 lines is a smell — extract it to a service or extension. Construction-only wiring can live beside the façade in harness factory/runtime modules; runtime dependency bundles should be passed as data (`SessionRuntime`) rather than long parameter lists.
+**Design rule**: `AgentSession.prompt` and friends are 100-line **dispatchers**. Any branch with logic-content >10 lines is a smell — extract it to a service or extension. Construction-only wiring lives in `core.runtime/` factory modules; runtime dependency bundles should be passed as data (`SessionRuntime`) rather than long parameter lists.
 
 ---
 
@@ -274,7 +292,11 @@ A change to the architecture is acceptable iff each of these is achievable **wit
 7. **Add a sub-agent system** → an extension that registers a `dispatch_agent` tool whose `execute` spawns nested `AgentSession` instances. Core never learns about sub-agents.
 8. **Add plan mode** → an extension that intercepts `before_agent_start`, prepends a planning system prompt, and adds a `submit_plan` tool. Core never learns about plan mode.
 
-If any of these requires editing `agentm-core` or `agentm-harness`, the boundary is wrong.
+If any of these requires editing `agentm.core`, the boundary is wrong.
+
+A 9th case has been promoted to first-class:
+
+9. **Replace the file/bash environment** with an SSH bundle, a sandbox, or an in-memory fake → write/register an alternate `operations_*` atom; the default scenario's `operations_local` is interchangeable with it. The substrate has no `_default_local_operations()` and no `Local{File,Bash}Operations` import — those live in `extensions/builtin/operations_local.py`.
 
 ---
 
@@ -309,15 +331,39 @@ All previous AgentM concepts are being **re-implemented as extensions** on the v
 
 ---
 
-## 10. Next Steps
+## 10. Migration Roadmap — Collapsing harness into core (completed 2026-05-11)
 
-1. Update `index.yaml` to register `pluggable_architecture` concept and link related docs.
-2. Draft `plans/YYYY-MM-DD-pluggable-skeleton.md` — the implementation plan to:
-   a. Carve `agentm-core` out of current package (move `AgentLoop`, `Middleware`, `Tool` types).
-   b. Define the five Protocol ports.
-   c. Implement minimal `EventBus` + 6 critical events (`input`, `before_agent_start`, `tool_call`, `tool_result`, `context`, `agent_end`).
-   d. Refactor existing `AgentRuntime` to be the harness orchestrator.
-3. Acceptance: a smoke-test scenario that swaps `StreamFn` (mock LLM) and constructs the session with `BashOperations` (in-memory FS) without modifying core.
+This section documents the migration that landed 2026-05-11; it is kept as a
+history note. The tree no longer has an `agentm.harness` package, an
+`agentm.llm` package, or `core/_internal/operations_impl.py`. The §2
+three-layer target is the current shape.
+
+Summary of what landed (full trail in
+`.claude/plans/2026-05-11-collapse-harness-into-core.md`):
+
+1. **Default policies promoted to atoms.** `LocalFileOperations` /
+   `LocalBashOperations` → `extensions/builtin/operations_local.py`; provider
+   `StreamFn` defaults → `extensions/builtin/llm_<provider>.py`; the
+   `GitBackedResourceWriter` config seam → `AgentSessionConfig.resource_writer`.
+2. **`register_*` hooks** on `ExtensionAPI` enforce "register at most once
+   before freeze"; the substrate fails loud if a required axis is unregistered.
+3. **Default scenario manifests** enumerate the atom set explicitly; the
+   substrate no longer knows any default atom's name.
+4. **`agentm.harness/*` merged into `agentm.core.runtime/*`** (Stage 4a
+   move-and-shim, Stage 4b ABI/impl split). The §11 atom validator forbids
+   `agentm.core.runtime.*` imports; atoms speak in `agentm.core.abi.*` +
+   `agentm.core.lib.*` only.
+5. **`agentm.llm` deleted.** Each provider lives as
+   `extensions/builtin/llm_<provider>.py`. The shared stream accumulator lives
+   at `agentm.core.lib.stream`.
+6. **Boundary contracts swept.** This doc, `.claude/index.yaml`, CLAUDE.md,
+   `extensions/validate.py`, and README all describe the three-layer story
+   without coexistence-layer caveats.
+
+Acceptance held: a smoke-test scenario can swap `StreamFn` (mock LLM) and
+register a sandbox `Operations` bundle, both as atoms in a manifest, without
+editing `agentm.core`. The substrate has no remaining reference to any
+concrete provider name or `Local*Operations` class.
 
 ### 5.1 Shared Presenter Rendering
 

@@ -20,15 +20,15 @@ from agentm.core.abi.roles import (
     SYSTEM_PROMPT_PROVIDER,
 )
 from agentm.extensions import discover as discover_mod
-from agentm.harness.atom_reloader import AtomReloader
-from agentm.harness.atom_sandbox import apply_atom_source_overrides
-from agentm.harness.command_dispatcher import HarnessCommandDispatcher
-from agentm.harness.events import (
+from agentm.core.runtime.atom_reloader import AtomReloader
+from agentm.core.runtime.atom_sandbox import apply_atom_source_overrides
+from agentm.core.runtime.command_dispatcher import HarnessCommandDispatcher
+from agentm.core.abi.events import (
     ChildSessionStartEvent,
     ExtensionInstallEvent,
     SessionReadyEvent,
 )
-from agentm.harness.extension import (
+from agentm.core.runtime.extension import (
     CommandSpec,
     ExtensionLoadError,
     ProviderConfig,
@@ -38,22 +38,22 @@ from agentm.harness.extension import (
     build_extension_api_scope,
     load_extension,
 )
-from agentm.harness.provider_resolver import LastRegisteredWins
-from agentm.harness.resource_loader import InMemoryResourceLoader, ResourceLoader
-from agentm.harness.resource_writer import GitBackedResourceWriter
-from agentm.harness.session_config import (
+from agentm.core.runtime.provider_resolver import LastRegisteredWins
+from agentm.core.runtime.resource_loader import InMemoryResourceLoader, ResourceLoader
+from agentm.core.runtime.resource_writer import GitBackedResourceWriter
+from agentm.core.abi.session_config import (
     AgentSessionConfig,
     default_child_provider_factory,
 )
-from agentm.harness.session_helpers import (
+from agentm.core.runtime.session_helpers import (
     AtomSource,
     SessionView,
     collect_auto_discovered_atoms,
     ensure_floor_atom,
     resolve_provider_config,
 )
-from agentm.harness.session_manager import InMemorySessionManager, SessionManager
-from agentm.harness.session_runtime import SessionRuntime
+from agentm.core.runtime.session_manager import InMemorySessionManager, SessionManager
+from agentm.core.runtime.session_runtime import SessionRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ async def create_agent_session(
         session_manager,
         loop_config_getter=lambda: configured_loop_config,
     )
-    resource_writer = GitBackedResourceWriter(
+    resource_writer = config.resource_writer or GitBackedResourceWriter(
         cwd=config.cwd,
         session_id=session_id,
         bus=bus,
@@ -274,6 +274,16 @@ async def create_agent_session(
             RuntimeError("provider extension did not call api.register_provider"),
         )
 
+    if scope.operations.bundle is None:
+        raise ExtensionLoadError(
+            "<operations>",
+            RuntimeError(
+                "no atom registered Operations; the active scenario manifest "
+                "must list an atom that calls api.register_operations(...) "
+                "(default: agentm.extensions.builtin.operations_local)"
+            ),
+        )
+
     if config.tool_allowlist is not None:
         tools[:] = [t for t in tools if t.name in config.tool_allowlist]
 
@@ -379,7 +389,7 @@ def _configure_manifest(cwd: str) -> None:
 
 def _migrate_catalog(cwd: str) -> None:
     try:
-        from agentm.harness.catalog.migrate import migrate_catalog_v2
+        from agentm.core.runtime.catalog.migrate import migrate_catalog_v2
 
         migrate_catalog_v2(root=Path(cwd))
     except Exception as exc:

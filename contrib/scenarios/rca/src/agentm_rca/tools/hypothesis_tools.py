@@ -10,8 +10,8 @@ from agentm.core.abi.messages import TextContent
 from agentm.core.abi import FunctionTool, ToolResult
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.builtin.artifact_store import ArtifactStore
-from agentm.harness.events import SessionReadyEvent
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.events import SessionReadyEvent
+from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(
     name="hypothesis_tools",

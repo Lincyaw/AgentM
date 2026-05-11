@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import BeforeAgentStartEvent
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.events import BeforeAgentStartEvent
+from agentm.core.abi.extension import ExtensionAPI
 
 
 MANIFEST = ExtensionManifest(

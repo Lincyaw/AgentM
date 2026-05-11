@@ -7,7 +7,7 @@ from typing import Any
 from agentm.ai import ProviderDescriptor, ProviderRegistry
 from agentm.cli import _build_session_config, run
 from agentm.core.abi import AssistantMessage, EventBus, TextContent
-from agentm.harness.session_manager import SessionManager
+from agentm.core.runtime.session_manager import SessionManager
 
 
 class _FakeSessionStore:
@@ -140,9 +140,9 @@ def test_cli_run_writes_final_output_to_injected_stream(
         assert config.cwd == str(tmp_path)
         return _FakeSession()
 
-    import agentm.harness
+    import agentm.core.runtime
 
-    monkeypatch.setattr(agentm.harness.AgentSession, "create", _fake_create)
+    monkeypatch.setattr(agentm.core.runtime.AgentSession, "create", _fake_create)
     output = StringIO()
 
     rc = __import__("asyncio").run(

@@ -6,15 +6,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from agentm.core.abi import AgentLoop, EventBus, Tool
-from agentm.harness.atom_reloader import AtomReloader
-from agentm.harness.extension import (
+from agentm.core.runtime.atom_reloader import AtomReloader
+from agentm.core.runtime.extension import (
     CommandSpec,
     ProviderConfig,
     Renderer,
     _ExtensionAPIImpl,
 )
-from agentm.harness.resource_loader import ResourceLoader
-from agentm.harness.session_manager import SessionManager
+from agentm.core.runtime.resource_loader import ResourceLoader
+from agentm.core.runtime.session_manager import SessionManager
 
 
 @dataclass(slots=True)

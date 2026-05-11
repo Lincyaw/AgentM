@@ -1,7 +1,7 @@
 """Constitution-layer catalog: pure kernel functions only.
 
 Filesystem-shaped helpers (freeze, migrate, indexer, project layout) live
-in :mod:`agentm.harness.catalog`. This package is import-safe in any cwd:
+in :mod:`agentm.core.runtime.catalog`. This package is import-safe in any cwd:
 no filesystem reads happen at import time, no path-walking heuristics,
 no implicit reach into :mod:`agentm.extensions`.
 """

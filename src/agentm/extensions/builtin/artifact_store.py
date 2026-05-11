@@ -21,8 +21,8 @@ from agentm.core.lib.artifact_files import (
     scan_artifact_metadata,
 )
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import SessionReadyEvent
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.events import SessionReadyEvent
+from agentm.core.abi.extension import ExtensionAPI
 
 _DEFAULT_INLINE_BYTES = 8 * 1024
 _DEFAULT_LIST_LIMIT = 50

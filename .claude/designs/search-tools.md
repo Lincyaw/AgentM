@@ -160,7 +160,7 @@ Truncate via `truncate_head(...)` after the entry-count limit is applied.
 ### Cross-cutting rules
 
 - `from __future__ import annotations` mandatory.
-- Imports limited to: stdlib, `pathspec`, `agentm.core.abi.*`, `agentm.core.lib.text_truncate`, `agentm.core.lib.path_utils`, `agentm.core.abi.operations` (for `FileOperations`), `agentm.harness.extension`, and `agentm.extensions` (for `ExtensionManifest`). Atom-to-atom imports forbidden ([extension-as-scenario.md §11.1](extension-as-scenario.md#111-hard-rules)).
+- Imports limited to: stdlib, `pathspec`, `agentm.core.abi.*`, `agentm.core.lib.text_truncate`, `agentm.core.lib.path_utils`, `agentm.core.abi.operations` (for `FileOperations`), `agentm.core.abi.extension`, and `agentm.extensions` (for `ExtensionManifest`). Atom-to-atom imports forbidden ([extension-as-scenario.md §11.1](extension-as-scenario.md#111-hard-rules)).
 - Each atom's `MANIFEST.registers` includes exactly one `tool:<name>` tag.
 - Cancellation: every `execute` accepts `signal: asyncio.Event`. Traversal checks the signal between awaited read/list operations.
 - Errors: raised as `Exception` with a single sentence. The kernel wraps them into a tool-error result.

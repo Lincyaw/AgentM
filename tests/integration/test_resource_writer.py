@@ -20,11 +20,12 @@ from agentm.core.abi import (
     Model,
     TextContent,
 )
-from agentm.harness.events import ResourceWriteEvent
-from agentm.harness.extension import ProviderConfig
-from agentm.harness.resource_loader import InMemoryResourceLoader
-from agentm.harness.resource_writer import GitBackedResourceWriter
-from agentm.harness.session import AgentSession, AgentSessionConfig
+from agentm.core.abi.events import ResourceWriteEvent
+from agentm.core.abi.extension import ProviderConfig
+from agentm.core.runtime.resource_loader import InMemoryResourceLoader
+from agentm.core.runtime.resource_writer import GitBackedResourceWriter
+from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.runtime.session import AgentSession
 
 
 class _StaticProvider:
@@ -116,7 +117,10 @@ async def _create_session(tmp_path: Path, *extensions: tuple[str, dict[str, Any]
     return await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),
-            extensions=list(extensions),
+            extensions=[
+                ("agentm.extensions.builtin.operations_local", {}),
+                *extensions,
+            ],
             provider=(provider_module, {}),
             resource_loader=InMemoryResourceLoader(),
         )
@@ -279,7 +283,7 @@ async def test_G8_advisory_mode_when_git_missing(
 ) -> None:
     """G8: missing git degrades to advisory mode, writes still succeed, warning once."""
 
-    monkeypatch.setattr("agentm.harness.resource_writer.shutil.which", lambda _: None)
+    monkeypatch.setattr("agentm.core.runtime.resource_writer.shutil.which", lambda _: None)
     target = tmp_path / "skills" / "foo" / "SKILL.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     writer = GitBackedResourceWriter(

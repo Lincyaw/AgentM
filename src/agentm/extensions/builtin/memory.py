@@ -46,8 +46,8 @@ from typing import Any, Final
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.lib.frontmatter import parse_frontmatter
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import BeforeAgentStartEvent
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.events import BeforeAgentStartEvent
+from agentm.core.abi.extension import ExtensionAPI
 
 
 MANIFEST = ExtensionManifest(

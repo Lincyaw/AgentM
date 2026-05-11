@@ -15,10 +15,10 @@ from agentm.extensions import ExtensionManifest
 from agentm.extensions.builtin import cost_budget, skill_loader
 from agentm.extensions.discover import discover_builtin
 from agentm.extensions.loader import ScenarioLoadError, sort_extensions_by_requires
-from agentm.harness.catalog import DefaultProjectLayout
-from agentm.harness.events import ResourcesDiscoverEvent, SessionReadyEvent
-from agentm.harness.extension import ProviderConfig
-from agentm.harness.session_helpers import missing_required_fields
+from agentm.core.runtime.catalog import DefaultProjectLayout
+from agentm.core.abi.events import ResourcesDiscoverEvent, SessionReadyEvent
+from agentm.core.abi.extension import ProviderConfig
+from agentm.core.runtime.session_helpers import missing_required_fields
 
 
 def _module(name: str, manifest: ExtensionManifest) -> str:
@@ -257,6 +257,14 @@ class _InstallApi:
 
     def register_provider(self, name: str, provider: Any) -> None:
         self.registered_providers[name] = provider
+
+    def has_provider(self, name: str) -> bool:
+        return name in self.registered_providers
+
+    def register_operations(self, *, file: Any, bash: Any) -> None:
+        # ``operations_local`` roundtrips via this hook; the test only
+        # cares that ``install`` succeeds, so we accept and drop the bundle.
+        del file, bash
 
     def register_command(self, name: str, command: Any) -> None:
         self.commands[name] = command

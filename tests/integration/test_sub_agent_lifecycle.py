@@ -17,10 +17,11 @@ from agentm.core.abi import (
     TextContent,
     ToolCallBlock,
 )
-from agentm.harness.events import ResolveSubagentEvent
-from agentm.harness.resource_loader import InMemoryResourceLoader
-from agentm.harness.session import AgentSession, AgentSessionConfig
-from agentm.harness.extension import ProviderConfig
+from agentm.core.abi.events import ResolveSubagentEvent
+from agentm.core.runtime.resource_loader import InMemoryResourceLoader
+from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.runtime.session import AgentSession
+from agentm.core.abi.extension import ProviderConfig
 
 
 CHILD_PERSONA = "CHILD PERSONA"
@@ -260,11 +261,17 @@ def _extensions(
     resolver_module: str,
 ) -> list[tuple[str, dict[str, Any]]]:
     return [
+        ("agentm.extensions.builtin.operations_local", {}),
         (
             "agentm.extensions.builtin.sub_agent",
             {
-                "inherit_extensions": [],
-                "available_inherited_extensions": {},
+                "inherit_extensions": ["operations_local"],
+                "available_inherited_extensions": {
+                    "operations_local": (
+                        "agentm.extensions.builtin.operations_local",
+                        {},
+                    ),
+                },
             },
         ),
         (resolver_module, {}),

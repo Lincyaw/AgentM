@@ -48,19 +48,19 @@ from agentm.core.abi import (
     Tool,
     UserMessage,
 )
-from agentm.harness.events import (
+from agentm.core.abi.events import (
     BeforeAgentStartEvent,
     ChildSessionEndEvent,
     SessionShutdownEvent,
 )
-from agentm.harness.resource_loader import ResourceLoader
-from agentm.harness.session_helpers import (
+from agentm.core.runtime.resource_loader import ResourceLoader
+from agentm.core.runtime.session_helpers import (
     collect_start_veto,
     collect_system_replacement,
     now,
 )
-from agentm.harness.session_runtime import SessionRuntime
-from agentm.harness.session_manager import SessionManager
+from agentm.core.runtime.session_runtime import SessionRuntime
+from agentm.core.runtime.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +69,9 @@ logger = logging.getLogger(__name__)
 # ``AgentSessionConfig`` lives in ``harness.session_config`` so extensions
 # (which cannot import this module per §11.4.5) can still construct one for
 # ``api.spawn_child_session``. Re-exported below for backward-compatible
-# imports from ``agentm.harness.session``.
+# imports from ``agentm.core.runtime.session``.
 
-from agentm.harness.session_config import (  # noqa: E402
+from agentm.core.abi.session_config import (  # noqa: E402
     AgentSessionConfig,
 )
 
@@ -126,7 +126,7 @@ class AgentSession:
 
     @classmethod
     async def create(cls, config: AgentSessionConfig) -> "AgentSession":
-        from agentm.harness.session_factory import create_agent_session
+        from agentm.core.runtime.session_factory import create_agent_session
 
         return await create_agent_session(cls, config)
 
@@ -368,7 +368,7 @@ class AgentSession:
         self._bus.clear()
 
         try:
-            from agentm.harness.catalog.indexer import index_trace
+            from agentm.core.runtime.catalog.indexer import index_trace
 
             trace_path = (
                 Path(self._cwd)

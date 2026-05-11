@@ -21,8 +21,8 @@ It implements the :class:`_SessionGateway` shape and is plugged into
    rebuild an API for the freshly-imported module.
 
 Hard rule: this module imports only stdlib + ``agentm.core.*`` +
-``agentm.harness.extension`` + ``agentm.extensions.*``. It never reaches
-back into ``agentm.harness.session`` to avoid the circular imports the
+``agentm.core.runtime.extension`` + ``agentm.extensions.*``. It never reaches
+back into ``agentm.core.runtime.session`` to avoid the circular imports the
 old in-line implementation tolerated by being a closure.
 """
 
@@ -45,12 +45,12 @@ from typing import Any, Callable, Literal
 
 from agentm.core._internal.catalog.hashing import compute_atom_hash
 from agentm.core._internal.catalog.manifest import is_constitution_path
-from agentm.harness.catalog import _layout
+from agentm.core.runtime.catalog import _layout
 from agentm.core.abi import BusPriority, EventBus, Tool
 from agentm.extensions import ExtensionManifest
 from agentm.extensions import discover as discover_mod
 from agentm.extensions import validate as validate_mod
-from agentm.harness.events import (
+from agentm.core.abi.events import (
     ApiRegisterEvent,
     BeforeInstallAtomEvent,
     BeforeUnloadAtomEvent,
@@ -58,7 +58,7 @@ from agentm.harness.events import (
     ExtensionReloadEvent,
     ExtensionUnloadEvent,
 )
-from agentm.harness.extension import (
+from agentm.core.runtime.extension import (
     AtomInfo,
     CommandSpec,
     InstallAtomResult,
@@ -69,7 +69,7 @@ from agentm.harness.extension import (
     _ExtensionAPIImpl,
     load_extension,
 )
-from agentm.harness.resource_writer import ResourceWriter
+from agentm.core.runtime.resource_writer import ResourceWriter
 
 logger = logging.getLogger(__name__)
 

@@ -18,7 +18,7 @@ def test_cli_slash_command_wins_over_prompt_template_collision(tmp_path: Path) -
 
     (tmp_path / "e2e_command.py").write_text(
         "from __future__ import annotations\n"
-        "from agentm.harness.extension import CommandSpec\n"
+        "from agentm.core.abi.extension import CommandSpec\n"
         "\n"
         "def install(api, config):\n"
         "    del config\n"
