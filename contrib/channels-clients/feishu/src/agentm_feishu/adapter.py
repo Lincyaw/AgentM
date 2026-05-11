@@ -86,6 +86,48 @@ class FeishuConfig:
     """Channel name announced on inbound envelopes. The gateway uses it
     as the synthetic-channel key registered through ``inject_channel``.
     """
+    stream_debounce_s: float = 0.3
+    """Trailing-edge debounce window for streamed message updates.
+    Feishu's ``update_card`` is rate-limited to roughly 5 QPS per
+    message; coalescing rapid updates into one patch every ~300 ms
+    keeps us comfortably under that ceiling while still feeling live.
+    """
+
+
+@dataclass(slots=True)
+class _StreamState:
+    """Per-(chat_id, stream_id) state for in-place card updates.
+
+    The adapter sends the first frame as a fresh card and records
+    ``message_id`` from the SendResult; every subsequent frame for the
+    same stream re-renders the card and calls ``channel.update_card``.
+    A debounced flush task (see :attr:`flush_task`) coalesces rapid
+    updates so we patch at most once per ``stream_debounce_s``.
+    """
+
+    message_id: str | None = None
+    """``None`` until the first SendResult comes back. Frames that
+    arrive before the initial send completes are queued by simply
+    overwriting :attr:`pending` — they'll be flushed once the
+    initial send registers ``message_id``."""
+
+    pending: tuple[str, list["_ButtonLike"]] | None = None
+    """Latest queued (content, buttons) waiting for the next patch
+    window. Always the most recent update — older intermediate frames
+    are discarded by design."""
+
+    flush_task: asyncio.Task[Any] | None = None
+    """Sleeper task that waits ``stream_debounce_s`` then flushes
+    :attr:`pending`. None when no flush is scheduled."""
+
+    flush_now: asyncio.Event = field(default_factory=asyncio.Event)
+    """Set to short-circuit the debounce sleep — the flush task wakes
+    on either the timer or this event. Used by ``final=True`` frames
+    and ``turn_complete`` to land the last update immediately."""
+
+    final_seen: bool = False
+    """Set when an outbound for this stream arrived with ``final=True``.
+    The flush path tears the state down once ``pending`` drains."""
 
 
 class FeishuAdapter:
@@ -98,6 +140,11 @@ class FeishuAdapter:
         # Pending ACK reactions keyed by chat_id — same lifetime contract
         # as the legacy implementation. Cleared on turn_complete.
         self._pending_acks: dict[str, list[asyncio.Task[Any]]] = {}
+        # Per-(chat_id, stream_id) state for streamed updates. Keyed on
+        # the tuple so two streams to the same chat (e.g. tool-call
+        # progress + final reply) don't clobber each other.
+        self._streams: dict[tuple[str, str], _StreamState] = {}
+        self._streams_lock = asyncio.Lock()
         self._running = False
         # Signalled by stop() to wake start() out of its idle wait. We
         # used to ``await asyncio.create_task(channel.connect())`` here,
@@ -278,8 +325,11 @@ class FeishuAdapter:
             log.warning("outbound dropped: empty chat_id (env id=%s)", env.id)
             return
         if out_kind == "turn_complete":
-            # Control signal — clear ACK reactions, nothing on the wire.
+            # Control signal — clear ACK reactions and flush any active
+            # streams in this chat (a turn ending without an explicit
+            # final=True frame still needs the in-place card to settle).
             await self._clear_pending_acks(chat_id)
+            await self._finalize_streams_for_chat(chat_id)
             return
         # Buttons travel in the body under "buttons" — list of dicts
         # ``{"label": str, "value": str, "style": str}`` mirroring the
@@ -298,6 +348,17 @@ class FeishuAdapter:
                 if label and value:
                     buttons.append(_ButtonLike(label=label, value=value, style=style))
         content = str(body.get("content") or "")
+        stream_id = body.get("stream_id")
+        final = bool(body.get("final"))
+        if isinstance(stream_id, str) and stream_id:
+            await self._handle_stream_frame(
+                chat_id=chat_id,
+                stream_id=stream_id,
+                content=content,
+                buttons=buttons,
+                final=final,
+            )
+            return
         await self._send_card(chat_id, content, buttons)
 
     async def _send_card(
@@ -312,6 +373,206 @@ class FeishuAdapter:
             chat_id,
             {"card": _markdown_card(content, buttons=buttons)},
         )
+
+    # -- streaming ----------------------------------------------------
+
+    async def _handle_stream_frame(
+        self,
+        *,
+        chat_id: str,
+        stream_id: str,
+        content: str,
+        buttons: list[_ButtonLike],
+        final: bool,
+    ) -> None:
+        """Apply one frame of a streamed update.
+
+        First frame for a ``(chat_id, stream_id)`` does a real ``send``
+        and captures the resulting ``message_id``. Subsequent frames
+        queue into the state's ``pending`` slot and schedule a
+        trailing-edge debounce flush. The ``final`` flag forces an
+        immediate flush and tears the entry down once delivered.
+        """
+        assert self._channel is not None
+        key = (chat_id, stream_id)
+        async with self._streams_lock:
+            state = self._streams.get(key)
+            if state is None:
+                state = _StreamState()
+                self._streams[key] = state
+                first_frame = True
+            else:
+                first_frame = False
+            if final:
+                state.final_seen = True
+
+        if first_frame:
+            # Initial send happens synchronously so we capture
+            # message_id before any subsequent frame tries to patch.
+            try:
+                result = await self._channel.send(
+                    chat_id,
+                    {"card": _markdown_card(content, buttons=buttons)},
+                )
+            except Exception:
+                log.exception(
+                    "[feishu] stream %s: initial send failed; dropping stream",
+                    stream_id,
+                )
+                async with self._streams_lock:
+                    self._streams.pop(key, None)
+                return
+            message_id = getattr(result, "message_id", None)
+            async with self._streams_lock:
+                state.message_id = (
+                    str(message_id) if isinstance(message_id, str) else None
+                )
+            if final:
+                async with self._streams_lock:
+                    self._streams.pop(key, None)
+            return
+
+        # Subsequent frame: stash latest content + schedule flush.
+        async with self._streams_lock:
+            state.pending = (content, buttons)
+            if final:
+                # Either wake the running flush task so it skips the
+                # rest of the debounce window, or start one with no
+                # debounce if none was scheduled yet.
+                state.flush_now.set()
+                if state.flush_task is None:
+                    state.flush_task = asyncio.create_task(
+                        self._flush_stream(key, debounce=False),
+                        name=f"feishu-stream-flush-{stream_id}",
+                    )
+            elif state.flush_task is None:
+                state.flush_task = asyncio.create_task(
+                    self._flush_stream(key, debounce=True),
+                    name=f"feishu-stream-flush-{stream_id}",
+                )
+
+    async def _flush_stream(
+        self, key: tuple[str, str], *, debounce: bool
+    ) -> None:
+        """Trailing-edge flush loop for one stream's pending updates.
+
+        Loops:
+          1. wait the debounce window (skipped on the first pass if
+             ``debounce=False`` — used by ``final=True`` and turn_complete
+             paths so the last frame lands immediately);
+          2. pull the latest pending content (older frames already
+             dropped by the producer side);
+          3. patch the card (or fall back to a fresh send if the initial
+             send never yielded a ``message_id``);
+          4. if another frame arrived during the patch RPC, debounce
+             again and patch the new latest; otherwise release the
+             flush slot (and drop the state if ``final_seen``).
+        """
+        chat_id, stream_id = key
+        first = True
+        while True:
+            async with self._streams_lock:
+                state = self._streams.get(key)
+                if state is None:
+                    return
+                event = state.flush_now
+            if not (first and not debounce):
+                try:
+                    await asyncio.wait_for(
+                        event.wait(), timeout=self._config.stream_debounce_s
+                    )
+                except (asyncio.TimeoutError, TimeoutError):
+                    pass
+                except asyncio.CancelledError:
+                    return
+            first = False
+
+            async with self._streams_lock:
+                state = self._streams.get(key)
+                if state is None:
+                    return
+                pending = state.pending
+                state.pending = None
+                state.flush_now.clear()
+                if pending is None:
+                    state.flush_task = None
+                    if state.final_seen:
+                        self._streams.pop(key, None)
+                    return
+                message_id = state.message_id
+
+            content, buttons = pending
+            if message_id is None:
+                try:
+                    await self._send_card(chat_id, content, buttons)
+                except Exception:
+                    log.exception(
+                        "[feishu] stream %s: fallback send failed", stream_id
+                    )
+            else:
+                try:
+                    assert self._channel is not None
+                    await self._channel.update_card(
+                        message_id,
+                        _markdown_card(content, buttons=buttons),
+                    )
+                except Exception:
+                    log.exception(
+                        "[feishu] stream %s: update_card failed (msg=%s)",
+                        stream_id,
+                        message_id,
+                    )
+            # If this was the final frame and no new frame arrived
+            # during the patch RPC, the stream is done — release the
+            # slot now instead of waiting another debounce window.
+            async with self._streams_lock:
+                state = self._streams.get(key)
+                if state is None:
+                    return
+                if state.final_seen and state.pending is None:
+                    state.flush_task = None
+                    self._streams.pop(key, None)
+                    return
+
+    async def _finalize_streams_for_chat(self, chat_id: str) -> None:
+        """Flush + drop every stream belonging to ``chat_id``.
+
+        Called on ``turn_complete``: any stream that ended without an
+        explicit ``final=True`` frame still needs its last update to
+        land so the in-place card matches the agent's actual final
+        output. We force ``final_seen`` and trigger a no-debounce
+        flush for each affected key.
+        """
+        start_keys: list[tuple[str, str]] = []
+        async with self._streams_lock:
+            for key, state in self._streams.items():
+                if key[0] != chat_id:
+                    continue
+                state.final_seen = True
+                # Wake any in-flight flush task so its debounce wait
+                # returns immediately and it patches with the latest
+                # pending content.
+                state.flush_now.set()
+                if state.pending is not None and state.flush_task is None:
+                    start_keys.append(key)
+        for key in start_keys:
+            async with self._streams_lock:
+                pending_state = self._streams.get(key)
+                if pending_state is None or pending_state.flush_task is not None:
+                    continue
+                pending_state.flush_task = asyncio.create_task(
+                    self._flush_stream(key, debounce=False),
+                    name=f"feishu-stream-finalize-{key[1]}",
+                )
+        # Garbage-collect entries with no pending work.
+        async with self._streams_lock:
+            stale = [
+                k
+                for k, s in self._streams.items()
+                if k[0] == chat_id and s.pending is None and s.flush_task is None
+            ]
+            for k in stale:
+                self._streams.pop(k, None)
 
     # -- ACK reactions ------------------------------------------------
 
