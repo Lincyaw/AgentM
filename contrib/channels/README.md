@@ -40,20 +40,26 @@ src/agentm_channels/
 ## Local validation (terminal mode)
 
 The fastest way to try this end-to-end without configuring a chat
-platform:
+platform — gateway + terminal client as two processes:
 
 ```bash
-uv run agentm-gateway --terminal --cwd ./workspace --scenario feishu_chat
+# Terminal A:
+uv run agentm-gateway --bind unix:///tmp/gw.sock \
+    --cwd ./workspace --scenario feishu_chat
+
+# Terminal B:
+uv run agentm-terminal --connect unix:///tmp/gw.sock
 ```
 
 You get a stdin/stdout REPL backed by the same gateway + commands +
 approvals as production. Useful for testing `/help`, `/skill:foo`,
 `/new`, custom markdown commands, and approval flows before pointing
-Feishu at the daemon. `Ctrl-D` ends the session.
+Feishu at the daemon. `Ctrl-D` on the terminal client ends the
+session.
 
-Approval-button round-trips in terminal mode: when the agent posts an
-approval card you'll see numbered `[1] Approve` / `[2] Deny` options
-and the literal `value=…` next to each. Type `=<value>` (e.g.
+Approval-button round-trips in the terminal client: when the agent
+posts an approval card you'll see numbered `[1] Approve` / `[2] Deny`
+options and the literal `value=…` next to each. Type `=<value>` (e.g.
 `=approval-deadbeef:approve`) to click. Less ergonomic than a Feishu
 button, but exercises the exact same code path.
 
