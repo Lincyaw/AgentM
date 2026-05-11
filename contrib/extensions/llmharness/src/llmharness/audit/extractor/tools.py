@@ -119,14 +119,17 @@ _EVENT_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": _REF_SCHEMA,
             "description": (
-                "Optional list of references this event makes to EARLIER "
-                "events (smaller id). Empty / omitted is fine — only emit "
-                "a ref when you can cite a literal witness in both turn "
-                "texts."
+                "References this event makes to EARLIER events (smaller "
+                "id within THIS firing). Always required as a field. "
+                "Allowed empty only for events[0] (id=1) — the genesis "
+                "event of this firing has no in-window predecessor. "
+                "Events with id>=2 MUST cite at least one earlier event "
+                "with a literal witness in both turn texts; the validator "
+                "rejects empty refs on non-genesis events."
             ),
         },
     },
-    "required": ["id", "kind", "summary", "source_turns"],
+    "required": ["id", "kind", "summary", "source_turns", "refs"],
     "additionalProperties": False,
 }
 

@@ -105,6 +105,18 @@ class ExtractionState:
                 refs_raw = []
             if not isinstance(refs_raw, list):
                 return f"submit_events: events[{ev.id - 1}].refs must be an array"
+            # Genesis exception: id=1 (first event of this firing) has no
+            # in-window predecessor and may have empty refs. Every other
+            # event MUST cite at least one earlier event — without refs
+            # the auditor cannot trace causal structure across this
+            # firing's window.
+            if ev.id >= 2 and not refs_raw:
+                return (
+                    f"submit_events: events[{ev.id - 1}].refs must be "
+                    "non-empty for non-genesis events (id>=2). The "
+                    f"event id={ev.id} must cite at least one earlier "
+                    "event in this firing with a witness."
+                )
             for ridx, raw_ref in enumerate(refs_raw):
                 if not isinstance(raw_ref, dict):
                     return (
