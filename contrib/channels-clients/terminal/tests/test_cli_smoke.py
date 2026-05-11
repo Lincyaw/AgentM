@@ -43,11 +43,16 @@ def test_bad_connect_scheme_exits_two(
     assert "unix://" in err
 
 
-def test_missing_connect_exits_two(
+def test_missing_connect_uses_default_socket(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    # --connect now has a default (matches agentm-gateway's default socket),
+    # so the CLI proceeds past argparse and fails with the "connect-failed"
+    # exit code 7 because no gateway is listening on the conventional path.
     rc = terminal_cli.main([])
-    assert rc == 2
+    assert rc == 7
+    err = capsys.readouterr().err
+    assert "connect-failed" in err
 
 
 def test_resolve_format_defaults_text_for_tty(

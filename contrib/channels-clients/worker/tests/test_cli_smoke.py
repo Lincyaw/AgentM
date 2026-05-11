@@ -37,11 +37,15 @@ def test_version_prints_and_exits_zero(
     assert "0.1.0" in out
 
 
-def test_missing_connect_exits_two(
+def test_missing_connect_uses_default_socket(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    # --connect now defaults to the conventional gateway socket; with no
+    # gateway running the CLI returns exit 7 (connect-failed), not 2.
     rc = worker_cli.main([])
-    assert rc == 2
+    assert rc == 7
+    err = capsys.readouterr().err
+    assert "connect-failed" in err
 
 
 def test_bad_connect_scheme_exits_two(

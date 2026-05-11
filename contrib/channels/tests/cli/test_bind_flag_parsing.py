@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from agentm_channels import DEFAULT_SOCKET_URL
 from agentm_channels.cli import _parse_args, _resolve_bind
 
 
@@ -25,9 +26,14 @@ def _ns(**kw: object) -> argparse.Namespace:
     )
 
 
-def test_resolve_bind_none_when_unset() -> None:
+def test_resolve_bind_falls_back_to_default_socket() -> None:
+    # When neither CLI nor YAML supplies a bind URL, _resolve_bind uses
+    # the shared DEFAULT_SOCKET_URL so a bare ``agentm-gateway`` launch
+    # picks up the conventional path.
     spec = _resolve_bind(_ns(), cfg={})
-    assert spec is None
+    assert spec is not None
+    expected_path = DEFAULT_SOCKET_URL.removeprefix("unix://")
+    assert spec.socket_path == expected_path
 
 
 def test_resolve_bind_tcp_rejected() -> None:
