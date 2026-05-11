@@ -129,7 +129,13 @@ async def test_G3_constitution_rejects_tool_edit(tmp_path: Path) -> None:
 
     _init_repo(tmp_path)
     target = tmp_path / "core-manifest.yaml"
-    target.write_text("version: 1\n", encoding="utf-8")
+    target.write_text(
+        "version: 1\n"
+        "constitution:\n"
+        "  paths:\n"
+        "    - core-manifest.yaml\n",
+        encoding="utf-8",
+    )
     _git(tmp_path, "add", "core-manifest.yaml")
     _git(tmp_path, "commit", "-m", "add constitution file", "--quiet")
     before = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
@@ -155,7 +161,7 @@ async def test_G3_constitution_rejects_tool_edit(tmp_path: Path) -> None:
     message = result.content[0]
     assert isinstance(message, TextContent)
     assert "constitution path" in message.text
-    assert target.read_text(encoding="utf-8") == "version: 1\n"
+    assert "version: 2" not in target.read_text(encoding="utf-8")
     assert after == before
 
 

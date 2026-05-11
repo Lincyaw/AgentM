@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from agentm.core.abi import BusPriority
+from agentm.core.abi.roles import COMMAND_PARSER, SLASH_COMMAND_DISPATCHER_SERVICE
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import CommandDispatchedEvent
 from agentm.harness.extension import CommandDispatcher, ExtensionAPI
@@ -21,12 +22,13 @@ MANIFEST = ExtensionManifest(
     requires=(),  # Leaf atom: dispatches commands registered by any peer.
     api_version=1,
     tier=1,
+    provides_role=(COMMAND_PARSER,),
 )
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config
-    service = api.get_service("slash_commands")
+    service = api.get_service(SLASH_COMMAND_DISPATCHER_SERVICE)
     dispatcher = service if isinstance(service, CommandDispatcher) else None
 
     async def _on_input(event: dict[str, Any]) -> dict[str, Any] | None:

@@ -505,6 +505,101 @@ class ExtensionAPI(Protocol):
 # --- Concrete impl ----------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class ExtensionAPIScope:
+    """Session-scoped bundle handed to every ``_ExtensionAPIImpl``.
+
+    One scope is built per :class:`AgentSession` and reused for every
+    ``_make_api(owner)`` call; only :attr:`_ExtensionAPIImpl._owner_name`
+    varies per atom. Bundling here keeps the impl constructor from growing
+    a kwarg every time a new pluggability axis lands.
+
+    Build via :func:`build_extension_api_scope` so defaults stay in one
+    place — direct construction is fine but every field is then mandatory.
+    """
+
+    bus: EventBus
+    cwd: str
+    session_id: str
+    session: ReadonlySession
+    tools: list[Tool]
+    commands: dict[str, CommandSpec]
+    providers: dict[str, ProviderConfig]
+    renderers: dict[str, Renderer]
+    pending_user_messages: list[str | list[Any]]
+    model_getter: Callable[[], Model | None]
+    provider_getter: Callable[[], ProviderConfig | None]
+    gateway: _SessionGateway
+    operations: Operations
+    project_layout: ProjectLayout
+    skills: SkillsService
+    prompt_templates: PromptTemplatesService
+    catalog: CatalogService
+    compaction: CompactionService
+    child_session_factory: ChildSessionFactory
+    resource_writer: ResourceWriter
+    service_registry: dict[str, Any]
+
+
+def build_extension_api_scope(
+    *,
+    bus: EventBus,
+    cwd: str,
+    session_id: str,
+    session: ReadonlySession,
+    tools: list[Tool],
+    commands: dict[str, CommandSpec],
+    providers: dict[str, ProviderConfig],
+    renderers: dict[str, Renderer],
+    pending_user_messages: list[str | list[Any]],
+    model_getter: Callable[[], Model | None],
+    provider_getter: Callable[[], ProviderConfig | None],
+    gateway: _SessionGateway | None = None,
+    operations: Operations | None = None,
+    project_layout: ProjectLayout | None = None,
+    skills: SkillsService | None = None,
+    prompt_templates: PromptTemplatesService | None = None,
+    catalog: CatalogService | None = None,
+    compaction: CompactionService | None = None,
+    child_session_factory: ChildSessionFactory | None = None,
+    resource_writer: ResourceWriter | None = None,
+    service_registry: dict[str, Any] | None = None,
+) -> ExtensionAPIScope:
+    """Resolve service defaults and return an :class:`ExtensionAPIScope`.
+
+    Centralises the fallback choices (local operations, default project
+    layout, git-backed resource writer) so the impl constructor stays a
+    pure assignment.
+    """
+
+    resolved_layout = project_layout or default_project_layout(cwd)
+    return ExtensionAPIScope(
+        bus=bus,
+        cwd=cwd,
+        session_id=session_id,
+        session=session,
+        tools=tools,
+        commands=commands,
+        providers=providers,
+        renderers=renderers,
+        pending_user_messages=pending_user_messages,
+        model_getter=model_getter,
+        provider_getter=provider_getter,
+        gateway=gateway or _NoopSessionGateway(),
+        operations=operations or _default_local_operations(cwd=cwd),
+        project_layout=resolved_layout,
+        skills=skills or default_skills_service(resolved_layout),
+        prompt_templates=prompt_templates
+        or default_prompt_templates_service(resolved_layout),
+        catalog=catalog or default_catalog_service(),
+        compaction=compaction or default_compaction_service(),
+        child_session_factory=child_session_factory or _NoopChildSessionFactory(),
+        resource_writer=resource_writer
+        or GitBackedResourceWriter(cwd=cwd, session_id=session_id, bus=bus),
+        service_registry=service_registry if service_registry is not None else {},
+    )
+
+
 class _ExtensionAPIImpl:
     """Concrete ``ExtensionAPI`` owned by an ``AgentSession``.
 
@@ -516,66 +611,30 @@ class _ExtensionAPIImpl:
     session's ``EventBus`` or the registries the session exposes.
     """
 
-    def __init__(
-        self,
-        *,
-        bus: EventBus,
-        cwd: str,
-        session_id: str,
-        session: ReadonlySession,
-        tools: list[Tool],
-        commands: dict[str, CommandSpec],
-        providers: dict[str, ProviderConfig],
-        renderers: dict[str, Renderer],
-        pending_user_messages: list[str | list[Any]],
-        model_getter: Callable[[], Model | None],
-        provider_getter: Callable[[], ProviderConfig | None],
-        gateway: _SessionGateway | None = None,
-        owner_name: str = "<unknown>",
-        operations: Operations | None = None,
-        skills_service: SkillsService | None = None,
-        prompt_templates_service: PromptTemplatesService | None = None,
-        catalog_service: CatalogService | None = None,
-        compaction_service: CompactionService | None = None,
-        project_layout: ProjectLayout | None = None,
-        child_session_factory: ChildSessionFactory | None = None,
-        resource_writer: ResourceWriter | None = None,
-        service_registry: dict[str, Any] | None = None,
-    ) -> None:
-        self._bus = bus
-        self._cwd = cwd
-        self._session_id = session_id
-        self._session = session
-        self._tools = tools
-        self._commands = commands
-        self._providers = providers
-        self._renderers = renderers
-        self._pending_user_messages = pending_user_messages
-        self._model_getter = model_getter
-        self._provider_getter = provider_getter
-        self._gateway: _SessionGateway = gateway or _NoopSessionGateway()
+    def __init__(self, scope: ExtensionAPIScope, *, owner_name: str = "<unknown>") -> None:
+        self._bus = scope.bus
+        self._cwd = scope.cwd
+        self._session_id = scope.session_id
+        self._session = scope.session
+        self._tools = scope.tools
+        self._commands = scope.commands
+        self._providers = scope.providers
+        self._renderers = scope.renderers
+        self._pending_user_messages = scope.pending_user_messages
+        self._model_getter = scope.model_getter
+        self._provider_getter = scope.provider_getter
+        self._gateway: _SessionGateway = scope.gateway
         self._owner_name = owner_name
         self._stale = False
-        self._child_session_factory: ChildSessionFactory = (
-            child_session_factory or _NoopChildSessionFactory()
-        )
-        self._operations = operations or _default_local_operations(cwd=cwd)
-        self._project_layout: ProjectLayout = project_layout or default_project_layout(
-            cwd
-        )
-        self._skills = skills_service or default_skills_service(self._project_layout)
-        self._prompt_templates = (
-            prompt_templates_service
-            or default_prompt_templates_service(self._project_layout)
-        )
-        self._catalog = catalog_service or default_catalog_service()
-        self._compaction = compaction_service or default_compaction_service()
-        self._resource_writer = resource_writer or GitBackedResourceWriter(
-            cwd=cwd,
-            session_id=session_id,
-            bus=bus,
-        )
-        self._services = service_registry if service_registry is not None else {}
+        self._child_session_factory: ChildSessionFactory = scope.child_session_factory
+        self._operations = scope.operations
+        self._project_layout: ProjectLayout = scope.project_layout
+        self._skills = scope.skills
+        self._prompt_templates = scope.prompt_templates
+        self._catalog = scope.catalog
+        self._compaction = scope.compaction
+        self._resource_writer = scope.resource_writer
+        self._services = scope.service_registry
 
     def mark_stale(self) -> None:
         self._stale = True

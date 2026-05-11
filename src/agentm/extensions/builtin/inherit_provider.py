@@ -11,13 +11,9 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from agentm.core.abi.roles import PARENT_PROVIDER_CONFIG_KEY, PROVIDER_INHERITOR
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI, ExtensionLoadError, ProviderConfig
-
-# Config key the spawn factory uses to hand the parent provider over. Public
-# so the factory and tests can reference it without a magic-string copy.
-PARENT_PROVIDER_CONFIG_KEY: Final = "provider"
-
 
 MANIFEST = ExtensionManifest(
     name="inherit_provider",
@@ -43,6 +39,7 @@ MANIFEST = ExtensionManifest(
     requires=(),  # Leaf provider shim: consumes only injected config.
     api_version=1,
     tier=1,
+    provides_role=(PROVIDER_INHERITOR,),
 )
 
 
@@ -62,4 +59,4 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     api.register_provider(provider.name, provider)
 
 
-__all__: Final = ["MANIFEST", "PARENT_PROVIDER_CONFIG_KEY", "install"]
+__all__: Final = ["MANIFEST", "install"]

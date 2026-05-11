@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
+from agentm.core.abi.roles import SUB_AGENT_RUNTIME
 from agentm.core.abi import (
     DecideTurnActionEvent,
     FunctionTool,
@@ -101,6 +102,7 @@ MANIFEST = ExtensionManifest(
         "additionalProperties": True,
     },
     requires=("system_prompt",),
+    provides_role=(SUB_AGENT_RUNTIME,),
 )
 
 

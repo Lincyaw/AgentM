@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from agentm.core._internal.catalog.manifest import reload_manifest
 from agentm.harness.catalog import freeze_current
 from agentm.harness.catalog.indexer import index_trace, rebuild_catalog
 from agentm.extensions import ExtensionManifest
@@ -53,7 +52,7 @@ def _write_atom(root: Path, name: str, source: str) -> None:
     atom_path.write_text(source, encoding="utf-8")
 
 
-def _configure_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _configure_manifest(tmp_path: Path) -> None:
     from agentm.core._internal.catalog import manifest as manifest_mod
 
     manifest_path = tmp_path / "core-manifest.yaml"
@@ -74,8 +73,7 @@ def _configure_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         "  tier_2_atoms: []\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(manifest_mod, "_MANIFEST_PATH", manifest_path)
-    reload_manifest()
+    manifest_mod.configure_manifest_path(manifest_path)
 
 
 def _write_trace(tmp_path: Path, trace_id: str, records: list[dict[str, object]]) -> Path:
@@ -116,7 +114,6 @@ def _capture_metrics(root: Path) -> dict[str, list[dict[str, object]]]:
 @pytest.mark.asyncio
 async def test_S10_manifest_change_moves_constitution_boundary(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from agentm.core._internal.catalog import manifest as manifest_mod
 
@@ -139,12 +136,10 @@ async def test_S10_manifest_change_moves_constitution_boundary(
         "  tier_2_atoms: []\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(manifest_mod, "_MANIFEST_PATH", custom_manifest)
-    reload_manifest()
-
-    assert manifest_mod.is_constitution_path("src/agentm/extensions/builtin/permission.py") is False
-    assert manifest_mod.is_constitution_path("core-manifest.yaml") is True
-    assert manifest_mod.is_constitution_path("src/agentm/core/operations.py") is True
+    with manifest_mod.override_manifest_path(custom_manifest):
+        assert manifest_mod.is_constitution_path("src/agentm/extensions/builtin/permission.py") is False
+        assert manifest_mod.is_constitution_path("core-manifest.yaml") is True
+        assert manifest_mod.is_constitution_path("src/agentm/core/operations.py") is True
 
 
 @pytest.mark.asyncio
@@ -181,9 +176,9 @@ async def test_E5_rebuild_is_idempotent(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_M1_freeze_idempotent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    _configure_manifest(tmp_path, monkeypatch)
+    _configure_manifest(tmp_path)
     _init_repo(tmp_path)
     source = "def install(api, config):\n    return 'first'\n"
     _write_atom(tmp_path, "tool_read", source)
@@ -210,9 +205,9 @@ async def test_M1_freeze_idempotent(
 
 @pytest.mark.asyncio
 async def test_M3_list_versions_after_first_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    _configure_manifest(tmp_path, monkeypatch)
+    _configure_manifest(tmp_path)
     _init_repo(tmp_path)
     source = "def install(api, config):\n    return 'read'\n"
     _write_atom(tmp_path, "tool_read", source)

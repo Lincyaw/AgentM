@@ -97,6 +97,21 @@ class ExtensionManifest:
     which writes to ``<cwd>/.agentm/atoms/<name>.py``, so source scenario
     files are never touched."""
 
+    provides_role: tuple[str, ...] = field(default_factory=tuple)
+    """Singleton roles this atom fulfils in the harness wiring.
+
+    Unlike ``registers`` (capability *tags*, many atoms may register the
+    same kind), each role names a slot the harness expects exactly one
+    atom to fill — e.g. ``"command_parser"``, ``"system_prompt_provider"``,
+    ``"compaction_prompts"``, ``"sub_agent_runtime"``,
+    ``"provider_inheritor"``. The discovery layer indexes atoms by role
+    so the session factory can resolve "which atom is today's command
+    parser?" without hard-coding atom names.
+
+    Use the constants exported from :mod:`agentm.core.abi.roles` rather
+    than raw strings. Empty tuple (default) means the atom claims no
+    singleton role."""
+
 
 # --- Tag parsing helper (used by validator + future tooling) ----------------
 

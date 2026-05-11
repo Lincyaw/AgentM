@@ -11,6 +11,13 @@ from typing import Any
 
 from agentm.core.abi import AgentLoop, EventBus, LoopConfig, Model, Tool
 from agentm.core.abi.events import DiagnosticEvent
+from agentm.core.abi.roles import (
+    COMMAND_PARSER,
+    COMPACTION_PROMPTS,
+    SLASH_COMMAND_DISPATCHER_SERVICE,
+    SUB_AGENT_RUNTIME,
+    SYSTEM_PROMPT_PROVIDER,
+)
 from agentm.extensions import discover as discover_mod
 from agentm.harness.atom_reloader import AtomReloader
 from agentm.harness.atom_sandbox import apply_atom_source_overrides
@@ -27,6 +34,7 @@ from agentm.harness.extension import (
     ReadonlySession,
     Renderer,
     _ExtensionAPIImpl,
+    build_extension_api_scope,
     load_extension,
 )
 from agentm.harness.provider_resolver import LastRegisteredWins
@@ -154,35 +162,41 @@ async def create_agent_session(
             spec.provider = child_provider_factory(parent_provider)
         return await session_cls.create(spec)
 
+    scope = build_extension_api_scope(
+        bus=bus,
+        cwd=config.cwd,
+        session_id=session_id,
+        session=session_view,
+        tools=tools,
+        commands=commands,
+        providers=providers,
+        renderers=renderers,
+        pending_user_messages=pending_user_messages,
+        model_getter=_model_getter,
+        provider_getter=_provider_getter,
+        gateway=reloader,
+        child_session_factory=_spawn_child_session,
+        resource_writer=resource_writer,
+        service_registry=services,
+    )
+
     def _make_api(owner: str) -> _ExtensionAPIImpl:
-        api = _ExtensionAPIImpl(
-            bus=bus,
-            cwd=config.cwd,
-            session_id=session_id,
-            session=session_view,
-            tools=tools,
-            commands=commands,
-            providers=providers,
-            renderers=renderers,
-            pending_user_messages=pending_user_messages,
-            model_getter=_model_getter,
-            provider_getter=_provider_getter,
-            gateway=reloader,
-            owner_name=owner,
-            child_session_factory=_spawn_child_session,
-            resource_writer=resource_writer,
-            service_registry=services,
-        )
+        api = _ExtensionAPIImpl(scope, owner_name=owner)
         reloader.wrap_api_on(api, owner)
         apis[owner] = api
         return api
 
     reloader.set_api_factory(_make_api)
-    services["slash_commands"] = HarnessCommandDispatcher(
+    command_parser_entry = discover_mod.discover_by_role().get(COMMAND_PARSER)
+    services[SLASH_COMMAND_DISPATCHER_SERVICE] = HarnessCommandDispatcher(
         commands=commands,
         owners_by_kind=reloader.owners_by_kind,
         apis=apis,
-        fallback_owner="agentm.extensions.builtin.slash_commands",
+        fallback_owner=(
+            command_parser_entry.module_path
+            if command_parser_entry is not None
+            else "<no-command-parser>"
+        ),
     )
 
     async def _install_with_events(
@@ -345,13 +359,17 @@ async def create_agent_session(
 
 
 def _configure_manifest(cwd: str) -> None:
+    # Each session binds its own path on the ContextVar — asyncio tasks
+    # copy the context at creation, so concurrent sessions in different
+    # cwds do not race. Sequential ``create_agent_session`` calls inside
+    # the same task overwrite the binding, which matches the desired
+    # "current session's cwd wins" semantics.
     try:
         from agentm.core._internal.catalog import manifest as _manifest_mod
 
-        if _manifest_mod._MANIFEST_PATH is None:
-            manifest_path = Path(cwd) / "core-manifest.yaml"
-            if manifest_path.exists():
-                _manifest_mod.configure_manifest_path(manifest_path)
+        manifest_path = Path(cwd) / "core-manifest.yaml"
+        if manifest_path.exists():
+            _manifest_mod.configure_manifest_path(manifest_path)
     except Exception as exc:
         logger.warning(
             "agentm core-manifest configuration failed during startup: %r", exc
@@ -386,16 +404,27 @@ async def _prime_contrib_discovery(config: AgentSessionConfig, bus: EventBus) ->
 async def _resolve_extensions(
     config: AgentSessionConfig, bus: EventBus
 ) -> list[tuple[str, dict[str, Any]]]:
-    floor_atoms = discover_mod.discover_builtin()
-    slash_commands_module = floor_atoms["slash_commands"].module_path
-    compaction_prompts_module = floor_atoms["compaction_prompts"].module_path
-    system_prompt_module = floor_atoms["system_prompt"].module_path
+    roles = discover_mod.discover_by_role()
+
+    def _role_module(role: str) -> str:
+        entry = roles.get(role)
+        if entry is None:
+            raise RuntimeError(
+                f"floor role {role!r} has no atom — no builtin/contrib atom "
+                "declares this role in MANIFEST.provides_role"
+            )
+        return entry.module_path
+
+    command_parser_module = _role_module(COMMAND_PARSER)
+    compaction_prompts_module = _role_module(COMPACTION_PROMPTS)
+    system_prompt_module = _role_module(SYSTEM_PROMPT_PROVIDER)
+    sub_agent_runtime_entry = roles.get(SUB_AGENT_RUNTIME)
     if config.no_extensions:
         to_load: list[tuple[str, dict[str, Any]]] = []
     elif config.extensions:
         to_load = list(config.extensions)
         ensure_floor_atom(to_load, compaction_prompts_module)
-        ensure_floor_atom(to_load, slash_commands_module)
+        ensure_floor_atom(to_load, command_parser_module)
     elif config.scenario is not None:
         from agentm.extensions.loader import ScenarioLoadError, load_scenario
 
@@ -412,7 +441,7 @@ async def _resolve_extensions(
             )
             to_load = []
         ensure_floor_atom(to_load, compaction_prompts_module)
-        ensure_floor_atom(to_load, slash_commands_module)
+        ensure_floor_atom(to_load, command_parser_module)
         # Layer ``<cwd>/.agentm/atoms/`` agent-installed atoms on top of the
         # scenario. Without this merge, ``api.install_atom`` calls would only
         # take effect for the lifetime of one session — the next process
@@ -469,8 +498,15 @@ async def _resolve_extensions(
         to_load.extend(config.extra_extensions)
     if not config.no_extensions:
         loaded_modules = {module_path for module_path, _cfg in to_load}
-        sub_agent_module = floor_atoms["sub_agent"].module_path
-        if sub_agent_module in loaded_modules and system_prompt_module not in loaded_modules:
+        # The sub-agent runtime injects inherited prompt text via the
+        # system-prompt hook, so any session that loads it needs an atom
+        # filling the SYSTEM_PROMPT_PROVIDER role even if the scenario
+        # author forgot to list one.
+        if (
+            sub_agent_runtime_entry is not None
+            and sub_agent_runtime_entry.module_path in loaded_modules
+            and system_prompt_module not in loaded_modules
+        ):
             to_load.insert(0, (system_prompt_module, {"prompt": ""}))
 
         from agentm.extensions.loader import sort_extensions_by_requires
