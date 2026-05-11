@@ -34,7 +34,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 from agentm.core.abi import EventBus
-from agentm_channels import DEFAULT_SOCKET_URL
+from pathlib import Path
+
+from agentm_channels import DEFAULT_SOCKET_URL, load_dotenv_files
 from agentm_channels.client import AuthError, WireClient
 from agentm_channels.wire import (
     KIND_BYE,
@@ -370,6 +372,9 @@ async def _arun(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Match agentm-gateway: pull .env vars (provider API keys, custom
+    # scenario knobs) from cwd / workspace root before arg parsing.
+    load_dotenv_files(Path.cwd())
     parser = _build_parser()
     try:
         args = parser.parse_args(list(argv) if argv is not None else sys.argv[1:])
