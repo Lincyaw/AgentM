@@ -15,6 +15,13 @@ dependencies = [
     "python-dotenv>=1.0",
 ]
 
+[project.optional-dependencies]
+# Backs the ``operations_agent_env`` atom with the ARL agent-env Python SDK.
+# Install with: ``uv sync --extra agent-env``.
+agent-env = [
+    "arl-env>=0.2.0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

@@ -35,6 +35,11 @@ dependencies = [
     { name = "typer" },
 ]
 
+[package.optional-dependencies]
+agent-env = [
+    { name = "arl-env" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
@@ -49,6 +54,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=0.86.0" },
+    { name = "arl-env", marker = "extra == 'agent-env'", specifier = ">=0.2.0" },
     { name = "openai", specifier = ">=1.50.0" },
     { name = "pathspec", specifier = ">=1.0.4" },
     { name = "python-dotenv", specifier = ">=1.0" },
@@ -56,6 +62,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "typer", specifier = ">=0.25.1" },
 ]
+provides-extras = ["agent-env"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -265,6 +272,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/19/14/2c5dd9f512b66549ae92767a9c7b330ae88e1932ca57876909410251fe13/anyio-4.13.0.tar.gz", hash = "sha256:334b70e641fd2221c1505b3890c69882fe4a2df910cba14d97019b90b24439dc", size = 231622, upload-time = "2026-03-24T12:59:09.671Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/da/42/e921fccf5015463e32a3cf6ee7f980a6ed0f395ceeaa45060b61d86486c2/anyio-4.13.0-py3-none-any.whl", hash = "sha256:08b310f9e24a9594186fd75b4f73f4a4152069e3853f1ed8bfbf58369f4ad708", size = 114353, upload-time = "2026-03-24T12:59:08.246Z" },
+]
+
+[[package]]
+name = "arl-env"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "rich" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1b/e8/b3757be84e09390debb8732e987df9c5b79039adb1821e1c1d54c7542f54/arl_env-0.3.1.tar.gz", hash = "sha256:d8d3ec745bd1afd5cc50255d3bd3ead9f48e6f88706be456996a82e0a932ad54", size = 16658, upload-time = "2026-03-10T06:39:57.846Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ea/88/0488facff383a0e30789b95638d1c4246c13e25c944de3dca330ae0a3fa9/arl_env-0.3.1-py3-none-any.whl", hash = "sha256:2659cecc4419968d833d267dbd32e2fdc1b9e07ac9bf9665533e149e55c81298", size = 18590, upload-time = "2026-03-10T06:39:56.892Z" },
 ]
 
 [[package]]

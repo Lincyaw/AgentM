@@ -1,0 +1,63 @@
+name: agent_env
+description: |
+  General-purpose scenario whose Operations bundle (bash + file I/O) is
+  backed by an ARL agent-env sandbox instead of the local host shell.
+
+  Use this when you want the agent's tool calls to execute inside an
+  isolated Kubernetes pod — e.g. for sandboxed code execution, snapshot/
+  restore on every step, or RL trajectory collection.
+
+  Mirrors ``general_purpose`` but swaps the Operations atom:
+    ``operations_local`` → ``operations_agent_env`` (see contrib/extensions/).
+
+  Prereqs:
+    - An ARL gateway reachable from the host (default
+      ``http://localhost:8080``; set ``AGENTM_AGENT_ENV_GATEWAY_URL`` to
+      override).
+    - A ready WarmPool whose name matches ``pool_ref`` below (or set
+      ``AGENTM_AGENT_ENV_POOL_REF``).
+    - ``uv sync --extra agent-env`` to pull the ``arl-env`` SDK.
+
+  Quick start (minikube):
+    See contrib/extensions/operations_agent_env.py and the agent-env
+    repo's examples/local-test/ for a full local bring-up.
+
+extensions:
+  # --- environment ports: swap the default operations_local for a
+  # sandbox-backed bundle. Bash and file I/O both target /workspace
+  # inside the warm pod. ---
+  - module: _agentm_contrib__operations_agent_env
+    config:
+      # Set via env var (AGENTM_AGENT_ENV_POOL_REF) if you'd rather not
+      # bake the pool name into the manifest. Atom config wins when both
+      # are present.
+      pool_ref: python-39-std
+      # gateway_url and namespace fall back to env vars / defaults; uncomment
+      # to override here:
+      # gateway_url: http://192.168.49.2:30080
+      # namespace: default
+      work_dir: /workspace
+
+  # --- file I/O and shell: identical to general_purpose. The Operations
+  # bundle above transparently routes these to the sandbox. ---
+  - module: agentm.extensions.builtin.tool_read
+  - module: agentm.extensions.builtin.tool_edit
+  - module: agentm.extensions.builtin.tool_write
+  - module: agentm.extensions.builtin.tool_bash
+
+  # --- observability + prompt assembly + skills / templates / memory:
+  # same set as general_purpose so the agent behaves identically apart
+  # from where its shell commands run. ---
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You are an AgentM agent whose bash, read, write, and edit tools
+        all execute inside an isolated agent-env sandbox (Kubernetes pod
+        with ``/workspace`` as the working directory). The local host
+        filesystem is NOT visible; create and read files under
+        ``/workspace``.
+  - module: agentm.extensions.builtin.runtime_context
+  - module: agentm.extensions.builtin.skill_loader
+  - module: agentm.extensions.builtin.prompt_templates
+  - module: agentm.extensions.builtin.memory
