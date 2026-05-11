@@ -17,6 +17,9 @@ from ..bus import OutboundMessage
 class StubChannel(BaseChannel):
     name = "stub"
     display_name = "Stub (in-memory)"
+    # See BaseChannel.__init_subclass__ — stubs are the test fixture
+    # for the wire path and must not trigger the v0-deprecation warning.
+    _is_stub_fixture = True
 
     def __init__(self, config: Any, bus: Any) -> None:
         super().__init__(config, bus)
