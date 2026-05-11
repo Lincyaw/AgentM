@@ -39,7 +39,7 @@ There is **no subtraction step**. Every tool listed in config is unconditionally
 
 ### 2.3 Inspiration
 
-Claude Code's architecture uses a three-layer filter model (from the [reference analysis](../../../docs/references/claude-code-agent-team-architecture.md)):
+Production agent systems often use a three-layer filter model:
 
 1. **Global disallowed list** — SDK-level, prevents sub-agents from using dispatch tools (recursion guard).
 2. **Agent-level disallowed list** — Declarative exclusion of specific tools per agent definition.

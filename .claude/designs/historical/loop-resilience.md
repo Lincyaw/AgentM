@@ -9,8 +9,6 @@ The current architecture lives in [pluggable-architecture.md](../pluggable-archi
 **Status**: DRAFT
 **Created**: 2026-03-31
 **Last Updated**: 2026-03-31
-**Reference**: Claude Code source analysis (see `docs/references/claude-code-sdk-reform-analysis.md`)
-
 ---
 
 ## Overview

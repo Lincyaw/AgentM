@@ -1,6 +1,6 @@
-"""Provider interface package — port of pi-mono ``packages/ai/``.
+"""Provider interface package.
 
-Interface-only port: concrete provider implementations live in
+Interface-only: concrete provider implementations live in
 ``agentm.llm``. This package exposes the provider descriptor / registry
 types that the CLI and contrib channels use to enumerate available
 providers and resolve API keys from the environment.

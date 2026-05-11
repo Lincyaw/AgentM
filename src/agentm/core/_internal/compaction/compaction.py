@@ -1,4 +1,4 @@
-"""Pure compaction logic adapted from pi-mono's LLM-driven compaction.
+"""Pure LLM-driven compaction logic.
 
 Per issue #76, the kernel keeps **zero** literal English prompt text and
 **zero** string-literal entry-type dispatch. Prompts are passed in as

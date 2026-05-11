@@ -6,13 +6,13 @@
 
 ## Overview
 
-A pure-function module `core/lib/edit_diff.py` containing the edit-application algorithm used by `tool_edit` (and reusable by future scenarios needing in-place file mutation): line-ending detection/restoration, BOM handling, NFKC + smart-quote / dash / space fuzzy normalization, and the multi-edit application pipeline that produces a final new content string from a base content + a list of `Edit{old, new}` operations. Pi-mono reference: [`packages/coding-agent/src/core/tools/edit-diff.ts`](/tmp/pi-analysis/pi-mono/packages/coding-agent/src/core/tools/edit-diff.ts).
+A pure-function module `core/lib/edit_diff.py` containing the edit-application algorithm used by `tool_edit` (and reusable by future scenarios needing in-place file mutation): line-ending detection/restoration, BOM handling, NFKC + smart-quote / dash / space fuzzy normalization, and the multi-edit application pipeline that produces a final new content string from a base content + a list of `Edit{old, new}` operations.
 
 ## Motivation
 
 AgentM's existing `tool_edit` does plain string replace. That fails in three real scenarios:
 
-1. **CRLF files** — pi-mono's `tool_edit` reads CRLF, normalizes to LF for matching, applies the edit, then restores CRLF on write. Plain `str.replace` mangles line endings if the model's `old_string` was learned from a previous `read` call (which usually returns LF-normalized text).
+1. **CRLF files** — the algorithm reads CRLF, normalizes to LF for matching, applies the edit, then restores CRLF on write. Plain `str.replace` mangles line endings if the model's `old_string` was learned from a previous `read` call (which usually returns LF-normalized text).
 2. **BOM-prefixed files** — UTF-8 BOM gets accidentally consumed/emitted by naive readers; the edit succeeds but the file's BOM disappears.
 3. **Smart-quote / em-dash drift** — the model writes `—` (U+2014) in `old_string`; the file has `--`. Exact match fails. Fuzzy normalization (NFKC + Unicode-dash → ASCII hyphen + smart-quote → ASCII quote + Unicode-space → space) lets the match succeed and the replacement uses the *normalized* content (acceptable: the side effect is normalizing minor formatting).
 
@@ -63,7 +63,7 @@ def apply_edits(base: str, edits: list[Edit]) -> AppliedEditsResult:
     normalized and original."""
 ```
 
-### Edit-application algorithm (port of `edit-diff.ts:147-...`)
+### Edit-application algorithm
 
 1. Read raw bytes, decode UTF-8 (errors=`replace` for safety).
 2. `bom, text = strip_bom(raw)`.

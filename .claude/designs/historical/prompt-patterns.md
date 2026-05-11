@@ -13,13 +13,13 @@ The current architecture lives in [pluggable-architecture.md](../pluggable-archi
 
 ## Overview
 
-A catalog of production-proven prompt design patterns that all AgentM prompt templates (`.j2` files) should follow, derived from Claude Code's multi-agent prompt architecture and adapted to AgentM's Jinja2 template system.
+A catalog of production-proven prompt design patterns that all AgentM prompt templates (`.j2` files) should follow, expressed in AgentM's Jinja2 template system.
 
 ---
 
 ## Motivation
 
-AgentM's current prompt templates have evolved organically. They lack a unified structural standard. Analysis of Claude Code's prompt architecture ([reference](../../../docs/references/claude-code-sdk-reform-analysis.md)) reveals 12 patterns that systematically improve LLM compliance, reduce hallucination, and enforce behavioral boundaries.
+AgentM's current prompt templates have evolved organically. They lack a unified structural standard. The 12 patterns below systematically improve LLM compliance, reduce hallucination, and enforce behavioral boundaries.
 
 Current templates already use some implicitly (role opening, structured output) but miss several high-impact ones (anti-rationalization checklists, deterrence statements, context isolation declarations, permission boundary markers).
 
@@ -381,7 +381,7 @@ GP templates are minimal by design but should still include Context Isolation (J
 |----------|-----------|
 | Patterns are guidelines, not enforced by tooling | Templates are hand-authored Jinja2; automated linting is premature |
 | Anti-rationalization checklists are scenario-specific | Generic checklists ("be thorough") are ineffective; only observed failure modes work |
-| `=== CRITICAL ===` over `<critical>` XML tag | Visual impact in raw editing; matches Claude Code convention |
+| `=== CRITICAL ===` over `<critical>` XML tag | Visual impact in raw editing |
 | Template structure is recommendation, not rigid | Different scenarios have legitimately different needs |
 
 ---

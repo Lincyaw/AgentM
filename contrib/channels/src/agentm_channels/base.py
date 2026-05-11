@@ -12,8 +12,7 @@ Optional surface:
   fall back to whole-turn :meth:`send` calls.
 * :attr:`name` / :attr:`display_name` — module identity.
 * :meth:`default_config` — schema hint for an interactive setup wizard
-  (matches nanobot's pattern; not used by the AgentM CLI today but
-  cheap to keep).
+  (not used by the AgentM CLI today but cheap to keep).
 
 The base class also defines :meth:`_handle_message`, the helper every
 concrete channel calls when it receives a user message. It does the

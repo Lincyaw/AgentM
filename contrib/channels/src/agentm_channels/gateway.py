@@ -1,6 +1,6 @@
 """Gateway — the agent-side half of the channel system.
 
-Mirrors HKUDS/nanobot's flow: a long-running consumer of
+A long-running consumer of
 ``MessageBus.inbound`` that, for each message, looks up (or creates) an
 :class:`agentm.harness.AgentSession` keyed on
 :attr:`InboundMessage.session_key`, sets per-turn approval context,

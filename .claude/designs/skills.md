@@ -6,7 +6,7 @@
 
 ## Overview
 
-Filesystem-discovered `SKILL.md` files with YAML frontmatter, advertised to the LLM as a compact `<available_skills>` index in the system prompt; the model loads any specific skill on demand via the existing `read` tool. Pi-mono reference: [`packages/coding-agent/src/core/skills.ts`](/tmp/pi-analysis/pi-mono/packages/coding-agent/src/core/skills.ts).
+Filesystem-discovered `SKILL.md` files with YAML frontmatter, advertised to the LLM as a compact `<available_skills>` index in the system prompt; the model loads any specific skill on demand via the existing `read` tool.
 
 ## Motivation
 
@@ -41,7 +41,7 @@ disable-model-invocation: false   # optional; if true, only invokable explicitly
 # Body — the markdown the model sees when it `read`s the file.
 ```
 
-### Validation rules (port from `skills.ts:93-132`)
+### Validation rules
 
 | Field | Rule |
 |---|---|
@@ -90,7 +90,7 @@ def format_skills_for_prompt(skills: list[SkillRecord]) -> str:
     empty string if no model-invocable skills."""
 ```
 
-`format_skills_for_prompt` produces (port of `skills.ts:340-366`):
+`format_skills_for_prompt` produces:
 
 ```
 \n\nThe following skills provide specialized instructions for specific tasks.
@@ -217,7 +217,7 @@ class ResourcesDiscoverEvent:
     reason: Literal["startup", "reload"]
 ```
 
-Handlers return `dict[str, list[str]]` (or None). Recognized keys: `skill_paths`, `prompt_paths`. Extra keys are forwarded to whichever consumer asked. This is the smallest-possible hook for runtime extensibility (see [pluggable-architecture.md §3.4](pluggable-architecture.md#34-resource-discovery-the-project-context-boundary), pi-mono `extensions/types.ts:495-510`).
+Handlers return `dict[str, list[str]]` (or None). Recognized keys: `skill_paths`, `prompt_paths`. Extra keys are forwarded to whichever consumer asked. This is the smallest-possible hook for runtime extensibility (see [pluggable-architecture.md §3.4](pluggable-architecture.md#34-resource-discovery-the-project-context-boundary)).
 
 `AgentSession` does **not** call `resources_discover` automatically. Each consumer (skill_loader, prompt_templates) emits it themselves at `session_ready` time. Rationale: keeps the harness ignorant of which resource kinds exist.
 

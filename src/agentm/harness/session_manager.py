@@ -1,8 +1,8 @@
 """Tree-shaped session storage, context reconstruction, and persistence.
 
-Mirrors pi-mono's session model closely enough for AgentM's v2 harness:
-append-only entries with parent pointers, a movable active leaf, branch-aware
-context reconstruction, and optional JSONL persistence.
+AgentM's v2 harness session model: append-only entries with parent
+pointers, a movable active leaf, branch-aware context reconstruction,
+and optional JSONL persistence.
 
 Layer purity: stdlib + ``agentm.core.abi`` only.
 """
