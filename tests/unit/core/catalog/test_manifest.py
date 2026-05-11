@@ -167,5 +167,5 @@ def test_S10_manifest_change_moves_constitution_boundary(
         # The boundary moved: the kernel (abi) file is now autonomy-layer.
         assert is_constitution_path(KERNEL_PATH) is False
         # ...but lib/ paths and the manifest itself are still protected.
-        assert is_constitution_path("src/agentm/core/lib/path_utils.py") is True
+        assert is_constitution_path("src/agentm/core/lib/frontmatter.py") is True
         assert is_constitution_path(MANIFEST_FILENAME) is True
