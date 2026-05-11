@@ -13,6 +13,15 @@ Rationale (vs. calling ``gateway._dispatch`` directly): going through
 ``MessageBus`` keeps a single dispatch contract for v0 and wire peers,
 so observability / approval / retry semantics are identical. The cost
 is one ``BaseChannel`` instance per wire peer — cheap and short-lived.
+
+Phase 5a addition — ``agent_worker`` peers
+------------------------------------------
+A second peer kind on the wire: workers that hold the agent session.
+The router policy (scenario-equality + sticky session_key) lives in
+:class:`agentm_channels.worker_registry.WorkerRegistry`. The bridge
+applies it on every inbound, and forwards worker-originated
+``KIND_OUTBOUND`` envelopes back to the originating chat client by
+matching ``body["channel"]`` against the synthetic-channel map.
 """
 
 from __future__ import annotations
@@ -23,11 +32,12 @@ import time
 from typing import Any
 
 from .base import BaseChannel
-from .bus import MessageBus, OutboundKind, OutboundMessage
+from .bus import InboundMessage, MessageBus, OutboundKind, OutboundMessage
 from .manager import ChannelManager
 from .outbox import OutboxStore
 from .peer import PeerSession
 from .wire import KIND_INBOUND, KIND_OUTBOUND, WIRE_VERSION, Envelope
+from .worker_registry import WorkerRegistry
 
 log = logging.getLogger("agentm_channels.wire_bridge")
 
@@ -72,36 +82,33 @@ class _WireChannel(BaseChannel):
         # Turn-complete is internal control; chat clients want it as
         # an envelope too, but for v1 we ship it on the wire so peers
         # can mirror it (terminal channel uses it to print a marker).
-        body: dict[str, Any] = {
-            "channel": msg.channel,
-            "chat_id": msg.chat_id,
-            "content": msg.content,
-            "kind": msg.kind.value
-            if isinstance(msg.kind, OutboundKind)
-            else str(msg.kind),
-        }
-        # Buttons round-trip the typed shape so terminal/Feishu clients
-        # can render their native UI and the approval bridge's
-        # button_value contract survives across the wire.
-        if msg.buttons:
-            body["buttons"] = [
-                {"label": b.label, "value": b.value, "style": b.style}
-                for b in msg.buttons
-            ]
-        # Pass through metadata when present — the approval bridge tags
-        # approval_request/approval_resolved with correlation info there,
-        # and the wire is the only path now that v0 channels are
-        # deprecated.
-        if msg.metadata:
-            body["metadata"] = dict(msg.metadata)
-        env = Envelope(
-            v=WIRE_VERSION,
-            id=f"out-{self._peer_id}-{int(time.time() * 1_000_000)}",
-            kind=KIND_OUTBOUND,
-            ts=time.time(),
-            body=body,
-        )
+        env = _outbound_to_envelope(msg, peer_id=self._peer_id)
         await asyncio.to_thread(self._outbox.enqueue, self._peer_id, env)
+
+
+def _outbound_to_envelope(msg: OutboundMessage, *, peer_id: str) -> Envelope:
+    body: dict[str, Any] = {
+        "channel": msg.channel,
+        "chat_id": msg.chat_id,
+        "content": msg.content,
+        "kind": msg.kind.value
+        if isinstance(msg.kind, OutboundKind)
+        else str(msg.kind),
+    }
+    if msg.buttons:
+        body["buttons"] = [
+            {"label": b.label, "value": b.value, "style": b.style}
+            for b in msg.buttons
+        ]
+    if msg.metadata:
+        body["metadata"] = dict(msg.metadata)
+    return Envelope(
+        v=WIRE_VERSION,
+        id=f"out-{peer_id}-{int(time.time() * 1_000_000)}",
+        kind=KIND_OUTBOUND,
+        ts=time.time(),
+        body=body,
+    )
 
 
 class WireBridge:
@@ -110,17 +117,67 @@ class WireBridge:
     Holds the :class:`ChannelManager` (so it can inject/remove synthetic
     :class:`_WireChannel` instances on the fly) and the
     :class:`OutboxStore` (so the synthetic channel can enqueue replies).
+
+    With Phase 5a, also holds a :class:`WorkerRegistry`. When a worker
+    matches an inbound's scenario, the bridge bypasses the in-process
+    MessageBus path and enqueues the original inbound envelope onto the
+    worker's outbox; reply outbounds from the worker are routed back to
+    the originating chat client's outbox by ``body["channel"]``.
     """
 
     def __init__(
-        self, *, bus: MessageBus, manager: ChannelManager, outbox: OutboxStore
+        self,
+        *,
+        bus: MessageBus,
+        manager: ChannelManager,
+        outbox: OutboxStore,
+        worker_registry: WorkerRegistry | None = None,
+        scenario: str | None = None,
+        allow_inproc: bool = True,
     ) -> None:
         self._bus = bus
         self._manager = manager
         self._outbox = outbox
+        self._workers = worker_registry or WorkerRegistry()
+        self._scenario = scenario or ""
+        self._allow_inproc = allow_inproc
         # peer_id → channel_name registered for that peer (so we can
         # tear it down on disconnect).
         self._peer_channels: dict[str, str] = {}
+        # Reverse: channel_name → chat_client peer_id. Used to route
+        # worker → chat outbounds back to the right peer's outbox.
+        self._channel_to_peer: dict[str, str] = {}
+
+    @property
+    def worker_registry(self) -> WorkerRegistry:
+        return self._workers
+
+    # -- WireServer hooks --------------------------------------------
+
+    async def handle_peer_hello(self, session: PeerSession) -> None:
+        """Register worker peers in the registry on hello.
+
+        Chat-client peers are still registered lazily on first inbound
+        (the synthetic-channel name is taken from ``body.channel`` and
+        not known until then).
+        """
+        if session.peer_kind == "agent_worker":
+            self._workers.register(session.peer_id, dict(session.capabilities))
+
+    async def handle_peer_disconnect(self, session: PeerSession) -> None:
+        """Tear down per-peer state on disconnect.
+
+        For workers: release sticky session bindings and warn every
+        affected chat client that its in-flight turn is lost.
+        For chat clients: drop the synthetic channel.
+        """
+        if session.peer_kind == "agent_worker":
+            lost = self._workers.unregister(session.peer_id)
+            for session_key in lost:
+                await self._emit_worker_lost(session_key)
+            return
+        # chat_client (or unknown): drop the synthetic channel.
+        await self.on_peer_disconnect(session.peer_id)
 
     async def handle_inbound(self, peer_session: PeerSession, env: Envelope) -> None:
         """Invoked by :class:`WireServer` for each ``inbound`` envelope."""
@@ -143,7 +200,50 @@ class WireBridge:
             )
             return
         await self._ensure_channel(peer_session.peer_id, channel_name)
-        from .bus import InboundMessage
+        session_key = f"{channel_name}:{chat_id}"
+
+        worker_peer = self._workers.find_worker(self._scenario, session_key)
+        if worker_peer is not None:
+            # Forward the inbound envelope to the worker's outbox. The
+            # body stays the same so the worker reconstructs an
+            # ``InboundMessage`` with the same fields.
+            forwarded = Envelope(
+                v=WIRE_VERSION,
+                id=f"fwd-{worker_peer}-{int(time.time() * 1_000_000)}",
+                kind=KIND_INBOUND,
+                ts=time.time(),
+                body=dict(body),
+                root_session_key=session_key,
+            )
+            await asyncio.to_thread(self._outbox.enqueue, worker_peer, forwarded)
+            return
+
+        if not self._allow_inproc:
+            log.warning(
+                "no worker available for scenario=%r session_key=%s; "
+                "gateway was started with --no-inproc-worker",
+                self._scenario,
+                session_key,
+            )
+            await self._bus.publish_outbound(
+                OutboundMessage(
+                    channel=channel_name,
+                    chat_id=chat_id,
+                    content=(
+                        f"no worker available for scenario {self._scenario!r}; "
+                        "gateway started with --no-inproc-worker. "
+                        "start an `agentm-worker --connect <gateway>` and retry."
+                    ),
+                )
+            )
+            await self._bus.publish_outbound(
+                OutboundMessage(
+                    channel=channel_name,
+                    chat_id=chat_id,
+                    kind=OutboundKind.TURN_COMPLETE,
+                )
+            )
+            return
 
         await self._bus.publish_inbound(
             InboundMessage(
@@ -154,6 +254,79 @@ class WireBridge:
                 button_value=button_value,
             )
         )
+
+    async def handle_worker_outbound(
+        self, worker_session: PeerSession, env: Envelope
+    ) -> None:
+        """Route a worker-originated ``KIND_OUTBOUND`` to the chat client.
+
+        Match by ``body["channel"]`` → owning chat_client peer_id and
+        enqueue onto that peer's outbox. The body is forwarded as-is so
+        renderers see the same shape they would have seen from the
+        in-process gateway.
+        """
+        body = env.body if isinstance(env.body, dict) else {}
+        channel_name = str(body.get("channel") or "")
+        if not channel_name:
+            log.warning(
+                "worker outbound rejected: missing channel (worker=%s id=%s)",
+                worker_session.peer_id,
+                env.id,
+            )
+            return
+        chat_peer_id = self._channel_to_peer.get(channel_name)
+        if chat_peer_id is None:
+            log.warning(
+                "worker outbound for channel=%r has no live chat peer "
+                "(worker=%s id=%s)",
+                channel_name,
+                worker_session.peer_id,
+                env.id,
+            )
+            return
+        # Rebuild so the envelope id is unique on the chat client's
+        # outbox (workers may reuse their own id-space). The body is
+        # the contract; the id is plumbing.
+        forwarded = Envelope(
+            v=WIRE_VERSION,
+            id=f"out-{chat_peer_id}-{int(time.time() * 1_000_000)}",
+            kind=KIND_OUTBOUND,
+            ts=time.time(),
+            body=dict(body),
+        )
+        await asyncio.to_thread(
+            self._outbox.enqueue, chat_peer_id, forwarded
+        )
+
+    # -- helpers -----------------------------------------------------
+
+    async def _emit_worker_lost(self, session_key: str) -> None:
+        """Notify the chat side that the worker holding ``session_key``
+        is gone. Strict policy: the in-flight turn is lost."""
+        channel_name, _, chat_id = session_key.partition(":")
+        if not channel_name or not chat_id:
+            return
+        chat_peer_id = self._channel_to_peer.get(channel_name)
+        if chat_peer_id is None:
+            # Chat already disconnected too — nothing to deliver.
+            return
+        msg = OutboundMessage(
+            channel=channel_name,
+            chat_id=chat_id,
+            content=(
+                "agent worker disconnected; the in-flight turn is lost. "
+                "send your next message to restart."
+            ),
+        )
+        env = _outbound_to_envelope(msg, peer_id=chat_peer_id)
+        await asyncio.to_thread(self._outbox.enqueue, chat_peer_id, env)
+        turn = OutboundMessage(
+            channel=channel_name,
+            chat_id=chat_id,
+            kind=OutboundKind.TURN_COMPLETE,
+        )
+        env2 = _outbound_to_envelope(turn, peer_id=chat_peer_id)
+        await asyncio.to_thread(self._outbox.enqueue, chat_peer_id, env2)
 
     async def _ensure_channel(self, peer_id: str, channel_name: str) -> None:
         existing = self._peer_channels.get(peer_id)
@@ -175,12 +348,16 @@ class WireBridge:
         )
         self._manager.inject_channel(channel_name, ch)
         self._peer_channels[peer_id] = channel_name
+        self._channel_to_peer[channel_name] = peer_id
         log.info(
             "wire peer registered as channel %r (peer_id=%s)", channel_name, peer_id
         )
 
     async def _drop_channel(self, channel_name: str) -> None:
         ch = self._manager.channels.pop(channel_name, None)
+        # Drop reverse mapping if it points at any peer (we don't know
+        # which one without a scan, but channel_name itself is the key).
+        self._channel_to_peer.pop(channel_name, None)
         if ch is None:
             return
         try:

@@ -17,6 +17,7 @@ members = [
     "agentm-feishu",
     "agentm-rca",
     "agentm-terminal",
+    "agentm-worker",
     "llmharness",
 ]
 
@@ -180,6 +181,34 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agentm-channels", editable = "contrib/channels" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+]
+provides-extras = ["dev"]
+
+[[package]]
+name = "agentm-worker"
+version = "0.1.0"
+source = { editable = "contrib/channels-clients/worker" }
+dependencies = [
+    { name = "agentm" },
+    { name = "agentm-channels" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "agentm", editable = "." },
     { name = "agentm-channels", editable = "contrib/channels" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },

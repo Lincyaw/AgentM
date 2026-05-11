@@ -47,6 +47,7 @@ members = [
     "contrib/channels",
     "contrib/channels-clients/terminal",
     "contrib/channels-clients/feishu",
+    "contrib/channels-clients/worker",
 ]
 
 [tool.pytest.ini_options]
