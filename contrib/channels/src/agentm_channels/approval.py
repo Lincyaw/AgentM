@@ -74,12 +74,20 @@ class ApprovalBridge:
         policy: ApprovalPolicy,
         *,
         get_context: Callable[[], ApprovalContext | None],
+        index: "dict[str, ApprovalBridge] | None" = None,
     ) -> None:
         self._bus = bus
         self._policy = policy
         self._get_context = get_context
         self._pending: dict[str, asyncio.Future[_PendingResult]] = {}
         self._lock = asyncio.Lock()
+        # Gateway-owned ``approval_id → bridge`` index for O(1) routing
+        # of button clicks. Optional so the bridge stays usable in unit
+        # tests that drive ``resolve()`` directly. When provided, the
+        # bridge keeps it in sync: register on request publish, pop on
+        # any terminal outcome (resolve / timeout). Misses fall back to
+        # the broadcast path in the gateway.
+        self._index = index
 
     def _decide(self, tool_name: str) -> str:
         if tool_name in self._policy.always_block:
@@ -121,6 +129,8 @@ class ApprovalBridge:
         approval_id = f"approval-{id(future):x}"
         async with self._lock:
             self._pending[approval_id] = future
+        if self._index is not None:
+            self._index[approval_id] = self
 
         body = self._format_request(event, requested_by=ctx.sender_id)
         # We encode the approval_id into each button's typed ``value``
@@ -160,6 +170,8 @@ class ApprovalBridge:
         except asyncio.TimeoutError:
             async with self._lock:
                 self._pending.pop(approval_id, None)
+            if self._index is not None:
+                self._index.pop(approval_id, None)
             await self._post_resolution(
                 ctx, event.tool_name, _DENY, "timeout"
             )
@@ -237,6 +249,8 @@ class ApprovalBridge:
             )
             return False
 
+        if self._index is not None:
+            self._index.pop(approval_id, None)
         future.set_result((decision, sender_id))
         return True
 

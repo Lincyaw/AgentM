@@ -87,6 +87,19 @@ class ExtensionManifest:
     in ``core-manifest.yaml::reload.tier_2_atoms``; the validator's
     §11.4.10 check warns on disagreement between this field and that list."""
 
+    mountable_via_command: bool = False
+    """Whether deployments may surface this atom as a ``/atom:install``
+    slash command in chat gateways. Two gates total: the atom author opts
+    in here, and the gateway operator must additionally list the atom in
+    ``commands.atoms.allow``. Both required so neither party can ship a
+    user-mountable atom by accident. Default ``False`` is fully backwards
+    compatible.
+
+    See ``.claude/designs/command-routing.md`` §8 for the runtime-overlay
+    semantics — installs route through ``ExtensionAPI.install_atom``,
+    which writes to ``<cwd>/.agentm/atoms/<name>.py``, so source scenario
+    files are never touched."""
+
 
 # --- Tag parsing helper (used by validator + future tooling) ----------------
 
