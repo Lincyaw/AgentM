@@ -42,6 +42,34 @@ the number of *retries* after the initial attempt (so 3 entries → up to
 4 sends total). Override at :class:`ChannelManager` construction time."""
 
 
+def _validate_allow_from(name: str, section: dict[str, Any]) -> None:
+    """Fail-fast when an enabled channel has an empty ``allow_from`` list.
+
+    Empty list means "deny everyone" — by itself that's a defensible
+    fail-closed default, but combined with ``enabled: true`` the bot
+    appears online and silently ignores every message. That looks like a
+    bug for the next two hours of the operator's life. Refuse to start
+    instead and tell the operator exactly what to fix.
+
+    ``None`` / missing key is treated the same as ``["*"]`` (permissive)
+    for the moment — channels that want stricter defaults should set
+    them in :meth:`BaseChannel.default_config`.
+    """
+    allow = section.get("allow_from", section.get("allowFrom"))
+    if allow is None:
+        return
+    if not isinstance(allow, list):
+        raise SystemExit(
+            f'channel "{name}" has non-list allow_from: {allow!r}. '
+            f'Use ["*"] to allow everyone, or list specific user ids.'
+        )
+    if len(allow) == 0:
+        raise SystemExit(
+            f'channel "{name}" has empty allow_from (denies all users). '
+            f'Set allow_from: ["*"] to permit everyone, or add explicit ids.'
+        )
+
+
 class ChannelManager:
     def __init__(
         self,
@@ -69,6 +97,7 @@ class ChannelManager:
                 continue
             if not section.get("enabled", False):
                 continue
+            _validate_allow_from(name, section)
             try:
                 self._channels[name] = cls(section, self._bus)
             except Exception:
