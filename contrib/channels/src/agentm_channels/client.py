@@ -62,12 +62,14 @@ class WireClient:
         *,
         token: str | None = None,
         on_outbound: OutboundHandler | None = None,
+        capabilities: dict[str, Any] | None = None,
     ) -> None:
         self._socket_path = socket_path
         self._peer_id = peer_id
         self._peer_kind = peer_kind
         self._token = token
         self._on_outbound = on_outbound
+        self._capabilities: dict[str, Any] = dict(capabilities or {})
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._read_task: asyncio.Task[None] | None = None
@@ -90,7 +92,7 @@ class WireClient:
                 "peer_id": self._peer_id,
                 "peer_kind": self._peer_kind,
                 "token": self._token,
-                "capabilities": {},
+                "capabilities": dict(self._capabilities),
             },
         )
         self._writer.write(encode(hello))
@@ -196,6 +198,14 @@ class WireClient:
 
     async def _dispatch(self, env: Envelope) -> None:
         if env.kind == KIND_OUTBOUND:
+            if self._on_outbound is not None:
+                await self._on_outbound(env)
+            return
+        if env.kind == KIND_INBOUND:
+            # Worker peers receive forwarded inbound envelopes from
+            # the gateway. The on_outbound callback name is historical
+            # ("messages delivered to this peer"); the wire kind tells
+            # the handler which way the message flows.
             if self._on_outbound is not None:
                 await self._on_outbound(env)
             return

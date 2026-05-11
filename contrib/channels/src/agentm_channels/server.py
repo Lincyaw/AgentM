@@ -53,6 +53,7 @@ from agentm_channels.wire import (
     KIND_ERROR,
     KIND_HELLO,
     KIND_INBOUND,
+    KIND_OUTBOUND,
     KIND_PING,
     KIND_PONG,
     KIND_WELCOME,
@@ -78,6 +79,17 @@ LEASE_REFRESH_INTERVAL: float = 5.0
 BATCH_REASON_RECONNECT_CATCHUP: str = "reconnect_catchup"
 
 InboundHandler = Callable[[PeerSession, Envelope], Awaitable[None]]
+# Optional hooks: ``hello`` fires after a successful handshake and
+# before any inbound is dispatched; ``disconnect`` fires when the peer
+# read loop exits (clean BYE, socket close, or crash). Both are
+# optional — the server keeps working when they are ``None``. Used by
+# :class:`WorkerRegistry` to track ``agent_worker`` peers.
+PeerHelloHandler = Callable[[PeerSession], Awaitable[None]]
+PeerDisconnectHandler = Callable[[PeerSession], Awaitable[None]]
+# Worker → gateway outbound: emitted by an ``agent_worker`` peer with
+# ``kind=outbound``; the server forwards it here so the gateway can
+# route it back to the originating chat client.
+WorkerOutboundHandler = Callable[[PeerSession, Envelope], Awaitable[None]]
 
 
 class _ConnectionLost(Exception):
@@ -136,11 +148,17 @@ class WireServer:
         lease_ttl: float = 30.0,
         slow_consumer_high_water: int = 1000,
         max_delivery_attempts: int = MAX_DELIVERY_ATTEMPTS,
+        on_peer_hello: PeerHelloHandler | None = None,
+        on_peer_disconnect: PeerDisconnectHandler | None = None,
+        on_worker_outbound: WorkerOutboundHandler | None = None,
     ) -> None:
         self._socket_path = socket_path
         self._outbox = outbox
         self._inbox = inbox
         self._on_inbound = on_inbound
+        self._on_peer_hello = on_peer_hello
+        self._on_peer_disconnect = on_peer_disconnect
+        self._on_worker_outbound = on_worker_outbound
         self._auth: Authenticator = authenticator or AllowAllAuthenticator()
         self._delivery_batch_max = delivery_batch_max
         self._lease_ttl = lease_ttl
@@ -253,6 +271,11 @@ class WireServer:
                 writer,
                 _make_env(KIND_WELCOME, {"server_version": SERVER_VERSION, "peer_id_echo": peer_id}),
             )
+            if self._on_peer_hello is not None:
+                try:
+                    await self._on_peer_hello(session)
+                except Exception:
+                    log.exception("on_peer_hello raised for peer=%s", peer_id)
 
             wake = asyncio.Event()
             self._wake_events[peer_id] = wake
@@ -281,7 +304,15 @@ class WireServer:
             log.exception("connection handler crashed")
         finally:
             if peer_id is not None:
+                session = self._registry.get(peer_id)
                 self._registry.deregister(peer_id)
+                if session is not None and self._on_peer_disconnect is not None:
+                    try:
+                        await self._on_peer_disconnect(session)
+                    except Exception:
+                        log.exception(
+                            "on_peer_disconnect raised for peer=%s", peer_id
+                        )
             with contextlib.suppress(Exception):
                 writer.close()
                 await writer.wait_closed()
@@ -323,6 +354,25 @@ class WireServer:
                 await self._on_inbound(session, env)
             except Exception:
                 log.exception("on_inbound handler raised for env id=%s", env.id)
+            return
+        if env.kind == KIND_OUTBOUND:
+            # Workers send ``outbound`` envelopes for the gateway to
+            # relay back to the originating chat client. Non-worker
+            # peers (chat_client) have no reason to emit outbound — we
+            # ignore those defensively, the gateway never asked them to
+            # forward replies.
+            if (
+                self._on_worker_outbound is not None
+                and session.peer_kind == "agent_worker"
+            ):
+                try:
+                    await self._on_worker_outbound(session, env)
+                except Exception:
+                    log.exception(
+                        "on_worker_outbound raised for env id=%s peer=%s",
+                        env.id,
+                        session.peer_id,
+                    )
             return
         if env.kind in (KIND_ACK, KIND_ACK_BATCH):
             return  # server-side acks are implicit; tolerate client-sent ones.
@@ -605,6 +655,9 @@ __all__ = [
     "AllowAllAuthenticator",
     "Authenticator",
     "MAX_DELIVERY_ATTEMPTS",
+    "PeerDisconnectHandler",
+    "PeerHelloHandler",
     "SERVER_VERSION",
     "WireServer",
+    "WorkerOutboundHandler",
 ]
