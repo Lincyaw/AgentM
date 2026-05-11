@@ -36,7 +36,9 @@ import uuid
 from typing import Any
 from urllib.parse import urlparse
 
-from agentm_channels import DEFAULT_SOCKET_URL
+from pathlib import Path
+
+from agentm_channels import DEFAULT_SOCKET_URL, load_dotenv_files
 from agentm_channels.client import AuthError, WireClient
 from agentm_channels.wire import (
     KIND_BYE,
@@ -418,6 +420,10 @@ async def _stdin_reader(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Match agentm-gateway: pull .env vars (e.g. AGENTM_TERMINAL_SENDER_ID
+    # or auth tokens for future wire-side extensions) from cwd / workspace
+    # root before arg parsing so the user doesn't have to re-export.
+    load_dotenv_files(Path.cwd())
     parser = _build_parser()
     try:
         args = parser.parse_args(list(argv) if argv is not None else sys.argv[1:])
