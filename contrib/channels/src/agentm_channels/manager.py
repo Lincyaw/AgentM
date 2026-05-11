@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
 from typing import Any
 
 from .base import BaseChannel
@@ -84,6 +85,23 @@ class ChannelManager:
         self._tasks: list[asyncio.Task[Any]] = []
         self._dispatch_task: asyncio.Task[Any] | None = None
         self._init_channels()
+        # Phase 4: warn when the yaml-driven v0 path is in use. The
+        # wire bridge does not go through __init__ with a config — it
+        # uses inject_channel — so this only fires on the legacy
+        # ``channels:`` yaml block. "stub" is the test fixture.
+        legacy = [n for n in self._channels if n != "stub"]
+        if legacy:
+            warnings.warn(
+                (
+                    "agentm_channels.ChannelManager: v0 in-process channels "
+                    f"{sorted(legacy)} are deprecated. Run "
+                    "`agentm-gateway --bind unix:///path/to/sock` and "
+                    "connect each platform as a separate client process "
+                    "(agentm-terminal, agentm-feishu)."
+                ),
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
     @property
     def channels(self) -> dict[str, BaseChannel]:

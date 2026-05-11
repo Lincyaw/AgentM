@@ -946,6 +946,39 @@ test fixture). Phase 4 removes the in-process path entirely.
 * `gateway.yaml` `channels:` key emits a deprecation warning on
   startup; supported until the next minor.
 
+#### Phase 4 — landed (2026-05-11)
+
+* **Wire-bridge feature completeness.** `_WireChannel.send` now
+  serializes `OutboundMessage.buttons` (typed shape — `label`/`value`/
+  `style`) and passes `OutboundMessage.metadata` through verbatim, so
+  the approval round-trip works end-to-end across the wire — no client
+  needed a code change because both `agentm-terminal` and
+  `agentm-feishu` already consumed `body["buttons"]`/`body["metadata"]`
+  from Phase 2/3. `WireBridge.handle_inbound` reads
+  `body["button_value"]` and forwards it as
+  `InboundMessage.button_value`, closing the click→approval-future
+  loop over the wire. Fail-stop test:
+  `contrib/channels/tests/test_wire_bridge_buttons.py`.
+* **`BaseChannel` / `ChannelManager` deprecation.**
+  `BaseChannel.__init_subclass__` raises `DeprecationWarning` for any
+  non-stub subclass, pointing operators to
+  `agentm-gateway --bind unix:///path` + a platform client.
+  `ChannelManager.__init__` raises a separate `DeprecationWarning`
+  when any non-stub channel is constructed from the yaml-driven path
+  (`inject_channel` is exempt — that's the wire bridge's seam). The
+  CLI additionally prints `agentm-gateway: warn: in-process channels
+  are deprecated …` to stderr at startup whenever
+  `gateway.yaml.channels:` is non-empty, so the migration is visible
+  to humans tailing logs.
+* **Historical archive.** `gateway-channels.md` moves to
+  `designs/historical/gateway-channels.md`; `index.yaml` flips
+  `gateway_channels.status` to `historical` and adds
+  `client_server_architecture.replaces: [gateway_channels]`.
+* **Out of scope.** `BaseChannel` / `ChannelManager` are NOT removed;
+  that's a future minor. `StubChannel` (and the synthetic
+  `_WireChannel` from the bridge) opt out of the warning via
+  `_is_stub_fixture = True`.
+
 ### Phase 5 — Agent workers as a peer kind
 
 * The gateway today owns `AgentSession`. After this phase, the
