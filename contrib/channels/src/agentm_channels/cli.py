@@ -374,6 +374,29 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "Mutually exclusive with --bind-allow-uid."
         ),
     )
+    # Phase 5a: gateway can refuse inbound when no external worker is
+    # connected. Default is unchanged (in-process worker); flip to
+    # ``--no-inproc-worker`` to require an ``agentm-worker`` peer.
+    p.add_argument(
+        "--inproc-worker",
+        dest="inproc_worker",
+        action="store_true",
+        default=True,
+        help=(
+            "Run the agent in-process when no external worker is "
+            "connected (default). Behaviour matches Phases 1-4."
+        ),
+    )
+    p.add_argument(
+        "--no-inproc-worker",
+        dest="inproc_worker",
+        action="store_false",
+        help=(
+            "Refuse inbound when no matching external worker is "
+            "connected; emit a chat message explaining the gap "
+            "instead. Requires --bind."
+        ),
+    )
     p.add_argument(
         "--check",
         action="store_true",
@@ -443,6 +466,13 @@ async def _arun(args: argparse.Namespace) -> int:
             "separately (agentm-terminal, agentm-feishu)\n"
         )
         sys.stderr.flush()
+    if not getattr(args, "inproc_worker", True) and bind_spec is None:
+        raise SystemExit(
+            "--no-inproc-worker requires --bind: workers connect over "
+            "the wire, so the gateway must run as a daemon. Add "
+            "--bind unix:///abs/path/to/sock."
+        )
+
     if not channels_cfg and bind_spec is None:
         raise SystemExit(
             "no channels configured and no --bind given. Either pass "
@@ -540,7 +570,13 @@ async def _arun(args: argparse.Namespace) -> int:
         state_dir.mkdir(parents=True, exist_ok=True)
         wire_outbox = SqliteOutbox(str(state_dir / "wire-outbox.sqlite"))
         wire_inbox = SqliteInbox(str(state_dir / "wire-inbox.sqlite"))
-        bridge = WireBridge(bus=bus, manager=manager, outbox=wire_outbox)
+        bridge = WireBridge(
+            bus=bus,
+            manager=manager,
+            outbox=wire_outbox,
+            scenario=args.scenario or cfg.get("scenario") or "",
+            allow_inproc=bool(getattr(args, "inproc_worker", True)),
+        )
         authenticator = UnixPeerCredAuthenticator(
             allowed_uids=set(bind_spec.allow_uids)
             if bind_spec.allow_uids is not None
@@ -552,6 +588,9 @@ async def _arun(args: argparse.Namespace) -> int:
             inbox=wire_inbox,
             on_inbound=bridge.handle_inbound,
             authenticator=authenticator,
+            on_peer_hello=bridge.handle_peer_hello,
+            on_peer_disconnect=bridge.handle_peer_disconnect,
+            on_worker_outbound=bridge.handle_worker_outbound,
         )
         await wire_server.start()
         logger.info(
