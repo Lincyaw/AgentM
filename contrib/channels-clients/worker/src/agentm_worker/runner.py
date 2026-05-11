@@ -189,6 +189,18 @@ class WorkerRunner:
         self._inflight_root_session_key[session_key] = (
             env.root_session_key or session_key
         )
+        # Session-as-routing-primary: the gateway hands us the
+        # ``resume_id`` for this session_key when the binding store has
+        # one (typically because a previous host crashed). Stash it in
+        # the local chat_session_map so the Gateway's session_factory
+        # picks it up on the very next ``session_factory(cwd, bus,
+        # resume_id)`` call. First-bind inbounds carry no resume_id —
+        # the Gateway then writes its freshly-created session_id back
+        # into chat_session_map, which we surface to the gateway-side
+        # binding store on the next outbound via ``_session_id_hint``.
+        resume_id_raw = body.get("resume_id")
+        if isinstance(resume_id_raw, str) and resume_id_raw:
+            self._gateway._chat_map.set(session_key, resume_id_raw)  # type: ignore[attr-defined]
         async with self._semaphore:
             await self._bus.publish_inbound(
                 InboundMessage(
@@ -233,10 +245,19 @@ class WorkerRunner:
         try:
             while not self._stopped.is_set():
                 msg: OutboundMessage = await self._bus.consume_outbound()
-                root = self._inflight_root_session_key.get(
-                    f"{msg.channel}:{msg.chat_id}"
+                session_key = f"{msg.channel}:{msg.chat_id}"
+                root = self._inflight_root_session_key.get(session_key)
+                # Surface the locally-known AgentSession id back to the
+                # gateway so the binding store records it. Gateway uses
+                # the hint to populate ``resume_id`` on the binding;
+                # next time this session_key rebinds to a fresh host,
+                # the new host receives the hint and resumes.
+                session_id_hint = self._gateway._chat_map.get(session_key)  # type: ignore[attr-defined]
+                env = _outbound_to_envelope(
+                    msg,
+                    root_session_key=root,
+                    session_id_hint=session_id_hint,
                 )
-                env = _outbound_to_envelope(msg, root_session_key=root)
                 try:
                     await self._client.send(env)
                 except Exception:
@@ -329,6 +350,7 @@ def _outbound_to_envelope(
     msg: OutboundMessage,
     *,
     root_session_key: str | None = None,
+    session_id_hint: str | None = None,
 ) -> Envelope:
     body: dict[str, Any] = {
         "channel": msg.channel,
@@ -345,6 +367,12 @@ def _outbound_to_envelope(
         ]
     if msg.metadata:
         body["metadata"] = dict(msg.metadata)
+    if session_id_hint:
+        # Side-channel: the gateway's WireBridge strips this before
+        # forwarding to the chat client and writes it onto the
+        # binding store. See the WireBridge.handle_worker_outbound
+        # comment for the rationale.
+        body["_session_id_hint"] = session_id_hint
     return Envelope(
         v=WIRE_VERSION,
         id=f"wkr-out-{int(time.time() * 1_000_000)}",

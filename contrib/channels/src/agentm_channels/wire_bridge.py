@@ -64,6 +64,7 @@ from .wire import (
     WIRE_VERSION,
     Envelope,
 )
+from .session_bindings import SessionBindingStore
 from .worker_registry import WorkerRegistry
 
 log = logging.getLogger("agentm_channels.wire_bridge")
@@ -174,6 +175,7 @@ class WireBridge:
         bus: MessageBus,
         manager: ChannelManager,
         outbox: OutboxStore,
+        bindings: SessionBindingStore | None = None,
         worker_registry: WorkerRegistry | None = None,
         scenario: str | None = None,
         allow_inproc: bool = True,
@@ -182,7 +184,13 @@ class WireBridge:
         self._bus = bus
         self._manager = manager
         self._outbox = outbox
-        self._workers = worker_registry or WorkerRegistry()
+        # The binding store is the routing source of truth. Tests omit
+        # the kwarg and we fall back to an in-memory sqlite — fine
+        # because tests construct one bridge per case. Production paths
+        # in ``cli.py`` supply an on-disk store next to ``outbox.sqlite``
+        # so the routing table survives gateway restart.
+        self._bindings = bindings or SessionBindingStore(":memory:")
+        self._workers = worker_registry or WorkerRegistry(self._bindings)
         self._scenario = scenario or ""
         self._allow_inproc = allow_inproc
         self._max_a2a_hops = max(1, int(max_a2a_hops))
@@ -216,14 +224,19 @@ class WireBridge:
     async def handle_peer_disconnect(self, session: PeerSession) -> None:
         """Tear down per-peer state on disconnect.
 
-        For workers: release sticky session bindings and warn every
-        affected chat client that its in-flight turn is lost.
+        For workers: drop the online-set entry but **leave the
+        persistent session bindings untouched**. The next inbound for
+        a stranded session_key will rebind to any other online host
+        advertising the same scenario, and the host receives the
+        binding's ``resume_id`` so the conversation continues. If no
+        replacement is available, the chat client gets the standard
+        "no host" outbound (same surface as a never-bound session)
+        instead of a separate "worker disconnected" error.
+
         For chat clients: drop the synthetic channel.
         """
         if session.peer_kind == "agent_worker":
-            lost = self._workers.unregister(session.peer_id)
-            for session_key in lost:
-                await self._emit_worker_lost(session_key)
+            self._workers.unregister(session.peer_id)
             return
         # chat_client (or unknown): drop the synthetic channel.
         await self.on_peer_disconnect(session.peer_id)
@@ -275,7 +288,9 @@ class WireBridge:
         # identifier of the user-facing conversation.
         root_session_key = env.root_session_key or session_key
 
-        worker_peer = self._workers.find_worker(self._scenario, session_key)
+        worker_peer, resume_id = self._workers.find_host(
+            self._scenario, session_key
+        )
         if worker_peer is not None:
             forwarded_hops = env.hops + 1
             if forwarded_hops > self._max_a2a_hops:
@@ -289,12 +304,19 @@ class WireBridge:
                     },
                 )
                 return
+            # Propagate the persisted resume_id (if any) so a host that
+            # took over from a crashed predecessor resumes the prior
+            # AgentSession instead of starting a fresh one — the whole
+            # point of session-as-routing-primary.
+            forwarded_body = dict(body)
+            if resume_id is not None:
+                forwarded_body["resume_id"] = resume_id
             forwarded = Envelope(
                 v=WIRE_VERSION,
                 id=f"fwd-{worker_peer}-{int(time.time() * 1_000_000)}",
                 kind=KIND_INBOUND,
                 ts=time.time(),
-                body=dict(body),
+                body=forwarded_body,
                 root_session_key=root_session_key,
                 correlation_id=env.correlation_id,
                 hops=forwarded_hops,
@@ -428,6 +450,21 @@ class WireBridge:
         """
         body = env.body if isinstance(env.body, dict) else {}
 
+        # Side-channel: workers report their AgentSession id back via
+        # ``body["_session_id_hint"]`` on outbound envelopes (the worker
+        # runner adds it after create/resume). We persist it onto the
+        # binding so a future rebind hands the next host the right
+        # resume anchor. Strip the hint before forwarding — chat
+        # clients don't need to see this plumbing.
+        hint = body.pop("_session_id_hint", None) if isinstance(body, dict) else None
+        if isinstance(hint, str) and hint:
+            ch = str(body.get("channel") or "")
+            cid = str(body.get("chat_id") or "")
+            if ch and cid:
+                await asyncio.to_thread(
+                    self._workers.record_resume_id, f"{ch}:{cid}", hint
+                )
+
         # Case 1: approval routing override. Must come before the
         # default path because approval-request bodies still carry a
         # channel field that points at the worker's synthetic channel.
@@ -540,34 +577,6 @@ class WireBridge:
             body={"reason": reason, **extra},
         )
         await asyncio.to_thread(self._outbox.enqueue, peer_id, env)
-
-    async def _emit_worker_lost(self, session_key: str) -> None:
-        """Notify the chat side that the worker holding ``session_key``
-        is gone. Strict policy: the in-flight turn is lost."""
-        channel_name, _, chat_id = session_key.partition(":")
-        if not channel_name or not chat_id:
-            return
-        chat_peer_id = self._channel_to_peer.get(channel_name)
-        if chat_peer_id is None:
-            # Chat already disconnected too — nothing to deliver.
-            return
-        msg = OutboundMessage(
-            channel=channel_name,
-            chat_id=chat_id,
-            content=(
-                "agent worker disconnected; the in-flight turn is lost. "
-                "send your next message to restart."
-            ),
-        )
-        env = _outbound_to_envelope(msg, peer_id=chat_peer_id)
-        await asyncio.to_thread(self._outbox.enqueue, chat_peer_id, env)
-        turn = OutboundMessage(
-            channel=channel_name,
-            chat_id=chat_id,
-            kind=OutboundKind.TURN_COMPLETE,
-        )
-        env2 = _outbound_to_envelope(turn, peer_id=chat_peer_id)
-        await asyncio.to_thread(self._outbox.enqueue, chat_peer_id, env2)
 
     async def _ensure_channel(self, peer_id: str, channel_name: str) -> None:
         existing = self._peer_channels.get(peer_id)
