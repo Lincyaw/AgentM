@@ -39,7 +39,7 @@ from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 
 MANIFEST = ExtensionManifest(

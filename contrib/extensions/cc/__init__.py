@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 from . import agents, commands, plugins
 

@@ -10,7 +10,7 @@ from agentm.core.abi import EventBus, MessageEnd, Model, text_message
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.extensions.builtin import retry_policy
 from agentm.extensions.builtin.retry_policy import ExponentialBackoffRetry
-from agentm.llm import anthropic, openai
+from agentm.extensions.builtin import llm_anthropic as anthropic, llm_openai as openai
 
 
 class _FakeRateLimitError(Exception):
@@ -70,6 +70,9 @@ async def test_openai_stream_fn_retries_typed_rate_limit(monkeypatch: pytest.Mon
         def register_provider(self, name: str, config: Any) -> None:
             assert name == "openai"
             self.provider = config
+
+        def has_provider(self, _name: str) -> bool:
+            return False
 
     api = _Api()
     retry_policy.install(cast(Any, api), {"max_retries": 1, "base_delay": 0})
@@ -163,6 +166,9 @@ def test_openai_verify_ssl_false_emits_warning_once() -> None:
         def register_provider(self, name: str, config: Any) -> None:
             assert name == "openai"
             assert config.stream_fn.verify_ssl is False
+
+        def has_provider(self, _name: str) -> bool:
+            return False
 
     openai.install(
         _Api(),
@@ -360,6 +366,6 @@ def test_openai_thinking_raise_strategy_errors() -> None:
 
 def test_harness_reexports_core_provider_config() -> None:
     from agentm.core.abi.provider import ProviderConfig as CoreProviderConfig
-    from agentm.harness.extension import ProviderConfig as HarnessProviderConfig
+    from agentm.core.abi.extension import ProviderConfig as HarnessProviderConfig
 
     assert HarnessProviderConfig is CoreProviderConfig

@@ -6,7 +6,7 @@ types every layer agrees on. The concrete ``FunctionTool`` wrapper used by
 tests and trivial atoms is an *implementation*, not part of the boundary,
 so it lives here in ``_internal``.
 
-It is re-exported from :mod:`agentm.core.abi` and :mod:`agentm.harness` for
+It is re-exported from :mod:`agentm.core.abi` and :mod:`agentm.core.runtime` for
 ergonomic access; nothing imports it from ``_internal`` directly except the
 re-export shims (see ``core/abi/__init__.py``).
 """

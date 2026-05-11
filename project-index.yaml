@@ -304,7 +304,7 @@ requirements:
     code:
       - path: src/agentm/core/abi/operations.py
       - path: src/agentm/core/abi/resource.py
-      - path: src/agentm/core/_internal/operations_impl.py
+      - path: src/agentm/extensions/builtin/operations_local.py
       - path: src/agentm/harness/resource_writer.py
       - path: src/agentm/extensions/builtin/tool_read.py
       - path: src/agentm/extensions/builtin/tool_write.py

@@ -35,34 +35,52 @@ uv run mypy <changed-files>
 For `mypy` issues on dynamic/duck-typed parameters, prefer targeted
 `# type: ignore[attr-defined]` over broad suppression.
 
-## Architecture (four layers, dependency arrows down only)
+## Architecture (three layers, dependency arrows down only)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │  agentm.cli  /  embedded SDK  /  (future: HTTP, RPC)                     │  presenters
 ├──────────────────────────────────────────────────────────────────────────┤
-│  agentm.harness — AgentSession · EventBus · SessionManager · Loader      │  harness
+│  agentm.extensions.builtin/  +  contrib/extensions/                      │  atoms (policy)
+│    operations_local · llm_<provider> · session_state_memory              │
+│    read_file · write_file · edit · bash · skills · ...                   │
 ├──────────────────────────────────────────────────────────────────────────┤
-│  agentm.core (constitution — write-protected)                            │  pure SDK
-│    abi/        AgentLoop · Tool · Message · StreamFn · events · ops      │
-│    lib/        edit_diff · frontmatter · path_utils · text_truncate      │
-│    _internal/  default impls + loaders (atoms reach via ExtensionAPI)    │
-├──────────────────────────────────────────────────────────────────────────┤
-│  agentm.llm   (StreamFn implementations: anthropic, openai-compatible)   │  provider
+│  agentm.core (unreplaceable substrate, write-protected)                  │  substrate
+│    abi/      Protocols + dataclasses + typed events                      │
+│    runtime/  AgentSession · EventBus · SessionManager · Loader           │
+│              · catalog freeze · reload transaction                       │
+│    lib/      pure helpers (edit_diff · frontmatter · path_utils)         │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-`agentm.core` must import in a Jupyter notebook with no harness, no CLI, no
-filesystem touched. Atoms reach stateful subsystems exclusively through
-ExtensionAPI services (`api.get_operations()`, `api.skills`,
-`api.prompt_templates`, `api.catalog`, `api.compaction`). The `extensions.validate`
-checker rejects atoms that import `core._internal.*` directly.
+**Unreplaceable-substrate axiom**: the only thing that cannot be a replaceable
+extension is *the act of loading replacements*. Everything else — including
+"defaults" — lives as an atom. Judgement rule: *"if it were replaceable, who
+would execute the replacement?"* No answer ⇒ substrate; otherwise ⇒ atom.
 
-**Five pluggability axes** (each is a `typing.Protocol` with a default impl):
-LLM stream · Tool environment · Session state · Project context · Policy / cross-cut.
-Tool environment `Operations` are a constitution-only axis in v0: the harness
-selects the bundle at session construction; atoms consume it through
-`api.get_operations()` but cannot replace it with `register_operations`.
+`agentm.core` must import in a Jupyter notebook **with zero side effects at
+import time** — module-load-time, not subpackage-content. `core.abi` and
+`core.lib` are pure types + pure functions; `core.runtime` *contains*
+stateful classes (sessions, writers, stores) but its modules perform no I/O
+at import. Side effects only happen when a session is **constructed**.
+`agentm.harness` and `agentm.llm` no longer exist as separate packages —
+session orchestration lives in `core.runtime/`; provider `StreamFn` impls live
+as atoms (`extensions/builtin/llm_<provider>.py`). Atoms reach stateful
+subsystems exclusively through ExtensionAPI services (`api.get_operations()`,
+`api.skills`, `api.prompt_templates`, `api.catalog`, `api.compaction`). The
+`extensions.validate` checker rejects atoms that import `core.runtime.*`
+directly.
+
+**Five pluggability axes** (each is a `typing.Protocol` in `core.abi`,
+registered by an atom via the corresponding `api.register_*` hook): LLM
+stream · Tool environment · Session state · Project context · Policy /
+cross-cut. The substrate provides registration hooks and asserts at freeze
+time that the required services have been registered; it never instantiates a
+default. The default scenario manifest is what enumerates the working set.
+
+> **Migration status**: harness-collapse completed 2026-05-11; the
+> `agentm.harness` and `agentm.llm` packages have been deleted. See
+> `.claude/plans/2026-05-11-collapse-harness-into-core.md` for the trail.
 
 ## Extension-as-Scenario
 
@@ -71,7 +89,7 @@ code. There is no privileged path between built-in and third-party scenarios.
 
 - **Built-in atoms**: `src/agentm/extensions/builtin/<name>.py` — one file per atom
   exporting `MANIFEST` and `install(api, config)`. §11 single-file contract:
-  no atom-to-atom imports, no `harness.session` import, no `core._internal` import.
+  no atom-to-atom imports, no `core.runtime.*` import, no `core._internal` import.
 - **Default scenario**: `contrib/scenarios/general_purpose/manifest.yaml` —
   the curated minimal atom set (read/write/edit/bash + observability +
   prompt assembly + skills). Loaded when `agentm` runs without
@@ -243,7 +261,7 @@ that serve five requirements but belong to none.
 - **No SDK / scenario conflation**: never put scenario-specific logic inside
   `agentm.core`. Core is the mechanism; scenarios are compositions of atoms.
 - **§11 atom contract**: each builtin atom is one file, no atom-to-atom imports,
-  no `harness.session` import, no `core._internal` import. Validator enforces.
+  no `core.runtime.*` import, no `core._internal` import. Validator enforces.
 - **contrib/ layout**: scenarios are manifest-only YAML; flat-file atoms
   auto-discover; nested packages mount via `--extension`. Don't extend the
   scenario loader to walk subdirs blindly.

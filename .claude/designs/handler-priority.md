@@ -1,6 +1,6 @@
 # Handler Priority — Per-Channel Dispatch Order Declaration
 
-Today every handler subscribed to a bus channel runs in registration order, and that order is determined by atom install order (alphabetical for auto-discovery, scenario-YAML order otherwise). For mutating channels the earlier handler runs first; for replacement channels (the `_collect_*` helpers in [agent-loop](agent-loop.md)) the **last non-None return wins**. This couples dispatch order to filename — a brittle invariant that broke once already (reload silently bumped atoms to the tail of every channel; fixed by [position preservation](../../src/agentm/harness/atom_reloader.py) but the underlying coupling stayed).
+Today every handler subscribed to a bus channel runs in registration order, and that order is determined by atom install order (alphabetical for auto-discovery, scenario-YAML order otherwise). For mutating channels the earlier handler runs first; for replacement channels (the `_collect_*` helpers in [agent-loop](agent-loop.md)) the **last non-None return wins**. This couples dispatch order to filename — a brittle invariant that broke once already (reload silently bumped atoms to the tail of every channel; fixed by [position preservation](../../src/agentm/core/runtime/atom_reloader.py) but the underlying coupling stayed).
 
 This document specifies a priority knob on `api.on(...)` so atoms declare their intended dispatch tier explicitly.
 
@@ -93,7 +93,7 @@ The veto contract on `before_install_atom` / `before_unload_atom` follows the sa
 
 When `reload_atom` re-installs an atom, its handlers re-register at the same `priority` they had originally — because the new install code passes `priority=...` exactly the same way the old code did. `bisect.insort` lands them in the right slot regardless of position-preservation gymnastics.
 
-The existing position-preservation fix in [atom_reloader](../../src/agentm/harness/atom_reloader.py) `_capture_handler_positions` / `_restore_handler_positions` becomes redundant for prioritized handlers — but stays in place as a safety net for atoms that don't declare priority and rely on default-tier FIFO ordering. Both mechanisms compose cleanly: priority wins the cross-tier ordering, position preservation handles within-tier ordering.
+The existing position-preservation fix in [atom_reloader](../../src/agentm/core/runtime/atom_reloader.py) `_capture_handler_positions` / `_restore_handler_positions` becomes redundant for prioritized handlers — but stays in place as a safety net for atoms that don't declare priority and rely on default-tier FIFO ordering. Both mechanisms compose cleanly: priority wins the cross-tier ordering, position preservation handles within-tier ordering.
 
 ## Migration
 

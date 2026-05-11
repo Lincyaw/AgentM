@@ -45,8 +45,9 @@ from agentm.core.abi import (
     TextContent,
     ToolCallBlock,
 )
-from agentm.harness.extension import ProviderConfig
-from agentm.harness.session import AgentSession, AgentSessionConfig
+from agentm.core.abi.extension import ProviderConfig
+from agentm.core.runtime.session import AgentSession
+from agentm.core.abi.session_config import AgentSessionConfig
 
 from llmharness.audit.entry_types import (
     AUDIT_EDGE,

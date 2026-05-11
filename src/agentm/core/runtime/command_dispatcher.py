@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 
-from agentm.harness.extension import (
+from agentm.core.runtime.extension import (
     CommandDispatchResult,
     CommandSpec,
     _ExtensionAPIImpl,

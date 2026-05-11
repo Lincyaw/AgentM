@@ -57,7 +57,7 @@ The user-facing call:
 ```python
 session = AgentSession.create(
     extensions=load_scenario("rca") + [("my_org.custom_ext", {})],
-    provider=("agentm.llm.anthropic", {"model": "claude-opus-4-7"}),
+    provider=("agentm.extensions.builtin.llm_anthropic", {"model": "claude-opus-4-7"}),
 )
 ```
 
@@ -110,7 +110,7 @@ session = AgentSession.create(
         ("agentm.extensions.builtin.sub_agent", {"max_workers": 4}),
         ("my_org.custom_extension", {"foo": "bar"}),
     ],
-    provider=("agentm.llm.anthropic", {"model": "claude-opus-4-7"}),
+    provider=("agentm.extensions.builtin.llm_anthropic", {"model": "claude-opus-4-7"}),
 )
 
 # OR: scenario recipe + extra atoms — the common case
@@ -118,7 +118,7 @@ session = AgentSession.create(
     extensions=load_scenario("rca") + [
         ("agentm.extensions.builtin.sub_agent", {"max_workers": 4}),
     ],
-    provider=("agentm.llm.anthropic", {"model": "claude-opus-4-7"}),
+    provider=("agentm.extensions.builtin.llm_anthropic", {"model": "claude-opus-4-7"}),
 )
 ```
 
@@ -412,7 +412,7 @@ src/agentm/
 
 **Deleted in this migration** (the old tree disappears entirely):
 - `src/agentm/core/tool.py` (legacy `@tool` decorator producing langchain-flavored tools)
-- `src/agentm/harness/middleware.py`, `runtime.py`, `scenario.py`, `worker_factory.py`, `handle.py`, `permission.py`, `tool_filter.py`, `cost_budget.py`, `tool_result_budget.py`, `system_reminder.py`, `micro_compact.py`, `agent_memory.py`, `loops/`
+- The former `agentm.harness/` package in its entirety (Stage 4-6 of pluggable-architecture §10 collapse-into-core, 2026-05-11). Substrate impls moved to `agentm.core.runtime/`; legacy middleware/scenario/worker_factory/permission/tool_filter/cost_budget/agent_memory modules were re-implemented as atoms under `agentm.extensions.builtin/`.
 - `src/agentm/scenarios/` (re-implemented as `extensions/builtin/{general_purpose,rca,trajectory_analysis}/`)
 - `src/agentm/tools/` (legacy tool modules; new tools live next to their scenarios or inside `extensions/builtin/`)
 - `src/agentm/agents/`, `src/agentm/builder.py` (replaced by `AgentSession.create`)
@@ -531,7 +531,8 @@ class BashOperations(Protocol):
                    on_data: Callable[[bytes], None] | None = None,
                    signal: asyncio.Event | None = None) -> ExecResult: ...
 
-# src/agentm/core/_internal/operations_impl.py — default impls
+# src/agentm/extensions/builtin/operations_local.py — default impls (atom)
+# install(api, config) calls api.register_operations(file=..., bash=...)
 class LocalFileOperations: ...     # stdlib-backed read environment
 class LocalBashOperations: ...     # asyncio.subprocess-backed
 ```
@@ -624,9 +625,8 @@ The §10b.7 method is reachable as `api.session.append_entry(...)`, **not** `api
    - stdlib
    - `agentm.core.abi.*` — types and Protocols (Tool, Message, StreamFn, events, FileOperations / BashOperations / ExecResult, SkillRecord, PromptTemplateRecord, Operations, CompactionSettings, ...)
    - `agentm.core.lib.*` — pure-function utility shelf (edit_diff, frontmatter, path_utils, text_truncate); use as stdlib
-   - `agentm.harness.extension`, `agentm.harness.events`, `agentm.harness.session_manager`, `agentm.harness.resource_loader`
    - `agentm.extensions` (the public surface — `ExtensionManifest`)
-   - **Forbidden**: `agentm.core._internal.*` (constitution-private; reach via `api.get_operations()` / `api.skills` / `api.prompt_templates` / `api.catalog` / `api.compaction`), `agentm.harness.session` (extensions never reach inside the orchestrator), other `agentm.extensions.builtin.*` modules (no atom-to-atom coupling), legacy `agentm.harness.middleware/runtime/...`.
+   - **Forbidden**: `agentm.core._internal.*` (constitution-private; reach via `api.get_operations()` / `api.skills` / `api.prompt_templates` / `api.catalog` / `api.compaction`), `agentm.core.runtime.*` (extensions never reach inside the runtime substrate), other `agentm.extensions.builtin.*` modules (no atom-to-atom coupling).
 5. **Config schema is declared, not implied.** `MANIFEST.config_schema` is a JSON-Schema `dict` (or `None` for "no config accepted"). The validator uses it to (a) reject unknown keys at load time, (b) provide an explicit contract for agent-driven config generation.
 
 ### 11.2 `ExtensionManifest` shape

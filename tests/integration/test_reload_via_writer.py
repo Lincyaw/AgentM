@@ -9,8 +9,9 @@ import pytest
 
 from agentm.core.abi import AssistantMessage, TextContent, ToolResult
 from agentm.core.abi.messages import ToolResultBlock, ToolResultMessage, UserMessage
-from agentm.harness.resource_loader import InMemoryResourceLoader
-from agentm.harness.session import AgentSession, AgentSessionConfig
+from agentm.core.runtime.resource_loader import InMemoryResourceLoader
+from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.runtime.session import AgentSession
 
 
 _PROVIDER_SOURCE = '''
@@ -20,7 +21,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from agentm.core.abi import AssistantMessage, MessageEnd, Model, TextContent, ToolCallBlock
-from agentm.harness.extension import ProviderConfig
+from agentm.core.abi.extension import ProviderConfig
 
 
 class _Stream:
@@ -70,7 +71,7 @@ def _tool_source(name: str, text: str, *, raises: bool = False) -> str:
 from __future__ import annotations
 
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(name={name!r}, description="boom", registers=("tool:demo",))
 
@@ -83,7 +84,7 @@ from __future__ import annotations
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(name={name!r}, description="reload test atom", registers=("tool:demo",))
 CAPTURED_API = None
@@ -175,7 +176,11 @@ async def _build_session(
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),
-            extensions=[(f"{pkg}.tool_demo", {})],
+            extensions=[
+
+                ("agentm.extensions.builtin.operations_local", {}),
+
+                (f"{pkg}.tool_demo", {})],
             provider=(f"{pkg}.provider", {}),
             resource_loader=InMemoryResourceLoader(),
         )
@@ -287,7 +292,7 @@ from __future__ import annotations
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(
     name="echo_helper",
@@ -342,7 +347,7 @@ async def test_reload_preserves_handler_position_in_channel(
     front_source = '''
 from __future__ import annotations
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(name="front", description="front", registers=())
 TAG = "front-v1"
@@ -355,7 +360,7 @@ def install(api: ExtensionAPI, config: dict[str, object]) -> None:
     back_source = '''
 from __future__ import annotations
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(name="back", description="back", registers=())
 
@@ -374,7 +379,11 @@ def install(api: ExtensionAPI, config: dict[str, object]) -> None:
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),
-            extensions=[(f"{pkg}.front", {}), (f"{pkg}.back", {})],
+            extensions=[
+
+                ("agentm.extensions.builtin.operations_local", {}),
+
+                (f"{pkg}.front", {}), (f"{pkg}.back", {})],
             provider=(f"{pkg}.provider", {}),
             resource_loader=InMemoryResourceLoader(),
         )
@@ -425,7 +434,7 @@ async def test_handler_priority_orders_dispatch_across_install_and_reload(
 from __future__ import annotations
 from agentm.core.abi import BusPriority
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(name="pre", description="pre", registers=())
 TAG = "pre"
@@ -438,7 +447,7 @@ def install(api: ExtensionAPI, config: dict[str, object]) -> None:
     normal_source = '''
 from __future__ import annotations
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(name="normal", description="normal", registers=())
 
@@ -451,7 +460,7 @@ def install(api: ExtensionAPI, config: dict[str, object]) -> None:
 from __future__ import annotations
 from agentm.core.abi import BusPriority
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(name="post", description="post", registers=())
 
@@ -475,6 +484,8 @@ def install(api: ExtensionAPI, config: dict[str, object]) -> None:
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[
+
+                ("agentm.extensions.builtin.operations_local", {}),
                 (f"{pkg}.post", {}),
                 (f"{pkg}.normal", {}),
                 (f"{pkg}.pre", {}),
@@ -575,7 +586,7 @@ async def test_install_then_unload_roundtrip_is_visible_to_running_session(
     constitution path. Single test by design — protects the
     install/unload fail-stop without padding out fine-grained cases.
     """
-    from agentm.harness.events import ExtensionInstallEvent, ExtensionUnloadEvent
+    from agentm.core.abi.events import ExtensionInstallEvent, ExtensionUnloadEvent
 
     _init_repo(tmp_path)
     session = await _build_session(
@@ -676,7 +687,7 @@ from agentm.core.abi import (
     ToolCallBlock,
     ToolResult,
 )
-from agentm.harness.extension import ProviderConfig
+from agentm.core.abi.extension import ProviderConfig
 
 
 _NEW_ATOM_SOURCE = """\\
@@ -684,7 +695,7 @@ from __future__ import annotations
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(
     name="agent_written_shout",
@@ -838,6 +849,8 @@ async def test_install_atom_in_turn_n_is_dispatchable_in_turn_n_plus_one(
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[
+
+                ("agentm.extensions.builtin.operations_local", {}),
                 ("contrib.extensions.tool_catalog.browse", {}),
                 ("contrib.extensions.tool_catalog.mutate", {}),
             ],

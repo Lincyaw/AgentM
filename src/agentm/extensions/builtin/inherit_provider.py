@@ -13,7 +13,7 @@ from typing import Any, Final
 
 from agentm.core.abi.roles import PARENT_PROVIDER_CONFIG_KEY, PROVIDER_INHERITOR
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI, ExtensionLoadError, ProviderConfig
+from agentm.core.abi.extension import ExtensionAPI, ExtensionLoadError, ProviderConfig
 
 MANIFEST = ExtensionManifest(
     name="inherit_provider",

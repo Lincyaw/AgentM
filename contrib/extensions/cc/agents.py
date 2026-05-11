@@ -8,12 +8,12 @@ from typing import Any
 from xml.sax.saxutils import escape
 
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import (
+from agentm.core.abi.events import (
     BeforeAgentStartEvent,
     ResourcesDiscoverEvent,
     SessionReadyEvent,
 )
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 from ._md_skills import AgentRecord, parse_md_agent_records
 

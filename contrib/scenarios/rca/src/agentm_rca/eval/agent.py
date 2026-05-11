@@ -92,7 +92,7 @@ def _build_provider(
         base_url = os.environ.get("ANTHROPIC_BASE_URL")
         if base_url:
             cfg["base_url"] = base_url
-        return ("agentm.llm.anthropic", cfg)
+        return ("agentm.extensions.builtin.llm_anthropic", cfg)
 
     if provider == "openai":
         cfg = {"model": model}
@@ -113,7 +113,7 @@ def _build_provider(
             cfg["default_query"] = {"warpgate-ticket": ticket}
         if not _env_bool("OPENAI_VERIFY_SSL", default=True):
             cfg["verify_ssl"] = False
-        return ("agentm.llm.openai", cfg)
+        return ("agentm.extensions.builtin.llm_openai", cfg)
 
     raise ValueError(
         f"unknown provider {provider!r}; expected 'anthropic' or 'openai'"
@@ -177,7 +177,8 @@ class AgentMAgent(BaseAgent):
         )
         from agentm.core.abi.messages import TextContent as _TextContent
         from agentm.core.abi.loop import LoopConfig
-        from agentm.harness import AgentSession, AgentSessionConfig
+        from agentm.core.abi.session_config import AgentSessionConfig
+        from agentm.core.runtime.session import AgentSession
         from rcabench_platform.v3.sdk.evaluation.v2 import AgentRCAOutput
 
         ctx: RunContext | None = kwargs.get("ctx")

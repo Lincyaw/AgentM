@@ -13,7 +13,7 @@ from typing import Any
 
 from agentm.core.abi import ImageContent, TextContent, ToolResult, ToolResultEvent
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 
 # Minimum text payload preserved for ``is_error=True`` tool results, so that

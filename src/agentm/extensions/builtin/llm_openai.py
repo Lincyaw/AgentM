@@ -1,6 +1,6 @@
 """OpenAI Chat Completions API provider — native ``StreamFn`` implementation.
 
-Sibling of :mod:`agentm.llm.anthropic` for OpenAI-compatible endpoints (the
+Sibling of :mod:`agentm.extensions.builtin.llm_anthropic` for OpenAI-compatible endpoints (the
 official OpenAI API, plus proxies that speak the same protocol: LiteLLM,
 DeepSeek, Doubao Ark, Together, Fireworks, vLLM, Ollama, …). Plugs into the
 kernel via the ``StreamFn`` Protocol described in
@@ -53,6 +53,7 @@ from agentm.core.abi.messages import (
 )
 from agentm.core.abi.events import DiagnosticEvent, EventBus
 from agentm.core.abi.provider import ProviderConfig
+from agentm.extensions import ExtensionManifest
 from agentm.core.abi.retry import RetryPolicy
 from agentm.core.abi.termination import (
     Aborted,
@@ -76,12 +77,44 @@ from agentm.core.abi.stream import (
 )
 from agentm.core.abi.tool import Tool
 
-from ._common import StreamAccumulator, ToolSpecAdapter, encode_tool_args
+from agentm.core.lib.stream import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
+
+
+MANIFEST = ExtensionManifest(
+    name="llm_openai",
+    description="Register an OpenAI Chat Completions API LLM stream provider.",
+    registers=("provider:openai",),
+    config_schema={
+        "type": "object",
+        "properties": {
+            "model": {
+                "type": "string",
+                "minLength": 1,
+                "default": "gpt-4o",
+            },
+            "api_key": {"type": "string"},
+            "base_url": {"type": "string"},
+            "name": {"type": "string", "minLength": 1},
+            "default_query": {"type": "object"},
+            "default_headers": {"type": "object"},
+            "verify_ssl": {"type": "boolean"},
+            "context_window": {"type": "integer", "minimum": 1},
+            "max_output_tokens": {"type": "integer", "minimum": 1},
+            "thinking_round_trip": {
+                "type": "string",
+                "enum": ["drop", "system_note", "raise"],
+            },
+        },
+        "required": ["model"],
+        "additionalProperties": True,
+    },
+    requires=("retry_policy",),
+)
 
 
 def _is_openai_retryable(exc: BaseException) -> bool:
@@ -717,7 +750,7 @@ def install(api: Any, config: dict[str, Any]) -> None:
     model_id = config.get("model")
     if not model_id or not isinstance(model_id, str):
         raise ValueError(
-            "agentm.llm.openai.install: config['model'] is required and must "
+            "agentm.extensions.builtin.llm_openai.install: config['model'] is required and must "
             "be a non-empty string (e.g. 'gpt-4o' or 'Kimi-K2')."
         )
 
@@ -759,7 +792,7 @@ def install(api: Any, config: dict[str, Any]) -> None:
     if raw_name is None:
         if _is_non_canonical_base_url(base_url):
             raise DuplicateProviderError(
-                "agentm.llm.openai.install: config['name'] is required when "
+                "agentm.extensions.builtin.llm_openai.install: config['name'] is required when "
                 f"base_url={base_url!r} is set to a non-canonical "
                 "OpenAI-compatible endpoint. Multiple custom endpoints "
                 "default to the bare 'openai' registry name and would "
@@ -771,13 +804,12 @@ def install(api: Any, config: dict[str, Any]) -> None:
         name = raw_name
     if not isinstance(name, str) or not name:
         raise ValueError(
-            "agentm.llm.openai.install: config['name'] must be a non-empty string."
+            "agentm.extensions.builtin.llm_openai.install: config['name'] must be a non-empty string."
         )
 
-    existing = getattr(api, "_providers", None)
-    if isinstance(existing, dict) and name in existing:
+    if api.has_provider(name):
         raise DuplicateProviderError(
-            f"agentm.llm.openai.install: provider name {name!r} is already "
+            f"agentm.extensions.builtin.llm_openai.install: provider name {name!r} is already "
             "registered in this session. Choose a unique config['name'] for "
             "each OpenAI-compatible endpoint."
         )
@@ -823,4 +855,4 @@ class DuplicateProviderError(ValueError):
     """
 
 
-__all__ = ["DuplicateProviderError", "OpenAIStreamFn", "install"]
+__all__ = ("DuplicateProviderError", "MANIFEST", "OpenAIStreamFn", "install")

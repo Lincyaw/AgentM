@@ -194,9 +194,9 @@ def _build_session_factory(
     from typing import cast as _cast
 
     from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-    from agentm.harness import (
-        AgentSession,
-        AgentSessionConfig,
+    from agentm.core.abi.session_config import AgentSessionConfig
+    from agentm.core.runtime.session import AgentSession
+    from agentm.core.runtime.session_bootstrap import (
         make_default_session_store,
         resolve_session_state,
     )

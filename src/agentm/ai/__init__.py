@@ -1,7 +1,7 @@
 """Provider interface package.
 
 Interface-only: concrete provider implementations live in
-``agentm.llm``. This package exposes the provider descriptor / registry
+``agentm.extensions.builtin.llm_<provider>``. This package exposes the provider descriptor / registry
 types that the CLI and contrib channels use to enumerate available
 providers and resolve API keys from the environment.
 """

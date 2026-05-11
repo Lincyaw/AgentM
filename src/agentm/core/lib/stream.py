@@ -1,4 +1,11 @@
-"""Shared helpers for provider-internal LLM stream adapters."""
+"""Provider-neutral stream accumulator for LLM ``StreamFn`` adapters.
+
+Holds the kernel-side accumulator used by all provider adapters (Anthropic,
+OpenAI-compatible, ...) to build an ``AssistantMessage`` from a sequence of
+provider-specific stream events. Lives in ``core.lib`` because the logic is
+purely about kernel data types (``AssistantContent``, ``ThinkingBlock``,
+``ToolCallBlock``, ``Usage``) and has no provider knowledge.
+"""
 
 from __future__ import annotations
 

@@ -257,7 +257,7 @@ been removed.
 from textual.app import App
 from textual.binding import Binding
 
-from agentm.harness import AgentSessionConfig
+from agentm.core.abi.session_config import AgentSessionConfig
 
 class AgentMApp(App[int]):
     """Textual TUI for AgentM. Returns process exit code on exit."""

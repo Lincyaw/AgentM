@@ -14,6 +14,11 @@ description: |
   approval bridge gates write-class calls.
 
 extensions:
+  # --- environment ports: register the local-FS / asyncio-bash Operations
+  # bundle. Must be listed first so any subsequent tool atom that calls
+  # ``api.get_operations()`` during install sees a registered bundle. ---
+  - module: agentm.extensions.builtin.operations_local
+
   # --- read-side tooling: agent reads files directly; navigation /
   # search (ls / find / grep) is delegated to ``bash`` below. ---
   - module: agentm.extensions.builtin.tool_read

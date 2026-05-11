@@ -20,10 +20,11 @@ from agentm.core.abi import (
     ToolCallBlock,
     ToolResult,
 )
-from agentm.harness.extension import ProviderConfig
-from agentm.harness.events import ResolveSubagentEvent
-from agentm.harness.resource_loader import InMemoryResourceLoader
-from agentm.harness.session import AgentSession, AgentSessionConfig
+from agentm.core.abi.extension import ProviderConfig
+from agentm.core.abi.events import ResolveSubagentEvent
+from agentm.core.runtime.resource_loader import InMemoryResourceLoader
+from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.runtime.session import AgentSession
 
 
 CHILD_PERSONA = "BUDGET CHILD PERSONA"
@@ -261,11 +262,19 @@ async def _run_budget_case(
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[
+
+                ("agentm.extensions.builtin.operations_local", {}),
                 (
                     "agentm.extensions.builtin.sub_agent",
                     {
-                        "inherit_extensions": ["ping"],
-                        "available_inherited_extensions": {"ping": (ping_module, {})},
+                        "inherit_extensions": ["operations_local", "ping"],
+                        "available_inherited_extensions": {
+                            "operations_local": (
+                                "agentm.extensions.builtin.operations_local",
+                                {},
+                            ),
+                            "ping": (ping_module, {}),
+                        },
                     },
                 ),
                 (resolver_module, {}),

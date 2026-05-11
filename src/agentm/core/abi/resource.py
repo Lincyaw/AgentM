@@ -1,7 +1,7 @@
 """Resource-writer Protocol shared between the kernel and harness.
 
 Atoms (and the catalog freeze CLI) depend on this surface so they don't
-need to import from ``agentm.harness.resource_writer`` directly. The
+need to import from ``agentm.core.runtime.resource_writer`` directly. The
 concrete ``GitBackedResourceWriter`` lives in the harness layer and
 implements ``ResourceWriter`` implicitly.
 """

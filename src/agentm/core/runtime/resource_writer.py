@@ -28,7 +28,7 @@ from agentm.core._internal.catalog.manifest import (
     load_core_manifest,
     matches_manifest_glob,
 )
-from agentm.harness.events import ResourceWriteEvent
+from agentm.core.abi.events import ResourceWriteEvent
 
 logger = logging.getLogger(__name__)
 
