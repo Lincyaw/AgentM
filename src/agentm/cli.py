@@ -1,8 +1,8 @@
 """AgentM CLI (typer-based).
 
-Single runtime: load the ``general_purpose`` scenario by default (curated
-minimal atom set, GenericAgent-style). A different curated list is opted
-into via ``--scenario X``. Subsystems are turned off via ``--no-*`` flags.
+Single runtime: load the ``general_purpose`` scenario by default (a
+curated minimal atom set). A different curated list is opted into via
+``--scenario X``. Subsystems are turned off via ``--no-*`` flags.
 Failures during construction emit diagnostics through the EventBus rather
 than raising; only a missing provider is fatal.
 """

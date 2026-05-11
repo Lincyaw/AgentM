@@ -6,7 +6,7 @@
 
 ## Overview
 
-Replace the single `ToolCallEvent` / `ToolResultEvent` (with stringly-typed `tool_name`) with a sealed family of per-tool dataclasses (`BashToolCallEvent`, `ReadToolCallEvent`, `GrepToolCallEvent`, ...), plus narrowing helpers (`is_bash_tool_call`, `is_grep_tool_result`, ...) so handlers can dispatch on tool identity with full static + runtime type safety. Pi-mono reference: [`packages/coding-agent/src/core/extensions/types.ts:740-940`](/tmp/pi-analysis/pi-mono/packages/coding-agent/src/core/extensions/types.ts).
+Replace the single `ToolCallEvent` / `ToolResultEvent` (with stringly-typed `tool_name`) with a sealed family of per-tool dataclasses (`BashToolCallEvent`, `ReadToolCallEvent`, `GrepToolCallEvent`, ...), plus narrowing helpers (`is_bash_tool_call`, `is_grep_tool_result`, ...) so handlers can dispatch on tool identity with full static + runtime type safety.
 
 ## Motivation
 

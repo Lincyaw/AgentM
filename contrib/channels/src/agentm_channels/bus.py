@@ -5,10 +5,10 @@ Two ``asyncio.Queue``s — one inbound (channel → agent), one outbound
 never sees a Feishu / Slack object. Both ends only know
 :class:`InboundMessage` / :class:`OutboundMessage`.
 
-The shape mirrors HKUDS/nanobot's ``nanobot.bus`` so adding a channel
-is a drop-in: implement :class:`agentm_channels.base.BaseChannel`,
-register it via auto-discovery, and the rest of the system handles
-session routing, approval, and outbound dispatch unchanged.
+Adding a channel is a drop-in: implement
+:class:`agentm_channels.base.BaseChannel`, register it via
+auto-discovery, and the rest of the system handles session routing,
+approval, and outbound dispatch unchanged.
 """
 
 from __future__ import annotations

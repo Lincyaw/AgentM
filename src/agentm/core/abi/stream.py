@@ -3,10 +3,8 @@
 Implements §3.1 (LLM Stream port) of
 `.claude/designs/pluggable-architecture.md`. The ``StreamFn`` Protocol is the
 single point that touches a real LLM API; the agent loop has zero hard-coded
-provider knowledge.
-
-Conceptually mirrors pi-mono ``packages/agent/src/types.ts`` ``StreamFn`` but
-with Python ``AsyncIterator`` semantics and a Python-native event taxonomy.
+provider knowledge. Uses Python ``AsyncIterator`` semantics and a
+Python-native event taxonomy.
 """
 
 from __future__ import annotations

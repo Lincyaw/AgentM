@@ -1,8 +1,7 @@
 """Kernel event bus and event taxonomy.
 
 Implements §3.5 (Extension Bus) of
-`.claude/designs/pluggable-architecture.md`. Conceptually a port of pi-mono's
-``packages/coding-agent/src/core/event-bus.ts`` (33 lines) to async Python,
+`.claude/designs/pluggable-architecture.md`. A small async event bus
 plus a minimal seed of typed event dataclasses used by ``loop.py``.
 
 Per-turn termination semantics follow the sum-type protocol described in

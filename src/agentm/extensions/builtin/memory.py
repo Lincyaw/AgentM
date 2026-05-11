@@ -1,10 +1,9 @@
 """Builtin ``memory`` atom.
 
-Project-local persistent memory inspired by lsdefine/GenericAgent's layered
-memory model (L2 global / L3 SOP / L4 archive) combined with Claude Code's
-typed-frontmatter convention. Skills handle "how to do X"; memory handles
-"what X is" — facts about the user, the project, prior feedback, and
-external references.
+Project-local persistent memory built on a layered model (L2 global /
+L3 SOP / L4 archive) with a typed-frontmatter convention. Skills handle
+"how to do X"; memory handles "what X is" — facts about the user, the
+project, prior feedback, and external references.
 
 On-disk layout (under ``<cwd>/.agentm/memory/`` by default):
 

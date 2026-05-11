@@ -6,7 +6,7 @@
 
 ## Overview
 
-Filesystem-discovered markdown files where the filename is a slash-command name (`<name>.md` → `/<name>`); when the user types `/<name> args`, the body is loaded, bash-style placeholders (`$1 $@ ${@:N:L} $ARGUMENTS`) are substituted with parsed arguments, and the resulting text is sent as the user prompt. Pi-mono reference: [`packages/coding-agent/src/core/prompt-templates.ts`](/tmp/pi-analysis/pi-mono/packages/coding-agent/src/core/prompt-templates.ts).
+Filesystem-discovered markdown files where the filename is a slash-command name (`<name>.md` → `/<name>`); when the user types `/<name> args`, the body is loaded, bash-style placeholders (`$1 $@ ${@:N:L} $ARGUMENTS`) are substituted with parsed arguments, and the resulting text is sent as the user prompt.
 
 ## Motivation
 
@@ -37,7 +37,7 @@ argument-hint: "<file> [<dir>]"   # optional; rendered next to the command in co
 Refactor $1 in $2 with the following constraints: $ARGUMENTS
 ```
 
-If `description` is absent, the loader uses the first non-empty line of the body, truncated to 60 chars (port of `prompt-templates.ts:111-119`).
+If `description` is absent, the loader uses the first non-empty line of the body, truncated to 60 chars.
 
 ### Argument parsing (port `parseCommandArgs`)
 

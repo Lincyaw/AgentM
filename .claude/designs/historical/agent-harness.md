@@ -15,11 +15,11 @@ The current architecture lives in [pluggable-architecture.md](../pluggable-archi
 
 ### 1.1 What Prompted This
 
-A reverse-engineering analysis of Claude Code's multi-agent architecture (see [reference doc](../../../docs/references/claude-code-agent-team-architecture.md)) revealed a key architectural insight:
+Analysis of production multi-agent architectures crystallized a key insight:
 
 > **The SDK is a Harness — it controls agent conversation loops, manages lifecycle, and routes messages. The LLM is a stateless function being called.**
 
-Claude Code implements this with no graph framework at all — just Node.js async loops and file-based message passing. This forced us to re-examine whether LangGraph is the right foundation for AgentM's SDK layer.
+Production implementations can achieve this with no graph framework at all — just async loops and file-based message passing. This forced us to re-examine whether LangGraph is the right foundation for AgentM's SDK layer.
 
 ### 1.2 The LangGraph Question
 
@@ -1050,4 +1050,3 @@ This allows incremental migration — existing middleware works immediately, and
 | [orchestrator.md](orchestrator.md) | Orchestrator uses `SimpleAgentLoop` |
 | [sub-agent.md](sub-agent.md) | Workers use `SimpleAgentLoop` |
 | [generic-state-wrapper.md](generic-state-wrapper.md) | `Scenario` protocol replaces `ReasoningStrategy`; `GenericAgentSystemBuilder` evolves into scenario-level builder using `AgentRuntime` |
-| [Claude Code architecture reference](../../../docs/references/claude-code-agent-team-architecture.md) | External reference that motivated this design |

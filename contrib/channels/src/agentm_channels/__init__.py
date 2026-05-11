@@ -1,6 +1,6 @@
 """agentm-channels — multi-channel chat gateway for AgentM.
 
-Architecture (mirrors HKUDS/nanobot):
+Architecture (two-queue message bus + channel registry):
 
     ┌──────────────┐  inbound   ┌──────────────────┐  prompt
     │   Channels   │ ─────────► │   MessageBus     │ ────────► AgentSession

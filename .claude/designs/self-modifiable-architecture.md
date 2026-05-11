@@ -4,7 +4,6 @@
 **Created**: 2026-05-01
 **Builds on**: [pluggable-architecture.md](pluggable-architecture.md), [extension-as-scenario.md](extension-as-scenario.md), [observability.md](observability.md)
 **Sister doc**: [evolution-substrate.md](evolution-substrate.md)
-**Reference codebase**: `badlogic/pi-mono` at `/tmp/pi-analysis/pi-mono/packages/coding-agent/`
 
 ---
 
@@ -263,7 +262,7 @@ Atomically replaces the file at `extensions/builtin/<name>.py` with the snapshot
 
 ## 6. `assert_active()` — Stale Context Invalidation
 
-Ported from pi-mono's `runtime.assertActive()` pattern (`packages/coding-agent/src/core/extensions/loader.ts:139-176, 196`). Solves the mid-flight reload problem: an atom captures `api` in a closure during `install()`, the atom is later reloaded; the old closure's `api` reference is now stale.
+Solves the mid-flight reload problem: an atom captures `api` in a closure during `install()`, the atom is later reloaded; the old closure's `api` reference is now stale.
 
 ### 6.1 Mechanics
 
@@ -288,7 +287,7 @@ Old captured `api` references now throw on use. Old captured `ctx` (in event han
 
 ### 6.2 Error message contract
 
-Stale errors must explain *what happened, where, and how to fix*. Pi-mono's message (long but precise) is the model. The error includes the atom name, the reload's trigger reason (agent vs human vs propose_change), and a hint to re-acquire via `install`.
+Stale errors must explain *what happened, where, and how to fix*. The error includes the atom name, the reload's trigger reason (agent vs human vs propose_change), and a hint to re-acquire via `install`.
 
 ### 6.3 Long-running operations
 
@@ -415,15 +414,9 @@ These belong to `evolution-substrate.md`. The two docs together describe the ful
 
 ## 11. References
 
-### pi-mono cited evidence
+### Distinctive properties of this design
 
-- `packages/coding-agent/src/core/extensions/loader.ts:139-176` — `assertActive` + stale-ctx guard pattern; informative error message; provider registration queueing.
-- `packages/coding-agent/src/core/extensions/loader.ts:195-339` — ExtensionAPI surface and registration methods.
-- `packages/coding-agent/src/core/extensions/runner.ts:761-943` — per-event combinator implementations (block-first, reducer, last-wins, accumulate).
-- `packages/coding-agent/src/core/extensions/types.ts:1071-1297` — full ExtensionAPI interface; large stable surface.
-
-What pi-mono does NOT have and we are adding:
-- Transactional reload with rollback (their `loadExtensions` collects errors but doesn't rollback).
+- Transactional reload with rollback — installs that fail are unwound atomically.
 - Constitution / autonomy split with manifest-driven gating.
 - Tier-2 atoms with deferred-approval reload.
 - Versioned ExtensionAPI with grace window.

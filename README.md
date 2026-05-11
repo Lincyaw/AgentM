@@ -3,8 +3,7 @@
 A pluggable agent framework in Python. The SDK is a **mechanism**; every policy
 is a port; every port has a default; every default is a replaceable extension.
 
-Inspired by [`badlogic/pi-mono`](https://github.com/badlogic/pi-mono). See
-`.claude/designs/pluggable-architecture.md` for the boundary contract.
+See `.claude/designs/pluggable-architecture.md` for the boundary contract.
 
 ---
 
@@ -33,7 +32,7 @@ Four layers, dependency arrows point downward only.
 │                loaders (skills, prompt_templates) · catalog/ · compaction│
 │                → atoms reach via ExtensionAPI services only              │
 ├──────────────────────────────────────────────────────────────────────────┤
-│  agentm.llm  (provider layer, analogous to pi-ai)                        │  provider
+│  agentm.llm  (provider layer)                                            │  provider
 │    anthropic StreamFn · ai/api_registry · OAuth / env keys               │
 └──────────────────────────────────────────────────────────────────────────┘
 ```

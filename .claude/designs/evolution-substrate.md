@@ -457,10 +457,6 @@ Goal: accelerate the loop and reduce A/B cost.
 - `extension-as-scenario.md` §11 — atom manifest schema; gains `affects` and (already in sister doc) `tier`, `api_version`.
 - `self-modifiable-architecture.md` — sister doc; defines what a "version" is (output of transactional reload) and reload's catalog hooks.
 
-### What pi-mono does NOT have (we are inventing this)
-
-`packages/coding-agent/src/core/telemetry.ts` — pi-mono ships a flat install-telemetry endpoint and per-session diagnostics, but no version registry, no per-version metrics, no compare API, no decision log. Self-modification is not their goal; an evolution substrate is the differentiator.
-
 ### Background
 
 The substrate is an MLOps pattern recognizable from model serving:
