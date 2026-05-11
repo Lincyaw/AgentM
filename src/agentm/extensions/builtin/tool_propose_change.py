@@ -45,15 +45,56 @@ from __future__ import annotations
 
 import json
 import math
+import statistics
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.lib.mad import mad_confidence
 from agentm.extensions import ExtensionManifest
 from agentm.harness.extension import ExtensionAPI
+
+
+def mad_confidence(
+    values: list[float], baseline: float, candidate: float
+) -> dict[str, Any] | None:
+    """Compute the MAD-confidence tier for ``candidate`` against
+    ``baseline`` given a reference pool ``values``.
+
+    Returns ``None`` when ``len(values) < 3`` (too small to estimate
+    dispersion) or when computed MAD == 0 (the pool is degenerate /
+    all identical, no signal). Otherwise returns
+    ``{"ratio": float, "tier": "real" | "marginal" | "noise"}`` where:
+
+    - ``ratio = abs(candidate - baseline) / MAD(values)``
+    - ``ratio >= 2.0``  -> ``"real"``
+    - ``1.0 <= ratio < 2.0`` -> ``"marginal"``
+    - ``ratio < 1.0``  -> ``"noise"``
+
+    MAD here is the population median absolute deviation (no scaling
+    constant); the choice of 1.0 / 2.0 thresholds is a heuristic
+    informed by the 2-sigma incumbent floor and is documented in
+    ``.claude/designs/per-task-evolution-loop.md``.
+
+    Inlined from the former ``agentm.core.lib.mad`` module — this atom
+    is the sole consumer, so it doesn't belong in ``core/lib/``.
+    """
+    if len(values) < 3:
+        return None
+    median = statistics.median(values)
+    deviations = [abs(v - median) for v in values]
+    mad = statistics.median(deviations)
+    if mad == 0:
+        return None
+    ratio = abs(candidate - baseline) / mad
+    if ratio >= 2.0:
+        tier = "real"
+    elif ratio >= 1.0:
+        tier = "marginal"
+    else:
+        tier = "noise"
+    return {"ratio": float(ratio), "tier": tier}
 
 
 MANIFEST = ExtensionManifest(
