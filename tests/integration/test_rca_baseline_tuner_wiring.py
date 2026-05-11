@@ -60,11 +60,17 @@ class _StubAPI:
         self.providers: dict[str, Any] = {}
         self.handlers: dict[str, list[Any]] = {}
         self.renderers: dict[str, Any] = {}
-        # Some atoms (skill_loader, prompt_templates) call into these — we
-        # don't load those in the tuner manifest so they're not strictly
-        # required, but provide the attrs in case future atoms appear.
-        self.prompt_templates = _NoopService()
+        # Some atoms (skill_loader, prompt_templates) reach for catalog /
+        # service-registry — none load in the tuner manifest, but provide
+        # the attrs in case future atoms appear.
         self.catalog = _NoopService()
+        self._services: dict[str, Any] = {}
+
+    def set_service(self, name: str, obj: Any) -> None:
+        self._services[name] = obj
+
+    def get_service(self, name: str) -> Any:
+        return self._services.get(name)
 
     def on(self, channel: str, handler: Any, *, priority: int = 0) -> Any:
         self.handlers.setdefault(channel, []).append(handler)

@@ -47,7 +47,7 @@ class ContextUsageEstimate:
 class CompactionPrompts:
     """Prompt bodies threaded into the compaction engine by callers.
 
-    Atoms resolve these via ``api.prompt_templates.get_prompt(...)`` and
+    Atoms resolve these via ``api.get_service("prompt_templates").get_prompt(...)`` and
     pass an instance into ``api.compaction.compact``. Empty strings are
     legal — they represent the graceful-degradation path used when the
     ``compaction_prompts`` atom is not installed.
