@@ -17,9 +17,15 @@ from agentm_feishu import cli as feishu_cli
 
 @pytest.fixture(autouse=True)
 def _scrub_lark_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make every test start from a clean LARK_* environment."""
+    """Make every test start from a clean LARK_* environment.
+
+    Also disable the ``.env`` autoload that ``cli.main()`` runs before
+    arg parsing — otherwise the repo's own ``.env`` would put LARK_* back
+    after we scrub them.
+    """
     monkeypatch.delenv("LARK_APP_ID", raising=False)
     monkeypatch.delenv("LARK_APP_SECRET", raising=False)
+    monkeypatch.setattr(feishu_cli, "load_dotenv_files", lambda _cwd: None)
 
 
 def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:

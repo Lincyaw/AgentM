@@ -403,6 +403,47 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    # lark-oapi logs the recv loop's clean WebSocket close as ERROR
+    # ("receive message loop exit, err: sent 1000 (OK); ...") which
+    # looks like a crash but isn't — 1000 is "Normal Closure". Downgrade
+    # those specific lines to INFO so operators don't get spooked.
+    class _LarkCleanCloseFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            if record.levelno == logging.ERROR and "1000 (OK)" in record.getMessage():
+                record.levelno = logging.INFO
+                record.levelname = "INFO"
+            return True
+
+    logging.getLogger("Lark").addFilter(_LarkCleanCloseFilter())
+
+    # asyncio yells "Task was destroyed but it is pending!" for the
+    # background tasks lark spawns on its private (daemon-thread) loop.
+    # See ``adapter._cancel_lark_tasks`` for the full diagnosis — those
+    # tasks have no actual remediation, they're already cancelled and
+    # the daemon thread dies with the process. Suppress the line so
+    # operators don't see a wall of red on Ctrl-C.
+    class _LarkOrphanTaskFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            message = record.getMessage()
+            if "lark_oapi" in message and "Task was destroyed" in message:
+                return False
+            return True
+
+    logging.getLogger("asyncio").addFilter(_LarkOrphanTaskFilter())
+
+    # And one more orphan: lark's ``ExpiringCache._start_clear_cron``
+    # coroutine never gets awaited because the task wrapping it dies
+    # with the daemon thread. Python prints this through the warnings
+    # module (not logging), so the asyncio filter above doesn't catch
+    # it — file a dedicated filterwarnings entry.
+    import warnings
+
+    warnings.filterwarnings(
+        "ignore",
+        message=r"coroutine 'ExpiringCache\._start_clear_cron' was never awaited",
+        category=RuntimeWarning,
+    )
+
     try:
         return asyncio.run(_arun(args))
     except KeyboardInterrupt:
