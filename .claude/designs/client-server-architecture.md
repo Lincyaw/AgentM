@@ -198,9 +198,10 @@ workers translate to/from an `AgentSession`), not protocol-shape.
 | kind | Purpose |
 |---|---|
 | `hello` | First message. Carries `peer_kind` (`chat_client` / `agent_worker` / `control`), `peer_name`, version, capabilities, optional auth. Server replies `welcome` or `error`. |
-| `inbound` | A message the peer wants the gateway to route. Body shape unchanged from v0 `InboundMessage` (sender_id, chat_id, content, media, metadata, session_key_override, button_value). New optional `to` field on the envelope (§4.3.1) lets a peer specify a destination peer for a2a; absence means "router policy decides". |
+| `inbound` | A message the peer wants the gateway to route. Body shape unchanged from v0 `InboundMessage`. New optional `to` field on the envelope (§4.3.1) lets a peer specify a destination peer for a2a; absence means "router policy decides". |
 | `presence` | Advisory: "user is typing", "agent is thinking", "worker drained". Server may relay to interested subscribers. |
-| `ack` | Confirms receipt of a server-originated message id. |
+| `ack` | Confirms receipt of one server-originated message id. |
+| `ack_batch` | Confirms receipt of a `delivery_batch` (§4.5.3) — single round-trip for a batch instead of N individual acks. |
 | `bye` | Graceful shutdown. Server flushes pending outbound for this peer, then closes. |
 | `subscribe` | (control / agent-worker) Subscribe to a routing event stream — peer connect/disconnect, session migrations, approval gates. |
 
@@ -208,11 +209,12 @@ workers translate to/from an `AgentSession`), not protocol-shape.
 
 | kind | Purpose |
 |---|---|
-| `welcome` | Reply to `hello`. Carries server version, negotiated wire version, the peer's assigned `peer_id`, optional `session_resume` list (§4.4). |
-| `outbound` | Render-and-send-this. For `chat_client` peers, body is `OutboundMessage` to render in the chat. For `agent_worker` peers, body is the same shape — what the worker's local code paths would have received as inbound for the session. The wire kind is `outbound` either way because "what the gateway is sending to the peer" is the semantic. |
+| `welcome` | Reply to `hello`. Carries server version, negotiated wire version, the peer's assigned `peer_id`, optional `session_resume` list (§4.4), and an optional `pending_summary` (per-session counts of outbox depth at reconnect time, so the peer can prepare for catch-up). |
+| `outbound` | Render-and-send-this. For `chat_client` peers, body is `OutboundMessage` to render in the chat. For `agent_worker` peers, body is the same shape — what the worker's local code paths would have received as inbound for the session. |
+| `delivery_batch` | Catch-up envelope: multiple `outbound` items grouped for one round-trip (§4.5.3). Used automatically on reconnect when outbox depth > 1 for a session. |
 | `error` | Protocol-level error (bad hello, auth failure, malformed payload, unknown routing target). Code + message + whether the connection survives. |
 | `ping` | Liveness check. Peer replies `pong`. |
-| `event` | Streaming routing event for `subscribe`d peers — peer-up / peer-down / session-migrated. |
+| `event` | Streaming routing event for `subscribe`d peers — peer-up / peer-down / session-migrated / dead_letter. |
 
 `pong` is the symmetric reply to `ping`.
 
@@ -301,18 +303,196 @@ the new fields touched.
 * Capability shape is open-ended per `peer_kind`. The server stores
   them verbatim and matches on them during routing.
 
-### 4.5 Delivery semantics
+### 4.5 Delivery semantics — durable outbox
 
-* Server → Client `outbound` is **at-least-once**. The server retains
-  unacked outbound for a small bounded window (default 100 messages
-  per client) and replays them after reconnect.
-* Client → Server `inbound` is **at-most-once** within a session — a
-  duplicate `inbound.id` from the same client is dropped after
-  logging. Clients responsible for not re-sending after a confirmed
-  ack.
-* Out-of-order tolerated: the server reorders nothing; each `outbound`
-  carries enough metadata (chat_id, turn marker) for the client to
-  render in receipt order.
+The naive "in-memory bounded ring per peer" approach earlier drafts
+described is too fragile. Real failure modes the gateway needs to
+survive without losing messages:
+
+* Gateway restart with peers connected and undelivered traffic in
+  flight.
+* Long peer outage (a Feishu adapter down for an hour while the
+  agent finishes a long-running task and posts results).
+* Network flap that drops the socket mid-write — the kernel buffer
+  flushed and we don't know how much the peer received.
+* Burst of outbound from a fast agent overwhelming a slow chat
+  client and back-pressuring everything else.
+
+The gateway therefore maintains a **durable outbox per peer**, not
+an in-memory ring:
+
+* **Storage.** SQLite at `<state_dir>/outbox.sqlite` by default.
+  One row per pending message: `(peer_id, msg_id, kind, body,
+  enqueued_at, last_attempt_at, attempts, status)`. WAL mode for
+  concurrent reader (delivery worker) + writer (gateway).
+* **Insert path.** Every outgoing envelope addressed to a peer is
+  written to outbox first, then attempted over the socket. The
+  insert is the source of truth; the socket write is a fast-path
+  hint.
+* **Delivery worker.** Per peer, a loop that pulls
+  `status=pending OR status=retry` messages in `(enqueued_at,
+  msg_id)` order, writes them on the socket, marks
+  `status=in_flight`. On `ack` from the peer, mark `status=acked`
+  and prune (configurable retention window so traces / replays can
+  read recent ones).
+* **Retry policy.** On write failure or missed ack within
+  `ack_timeout` (default 30s): exponential backoff starting at 1s,
+  capped at 60s, with full jitter. `attempts` increments. After
+  `max_attempts` (default 12, ~12 minutes of retries), the message
+  is moved to a **dead-letter** table and an `event` is emitted on
+  the `subscribe` stream so operators see it.
+* **At-least-once with idempotency.** A peer that receives a
+  duplicate `msg_id` (it had already acked but the ack got lost
+  before we recorded it) treats it as a no-op and re-acks.
+  Idempotency-key field on `outbound` is the envelope `id`; peers
+  dedup on `(server_peer_id, id)`.
+* **Bounded write-burst control.** When the outbox depth for a
+  peer exceeds `peer_outbox_high_water` (default 1000), inbound
+  *destined for that peer* triggers a `slow_consumer` event;
+  upstream peers (agent workers) get a flow-control hint to throttle
+  via `presence`.
+* **Crash recovery.** Gateway restart re-opens SQLite, finds
+  `status=in_flight OR pending`, resets them to `pending`, the
+  delivery worker resumes from there. No message is lost; some may
+  be re-delivered (handled by idempotency).
+
+### 4.5.1 Inbound durability
+
+Peer → gateway `inbound` is, by contrast, **at-most-once with
+ack-on-process**:
+
+* When a peer sends `inbound`, the gateway writes it to an inbox
+  log (same SQLite) before processing.
+* After successful processing (dispatched to a session or rejected
+  with a structured error), the gateway emits `ack` with the
+  envelope's `id`.
+* A peer that does not see the ack should resend with the same `id`.
+  The gateway dedupes on `(peer_id, id)` — duplicates are no-op
+  acked.
+* If processing fails (crash mid-dispatch), the inbox entry stays
+  unacked. On restart the gateway replays from the inbox before
+  accepting new traffic.
+
+This is a small ledger, not a queue — the gateway processes inbound
+synchronously most of the time. The inbox exists so that
+*ack-on-process* is honest: we don't ack until we've actually done
+the work, and on crash we redo unacked work.
+
+### 4.5.2 Ordering
+
+* Per `(peer_id, session_key)`: ordered. The delivery worker
+  serializes by session.
+* Across sessions on the same peer: best-effort FIFO from the
+  outbox table; may be reordered after retry.
+* Across peers: no global ordering claim.
+
+### 4.5.3 Batch delivery (catch-up)
+
+When a peer reconnects after an outage with many queued messages,
+the gateway should not pay one round-trip per message — that turns
+a 30-second outage into a slow drain.
+
+**Two mechanisms compose:**
+
+1. **Pipelined push.** The default. The delivery worker writes the
+   next outbound to the socket without waiting for the previous
+   ack to land. Bounded by `peer_in_flight_max` (default 64) — the
+   peer may have up to N unacked messages at once. Acks arrive
+   asynchronously and slide the window. This is the same pattern
+   as HTTP/2 or AMQP prefetch; no new wire kind required, just
+   permission to not block on ack.
+
+2. **Explicit batch envelope.** New optional kind `delivery_batch`
+   (server → peer) and `ack_batch` (peer → server) for catch-up
+   scenarios where the gateway *wants* the peer to consider the
+   batch as a unit:
+
+   ```json
+   {
+     "v":"v0", "id":"b1", "kind":"delivery_batch", "ts":"...",
+     "body":{
+       "reason":"reconnect_catchup",
+       "session_key":"feishu:c123",
+       "items":[
+         {"id":"m1","kind":"outbound","body":{...}},
+         {"id":"m2","kind":"outbound","body":{...}},
+         {"id":"m3","kind":"outbound","body":{...}}
+       ]
+     }
+   }
+   ```
+
+   Peer responds with a single `ack_batch` (acking the batch_id +
+   list of item ids it accepted) or, if it cannot accept all
+   atomically, with individual `ack`s for the ones it processed
+   and the server keeps the rest pending.
+
+**When the server uses a batch vs pipelined push:**
+
+| Condition | Mechanism |
+|---|---|
+| Normal steady-state (outbox depth < 16) | Pipelined push, msg-by-msg |
+| Reconnect with > 1 message pending | One `delivery_batch` per session_key, up to `batch_max_items` (default 64) per batch |
+| Outbox depth > `peer_outbox_high_water` (slow consumer) | Multiple batches in flight, throttled per `peer_in_flight_max` |
+| Cross-session catch-up | One batch per `(peer_id, session_key)` — preserves the per-session ordering claim while allowing many sessions to drain in parallel |
+
+**Why this matters for the user's scenario.** Agent worker
+crashes; user sends 5 chat messages; agent worker reconnects. The
+gateway has all 5 queued. The agent worker receives them as one
+`delivery_batch` (because reason=reconnect_catchup, session_key
+matches). The agent has the option to:
+
+* Process each message as a separate turn (the dumb default — fine
+  if "5 messages" semantically means "5 conversations").
+* **Consolidate**: notice the batch shape, fold the 5 inbound into
+  one user turn ("the user sent these 5 things while I was down,
+  here's a combined prompt"). This is a *scenario-level* decision,
+  exposed to atoms via an event (`InboundBatchEvent` with the
+  whole list) before per-message dispatch. Atom default: pass
+  through one-by-one. Worker scenarios that want to consolidate
+  set a handler.
+
+**Idempotency under batching.** Per-item `id` is still the dedup
+key. A batch that gets re-delivered (no `ack_batch` seen) is
+de-duped item by item at the peer; items already processed are
+no-op'd.
+
+**Why not just rely on TCP buffering?**
+
+* The peer's local processing rate, not the socket buffer, is the
+  bottleneck. Pipelined push hides the latency *but* still requires
+  the peer to process N times. Batch envelope lets the peer take N
+  messages and decide to do *less* work than N processings.
+* `reason` field on `delivery_batch` lets the receiving scenario
+  distinguish `reconnect_catchup` (consolidate) from
+  `slow_consumer_drain` (process individually but in bulk).
+* Operational: one `ack_batch` replacing N `ack`s reduces protocol
+  chatter for what is otherwise an O(N) wire pattern.
+
+### 4.5.3 Why not an external broker (Redis / NATS / RabbitMQ / Kafka)
+
+Considered and rejected for v1, kept on the table for v2 plug-in:
+
+* **Operational cost.** A second daemon to deploy / monitor / fail
+  over, for a workload that fits in a single SQLite file for years
+  of production traffic.
+* **Latency.** Direct-socket dispatch is microseconds in the
+  happy path; broker-mediated is milliseconds, and the happy path
+  is what users feel.
+* **Dependency surface.** Pulling in `redis-py` / `nats-py` /
+  `aiokafka` per language for the future polyglot clients defeats
+  the "any language, hand-rolled adapter" goal.
+* **Scale.** The gateway is one process per operator deployment; a
+  single SQLite WAL handles tens of thousands of messages/second
+  comfortably. The number of chat messages an organisation
+  generates is small relative to that.
+
+`[OPEN]` Should we ship a **pluggable outbox backend** interface in
+Phase 1 (so an operator can swap SQLite for Redis Streams / NATS
+JetStream later without modifying gateway core)? Recommend **yes**
+— it's two extra interfaces (`OutboxStore` + `InboxLog`) and a
+factory; the default implementation is SQLite, alternatives are
+contrib. Keeps the door open without committing to a broker dep.
 
 ### 4.6 Why JSON, not protobuf / msgpack / cap'n proto
 
@@ -574,15 +754,37 @@ envelope (added when the tool fires).
   peer identities — workers can come and go without other workers
   needing to know.
 
-**A2A failure semantics.**
+**A2A failure semantics — two delivery shapes.**
 
-* Destination peer not connected: gateway returns `error:
-  unknown_peer` to the sender. No queueing.
-* Destination connected but rejects (`error: forbidden_target`):
-  gateway returns the rejection to the sender; the sender's tool
-  call gets a structured error.
-* Destination drops mid-exchange (`wait_for_reply`): pending tool
-  times out per `timeout_seconds`. Standard tool-timeout path.
+Fire-and-forget (`wait_for_reply: false`) goes through the durable
+outbox (§4.5):
+
+* Destination offline at send time: message persists in outbox,
+  delivers on reconnect.
+* Destination permanently gone (`max_attempts` exhausted, default
+  ~12 min of retries): message lands in dead-letter, an `event` is
+  emitted, the originating session sees a delayed
+  `peer_send_failed` notification (the tool call has already
+  returned `status=queued`).
+* Idempotency: the envelope's `id` doubles as the dedup key —
+  re-sending the same `id` is a no-op at the destination.
+
+RPC-style (`wait_for_reply: true`) is **not** durably queued
+because the calling session is blocked on the reply:
+
+* Destination not connected at send time: tool returns
+  `error: unknown_peer` immediately. No outbox insert.
+* Destination connected but unresponsive: tool times out per
+  `timeout_seconds` (default 60). The tool call gets a structured
+  timeout error; the destination's pending work continues but its
+  reply, if it ever arrives, is dropped (correlation_id no longer
+  has a waiter).
+* Destination crash mid-call: same as timeout — sender's tool sees
+  timeout, no reply lands.
+
+The distinction matches the user's mental model: "fire a message"
+should survive a partition; "call another agent and wait" is RPC
+with the usual RPC failure semantics.
 
 **Loop prevention.** The gateway sets a `hops` counter in the
 envelope, increments on each a2a forward, and refuses to forward
@@ -754,6 +956,16 @@ checkout:
    envelope later is cheap, but rolling out a v0→v0.1 mid-cluster
    is not. Confirm the "all envelope fields shipped in Phase 1"
    approach.
+9. **Pluggable outbox backend (§4.5.3).** Recommend shipping
+   `OutboxStore` / `InboxLog` interfaces in Phase 1 with the
+   default being SQLite, so a future operator can swap in NATS
+   JetStream / Redis Streams without modifying gateway core.
+   Confirm.
+10. **Outbox defaults (§4.5).** Recommend `ack_timeout=30s`,
+    `max_attempts=12` (~12 min of exponential backoff with jitter),
+    `peer_outbox_high_water=1000` for slow-consumer detection,
+    7-day retention of acked messages for trace inspection.
+    Confirm or argue for different numbers.
 
 ---
 

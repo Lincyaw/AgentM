@@ -30,17 +30,21 @@ listed in `client-server-architecture.md` §10:
 
 Each phase is one PR. Order matters; each unlocks the next.
 
-### Phase 1 — Wire protocol + server, in-tree client lib
+### Phase 1 — Wire protocol + server + durable outbox + in-tree client lib
 
-- `contrib/channels/src/agentm_channels/wire/{__init__.py,framing.py,envelope.py,kinds.py}` — pure functions, no I/O. Length-frame encode/decode, envelope validation, kind enum.
-- `contrib/channels/src/agentm_channels/server.py` — asyncio Unix socket server bound to `Gateway`. Accepts hello, registers a `ClientRegistry` entry, fans inbound onto the existing `MessageBus`, drains outbound to the connected client.
-- `contrib/channels/src/agentm_channels/client.py` — Python client lib used by tests + Phase 2/3. Connects, handshakes, sends inbound, consumes outbound.
+- `contrib/channels/src/agentm_channels/wire/{__init__.py,framing.py,envelope.py,kinds.py}` — pure functions, no I/O. Length-frame encode/decode, envelope validation, kind enum. All envelope fields (`peer_kind`, `to`, `correlation_id`, `hops`, `root_session_key`) ship here.
+- `contrib/channels/src/agentm_channels/outbox/{sqlite.py,interface.py}` — `OutboxStore` and `InboxLog` Protocols + default SQLite impl. WAL mode, idempotency key = envelope `id`, retry policy with exponential backoff + jitter, dead-letter on `max_attempts` exhausted.
+- `contrib/channels/src/agentm_channels/server.py` — asyncio Unix socket server. PeerRegistry, per-peer delivery worker that drains the outbox (pipelined push by default; `delivery_batch` on reconnect catch-up).
+- `contrib/channels/src/agentm_channels/client.py` — Python client lib used by tests + Phase 2/3/5. Connects, handshakes, sends inbound, consumes outbound (including batch handling and ack_batch).
 - New CLI flag `--bind unix:///path` on `agentm-gateway`. When set, runs the socket server alongside (or instead of) in-process channels.
 - New tests:
   - Wire encode/decode round-trip (fuzz on random envelopes).
-  - hello/welcome handshake.
+  - hello/welcome handshake (chat_client and agent_worker shapes).
   - Inbound→outbound echo through the socket using a stub session factory.
-  - Client crash mid-conversation → reconnect → replay (bounded buffer).
+  - **Outbox durability**: gateway restart while messages pending → after restart, peer reconnects → all messages redelivered, idempotency dedupes the in-flight ones the peer had already seen.
+  - **Catch-up batching**: peer offline for N seconds, M messages queued, on reconnect → one `delivery_batch` per session (not M individual pushes), batch_max_items respected.
+  - **Slow consumer**: peer accepts messages slower than producer; outbox depth > high_water → `slow_consumer` event emitted, producer back-pressured via presence hint.
+  - **Dead-letter**: peer permanently gone → after max_attempts, message moves to DLQ, originating session sees `peer_send_failed` event.
   - Auth failure path (wrong token / wrong peer uid).
 - The Phase 1 PR adds no removals — v0 channels keep working.
 
