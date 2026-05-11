@@ -40,8 +40,8 @@ import yaml
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.messages import AssistantMessage
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
-from agentm.harness.session_config import AgentSessionConfig
+from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi.session_config import AgentSessionConfig
 
 
 class GradeResult(TypedDict):

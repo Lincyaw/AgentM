@@ -7,8 +7,8 @@ from typing import Any
 from agentm.core.abi import BusPriority
 from agentm.core.abi.roles import COMMAND_PARSER, SLASH_COMMAND_DISPATCHER_SERVICE
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import CommandDispatchedEvent
-from agentm.harness.extension import CommandDispatcher, ExtensionAPI
+from agentm.core.abi.events import CommandDispatchedEvent
+from agentm.core.abi.extension import CommandDispatcher, ExtensionAPI
 
 
 MANIFEST = ExtensionManifest(

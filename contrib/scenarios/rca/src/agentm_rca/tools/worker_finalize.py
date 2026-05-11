@@ -45,7 +45,7 @@ from agentm.core.abi import (
     ToolTerminate,
 )
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(
     name="worker_finalize",

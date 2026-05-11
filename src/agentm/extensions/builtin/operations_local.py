@@ -1,4 +1,17 @@
-"""Default local implementations of `FileOperations` and `BashOperations`."""
+"""Builtin ``operations_local`` atom.
+
+Registers the default :class:`agentm.core.abi.operations.Operations`
+bundle: local-stdlib file I/O and ``asyncio``-subprocess shell exec.
+See ``.claude/designs/pluggable-architecture.md`` §3.2 — Operations are
+a pluggability axis like any other; the substrate no longer instantiates
+a default bundle, so every scenario manifest that uses tool atoms must
+list this atom (or an alternate ``operations_*`` atom such as an SSH /
+sandbox / in-memory implementation).
+
+§11 single-file contract: only stdlib + ``agentm.core.abi.*`` +
+``agentm.extensions.*`` + ``agentm.core.abi.extension`` imports. No
+atom-to-atom imports.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +20,27 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 from signal import SIGKILL
+from typing import Any
 
 from agentm.core.abi.operations import ExecResult
+from agentm.extensions import ExtensionManifest
+from agentm.core.abi.extension import ExtensionAPI
+
+
+MANIFEST = ExtensionManifest(
+    name="operations_local",
+    description=(
+        "Registers the default local-FS / asyncio-subprocess Operations "
+        "bundle. Listed first in every scenario that uses file/bash tools."
+    ),
+    registers=(),
+    config_schema={
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    requires=(),
+)
 
 
 class LocalFileOperations:
@@ -145,3 +177,11 @@ class LocalBashOperations:
             os.killpg(pgid, SIGKILL)
         except ProcessLookupError:
             return
+
+
+def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+    del config
+    api.register_operations(
+        file=LocalFileOperations(cwd=api.cwd),
+        bash=LocalBashOperations(),
+    )

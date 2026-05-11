@@ -8,7 +8,7 @@ from typing import Any, Final
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.operations import BashOperations
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 120.0

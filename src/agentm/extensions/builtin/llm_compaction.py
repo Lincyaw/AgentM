@@ -55,8 +55,8 @@ from agentm.core.abi.tool import (
     FILE_OP_WRITE,
 )
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import AfterCompactEvent, BeforeCompactEvent
-from agentm.harness.extension import ExtensionAPI, ProviderConfig
+from agentm.core.abi.events import AfterCompactEvent, BeforeCompactEvent
+from agentm.core.abi.extension import ExtensionAPI, ProviderConfig
 
 
 # Prompt registry keys. Kept in sync with ``compaction_prompts.py``;

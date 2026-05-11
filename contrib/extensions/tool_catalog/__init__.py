@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 from .browse import MANIFEST as BROWSE_MANIFEST
 from .browse import install as install_browse

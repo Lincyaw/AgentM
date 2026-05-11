@@ -11,8 +11,8 @@ import pytest
 import agentm.core.abi.events as events_mod
 from agentm.core.abi import EventBus
 from agentm.extensions.builtin import observability
-from agentm.harness.events import SessionShutdownEvent
-from agentm.harness.extension import _ExtensionAPIImpl
+from agentm.core.abi.events import SessionShutdownEvent
+from agentm.core.runtime.extension import _ExtensionAPIImpl
 
 
 class _SessionView:
@@ -38,7 +38,7 @@ class _SessionView:
 
 
 def _api(tmp_path: Path) -> _ExtensionAPIImpl:
-    from agentm.harness.extension import build_extension_api_scope
+    from agentm.core.runtime.extension import build_extension_api_scope
 
     scope = build_extension_api_scope(
         bus=EventBus(),

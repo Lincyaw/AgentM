@@ -35,8 +35,9 @@ from agentm.core.abi import (
     TextContent,
 )
 from agentm.core.abi.messages import AssistantMessage, ToolCallBlock
-from agentm.harness.extension import ProviderConfig
-from agentm.harness.session import AgentSession, AgentSessionConfig
+from agentm.core.abi.extension import ProviderConfig
+from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.runtime.session import AgentSession
 
 
 _PROVIDER_MODULE = "agentm._tests.evolution_provider"
@@ -179,6 +180,8 @@ async def _create_tuner_session(
             cwd=str(cwd),
             provider=(provider_module, {}),
             extensions=[
+
+                ("agentm.extensions.builtin.operations_local", {}),
                 (
                     "agentm.extensions.builtin.tool_query_traces",
                     {},
@@ -222,6 +225,8 @@ async def test_propose_change_rejects_without_evidence(tmp_path: Path) -> None:
             cwd=str(tmp_path),
             provider=(provider_module, {}),
             extensions=[
+
+                ("agentm.extensions.builtin.operations_local", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {"target_scenario": "format_fix"},
@@ -293,6 +298,8 @@ async def test_tier2_activate_is_deferred(tmp_path: Path) -> None:
             cwd=str(tmp_path),
             provider=(provider_module, {}),
             extensions=[
+
+                ("agentm.extensions.builtin.operations_local", {}),
                 ("agentm.extensions.builtin.permission", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
@@ -406,7 +413,11 @@ async def test_tool_write_rejects_decisions_path(tmp_path: Path) -> None:
         AgentSessionConfig(
             cwd=str(repo_root),
             provider=(provider_module, {}),
-            extensions=[("agentm.extensions.builtin.tool_write", {})],
+            extensions=[
+
+                ("agentm.extensions.builtin.operations_local", {}),
+
+                ("agentm.extensions.builtin.tool_write", {})],
         )
     )
     try:
@@ -445,7 +456,9 @@ async def test_atom_source_override_leaves_tree_clean(tmp_path: Path) -> None:
     scenario_dir = tmp_path / "contrib" / "scenarios" / "tinytest"
     scenario_dir.mkdir(parents=True)
     (scenario_dir / "manifest.yaml").write_text(
-        "name: tinytest\nextensions:\n  - local: tinyatom\n",
+        "name: tinytest\nextensions:\n"
+        "  - module: agentm.extensions.builtin.operations_local\n"
+        "  - local: tinyatom\n",
         encoding="utf-8",
     )
     atom_src = (
@@ -576,6 +589,7 @@ async def test_end_to_end_loop_activates_known_good_replacement(
     (scenario_dir / "tool_normalize_json.py").write_text(weak_atom, encoding="utf-8")
     (scenario_dir / "manifest.yaml").write_text(
         "name: format_fix\ntask_class: format_fix\nextensions:\n"
+        "  - module: agentm.extensions.builtin.operations_local\n"
         "  - local: tool_normalize_json\n",
         encoding="utf-8",
     )

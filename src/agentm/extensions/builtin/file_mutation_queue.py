@@ -8,7 +8,7 @@ from typing import Any
 
 from agentm.core.abi import AgentStartEvent, Tool, ToolOutcome, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI, ExtensionLoadError
+from agentm.core.abi.extension import ExtensionAPI, ExtensionLoadError
 
 
 MANIFEST = ExtensionManifest(

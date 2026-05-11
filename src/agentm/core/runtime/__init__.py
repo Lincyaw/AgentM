@@ -1,10 +1,19 @@
-"""AgentM v2 harness public surface."""
+"""Runtime substrate — sessions, extensions, catalog, resources.
+
+Holds the stateful side of the SDK: `AgentSession`, the extension
+loader, catalog/freeze machinery, default session/resource backends.
+Modules here may touch the filesystem at runtime but perform no side
+effects at module import time (`agentm.core` stays Jupyter-clean to
+import). Atoms reach this layer only through `agentm.core.abi.*`
+Protocols and `api.*` hooks; direct atom imports of
+`agentm.core.runtime.*` are validator-rejected.
+"""
 
 from __future__ import annotations
 
 from agentm.core.abi import FunctionTool
-from agentm.harness import events
-from agentm.harness.events import (
+from agentm.core.abi import events
+from agentm.core.abi.events import (
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
     ChildSessionEndEvent,
@@ -13,7 +22,7 @@ from agentm.harness.events import (
     ExtensionInstallEvent,
     ExtensionReloadEvent,
 )
-from agentm.harness.extension import (
+from agentm.core.runtime.extension import (
     CommandSpec,
     ExtensionAPI,
     ExtensionLoadError,
@@ -22,19 +31,19 @@ from agentm.harness.extension import (
     UnknownCommandError,
     load_extension,
 )
-from agentm.harness.resource_loader import (
+from agentm.core.runtime.resource_loader import (
     DefaultResourceLoader,
     InMemoryResourceLoader,
     ResourceLoader,
 )
-from agentm.harness.resource_writer import (
+from agentm.core.runtime.resource_writer import (
     GitBackedResourceWriter,
     ResourceWriter,
     WriteResult,
 )
-from agentm.harness.session_cwd import MissingSessionCwdError
-from agentm.harness.session import AgentSession, AgentSessionConfig
-from agentm.harness.session_manager import (
+from agentm.core.runtime.session_cwd import MissingSessionCwdError
+from agentm.core.runtime.session import AgentSession, AgentSessionConfig
+from agentm.core.runtime.session_manager import (
     InMemorySessionManager,
     JsonlSessionManager,
     JsonlSessionStore,
@@ -44,7 +53,7 @@ from agentm.harness.session_manager import (
     SessionManager,
     SessionTreeNode,
 )
-from agentm.harness.session_bootstrap import (
+from agentm.core.runtime.session_bootstrap import (
     make_default_session_store,
     resolve_session_state,
 )

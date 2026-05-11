@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from agentm.harness.catalog import freeze_current
-from agentm.harness.catalog.indexer import index_trace, rebuild_catalog
+from agentm.core.runtime.catalog import freeze_current
+from agentm.core.runtime.catalog.indexer import index_trace, rebuild_catalog
 from agentm.extensions import ExtensionManifest
 
 

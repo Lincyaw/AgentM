@@ -8,8 +8,8 @@ from typing import Any, Literal
 from agentm.core.abi.skill import SkillRecord
 from agentm.core.abi import BusPriority
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import ResourcesDiscoverEvent, SessionReadyEvent
-from agentm.harness.extension import CommandSpec, ExtensionAPI
+from agentm.core.abi.events import ResourcesDiscoverEvent, SessionReadyEvent
+from agentm.core.abi.extension import CommandSpec, ExtensionAPI
 
 from ._md_skills import parse_md_command_records, parse_md_skill_records
 

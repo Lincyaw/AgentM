@@ -146,7 +146,7 @@ If a template name collides with a registered code command, the code command win
 
 ## Interface Definition
 
-See API block above. Everything is in stdlib + `agentm.core.abi` + `agentm.harness.events` + `agentm.harness.extension`.
+See API block above. Everything is in stdlib + `agentm.core.abi` + `agentm.core.abi.events` + `agentm.core.abi.extension`.
 
 ## Acceptance Scenarios
 

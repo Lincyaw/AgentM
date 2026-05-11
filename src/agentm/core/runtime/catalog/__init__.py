@@ -13,14 +13,14 @@ from pathlib import Path
 from typing import Any
 
 from agentm.core.abi.project_layout import ProjectLayout
-from agentm.harness.catalog import _layout
-from agentm.harness.catalog.freeze import freeze_current
-from agentm.harness.catalog.indexer import (
+from agentm.core.runtime.catalog import _layout
+from agentm.core.runtime.catalog.freeze import freeze_current
+from agentm.core.runtime.catalog.indexer import (
     IndexerResult,
     index_trace,
     rebuild_catalog,
 )
-from agentm.harness.catalog.migrate import migrate_catalog_v2
+from agentm.core.runtime.catalog.migrate import migrate_catalog_v2
 
 
 def list_atoms(*, root: Path | None = None) -> list[dict[str, Any]]:

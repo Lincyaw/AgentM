@@ -31,7 +31,7 @@ explicitly. The atom keeps the extractor pluggable via
 
 §11 contract: single file; no atom-to-atom imports; no harness.session
 import; no core._internal import. The session_ready hook is a public
-harness event from ``agentm.harness.events``.
+harness event from ``agentm.core.abi.events``.
 """
 
 from __future__ import annotations
@@ -42,8 +42,8 @@ from pathlib import Path
 from typing import Any
 
 from agentm.extensions import ExtensionManifest
-from agentm.harness.events import SessionReadyEvent
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.events import SessionReadyEvent
+from agentm.core.abi.extension import ExtensionAPI
 
 
 MANIFEST = ExtensionManifest(

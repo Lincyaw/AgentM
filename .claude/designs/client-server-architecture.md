@@ -148,7 +148,7 @@ Three peer kinds today:
 
 * `chat_client` — speaks a chat platform (Feishu, terminal, HTTP
   webhook). Maps user activity to/from `inbound`/`outbound`.
-* `agent_worker` — runs the AgentM loop. Imports `agentm.harness`,
+* `agent_worker` — runs the AgentM loop. Imports `agentm.core`,
   holds `AgentSession`s, calls real LLM providers. Declares
   capabilities at hello: which scenarios it can serve, which models
   it has credentials for, max concurrent sessions.

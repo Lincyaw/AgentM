@@ -10,7 +10,7 @@ change). The caller is responsible for tearing the sandbox down on
 session shutdown.
 
 Layer rule: this module sits in the harness layer alongside the
-reloader. It imports only stdlib + ``agentm.harness.atom_reloader`` +
+reloader. It imports only stdlib + ``agentm.core.runtime.atom_reloader`` +
 ``agentm.core.abi.events`` so it can be invoked from session
 bootstrap without crossing layer boundaries.
 """
@@ -25,7 +25,7 @@ from pathlib import Path
 from agentm.core.abi import EventBus
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.core.abi.resource import ResourceWriter
-from agentm.harness.atom_reloader import AtomReloader
+from agentm.core.runtime.atom_reloader import AtomReloader
 
 logger = logging.getLogger(__name__)
 

@@ -34,8 +34,9 @@ from agentm.core.abi import (
 )
 from agentm.core.abi.messages import AssistantMessage
 from agentm.extensions.builtin.tool_propose_change import mad_confidence
-from agentm.harness.extension import ProviderConfig
-from agentm.harness.session import AgentSession, AgentSessionConfig
+from agentm.core.abi.extension import ProviderConfig
+from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.runtime.session import AgentSession
 
 
 _PROVIDER_MODULE = "agentm._tests.mad_confidence_provider"
@@ -121,7 +122,9 @@ def _materialize_scenario(tmp_path: Path) -> Path:
     )
     (scenario_dir / "tiny_atom.py").write_text(atom_src, encoding="utf-8")
     (scenario_dir / "manifest.yaml").write_text(
-        "name: mad_test\nextensions:\n  - local: tiny_atom\n",
+        "name: mad_test\nextensions:\n"
+        "  - module: agentm.extensions.builtin.operations_local\n"
+        "  - local: tiny_atom\n",
         encoding="utf-8",
     )
     subprocess.run(

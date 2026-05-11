@@ -33,7 +33,7 @@ from agentm.core.abi.messages import ToolCallBlock
 from agentm.core.lib import to_jsonable
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
-from agentm.harness.events import (
+from agentm.core.abi.events import (
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
     BeforeAgentStartEvent,
@@ -43,7 +43,7 @@ from agentm.harness.events import (
     SessionReadyEvent,
     SessionShutdownEvent,
 )
-from agentm.harness.extension import ExtensionAPI, Handler
+from agentm.core.abi.extension import ExtensionAPI, Handler
 
 logger = logging.getLogger(__name__)
 

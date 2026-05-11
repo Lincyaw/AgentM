@@ -65,7 +65,7 @@ The reference atom (abbreviated):
 ```python
 # src/llmharness/extensions/check_repeated_actions.py
 from agentm.extensions import ExtensionManifest
-from agentm.harness.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI
 
 from ..audit.registry import SERVICE_KEY, AuditCheckRegistry, CheckContext
 from ..schema import EventKind, Finding

@@ -163,7 +163,7 @@ Rationale for using `session_ready` (not `install`) to populate the cache: `reso
 
 ### Frontmatter parsing — package vs. hand-roll
 
-`AgentM/src/agentm/harness/resource_loader.py` already has a 30-line in-house `_split_frontmatter` using `yaml.safe_load`. Two options for `core/lib/frontmatter.py`:
+`AgentM/src/agentm/core/runtime/resource_loader.py` already has a 30-line in-house `_split_frontmatter` using `yaml.safe_load`. Two options for `core/lib/frontmatter.py`:
 
 **Option A — adopt [`python-frontmatter`](https://pypi.org/project/python-frontmatter/)** (`uv add python-frontmatter`).
 - Pros: well-maintained, handles JSON/TOML frontmatter too, used by Pelican/MkDocs ecosystem, ~1k LoC of edge cases we don't have to own.

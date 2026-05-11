@@ -19,11 +19,11 @@ This is operational, not philosophical: it tells us where to put a feature by as
 
 A stronger property follows from this boundary, and the constitution split is designed around it:
 
-> **`core/abi/` + `core/lib/` + `llm/` + stdlib must be sufficient to launch a working agent loop.** No import from `agentm.harness` or `agentm.extensions` may be required.
+> **`core/abi/` + `core/lib/` + `core/runtime/` + stdlib must be sufficient to launch a working agent loop.** No import from `agentm.extensions` may be required.
 
-This is not just "agent cannot break core" — it is "core alone yields a usable agent". When the autonomy layer is corrupted (a self-edited atom misbehaves, a scenario YAML is malformed, an extension reload leaves harness in an inconsistent state), the operator still has a path to launch an agent: invoke `agentm --no-extensions "<prompt>"` to bypass atom discovery entirely, leaving only the kernel + provider + loop. That floor has no tool environment, skills, or observability, but it launches, accepts a prompt, and returns — enough to inspect and repair whatever is broken above.
+This is not just "agent cannot break core" — it is "core alone yields a usable agent". When the autonomy layer is corrupted (a self-edited atom misbehaves, a scenario YAML is malformed, an extension reload leaves the runtime in an inconsistent state), the operator still has a path to launch an agent: invoke `agentm --no-extensions "<prompt>"` to bypass atom discovery entirely, leaving only the kernel + provider + loop. That floor has no tool environment, skills, or observability, but it launches, accepts a prompt, and returns — enough to inspect and repair whatever is broken above.
 
-The invariant is enforced structurally (no `harness`/`extensions` import in `core/abi/`, `core/lib/`, or `llm/`) and is the load-bearing reason for keeping `core/abi/` and `core/lib/` import-closed. Future PRs that introduce a `harness` import into `core/abi/` or `core/lib/` should be rejected on this basis alone.
+The invariant is enforced structurally (no `extensions` import in `core/abi/` or `core/lib/`) and is the load-bearing reason for keeping `core/abi/` and `core/lib/` import-closed. Future PRs that introduce an `extensions` import into `core/abi/` or `core/lib/` should be rejected on this basis alone.
 
 ---
 
@@ -39,13 +39,13 @@ The invariant is enforced structurally (no `harness`/`extensions` import in `cor
 │    core/lib/        pure-function utilities (edit_diff, frontmatter, │
 │                     path_utils, text_truncate)                       │
 │                     → atom may import (stdlib-style)                 │
-│    core/_internal/  stateful subsystems & default impls              │
-│                     (operations_impl, skills, prompt_templates,      │
-│                     catalog/, compaction/ engine)                    │
-│                     → atom should reach via ExtensionAPI             │
+│    core/runtime/    stateful substrate — AgentSession, EventBus,     │
+│                     SessionManager, catalog/, extension loader,      │
+│                     GitBackedResourceWriter, AtomReloader.           │
+│                     → atom may NOT import; reach via ExtensionAPI    │
+│    core/_internal/  reload-time helpers (atoms never touch)          │
 │                                                                      │
-│    llm/, ai/                          (provider boundary)            │
-│    harness/{session, extension, events, session_manager, ...}       │
+│    ai/                                (provider descriptor registry) │
 │    extensions/{loader, discover, validate}                           │
 │    cli                                (presenter startup contract)   │
 │    .agentm/catalog/                   (write-protected from agent)   │
@@ -77,9 +77,10 @@ The constitution is uniform on the **modifiability** axis — nothing in `core/`
 |---|---|---|---|
 | `core/abi/` | constitution | yes | the ABI surface — types and Protocols both atoms and the llm provider depend on |
 | `core/lib/` | constitution | yes (stdlib-style) | pure functions with no state; routing through ExtensionAPI would only add boilerplate |
-| `core/_internal/` | constitution | **no** — atoms use ExtensionAPI services | stateful subsystems and default impls. Atoms reach them via `api.get_operations()`, `api.skills`, `api.prompt_templates`, `api.catalog`, `api.compaction` — harness owns instance lifecycle and substitution |
+| `core/runtime/` | constitution | **no** — atoms use ExtensionAPI services | stateful substrate (sessions, catalog, writers). Atoms reach them via `api.get_operations()`, `api.skills`, `api.prompt_templates`, `api.catalog`, `api.compaction` — the runtime owns instance lifecycle and substitution |
+| `core/_internal/` | constitution | **no** | reload-time internals; atoms never touch |
 
-Concretely, this means an atom like `tool_edit` can `from agentm.core.lib import edit_diff` (pure function) freely and `from agentm.core.abi.operations import FileOperations` for the type, but obtains the bound instance through `api.get_operations().file` — never `from agentm.core._internal.operations_impl import LocalFileOperations`. The validator forbids any import under `agentm.core._internal.*` from atom modules.
+Concretely, this means an atom like `tool_edit` can `from agentm.core.lib import edit_diff` (pure function) freely and `from agentm.core.abi.operations import FileOperations` for the type, but obtains the bound instance through `api.get_operations().file` — never by importing a concrete impl class. The validator forbids any import under `agentm.core._internal.*` from atom modules. The `Local{File,Bash}Operations` concrete impls live in the `operations_local` atom (`extensions/builtin/operations_local.py`); only that atom may instantiate them, and it does so to call `api.register_operations(...)` — other atoms read the bundle via `api.get_operations()` and never name the concrete class.
 
 Pure data types that atoms exchange (e.g. `SkillRecord`, `PromptTemplateRecord`, `Operations` bundle, `CompactionSettings`) live in `core/abi/` so the atom can construct and pattern-match against them without traversing the API. Only behaviour (loaders, engines, fingerprint computation) hides behind the API.
 
@@ -114,21 +115,12 @@ version: 1
 constitution:
   paths:
     # core/ — three visibility tiers, all write-protected
-    - src/agentm/core/abi/**         # ABI surface (atom + llm import)
-    - src/agentm/core/lib/**         # pure-function utility shelf (atom import)
-    - src/agentm/core/_internal/**   # stateful subsystems & default impls
-    # Provider boundary
-    - src/agentm/llm/**
-    - src/agentm/ai/**
-    # Harness orchestrator
-    - src/agentm/harness/session.py
-    - src/agentm/harness/extension.py
-    - src/agentm/harness/events.py
-    - src/agentm/harness/session_manager.py
-    - src/agentm/harness/resource_loader.py
-    - src/agentm/harness/session_runtime.py
-    - src/agentm/harness/session_services.py
-    - src/agentm/harness/session_cwd.py
+    - src/agentm/core/abi/**         # ABI surface (atom-importable)
+    - src/agentm/core/lib/**         # pure-function utility shelf (atom-importable)
+    - src/agentm/core/_internal/**   # stateful subsystems (skills, prompt registry, catalog, compaction engine)
+    - src/agentm/core/runtime/**     # substrate impls (AgentSession, EventBus, SessionManager, loader, resource_writer, atom_reloader, catalog freeze, ...)
+    # Provider-discovery layer
+    - src/agentm/ai/**               # provider descriptors, env keys, registry (CLI-side)
     # Extension subsystem mechanism
     - src/agentm/extensions/loader.py
     - src/agentm/extensions/discover.py

@@ -14,6 +14,12 @@ description: |
   persist across restarts.
 
 extensions:
+  # --- environment ports: register the local-FS / asyncio-bash Operations
+  # bundle. Must be listed first so any subsequent tool atom that calls
+  # ``api.get_operations()`` during install sees a registered bundle.
+  # See ``.claude/designs/pluggable-architecture.md`` §3.2. ---
+  - module: agentm.extensions.builtin.operations_local
+
   # --- file I/O: read whole files; edit by exact-match replace;
   # write whole files. ls/find/grep are intentionally absent —
   # delegated to ``bash`` so the agent composes shell commands. ---
