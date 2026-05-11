@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import warnings
 from typing import Any, Literal
 
 from ..base import BaseChannel
@@ -105,6 +106,13 @@ class TerminalChannel(BaseChannel):
     async def start(self) -> None:
         if self._running:
             return
+        warnings.warn(
+            "TerminalChannel (in-process) is deprecated and will be removed in "
+            "a future release. Run the gateway with --bind unix:///path and "
+            "connect with `agentm-terminal --connect unix:///path` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._running = True
         self._reader_task = asyncio.create_task(
             self._read_loop(), name="terminal-read"
