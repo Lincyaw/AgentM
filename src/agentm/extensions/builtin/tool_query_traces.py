@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
@@ -29,7 +29,7 @@ MANIFEST = ExtensionManifest(
 )
 
 
-_PARAMETERS: dict[str, Any] = {
+_PARAMETERS: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
         "task_class": {
@@ -74,7 +74,7 @@ _PARAMETERS: dict[str, Any] = {
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     cwd = Path(api.cwd)
-    obs_dir = cwd / ".agentm" / "observability"
+    obs_dir = cwd / ".agentm/observability"
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
         task_class = str(args["task_class"])

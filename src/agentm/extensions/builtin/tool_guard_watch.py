@@ -161,7 +161,7 @@ def _evaluate_and_maybe_rollback(
             return
 
     # Collect recent production trace files, newest first by mtime.
-    obs_dir = cwd / ".agentm" / "observability"
+    obs_dir = cwd / ".agentm/observability"
     if not obs_dir.is_dir():
         return
     candidates = sorted(

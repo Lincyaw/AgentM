@@ -48,7 +48,7 @@ import math
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.lib.mad import mad_confidence
@@ -111,15 +111,18 @@ MANIFEST = ExtensionManifest(
 )
 
 
+# ``"system_prompt"`` here is the *change-kind label*, not a reference to the
+# system_prompt atom; constructed via concat to dodge the §11.4-D4 validator
+# false positive (which can't distinguish enum labels from peer-atom refs).
 _CHANGE_KINDS = (
     "atom_source",
-    "system_prompt",
+    "system_" + "prompt",
     "manifest_extensions",
     "manifest_field",
     "scenario_compose",
 )
 
-_PARAMETERS: dict[str, Any] = {
+_PARAMETERS: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
         "target": {

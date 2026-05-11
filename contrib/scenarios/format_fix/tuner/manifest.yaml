@@ -9,7 +9,7 @@ task_class: format_fix_tuner
 
 extensions:
   - module: agentm.extensions.builtin.tool_read
-  - module: agentm.extensions.builtin.tool_grep
+  - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.tool_query_traces
   - module: agentm.extensions.builtin.tool_query_module_feedback
     config:

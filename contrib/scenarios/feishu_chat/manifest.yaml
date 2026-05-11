@@ -14,12 +14,9 @@ description: |
   approval bridge gates write-class calls.
 
 extensions:
-  # --- read-side tooling: agent can investigate its own filesystem
-  # / memory / scratch space directly. ---
+  # --- read-side tooling: agent reads files directly; navigation /
+  # search (ls / find / grep) is delegated to ``bash`` below. ---
   - module: agentm.extensions.builtin.tool_read
-  - module: agentm.extensions.builtin.tool_grep
-  - module: agentm.extensions.builtin.tool_find
-  - module: agentm.extensions.builtin.tool_ls
 
   # --- write-side tooling: agent can mutate the workspace directly.
   # bash for shell, edit for file diffs, write for whole-file rewrites,
