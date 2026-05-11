@@ -58,7 +58,7 @@ _ALLOWED_PREFIXES: tuple[str, ...] = (
 _FORBIDDEN_PREFIXES: tuple[tuple[str, str], ...] = (
     (
         "agentm.core._internal",
-        "constitution-private modules — reach via api.skills / "
+        "constitution-private modules — reach via "
         "api.prompt_templates / api.catalog / "
         "api.get_operations() instead",
     ),

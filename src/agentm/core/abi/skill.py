@@ -3,9 +3,8 @@
 the ``resources_discover`` event channel.
 
 The dataclasses here carry no logic; they exist so atoms can speak the same
-shape without reaching into ``core._internal``. The actual loading /
-formatting helpers stay in ``_internal/skills.py`` and are exposed to atoms
-through ``ExtensionAPI.skills``.
+shape without reaching into the ``skill_loader`` atom. The actual loading /
+formatting helpers live inside ``skill_loader`` itself.
 """
 
 from __future__ import annotations

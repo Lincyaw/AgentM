@@ -63,7 +63,6 @@ class _StubAPI:
         # Some atoms (skill_loader, prompt_templates) call into these — we
         # don't load those in the tuner manifest so they're not strictly
         # required, but provide the attrs in case future atoms appear.
-        self.skills = _NoopService()
         self.prompt_templates = _NoopService()
         self.catalog = _NoopService()
 
