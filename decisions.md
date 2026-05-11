@@ -115,3 +115,40 @@ between sessions. L4 entries also get the `[flagged]` prefix.
   before Stage 5 deletes the shims; cost of premature narrowing > cost of
   the audit, and the surface only grows if test authors add new imports
   before then.
+
+## 2026-05-11 — OTel tracing rollout (otel_tracing atom)
+
+- **Default-scenario opt-in by default** (L2: user request + convention check).
+  User asked: "加了这个插件之后应该所有的都要有记录". Default
+  `contrib/scenarios/general_purpose/manifest.yaml` now lists
+  `agentm.extensions.builtin.otel_tracing` uncommented. SDK is in the
+  `otel` extra; if not installed the atom logs a notice and no-ops so
+  the session still boots — matches the repo's "opinionated defaults
+  over knobs" memory (`feedback_simple_and_pluggable.md`).
+- **Per-handler `agentm.handler:<channel>` spans** (L1: codebase convention).
+  `observability.py` already emits one `handler.invoke` JSONL record per
+  handler invocation. To keep OTel and JSONL views agreeing on
+  cardinality, the OTel atom emits one real child span per handler
+  invocation (not `add_event`) parented to the surrounding
+  `agentm.event:<channel>` span.
+- **Exclude `stream_delta` by default** (L1: codebase convention).
+  `observability.py` documents stream_delta as "pure bloat for trace
+  consumers" — one span per LLM token would flood any collector. Users
+  can opt back in via `exclude_channels: []` config.
+- **No new test gate beyond the surface assertion** (L2: project testing
+  philosophy). CLAUDE.md says tests only at fail-stop positions. The
+  OTel atom is observation-only and doesn't affect agent correctness; a
+  single span-surface regression guard in `tests/unit/extensions/
+  test_otel_tracing.py` is enough — protects the "every category of
+  operation has a span" contract the user explicitly asked for.
+- **Trust the OTLP exporter on background failure** (L2: matches
+  observability sink design). `observability.py`'s JSONL sink drops on
+  full / logs and keeps the session alive. The OTel `BatchSpanProcessor`
+  has the same property: it retries, then drops; agent runs unaffected.
+  No extra "is collector reachable?" check at install time.
+- **No cross-session trace propagation for sub-agents (yet)** (L2:
+  deferred until a real need surfaces). Each sub-agent session opens
+  its own root `agentm.session` span. Linking parent ↔ child sessions
+  needs context propagation through the `sub_agent` atom; the user
+  hasn't asked for it and over-engineering the first cut violates the
+  "simple and pluggable" memory.
