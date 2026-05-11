@@ -194,19 +194,22 @@ Every JSON body wraps:
 
 ```json
 {
-  "v": "v0",
+  "v": 1,
   "id": "client-msg-12",
   "kind": "<kind>",
-  "ts": "2026-05-11T14:32:18Z",
+  "ts": 1746974538.42,
   "body": { ... }
 }
 ```
 
-* `v` — protocol version. Servers reject unknown majors.
+* `v` — integer wire-protocol version. Current: `1`. Servers reject
+  unknown versions immediately. Integer (not `"v0"` string) so
+  validation is a single equality check.
 * `id` — sender-assigned, opaque. Used to correlate replies/acks.
 * `kind` — discriminator (one of the kinds in §4.3).
-* `ts` — ISO 8601 UTC, advisory; servers use their own clock for
-  ordering when authoritative.
+* `ts` — float, epoch seconds. Advisory; servers use their own clock
+  for ordering when authoritative. (Float over ISO string for the
+  same reason as `v`: cheap validation, one canonical representation.)
 * `body` — kind-specific payload.
 
 ### 4.3 Kinds
@@ -279,12 +282,12 @@ op appears, we add it then.
 
 ```json
 {
-  "v":"v0", "id":"h1", "kind":"hello", "ts":"...",
+  "v":1, "id":"h1", "kind":"hello", "ts":1746974538.42,
   "body":{
     "peer_kind":"chat_client",
     "peer_name":"feishu",
     "peer_version":"0.1.0",
-    "wire_versions":["v0"],
+    "wire_versions":[1],
     "auth": {"method":"token","token":"..."} ,
     "capabilities":["streaming","buttons","markdown"]
   }
@@ -295,12 +298,12 @@ op appears, we add it then.
 
 ```json
 {
-  "v":"v0", "id":"h2", "kind":"hello", "ts":"...",
+  "v":1, "id":"h2", "kind":"hello", "ts":1746974538.42,
   "body":{
     "peer_kind":"agent_worker",
     "peer_name":"worker-gpu-1",
     "peer_version":"0.2.0",
-    "wire_versions":["v0"],
+    "wire_versions":[1],
     "auth": {"method":"token","token":"..."} ,
     "capabilities":{
       "scenarios":["general_purpose","rca","feishu_chat"],
@@ -316,10 +319,10 @@ op appears, we add it then.
 
 ```json
 {
-  "v":"v0", "id":"w1", "kind":"welcome", "ts":"...", "in_reply_to":"h1",
+  "v":1, "id":"w1", "kind":"welcome", "ts":1746974538.42, "in_reply_to":"h1",
   "body":{
     "server_version":"0.2.0",
-    "wire_version":"v0",
+    "wire_version":1,
     "peer_id":"feishu-a8f3e2",
     "session_resume": ["feishu:c123","feishu:c456"]
   }
@@ -379,11 +382,22 @@ an in-memory ring:
   before we recorded it) treats it as a no-op and re-acks.
   Idempotency-key field on `outbound` is the envelope `id`; peers
   dedup on `(server_peer_id, id)`.
-* **Bounded write-burst control.** When the outbox depth for a
-  peer exceeds `peer_outbox_high_water` (default 1000), inbound
-  *destined for that peer* triggers a `slow_consumer` event;
-  upstream peers (agent workers) get a flow-control hint to throttle
-  via `presence`.
+* **Bounded write-burst observation.** When the outbox depth for a
+  peer exceeds `peer_outbox_high_water` (default 1000), the delivery
+  worker emits a `slow_consumer` log line and sets an observational
+  `backpressure` flag on the peer session. v1 does **not** stop
+  pulling from the outbox under back-pressure (doing so would
+  deadlock the queue — the only way to drain it is to keep pulling).
+  Real back-pressure (gating enqueue at the producer) is a v2
+  concern, gated on whether a producer ever genuinely overruns
+  consumers in practice.
+* **Delivery-loop disconnect.** A single write failure
+  (BrokenPipeError / ConnectionResetError) terminates the peer's
+  delivery loop and tears down the peer session. The outbox row is
+  nack'd with backoff so it redelivers on reconnect — retrying the
+  same write against a dead writer would exhaust max_attempts in
+  milliseconds. (Implementation: `_ConnectionLost` sentinel in
+  `WireServer._delivery_loop`.)
 * **Crash recovery.** Gateway restart re-opens SQLite, finds
   `status=in_flight OR pending`, resets them to `pending`, the
   delivery worker resumes from there. No message is lost; some may
@@ -442,7 +456,7 @@ a 30-second outage into a slow drain.
 
    ```json
    {
-     "v":"v0", "id":"b1", "kind":"delivery_batch", "ts":"...",
+     "v":1, "id":"b1", "kind":"delivery_batch", "ts":1746974538.42,
      "body":{
        "reason":"reconnect_catchup",
        "session_key":"feishu:c123",
