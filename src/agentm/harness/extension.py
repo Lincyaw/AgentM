@@ -38,11 +38,9 @@ from agentm.core.abi.operations import (
 from agentm.core.abi.project_layout import ProjectLayout
 from agentm.harness.services import (
     CatalogService,
-    CompactionService,
     PromptTemplatesService,
     SkillsService,
     default_catalog_service,
-    default_compaction_service,
     default_project_layout,
     default_prompt_templates_service,
     default_skills_service,
@@ -498,8 +496,6 @@ class ExtensionAPI(Protocol):
     def prompt_templates(self) -> PromptTemplatesService: ...
     @property
     def catalog(self) -> CatalogService: ...
-    @property
-    def compaction(self) -> CompactionService: ...
 
 
 # --- Concrete impl ----------------------------------------------------------
@@ -535,7 +531,6 @@ class ExtensionAPIScope:
     skills: SkillsService
     prompt_templates: PromptTemplatesService
     catalog: CatalogService
-    compaction: CompactionService
     child_session_factory: ChildSessionFactory
     resource_writer: ResourceWriter
     service_registry: dict[str, Any]
@@ -560,7 +555,6 @@ def build_extension_api_scope(
     skills: SkillsService | None = None,
     prompt_templates: PromptTemplatesService | None = None,
     catalog: CatalogService | None = None,
-    compaction: CompactionService | None = None,
     child_session_factory: ChildSessionFactory | None = None,
     resource_writer: ResourceWriter | None = None,
     service_registry: dict[str, Any] | None = None,
@@ -592,7 +586,6 @@ def build_extension_api_scope(
         prompt_templates=prompt_templates
         or default_prompt_templates_service(resolved_layout),
         catalog=catalog or default_catalog_service(),
-        compaction=compaction or default_compaction_service(),
         child_session_factory=child_session_factory or _NoopChildSessionFactory(),
         resource_writer=resource_writer
         or GitBackedResourceWriter(cwd=cwd, session_id=session_id, bus=bus),
@@ -632,7 +625,6 @@ class _ExtensionAPIImpl:
         self._skills = scope.skills
         self._prompt_templates = scope.prompt_templates
         self._catalog = scope.catalog
-        self._compaction = scope.compaction
         self._resource_writer = scope.resource_writer
         self._services = scope.service_registry
 
@@ -882,11 +874,6 @@ class _ExtensionAPIImpl:
     def catalog(self) -> CatalogService:
         self._assert_active()
         return self._catalog
-
-    @property
-    def compaction(self) -> CompactionService:
-        self._assert_active()
-        return self._compaction
 
 
 def _default_local_operations(cwd: str | None = None) -> Operations:

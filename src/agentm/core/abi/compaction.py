@@ -1,10 +1,8 @@
 """Compaction value types — public ABI for compaction-related atoms.
 
 Pure dataclasses an atom (e.g. ``llm_compaction``) reads/constructs.
-The compaction *engine* (``compact``, ``prepare_compaction``,
-``estimate_context_tokens``, ``should_compact``) stays in
-``_internal/compaction`` and reaches atoms through
-``ExtensionAPI.compaction``.
+The compaction engine itself lives inside the ``llm_compaction`` atom;
+these types are the only stable surface other code should depend on.
 """
 
 from __future__ import annotations

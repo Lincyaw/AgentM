@@ -33,7 +33,7 @@ from agentm.core.abi.session import (
     compaction_entry,
     message_entry,
 )
-from agentm.core._internal.compaction import (
+from agentm.extensions.builtin.llm_compaction import (
     compact,
     create_file_ops,
     extract_file_ops_from_message,
