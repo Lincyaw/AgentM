@@ -7,13 +7,15 @@ requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "AgentM contributors" }]
 # `agentm` is supplied by the parent workspace (path install) and intentionally
-# omitted here. lark-oapi is required for the bundled Feishu channel; future
-# channel modules pull their own per-vendor SDKs as direct deps too — keeping
-# them here means `agentm-gateway` works out of the box after `uv sync`.
+# omitted here. Per-vendor SDKs (lark-oapi, slack-sdk, …) used to live here
+# when channels ran in-process; as of Phase 3 they belong to the extracted
+# client packages (`agentm-feishu`, …) so the gateway image stays vendor-
+# agnostic. The legacy in-process `FeishuChannel` is kept for backwards
+# compatibility but emits a DeprecationWarning and imports lark_oapi lazily,
+# so it no longer needs to appear here.
 dependencies = [
     "pyyaml>=6",
     "python-dotenv>=1.0",
-    "lark-oapi>=1.6",
 ]
 
 [project.optional-dependencies]
