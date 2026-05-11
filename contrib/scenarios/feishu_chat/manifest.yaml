@@ -32,6 +32,7 @@ extensions:
   - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.tool_edit
   - module: agentm.extensions.builtin.tool_write
+  - module: contrib.extensions.changespec_validators
   - module: agentm.extensions.builtin.tool_propose_change
 
   # --- meta-tools: agent can self-extend by installing new atoms.

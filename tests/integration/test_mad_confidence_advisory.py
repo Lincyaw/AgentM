@@ -270,6 +270,7 @@ async def test_mad_recorded_on_rejected_record_with_full_pool(
             provider=(provider_module, {}),
             extensions=scenario_extensions
             + [
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {
@@ -362,6 +363,7 @@ async def test_mad_below_floor_records_explicit_null(tmp_path: Path) -> None:
             provider=(provider_module, {}),
             extensions=scenario_extensions
             + [
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {
@@ -475,6 +477,7 @@ async def test_mad_does_not_flip_gate_decision(tmp_path: Path) -> None:
             provider=(provider_module, {}),
             extensions=scenario_extensions
             + [
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {

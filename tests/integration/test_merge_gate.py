@@ -197,6 +197,7 @@ async def test_merge_within_noise_floor_rejected(tmp_path: Path) -> None:
             extensions=[
 
                 ("agentm.extensions.builtin.operations_local", {}),
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {
@@ -287,6 +288,7 @@ async def test_merge_passing_all_floors_activates(tmp_path: Path) -> None:
             extensions=[
 
                 ("agentm.extensions.builtin.operations_local", {}),
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {
@@ -379,6 +381,7 @@ async def test_merge_requires_two_parents(tmp_path: Path) -> None:
             extensions=[
 
                 ("agentm.extensions.builtin.operations_local", {}),
+                ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
                     {
