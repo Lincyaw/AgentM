@@ -1,12 +1,27 @@
-"""Builtin skill loader atom."""
+"""Builtin skill loader atom.
+
+Discovers SKILL.md files (default agent dir, project dirs supplied by the
+:class:`agentm.core.abi.project_layout.ProjectLayout`, explicit paths, peer
+contributions via ``ResourcesDiscoverEvent``) and injects an
+``<available_skills>`` index into the system prompt.
+
+The skill discovery + prompt formatting engine is inlined below; it
+previously lived in ``core/_internal/skills.py`` and was reached via
+``api.skills``. Now that the only consumer is this atom, the indirection
+adds nothing.
+"""
 
 from __future__ import annotations
 
+import html
+import os
+import re
 from pathlib import Path
 from typing import Any
 
 from agentm.core.abi.events import DiagnosticEvent
-from agentm.core.abi.skill import SkillRecord
+from agentm.core.abi.skill import SkillDiagnostic, SkillRecord
+from agentm.core.lib.frontmatter import parse_frontmatter
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import (
     BeforeAgentStartEvent,
@@ -35,6 +50,315 @@ MANIFEST = ExtensionManifest(
     },
     requires=(),  # Leaf atom: consumes resource-discovery responses from any peer.
 )
+
+
+# === Skills engine (inlined; previously core/_internal/skills.py) ==========
+
+DEFAULT_MAX_NAME_LENGTH = 64
+DEFAULT_MAX_DESCRIPTION_LENGTH = 1024
+_NAME_PATTERN = r"^[a-z0-9-]+$"
+
+
+def _normalize_path(raw_path: str, cwd: str) -> str:
+    expanded = raw_path.strip()
+    if expanded == "~":
+        return str(Path.home())
+    if expanded.startswith("~/"):
+        return str(Path.home() / expanded[2:])
+    if expanded.startswith("~"):
+        return str(Path.home() / expanded[1:])
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.abspath(os.path.join(cwd, expanded))
+
+
+def _validate_name(
+    name: str, parent_dir_name: str, *, max_name_length: int
+) -> list[str]:
+    issues: list[str] = []
+    if name != parent_dir_name:
+        issues.append(
+            f'name "{name}" does not match parent directory "{parent_dir_name}"'
+        )
+    if len(name) > max_name_length:
+        issues.append(f"name exceeds {max_name_length} characters ({len(name)})")
+    if not re.match(_NAME_PATTERN, name):
+        issues.append(
+            "name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"
+        )
+    if name.startswith("-") or name.endswith("-"):
+        issues.append("name must not start or end with a hyphen")
+    if "--" in name:
+        issues.append("name must not contain consecutive hyphens")
+    return issues
+
+
+def _validate_description(
+    description: str | None, *, max_description_length: int
+) -> list[str]:
+    issues: list[str] = []
+    if description is None or description.strip() == "":
+        issues.append("description is required")
+    elif len(description) > max_description_length:
+        issues.append(
+            f"description exceeds {max_description_length} characters "
+            f"({len(description)})"
+        )
+    return issues
+
+
+def _parse_skill_file(
+    file_path: str,
+    source: str,
+    *,
+    max_name_length: int,
+    max_description_length: int,
+) -> tuple[SkillRecord | None, list[SkillDiagnostic]]:
+    diagnostics: list[SkillDiagnostic] = []
+    try:
+        text = Path(file_path).read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, [
+            SkillDiagnostic(level="warning", message=str(exc), path=file_path)
+        ]
+
+    metadata, _body = parse_frontmatter(text)
+    skill_dir = str(Path(file_path).parent)
+    parent_dir_name = Path(skill_dir).name
+
+    description_value = metadata.get("description")
+    description = description_value if isinstance(description_value, str) else None
+    for issue in _validate_description(
+        description, max_description_length=max_description_length
+    ):
+        diagnostics.append(
+            SkillDiagnostic(level="warning", message=issue, path=file_path)
+        )
+
+    raw_name = metadata.get("name")
+    name = raw_name if isinstance(raw_name, str) and raw_name else parent_dir_name
+    for issue in _validate_name(
+        name, parent_dir_name, max_name_length=max_name_length
+    ):
+        diagnostics.append(
+            SkillDiagnostic(level="warning", message=issue, path=file_path)
+        )
+
+    disable_value = metadata.get("disable-model-invocation")
+    disable_model_invocation = disable_value is True
+    if disable_value is not None and not isinstance(disable_value, bool):
+        diagnostics.append(
+            SkillDiagnostic(
+                level="warning",
+                message="disable-model-invocation must be a boolean",
+                path=file_path,
+            )
+        )
+
+    if description is None or description.strip() == "":
+        return None, diagnostics
+
+    return (
+        SkillRecord(
+            name=name,
+            description=description,
+            file_path=file_path,
+            base_dir=skill_dir,
+            disable_model_invocation=disable_model_invocation,
+            source=source,
+        ),
+        diagnostics,
+    )
+
+
+def _load_skills_from_dir(
+    directory: str,
+    source: str,
+    *,
+    include_root_files: bool,
+    max_name_length: int,
+    max_description_length: int,
+) -> tuple[list[SkillRecord], list[SkillDiagnostic]]:
+    skills: list[SkillRecord] = []
+    diagnostics: list[SkillDiagnostic] = []
+    if not os.path.isdir(directory):
+        return skills, diagnostics
+
+    visited: set[str] = set()
+
+    for dirpath, dirnames, filenames in os.walk(
+        directory,
+        topdown=True,
+        followlinks=True,
+    ):
+        real_dir = os.path.realpath(dirpath)
+        if real_dir in visited:
+            dirnames[:] = []
+            continue
+        visited.add(real_dir)
+
+        dirnames[:] = sorted(dirnames)
+        filenames = sorted(filenames)
+
+        skill_path = os.path.join(dirpath, "SKILL.md")
+        if "SKILL.md" in filenames and os.path.isfile(skill_path):
+            skill, skill_diags = _parse_skill_file(
+                os.path.abspath(skill_path),
+                source,
+                max_name_length=max_name_length,
+                max_description_length=max_description_length,
+            )
+            if skill is not None:
+                skills.append(skill)
+            diagnostics.extend(skill_diags)
+            dirnames[:] = []
+            continue
+
+        if (
+            not include_root_files
+            or os.path.abspath(dirpath) != os.path.abspath(directory)
+        ):
+            continue
+
+        for filename in filenames:
+            if not filename.endswith(".md"):
+                continue
+            file_path = os.path.join(dirpath, filename)
+            if not os.path.isfile(file_path):
+                continue
+            skill, skill_diags = _parse_skill_file(
+                os.path.abspath(file_path),
+                source,
+                max_name_length=max_name_length,
+                max_description_length=max_description_length,
+            )
+            if skill is not None:
+                skills.append(skill)
+            diagnostics.extend(skill_diags)
+
+    return skills, diagnostics
+
+
+def load_skills(
+    *,
+    cwd: str,
+    agent_dir: str,
+    skill_paths: list[str] | tuple[str, ...] = (),
+    include_defaults: bool = True,
+    project_skill_dirs: list[str] | tuple[str, ...] | None = None,
+    max_name_length: int = DEFAULT_MAX_NAME_LENGTH,
+    max_description_length: int = DEFAULT_MAX_DESCRIPTION_LENGTH,
+) -> tuple[list[SkillRecord], list[SkillDiagnostic]]:
+    discovered: list[SkillRecord] = []
+    diagnostics: list[SkillDiagnostic] = []
+    seen_real_files: set[str] = set()
+    seen_names: dict[str, str] = {}
+
+    def add_batch(
+        batch_skills: list[SkillRecord], batch_diagnostics: list[SkillDiagnostic]
+    ) -> None:
+        diagnostics.extend(batch_diagnostics)
+        for skill in batch_skills:
+            real_path = os.path.realpath(skill.file_path)
+            if real_path in seen_real_files:
+                continue
+            seen_real_files.add(real_path)
+            existing_path = seen_names.get(skill.name)
+            if existing_path is not None:
+                diagnostics.append(
+                    SkillDiagnostic(
+                        level="collision",
+                        message=(
+                            f"skill name collision: {skill.name!r} already loaded from "
+                            f"{existing_path}"
+                        ),
+                        path=skill.file_path,
+                    )
+                )
+                continue
+            seen_names[skill.name] = skill.file_path
+            discovered.append(skill)
+
+    if include_defaults:
+        add_batch(
+            *_load_skills_from_dir(
+                os.path.join(agent_dir, "skills"),
+                "user",
+                include_root_files=True,
+                max_name_length=max_name_length,
+                max_description_length=max_description_length,
+            )
+        )
+        # Project-scope skill directories are policy, not kernel — they MUST be
+        # supplied by the harness via ``ProjectLayout.skills_dirs()``. The
+        # kernel no longer hard-codes ``<cwd>/.agentm/skills``; minimal/no-layout
+        # sessions simply have no project skills.
+        project_dirs: tuple[str, ...] = (
+            tuple(project_skill_dirs) if project_skill_dirs is not None else ()
+        )
+        for project_dir in project_dirs:
+            add_batch(
+                *_load_skills_from_dir(
+                    project_dir,
+                    "project",
+                    include_root_files=True,
+                    max_name_length=max_name_length,
+                    max_description_length=max_description_length,
+                )
+            )
+
+    for raw_path in skill_paths:
+        resolved_path = _normalize_path(raw_path, cwd)
+        if os.path.isdir(resolved_path):
+            add_batch(
+                *_load_skills_from_dir(
+                    resolved_path,
+                    "path",
+                    include_root_files=True,
+                    max_name_length=max_name_length,
+                    max_description_length=max_description_length,
+                )
+            )
+            continue
+        if os.path.isfile(resolved_path):
+            skill, skill_diags = _parse_skill_file(
+                os.path.abspath(resolved_path),
+                "path",
+                max_name_length=max_name_length,
+                max_description_length=max_description_length,
+            )
+            add_batch([skill] if skill is not None else [], skill_diags)
+
+    return discovered, diagnostics
+
+
+def format_skills_for_prompt(skills: list[SkillRecord]) -> str:
+    visible_skills = [skill for skill in skills if not skill.disable_model_invocation]
+    if not visible_skills:
+        return ""
+
+    lines = [
+        "\n\nThe following skills provide specialized instructions for specific tasks.",
+        "Use the read tool to load a skill's file when the task matches its description.",
+        "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
+        "",
+        "<available_skills>",
+    ]
+    for skill in visible_skills:
+        lines.append("  <skill>")
+        lines.append(f"    <name>{html.escape(skill.name, quote=True)}</name>")
+        lines.append(
+            f"    <description>{html.escape(skill.description, quote=True)}</description>"
+        )
+        lines.append(
+            f"    <location>{html.escape(skill.file_path, quote=True)}</location>"
+        )
+        lines.append("  </skill>")
+    lines.append("</available_skills>")
+    return "\n".join(lines)
+
+
+# === Atom install ==========================================================
 
 
 async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
@@ -114,11 +438,19 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 for entry in extra_skills:
                     if isinstance(entry, SkillRecord):
                         contributed_skills.append(entry)
-        skills, _diagnostics = api.skills.load_skills(
+
+        # Resolve project-scope skill dirs from the harness-supplied layout
+        # (previously the SkillsService injected this; now the atom does it
+        # directly).
+        layout = api.get_project_layout()
+        project_dirs = tuple(str(p) for p in layout.skills_dirs())
+
+        skills, _diagnostics = load_skills(
             cwd=api.cwd,
             agent_dir=str(Path.home() / ".agentm"),
             skill_paths=tuple(discovered_paths),
             include_defaults=include_defaults,
+            project_skill_dirs=project_dirs,
         )
         # Append peer-contributed records last so they don't shadow disk-based
         # skills with the same name.
@@ -128,7 +460,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 continue
             seen_names.add(record.name)
             skills.append(record)
-        cached_prompt_block = api.skills.format_skills_for_prompt(skills)
+        cached_prompt_block = format_skills_for_prompt(skills)
 
     def _inject(event: BeforeAgentStartEvent) -> dict[str, str] | None:
         if not cached_prompt_block:

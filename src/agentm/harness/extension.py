@@ -39,11 +39,9 @@ from agentm.core.abi.project_layout import ProjectLayout
 from agentm.harness.services import (
     CatalogService,
     PromptTemplatesService,
-    SkillsService,
     default_catalog_service,
     default_project_layout,
     default_prompt_templates_service,
-    default_skills_service,
 )
 from agentm.harness.resource_writer import (
     GitBackedResourceWriter,
@@ -491,8 +489,6 @@ class ExtensionAPI(Protocol):
 
     def get_project_layout(self) -> ProjectLayout: ...
     @property
-    def skills(self) -> SkillsService: ...
-    @property
     def prompt_templates(self) -> PromptTemplatesService: ...
     @property
     def catalog(self) -> CatalogService: ...
@@ -528,7 +524,6 @@ class ExtensionAPIScope:
     gateway: _SessionGateway
     operations: Operations
     project_layout: ProjectLayout
-    skills: SkillsService
     prompt_templates: PromptTemplatesService
     catalog: CatalogService
     child_session_factory: ChildSessionFactory
@@ -552,7 +547,6 @@ def build_extension_api_scope(
     gateway: _SessionGateway | None = None,
     operations: Operations | None = None,
     project_layout: ProjectLayout | None = None,
-    skills: SkillsService | None = None,
     prompt_templates: PromptTemplatesService | None = None,
     catalog: CatalogService | None = None,
     child_session_factory: ChildSessionFactory | None = None,
@@ -582,7 +576,6 @@ def build_extension_api_scope(
         gateway=gateway or _NoopSessionGateway(),
         operations=operations or _default_local_operations(cwd=cwd),
         project_layout=resolved_layout,
-        skills=skills or default_skills_service(resolved_layout),
         prompt_templates=prompt_templates
         or default_prompt_templates_service(resolved_layout),
         catalog=catalog or default_catalog_service(),
@@ -622,7 +615,6 @@ class _ExtensionAPIImpl:
         self._child_session_factory: ChildSessionFactory = scope.child_session_factory
         self._operations = scope.operations
         self._project_layout: ProjectLayout = scope.project_layout
-        self._skills = scope.skills
         self._prompt_templates = scope.prompt_templates
         self._catalog = scope.catalog
         self._resource_writer = scope.resource_writer
@@ -859,11 +851,6 @@ class _ExtensionAPIImpl:
     def get_project_layout(self) -> ProjectLayout:
         self._assert_active()
         return self._project_layout
-
-    @property
-    def skills(self) -> SkillsService:
-        self._assert_active()
-        return self._skills
 
     @property
     def prompt_templates(self) -> PromptTemplatesService:

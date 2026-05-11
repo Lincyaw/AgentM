@@ -6,11 +6,12 @@ This command is the **explicit override**: when the LLM has not
 selected the right skill (or any skill at all), the user types
 ``/skill:<name> <args>`` to force the body into the current turn.
 
-We do not call ``api.skills.load_skills`` directly — the API is
-session-internal. The router walks the same canonical skill
-directories (``<cwd>/.claude/skills/``, ``~/.claude/skills/``) the
-skill_loader atom walks. Discovery is shallow: each ``<dir>/SKILL.md``
-becomes one skill named after the parent directory.
+We do not reach into the ``skill_loader`` atom's loader directly — its
+discovery pipeline is session-internal. The router walks the same
+canonical skill directories (``<cwd>/.claude/skills/``,
+``~/.claude/skills/``) the skill_loader atom walks. Discovery is
+shallow: each ``<dir>/SKILL.md`` becomes one skill named after the
+parent directory.
 """
 
 from __future__ import annotations
