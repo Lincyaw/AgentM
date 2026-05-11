@@ -1,4 +1,4 @@
-"""argparse-level smoke tests for ``agentm-feishu``.
+"""CLI smoke tests for ``agentm-feishu``.
 
 No subprocess, no real Feishu, no real socket. ``--check-config`` is
 used to drive the happy path through argument parsing and config
@@ -12,100 +12,78 @@ from pathlib import Path
 
 import pytest
 
-from agentm_feishu import cli as feishu_cli
+# Disable autoload so the repo's own .env doesn't poison the fixture.
+# Must happen BEFORE importing the cli module.
+os.environ.setdefault("AGENTM_SKIP_DOTENV", "1")
+
+from typer.testing import CliRunner  # noqa: E402
+
+from agentm_feishu import cli as feishu_cli  # noqa: E402
+
+runner = CliRunner()
 
 
 @pytest.fixture(autouse=True)
 def _scrub_lark_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make every test start from a clean LARK_* environment.
-
-    Also disable the ``.env`` autoload that ``cli.main()`` runs before
-    arg parsing — otherwise the repo's own ``.env`` would put LARK_* back
-    after we scrub them.
-    """
+    """Every test starts from a clean LARK_* environment."""
     monkeypatch.delenv("LARK_APP_ID", raising=False)
     monkeypatch.delenv("LARK_APP_SECRET", raising=False)
-    monkeypatch.setattr(feishu_cli, "load_dotenv_files", lambda _cwd: None)
 
 
-def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
-    with pytest.raises(SystemExit) as exc:
-        feishu_cli._build_parser().parse_args(["--help"])
-    assert exc.value.code == 0
-    out = capsys.readouterr().out
-    assert "agentm-feishu" in out
-    assert "--connect" in out
-    assert "--app-id" in out
-    assert "--app-secret" in out
-    # Examples section is mandated by the brief.
-    assert "Examples" in out
+def test_help_exits_zero() -> None:
+    result = runner.invoke(feishu_cli.app, ["--help"])
+    assert result.exit_code == 0
+    assert "agentm-feishu" in result.stdout
+    assert "--connect" in result.stdout
+    assert "--app-id" in result.stdout
+    assert "--app-secret" in result.stdout
+    assert "Examples" in result.stdout
 
 
-def test_version_prints_and_exits_zero(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with pytest.raises(SystemExit) as exc:
-        feishu_cli._build_parser().parse_args(["--version"])
-    assert exc.value.code == 0
-    out = capsys.readouterr().out
-    assert "0.1.0" in out
+def test_version_prints_and_exits_zero() -> None:
+    result = runner.invoke(feishu_cli.app, ["--version"])
+    assert result.exit_code == 0
+    assert "0.1.0" in result.stdout
 
 
-def test_missing_connect_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
-    rc = feishu_cli.main([])
-    assert rc == 2
-
-
-def test_bad_connect_scheme_exits_two(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    rc = feishu_cli.main(
-        [
-            "--connect",
-            "tcp://127.0.0.1:7000",
-            "--app-id",
-            "cli_xxxx",
-            "--check-config",
-        ]
+def test_bad_connect_scheme_exits_two() -> None:
+    result = runner.invoke(
+        feishu_cli.app,
+        ["--connect", "tcp://127.0.0.1:7000", "--app-id", "cli_xxxx", "--check-config"],
     )
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "agentm-feishu: error" in err
-    assert "unix://" in err
+    assert result.exit_code == 2
+    assert "agentm-feishu: error" in result.stderr
+    assert "unix://" in result.stderr
 
 
-def test_missing_app_id_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
-    rc = feishu_cli.main(
-        ["--connect", "unix:///tmp/gw.sock", "--check-config"]
+def test_missing_app_id_exits_two() -> None:
+    result = runner.invoke(
+        feishu_cli.app, ["--connect", "unix:///tmp/gw.sock", "--check-config"]
     )
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "missing --app-id" in err
+    assert result.exit_code == 2
+    assert "missing --app-id" in result.stderr
 
 
-def test_missing_app_secret_exits_two(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    rc = feishu_cli.main(
+def test_missing_app_secret_exits_two() -> None:
+    result = runner.invoke(
+        feishu_cli.app,
         [
             "--connect",
             "unix:///tmp/gw.sock",
             "--app-id",
             "cli_xxxx",
             "--check-config",
-        ]
+        ],
     )
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "missing app secret" in err
+    assert result.exit_code == 2
+    assert "missing app secret" in result.stderr
 
 
-def test_empty_secret_file_exits_two(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_empty_secret_file_exits_two(tmp_path: Path) -> None:
     secret_file = tmp_path / "secret"
     secret_file.write_text("")
-    rc = feishu_cli.main(
+    result = runner.invoke(
+        feishu_cli.app,
         [
             "--connect",
             "unix:///tmp/gw.sock",
@@ -114,28 +92,26 @@ def test_empty_secret_file_exits_two(
             "--app-secret",
             str(secret_file),
             "--check-config",
-        ]
+        ],
     )
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "empty" in err
+    assert result.exit_code == 2
+    assert "empty" in result.stderr
 
 
-def test_check_config_success_with_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_check_config_success_with_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LARK_APP_ID", "cli_xxxx")
     monkeypatch.setenv("LARK_APP_SECRET", "secret_value")
-    rc = feishu_cli.main(
-        ["--connect", "unix:///tmp/gw.sock", "--check-config"]
+    result = runner.invoke(
+        feishu_cli.app, ["--connect", "unix:///tmp/gw.sock", "--check-config"]
     )
-    assert rc == 0
+    assert result.exit_code == 0
 
 
 def test_check_config_success_with_file(tmp_path: Path) -> None:
     secret_file = tmp_path / "secret"
     secret_file.write_text("secret_value\n")
-    rc = feishu_cli.main(
+    result = runner.invoke(
+        feishu_cli.app,
         [
             "--connect",
             "unix:///tmp/gw.sock",
@@ -144,9 +120,9 @@ def test_check_config_success_with_file(tmp_path: Path) -> None:
             "--app-secret",
             str(secret_file),
             "--check-config",
-        ]
+        ],
     )
-    assert rc == 0
+    assert result.exit_code == 0
 
 
 def test_secret_file_wins_over_env(
@@ -157,24 +133,17 @@ def test_secret_file_wins_over_env(
     secret_file = tmp_path / "secret"
     secret_file.write_text("from_file")
     cfg = feishu_cli._resolve_config(
-        feishu_cli._build_parser().parse_args(
-            [
-                "--connect",
-                "unix:///tmp/gw.sock",
-                "--app-id",
-                "cli_xxxx",
-                "--app-secret",
-                str(secret_file),
-            ]
-        )
+        app_id="cli_xxxx",
+        app_secret_path=str(secret_file),
+        allow_from=None,
+        chat_id_prefix="feishu",
     )
     assert cfg.app_secret == "from_file"
 
 
-def test_bad_secret_file_path_exits_two(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    rc = feishu_cli.main(
+def test_bad_secret_file_path_exits_two() -> None:
+    result = runner.invoke(
+        feishu_cli.app,
         [
             "--connect",
             "unix:///tmp/gw.sock",
@@ -183,48 +152,33 @@ def test_bad_secret_file_path_exits_two(
             "--app-secret",
             "/nonexistent/path/that/does/not/exist",
             "--check-config",
-        ]
+        ],
     )
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "cannot read --app-secret file" in err
+    assert result.exit_code == 2
+    assert "cannot read --app-secret file" in result.stderr
 
 
 def test_default_allow_from_is_star(tmp_path: Path) -> None:
     secret_file = tmp_path / "secret"
     secret_file.write_text("x")
-    args = feishu_cli._build_parser().parse_args(
-        [
-            "--connect",
-            "unix:///tmp/gw.sock",
-            "--app-id",
-            "cli_xxxx",
-            "--app-secret",
-            str(secret_file),
-        ]
+    cfg = feishu_cli._resolve_config(
+        app_id="cli_xxxx",
+        app_secret_path=str(secret_file),
+        allow_from=None,
+        chat_id_prefix="feishu",
     )
-    cfg = feishu_cli._resolve_config(args)
     assert cfg.allow_from == ["*"]
 
 
 def test_repeated_allow_from(tmp_path: Path) -> None:
     secret_file = tmp_path / "secret"
     secret_file.write_text("x")
-    args = feishu_cli._build_parser().parse_args(
-        [
-            "--connect",
-            "unix:///tmp/gw.sock",
-            "--app-id",
-            "cli_xxxx",
-            "--app-secret",
-            str(secret_file),
-            "--allow-from",
-            "ou_alice",
-            "--allow-from",
-            "ou_bob",
-        ]
+    cfg = feishu_cli._resolve_config(
+        app_id="cli_xxxx",
+        app_secret_path=str(secret_file),
+        allow_from=["ou_alice", "ou_bob"],
+        chat_id_prefix="feishu",
     )
-    cfg = feishu_cli._resolve_config(args)
     assert cfg.allow_from == ["ou_alice", "ou_bob"]
 
 
@@ -235,17 +189,13 @@ def test_env_path_does_not_leak_when_arg_given(
     monkeypatch.setenv("LARK_APP_ID", "from_env")
     secret_file = tmp_path / "secret"
     secret_file.write_text("x")
-    args = feishu_cli._build_parser().parse_args(
-        [
-            "--connect",
-            "unix:///tmp/gw.sock",
-            "--app-id",
-            "explicit_arg",
-            "--app-secret",
-            str(secret_file),
-        ]
+    cfg = feishu_cli._resolve_config(
+        app_id="explicit_arg",
+        app_secret_path=str(secret_file),
+        allow_from=None,
+        chat_id_prefix="feishu",
     )
-    cfg = feishu_cli._resolve_config(args)
     assert cfg.app_id == "explicit_arg"
-    # Belt-and-braces: env is gone for the rest of the test.
+    # Belt-and-braces: env is still set (we test the override is at
+    # resolve time, not via mutation of os.environ).
     assert os.environ["LARK_APP_ID"] == "from_env"

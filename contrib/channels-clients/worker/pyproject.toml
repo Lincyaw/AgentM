@@ -11,6 +11,7 @@ authors = [{ name = "AgentM contributors" }]
 dependencies = [
     "agentm",
     "agentm-channels",
+    "typer>=0.25.1",
 ]
 
 [project.optional-dependencies]
