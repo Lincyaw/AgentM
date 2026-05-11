@@ -9,14 +9,32 @@ custom ``cost_budget_exceeded`` event instead of throwing across handlers.
 from __future__ import annotations
 
 import json
-from dataclasses import fields, is_dataclass
-from typing import Any
+from dataclasses import dataclass, fields, is_dataclass
+from typing import Any, Protocol
 
-from agentm.core.abi import BeforeSendToLlmEvent, BudgetExhausted, CostBreakdown, TurnEndEvent
+from agentm.core.abi import BeforeSendToLlmEvent, BudgetExhausted, TurnEndEvent
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import BeforeAgentStartEvent, CostBudgetExceededEvent
 from agentm.harness.extension import ExtensionAPI
+
+
+# ---------------------------------------------------------------------------
+# Cost-query service contract — inlined from the former
+# agentm.core.abi.services. cost_budget is the sole consumer; the CLI and
+# textual_app fetch the service via api.get_service("cost_query") string
+# lookup, not via Protocol import, so this stays scoped to the atom.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class CostBreakdown:
+    amount: float
+    currency: str = "usd"
+
+
+class CostQueryService(Protocol):
+    def estimate(self, usage: Any, *, provider: str | None = None) -> CostBreakdown: ...
 
 
 MANIFEST = ExtensionManifest(
