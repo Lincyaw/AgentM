@@ -303,51 +303,13 @@ async def run(
     return 1 if diagnostic_state["error_seen"] else 0
 
 
-async def _run_interactive(
-    *,
-    scenario: str | None,
-    extra_extensions: list[tuple[str, dict[str, Any]]],
-    no_extensions: bool,
-    no_skills: bool,
-    no_prompt_templates: bool,
-    tool_allowlist: list[str] | None,
-    provider: str,
-    model: str,
-    cwd: str,
-    theme: str = "dark",
-    css_path: Path | None = None,
-) -> int:
-    """Build a session config and hand off to the Textual TUI runner."""
-
-    from agentm.modes.textual_app import run as run_textual_tui
-
-    bus = EventBus()
-    _attach_default_diagnostics(bus)
-    config, session_manager = _build_session_config(
-        scenario=scenario,
-        extra_extensions=extra_extensions,
-        no_extensions=no_extensions,
-        no_skills=no_skills,
-        no_prompt_templates=no_prompt_templates,
-        tool_allowlist=tool_allowlist,
-        provider=provider,
-        model=model,
-        cwd=cwd,
-        bus=bus,
-    )
-    if session_manager.session_file is not None:
-        print(f"INFO: session log: {session_manager.session_file}", file=sys.stderr)
-
-    return await run_textual_tui(config, theme=theme, css_path=css_path)
-
-
 def run_cmd(
     prompt: Annotated[
         str,
         typer.Argument(
             help=(
-                "User prompt to send to the agent. Pass empty string with "
-                "--interactive for the multi-turn TUI."
+                "User prompt to send to the agent. For multi-turn / TUI "
+                "use, run the channels gateway + agentm-terminal --format textual."
             ),
         ),
     ] = "",
@@ -438,31 +400,6 @@ def run_cmd(
         bool,
         typer.Option("--quiet", help="Suppress final-output printout."),
     ] = False,
-    interactive: Annotated[
-        bool,
-        typer.Option(
-            "-i",
-            "--interactive",
-            help="Open the Textual multi-turn TUI instead of running a single prompt.",
-        ),
-    ] = False,
-    theme: Annotated[
-        str,
-        typer.Option(
-            "--theme",
-            help="Textual theme name for --interactive (aliases: dark, light).",
-        ),
-    ] = "dark",
-    css_path: Annotated[
-        Path | None,
-        typer.Option(
-            "--css-path",
-            exists=True,
-            dir_okay=False,
-            readable=True,
-            help="Optional Textual CSS path for --interactive.",
-        ),
-    ] = None,
     resume: Annotated[
         str | None,
         typer.Option(
@@ -497,26 +434,16 @@ def run_cmd(
     if scenario is None and not no_extensions:
         scenario = "general_purpose"
 
-    if interactive:
-        rc = asyncio.run(
-            _run_interactive(
-                scenario=scenario,
-                extra_extensions=extra_extensions,
-                no_extensions=no_extensions,
-                no_skills=no_skills,
-                no_prompt_templates=no_prompt_templates,
-                tool_allowlist=_parse_tools(tools),
-                provider=provider,
-                model=model,
-                cwd=cwd,
-                theme=theme,
-                css_path=css_path,
-            )
-        )
-        raise typer.Exit(code=rc)
-
     if not prompt:
-        print("ERROR: prompt is required (or pass --interactive)", file=sys.stderr)
+        print(
+            "ERROR: prompt is required.\n"
+            "       The in-process Textual TUI (--interactive) was removed —\n"
+            "       use the channels gateway instead:\n"
+            "         agentm-gateway --bind unix:///tmp/agentm/gw.sock\n"
+            "         agentm-worker  --connect unix:///tmp/agentm/gw.sock\n"
+            "         agentm-terminal --connect unix:///tmp/agentm/gw.sock --format textual",
+            file=sys.stderr,
+        )
         raise typer.Exit(code=2)
 
     rc = asyncio.run(

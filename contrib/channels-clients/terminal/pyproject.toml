@@ -12,6 +12,10 @@ authors = [{ name = "AgentM contributors" }]
 # install time beyond `uv sync`.
 dependencies = [
     "agentm-channels",
+    # Drives the `--format textual` rich frontend (the legacy in-process
+    # TUI lived under src/agentm/modes/ — moved here in the
+    # session-as-routing-primary refactor). Pulls Rich transitively.
+    "textual>=0.85",
 ]
 
 [project.optional-dependencies]
