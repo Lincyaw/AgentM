@@ -41,6 +41,9 @@ class _WireChannel(BaseChannel):
 
     name = "_wire"
     display_name = "Wire peer"
+    # Synthetic bridge channel — not a v0 in-process platform adapter,
+    # so the BaseChannel deprecation warning does not apply.
+    _is_stub_fixture = True
 
     def __init__(
         self,
@@ -69,19 +72,34 @@ class _WireChannel(BaseChannel):
         # Turn-complete is internal control; chat clients want it as
         # an envelope too, but for v1 we ship it on the wire so peers
         # can mirror it (terminal channel uses it to print a marker).
+        body: dict[str, Any] = {
+            "channel": msg.channel,
+            "chat_id": msg.chat_id,
+            "content": msg.content,
+            "kind": msg.kind.value
+            if isinstance(msg.kind, OutboundKind)
+            else str(msg.kind),
+        }
+        # Buttons round-trip the typed shape so terminal/Feishu clients
+        # can render their native UI and the approval bridge's
+        # button_value contract survives across the wire.
+        if msg.buttons:
+            body["buttons"] = [
+                {"label": b.label, "value": b.value, "style": b.style}
+                for b in msg.buttons
+            ]
+        # Pass through metadata when present — the approval bridge tags
+        # approval_request/approval_resolved with correlation info there,
+        # and the wire is the only path now that v0 channels are
+        # deprecated.
+        if msg.metadata:
+            body["metadata"] = dict(msg.metadata)
         env = Envelope(
             v=WIRE_VERSION,
             id=f"out-{self._peer_id}-{int(time.time() * 1_000_000)}",
             kind=KIND_OUTBOUND,
             ts=time.time(),
-            body={
-                "channel": msg.channel,
-                "chat_id": msg.chat_id,
-                "content": msg.content,
-                "kind": msg.kind.value
-                if isinstance(msg.kind, OutboundKind)
-                else str(msg.kind),
-            },
+            body=body,
         )
         await asyncio.to_thread(self._outbox.enqueue, self._peer_id, env)
 
@@ -113,6 +131,10 @@ class WireBridge:
         chat_id = str(body.get("chat_id") or "")
         sender_id = str(body.get("sender_id") or peer_session.peer_id)
         content = str(body.get("content") or "")
+        button_value_raw = body.get("button_value")
+        button_value = (
+            str(button_value_raw) if button_value_raw is not None else None
+        )
         if not channel_name or not chat_id:
             log.warning(
                 "wire inbound rejected: missing channel/chat_id (peer=%s id=%s)",
@@ -129,6 +151,7 @@ class WireBridge:
                 sender_id=sender_id,
                 chat_id=chat_id,
                 content=content,
+                button_value=button_value,
             )
         )
 

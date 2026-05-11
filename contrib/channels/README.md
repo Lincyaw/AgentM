@@ -39,8 +39,9 @@ src/agentm_channels/
 
 ## Local validation (terminal mode)
 
-The fastest way to try this end-to-end without configuring a chat
-platform — gateway + terminal client as two processes:
+Two-process invocation is the only documented contract: the gateway
+runs as a wire-protocol daemon, each chat platform runs as a separate
+client process and talks to the gateway over a Unix socket.
 
 ```bash
 # Terminal A:
@@ -62,6 +63,12 @@ posts an approval card you'll see numbered `[1] Approve` / `[2] Deny`
 options and the literal `value=…` next to each. Type `=<value>` (e.g.
 `=approval-deadbeef:approve`) to click. Less ergonomic than a Feishu
 button, but exercises the exact same code path.
+
+> **Deprecated:** the v0 in-process `channels:` yaml block still loads
+> for backwards compatibility, but emits a `DeprecationWarning` (and
+> an `agentm-gateway: warn: …` line on stderr at startup) and will be
+> removed in a future minor. New deployments should always use
+> `--bind unix:///path` + separate client processes.
 
 ## Run (one-liner)
 

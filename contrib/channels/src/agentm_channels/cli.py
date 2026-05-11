@@ -431,6 +431,18 @@ async def _arun(args: argparse.Namespace) -> int:
     channels_cfg: dict[str, Any] = (
         cfg.get("channels") or _channels_from_env(dict(os.environ))
     )
+    # Phase 4 deprecation: surface a structured warning when the
+    # operator is still launching the gateway with an in-process
+    # ``channels:`` block. ChannelManager raises a DeprecationWarning
+    # as well, but those are silenced by default; printing to stderr
+    # makes the migration visible to humans tailing logs.
+    if channels_cfg:
+        sys.stderr.write(
+            "agentm-gateway: warn: in-process channels are deprecated; "
+            "configure `--bind unix:///path` and run platform clients "
+            "separately (agentm-terminal, agentm-feishu)\n"
+        )
+        sys.stderr.flush()
     if not channels_cfg and bind_spec is None:
         raise SystemExit(
             "no channels configured and no --bind given. Either pass "
