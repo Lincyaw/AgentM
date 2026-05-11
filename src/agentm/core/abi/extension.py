@@ -324,6 +324,24 @@ class ExtensionAPI(Protocol):
         case).
         """
         ...
+
+    def register_resource_writer(self, writer: ResourceWriter) -> None:
+        """Replace the session's ``ResourceWriter``.
+
+        Must be called at most once before freeze; a second call raises
+        ``KeyError``. Atoms that want to redirect ``tool_write`` /
+        ``tool_edit`` / ``tool_propose_change`` writes to a non-default
+        target (e.g. a sandbox-backed filesystem) call this at install
+        time. If no atom calls it, ``get_resource_writer()`` returns the
+        default :class:`~agentm.core.runtime.resource_writer.GitBackedResourceWriter`
+        the substrate constructed from ``cwd``.
+
+        Implementations must honour the constitution-path refusal contract
+        of :class:`ResourceWriter`. Sandbox-backed writers typically reject
+        every host path (the sandbox cannot see the AgentM tree) and
+        accept only paths inside their managed work-dir.
+        """
+        ...
     def register_message_renderer(
         self, custom_type: str, renderer: Renderer
     ) -> None: ...
