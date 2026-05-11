@@ -18,8 +18,7 @@ Config shape (under any larger config; the manager only reads the
       slack:
         enabled: false
 
-Channels not present in the config are simply not started — the same
-shape as nanobot.
+Channels not present in the config are simply not started.
 """
 
 from __future__ import annotations

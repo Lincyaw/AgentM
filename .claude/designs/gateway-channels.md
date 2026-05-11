@@ -8,7 +8,6 @@ for v1 (process-level split). This doc continues to describe the
 during the migration window because v0 channels remain supported until
 every shipping platform has a v1 client. Once that migration
 completes, this doc moves to `designs/historical/`.
-**Reference codebase**: [`HKUDS/nanobot`](https://github.com/HKUDS/nanobot) — multi-channel chat agent. Local clone read at `/tmp/refs/nanobot` on 2026-05-11.
 
 ---
 
@@ -39,9 +38,7 @@ live in their own files under `contrib/channels/src/agentm_channels/channels/`.
 3. **Typed wire format**: no magic-string dispatch on `metadata` dict
    keys. Control vs content distinction is `OutboundKind` enum;
    approval buttons are typed `Button` dataclasses; sticky control
-   state is on the route, not the message metadata. Compare with
-   nanobot's `metadata["_progress"] / ["_stream_delta"] / ["_streamed"]`
-   forest.
+   state is on the route, not the message metadata.
 4. **Cross-loop safety**: `lark_oapi` dispatches inbound on a
    background-thread loop; `MessageBus` detects foreign callers and
    bridges via `call_soon_threadsafe` onto the home loop. Channels
@@ -223,8 +220,7 @@ message:
 
 Tool calls and tool results are **not** echoed back to the chat by
 design. Operators reading the trajectory JSONL see everything; users
-see what the assistant's next turn summarises. Compare with nanobot's
-tool-hint cards — we deliberately opt out.
+see what the assistant's next turn summarises.
 
 ---
 
@@ -265,40 +261,35 @@ private encoding. Listed in command-routing.md, not implemented in PR #1.
 
 ## 8. What we deliberately do not have yet
 
-| Feature | nanobot does it | We will when |
-|---|---|---|
-| Streaming text (`send_delta`) | yes, CardKit + delta-coalesce | AgentM `EventBus` exposes token-delta events |
-| Persistent message history per chat (separate from AgentM session) | yes, JSONL per chat | Verified that AgentM's `SessionManager` resume does not round-trip our chat history. Until then, ChatSessionMap (session_key → session_id) is enough. |
-| Group `respond_when: mention` | yes, `_is_bot_mentioned` | Feishu group support is a real use case (in plan batch 3) |
-| Bounded queues + drop policy | no (also unbounded) | Outbound backpressure becomes observable |
-| ASR / audio transcription | yes | Never — not in AgentM's scope |
-| `sendProgress` / tool-hint cards | yes | Never — operator reads JSONL, user reads summaries |
-| Multi-replica / leader election | no | Production HA pressure shows up |
+| Feature | We will when |
+|---|---|
+| Streaming text (`send_delta`) | AgentM `EventBus` exposes token-delta events |
+| Persistent message history per chat (separate from AgentM session) | Verified that AgentM's `SessionManager` resume does not round-trip our chat history. Until then, ChatSessionMap (session_key → session_id) is enough. |
+| Group `respond_when: mention` | Feishu group support is a real use case (in plan batch 3) |
+| Bounded queues + drop policy | Outbound backpressure becomes observable |
+| ASR / audio transcription | Never — not in AgentM's scope |
+| `sendProgress` / tool-hint cards | Never — operator reads JSONL, user reads summaries |
+| Multi-replica / leader election | Production HA pressure shows up |
 
 ---
 
-## 9. Differences from nanobot worth recording
+## 9. Notable design choices
 
-We started from nanobot's `bus + channels + manager` shape and kept
-the discovery/registry/manager pattern verbatim. Differences:
-
-1. **Typed `OutboundKind`** replaces magic `metadata["_progress"]` /
-   `["_stream_delta"]` / `["_streamed"]` dispatch. nanobot's
-   `_dispatch_outbound` is a long `if msg.metadata.get(...)` chain;
-   ours is a `match msg.kind`.
+1. **Typed `OutboundKind`** avoids magic-`metadata` string dispatch;
+   our outbound dispatcher is a `match msg.kind`.
 2. **Typed `Button`** replaces `buttons: list[list[str]]` and label
-   string-matching for callback resolution. nanobot has no formal
-   tool-call approval workflow (its `ask_user` is an agent-loop stop
-   reason).
+   string-matching for callback resolution, giving us a formal
+   tool-call approval workflow.
 3. **`ApprovalBridge`** is a separate channel-agnostic module with
    per-call identity check, timeout, and a private button-value
    encoding. Built around `ToolCallEvent` so any tool can be gated.
-4. **Cross-loop bus** centralizes the `lark_oapi` foreign-loop fix;
-   nanobot inlines `run_coroutine_threadsafe` at each callback.
-5. **No tool I/O echo to chat**. Deliberate product choice; nanobot
-   sends progress cards by default.
-6. **Smaller surface**: 1.5k lines vs nanobot's 14.6k in channels/.
-   Feature parity is **not** a goal; correctness + replaceability is.
+4. **Cross-loop bus** centralizes the `lark_oapi` foreign-loop fix
+   so each callback site does not have to inline a
+   `run_coroutine_threadsafe`.
+5. **No tool I/O echo to chat**. Deliberate product choice — operators
+   read JSONL, users read summaries.
+6. **Smaller surface**: ~1.5k lines in `contrib/channels/`. Correctness
+   and replaceability over feature breadth.
 
 ---
 

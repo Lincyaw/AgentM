@@ -6,8 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 AgentM is a pluggable agent framework in Python (v0.1.0). The SDK is a **mechanism**;
 every policy is a port; every port has a default; every default is a replaceable
-extension. Inspired by [`badlogic/pi-mono`](https://github.com/badlogic/pi-mono);
-boundary contract in `.claude/designs/pluggable-architecture.md`.
+extension. Boundary contract in `.claude/designs/pluggable-architecture.md`.
 
 - **Language**: Python 3.12+
 - **Package manager / build backend**: `uv` / `uv_build`

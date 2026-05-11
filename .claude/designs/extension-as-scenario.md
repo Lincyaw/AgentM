@@ -122,13 +122,13 @@ session = AgentSession.create(
 )
 ```
 
-Path is a Python module path resolved via `importlib`. The module must export an `install` callable. No metadata files, no plugin manifest — convention is the manifest. Inspired by pi's package convention but Python-native (entry points are deferred to v0.2 if needed).
+Path is a Python module path resolved via `importlib`. The module must export an `install` callable. No metadata files, no plugin manifest — convention is the manifest. Python-native (entry points are deferred to v0.2 if needed).
 
 ---
 
 ## 3. ExtensionAPI (v0 surface)
 
-Keep this small. Every method earns its keep. Reference: pi-mono `extensions/types.ts:1067-1290` (full surface, 50+ methods). We pick the minimal subset that covers the 8 acceptance scenarios in `pluggable-architecture.md` §6.
+Keep this small. Every method earns its keep — we pick the minimal subset that covers the 8 acceptance scenarios in `pluggable-architecture.md` §6.
 
 ```python
 class ExtensionAPI(Protocol):
@@ -240,7 +240,7 @@ class JsonlSessionManager(SessionManager): ...      # default, ~/.agentm/session
 class InMemorySessionManager(SessionManager): ...   # for tests / embedding
 ```
 
-Single JSONL file, append-only. `payload: Any` lets extensions persist their own structured data (RCA hypothesis index, trajectory analysis snapshots, etc.) without forking the format. Reference: pi-mono `core/session-manager.ts:30-100` and `compaction.ts` (`details: T` extension hook).
+Single JSONL file, append-only. `payload: Any` lets extensions persist their own structured data (RCA hypothesis index, trajectory analysis snapshots, etc.) without forking the format.
 
 ---
 
@@ -272,7 +272,7 @@ class ResourceLoader(Protocol):
     def reload(self) -> None: ...
 ```
 
-Default impl walks `~/.agentm/{skills,prompts}/` and `cwd → parent dirs` for `AGENTS.md`. Embedded SDK callers pass an in-memory or DB-backed loader. Reference: pi-mono `core/resource-loader.ts`, `core/skills.ts`.
+Default impl walks `~/.agentm/{skills,prompts}/` and `cwd → parent dirs` for `AGENTS.md`. Embedded SDK callers pass an in-memory or DB-backed loader.
 
 ---
 
@@ -301,7 +301,7 @@ Each is one Python module with `install(api, config)` doing **one thing**. The a
 | `extensions.builtin.system_prompt` | `before_agent_start`: prepends `config["prompt"]` to the assembled system prompt. Single most-reused atom. |
 | `extensions.builtin.turn_reminder` | (was `system_reminder`) Re-injects `config["reminder"]` every `every_n_turns`. |
 | `extensions.builtin.micro_compact` | Compacts context near limit; emits `before_compact` / `after_compact`. |
-| `extensions.builtin.llm_compaction` | Performs pi-mono-style LLM compaction when the durable session branch exceeds the reserved-token threshold; rebuilds context from the session tree after persisting a `compaction` entry. |
+| `extensions.builtin.llm_compaction` | Performs LLM-driven compaction when the durable session branch exceeds the reserved-token threshold; rebuilds context from the session tree after persisting a `compaction` entry. |
 | `extensions.builtin.trajectory` | Records every event to JSONL. |
 
 #### Policy atoms

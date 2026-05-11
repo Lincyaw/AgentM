@@ -6,7 +6,7 @@
 
 ## Overview
 
-Three new tool atoms — `grep`, `find`, `ls` — implemented as deterministic stdlib + `pathspec` traversals behind the shared `FileOperations` read seam. They respect `.gitignore` where search semantics require it and apply deterministic truncation rules. They sit alongside the existing `tool_read` / `tool_bash` / `tool_edit` / `tool_write` atoms and follow the issue #89 hybrid IO seam: read-only file tools consume `FileOperations`, while write tools consume `ResourceWriter`. Pi-mono references: [`tools/grep.ts`](/tmp/pi-analysis/pi-mono/packages/coding-agent/src/core/tools/grep.ts), [`tools/find.ts`](/tmp/pi-analysis/pi-mono/packages/coding-agent/src/core/tools/find.ts), [`tools/ls.ts`](/tmp/pi-analysis/pi-mono/packages/coding-agent/src/core/tools/ls.ts), plus shared utilities [`tools/truncate.ts`](/tmp/pi-analysis/pi-mono/packages/coding-agent/src/core/tools/truncate.ts) and [`tools/path-utils.ts`](/tmp/pi-analysis/pi-mono/packages/coding-agent/src/core/tools/path-utils.ts).
+Three new tool atoms — `grep`, `find`, `ls` — implemented as deterministic stdlib + `pathspec` traversals behind the shared `FileOperations` read seam. They respect `.gitignore` where search semantics require it and apply deterministic truncation rules. They sit alongside the existing `tool_read` / `tool_bash` / `tool_edit` / `tool_write` atoms and follow the issue #89 hybrid IO seam: read-only file tools consume `FileOperations`, while write tools consume `ResourceWriter`.
 
 ## Motivation
 

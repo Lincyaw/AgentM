@@ -2,7 +2,7 @@ name: general_purpose
 description: |
   Default scenario for ``agentm "<prompt>"`` (no ``--scenario`` flag).
 
-  Inspired by GenericAgent's "9 atomic tools + ~100-line loop" philosophy:
+  Built around the "9 atomic tools + ~100-line loop" philosophy:
   load a small core of always-useful capabilities and trust the LLM to
   compose the rest via ``bash``. Specialised behaviour (self-modify,
   evolution/query, plan-only, eval orchestration) lives in dedicated

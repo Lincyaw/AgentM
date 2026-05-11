@@ -4,7 +4,7 @@ Multi-channel chat gateway for AgentM. Wraps Feishu / Slack / Discord /
 … behind a single message bus so the same agent can serve any chat
 surface, and adding a new channel is one file.
 
-Architecture (mirrors HKUDS/nanobot's `nanobot.bus` + `nanobot.channels`):
+Architecture (two-queue message bus + channel registry):
 
 ```
        ┌────────────────────────────┐                       ┌────────────────────────┐

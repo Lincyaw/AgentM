@@ -2,7 +2,6 @@
 
 **Status**: PROPOSED
 **Created**: 2026-04-30
-**Reference codebase**: [`badlogic/pi-mono`](https://github.com/badlogic/pi-mono) — analyzed at commit on 2026-04-30, local clone at `/tmp/pi-analysis/pi-mono`.
 
 ---
 
@@ -23,7 +22,7 @@ This document is the **boundary contract**: which things are in core, which thin
 
 ## 2. Layered Package Boundary
 
-Inspired by pi-mono's three-layer split (`pi-ai` → `pi-agent` → `pi-coding-agent`), AgentM is organized as:
+AgentM is organized as four layers, with dependency arrows pointing downward only:
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -36,7 +35,7 @@ Inspired by pi-mono's three-layer split (`pi-ai` → `pi-agent` → `pi-coding-a
 │  agentm-core/                                                    │
 │    AgentLoop · Tool · Message · StreamFn · ToolOperations ports  │ pure SDK
 ├──────────────────────────────────────────────────────────────────┤
-│  agentm-llm/  (provider layer; analogous to pi-ai)               │ provider
+│  agentm-llm/  (provider layer)                                   │ provider
 │    Model registry · StreamFn implementations · OAuth             │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -49,8 +48,6 @@ Inspired by pi-mono's three-layer split (`pi-ai` → `pi-agent` → `pi-coding-a
 | `agentm-core` | message turns, tool execution, streaming | sessions, files, scenarios, UI |
 | `agentm-harness` | persistence, extensions, resource discovery | concrete scenarios, UI rendering |
 | `agentm-modes` | I/O surface (stdin/stdout/TUI/HTTP) | LLM protocol, agent loop |
-
-**Reference**: pi-mono enforces this physically as separate packages — see `packages/{ai,agent,coding-agent}/` and the import graph in `packages/coding-agent/src/core/sdk.ts:1-30`.
 
 ---
 
@@ -80,8 +77,6 @@ class StreamFn(Protocol):
 - Extensions register additional providers via `register_provider(name, ProviderConfig)`. `ProviderConfig` lives in `agentm.core.abi.provider` so provider modules do not import the harness; the harness re-exports it for extension compatibility. The harness chooses the active registration through the `ProviderResolver` port; the default `LastRegisteredWins` resolver preserves insertion-order behavior.
 - Presenter-side provider selection goes through `ProviderRegistry.build(provider, config)`: descriptors own CLI extension module paths, default model ids, aliases, and ambient env-var conventions, so adding a provider descriptor does not require editing CLI branches.
 - **Crucial**: `StreamFn` is the only point that touches a real LLM API. The agent loop has zero hard-coded provider knowledge.
-
-**Reference**: pi-mono `packages/agent/src/types.ts:18-26` (`StreamFn` type), `packages/coding-agent/src/core/extensions/types.ts:1212-1245` (`registerProvider` API with `streamSimple` override).
 
 ### 3.2 Tool Execution (the environment boundary)
 
@@ -131,13 +126,7 @@ redirect reads override `FileOperations`; scenario authors that need to redirect
 or audit writes override `ResourceWriter`. Atoms must not call both seams for one
 write path.
 
-**Why three layers**: the "what" (definition), "how-to-call" (Tool), and "where-it-runs" (Operations) vary independently. Pi proves it: their `read.ts` tool body is unchanged whether running locally or over SSH; only `ReadOperations` is swapped.
-
-**Reference**:
-- Definition: `packages/coding-agent/src/core/extensions/types.ts:332-403` (`ToolDefinition`)
-- Operations port pattern: `packages/coding-agent/src/core/tools/read.ts:30-46`, `bash.ts:42-66`, `edit.ts` (`EditOperations`)
-- Default local impl: `packages/coding-agent/src/core/tools/bash.ts:75-100` (`createLocalBashOperations`)
-- File mutation queue (cross-tool serialization): `packages/coding-agent/src/core/tools/file-mutation-queue.ts`
+**Why three layers**: the "what" (definition), "how-to-call" (Tool), and "where-it-runs" (Operations) vary independently. The same tool body can run locally or over SSH by swapping only the underlying `Operations` implementation.
 
 ### 3.3 Session Persistence (the state boundary)
 
@@ -164,8 +153,6 @@ class SessionManager(Protocol):
 - Default impl writes to `~/.agentm/sessions/`; SDK callers can pass `InMemorySessionManager` or `SqliteSessionManager`.
 - Presenters depend on `SessionStore` (`open`, `most_recent`, `create`) rather than globbing JSONL files directly. `JsonlSessionStore` wraps the current `SessionManager` format, while tests and future backends can provide in-memory, sqlite, or remote implementations without changing CLI/TUI construction.
 
-**Reference**: `packages/coding-agent/src/core/session-manager.ts:30-90` (entry types with `parentId`), `:60-78` (`CompactionEntry.details: T` for extension data), `1425` lines total — but the format is what matters, not the implementation size.
-
 ### 3.4 Resource Discovery (the project-context boundary)
 
 ```python
@@ -181,9 +168,7 @@ class ResourceLoader(Protocol):
 - Embedded SDK callers pass a `ResourceLoader` backed by DB / HTTP / in-memory.
 - Extensions can extend the discovery via the `resources_discover` event (returning extra paths) without replacing the loader.
 
-**Why this matters for SDK reuse**: a web-app embedding AgentM has no filesystem. If `ResourceLoader` is hard-wired to `os.walk`, the SDK is unembeddable. Pi enforces this via the `ResourceLoader` interface and `DefaultResourceLoader` class.
-
-**Reference**: `packages/coding-agent/src/core/resource-loader.ts` (interface + default impl), `packages/coding-agent/src/core/extensions/types.ts:495-510` (`ResourcesDiscoverEvent`).
+**Why this matters for SDK reuse**: a web-app embedding AgentM has no filesystem. If `ResourceLoader` is hard-wired to `os.walk`, the SDK is unembeddable; keeping it behind a Protocol makes alternative backends (DB, HTTP, in-memory) trivial.
 
 ### 3.5 Extension Bus (the policy-replacement boundary)
 
@@ -225,18 +210,11 @@ exponential-backoff implementation with `api.set_service("retry_policy", ...)`,
 and provider adapters use provider-typed retry predicates rather than string
 sniffing wire errors.
 
-**Reference**:
-- Minimal EventBus: `packages/coding-agent/src/core/event-bus.ts` (33 lines — copy this verbatim conceptually)
-- Event taxonomy: `packages/coding-agent/src/core/extensions/types.ts:495-960` (full event type hierarchy)
-- Mutation-in-place contract: `extensions/types.ts:854-868` (`ToolCallEvent.input is mutable`)
-- Cancel/replace contract: `extensions/types.ts:535-546` (`SessionBeforeCompactResult.cancel | compaction`), `:563-580` (`SessionBeforeTreeResult.summary`)
-- ExtensionAPI surface: `extensions/types.ts:1067-1290`
-
 ---
 
 ## 4. AgentSession: the Orchestrator Façade
 
-Per pi-mono's `agent-session.ts` (3099 lines, but **zero business logic**), the orchestrator is intentionally fat-but-thin: it holds references to every subsystem and wires events, but every actual decision lives in a subsystem.
+The orchestrator is intentionally fat-but-thin: it holds references to every subsystem and wires events, but every actual decision lives in a subsystem.
 
 ```python
 class AgentSession:
@@ -257,8 +235,6 @@ class AgentSession:
 ```
 
 **Design rule**: `AgentSession.prompt` and friends are 100-line **dispatchers**. Any branch with logic-content >10 lines is a smell — extract it to a service or extension. Construction-only wiring can live beside the façade in harness factory/runtime modules; runtime dependency bundles should be passed as data (`SessionRuntime`) rather than long parameter lists.
-
-**Reference**: `packages/coding-agent/src/core/agent-session.ts:942-1050` (`prompt` method — note how mechanical it is).
 
 ---
 
@@ -281,8 +257,6 @@ Modes share **all** runtime; they only differ in:
 
 Presenter-owned commands may add UI affordances, but command discovery and extension-registered command parity stay registry-driven: the Textual mode uses a `BuiltinCommandRegistry` for its local commands and mirrors `ExtensionAPI.register_command` registrations into the same palette/dispatch path. Kernel event identity uses prompt-local `turn_index` plus session-monotone `turn_id`; presenters key long-lived widgets by `turn_id`.
 
-**Reference**: `packages/coding-agent/src/modes/{print-mode.ts, rpc/, interactive/}` and `core/sdk.ts:createAgentSession` (the SDK entrypoint shared by all modes).
-
 **Design rule for AgentM**: any feature added to a mode that *cannot* also be reached via the SDK is a bug. The SDK is the contract; modes are sugar.
 
 ---
@@ -301,8 +275,6 @@ A change to the architecture is acceptable iff each of these is achievable **wit
 8. **Add plan mode** → an extension that intercepts `before_agent_start`, prepends a planning system prompt, and adds a `submit_plan` tool. Core never learns about plan mode.
 
 If any of these requires editing `agentm-core` or `agentm-harness`, the boundary is wrong.
-
-**Reference**: cases 7 and 8 are exactly how pi argues for omitting these from core — see pi README "Philosophy" section and `packages/coding-agent/README.md:340-360`.
 
 ---
 
@@ -327,77 +299,12 @@ All previous AgentM concepts are being **re-implemented as extensions** on the v
 
 ---
 
-## 8. Reference Index (pi-mono ↔ AgentM)
-
-Quick lookup for implementation. All paths relative to `pi-mono/packages/`.
-
-### Layered package boundary (§2)
-- Pure provider: `ai/src/{stream.ts,api-registry.ts,oauth.ts}`
-- Pure agent loop: `agent/src/{agent.ts,agent-loop.ts,types.ts}` (~1300 LoC total)
-- Harness orchestrator: `coding-agent/src/core/agent-session.ts`
-- Mode presenters: `coding-agent/src/modes/`
-
-### Stream / Provider port (§3.1)
-- `StreamFn` type: `agent/src/types.ts:18-26`
-- Provider registration: `coding-agent/src/core/extensions/types.ts:1212-1290`
-- Model registry: `coding-agent/src/core/model-registry.ts`
-
-### Tool / Operations port (§3.2)
-- `AgentTool` (loop-facing): `agent/src/types.ts` (search `interface AgentTool`)
-- `ToolDefinition` (UI/semantics): `coding-agent/src/core/extensions/types.ts:332-403`
-- `defineTool` helper: `coding-agent/src/core/extensions/types.ts:415-419`
-- `ReadOperations`: `coding-agent/src/core/tools/read.ts:30-46`
-- `BashOperations`: `coding-agent/src/core/tools/bash.ts:42-66`
-- Local default: `tools/bash.ts:75-150`
-- File mutation queue: `tools/file-mutation-queue.ts`
-- Schema validation hook (`prepareArguments`): `extensions/types.ts:362`
-
-### Session port (§3.3)
-- Entry types: `coding-agent/src/core/session-manager.ts:30-100`
-- Tree navigation: same file, search `navigateTree` / `fork`
-- Compaction extension hook (`details: T`): `session-manager.ts:60-78`
-- Compaction logic (default impl): `coding-agent/src/core/compaction/compaction.ts`
-- JSONL format spec: `coding-agent/docs/session-format.md`
-
-### Resource port (§3.4)
-- `ResourceLoader` interface: `coding-agent/src/core/resource-loader.ts` (top of file)
-- `DefaultResourceLoader`: same file
-- Skill spec & loader: `coding-agent/src/core/skills.ts`
-- Discovery extension hook: `extensions/types.ts:495-510` (`ResourcesDiscoverEvent`)
-- Settings layering: `coding-agent/src/core/settings-manager.ts`
-
-### Extension bus (§3.5)
-- Minimal bus impl: `coding-agent/src/core/event-bus.ts` (33 lines)
-- Event taxonomy: `coding-agent/src/core/extensions/types.ts:495-960`
-- ExtensionAPI surface: `extensions/types.ts:1067-1290`
-- Runner (default dispatcher): `coding-agent/src/core/extensions/runner.ts`
-- Loader (extension discovery): `coding-agent/src/core/extensions/loader.ts`
-- ExtensionUIContext (per-mode UI surface): `extensions/types.ts:120-280`
-
-### Orchestrator façade (§4)
-- `AgentSession` class: `coding-agent/src/core/agent-session.ts:239-` (rest of file)
-- `prompt()` flow: `agent-session.ts:942-1050`
-- Streaming queue (steer / followUp): same file, search `_queueSteer` / `_queueFollowUp`
-- Pending message queue (in core): `agent/src/agent.ts:103-150` (`PendingMessageQueue`)
-
-### Modes (§5)
-- SDK factory: `coding-agent/src/core/sdk.ts:createAgentSession`
-- Print mode: `coding-agent/src/modes/print-mode.ts`
-- RPC mode (JSONL): `coding-agent/src/modes/rpc/`
-- Interactive: `coding-agent/src/modes/interactive/`
-
-### Philosophy (§6 acceptance test)
-- pi README "Philosophy" section: `coding-agent/README.md` (search "Philosophy")
-- Why no MCP / no sub-agents / no plan mode in core: same section
-
----
-
 ## 9. Open Questions
 
-1. **Python equivalent of TypeBox**: pi uses TypeBox for tool parameter schemas (compile-time + runtime types). Python options: pydantic v2 (heavy, popular), msgspec (fast, less ecosystem), plain JSON Schema + manual validation. Decide before locking `ToolDefinition.parameters`.
-2. **Async event bus dispatch**: serial vs. concurrent. Pi runs serially per channel (so mutation order is stable). AgentM should match — concurrent extension execution has no upside and breaks the "later handlers see earlier mutations" contract.
+1. **Tool parameter schema choice**: pydantic v2 (heavy, popular), msgspec (fast, less ecosystem), or plain JSON Schema + manual validation. Decide before locking `ToolDefinition.parameters`.
+2. **Async event bus dispatch**: serial vs. concurrent. AgentM runs handlers serially per channel so mutation order is stable; concurrent execution has no upside and breaks the "later handlers see earlier mutations" contract.
 3. **Middleware-to-event migration**: see §7 open decision. Keep `Middleware` as facade vs. fully replace.
-4. **Mode parity**: do we need `interactive` TUI in v0.1? Pi has 7 modes; AgentM might ship `sdk + json` first and add CLI later. The architecture supports either order.
+4. **Mode parity**: do we need `interactive` TUI in v0.1? AgentM may ship `sdk + json` first and add a TUI later. The architecture supports either order.
 5. **Where do "Scenarios" sit?** Suggestion: a Scenario is a function that takes a fresh `ExtensionAPI` and registers everything needed (tools, middleware, prompts, default extensions). This makes scenarios trivially composable and indistinguishable from third-party extensions. See [generic-state-wrapper.md](historical/generic-state-wrapper.md) for the existing direction; harmonize in a follow-up plan.
 
 ---

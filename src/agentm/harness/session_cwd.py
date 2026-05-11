@@ -1,4 +1,4 @@
-"""Session cwd validation helpers, ported from pi-mono's session-cwd.ts."""
+"""Session cwd validation helpers."""
 
 from __future__ import annotations
 
