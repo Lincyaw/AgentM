@@ -108,7 +108,7 @@ contrib/
 │   └── llmharness/    # cognitive-audit package: atoms + adapter + tests
 └── scenarios/         # scenario manifests (loader entry point)
     ├── general_purpose/  # default — used when no --scenario is given
-    ├── feishu_chat/      # interactive chat (Feishu/Lark gateway)
+    ├── agent_env/        # ARL-sandboxed Operations + ResourceWriter
     ├── format_fix/       # toy task class + tuner
     └── rca/              # also a workspace member (agentm_rca/)
 ```

@@ -17,7 +17,7 @@ gateway with ``--bind unix:///path`` and connect a separate
 Minimal config (``gateway.yaml``)::
 
     cwd: ./workspace
-    scenario: feishu_chat
+    scenario: general_purpose
     provider: openai
     model: <provider-default>
 
@@ -327,7 +327,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--scenario",
-        default=os.environ.get("AGENTM_GATEWAY_SCENARIO", "feishu_chat"),
+        default=os.environ.get("AGENTM_GATEWAY_SCENARIO", "general_purpose"),
     )
     p.add_argument("--state-dir", type=Path)
     p.add_argument(
