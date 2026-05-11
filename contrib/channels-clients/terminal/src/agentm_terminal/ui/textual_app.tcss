@@ -1,0 +1,78 @@
+/* agentm-terminal Textual UI — minimal chrome.
+ *
+ *   ┌────────────────────────────────────────┐
+ *   │ #status-header (dock:top, h:1)         │
+ *   ├────────────────────────────────────────┤
+ *   │ #conversation-log (1fr, scrollable)    │
+ *   ├────────────────────────────────────────┤
+ *   │ #input-bar (dock:bottom, h:auto)       │
+ *   └────────────────────────────────────────┘
+ *
+ * Hierarchy comes from symbols (`> `, `●`) and color, never borders.
+ * Stripped down from the legacy in-process textual_app — no tool-call
+ * blocks, no subagent rows, no thinking blocks. Plain assistant text +
+ * approval buttons + user input only. */
+
+Screen {
+    background: $surface;
+}
+
+#status-header {
+    dock: top;
+    height: 1;
+    background: transparent;
+    color: $text-muted;
+    padding: 0 2;
+    text-style: italic;
+    overflow: hidden hidden;
+}
+
+#conversation-log {
+    padding: 1 2 0 2;
+    overflow-y: auto;
+    background: transparent;
+}
+
+UserTurn {
+    margin: 1 0 0 0;
+    padding: 0;
+    background: transparent;
+    color: $primary;
+    text-style: bold;
+}
+
+AssistantTextBlock {
+    margin: 0 0 0 0;
+    padding: 0 0 0 2;
+    background: transparent;
+    color: $text;
+}
+
+ApprovalBlock {
+    margin: 1 0 0 2;
+    padding: 0;
+    background: transparent;
+}
+
+ApprovalBlock > Static.label {
+    color: $accent;
+    text-style: bold;
+}
+
+ApprovalBlock > Static.choice {
+    color: $warning;
+    margin: 0 0 0 2;
+}
+
+#input-bar {
+    dock: bottom;
+    height: auto;
+    padding: 0 1;
+    background: transparent;
+}
+
+#prompt-input {
+    width: 100%;
+    min-height: 3;
+    background: transparent;
+}
