@@ -1,12 +1,12 @@
 """``agentm-gateway`` console entry.
 
-Reads a YAML config (or env vars), builds a :class:`MessageBus`,
-spins up a :class:`ChannelManager` and a :class:`Gateway`, and runs
-until the process is signalled to stop (SIGINT / SIGTERM).
+Reads an optional YAML config, builds a :class:`MessageBus`, spins up
+a :class:`ChannelManager` (wire-bridge mode only) and a :class:`Gateway`,
+and runs until the process is signalled to stop (SIGINT / SIGTERM).
 
-The legacy in-process ``--terminal`` driver has been removed; run the
-gateway with ``--bind unix:///path`` and connect a separate
-``agentm-terminal --connect unix:///path`` process instead.
+The gateway is a wire-protocol daemon. Channel platforms (Feishu,
+terminal, …) run as separate client processes and connect to the gateway
+over a Unix socket — there is no in-process channel path.
 
     # Terminal A:
     agentm-gateway --bind unix:///tmp/gw.sock --config gw.yaml
@@ -25,25 +25,12 @@ Minimal config (``gateway.yaml``)::
       require_approval: [bash]
       timeout_seconds: 300
 
-    channels:
-      feishu:
-        enabled: true
-        app_id: ${LARK_APP_ID}
-        app_secret: ${LARK_APP_SECRET}
-        allow_from: ['*']
-
-Env-var convenience: when no ``--config`` is passed, the CLI builds a
-minimal config from ``LARK_APP_ID`` / ``LARK_APP_SECRET`` so a one-line
-launch works::
-
-    LARK_APP_ID=… LARK_APP_SECRET=… agentm-gateway --cwd ./work
-
 ``.env`` is auto-loaded from the cwd and the AgentM workspace root.
 
 Exit codes (see also ``cli-design`` rule group 3):
 
 * ``0`` — clean shutdown
-* ``2`` — argument / config error (missing channels, bad YAML, empty allow_from)
+* ``2`` — argument / config error (no --bind, bad YAML, legacy channels: block)
 * ``130`` — SIGINT (Ctrl-C)
 """
 
@@ -424,24 +411,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def _channels_from_env(env: dict[str, str]) -> dict[str, Any]:
-    """Build a minimal ``channels`` config from env vars (one-liner mode)."""
-    channels: dict[str, Any] = {}
-    if env.get("LARK_APP_ID") and env.get("LARK_APP_SECRET"):
-        channels["feishu"] = {
-            "enabled": True,
-            "app_id": env["LARK_APP_ID"],
-            "app_secret": env["LARK_APP_SECRET"],
-            "allow_from": [
-                x.strip()
-                for x in env.get("LARK_ALLOW_FROM", "*").split(",")
-                if x.strip()
-            ]
-            or ["*"],
-        }
-    return channels
-
-
 # -------- main ---------------------------------------------------------
 
 
@@ -465,21 +434,21 @@ async def _arun(args: argparse.Namespace) -> int:
 
     bind_spec = _resolve_bind(args, cfg)
 
-    channels_cfg: dict[str, Any] = (
-        cfg.get("channels") or _channels_from_env(dict(os.environ))
-    )
-    # Phase 4 deprecation: surface a structured warning when the
-    # operator is still launching the gateway with an in-process
-    # ``channels:`` block. ChannelManager raises a DeprecationWarning
-    # as well, but those are silenced by default; printing to stderr
-    # makes the migration visible to humans tailing logs.
-    if channels_cfg:
-        sys.stderr.write(
-            "agentm-gateway: warn: in-process channels are deprecated; "
-            "configure `--bind unix:///path` and run platform clients "
-            "separately (agentm-terminal, agentm-feishu)\n"
+    raw_channels = cfg.get("channels") or {}
+    if not isinstance(raw_channels, dict):
+        raise SystemExit(f"`channels:` must be a mapping, got {type(raw_channels).__name__}")
+    # In-process platform channels are gone; only the test-only ``stub``
+    # adapter stays usable through this YAML path (kept so the bind-flow
+    # smoke tests can run without spinning up a real platform client).
+    bad = sorted(n for n in raw_channels if n != "stub")
+    if bad:
+        raise SystemExit(
+            f"config `channels:` block lists v0 in-process channels {bad}; "
+            "those are removed. Run `agentm-gateway --bind unix:///path` "
+            "and connect each platform as a separate client process "
+            "(agentm-terminal, agentm-feishu)."
         )
-        sys.stderr.flush()
+
     if not getattr(args, "inproc_worker", True) and bind_spec is None:
         raise SystemExit(
             "--no-inproc-worker requires --bind: workers connect over "
@@ -487,14 +456,14 @@ async def _arun(args: argparse.Namespace) -> int:
             "--bind unix:///abs/path/to/sock."
         )
 
-    if not channels_cfg and bind_spec is None:
+    if bind_spec is None:
         raise SystemExit(
-            "no channels configured and no --bind given. Either pass "
-            "--bind unix:///abs/path/to/sock (and connect a client like "
-            "`agentm-terminal --connect unix://…`), or pass --config "
-            "<yaml> with a `channels:` section, or set LARK_APP_ID / "
-            "LARK_APP_SECRET for the one-liner Feishu mode."
+            "no --bind given. Pass --bind unix:///abs/path/to/sock and "
+            "connect a client (e.g. `agentm-terminal --connect unix://…`, "
+            "`agentm-feishu --connect unix://…`)."
         )
+
+    channels_cfg: dict[str, Any] = raw_channels
 
     provider = args.provider or cfg.get("provider") or _default_provider()
     model = (

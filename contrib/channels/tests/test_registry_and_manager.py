@@ -9,10 +9,12 @@ from agentm_channels.manager import ChannelManager
 from agentm_channels.registry import discover_all
 
 
-def test_registry_discovers_stub_and_feishu() -> None:
+def test_registry_discovers_stub() -> None:
+    # In-process platform channels (feishu, terminal) were removed —
+    # only the test stub remains as a bundled built-in.
     found = discover_all()
     assert "stub" in found
-    assert "feishu" in found  # bundled built-in
+    assert set(found.keys()) == {"stub"}
 
 
 @pytest.mark.asyncio

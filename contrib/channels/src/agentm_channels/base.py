@@ -23,7 +23,6 @@ an :class:`InboundMessage` onto the bus.
 from __future__ import annotations
 
 import logging
-import warnings
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -38,30 +37,6 @@ class BaseChannel(ABC):
     """Module name; must match the file (``feishu.py`` → ``"feishu"``)."""
 
     display_name: str = "Base"
-
-    # Test fixtures (StubChannel) opt out of the v0-deprecation warning
-    # by setting this to True at class scope.
-    _is_stub_fixture: bool = False
-
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        super().__init_subclass__(**kwargs)
-        # Exempt test stubs: StubChannel stays in-process by design
-        # (Phase 4 deprecation note in client-server-architecture.md §8).
-        if cls.__name__ == "StubChannel" or getattr(
-            cls, "_is_stub_fixture", False
-        ):
-            return
-        warnings.warn(
-            (
-                "agentm_channels.BaseChannel: in-process channel subclass "
-                f"{cls.__module__}.{cls.__name__} is deprecated. Run "
-                "`agentm-gateway --bind unix:///path/to/sock` and connect a "
-                "platform client (`agentm-terminal`, `agentm-feishu`) as a "
-                "separate process. Will be removed in a future minor."
-            ),
-            DeprecationWarning,
-            stacklevel=2,
-        )
 
     def __init__(self, config: Any, bus: MessageBus) -> None:
         self.config = config
