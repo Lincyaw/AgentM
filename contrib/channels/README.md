@@ -46,7 +46,7 @@ client process and talks to the gateway over a Unix socket.
 ```bash
 # Terminal A:
 uv run agentm-gateway --bind unix:///tmp/gw.sock \
-    --cwd ./workspace --scenario feishu_chat
+    --cwd ./workspace --scenario general_purpose
 
 # Terminal B:
 uv run agentm-terminal --connect unix:///tmp/gw.sock
@@ -75,7 +75,7 @@ button, but exercises the exact same code path.
 ```bash
 LARK_APP_ID=cli_xxxx \
 LARK_APP_SECRET=xxxx \
-uv run agentm-gateway --cwd ./workspace --scenario feishu_chat
+uv run agentm-gateway --cwd ./workspace --scenario general_purpose
 ```
 
 `.env` in the cwd or AgentM workspace root is auto-loaded
@@ -86,7 +86,7 @@ uv run agentm-gateway --cwd ./workspace --scenario feishu_chat
 ```yaml
 # gateway.yaml
 cwd: ./workspace
-scenario: feishu_chat
+scenario: general_purpose
 provider: openai
 model: Doubao-Seed-2.0-pro
 
