@@ -17,84 +17,6 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from agentm.core.abi.project_layout import ProjectLayout
-from agentm.core.abi.prompt_template import PromptTemplateRecord
-
-
-# --- PromptTemplates service ----------------------------------------------
-
-
-@runtime_checkable
-class PromptTemplatesService(Protocol):
-    def load_prompt_templates(
-        self,
-        *,
-        cwd: str,
-        agent_dir: str,
-        prompt_paths: list[str] | tuple[str, ...] = (),
-        include_defaults: bool = True,
-    ) -> list[PromptTemplateRecord]: ...
-
-    def expand_prompt_template(
-        self,
-        text: str,
-        templates: list[PromptTemplateRecord],
-    ) -> str | None: ...
-
-    # In-memory prompt registry. Atoms register named prompt bodies at
-    # install time; engine code retrieves them by name. Decoupled from the
-    # on-disk slash-command template flow above so kernel callers don't have
-    # to coordinate filesystem state.
-    def register_prompt(self, name: str, body: str) -> None: ...
-
-    def get_prompt(self, name: str) -> str | None: ...
-
-
-class _DefaultPromptTemplatesService:
-    def __init__(self, layout: ProjectLayout | None = None) -> None:
-        self._layout = layout
-        self._registry: dict[str, str] = {}
-
-    def load_prompt_templates(
-        self,
-        *,
-        cwd: str,
-        agent_dir: str,
-        prompt_paths: list[str] | tuple[str, ...] = (),
-        include_defaults: bool = True,
-    ) -> list[PromptTemplateRecord]:
-        from agentm.core._internal.prompt_templates import (
-            load_prompt_templates as _impl,
-        )
-
-        project_dirs: tuple[str, ...] | None
-        if self._layout is None:
-            project_dirs = None
-        else:
-            project_dirs = tuple(str(p) for p in self._layout.prompts_dirs())
-        return _impl(
-            cwd=cwd,
-            agent_dir=agent_dir,
-            prompt_paths=prompt_paths,
-            include_defaults=include_defaults,
-            project_prompt_dirs=project_dirs,
-        )
-
-    def expand_prompt_template(
-        self,
-        text: str,
-        templates: list[PromptTemplateRecord],
-    ) -> str | None:
-        from agentm.core._internal.prompt_templates import (
-            expand_prompt_template as _impl,
-        )
-
-        return _impl(text, templates)
-
-    def register_prompt(self, name: str, body: str) -> None:
-        self._registry[name] = body
-
-    def get_prompt(self, name: str) -> str | None:
-        return self._registry.get(name)
 
 
 # --- Catalog service -------------------------------------------------------
@@ -192,12 +114,6 @@ class _DefaultCatalogService:
 # --- Default builders ------------------------------------------------------
 
 
-def default_prompt_templates_service(
-    layout: ProjectLayout | None = None,
-) -> PromptTemplatesService:
-    return _DefaultPromptTemplatesService(layout)
-
-
 def default_catalog_service() -> CatalogService:
     return _DefaultCatalogService()
 
@@ -213,8 +129,6 @@ def default_project_layout(cwd: str) -> ProjectLayout:
 __all__ = [
     "CatalogService",
     "ProjectLayout",
-    "PromptTemplatesService",
     "default_catalog_service",
     "default_project_layout",
-    "default_prompt_templates_service",
 ]

@@ -5,10 +5,10 @@ Owns two pieces the kernel deliberately does not:
 1. The English prompt bodies the LLM-driven compaction engine uses
    (system persona, fresh summarization, incremental update, split-turn
    prefix summarization, branch-summary instructions and preamble).
-   Registered into the in-memory prompt registry exposed by
-   ``api.prompt_templates.register_prompt``. Engine callers
+   Registered into the in-memory prompt registry resolved via
+   ``api.get_service("prompt_templates").register_prompt``. Engine callers
    (``llm_compaction``, branch summarization) retrieve them via
-   ``api.prompt_templates.get_prompt(<name>)``.
+   ``api.get_service("prompt_templates").get_prompt(<name>)``.
 
 2. The default :class:`EntryMaterializer` implementations for the three
    kernel-defined session-entry types: ``message``, ``branch_summary``,
@@ -17,6 +17,10 @@ Owns two pieces the kernel deliberately does not:
    engine's ``get_message_from_entry`` and the harness's
    ``build_session_context`` resolve materialization through the registry
    rather than branching on ``entry.type`` string literals.
+
+The prompt registry is published by the ``prompt_templates`` atom under the
+``"prompt_templates"`` service key; this atom resolves it via
+``api.get_service("prompt_templates")``.
 
 The §11 single-file contract holds: this atom does not import any other
 atom and reaches services exclusively via :class:`ExtensionAPI`.
@@ -50,8 +54,8 @@ from agentm.harness.extension import ExtensionAPI
 # --- Prompt names -----------------------------------------------------------
 #
 # These are the canonical keys the compaction engine and ``llm_compaction``
-# atom look up via ``api.prompt_templates.get_prompt``. Centralised here so
-# atom-side and engine-side stay in agreement.
+# atom look up via ``api.get_service("prompt_templates").get_prompt``.
+# Centralised here so atom-side and engine-side stay in agreement.
 
 PROMPT_SUMMARIZATION_SYSTEM = "compaction.summarization_system"
 PROMPT_SUMMARIZATION = "compaction.summarization"
@@ -263,7 +267,7 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": True,
     },
-    requires=(),  # Leaf atom: publishes prompt templates through api.prompt_templates.
+    requires=("prompt_templates",),
     provides_role=(COMPACTION_PROMPTS,),
 )
 
@@ -283,8 +287,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             config, "branch_summary_preamble", _BRANCH_SUMMARY_PREAMBLE
         ),
     }
+    registry = api.get_service("prompt_templates")
+    if registry is None:
+        raise RuntimeError(
+            "compaction_prompts atom requires the prompt_templates service "
+            "(install the prompt_templates atom first)"
+        )
     for name, body in bodies.items():
-        api.prompt_templates.register_prompt(name, body)
+        registry.register_prompt(name, body)
 
     # Module-level mutation: the registry on ``core.abi.session`` is shared
     # across the process. Multiple sessions installing the atom is harmless

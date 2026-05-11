@@ -31,6 +31,14 @@ manifest so the ``llm_compaction`` atom always finds the default English
 prompts.
 Default fulfiller: ``agentm.extensions.builtin.compaction_prompts``."""
 
+PROMPT_REGISTRY: Final = "prompt_registry"
+"""Atom that publishes the in-memory prompt registry (under service key
+``"prompt_templates"``) and the on-disk slash-template loader.
+
+Floor atom: present in every session because ``compaction_prompts`` and
+``llm_compaction`` resolve their bodies through it. Default fulfiller:
+``agentm.extensions.builtin.prompt_templates``."""
+
 SYSTEM_PROMPT_PROVIDER: Final = "system_prompt_provider"
 """Atom that prepends a system prompt at ``before_agent_start``.
 
@@ -73,6 +81,7 @@ __all__ = [
     "COMMAND_PARSER",
     "COMPACTION_PROMPTS",
     "PARENT_PROVIDER_CONFIG_KEY",
+    "PROMPT_REGISTRY",
     "PROVIDER_INHERITOR",
     "SLASH_COMMAND_DISPATCHER_SERVICE",
     "SUB_AGENT_RUNTIME",

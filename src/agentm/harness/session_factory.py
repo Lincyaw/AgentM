@@ -14,6 +14,7 @@ from agentm.core.abi.events import DiagnosticEvent
 from agentm.core.abi.roles import (
     COMMAND_PARSER,
     COMPACTION_PROMPTS,
+    PROMPT_REGISTRY,
     SLASH_COMMAND_DISPATCHER_SERVICE,
     SUB_AGENT_RUNTIME,
     SYSTEM_PROMPT_PROVIDER,
@@ -417,12 +418,14 @@ async def _resolve_extensions(
 
     command_parser_module = _role_module(COMMAND_PARSER)
     compaction_prompts_module = _role_module(COMPACTION_PROMPTS)
+    prompt_registry_module = _role_module(PROMPT_REGISTRY)
     system_prompt_module = _role_module(SYSTEM_PROMPT_PROVIDER)
     sub_agent_runtime_entry = roles.get(SUB_AGENT_RUNTIME)
     if config.no_extensions:
         to_load: list[tuple[str, dict[str, Any]]] = []
     elif config.extensions:
         to_load = list(config.extensions)
+        ensure_floor_atom(to_load, prompt_registry_module)
         ensure_floor_atom(to_load, compaction_prompts_module)
         ensure_floor_atom(to_load, command_parser_module)
     elif config.scenario is not None:
@@ -440,6 +443,7 @@ async def _resolve_extensions(
                 ),
             )
             to_load = []
+        ensure_floor_atom(to_load, prompt_registry_module)
         ensure_floor_atom(to_load, compaction_prompts_module)
         ensure_floor_atom(to_load, command_parser_module)
         # Layer ``<cwd>/.agentm/atoms/`` agent-installed atoms on top of the
