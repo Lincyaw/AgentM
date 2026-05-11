@@ -16,6 +16,7 @@ dependencies = [
     # TUI lived under src/agentm/modes/ — moved here in the
     # session-as-routing-primary refactor). Pulls Rich transitively.
     "textual>=0.85",
+    "typer>=0.25.1",
 ]
 
 [project.optional-dependencies]

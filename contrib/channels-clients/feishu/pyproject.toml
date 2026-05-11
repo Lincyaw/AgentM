@@ -14,6 +14,7 @@ dependencies = [
     "agentm-channels",
     "lark-oapi>=1.6",
     "python-dotenv>=1.0",
+    "typer>=0.25.1",
 ]
 
 [project.optional-dependencies]

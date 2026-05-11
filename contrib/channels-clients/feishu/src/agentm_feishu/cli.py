@@ -29,18 +29,19 @@ Examples::
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import logging
 import os
 import signal
 import sys
 import uuid
+import warnings
+from typing import Annotated
 from urllib.parse import urlparse
 
-from pathlib import Path
+import typer
 
-from agentm_channels import DEFAULT_SOCKET_URL, load_dotenv_files
+from agentm_channels import DEFAULT_SOCKET_URL, autoload_dotenv
 from agentm_channels.client import AuthError, WireClient
 from agentm_channels.wire import (
     KIND_BYE,
@@ -55,6 +56,9 @@ from agentm_channels.wire import (
 from . import __version__
 from .adapter import FeishuAdapter, FeishuConfig
 from .ws_patch import apply_ws_patch
+
+# Pull ``.env`` into ``os.environ`` before typer parses argv. Idempotent.
+autoload_dotenv()
 
 # -- Exit codes (cli-design rule group 3) ------------------------------
 
@@ -76,102 +80,14 @@ def _err(kind: str, root: str, fix: str) -> None:
     sys.stderr.flush()
 
 
-# -- argv --------------------------------------------------------------
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    epilog = (
-        "Examples:\n"
-        "  File-based secret (recommended):\n"
-        f"    {PROG} --connect unix:///tmp/gw.sock \\\n"
-        "      --app-id cli_xxxx \\\n"
-        "      --app-secret /run/secrets/feishu_app_secret\n"
-        "\n"
-        "  Env-based credentials:\n"
-        "    LARK_APP_ID=cli_xxxx LARK_APP_SECRET=... \\\n"
-        f"      {PROG} --connect unix:///tmp/gw.sock\n"
-    )
-    p = argparse.ArgumentParser(
-        prog=PROG,
-        description=(
-            "Feishu / Lark client for the AgentM channels gateway. "
-            "Connects over the v1 wire protocol (Unix socket) and "
-            "bridges Feishu events ↔ gateway envelopes."
-        ),
-        epilog=epilog,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p.add_argument(
-        "--connect",
-        default=DEFAULT_SOCKET_URL,
-        metavar="URL",
-        help=(
-            "Gateway socket URL. v1 supports only unix:///abs/path/to/sock; "
-            "other schemes are rejected with exit 2. "
-            f"Default: ``{DEFAULT_SOCKET_URL}`` "
-            "(matches `agentm-gateway`'s default)."
-        ),
-    )
-    p.add_argument(
-        "--app-id",
-        metavar="ID",
-        default=None,
-        help=(
-            "Feishu app id. Falls back to the LARK_APP_ID env variable; "
-            "missing → exit 2."
-        ),
-    )
-    p.add_argument(
-        "--app-secret",
-        metavar="PATH",
-        default=None,
-        help=(
-            "Path to a file containing the Feishu app secret. Required "
-            "unless LARK_APP_SECRET is set in the environment. The file "
-            "wins if both are present. Secrets are never accepted as "
-            "literal CLI values."
-        ),
-    )
-    p.add_argument(
-        "--allow-from",
-        action="append",
-        metavar="PATTERN",
-        default=None,
-        help=(
-            "Sender id allow-list for inbound (repeatable). Defaults to "
-            "['*'] (allow everyone) — set explicit ids to harden."
-        ),
-    )
-    p.add_argument(
-        "--chat-id-prefix",
-        default="feishu",
-        metavar="STR",
-        help="Channel name reported on inbound envelopes (default: feishu).",
-    )
-    p.add_argument(
-        "--check-config",
-        action="store_true",
-        help=(
-            "Validate flags / env and exit 0 without contacting the "
-            "gateway or Feishu. Useful for systemd unit smoke tests."
-        ),
-    )
-    p.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Raise log level on stderr to INFO (default: WARNING).",
-    )
-    p.add_argument(
-        "--version",
-        action="version",
-        version=f"{PROG} {__version__}",
-    )
-    return p
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"{PROG} {__version__}")
+        raise typer.Exit(code=EXIT_OK)
 
 
 def _parse_connect_url(url: str) -> str:
-    """Return the absolute socket path. Raises ``SystemExit(2)`` on
+    """Return the absolute socket path. Raises ``typer.Exit(2)`` on
     invalid input (scheme, missing path)."""
     parsed = urlparse(url)
     if parsed.scheme != "unix":
@@ -180,7 +96,7 @@ def _parse_connect_url(url: str) -> str:
             f"--connect scheme {parsed.scheme!r} is not supported",
             "use unix:///abs/path/to/sock (only unix:// is available in v1)",
         )
-        raise SystemExit(EXIT_USAGE)
+        raise typer.Exit(code=EXIT_USAGE)
     socket_path = parsed.path or parsed.netloc
     if not socket_path or not socket_path.startswith("/"):
         _err(
@@ -188,7 +104,7 @@ def _parse_connect_url(url: str) -> str:
             f"--connect URL {url!r} has no absolute socket path",
             "use unix:///abs/path/to/sock",
         )
-        raise SystemExit(EXIT_USAGE)
+        raise typer.Exit(code=EXIT_USAGE)
     return socket_path
 
 
@@ -204,55 +120,244 @@ def _load_app_secret(path: str | None) -> str | None:
                 f"cannot read --app-secret file {path!r}: {exc.strerror or exc}",
                 "check the path and read permission",
             )
-            raise SystemExit(EXIT_USAGE) from exc
+            raise typer.Exit(code=EXIT_USAGE) from exc
         if not secret:
             _err(
                 "bad-argument",
                 f"--app-secret file {path!r} is empty",
                 "write the secret into the file (no trailing newline required)",
             )
-            raise SystemExit(EXIT_USAGE)
+            raise typer.Exit(code=EXIT_USAGE)
         return secret
     env_secret = os.environ.get("LARK_APP_SECRET", "").strip()
     return env_secret or None
 
 
-def _resolve_config(args: argparse.Namespace) -> FeishuConfig:
+def _resolve_config(
+    *,
+    app_id: str | None,
+    app_secret_path: str | None,
+    allow_from: list[str] | None,
+    chat_id_prefix: str,
+) -> FeishuConfig:
     """Materialize the adapter config or exit 2."""
-    app_id = args.app_id or os.environ.get("LARK_APP_ID", "").strip()
-    if not app_id:
+    resolved_app_id = app_id or os.environ.get("LARK_APP_ID", "").strip()
+    if not resolved_app_id:
         _err(
             "bad-argument",
             "missing --app-id (and no LARK_APP_ID in env)",
             "pass --app-id cli_xxxx or set LARK_APP_ID",
         )
-        raise SystemExit(EXIT_USAGE)
-    app_secret = _load_app_secret(args.app_secret)
-    if not app_secret:
+        raise typer.Exit(code=EXIT_USAGE)
+    resolved_app_secret = _load_app_secret(app_secret_path)
+    if not resolved_app_secret:
         _err(
             "bad-argument",
             "missing app secret (no --app-secret file and LARK_APP_SECRET empty)",
             "pass --app-secret PATH or set LARK_APP_SECRET",
         )
-        raise SystemExit(EXIT_USAGE)
-    allow_from = list(args.allow_from) if args.allow_from else ["*"]
+        raise typer.Exit(code=EXIT_USAGE)
     return FeishuConfig(
-        app_id=app_id,
-        app_secret=app_secret,
-        allow_from=allow_from,
-        chat_id_prefix=args.chat_id_prefix,
-        channel_name=args.chat_id_prefix,
+        app_id=resolved_app_id,
+        app_secret=resolved_app_secret,
+        allow_from=list(allow_from) if allow_from else ["*"],
+        chat_id_prefix=chat_id_prefix,
+        channel_name=chat_id_prefix,
     )
+
+
+# -- lark logging hygiene ----------------------------------------------
+
+
+def _install_lark_log_filters() -> None:
+    """Tame two known shutdown-noise sources from lark_oapi.
+
+    Idempotent: the filter classes are unique-per-call but installing
+    them twice on the same logger is harmless — they're cheap predicates.
+    """
+
+    class _LarkCleanCloseFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            if record.levelno == logging.ERROR and "1000 (OK)" in record.getMessage():
+                record.levelno = logging.INFO
+                record.levelname = "INFO"
+            return True
+
+    logging.getLogger("Lark").addFilter(_LarkCleanCloseFilter())
+
+    class _LarkOrphanTaskFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            message = record.getMessage()
+            if "lark_oapi" in message and "Task was destroyed" in message:
+                return False
+            return True
+
+    logging.getLogger("asyncio").addFilter(_LarkOrphanTaskFilter())
+
+    warnings.filterwarnings(
+        "ignore",
+        message=r"coroutine 'ExpiringCache\._start_clear_cron' was never awaited",
+        category=RuntimeWarning,
+    )
+
+
+# -- typer app ---------------------------------------------------------
+
+app = typer.Typer(
+    name=PROG,
+    add_completion=False,
+    rich_markup_mode=None,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+
+
+@app.command()
+def cli(
+    connect: Annotated[
+        str,
+        typer.Option(
+            "--connect",
+            envvar="AGENTM_SOCKET",
+            metavar="URL",
+            help=(
+                "Gateway socket URL. v1 supports only unix:///abs/path/to/sock; "
+                "other schemes are rejected with exit 2. Default: shared with "
+                "`agentm-gateway`. Env: AGENTM_SOCKET."
+            ),
+        ),
+    ] = DEFAULT_SOCKET_URL,
+    app_id: Annotated[
+        str | None,
+        typer.Option(
+            "--app-id",
+            envvar="LARK_APP_ID",
+            metavar="ID",
+            help=(
+                "Feishu app id. Falls back to the LARK_APP_ID env variable; "
+                "missing → exit 2."
+            ),
+        ),
+    ] = None,
+    app_secret: Annotated[
+        str | None,
+        typer.Option(
+            "--app-secret",
+            metavar="PATH",
+            help=(
+                "Path to a file containing the Feishu app secret. Required "
+                "unless LARK_APP_SECRET is set in the environment. The file "
+                "wins if both are present. Secrets are never accepted as "
+                "literal CLI values."
+            ),
+        ),
+    ] = None,
+    allow_from: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allow-from",
+            metavar="PATTERN",
+            help=(
+                "Sender id allow-list for inbound (repeatable). Defaults "
+                "to ['*'] (allow everyone) — set explicit ids to harden."
+            ),
+        ),
+    ] = None,
+    chat_id_prefix: Annotated[
+        str,
+        typer.Option(
+            "--chat-id-prefix",
+            metavar="STR",
+            help="Channel name reported on inbound envelopes (default: feishu).",
+        ),
+    ] = "feishu",
+    check_config: Annotated[
+        bool,
+        typer.Option(
+            "--check-config",
+            help=(
+                "Validate flags / env and exit 0 without contacting the "
+                "gateway or Feishu. Useful for systemd unit smoke tests."
+            ),
+        ),
+    ] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose",
+            "-v",
+            help="Raise log level on stderr to INFO (default: WARNING).",
+        ),
+    ] = False,
+    _version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            is_eager=True,
+            callback=_version_callback,
+            help="Print version and exit.",
+        ),
+    ] = False,
+) -> None:
+    """Feishu / Lark client for the AgentM channels gateway.
+
+    Connects over the v1 wire protocol (Unix socket) and bridges
+    Feishu events ↔ gateway envelopes.
+
+    Examples:
+
+      File-based secret (recommended):
+        agentm-feishu --connect unix:///tmp/gw.sock \\
+          --app-id cli_xxxx \\
+          --app-secret /run/secrets/feishu_app_secret
+
+      Env-based credentials:
+        LARK_APP_ID=cli_xxxx LARK_APP_SECRET=... \\
+          agentm-feishu --connect unix:///tmp/gw.sock
+    """
+    logging.basicConfig(
+        level=logging.INFO if verbose else logging.WARNING,
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    _install_lark_log_filters()
+
+    try:
+        rc = asyncio.run(
+            _arun(
+                connect=connect,
+                app_id=app_id,
+                app_secret_path=app_secret,
+                allow_from=allow_from,
+                chat_id_prefix=chat_id_prefix,
+                check_config=check_config,
+            )
+        )
+    except KeyboardInterrupt:
+        rc = EXIT_SIGINT
+    raise typer.Exit(code=rc)
 
 
 # -- async run loop ----------------------------------------------------
 
 
-async def _arun(args: argparse.Namespace) -> int:
-    socket_path = _parse_connect_url(args.connect)
-    cfg = _resolve_config(args)
+async def _arun(
+    *,
+    connect: str,
+    app_id: str | None,
+    app_secret_path: str | None,
+    allow_from: list[str] | None,
+    chat_id_prefix: str,
+    check_config: bool,
+) -> int:
+    socket_path = _parse_connect_url(connect)
+    cfg = _resolve_config(
+        app_id=app_id,
+        app_secret_path=app_secret_path,
+        allow_from=allow_from,
+        chat_id_prefix=chat_id_prefix,
+    )
 
-    if args.check_config:
+    if check_config:
         return EXIT_OK
 
     peer_id = f"feishu-{uuid.uuid4().hex[:8]}"
@@ -310,25 +415,21 @@ async def _arun(args: argparse.Namespace) -> int:
     except (FileNotFoundError, ConnectionRefusedError) as exc:
         _err(
             "connect-failed",
-            f"cannot connect to {args.connect!r} ({exc.__class__.__name__})",
+            f"cannot connect to {connect!r} ({exc.__class__.__name__})",
             "is the gateway running with --bind on that path",
         )
         return EXIT_CONNECT
     except OSError as exc:
         _err(
             "connect-failed",
-            f"cannot connect to {args.connect!r}: {exc.strerror or exc}",
+            f"cannot connect to {connect!r}: {exc.strerror or exc}",
             "check the socket path and gateway state",
         )
         return EXIT_CONNECT
 
-    # Apply WS patch *before* constructing the adapter — the patch
-    # rebinds ``lark_oapi.ws.client.loop`` and the adapter's
-    # ``FeishuChannel`` constructor latches onto that module global.
     apply_ws_patch()
     adapter = FeishuAdapter(client=client, config=cfg)
 
-    # Install signal handlers for clean shutdown.
     sigint_seen = False
 
     def _on_sigint() -> None:
@@ -353,19 +454,14 @@ async def _arun(args: argparse.Namespace) -> int:
             [adapter_task, stop_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
-        # If the adapter task crashed (e.g. invalid Feishu credentials)
-        # surface the exception class as an auth failure.
         if adapter_task in done and adapter_task.exception() is not None:
             adapter_exc = adapter_task.exception()
-            assert adapter_exc is not None  # for mypy
+            assert adapter_exc is not None
             _err(
                 "feishu-error",
                 f"adapter failed: {adapter_exc.__class__.__name__}: {adapter_exc}",
                 "check --app-id / --app-secret and Feishu app status",
             )
-            # Distinguish credential / handshake failures from generic
-            # crashes by class name — lark_oapi raises connect errors
-            # without a dedicated type, so this is the best we can do.
             return EXIT_AUTH
         for t in pending:
             t.cancel()
@@ -384,75 +480,10 @@ async def _arun(args: argparse.Namespace) -> int:
 # -- entrypoint --------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
-    # Pick up LARK_APP_ID / LARK_APP_SECRET etc. from a .env in the
-    # caller's cwd (or the workspace root) before arg parsing — matches
-    # what agentm-gateway does.
-    load_dotenv_files(Path.cwd())
-    parser = _build_parser()
-    try:
-        args = parser.parse_args(list(argv) if argv is not None else sys.argv[1:])
-    except SystemExit as exc:
-        if isinstance(exc.code, int):
-            return EXIT_USAGE if exc.code == 2 else int(exc.code)
-        return EXIT_USAGE
-
-    logging.basicConfig(
-        level=logging.INFO if args.verbose else logging.WARNING,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
-    # lark-oapi logs the recv loop's clean WebSocket close as ERROR
-    # ("receive message loop exit, err: sent 1000 (OK); ...") which
-    # looks like a crash but isn't — 1000 is "Normal Closure". Downgrade
-    # those specific lines to INFO so operators don't get spooked.
-    class _LarkCleanCloseFilter(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            if record.levelno == logging.ERROR and "1000 (OK)" in record.getMessage():
-                record.levelno = logging.INFO
-                record.levelname = "INFO"
-            return True
-
-    logging.getLogger("Lark").addFilter(_LarkCleanCloseFilter())
-
-    # asyncio yells "Task was destroyed but it is pending!" for the
-    # background tasks lark spawns on its private (daemon-thread) loop.
-    # See ``adapter._cancel_lark_tasks`` for the full diagnosis — those
-    # tasks have no actual remediation, they're already cancelled and
-    # the daemon thread dies with the process. Suppress the line so
-    # operators don't see a wall of red on Ctrl-C.
-    class _LarkOrphanTaskFilter(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            message = record.getMessage()
-            if "lark_oapi" in message and "Task was destroyed" in message:
-                return False
-            return True
-
-    logging.getLogger("asyncio").addFilter(_LarkOrphanTaskFilter())
-
-    # And one more orphan: lark's ``ExpiringCache._start_clear_cron``
-    # coroutine never gets awaited because the task wrapping it dies
-    # with the daemon thread. Python prints this through the warnings
-    # module (not logging), so the asyncio filter above doesn't catch
-    # it — file a dedicated filterwarnings entry.
-    import warnings
-
-    warnings.filterwarnings(
-        "ignore",
-        message=r"coroutine 'ExpiringCache\._start_clear_cron' was never awaited",
-        category=RuntimeWarning,
-    )
-
-    try:
-        return asyncio.run(_arun(args))
-    except KeyboardInterrupt:
-        return EXIT_SIGINT
-    except SystemExit as exc:
-        if isinstance(exc.code, int):
-            return exc.code
-        return EXIT_GENERIC
+def main() -> None:
+    """Entry point referenced by the ``agentm-feishu`` console script."""
+    app()
 
 
 if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())
+    main()

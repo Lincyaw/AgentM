@@ -23,6 +23,30 @@ from pathlib import Path
 
 __version__ = "0.1.0"
 
+_dotenv_loaded: bool = False
+
+
+def autoload_dotenv() -> None:
+    """Idempotent ``.env`` autoload for CLI entry points.
+
+    Must be called **at module-import time** in every CLI under
+    ``agentm-channels`` / ``agentm-channels-clients`` so that
+    environment variables (``AGENTM_PROVIDER``, ``LARK_APP_ID``, …)
+    are visible by the time typer / argparse evaluates option
+    defaults (including ``envvar=...``). Subsequent calls are no-ops.
+
+    Opt-out: set ``AGENTM_SKIP_DOTENV=1`` to disable autoloading
+    entirely. Tests rely on this to keep the repo's own ``.env`` out
+    of their fixture environment.
+    """
+    global _dotenv_loaded
+    if _dotenv_loaded:
+        return
+    _dotenv_loaded = True
+    if os.environ.get("AGENTM_SKIP_DOTENV"):
+        return
+    load_dotenv_files(Path.cwd())
+
 
 def load_dotenv_files(cwd: Path) -> None:
     """Best-effort ``.env`` autoload for any channels CLI.
