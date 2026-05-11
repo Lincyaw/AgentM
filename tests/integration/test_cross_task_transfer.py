@@ -107,7 +107,7 @@ async def test_transfer_plants_candidate_in_sibling_scenario(
     tmp_path: Path,
 ) -> None:
     """A successful atom_source activate in ``rca`` writes a candidate to
-    ``plan_mode``'s candidates/ directory carrying ``transferred_from='rca'``.
+    ``review_mode``'s candidates/ directory carrying ``transferred_from='rca'``.
     The sibling's activations.jsonl is not touched — transfer never deploys.
     """
     # Source scenario: real on-disk atom so cross-session resolution works.
@@ -155,7 +155,7 @@ async def test_transfer_plants_candidate_in_sibling_scenario(
                     "agentm.extensions.builtin.tool_propose_change",
                     {
                         "target_scenario": "rca",
-                        "transfer_to": ["plan_mode", "general_purpose"],
+                        "transfer_to": ["review_mode", "general_purpose"],
                     },
                 ),
             ],
@@ -182,11 +182,11 @@ async def test_transfer_plants_candidate_in_sibling_scenario(
         assert payload["status"] == "activate"
         # The atom message reports which siblings got transferred candidates.
         transferred = payload.get("transferred") or []
-        assert any(s.startswith("plan_mode:") for s in transferred), transferred
+        assert any(s.startswith("review_mode:") for s in transferred), transferred
         assert any(s.startswith("general_purpose:") for s in transferred), transferred
 
         # Destination candidates exist and carry transfer metadata.
-        for sibling in ("plan_mode", "general_purpose"):
+        for sibling in ("review_mode", "general_purpose"):
             cand_dir = (
                 tmp_path / ".agentm" / "decisions" / sibling / "candidates"
             )
@@ -274,7 +274,7 @@ async def test_transfer_skipped_for_non_atom_source(tmp_path: Path) -> None:
                     "agentm.extensions.builtin.tool_propose_change",
                     {
                         "target_scenario": "rca",
-                        "transfer_to": ["plan_mode"],
+                        "transfer_to": ["review_mode"],
                     },
                 ),
             ],
@@ -298,7 +298,7 @@ async def test_transfer_skipped_for_non_atom_source(tmp_path: Path) -> None:
         )
         # Whether the gate passes is incidental; what matters is no transfer
         # was planted regardless of outcome.
-        sibling_dir = tmp_path / ".agentm" / "decisions" / "plan_mode"
+        sibling_dir = tmp_path / ".agentm" / "decisions" / "review_mode"
         if result.is_error is False:
             payload = json.loads(result.content[0].text)
             assert payload.get("transferred") in ([], None), payload

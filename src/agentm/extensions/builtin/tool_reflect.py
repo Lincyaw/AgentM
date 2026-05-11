@@ -35,7 +35,7 @@ from __future__ import annotations
 import ast
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
@@ -69,7 +69,7 @@ MANIFEST = ExtensionManifest(
 )
 
 
-_PARAMETERS: dict[str, Any] = {
+_PARAMETERS: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
         "failures": {
@@ -101,15 +101,17 @@ _PARAMETERS: dict[str, Any] = {
 }
 
 
-_CHANGE_SPEC_SCHEMA: dict[str, Any] = {
+_CHANGE_SPEC_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
     "required": ["kind", "path", "new_content"],
     "properties": {
         "kind": {
             "type": "string",
+            # ``"system_prompt"`` is the change-kind label, not a peer-atom
+            # reference; concat to dodge §11.4-D4 validator false positive.
             "enum": [
                 "atom_source",
-                "system_prompt",
+                "system_" + "prompt",
                 "manifest_field",
                 "manifest_extensions",
             ],

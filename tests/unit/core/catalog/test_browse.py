@@ -164,19 +164,19 @@ def test_runs_for_intersects_trace_symlink_sets_by_git_sha(tmp_path: Path) -> No
         )
 
     tool_read_runs = _layout.atom_runs_dir("tool_read", first_sha, root=tmp_path)
-    tool_find_runs = _layout.atom_runs_dir("tool_find", second_sha, root=tmp_path)
+    tool_write_runs = _layout.atom_runs_dir("tool_write", second_sha, root=tmp_path)
     tool_read_runs.mkdir(parents=True, exist_ok=True)
-    tool_find_runs.mkdir(parents=True, exist_ok=True)
+    tool_write_runs.mkdir(parents=True, exist_ok=True)
 
     os.symlink(trace_root / "trace-1.jsonl", tool_read_runs / "trace-1")
     os.symlink(trace_root / "trace-2.jsonl", tool_read_runs / "trace-2")
-    os.symlink(trace_root / "trace-2.jsonl", tool_find_runs / "trace-2")
+    os.symlink(trace_root / "trace-2.jsonl", tool_write_runs / "trace-2")
 
     assert runs_for(
         {
             "atoms": {
                 "tool_read": f"tool_read@{first_sha}",
-                "tool_find": f"tool_find@{second_sha}",
+                "tool_write": f"tool_write@{second_sha}",
             }
         },
         tmp_path,

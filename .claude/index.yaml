@@ -83,7 +83,7 @@ concepts:
     tasks: []
 
   operations_ports:
-    description: "FileOperations / BashOperations Protocols in src/agentm/core/abi/operations.py + LocalFileOperations / LocalBashOperations defaults in src/agentm/core/_internal/operations_impl.py. The environment boundary is hybrid after issue #89: read-only file atoms (tool_read, tool_grep, tool_find, tool_ls) consume FileOperations through ExtensionAPI operations, write atoms (tool_write, tool_edit) consume ResourceWriter as the single mutation chokepoint, and tool_bash consumes BashOperations. In v0 Operations is a constitution-only axis: the harness injects the bundle at session construction, and atoms consume but do not replace it at runtime."
+    description: "FileOperations / BashOperations Protocols in src/agentm/core/abi/operations.py + LocalFileOperations / LocalBashOperations defaults in src/agentm/core/_internal/operations_impl.py. The environment boundary is hybrid after issue #89: read-only file atom (tool_read) consumes FileOperations through ExtensionAPI operations, write atoms (tool_write, tool_edit) consume ResourceWriter as the single mutation chokepoint, and tool_bash consumes BashOperations (which subsumes ls/find/grep — those dedicated atoms were removed in favour of shell composition). In v0 Operations is a constitution-only axis: the harness injects the bundle at session construction, and atoms consume but do not replace it at runtime."
     design: "designs/extension-as-scenario.md#10b6"
     related_concepts: [pluggable_architecture, extension_as_scenario]
     plans: [plans/2026-05-09-issue-80-abi-prep.md]
@@ -104,7 +104,7 @@ concepts:
     tasks: []
 
   search_tools:
-    description: "Three new tool atoms — tool_grep, tool_find, tool_ls — implemented with stdlib+pathspec behind the shared FileOperations read seam, .gitignore-aware where search semantics require it, with deterministic byte/line truncation. The tools do not expose bespoke per-tool operations protocols; SSH/sandbox/in-memory scenarios swap FileOperations, matching issue #89 Option C. Adds shared core/lib/text_truncate.py and core/lib/path_utils.py modules. Pi-mono-inspired port of tools/{grep,find,ls,truncate,path-utils}.ts."
+    description: "[HISTORICAL — tool_grep/tool_find/tool_ls atoms were removed in favour of shell composition via tool_bash, GenericAgent-style. Default scenario now ships only tool_read + tool_bash for navigation/search. designs/search-tools.md is kept for context on the .gitignore-aware truncation helpers, which still live in core/lib/text_truncate.py + core/lib/path_utils.py.]"
     design: "designs/search-tools.md"
     related_concepts: [edit_diff, tool_event_narrowing, extension_as_scenario, operations_ports, pluggable_architecture]
     plans: []
