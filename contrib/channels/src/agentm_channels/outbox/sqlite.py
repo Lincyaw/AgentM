@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Callable
 from typing import Any
 
 from agentm_channels.wire import Envelope
@@ -82,12 +83,51 @@ def _open(path: str) -> sqlite3.Connection:
 class SqliteOutbox:
     """Default OutboxStore implementation. See module docstring."""
 
-    def __init__(self, path: str, *, lease_ttl: float = LEASE_TTL_SECONDS) -> None:
+    def __init__(
+        self,
+        path: str,
+        *,
+        lease_ttl: float = LEASE_TTL_SECONDS,
+        backoff: Callable[[int], float] | None = None,
+    ) -> None:
         self._path = path
         self._lease_ttl = lease_ttl
         self._lock = threading.Lock()
         self._conn: sqlite3.Connection | None = _open(path)
         self._conn.executescript(_OUTBOX_SCHEMA)
+        # Optional retry-delay policy. The store doesn't use it
+        # internally — callers (server delivery loop) call
+        # :meth:`backoff_delay` to compute ``next_retry_at`` and pass it
+        # to ``nack``. Kept as injected state so tests can replace the
+        # policy without monkey-patching module globals.
+        from .policy import exponential_backoff as _default_backoff
+        self._backoff: Callable[[int], float] = backoff or _default_backoff
+        # Per-peer wakeup notifier registered by the server.
+        self._notifiers: dict[str, Callable[[str], None]] = {}
+
+    def set_notifier(
+        self, peer_id: str, notifier: Callable[[str], None] | None
+    ) -> None:
+        """Register/clear a wakeup callback for ``peer_id``.
+
+        Called by :class:`WireServer` so ``enqueue`` can wake the
+        delivery worker immediately instead of waiting on the
+        ``LEASE_REFRESH_INTERVAL`` poll. ``None`` clears the entry.
+        """
+        with self._lock:
+            if notifier is None:
+                self._notifiers.pop(peer_id, None)
+            else:
+                self._notifiers[peer_id] = notifier
+
+    def backoff_delay(self, attempts: int) -> float:
+        """Compute the retry delay for ``attempts`` failures.
+
+        Indirection so callers don't import ``exponential_backoff``
+        directly and tests can pin a fast schedule via the ``backoff``
+        constructor arg.
+        """
+        return self._backoff(attempts)
 
     # -- internal -----------------------------------------------------
 
@@ -109,6 +149,16 @@ class SqliteOutbox:
                 "VALUES (?, ?, ?, 0, ?, 0, 0)",
                 (peer_id, env.id, payload, env.ts),
             )
+            notifier = self._notifiers.get(peer_id)
+        # Fire the notifier *outside* the lock — the callback is
+        # responsible for being non-blocking and thread-safe (the
+        # server bounces it through loop.call_soon_threadsafe).
+        if notifier is not None:
+            try:
+                notifier(peer_id)
+            except Exception:  # noqa: BLE001
+                # A misbehaving notifier must not break enqueue.
+                pass
 
     def lease(
         self, peer_id: str, batch_max: int, now: float

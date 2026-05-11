@@ -129,6 +129,31 @@ class ChannelManager:
                 task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
+    def inject_channel(self, name: str, channel: BaseChannel) -> None:
+        """Register an externally-constructed channel and start it.
+
+        Used by :class:`WireBridge` to splice in a synthetic per-peer
+        channel that forwards outbound to the wire instead of running
+        its own loop. Public so callers don't have to reach into
+        ``_channels`` / ``_tasks``.
+
+        Raises :class:`ValueError` if ``name`` is already registered —
+        the wire bridge is expected to drop the prior synthetic channel
+        first when a peer renames itself (see
+        :meth:`WireBridge._ensure_channel`).
+        """
+        if name in self._channels:
+            raise ValueError(f"channel {name!r} already registered")
+        self._channels[name] = channel
+        # Start eagerly so the channel's lifecycle is symmetric with
+        # the config-discovered ones. ``_safe_start`` is reused so any
+        # exception in ``start()`` is logged but does not crash the
+        # caller — same contract as :meth:`start`.
+        task = asyncio.create_task(
+            self._safe_start(channel), name=f"ch-{name}"
+        )
+        self._tasks.append(task)
+
     async def _safe_start(self, ch: BaseChannel) -> None:
         try:
             await ch.start()
