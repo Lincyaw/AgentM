@@ -39,6 +39,7 @@ from agentm_channels.wire import (
     KIND_BYE,
     KIND_ERROR,
     KIND_INBOUND,
+    KIND_OUTBOUND,
     Envelope,
 )
 
@@ -244,16 +245,24 @@ async def _arun(args: argparse.Namespace) -> int:
     runner_ref: dict[str, WorkerRunner] = {}
 
     async def on_outbound(env: Envelope) -> None:
-        # The gateway forwards inbound work as ``KIND_INBOUND`` even
-        # though we are technically "subscribed" — workers receive
-        # work, they don't receive replies. We treat ``KIND_OUTBOUND``
-        # as a defensive no-op (the gateway has no reason to send one).
+        # The gateway forwards inbound work as ``KIND_INBOUND``. With
+        # Phase 6 A2A support, the gateway *also* routes
+        # ``KIND_OUTBOUND`` envelopes back to this worker when a peer
+        # delivers a reply to one of our ``peer_send`` calls — match by
+        # ``correlation_id`` in the runner's pending-replies map.
         if env.kind == KIND_INBOUND:
             runner = runner_ref.get("r")
             if runner is None:
                 log.warning("inbound id=%s arrived before runner ready", env.id)
                 return
             await runner.handle_inbound_envelope(env)
+            return
+        if env.kind == KIND_OUTBOUND:
+            runner = runner_ref.get("r")
+            if runner is None:
+                log.warning("outbound id=%s arrived before runner ready", env.id)
+                return
+            await runner.handle_outbound_envelope(env)
             return
         if env.kind == KIND_BYE:
             log.info("gateway sent BYE; shutting down")

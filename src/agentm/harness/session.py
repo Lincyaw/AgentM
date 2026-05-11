@@ -160,6 +160,20 @@ class AgentSession:
     def get_service(self, name: str) -> Any | None:
         return self._services.get(name)
 
+    def set_service(self, name: str, obj: Any) -> None:
+        """Publish a host-supplied service into the session's registry.
+
+        Mirrors :meth:`ExtensionAPI.set_service` but is callable from the
+        embedding process (the harness host), not just from inside an
+        atom. Used by ``agentm-worker`` to inject a ``peer_messaging``
+        handle so the optional ``tool_peer_send`` atom can call out to
+        the gateway. Refuses to clobber an existing entry — keep service
+        ownership unambiguous (matches the atom-side contract).
+        """
+        if name in self._services:
+            raise KeyError(f"service {name!r} is already registered")
+        self._services[name] = obj
+
     @property
     def tool_renderers(self) -> dict[str, Any]:
         return {

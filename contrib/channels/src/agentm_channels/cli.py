@@ -72,7 +72,7 @@ from .gateway import Gateway, GatewayConfig
 from .manager import ChannelManager
 from .outbox import SqliteInbox, SqliteOutbox
 from .server import WireServer
-from .wire_bridge import WireBridge
+from .wire_bridge import DEFAULT_MAX_A2A_HOPS, WireBridge
 
 
 def _default_provider() -> str:
@@ -398,6 +398,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--max-a2a-hops",
+        type=int,
+        default=DEFAULT_MAX_A2A_HOPS,
+        metavar="N",
+        help=(
+            "Maximum agent-to-agent hop count for forwarded inbound "
+            "envelopes. Each forward through the gateway increments "
+            "the hop counter; envelopes that would exceed this cap are "
+            f"dropped and a hop_limit_exceeded error is returned to the "
+            f"sender. Default: {DEFAULT_MAX_A2A_HOPS}."
+        ),
+    )
+    p.add_argument(
         "--check",
         action="store_true",
         help=(
@@ -576,6 +589,9 @@ async def _arun(args: argparse.Namespace) -> int:
             outbox=wire_outbox,
             scenario=args.scenario or cfg.get("scenario") or "",
             allow_inproc=bool(getattr(args, "inproc_worker", True)),
+            max_a2a_hops=int(
+                getattr(args, "max_a2a_hops", DEFAULT_MAX_A2A_HOPS)
+            ),
         )
         authenticator = UnixPeerCredAuthenticator(
             allowed_uids=set(bind_spec.allow_uids)
