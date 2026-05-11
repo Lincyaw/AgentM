@@ -32,6 +32,20 @@ Phase 2 (auditor) every k turns (v3, commit 4):
   ``events`` / ``edges`` are bridged to the new ``get_event_detail``
   tool atom via the ``config`` dict (commit-3 pattern).
 * Persist the verdict and (if ``surface_reminder``) queue the reminder.
+
+Reminder delivery (unified path):
+* All queued reminders are drained on :class:`DecideTurnActionEvent`.
+* Mid-trajectory turn (kernel default ``Step``): handler returns
+  ``Inject([reminder_msgs])`` — extends ``messages`` and continues, same
+  visible effect as appending a synthetic user message before the next
+  LLM call.
+* Terminal turn (kernel default ``Stop`` with non-final cause, e.g.
+  ``ToolTerminated`` from ``submit_final_report`` / ``ModelEndTurn``):
+  handler returns ``Inject([reminder_msgs])`` which overrides the stop
+  and re-opens the loop so the model sees the reminder + may revise.
+* Final-cause stops (``MaxTurnsExhausted`` / ``SignalAborted`` / etc.)
+  ignore overrides; the handler logs a warning and leaves the reminder
+  pending — there is no safe way to re-open the loop in that case.
 """
 
 from __future__ import annotations
@@ -46,7 +60,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
-from agentm.core.abi import BeforeSendToLlmEvent, TurnEndEvent
+from agentm.core.abi import (
+    DecideTurnActionEvent,
+    Inject,
+    LoopAction,
+    Stop,
+    TurnEndEvent,
+)
 from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
@@ -96,15 +116,17 @@ MANIFEST = ExtensionManifest(
         "with witness-based edge construction and an every-k-turns graph "
         "auditor (Phase 2). ``mode='async'`` (default) runs audit on a "
         "background worker so the main agent loop is never blocked; verdicts "
-        "arrive as synthetic user messages on the next before_send_to_llm and "
-        "the session_shutdown handler drains the queue. ``mode='sync'`` runs "
+        "arrive as synthetic user messages via decide_turn_action.Inject "
+        "(extending Step turns and overriding non-final Stop terminations so "
+        "a terminal-turn reminder re-opens the loop), and the "
+        "session_shutdown handler drains the queue. ``mode='sync'`` runs "
         "audit inline at turn_end — slower but guarantees every turn has "
         "paired audit data, suitable for dataset collection / offline "
         "distillation."
     ),
     registers=(
         "event:turn_end",
-        "event:before_send_to_llm",
+        "event:decide_turn_action",
         "event:session_shutdown",
     ),
     config_schema={
@@ -141,7 +163,7 @@ MANIFEST = ExtensionManifest(
     },
     affects=(
         "event:turn_end",
-        "event:before_send_to_llm",
+        "event:decide_turn_action",
         "event:session_shutdown",
     ),
     api_version=1,
@@ -374,7 +396,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
         api.on(TurnEndEvent.CHANNEL, _on_turn_end_sync)
         api.on(
-            BeforeSendToLlmEvent.CHANNEL,
+            DecideTurnActionEvent.CHANNEL,
             _make_reminder_injector(api, pending_reminders),
         )
         return
@@ -408,7 +430,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         if (turn_count % k) == 0:
             queue.put_nowait(_AuditorJob(messages=messages_snapshot))
 
-    _on_before_send_to_llm = _make_reminder_injector(api, pending_reminders)
+    _on_decide_inject = _make_reminder_injector(api, pending_reminders)
 
     async def _on_session_shutdown(_event: SessionShutdownEvent) -> None:
         if worker_task is None or worker_task.done():
@@ -430,7 +452,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             _logger.exception("llmharness audit worker raised on shutdown")
 
     api.on(TurnEndEvent.CHANNEL, _on_turn_end)
-    api.on(BeforeSendToLlmEvent.CHANNEL, _on_before_send_to_llm)
+    api.on(DecideTurnActionEvent.CHANNEL, _on_decide_inject)
     api.on(SessionShutdownEvent.CHANNEL, _on_session_shutdown)
 
 
@@ -459,12 +481,39 @@ def _parse_provider_spec(
 
 def _make_reminder_injector(
     api: ExtensionAPI, pending_reminders: list[Reminder]
-) -> Callable[[BeforeSendToLlmEvent], None]:
-    def _inject(event: BeforeSendToLlmEvent) -> None:
+) -> Callable[[DecideTurnActionEvent], LoopAction | None]:
+    """Drain pending reminders into the loop via DecideTurnAction.
+
+    Unified path: a reminder produced mid-trajectory (default action would
+    have been ``Step``) becomes ``Inject(reminder_msgs)`` and the loop
+    extends ``messages`` and continues — identical visible behavior to
+    appending the reminder before the next LLM call. A reminder produced
+    on the terminal turn (default action is ``Stop(non_final_cause)``)
+    likewise becomes ``Inject``, which overrides the kernel's stop and
+    re-opens the loop so the model sees the reminder + can revise. Stops
+    flagged ``cause.final`` (kernel-imposed terminations like
+    MaxTurnsExhausted / SignalAborted) ignore overrides; we leave the
+    reminder pending and warn — there is no safe way to re-open then.
+    """
+
+    def _on_decide(event: DecideTurnActionEvent) -> LoopAction | None:
+        if not pending_reminders:
+            return None
+        default = event.observation.default_action
+        if isinstance(default, Stop) and default.cause.final:
+            _logger.warning(
+                "llmharness audit reminder pending but loop default is "
+                "final %s; reminder will not be delivered",
+                type(default.cause).__name__,
+            )
+            return None
+        injected: list[AgentMessage] = []
         while pending_reminders:
             reminder = pending_reminders.pop(0)
-            event.messages.append(
-                text_message(_REMINDER_PREAMBLE + reminder.text, timestamp=time.time())
+            injected.append(
+                text_message(
+                    _REMINDER_PREAMBLE + reminder.text, timestamp=time.time()
+                )
             )
             try:
                 api.session.append_entry(
@@ -473,8 +522,9 @@ def _make_reminder_injector(
                 )
             except Exception:
                 _logger.exception("failed to persist reminder_delivered entry")
+        return Inject(messages=injected)
 
-    return _inject
+    return _on_decide
 
 
 async def _drain_queue(

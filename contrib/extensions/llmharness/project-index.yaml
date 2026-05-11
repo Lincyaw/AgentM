@@ -541,6 +541,77 @@ requirements:
       - tests/test_reference_check_atoms.py
     depends_on: [REQ-001, REQ-029]
 
+  - id: REQ-033
+    title: Extractor refs are required (genesis exception for id=1)
+    description: |
+      Tighten the v3.1 single-tool extractor contract so the auditor
+      always receives a connected graph from each firing.
+
+      ``submit_events`` JSON Schema now lists ``refs`` in the per-event
+      ``required`` array — the field must always be present (may still
+      be an empty array, see exception). ``ExtractionState.commit``
+      additionally rejects empty refs on any event with ``id >= 2``
+      with a hard error string, so the LLM gets a corrective tool
+      result and may retry within the caller's attempt budget.
+
+      Genesis exception: events[0] (``id=1``) has no in-window
+      predecessor (refs may only point to earlier events in THIS
+      firing, not into prior firings' recent_graph), so empty refs is
+      legitimate and accepted.
+
+      Motivation: rca:harness.sync E2E (2026-05-11) showed late
+      extractor firings producing 3 events with refs=[] on every
+      event; the resulting graph was disconnected and the auditor
+      could not trace causal structure across the window.
+    priority: P1
+    status: tested
+    code:
+      - src/llmharness/audit/extractor/state.py
+      - src/llmharness/audit/extractor/tools.py
+    tests:
+      - tests/test_extractor_state.py
+    depends_on: [REQ-020]
+
+  - id: REQ-034
+    title: Unified reminder delivery via DecideTurnAction.Inject
+    description: |
+      Replace the ``BeforeSendToLlmEvent``-based reminder injector
+      with a single ``DecideTurnActionEvent`` handler that drains
+      ``pending_reminders`` and returns ``Inject([reminder_msgs])``.
+
+      One path covers both delivery cases:
+      - Mid-trajectory turn (default action ``Step``): ``Inject``
+        extends ``messages`` so the next turn's LLM call sees the
+        reminder as a synthetic user message — same visible effect
+        as the previous before_send_to_llm append.
+      - Terminal turn (default action ``Stop`` with non-final cause
+        such as ``ToolTerminated`` from ``submit_final_report`` or
+        ``ModelEndTurn`` from a no-tool assistant message): ``Inject``
+        overrides the kernel default and re-opens the loop so the
+        model can revise its conclusion with the reminder in hand.
+      - Final-cause stops (``MaxTurnsExhausted`` / ``SignalAborted`` /
+        any cause with ``final=True``): kernel ignores overrides;
+        handler logs a warning and leaves the reminder pending —
+        nothing safe to do then.
+
+      Manifest ``registers`` / ``affects`` updated from
+      ``event:before_send_to_llm`` to ``event:decide_turn_action``.
+
+      Motivation: rca:harness.sync E2E (2026-05-11) showed the final
+      auditor firing produced an actionable reminder ("compare against
+      normal baseline; verify propagation chain") that exactly named
+      the reason the case lost points, but it landed after the main
+      agent had already returned ``submit_final_report`` and the
+      reminder was queued with no consumer. User feedback: terminal
+      and mid-trajectory delivery should have the same logic.
+    priority: P1
+    status: tested
+    code:
+      - src/llmharness/adapters/agentm.py
+    tests:
+      - tests/test_reminder_injector.py
+    depends_on: [REQ-019, REQ-021]
+
   # ---------------------------------------------------------------------------
   # Removed in the 2026-05-08 SDK-native cleanup. Kept here for traceability;
   # downstream consumers should depend on REQ-017 / REQ-018 / REQ-001 instead.
