@@ -57,21 +57,28 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
 import sys
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from agentm.ai import DEFAULT_PROVIDER_REGISTRY
 from agentm.core.abi import EventBus
 
 from .approval import ApprovalPolicy
+from .auth import UnixPeerCredAuthenticator
 from .bus import MessageBus
 from .gateway import Gateway, GatewayConfig
 from .manager import ChannelManager
+from .outbox import SqliteInbox, SqliteOutbox
+from .server import WireServer
+from .wire_bridge import WireBridge
 
 
 def _default_provider() -> str:
@@ -217,6 +224,84 @@ def _build_session_factory(
     return factory
 
 
+# -------- --bind resolution -------------------------------------------
+
+
+@dataclass(frozen=True)
+class BindSpec:
+    """Resolved ``--bind`` configuration. ``allow_uids`` of ``None``
+    means any-uid (peer-cred reads the kernel uid but doesn't filter)."""
+
+    socket_path: str
+    allow_uids: frozenset[int] | None
+
+
+def _resolve_bind(
+    args: argparse.Namespace, cfg: dict[str, Any]
+) -> BindSpec | None:
+    """Merge CLI flags > yaml ``bind:`` section > absent.
+
+    Returns ``None`` when neither side requests a wire bind. Raises
+    :class:`SystemExit` (exit code 2) on invalid input — TCP scheme,
+    or conflicting allow-uid flags.
+    """
+    cli_url = args.bind
+    yaml_bind = cfg.get("bind") if isinstance(cfg.get("bind"), dict) else None
+    yaml_url = (yaml_bind or {}).get("socket")
+    url = cli_url or yaml_url
+    if not url:
+        return None
+    parsed = urlparse(str(url))
+    if parsed.scheme != "unix":
+        raise SystemExit(
+            f"--bind scheme {parsed.scheme!r} not supported; only unix:// is "
+            "available in v1 (TCP is deferred per "
+            ".claude/designs/client-server-architecture.md §5.2)."
+        )
+    # urlparse on ``unix:///abs/path`` gives netloc="" and path="/abs/path".
+    socket_path = parsed.path or parsed.netloc
+    if not socket_path:
+        raise SystemExit(
+            f"--bind {url!r} has no socket path; use unix:///abs/path/to/sock"
+        )
+
+    cli_uids = list(args.bind_allow_uid or ())
+    cli_any = bool(args.bind_allow_any_uid)
+    if cli_uids and cli_any:
+        raise SystemExit(
+            "--bind-allow-uid and --bind-allow-any-uid are mutually exclusive."
+        )
+
+    if cli_uids or cli_any:
+        # CLI side made an explicit decision; YAML is ignored to keep
+        # the precedence rule honest.
+        allow_uids: frozenset[int] | None = (
+            None if cli_any else frozenset(int(x) for x in cli_uids)
+        )
+    elif yaml_bind is not None and (
+        "allow_uids" in yaml_bind or "allow_any_uid" in yaml_bind
+    ):
+        if yaml_bind.get("allow_any_uid") and yaml_bind.get("allow_uids"):
+            raise SystemExit(
+                "bind.allow_uids and bind.allow_any_uid are mutually exclusive."
+            )
+        if yaml_bind.get("allow_any_uid"):
+            allow_uids = None
+        else:
+            raw = yaml_bind.get("allow_uids") or []
+            if not isinstance(raw, list):
+                raise SystemExit("bind.allow_uids must be a list of integers.")
+            try:
+                allow_uids = frozenset(int(x) for x in raw)
+            except (TypeError, ValueError) as exc:
+                raise SystemExit(f"bind.allow_uids: invalid entry: {exc}") from exc
+    else:
+        # Most-secure default: current process uid only.
+        allow_uids = frozenset({os.geteuid()})
+
+    return BindSpec(socket_path=socket_path, allow_uids=allow_uids)
+
+
 # -------- argv ---------------------------------------------------------
 
 
@@ -287,6 +372,38 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--bind",
+        default=None,
+        help=(
+            "Run the wire-protocol server on the given URL (v1 supports "
+            "only ``unix:///abs/path/to/sock``; TCP is deferred). Coexists "
+            "with --terminal and the v0 channels: section. Authentication "
+            "is Unix peer-cred; by default only the current process's uid "
+            "may connect — override with --bind-allow-uid or "
+            "--bind-allow-any-uid."
+        ),
+    )
+    p.add_argument(
+        "--bind-allow-uid",
+        action="append",
+        type=int,
+        default=None,
+        metavar="UID",
+        help=(
+            "Add a uid to the peer-cred allow-list. Repeatable. Ignored "
+            "unless --bind is set. Mutually exclusive with "
+            "--bind-allow-any-uid."
+        ),
+    )
+    p.add_argument(
+        "--bind-allow-any-uid",
+        action="store_true",
+        help=(
+            "Accept any local peer uid. Use only on a fully trusted host. "
+            "Mutually exclusive with --bind-allow-uid."
+        ),
+    )
+    p.add_argument(
         "--check",
         action="store_true",
         help=(
@@ -338,6 +455,8 @@ async def _arun(args: argparse.Namespace) -> int:
     else:
         cwd = args.cwd
 
+    bind_spec = _resolve_bind(args, cfg)
+
     if args.terminal:
         # Terminal mode overrides any YAML/env channels — explicit flag
         # is unambiguous about intent (local validation, single user).
@@ -355,12 +474,12 @@ async def _arun(args: argparse.Namespace) -> int:
             args.log_level = "WARNING"
     else:
         channels_cfg = cfg.get("channels") or _channels_from_env(dict(os.environ))
-        if not channels_cfg:
+        if not channels_cfg and bind_spec is None:
             raise SystemExit(
                 "no channels configured. Pass --config <yaml> with a "
                 "`channels:` section, set LARK_APP_ID / LARK_APP_SECRET for "
-                "the one-liner Feishu mode, or run with --terminal for local "
-                "validation."
+                "the one-liner Feishu mode, run with --terminal for local "
+                "validation, or run with --bind unix:///… to accept wire peers."
             )
 
     provider = args.provider or cfg.get("provider") or _default_provider()
@@ -401,6 +520,12 @@ async def _arun(args: argparse.Namespace) -> int:
         ),
     )
 
+    state_dir = (
+        args.state_dir
+        or (Path(cfg["state_dir"]) if "state_dir" in cfg else None)
+        or (Path(cwd) / ".agentm" / "channels")
+    )
+
     if args.check:
         # ``--check`` is a dry-run gate: everything above has already
         # parsed config, validated YAML, instantiated channels (which
@@ -409,6 +534,22 @@ async def _arun(args: argparse.Namespace) -> int:
         # structurally OK. No channels are started → no LLM calls, no
         # network, no side effects.
         logger.info("config OK: channels=%s", sorted(manager.channels))
+        check_payload: dict[str, Any] = {
+            "kind": "check",
+            "channels": sorted(manager.channels),
+            "state_dir": str(state_dir),
+        }
+        if bind_spec is not None:
+            check_payload["bind"] = {
+                "socket": f"unix://{bind_spec.socket_path}",
+                "allow_uids": (
+                    sorted(bind_spec.allow_uids)
+                    if bind_spec.allow_uids is not None
+                    else None
+                ),
+            }
+        sys.stdout.write(json.dumps(check_payload) + "\n")
+        sys.stdout.flush()
         return EXIT_OK
 
     stop_event = asyncio.Event()
@@ -421,6 +562,36 @@ async def _arun(args: argparse.Namespace) -> int:
 
     await manager.start()
     await gateway.start()
+
+    wire_server: WireServer | None = None
+    wire_outbox: SqliteOutbox | None = None
+    wire_inbox: SqliteInbox | None = None
+    if bind_spec is not None:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        wire_outbox = SqliteOutbox(str(state_dir / "wire-outbox.sqlite"))
+        wire_inbox = SqliteInbox(str(state_dir / "wire-inbox.sqlite"))
+        bridge = WireBridge(bus=bus, manager=manager, outbox=wire_outbox)
+        authenticator = UnixPeerCredAuthenticator(
+            allowed_uids=set(bind_spec.allow_uids)
+            if bind_spec.allow_uids is not None
+            else None
+        )
+        wire_server = WireServer(
+            socket_path=bind_spec.socket_path,
+            outbox=wire_outbox,
+            inbox=wire_inbox,
+            on_inbound=bridge.handle_inbound,
+            authenticator=authenticator,
+        )
+        await wire_server.start()
+        logger.info(
+            "wire server bound at unix://%s (allow_uids=%s)",
+            bind_spec.socket_path,
+            sorted(bind_spec.allow_uids)
+            if bind_spec.allow_uids is not None
+            else "any",
+        )
+
     logger.info(
         "gateway running with channels: %s", sorted(manager.channels) or "(none)"
     )
@@ -449,6 +620,12 @@ async def _arun(args: argparse.Namespace) -> int:
         finally:
             if not signal_wait.done():
                 signal_wait.cancel()
+            if wire_server is not None:
+                await wire_server.stop()
+            if wire_outbox is not None:
+                wire_outbox.close()
+            if wire_inbox is not None:
+                wire_inbox.close()
             await gateway.stop()
             await manager.stop()
         return EXIT_OK
@@ -457,6 +634,12 @@ async def _arun(args: argparse.Namespace) -> int:
         await stop_event.wait()
     finally:
         logger.info("gateway shutting down")
+        if wire_server is not None:
+            await wire_server.stop()
+        if wire_outbox is not None:
+            wire_outbox.close()
+        if wire_inbox is not None:
+            wire_inbox.close()
         await gateway.stop()
         await manager.stop()
     return EXIT_OK
