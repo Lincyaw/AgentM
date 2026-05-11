@@ -367,6 +367,10 @@ def _outbound_to_envelope(
         ]
     if msg.metadata:
         body["metadata"] = dict(msg.metadata)
+    if msg.stream_id is not None:
+        body["stream_id"] = msg.stream_id
+    if msg.final:
+        body["final"] = True
     if session_id_hint:
         # Side-channel: the gateway's WireBridge strips this before
         # forwarding to the chat client and writes it onto the
