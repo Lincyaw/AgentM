@@ -54,17 +54,29 @@ demultiplexes connected clients.
    deployments, TCP optional behind a feature flag for remote
    deployments. No HTTP, no gRPC in v1 — both pull in framework
    dependencies that the kernel does not need to take on.
-3. **Clients are dumb adapters.** A client speaks one chat platform
-   ("speak lark_oapi to/from Feishu") and the gateway protocol. It
-   owns no session state, no approval state, no command routing. If
-   it crashes mid-conversation, the gateway carries on; the client
-   reconnects and resumes.
-4. **No silent reach-arounds.** The gateway never opens a network
+3. **The gateway is a routing bus, not a session host.** Every
+   process connecting to the gateway is a *peer*. Peers come in
+   kinds — `chat_client` (Feishu, terminal, …), `agent_worker` (a
+   process running the AgentM loop with real LLM calls),
+   `control` (admin / observability). The wire is identical for all
+   kinds; what differs is the `peer_kind` declared at hello and how
+   the gateway routes messages addressed to or from that kind.
+   Generalised from the "chat client" framing in earlier drafts
+   because agent runtimes need to be distributable on the same
+   wire (§7.5, §8 phase 5).
+4. **Clients are dumb adapters.** A chat-side client speaks one chat
+   platform ("speak lark_oapi to/from Feishu") and the gateway
+   protocol. It owns no session state, no approval state, no command
+   routing. If it crashes mid-conversation, the gateway carries on;
+   the client reconnects and resumes. Agent-worker peers are the
+   same shape — they connect, declare what scenarios/models they can
+   handle, and the gateway dispatches sessions to them.
+5. **No silent reach-arounds.** The gateway never opens a network
    connection to a chat platform. Every byte from the world reaches
-   the gateway through a client process speaking the wire. This is
+   the gateway through a peer process speaking the wire. This is
    the same boundary as §11 — kernel never touches scenario code
    directly.
-5. **Backwards compatibility is finite.** v0 in-process channels stay
+6. **Backwards compatibility is finite.** v0 in-process channels stay
    functional during the migration window but are tagged deprecated
    and removed after every shipping channel has a v1 client. No
    permanent dual-stack.
@@ -74,37 +86,62 @@ demultiplexes connected clients.
 ## 3. Topology
 
 ```
-                    ┌──────────────────────────────┐
-                    │  agentm-gateway (daemon)     │
-                    │                              │
-                    │   ChatSessionMap             │
-                    │   ApprovalBridge             │
-                    │   CommandRouter              │
-                    │   AgentSession × N           │
-                    │   ClientRegistry             │
-                    │   ┌─────────────┐            │
-                    │   │ SocketServer│ ◄─── unix:///var/run/agentm.sock
-                    │   └─────────────┘            │
-                    └──────────────────────────────┘
-                               ▲   ▲   ▲
-                          IPC  │   │   │  IPC
-              ┌────────────────┘   │   └─────────────────┐
-              │                    │                     │
-   ┌─────────────────────┐   ┌─────────────┐  ┌────────────────────────┐
-   │ agentm-feishu (proc)│   │ agentm-     │  │ agentm-terminal (proc) │
-   │                     │   │ http (proc) │  │  stdin / stdout        │
-   │  lark_oapi WS       │   │ webhooks    │  │                        │
-   │  → InboundMessage   │   │             │  │                        │
-   │  ← OutboundMessage  │   │             │  │                        │
-   │     → card render   │   │             │  │                        │
-   └─────────────────────┘   └─────────────┘  └────────────────────────┘
-            │
-   Feishu open platform
+                                       ┌──────────────────────────────────────┐
+                                       │  agentm-gateway (daemon, one host)   │
+                                       │                                      │
+                                       │   PeerRegistry  (every kind)         │
+                                       │   ChatSessionMap                     │
+                                       │   ApprovalBridge                     │
+                                       │   CommandRouter                      │
+                                       │   Router (by peer_id / capability)   │
+                                       │   ┌─────────────┐                    │
+                                       │   │ SocketServer│ ◄── unix or tcp
+                                       │   └─────────────┘                    │
+                                       └──────────────────────────────────────┘
+                                                ▲                    ▲
+                            ━━━━━━━━━━━━━━━━━━━━┛                    ┗━━━━━━━━━━━━━━━━━━━━━━━━━
+                            │   chat side (peer_kind=chat_client)    │   agent side (peer_kind=agent_worker)
+                            │                                        │
+                ┌───────────┴─────────┐  ┌─────────────┐    ┌────────┴─────────┐  ┌─────────────────┐
+                │ agentm-feishu       │  │ agentm-http │    │ agent-worker-A    │  │ agent-worker-B  │
+                │  lark_oapi WS       │  │  webhooks   │    │  scenarios=[…]    │  │  scenarios=[…]  │
+                │                     │  │             │    │  model=opus       │  │  model=sonnet   │
+                └─────────────────────┘  └─────────────┘    │  host=gpu-pod-1   │  │  host=laptop    │
+                            │                                └──────┬───────────┘  └──────┬──────────┘
+                  Feishu open platform                              │ AgentSession × N      │ AgentSession × M
+                                                                     │ (live LLM loop)       │
+                                                                     │
+                                                                     └─── agent_worker_C ⇄ agent_worker_D
+                                                                          (a2a tool calls — §7.6)
 ```
 
-The gateway runs on one host as a single process. Every client runs
-as its own process. Communication is one bidirectional stream socket
-per client connection.
+The gateway runs on one host as a single process. **Every other
+process — chat adapters and agent runtimes alike — is a peer.** They
+connect from anywhere (same host, sibling pod, laptop on the WAN over
+TLS-fronted TCP) and speak the same wire. The gateway routes between
+them; it owns no LLM and no chat secret directly.
+
+Three peer kinds today:
+
+* `chat_client` — speaks a chat platform (Feishu, terminal, HTTP
+  webhook). Maps user activity to/from `inbound`/`outbound`.
+* `agent_worker` — runs the AgentM loop. Imports `agentm.harness`,
+  holds `AgentSession`s, calls real LLM providers. Declares
+  capabilities at hello: which scenarios it can serve, which models
+  it has credentials for, max concurrent sessions.
+* `control` — admin/observability. Subscribes to gateway events,
+  introspects routing state, can force-shutdown peers. Not on the
+  v1 critical path; reserved in the protocol.
+
+The wire stays the same envelope for all three. The only kind-aware
+logic in the server is **routing policy**:
+
+* `chat_client` inbound → dispatched to an `agent_worker` peer that
+  matches the route's `(scenario, model)` constraint.
+* `agent_worker` outbound → routed to the originating `chat_client`
+  (via the session_key map).
+* Either kind can send to a `peer://<id>` address — that's the a2a
+  primitive (§7.6).
 
 ---
 
@@ -151,56 +188,118 @@ Every JSON body wraps:
 
 ### 4.3 Kinds
 
-**Client → Server**
+The kind set is **peer-symmetric** — both chat clients and agent
+workers send `inbound` and receive `outbound`. The difference is
+semantic (chat clients translate to/from a chat platform; agent
+workers translate to/from an `AgentSession`), not protocol-shape.
 
-| kind | Direction | Purpose |
-|---|---|---|
-| `hello` | C→S, first message | Client identifies itself: channel name, version, capabilities, optional auth token. Server replies `welcome` or `error`. |
-| `inbound` | C→S | Forwarded user message: sender_id, chat_id, content, media, metadata, session_key_override, button_value. Mirrors current `InboundMessage`. |
-| `presence` | C→S | (Optional) "user is typing", "user opened chat". Advisory; server may ignore. |
-| `ack` | C→S | Confirms receipt of a server-originated message id. Servers use this for delivery guarantees in §4.5. |
-| `bye` | C→S, last | Graceful shutdown. Server flushes pending outbound for this client, then closes. |
+**Peer → Server**
 
-**Server → Client**
+| kind | Purpose |
+|---|---|
+| `hello` | First message. Carries `peer_kind` (`chat_client` / `agent_worker` / `control`), `peer_name`, version, capabilities, optional auth. Server replies `welcome` or `error`. |
+| `inbound` | A message the peer wants the gateway to route. Body shape unchanged from v0 `InboundMessage` (sender_id, chat_id, content, media, metadata, session_key_override, button_value). New optional `to` field on the envelope (§4.3.1) lets a peer specify a destination peer for a2a; absence means "router policy decides". |
+| `presence` | Advisory: "user is typing", "agent is thinking", "worker drained". Server may relay to interested subscribers. |
+| `ack` | Confirms receipt of a server-originated message id. |
+| `bye` | Graceful shutdown. Server flushes pending outbound for this peer, then closes. |
+| `subscribe` | (control / agent-worker) Subscribe to a routing event stream — peer connect/disconnect, session migrations, approval gates. |
 
-| kind | Direction | Purpose |
-|---|---|---|
-| `welcome` | S→C, reply to `hello` | Server accepted the client; carries server version, negotiated protocol version, gateway session id. |
-| `outbound` | S→C | Render-and-send-this-to-the-user. Mirrors current `OutboundMessage` (content, buttons, kind=message|turn_complete, metadata). |
-| `error` | S→C | Protocol-level error (bad hello, auth failure, malformed inbound). Carries a code + message + whether the connection survives. |
-| `ping` | S→C | Liveness check. Client replies `pong`. Drift threshold for stale-client cleanup. |
+**Server → Peer**
 
-`pong` (C→S) is the symmetric reply to `ping`.
+| kind | Purpose |
+|---|---|
+| `welcome` | Reply to `hello`. Carries server version, negotiated wire version, the peer's assigned `peer_id`, optional `session_resume` list (§4.4). |
+| `outbound` | Render-and-send-this. For `chat_client` peers, body is `OutboundMessage` to render in the chat. For `agent_worker` peers, body is the same shape — what the worker's local code paths would have received as inbound for the session. The wire kind is `outbound` either way because "what the gateway is sending to the peer" is the semantic. |
+| `error` | Protocol-level error (bad hello, auth failure, malformed payload, unknown routing target). Code + message + whether the connection survives. |
+| `ping` | Liveness check. Peer replies `pong`. |
+| `event` | Streaming routing event for `subscribe`d peers — peer-up / peer-down / session-migrated. |
+
+`pong` is the symmetric reply to `ping`.
+
+### 4.3.1 Addressing
+
+Every `inbound`/`outbound` envelope may carry an optional `to`
+address:
+
+* `chat://<channel_name>/<chat_id>` — deliver to the chat client
+  servicing that chat (e.g. `chat://feishu/oc_xxx`).
+* `session://<session_id>` — deliver to whichever peer currently owns
+  this session. Used by the gateway internally; peers don't usually
+  set this.
+* `peer://<peer_id>` — deliver directly to a named peer. The receiver
+  sees an `inbound` whose `metadata.from_peer = <sender_peer_id>`.
+  This is the a2a primitive.
+* `kind://<peer_kind>` — broadcast to every peer of that kind. Used
+  by control plane operations ("drain all agent_workers"). Gated
+  behind `control` permission.
+
+If `to` is absent, the gateway falls back to the v0 routing policy:
+chat inbound → owning agent worker; agent outbound → originating
+chat client. This means everything in PR #137 keeps working without
+the new fields touched.
 
 ### 4.4 hello / welcome handshake
 
+**Chat client hello:**
+
 ```json
-// C→S
 {
   "v":"v0", "id":"h1", "kind":"hello", "ts":"...",
   "body":{
-    "client_name":"feishu",
-    "client_version":"0.1.0",
+    "peer_kind":"chat_client",
+    "peer_name":"feishu",
+    "peer_version":"0.1.0",
     "wire_versions":["v0"],
     "auth": {"method":"token","token":"..."} ,
     "capabilities":["streaming","buttons","markdown"]
   }
 }
+```
 
-// S→C
+**Agent worker hello:**
+
+```json
+{
+  "v":"v0", "id":"h2", "kind":"hello", "ts":"...",
+  "body":{
+    "peer_kind":"agent_worker",
+    "peer_name":"worker-gpu-1",
+    "peer_version":"0.2.0",
+    "wire_versions":["v0"],
+    "auth": {"method":"token","token":"..."} ,
+    "capabilities":{
+      "scenarios":["general_purpose","rca","feishu_chat"],
+      "models":["claude-opus-4-7","claude-sonnet-4-6"],
+      "max_concurrent_sessions": 8,
+      "supports_a2a": true
+    }
+  }
+}
+```
+
+**Welcome:**
+
+```json
 {
   "v":"v0", "id":"w1", "kind":"welcome", "ts":"...", "in_reply_to":"h1",
   "body":{
     "server_version":"0.2.0",
     "wire_version":"v0",
+    "peer_id":"feishu-a8f3e2",
     "session_resume": ["feishu:c123","feishu:c456"]
   }
 }
 ```
 
-`session_resume` lets a reconnecting client know which routes the
-server still believes belong to it — important for crash recovery
-(§7).
+* `peer_id` is gateway-assigned, stable for the connection lifetime
+  (and across reconnects when the peer auth matches a previously
+  seen peer). It's the routing address other peers use to reach this
+  one via `peer://<peer_id>`.
+* `session_resume` lets a reconnecting peer know which routes the
+  server still believes belong to it — important for crash recovery
+  (§7).
+* Capability shape is open-ended per `peer_kind`. The server stores
+  them verbatim and matches on them during routing.
 
 ### 4.5 Delivery semantics
 
@@ -379,18 +478,166 @@ usual; user sees "approval timed out" the same as if they sat on
 their hands. The gateway never sees the click → it's a deny. This is
 acceptable failure semantics.
 
+### 7.5 Distributed agent workers
+
+An `agent_worker` peer is a process running the AgentM loop. It
+holds `AgentSession` instances locally and calls real LLM
+providers. It connects to the gateway *out* — typically over Unix
+socket for same-host, TCP-via-stunnel for off-host.
+
+**Session ownership.** Sessions live in the worker, not the
+gateway. The gateway records `session_key → owning peer_id` in an
+extended `ChatSessionMap` and acts as a router; the worker holds
+the conversation history, runs `prompt()`, and emits assistant
+text. Worker death takes its sessions with it (unless persistence
+is configured at the worker level — orthogonal to this design).
+
+**Dispatch.** When a `chat_client` inbound arrives, the gateway:
+
+1. Looks up the session_key in the map. If a worker owns it and
+   the worker is connected → forward the `inbound` to that worker.
+2. If no worker owns it (new session) → pick a worker whose
+   capabilities match the session's `(scenario, model)` constraint.
+   Selection policy is configurable; default is `least_loaded`
+   among matching workers.
+3. If no eligible worker is connected → buffer in the gateway's
+   pending queue for up to `pending_inbound_ttl_seconds` (default
+   30), reply with an `error` of code `no_capable_worker` to the
+   chat client after the timeout.
+4. If a worker accepts the dispatch, the gateway records ownership
+   and forwards subsequent inbound for that session_key to the
+   same worker (sticky session).
+
+**Worker death / migration.** Two policies:
+
+* **(A) Strict** (default): if the owning worker disconnects, the
+  session is marked `lost` in the map. New inbound on that
+  session_key returns `error: session_lost`. The chat client is
+  expected to start fresh (or the user types `/new`). This matches
+  the user's mental model of "the bot crashed, start over."
+* **(B) Re-dispatch** (opt-in): when the worker disconnects and the
+  session has a serializable transcript (worker-side persistence
+  config), the gateway re-dispatches the session to another
+  eligible worker with the transcript as resume context. Requires
+  agreement on the resume protocol; deferred from v1 minimum.
+
+**Capability matching.** Workers declare scenarios + models. The
+gateway's routing config can additionally constrain — e.g. "only
+worker peers from this allow-list serve `feishu_chat` sessions" —
+to prevent a malicious worker from grabbing chat traffic it should
+not see. Standard `allow_from`-style policy, extended to workers.
+
+**Load balancing.** Default policy is `least_loaded` measured by
+`active_session_count` reported via `presence`. Operators wanting
+deterministic routing (one worker per chat, useful for debugging)
+flip to `sticky_first_worker`. More-sophisticated policies (queue
+depth, model cost, region affinity) are config-pluggable but not
+shipped in v1.
+
+### 7.6 Agent-to-agent messaging (a2a)
+
+An agent_worker can send a message addressed to another peer (an
+agent_worker, or even a chat client) by emitting an `outbound` with
+`to: peer://<peer_id>` or `to: chat://<channel>/<chat_id>`. The
+gateway routes it to the destination peer; the destination receives
+it as an `inbound` whose `metadata.from_peer = <sender_peer_id>`.
+
+**The tool form.** The atom `tool_peer_send` (ships in a later
+phase, **not** v1 minimum) exposes this to the LLM as a tool:
+
+```
+tool name: peer_send
+args:
+  to_peer_id: "<peer-id>"            # or to_chat: "<channel>/<chat>"
+  content: "<message>"
+  wait_for_reply: true               # block until destination replies, or fire-and-forget
+  timeout_seconds: 60
+returns: { reply_content?, reply_peer_id, status }
+```
+
+When `wait_for_reply: true`, the calling worker pauses the calling
+session until the destination peer emits an outbound back to the
+caller. The gateway correlates by a `correlation_id` on the
+envelope (added when the tool fires).
+
+**Why route through the gateway, not direct peer-to-peer?**
+
+* Centralised auth — the gateway already knows which peers may
+  talk to which. Direct peer dialing means another auth surface.
+* Centralised observability — every message between agents lands
+  in the same observability stream the gateway already produces.
+* Centralised approval — if agent A's `peer_send` should require
+  human approval (because it's about to spend money on agent B's
+  expensive model), `ApprovalBridge` is the existing gate. Direct
+  peer-to-peer skips it.
+* Routing remains a property of the cluster, not of individual
+  peer identities — workers can come and go without other workers
+  needing to know.
+
+**A2A failure semantics.**
+
+* Destination peer not connected: gateway returns `error:
+  unknown_peer` to the sender. No queueing.
+* Destination connected but rejects (`error: forbidden_target`):
+  gateway returns the rejection to the sender; the sender's tool
+  call gets a structured error.
+* Destination drops mid-exchange (`wait_for_reply`): pending tool
+  times out per `timeout_seconds`. Standard tool-timeout path.
+
+**Loop prevention.** The gateway sets a `hops` counter in the
+envelope, increments on each a2a forward, and refuses to forward
+beyond `max_a2a_hops` (default 5). Stops infinite agent ping-pong
+in one place.
+
+`[OPEN]` Should the *sender* peer's identity (`from_peer`) be
+forwarded verbatim, or rewritten by the gateway to hide identities
+across security boundaries? Recommend verbatim within an
+operator-managed cluster; rewrite-only behind a future "untrusted
+worker" boundary.
+
+### 7.7 Cross-peer approval
+
+When an agent_worker A's `peer_send` to agent_worker B causes B's
+tool call that needs human approval, who approves? The chat user
+(the *root* of the dispatch chain) is the only available human.
+Approval card must travel:
+
+* `agent_worker B` → emits `ToolCallEvent` to gateway
+* gateway sees the request came from a session whose root is
+  `chat://feishu/oc_xxx`, fans approval card to that chat
+* chat user clicks Approve
+* gateway resolves B's approval future; B's tool proceeds
+
+This requires the gateway to track the **root chat** of every
+session, including a2a-spawned ones. Achieved by propagating a
+`root_session_key` through the envelope when a session originates
+from another session via a2a. One field on the inbound envelope,
+filled by the gateway when the a2a tool fires.
+
+Recommendation: hold approvals only at the root chat. An a2a child
+session does not get its own approval surface; if there is no root
+chat (worker-initiated session with no human in the loop), the
+approval policy must be `always_allow` or `always_block` —
+`require_approval` becomes an error at session creation.
+
 ---
 
-## 8. Migration plan (channels v0 → v1)
+## 8. Migration plan (channels v0 → v1 → peer mesh)
 
-Four phases, each shippable independently.
+Six phases, each shippable independently. The first four are the
+"v0 → v1 channels" path locked in earlier drafts; phases 5–6 are
+the peer-mesh extension. Each phase is meant to be one PR.
 
 ### Phase 1 — Protocol + server, in-tree client lib
 
-* Implement `agentm_channels.wire` (framing + envelope + kinds).
+* Implement `agentm_channels.wire` (framing + envelope + kinds,
+  *including* `peer_kind`, the optional `to` address, and the
+  `correlation_id`+`hops`+`root_session_key` fields from §7.6/7.7
+  — adding them in the wire from day one is much cheaper than
+  retrofitting later).
 * Implement `SocketServer` inside the existing gateway daemon.
 * Implement `agentm_channels.client` Python lib (used by tests and
-  by Phase 2 clients).
+  by Phase 2/3/5 clients).
 * `BaseChannel` stays. The gateway can run *either* in-process
   channels (v0) *or* a `SocketServer` (v1) selected by config.
 * Wire test: in-tree client lib drives the running gateway through a
@@ -420,19 +667,8 @@ Four phases, each shippable independently.
 * Gateway pyproject no longer requires `lark_oapi` (it moves to
   `agentm-feishu`'s pyproject). Smaller deps for everyone not
   running Feishu.
-* `gateway.yaml`:
 
-  ```yaml
-  clients:
-    feishu:
-      socket: unix:///var/run/agentm/gateway.sock
-      app_id: ...
-      app_secret: ...
-  ```
-
-  becomes the new shape (config moved out of the gateway YAML).
-
-### Phase 4 — Deprecate in-process channels
+### Phase 4 — Deprecate v0 in-process channels
 
 * `BaseChannel` and the `channels/` directory get a "Use clients
   instead" deprecation note.
@@ -440,6 +676,38 @@ Four phases, each shippable independently.
   necessity.
 * `gateway.yaml` `channels:` key emits a deprecation warning on
   startup; supported until the next minor.
+
+### Phase 5 — Agent workers as a peer kind
+
+* The gateway today owns `AgentSession`. After this phase, the
+  gateway only **routes** to a peer that holds the session.
+* New process: `agentm-worker`. Wraps the wire client lib;
+  `peer_kind = agent_worker`. On accepted dispatch (§7.5) it
+  constructs an `AgentSession` locally, runs `prompt()`, fans
+  `outbound` over the wire.
+* Gateway gains: capability matching, sticky session routing,
+  worker pool config, `least_loaded` selection, `presence`-driven
+  load tracking.
+* Default migration: `agentm-gateway --inproc-worker` keeps the
+  in-process worker path so single-host deployments don't pay the
+  process cost. Off-host deployments turn it off and connect one
+  or more external `agentm-worker` processes.
+* This is the phase where the gateway pyproject can drop the LLM
+  provider deps as well — only `agentm-worker` needs anthropic /
+  openai SDKs.
+
+### Phase 6 — A2A tool calls
+
+* Ships `tool_peer_send` atom (`MANIFEST.mountable_via_command=False`
+  by default; operators opt in per-deployment for safety).
+* Server enforces the loop guard (`max_a2a_hops`, default 5) and
+  cross-peer approval forwarding (§7.7) — both happen at the
+  envelope level, so no changes to existing approval-bridge code.
+* Documents the "agent calls another agent through the bus" pattern
+  as a first-class scenario; ships an example multi-agent scenario
+  YAML.
+* `[OPEN]` Should `from_peer` identity be exposed verbatim or
+  rewritten across security boundaries? See §7.6.
 
 ---
 
@@ -470,6 +738,22 @@ checkout:
 4. **Token rotation / cred refresh** for TCP mode. Today `hello`
    carries the static token. Live rotation needs a kind like
    `reauth`. Defer to v2 unless explicitly needed.
+5. **Worker death policy (§7.5).** Default (A) Strict — session is
+   lost when its worker dies. (B) Re-dispatch via serializable
+   transcript is opt-in and deferred from v1 minimum. Confirm
+   Strict as default.
+6. **A2A `from_peer` identity (§7.6).** Recommend verbatim within
+   one operator-managed cluster; "rewrite across boundaries" hook
+   reserved for future. Confirm verbatim default.
+7. **Approval forwarding to root chat (§7.7).** Recommend approvals
+   only at the root chat; if no root chat exists,
+   `require_approval` is an error at session creation. Confirm.
+8. **Wire fields added Day 1.** Phase 1 should land
+   `peer_kind`/`to`/`correlation_id`/`hops`/`root_session_key` even
+   though Phases 5–6 are when they get *used* — retrofitting the
+   envelope later is cheap, but rolling out a v0→v0.1 mid-cluster
+   is not. Confirm the "all envelope fields shipped in Phase 1"
+   approach.
 
 ---
 

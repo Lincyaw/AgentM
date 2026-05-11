@@ -80,6 +80,21 @@ Each phase is one PR. Order matters; each unlocks the next.
 - Move `gateway-channels.md` to `designs/historical/`.
 - Removal in the next minor after Phase 4 lands.
 
+### Phase 5 — Agent workers as a peer kind
+
+- New process `agentm-worker`: holds `AgentSession`, calls real LLM providers, connects to the gateway as `peer_kind=agent_worker`.
+- Gateway routing: capability matching (scenario, model), sticky session ownership, `least_loaded` selection, `presence`-reported load tracking.
+- Gateway pyproject can drop provider deps (anthropic / openai SDKs); only the worker carries them.
+- Default `--inproc-worker` mode keeps single-host deployments simple.
+- Tests: multi-worker dispatch, worker death (Strict policy by default), capability-mismatch rejection, sticky session continuity across worker restarts within the same connection lifecycle.
+
+### Phase 6 — A2A tool calls
+
+- Ship `tool_peer_send` atom (opt-in per deployment via `MANIFEST.mountable_via_command` + gateway allow list, same gate as `/atom:install`).
+- Gateway envelope-level enforcement: `max_a2a_hops` loop guard, `root_session_key` propagation for approval forwarding (§7.7 of design doc), `correlation_id` for `wait_for_reply` semantics.
+- Documentation: a multi-agent scenario example showing researcher → coder → reviewer chain via a2a.
+- Tests: hop-limit enforced, cross-peer approval card lands at root chat, dropped destination times out cleanly.
+
 ## Out of scope (forever, or v2+)
 
 - WebSocket / HTTP transport (v2 if a browser client materialises).
