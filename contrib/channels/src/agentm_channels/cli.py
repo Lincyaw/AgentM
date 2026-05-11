@@ -2,13 +2,17 @@
 
 Reads a YAML config (or env vars), builds a :class:`MessageBus`,
 spins up a :class:`ChannelManager` and a :class:`Gateway`, and runs
-until the process is signalled to stop (SIGINT / SIGTERM) — *or*, in
-``--terminal`` mode, until stdin closes (Ctrl-D / piped input
-exhausted). The terminal-EOF path is what lets shell pipelines drive
-the gateway without timeouts:
+until the process is signalled to stop (SIGINT / SIGTERM).
 
-    printf '/help\\n/atom:list\\n' | \\
-      agentm-gateway --terminal --terminal-format json --config gw.yaml
+The legacy in-process ``--terminal`` driver has been removed; run the
+gateway with ``--bind unix:///path`` and connect a separate
+``agentm-terminal --connect unix:///path`` process instead.
+
+    # Terminal A:
+    agentm-gateway --bind unix:///tmp/gw.sock --config gw.yaml
+
+    # Terminal B:
+    agentm-terminal --connect unix:///tmp/gw.sock
 
 Minimal config (``gateway.yaml``)::
 
@@ -41,16 +45,6 @@ Exit codes (see also ``cli-design`` rule group 3):
 * ``0`` — clean shutdown
 * ``2`` — argument / config error (missing channels, bad YAML, empty allow_from)
 * ``130`` — SIGINT (Ctrl-C)
-
-JSON output contract (``--terminal --terminal-format json``):
-
-* stdout is one JSON object per line; stderr carries logs only.
-* ``{"kind":"ready"}`` — channel started, safe to start sending.
-* ``{"kind":"message","content":"…","buttons":[…],"metadata":{…}}``
-* ``{"kind":"turn_complete"}`` — emitted at the end of a real agent
-  turn. Control commands (``/help`` / ``/status`` / …) do **not** emit
-  ``turn_complete``; they emit one ``message`` object and that's it.
-* ``{"kind":"stopped"}`` — final line; no further output is coming.
 """
 
 from __future__ import annotations
@@ -319,11 +313,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "one command router, one approval bridge."
         ),
         epilog=(
-            "Shell-driving recipe (no driver/wrapper needed):\n"
-            "  printf '/help\\n/atom:list\\n' | \\\n"
-            "    agentm-gateway --terminal --terminal-format json \\\n"
-            "                   --config gw.yaml 2>/tmp/gw.err\n"
-            "Stdout = one JSON object per line; stderr = logs."
+            "Run as a wire-protocol daemon and connect clients separately:\n"
+            "  agentm-gateway --bind unix:///tmp/gw.sock --config gw.yaml\n"
+            "  agentm-terminal --connect unix:///tmp/gw.sock\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -351,35 +343,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--log-level", default=os.environ.get("AGENTM_GATEWAY_LOG_LEVEL", "INFO")
     )
     p.add_argument(
-        "--terminal",
-        action="store_true",
-        help=(
-            "Run the gateway with only the terminal channel (stdin/stdout). "
-            "Useful for local validation of slash commands and skill "
-            "activation without configuring a chat platform."
-        ),
-    )
-    p.add_argument(
-        "--terminal-format",
-        choices=("text", "json"),
-        default=os.environ.get("AGENTM_GATEWAY_TERMINAL_FORMAT", "text"),
-        help=(
-            "Output format when --terminal is set. 'text' is human-"
-            "friendly (ANSI colors, agent prefix). 'json' emits one "
-            "JSON object per line — use this when a script or another "
-            "agent is driving the gateway. See module docstring for the "
-            "JSON contract."
-        ),
-    )
-    p.add_argument(
         "--bind",
         default=None,
         help=(
             "Run the wire-protocol server on the given URL (v1 supports "
             "only ``unix:///abs/path/to/sock``; TCP is deferred). Coexists "
-            "with --terminal and the v0 channels: section. Authentication "
-            "is Unix peer-cred; by default only the current process's uid "
-            "may connect — override with --bind-allow-uid or "
+            "with the v0 channels: section. Authentication is Unix "
+            "peer-cred; by default only the current process's uid may "
+            "connect — override with --bind-allow-uid or "
             "--bind-allow-any-uid."
         ),
     )
@@ -457,30 +428,17 @@ async def _arun(args: argparse.Namespace) -> int:
 
     bind_spec = _resolve_bind(args, cfg)
 
-    if args.terminal:
-        # Terminal mode overrides any YAML/env channels — explicit flag
-        # is unambiguous about intent (local validation, single user).
-        channels_cfg: dict[str, Any] = {
-            "terminal": {
-                "enabled": True,
-                "allow_from": ["*"],
-                "format": args.terminal_format,
-            }
-        }
-        # JSON mode is consumed by parsers; even WARNING-level logging
-        # on stderr is the right home (operator can still see it via
-        # ``2>``). Suppress INFO chatter unless the operator opted in.
-        if args.log_level.upper() == "INFO":
-            args.log_level = "WARNING"
-    else:
-        channels_cfg = cfg.get("channels") or _channels_from_env(dict(os.environ))
-        if not channels_cfg and bind_spec is None:
-            raise SystemExit(
-                "no channels configured. Pass --config <yaml> with a "
-                "`channels:` section, set LARK_APP_ID / LARK_APP_SECRET for "
-                "the one-liner Feishu mode, run with --terminal for local "
-                "validation, or run with --bind unix:///… to accept wire peers."
-            )
+    channels_cfg: dict[str, Any] = (
+        cfg.get("channels") or _channels_from_env(dict(os.environ))
+    )
+    if not channels_cfg and bind_spec is None:
+        raise SystemExit(
+            "no channels configured and no --bind given. Either pass "
+            "--bind unix:///abs/path/to/sock (and connect a client like "
+            "`agentm-terminal --connect unix://…`), or pass --config "
+            "<yaml> with a `channels:` section, or set LARK_APP_ID / "
+            "LARK_APP_SECRET for the one-liner Feishu mode."
+        )
 
     provider = args.provider or cfg.get("provider") or _default_provider()
     model = (
@@ -595,40 +553,6 @@ async def _arun(args: argparse.Namespace) -> int:
     logger.info(
         "gateway running with channels: %s", sorted(manager.channels) or "(none)"
     )
-
-    # In ``--terminal`` mode, stdin EOF must teardown the daemon — that
-    # is what makes ``printf '…' | agentm-gateway --terminal`` exit
-    # cleanly without an external ``timeout``. The terminal channel
-    # already sets its ``_stopped`` event on EOF; the manager's
-    # per-channel start tasks complete when it does. So in terminal
-    # mode we race ``stop_event`` (SIGINT/SIGTERM) against "any
-    # channel task finished naturally". Other modes only honour
-    # signals — Feishu's channel.start() blocks forever and an EOF
-    # condition isn't meaningful.
-    if args.terminal:
-        channel_tasks = list(manager._tasks)  # type: ignore[attr-defined]
-        signal_wait = asyncio.create_task(stop_event.wait(), name="gw-signal")
-        try:
-            done, _pending = await asyncio.wait(
-                [signal_wait, *channel_tasks],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if signal_wait in done:
-                logger.info("gateway shutting down (signal)")
-            else:
-                logger.info("gateway shutting down (stdin EOF)")
-        finally:
-            if not signal_wait.done():
-                signal_wait.cancel()
-            if wire_server is not None:
-                await wire_server.stop()
-            if wire_outbox is not None:
-                wire_outbox.close()
-            if wire_inbox is not None:
-                wire_inbox.close()
-            await gateway.stop()
-            await manager.stop()
-        return EXIT_OK
 
     try:
         await stop_event.wait()

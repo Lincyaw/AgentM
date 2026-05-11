@@ -161,7 +161,6 @@ def test_check_rejects_tcp_bind() -> None:
             sys.executable,
             "-m",
             "agentm_channels.cli",
-            "--terminal",
             "--bind",
             "tcp://127.0.0.1:7000",
             "--check",
