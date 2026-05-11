@@ -150,18 +150,14 @@ class WireBridge:
             channel_name=channel_name,
             outbox=self._outbox,
         )
-        self._manager._channels[channel_name] = ch  # type: ignore[attr-defined]
-        # Run the channel's start() so ``stop()`` is well-formed; the
-        # task being tracked by the manager keeps lifecycle symmetric.
-        task = asyncio.create_task(ch.start(), name=f"wire-ch-{channel_name}")
-        self._manager._tasks.append(task)  # type: ignore[attr-defined]
+        self._manager.inject_channel(channel_name, ch)
         self._peer_channels[peer_id] = channel_name
         log.info(
             "wire peer registered as channel %r (peer_id=%s)", channel_name, peer_id
         )
 
     async def _drop_channel(self, channel_name: str) -> None:
-        ch = self._manager._channels.pop(channel_name, None)  # type: ignore[attr-defined]
+        ch = self._manager.channels.pop(channel_name, None)
         if ch is None:
             return
         try:

@@ -45,7 +45,11 @@ class _BadWriter:
 
 
 async def test_dead_letter_after_max_attempts(socket_path: str, db_path: str) -> None:
-    outbox = SqliteOutbox(db_path)
+    # Inject a near-zero backoff via the outbox constructor — no
+    # module-level monkey-patch needed. The server reads
+    # ``outbox.backoff_delay`` so this transparently shortens both
+    # nack and retry-schedule delays.
+    outbox = SqliteOutbox(db_path, backoff=lambda attempts: 0.001)
     inbox = SqliteInbox(db_path)
     outbox.enqueue(
         "D",
@@ -57,14 +61,6 @@ async def test_dead_letter_after_max_attempts(socket_path: str, db_path: str) ->
             body={"k": "v"},
         ),
     )
-
-    # Use a very small backoff so retries happen fast. We don't expose
-    # the policy fn as config — instead, monkey-patch the policy module
-    # so attempts re-fire promptly.
-    import agentm_channels.server as server_mod
-
-    real_backoff = server_mod.exponential_backoff
-    server_mod.exponential_backoff = lambda attempts: 0.0  # type: ignore[assignment]
 
     # max_delivery_attempts=1 → first write failure dead-letters,
     # exercising the same code path that fires at MAX_DELIVERY_ATTEMPTS
@@ -80,7 +76,10 @@ async def test_dead_letter_after_max_attempts(socket_path: str, db_path: str) ->
     )
     await server.start()
 
-    # Replace the writer on register to one that always fails.
+    # The writer wrap below stays as a monkey-patch: PeerRegistry has
+    # no public hook for "intercept the writer at register time", and
+    # adding one only to support this test would be premature surface.
+    # Documented constraint, not laziness.
     real_register = server._registry.register
 
     def patched_register(session: PeerSession) -> None:  # type: ignore[no-redef]
@@ -101,7 +100,6 @@ async def test_dead_letter_after_max_attempts(socket_path: str, db_path: str) ->
         assert outbox.pending_count("D") == 0
         await client.close()
     finally:
-        server_mod.exponential_backoff = real_backoff  # type: ignore[assignment]
         await server.stop()
         outbox.close()
         inbox.close()
