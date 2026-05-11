@@ -37,6 +37,26 @@ src/agentm_channels/
     └── feishu.py        # FeishuChannel (lark_oapi.channel adapter)
 ```
 
+## Local validation (terminal mode)
+
+The fastest way to try this end-to-end without configuring a chat
+platform:
+
+```bash
+uv run agentm-gateway --terminal --cwd ./workspace --scenario feishu_chat
+```
+
+You get a stdin/stdout REPL backed by the same gateway + commands +
+approvals as production. Useful for testing `/help`, `/skill:foo`,
+`/new`, custom markdown commands, and approval flows before pointing
+Feishu at the daemon. `Ctrl-D` ends the session.
+
+Approval-button round-trips in terminal mode: when the agent posts an
+approval card you'll see numbered `[1] Approve` / `[2] Deny` options
+and the literal `value=…` next to each. Type `=<value>` (e.g.
+`=approval-deadbeef:approve`) to click. Less ergonomic than a Feishu
+button, but exercises the exact same code path.
+
 ## Run (one-liner)
 
 ```bash
@@ -98,6 +118,50 @@ External plugins use `pyproject.toml` entry points:
 [project.entry-points."agentm_channels.channels"]
 discord = "my_pkg.discord:DiscordChannel"
 ```
+
+## Slash commands
+
+Messages starting with `/` are intercepted before the agent sees them.
+Design lives in `.claude/designs/command-routing.md`.
+
+Builtin control commands (no LLM call):
+
+| Command | Effect |
+|---|---|
+| `/new` | Discard the AgentSession for this chat; next message starts fresh. |
+| `/end` | Discard the session **and** forget the persistent mapping (cold restart on next message). |
+| `/status` | Report session id, turn count, pending approvals. |
+| `/help` | List every discovered command, grouped by source. |
+
+Custom prompt commands (Claude-Code-style markdown) live in
+`<cwd>/.agentm/commands/*.md`:
+
+```markdown
+---
+name: standup
+summary: Generate today's standup
+---
+Read the last 24h of commits and write a 3-bullet standup for
+$ARGUMENTS.
+```
+
+`/standup polish` resolves `$ARGUMENTS` to `polish` and feeds the
+expanded body to the agent as the user turn.
+
+Skills as commands. Any SKILL.md under `<cwd>/.claude/skills/` or
+`~/.claude/skills/` is also reachable as `/skill:<name> [args]`. The
+skill body is injected as a one-turn instruction, so the user can
+force-activate a skill even when the LLM has not selected it from the
+auto-loaded skill index.
+
+Unknown commands (`/foo` with no matching handler) are rejected with a
+visible error — they **never** reach the LLM. This avoids the failure
+mode of typos leaking sensitive prompts into the model when the user
+clearly intended a command.
+
+Atom commands (`/atom:install <name>`, `/atom:uninstall <name>`) are
+designed but not implemented in this PR — see
+`.claude/designs/command-routing.md` §8.
 
 ## Approval flow
 

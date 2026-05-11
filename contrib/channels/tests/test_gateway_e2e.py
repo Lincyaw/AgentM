@@ -42,7 +42,7 @@ class _FakeSession:
         self.session_manager = _FakeSM()
 
     async def prompt(self, text: str) -> None:
-        if text.strip().lower() == "/tool":
+        if text.strip().lower() == "run-tool":
             tc = ToolCallEvent(
                 tool_call_id="t1", tool_name="bash", args={"cmd": "echo hi"}
             )
@@ -141,7 +141,7 @@ async def test_blocked_tool_call_is_reported(tmp_path: Path) -> None:
     )
     try:
         stub = mgr.channels["stub"]
-        await stub.push(sender_id="u1", chat_id="c1", content="/tool")  # type: ignore[attr-defined]
+        await stub.push(sender_id="u1", chat_id="c1", content="run-tool")  # type: ignore[attr-defined]
         await _wait_for(
             lambda: any(  # noqa: E501
                 "blocked: tool 'bash'" in o.content for o in stub.outbox  # type: ignore[attr-defined]
@@ -177,7 +177,7 @@ async def test_approval_card_round_trip_lets_tool_through(tmp_path: Path) -> Non
                         return
                 await asyncio.sleep(0.01)
 
-        await stub.push(sender_id="u1", chat_id="c1", content="/tool")  # type: ignore[attr-defined]
+        await stub.push(sender_id="u1", chat_id="c1", content="run-tool")  # type: ignore[attr-defined]
         approver = asyncio.create_task(auto_approver())
         await _wait_for(
             lambda: any("ran bash" in o.content for o in stub.outbox),  # type: ignore[attr-defined]
