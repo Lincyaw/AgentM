@@ -105,23 +105,6 @@ def collect_start_veto(returns: list[Any]) -> TerminationCause | None:
     return None
 
 
-async def _iter_auto_discovered_atoms(
-    *,
-    bus: EventBus,
-    source: str,
-    discover: Callable[[], dict[str, Any]],
-    skip_label: str,
-) -> list[tuple[str, dict[str, Any]]]:
-    """Discover one source's atoms; emit diagnostics for failures and
-    config-incomplete entries. Kept as a thin shim over
-    :func:`collect_auto_discovered_atoms` for backward compatibility.
-    """
-    return await collect_auto_discovered_atoms(
-        bus=bus,
-        sources=(AtomSource(label=source, discover=discover, skip_label=skip_label),),
-    )
-
-
 async def collect_auto_discovered_atoms(
     *,
     bus: EventBus,

@@ -351,7 +351,6 @@ async def test_shutdown_indexes_observability_trace_when_present(
         session_id="session-123",
         parent_bus=None,
         parent_session_id=None,
-        purpose="test",
     )
 
     await session.shutdown()

@@ -95,7 +95,6 @@ class _SessionGateway(Protocol):
         name: str,
         *,
         agent_initiated: bool = True,
-        rationale: str | None = None,
     ) -> "UnloadAtomResult": ...
 
     def freeze_current(self, name: str) -> str: ...
@@ -135,9 +134,8 @@ class _NoopSessionGateway:
         name: str,
         *,
         agent_initiated: bool = True,
-        rationale: str | None = None,
     ) -> "UnloadAtomResult":
-        del name, agent_initiated, rationale
+        del name, agent_initiated
         raise RuntimeError("unload_atom is unavailable on this ExtensionAPI instance")
 
     def freeze_current(self, name: str) -> str:
@@ -432,7 +430,6 @@ class ExtensionAPI(Protocol):
         name: str,
         *,
         agent_initiated: bool = True,
-        rationale: str | None = None,
     ) -> UnloadAtomResult:
         """Remove an installed atom from the running session.
 
@@ -742,13 +739,11 @@ class _ExtensionAPIImpl:
         name: str,
         *,
         agent_initiated: bool = True,
-        rationale: str | None = None,
     ) -> UnloadAtomResult:
         self._assert_active()
         return self._gateway.unload_atom(
             name,
             agent_initiated=agent_initiated,
-            rationale=rationale,
         )
 
     def freeze_current(self, name: str) -> str:

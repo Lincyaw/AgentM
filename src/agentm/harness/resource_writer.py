@@ -93,70 +93,6 @@ class _BatchImpl(BatchHandle):
         self.pending.append(_PendingBatchOp(kind="delete", path=path))
 
 
-class _NoopResourceWriter:
-    async def read(self, path: str) -> bytes:
-        return await asyncio.to_thread(Path(path).read_bytes)
-
-    async def write(
-        self,
-        path: str,
-        content: bytes,
-        *,
-        rationale: str,
-        author: WriterAuthor = "agent",
-    ) -> WriteResult:
-        del content, rationale, author
-        return WriteResult(path=path, path_class="unmanaged", committed=False, commit_sha_before=None, commit_sha_after=None)
-
-    async def replace(
-        self,
-        path: str,
-        old: bytes,
-        new: bytes,
-        *,
-        rationale: str,
-        author: WriterAuthor = "agent",
-    ) -> WriteResult:
-        del old, new, rationale, author
-        return WriteResult(path=path, path_class="unmanaged", committed=False, commit_sha_before=None, commit_sha_after=None)
-
-    async def delete(
-        self,
-        path: str,
-        *,
-        rationale: str,
-        author: WriterAuthor = "agent",
-    ) -> WriteResult:
-        del rationale, author
-        return WriteResult(path=path, path_class="unmanaged", committed=False, commit_sha_before=None, commit_sha_after=None)
-
-    def classify(self, path: str) -> PathClass:
-        del path
-        return "unmanaged"
-
-    def restore(self, path: Path, version: str) -> None:
-        del path, version
-        raise NotImplementedError("noop ResourceWriter has no versions")
-
-    def current_version_for_path(self, path: str) -> str | None:
-        del path
-        return None
-
-    def batch(
-        self,
-        *,
-        rationale: str,
-        author: WriterAuthor = "agent",
-    ) -> AbstractAsyncContextManager[BatchHandle]:
-        del rationale, author
-
-        @asynccontextmanager
-        async def _manager() -> AsyncIterator[BatchHandle]:
-            yield _BatchImpl()
-
-        return _manager()
-
-
 class GitBackedResourceWriter:
     """Single chokepoint for managed-resource writes."""
 
@@ -825,5 +761,4 @@ __all__ = [
     "ResourceWriter",
     "WriteResult",
     "WriterAuthor",
-    "_NoopResourceWriter",
 ]

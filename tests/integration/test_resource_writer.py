@@ -403,7 +403,3 @@ async def test_current_version_for_path_returns_commit_sha(tmp_path: Path) -> No
     assert writer.current_version_for_path("notes.md") == result.commit_sha_after
 
 
-def test_noop_resource_writer_has_no_current_version() -> None:
-    from agentm.harness.resource_writer import _NoopResourceWriter
-
-    assert _NoopResourceWriter().current_version_for_path("anything.txt") is None

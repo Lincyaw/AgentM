@@ -331,6 +331,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     )
 
 
+def _decisions_path(atom_name: str, target_sha: str, root: Any) -> Any:
+    from agentm.harness.catalog import _layout
+
+    return _layout.atom_decisions_path(atom_name, target_sha, root=root)
+
+
 def _regression_decision(
     api: ExtensionAPI,
     atom_name: str | None,
@@ -340,7 +346,13 @@ def _regression_decision(
 ) -> dict[str, Any] | None:
     if atom_name is None:
         return None
-    for payload in api.catalog.read_atom_decisions(atom_name, target_sha, root):
+    path = _decisions_path(atom_name, target_sha, root)
+    if not path.exists():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
         if payload.get("regressed") is True or payload.get("kind") == "regressed":
             return payload
     return None
@@ -354,9 +366,18 @@ def _append_decision(
     *,
     root: Any,
 ) -> None:
+    # Bypasses ResourceWriter because ``.agentm/catalog/**`` is
+    # constitution-protected — only this atom (the mediated catalog-mutation
+    # channel) writes to the per-atom decisions journal. Matches the pattern
+    # at tool_propose_change._append_decision_record. Schema-stamped keys
+    # are enforced literally at call sites.
     if atom_name is None:
         return
-    api.catalog.append_atom_decision(atom_name, target_sha, record, root)
+    path = _decisions_path(atom_name, target_sha, root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True))
+        handle.write("\n")
 
 
 def _now_iso() -> str:

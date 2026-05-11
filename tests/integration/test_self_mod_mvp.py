@@ -142,7 +142,7 @@ async def test_S10_manifest_change_moves_constitution_boundary(
     monkeypatch.setattr(manifest_mod, "_MANIFEST_PATH", custom_manifest)
     reload_manifest()
 
-    assert manifest_mod.is_constitution_path("src/agentm/core/kernel/loop.py") is False
+    assert manifest_mod.is_constitution_path("src/agentm/extensions/builtin/permission.py") is False
     assert manifest_mod.is_constitution_path("core-manifest.yaml") is True
     assert manifest_mod.is_constitution_path("src/agentm/core/operations.py") is True
 

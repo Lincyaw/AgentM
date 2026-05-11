@@ -32,7 +32,7 @@ from agentm.core.abi import (
     ToolTerminated,
     UserMessage,
 )
-from agentm.core.lib import _to_jsonable
+from agentm.core.lib import to_jsonable
 from agentm.core.lib.artifact_files import list_artifacts_for_task
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
@@ -213,7 +213,7 @@ def _extract_return_response_text(messages: list[Any]) -> str | None:
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
     return ToolResult(
-        content=[TextContent(type="text", text=json.dumps(_to_jsonable(payload)))],
+        content=[TextContent(type="text", text=json.dumps(to_jsonable(payload)))],
         is_error=is_error,
         extras=payload,
     )

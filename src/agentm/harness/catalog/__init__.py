@@ -14,7 +14,7 @@ from typing import Any
 
 from agentm.core.abi.project_layout import ProjectLayout
 from agentm.harness.catalog import _layout
-from agentm.harness.catalog.freeze import freeze_current, source_path_for_hash
+from agentm.harness.catalog.freeze import freeze_current
 from agentm.harness.catalog.indexer import (
     IndexerResult,
     index_trace,
@@ -104,5 +104,4 @@ __all__ = [
     "list_atoms",
     "migrate_catalog_v2",
     "rebuild_catalog",
-    "source_path_for_hash",
 ]

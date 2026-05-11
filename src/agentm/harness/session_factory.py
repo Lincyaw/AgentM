@@ -286,6 +286,7 @@ async def create_agent_session(
     eval_sandbox = await apply_atom_source_overrides(
         reloader=reloader,
         bus=bus,
+        resource_writer=resource_writer,
         cwd=config.cwd,
         session_id=session_id,
         overrides=config.atom_source_overrides or {},
@@ -312,7 +313,6 @@ async def create_agent_session(
         session_id=session_id,
         parent_bus=config.parent_bus,
         parent_session_id=config.parent_session_id,
-        purpose=config.purpose,
         eval_sandbox=eval_sandbox,
     )
 

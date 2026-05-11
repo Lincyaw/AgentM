@@ -58,14 +58,6 @@ def freeze_current(
     return version_key
 
 
-def source_path_for_hash(
-    name: str, version_key: str, *, root: Path | None = None
-) -> Path:
-    raise RuntimeError(
-        "catalog source blobs moved to git; browse.py legacy helpers are handled in issue #3"
-    )
-
-
 def _resolve_atom_source_path(name: str, *, root: Path) -> Path:
     candidate = root / "src" / "agentm" / "extensions" / "builtin" / f"{name}.py"
     if candidate.is_file():

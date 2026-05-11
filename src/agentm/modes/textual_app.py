@@ -31,7 +31,7 @@ from agentm.core.abi import (
     LlmRequestEndEvent,
     LlmRequestStartEvent,
     MessageEnd,
-    Phase as KernelPhase,
+    Phase,
     StreamDeltaEvent,
     TextDelta,
     ThinkingDelta,
@@ -63,9 +63,6 @@ from agentm.harness import (
 )
 
 
-# Re-export the kernel ``Phase`` literal under the legacy presenter name
-# so existing module consumers (tests, themes) keep their imports.
-Phase = KernelPhase
 CommandHandler = Callable[["AgentMApp", str], Awaitable[None] | None]
 KeyMap = Sequence[Binding]
 PromptFailure = Exception
