@@ -1114,9 +1114,7 @@ class AtomReloader:
         name: str,
         *,
         agent_initiated: bool = True,
-        rationale: str | None = None,
     ) -> UnloadAtomResult:
-        del rationale  # reserved for future audit log; unused for now
         atom = self._loaded_by_name.get(name)
         if atom is None:
             return UnloadAtomResult(

@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
+from agentm.core.abi.roles import SUB_AGENT_RUNTIME
 from agentm.core.abi import (
     DecideTurnActionEvent,
     FunctionTool,
@@ -32,7 +33,7 @@ from agentm.core.abi import (
     ToolTerminated,
     UserMessage,
 )
-from agentm.core.lib import _to_jsonable
+from agentm.core.lib import to_jsonable
 from agentm.core.lib.artifact_files import list_artifacts_for_task
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
@@ -101,6 +102,7 @@ MANIFEST = ExtensionManifest(
         "additionalProperties": True,
     },
     requires=("system_prompt",),
+    provides_role=(SUB_AGENT_RUNTIME,),
 )
 
 
@@ -213,7 +215,7 @@ def _extract_return_response_text(messages: list[Any]) -> str | None:
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
     return ToolResult(
-        content=[TextContent(type="text", text=json.dumps(_to_jsonable(payload)))],
+        content=[TextContent(type="text", text=json.dumps(to_jsonable(payload)))],
         is_error=is_error,
         extras=payload,
     )

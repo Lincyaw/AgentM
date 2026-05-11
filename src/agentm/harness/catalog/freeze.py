@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import inspect
 import threading
 from pathlib import Path
@@ -58,14 +59,6 @@ def freeze_current(
     return version_key
 
 
-def source_path_for_hash(
-    name: str, version_key: str, *, root: Path | None = None
-) -> Path:
-    raise RuntimeError(
-        "catalog source blobs moved to git; browse.py legacy helpers are handled in issue #3"
-    )
-
-
 def _resolve_atom_source_path(name: str, *, root: Path) -> Path:
     candidate = root / "src" / "agentm" / "extensions" / "builtin" / f"{name}.py"
     if candidate.is_file():
@@ -111,7 +104,12 @@ def _write_via_writer(
         except BaseException as exc:  # pragma: no cover - exercised by caller
             error.append(exc)
 
-    thread = threading.Thread(target=_runner, name="agentm-freeze-current")
+    # The async writer reads the manifest-path ContextVar to decide
+    # constitution boundary; copy the current context into the worker
+    # thread so the binding propagates (``threading.Thread`` does not
+    # inherit ContextVars by default).
+    ctx = contextvars.copy_context()
+    thread = threading.Thread(target=ctx.run, args=(_runner,), name="agentm-freeze-current")
     thread.start()
     thread.join()
     if error:

@@ -129,7 +129,13 @@ async def test_G3_constitution_rejects_tool_edit(tmp_path: Path) -> None:
 
     _init_repo(tmp_path)
     target = tmp_path / "core-manifest.yaml"
-    target.write_text("version: 1\n", encoding="utf-8")
+    target.write_text(
+        "version: 1\n"
+        "constitution:\n"
+        "  paths:\n"
+        "    - core-manifest.yaml\n",
+        encoding="utf-8",
+    )
     _git(tmp_path, "add", "core-manifest.yaml")
     _git(tmp_path, "commit", "-m", "add constitution file", "--quiet")
     before = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
@@ -155,7 +161,7 @@ async def test_G3_constitution_rejects_tool_edit(tmp_path: Path) -> None:
     message = result.content[0]
     assert isinstance(message, TextContent)
     assert "constitution path" in message.text
-    assert target.read_text(encoding="utf-8") == "version: 1\n"
+    assert "version: 2" not in target.read_text(encoding="utf-8")
     assert after == before
 
 
@@ -403,7 +409,3 @@ async def test_current_version_for_path_returns_commit_sha(tmp_path: Path) -> No
     assert writer.current_version_for_path("notes.md") == result.commit_sha_after
 
 
-def test_noop_resource_writer_has_no_current_version() -> None:
-    from agentm.harness.resource_writer import _NoopResourceWriter
-
-    assert _NoopResourceWriter().current_version_for_path("anything.txt") is None

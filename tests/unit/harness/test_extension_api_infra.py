@@ -32,7 +32,9 @@ class _SessionView:
 
 
 def _api(tmp_path: Any, *, child_factory: Any | None = None) -> _ExtensionAPIImpl:
-    return _ExtensionAPIImpl(
+    from agentm.harness.extension import build_extension_api_scope
+
+    scope = build_extension_api_scope(
         bus=EventBus(),
         cwd=str(tmp_path),
         session_id="session",
@@ -46,6 +48,7 @@ def _api(tmp_path: Any, *, child_factory: Any | None = None) -> _ExtensionAPIImp
         provider_getter=lambda: None,
         child_session_factory=child_factory,
     )
+    return _ExtensionAPIImpl(scope)
 
 
 @pytest.mark.asyncio

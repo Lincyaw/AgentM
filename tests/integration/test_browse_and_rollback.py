@@ -11,7 +11,6 @@ import pytest
 from agentm.core.abi import AssistantMessage, EventBus, TextContent, ToolResult
 from agentm.core.abi.messages import ToolResultBlock, ToolResultMessage, UserMessage
 from agentm.harness.catalog import _layout
-from agentm.core._internal.catalog.manifest import reload_manifest
 from agentm.harness.resource_loader import InMemoryResourceLoader
 from agentm.harness.resource_writer import GitBackedResourceWriter
 from agentm.harness.session import AgentSession, AgentSessionConfig
@@ -120,7 +119,7 @@ def _init_repo(root: Path) -> None:
     _git(root, "commit", "-m", "initial", "--quiet")
 
 
-def _write_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _write_manifest(tmp_path: Path) -> None:
     from agentm.core._internal.catalog import manifest as manifest_mod
 
     manifest_path = tmp_path / "core-manifest.yaml"
@@ -143,8 +142,7 @@ def _write_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         "  tier_2_atoms: []\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(manifest_mod, "_MANIFEST_PATH", manifest_path)
-    reload_manifest()
+    manifest_mod.configure_manifest_path(manifest_path)
 
 
 def _write_package(tmp_path: Path, source: str) -> str:
@@ -163,7 +161,7 @@ async def _build_session(
     *,
     atom_source: str,
 ) -> AgentSession:
-    _write_manifest(tmp_path, monkeypatch)
+    _write_manifest(tmp_path)
     pkg = _write_package(tmp_path, atom_source)
     _git(tmp_path, "add", pkg)
     _git(tmp_path, "commit", "-m", f"seed {pkg}", "--quiet")
@@ -370,7 +368,7 @@ async def test_G9_batch_write_still_coalesces_into_one_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _init_repo(tmp_path)
-    _write_manifest(tmp_path, monkeypatch)
+    _write_manifest(tmp_path)
     left = tmp_path / "skills" / "foo" / "SKILL.md"
     right = tmp_path / "prompts" / "note.txt"
     left.parent.mkdir(parents=True, exist_ok=True)

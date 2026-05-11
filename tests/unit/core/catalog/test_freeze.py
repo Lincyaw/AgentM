@@ -5,9 +5,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
-
-from agentm.core._internal.catalog.manifest import reload_manifest
 from agentm.harness.catalog import freeze_current, list_atoms
 from agentm.harness.catalog._layout import atom_runs_dir, atom_version_dir
 from agentm.extensions import ExtensionManifest
@@ -52,7 +49,7 @@ def _write_atom(root: Path, name: str, source: str) -> None:
     atom_path.write_text(source, encoding="utf-8")
 
 
-def _configure_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _configure_manifest(tmp_path: Path) -> None:
     from agentm.core._internal.catalog import manifest as manifest_mod
 
     manifest_path = tmp_path / "core-manifest.yaml"
@@ -73,14 +70,13 @@ def _configure_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         "  tier_2_atoms: []\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(manifest_mod, "_MANIFEST_PATH", manifest_path)
-    reload_manifest()
+    manifest_mod.configure_manifest_path(manifest_path)
 
 
 def test_freeze_returns_git_sha_and_creates_runs_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    _configure_manifest(tmp_path, monkeypatch)
+    _configure_manifest(tmp_path)
     _init_repo(tmp_path)
     source = "def install(api, config):\n    return None\n"
     _write_atom(tmp_path, "tool_read", source)
@@ -95,9 +91,9 @@ def test_freeze_returns_git_sha_and_creates_runs_dir(
 
 
 def test_M1_idempotent_reuses_existing_git_version(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    _configure_manifest(tmp_path, monkeypatch)
+    _configure_manifest(tmp_path)
     _init_repo(tmp_path)
     source = "def install(api, config):\n    return None\n"
     _write_atom(tmp_path, "tool_read", source)
@@ -109,9 +105,9 @@ def test_M1_idempotent_reuses_existing_git_version(
 
 
 def test_freeze_changes_version_after_source_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    _configure_manifest(tmp_path, monkeypatch)
+    _configure_manifest(tmp_path)
     _init_repo(tmp_path)
     first_source = "def install(api, config):\n    return 'first'\n"
     second_source = "def install(api, config):\n    return 'second'\n"
@@ -127,9 +123,9 @@ def test_freeze_changes_version_after_source_changes(
 
 
 def test_list_atoms_returns_current_catalog_metadata(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    _configure_manifest(tmp_path, monkeypatch)
+    _configure_manifest(tmp_path)
     _init_repo(tmp_path)
     tool_read_source = "def install(api, config):\n    return 'first'\n"
     tool_bash_source = "def install(api, config):\n    return 'bash'\n"

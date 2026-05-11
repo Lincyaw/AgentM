@@ -1,25 +1,18 @@
-"""Provider interface package — port of pi-mono `packages/ai/`.
+"""Provider interface package — port of pi-mono ``packages/ai/``.
 
-This is an *interface-only* port. Concrete provider implementations
-(Anthropic, OpenAI, Bedrock, ...) are deliberately not ported; they
-should be added by consumers when needed. The current direct-LLM
-path through ``agentm.llm`` continues to work alongside this registry.
+Interface-only port: concrete provider implementations live in
+``agentm.llm``. This package exposes the provider descriptor / registry
+types that the CLI and contrib channels use to enumerate available
+providers and resolve API keys from the environment.
 """
 
-from agentm.ai.api_registry import (
-    ApiProvider,
-    clear_api_providers,
-    get_api_provider,
-    get_api_providers,
-    register_api_provider,
-    unregister_api_providers,
-)
 from agentm.ai.env_api_keys import find_env_keys, get_env_api_key, resolve
 from agentm.ai.types import (
     DEFAULT_PROVIDER_DESCRIPTORS,
     DEFAULT_PROVIDER_REGISTRY,
     KNOWN_APIS,
     KNOWN_PROVIDERS,
+    ApiProvider,
     Model,
     ProviderDescriptor,
     ProviderRegistry,
@@ -36,12 +29,7 @@ __all__ = [
     "ProviderDescriptor",
     "ProviderRegistry",
     "StreamFunction",
-    "clear_api_providers",
     "find_env_keys",
-    "get_api_provider",
-    "get_api_providers",
     "get_env_api_key",
-    "register_api_provider",
     "resolve",
-    "unregister_api_providers",
 ]

@@ -1,9 +1,6 @@
-"""AgentM package root.
+"""AgentM package root — v2 kernel + harness + extension catalog.
 
-Phase 2.5 reduces the package to the v2 kernel + harness + extension catalog.
-The CLI used to live in ``agentm.cli`` (deleted with the legacy tree); the
-``agentm`` console-script now points at :func:`agentm.cli.main` defined in
-``cli.py``.
+The ``agentm`` console-script entry point delegates to :func:`agentm.cli.main`.
 """
 
 from __future__ import annotations
