@@ -1,7 +1,13 @@
-# Design: Gateway & Channels (Feishu / Lark and beyond)
+# Design: Gateway & Channels (Feishu / Lark and beyond) — channels v0
 
-**Status**: PROPOSED
+**Status**: SHIPPED (PR #137)
 **Created**: 2026-05-11
+**Superseded by**: [`client-server-architecture.md`](client-server-architecture.md)
+for v1 (process-level split). This doc continues to describe the
+**v0 in-process design** that ships today; it stays load-bearing
+during the migration window because v0 channels remain supported until
+every shipping platform has a v1 client. Once that migration
+completes, this doc moves to `designs/historical/`.
 **Reference codebase**: [`HKUDS/nanobot`](https://github.com/HKUDS/nanobot) — multi-channel chat agent. Local clone read at `/tmp/refs/nanobot` on 2026-05-11.
 
 ---
