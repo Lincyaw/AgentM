@@ -99,3 +99,83 @@ async def test_turn_complete_kind_does_not_print_empty_body(
     )
     captured = capsys.readouterr().out
     assert "turn complete" in captured
+
+
+# --- JSON mode --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_json_mode_emits_one_object_per_outbound(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """JSON mode is the script-friendly contract: every ``send`` is one
+    object on stdout, parseable line-by-line."""
+    import json as _json
+    from agentm_channels.bus import Button
+
+    bus = MessageBus()
+    chan = TerminalChannel(
+        {"enabled": True, "allow_from": ["*"], "format": "json"}, bus
+    )
+    await chan.send(
+        OutboundMessage(
+            channel="terminal",
+            chat_id="terminal",
+            content="hello world",
+            buttons=[
+                Button(label="Approve", value="ap-1:approve", style="primary"),
+                Button(label="Deny", value="ap-1:deny", style="danger"),
+            ],
+            metadata={"kind": "approval_request", "approval_id": "ap-1"},
+        )
+    )
+    await chan.send(
+        OutboundMessage(
+            channel="terminal",
+            chat_id="terminal",
+            kind=OutboundKind.TURN_COMPLETE,
+        )
+    )
+    lines = [line for line in capsys.readouterr().out.splitlines() if line]
+    parsed = [_json.loads(line) for line in lines]
+    assert parsed[0]["kind"] == "message"
+    assert parsed[0]["content"] == "hello world"
+    assert parsed[0]["buttons"][0]["value"] == "ap-1:approve"
+    assert parsed[0]["metadata"]["approval_id"] == "ap-1"
+    assert parsed[1] == {"kind": "turn_complete"}
+
+
+@pytest.mark.asyncio
+async def test_json_mode_announces_ready_and_stopped(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json as _json
+
+    bus = MessageBus()
+    # Empty stdin → start() emits ``ready``, the read loop hits EOF,
+    # the channel sets ``stopped`` and start() returns; stop() emits
+    # ``stopped`` so a parser knows no more output is coming.
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    chan = TerminalChannel(
+        {"enabled": True, "allow_from": ["*"], "format": "json"}, bus
+    )
+    await chan.start()
+    await chan.stop()
+    parsed = [
+        _json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line
+    ]
+    kinds = [p["kind"] for p in parsed]
+    assert "ready" in kinds
+    assert "stopped" in kinds
+    assert kinds.index("ready") < kinds.index("stopped")
+
+
+def test_invalid_format_value_rejected() -> None:
+    bus = MessageBus()
+    with pytest.raises(ValueError, match="format must be 'text' or 'json'"):
+        TerminalChannel(
+            {"enabled": True, "allow_from": ["*"], "format": "yaml"}, bus
+        )

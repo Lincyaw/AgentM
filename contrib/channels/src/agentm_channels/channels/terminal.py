@@ -1,17 +1,28 @@
 """TerminalChannel — stdin/stdout adapter for local validation.
 
-Lets you drive the gateway from a terminal without a chat platform:
-every typed line becomes an :class:`InboundMessage`, every outbound
-message is printed back. Useful for trying slash commands, skill
-activation, or approval flows against a real agent before pointing
-Feishu at the same gateway.
+Drives the gateway from a terminal without a chat platform. Same
+``BaseChannel`` contract as Feishu so what you validate here is what
+runs in chat.
 
-This is **not** intended for production use — there is no multi-user
-support, no rich rendering, and stdin reading is line-buffered. It is
-a deliberate analog to nanobot's terminal mode and to the existing
-``agentm`` CLI's REPL, but routed through the same channel + command
-+ approval plumbing that Feishu uses, so what you validate in the
-terminal is what runs in chat.
+Two output formats, picked at config time:
+
+* ``format: text`` (default) — human-friendly: ANSI colors, ``agent ▸``
+  prefix, ``[N] Approve`` button rendering. What you want when typing
+  interactively.
+* ``format: json`` — one JSON object per line on stdout:
+
+  * ``{"kind":"ready"}`` — channel started, you may start sending.
+  * ``{"kind":"message","content":"…","buttons":[{...}]}`` — assistant
+    text (and any approval buttons).
+  * ``{"kind":"turn_complete"}`` — end of the current turn. Readers
+    poll until they see this before sending the next line.
+  * ``{"kind":"stopped"}`` — channel is shutting down; no further
+    output on stdout.
+
+  Logging stays on stderr regardless of format, so callers can
+  ``2>/tmp/gw.err`` and parse stdout cleanly. This is the mode an
+  outside script (test harness, agent driver) should use — request /
+  response framing is exact and there's no ANSI noise.
 
 Configuration::
 
@@ -19,23 +30,23 @@ Configuration::
       terminal:
         enabled: true
         allow_from: ["*"]
-        sender_id: local        # what InboundMessage.sender_id reports (default: "local")
-        chat_id: terminal       # session scope (default: "terminal")
-        color: true             # ANSI colors on outbound (default: True; auto-off if stdout is not a tty)
+        sender_id: local        # InboundMessage.sender_id (default "local")
+        chat_id: terminal       # session scope (default "terminal")
+        format: text             # "text" (humans) or "json" (scripts)
+        color: true              # only meaningful in text mode
 
-The ``BUTTONS`` rendering hint is plain text: each :class:`Button`
-becomes ``[N] <label>`` and the user types ``/approve`` or
-``/deny`` (when that command lands) or pastes the literal
-``button_value`` prefixed with ``=`` for the round-trip. The escape
-hatch keeps the channel usable for approval flows even before the
-text-fallback commands ship.
+The ``BUTTONS`` rendering hint in text mode is ``[N] <label>`` plus
+the literal ``value=…`` next to each so the user can type
+``=<button_value>`` to round-trip a click. In JSON mode the full
+typed button is just on the JSON object.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
-from typing import Any
+from typing import Any, Literal
 
 from ..base import BaseChannel
 from ..bus import Button, OutboundKind, OutboundMessage
@@ -43,10 +54,12 @@ from ..bus import Button, OutboundKind, OutboundMessage
 
 _RESET = "\033[0m"
 _DIM = "\033[2m"
-_BOLD = "\033[1m"
 _BLUE = "\033[94m"
 _YELLOW = "\033[93m"
 _GREEN = "\033[92m"
+
+
+Format = Literal["text", "json"]
 
 
 class TerminalChannel(BaseChannel):
@@ -61,10 +74,19 @@ class TerminalChannel(BaseChannel):
         cfg = config if isinstance(config, dict) else {}
         self._sender_id: str = str(cfg.get("sender_id") or "local")
         self._chat_id: str = str(cfg.get("chat_id") or "terminal")
+        fmt_raw = str(cfg.get("format", "text")).lower()
+        if fmt_raw not in ("text", "json"):
+            raise ValueError(
+                f"terminal format must be 'text' or 'json' (got {fmt_raw!r})"
+            )
+        self._format: Format = "json" if fmt_raw == "json" else "text"
         # Default to color when attached to a tty; explicit ``False``
-        # wins for capture/CI runs.
+        # wins for capture/CI runs. ANSI is also forced off in JSON
+        # mode — JSON output is meant to be parsed.
         cfg_color = cfg.get("color")
-        if cfg_color is None:
+        if self._format == "json":
+            self._color = False
+        elif cfg_color is None:
             self._color = sys.stdout.isatty()
         else:
             self._color = bool(cfg_color)
@@ -76,6 +98,7 @@ class TerminalChannel(BaseChannel):
             "allow_from": ["*"],
             "sender_id": "local",
             "chat_id": "terminal",
+            "format": "text",
             "color": True,
         }
 
@@ -86,12 +109,16 @@ class TerminalChannel(BaseChannel):
         self._reader_task = asyncio.create_task(
             self._read_loop(), name="terminal-read"
         )
-        self._print(
-            self._style(
-                "[terminal channel ready — type /help for commands, Ctrl-D to exit]",
-                _DIM,
+        if self._format == "json":
+            self._emit({"kind": "ready"})
+        else:
+            self._print(
+                self._style(
+                    "[terminal channel ready — type /help for commands, "
+                    "Ctrl-D to exit]",
+                    _DIM,
+                )
             )
-        )
         await self._stopped.wait()
 
     async def stop(self) -> None:
@@ -99,6 +126,8 @@ class TerminalChannel(BaseChannel):
             return
         self._running = False
         self._stopped.set()
+        if self._format == "json":
+            self._emit({"kind": "stopped"})
         if self._reader_task is not None and not self._reader_task.done():
             self._reader_task.cancel()
             try:
@@ -107,8 +136,15 @@ class TerminalChannel(BaseChannel):
                 pass
 
     async def send(self, msg: OutboundMessage) -> None:
+        if self._format == "json":
+            await self._send_json(msg)
+            return
+        await self._send_text(msg)
+
+    # --- text rendering -----------------------------------------------
+
+    async def _send_text(self, msg: OutboundMessage) -> None:
         if msg.kind is OutboundKind.TURN_COMPLETE:
-            # Mark end-of-turn for the user; no payload to render.
             self._print(self._style("… (turn complete)", _DIM))
             return
         text = msg.content.rstrip()
@@ -129,6 +165,30 @@ class TerminalChannel(BaseChannel):
                 )
             )
 
+    # --- json rendering -----------------------------------------------
+
+    async def _send_json(self, msg: OutboundMessage) -> None:
+        if msg.kind is OutboundKind.TURN_COMPLETE:
+            self._emit({"kind": "turn_complete"})
+            return
+        payload: dict[str, Any] = {
+            "kind": "message",
+            "content": msg.content,
+        }
+        if msg.buttons:
+            payload["buttons"] = [
+                {"label": b.label, "value": b.value, "style": b.style}
+                for b in msg.buttons
+            ]
+        # Forward channel-private metadata so callers needing the
+        # ``approval_request`` / ``approval_resolved`` kind can match
+        # without re-parsing button labels.
+        if msg.metadata:
+            payload["metadata"] = dict(msg.metadata)
+        self._emit(payload)
+
+    # --- read loop ----------------------------------------------------
+
     async def _read_loop(self) -> None:
         loop = asyncio.get_running_loop()
         while self._running:
@@ -137,11 +197,7 @@ class TerminalChannel(BaseChannel):
             except Exception:  # pragma: no cover — defensive
                 line = ""
             if not line:
-                # EOF (Ctrl-D / piped input exhausted). Signal shutdown
-                # by setting the stopped event; the manager's start_all
-                # noticing won't help because terminal.start() is what
-                # holds the manager alive — emit a synthetic /end to
-                # close the session cleanly, then stop.
+                # EOF (Ctrl-D / piped input exhausted). Signal shutdown.
                 self._stopped.set()
                 return
             content = line.rstrip("\n")
@@ -151,8 +207,7 @@ class TerminalChannel(BaseChannel):
 
     async def _dispatch_user_line(self, content: str) -> None:
         # ``=<button_value>`` is the round-trip escape for approval
-        # button clicks. Mirrors what a Feishu cardAction event looks
-        # like to the bridge: same ``button_value``, no user prose.
+        # button clicks. Mirrors what a Feishu cardAction event carries.
         if content.startswith("="):
             button_value = content[1:].strip()
             await self._handle_message(
@@ -177,10 +232,15 @@ class TerminalChannel(BaseChannel):
 
     @staticmethod
     def _print(text: str) -> None:
-        # Flush so prompts arrive before the stdin readline blocks the
-        # main thread's view of the terminal.
         print(text, flush=True)
 
+    @staticmethod
+    def _emit(obj: dict[str, Any]) -> None:
+        """Write one JSON line, ASCII-safe (ensure_ascii=False keeps
+        Chinese readable; the trailing flush makes the line visible to
+        a piped reader without buffering delay)."""
+        sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
 
-# Tag for the structural Protocol check the registry runs at startup.
+
 __all__ = ["TerminalChannel"]

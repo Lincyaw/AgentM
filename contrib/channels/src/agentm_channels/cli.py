@@ -2,7 +2,13 @@
 
 Reads a YAML config (or env vars), builds a :class:`MessageBus`,
 spins up a :class:`ChannelManager` and a :class:`Gateway`, and runs
-until the process is signalled to stop.
+until the process is signalled to stop (SIGINT / SIGTERM) — *or*, in
+``--terminal`` mode, until stdin closes (Ctrl-D / piped input
+exhausted). The terminal-EOF path is what lets shell pipelines drive
+the gateway without timeouts:
+
+    printf '/help\\n/atom:list\\n' | \\
+      agentm-gateway --terminal --terminal-format json --config gw.yaml
 
 Minimal config (``gateway.yaml``)::
 
@@ -29,6 +35,22 @@ launch works::
     LARK_APP_ID=… LARK_APP_SECRET=… agentm-gateway --cwd ./work
 
 ``.env`` is auto-loaded from the cwd and the AgentM workspace root.
+
+Exit codes (see also ``cli-design`` rule group 3):
+
+* ``0`` — clean shutdown
+* ``2`` — argument / config error (missing channels, bad YAML, empty allow_from)
+* ``130`` — SIGINT (Ctrl-C)
+
+JSON output contract (``--terminal --terminal-format json``):
+
+* stdout is one JSON object per line; stderr carries logs only.
+* ``{"kind":"ready"}`` — channel started, safe to start sending.
+* ``{"kind":"message","content":"…","buttons":[…],"metadata":{…}}``
+* ``{"kind":"turn_complete"}`` — emitted at the end of a real agent
+  turn. Control commands (``/help`` / ``/status`` / …) do **not** emit
+  ``turn_complete``; they emit one ``message`` object and that's it.
+* ``{"kind":"stopped"}`` — final line; no further output is coming.
 """
 
 from __future__ import annotations
@@ -198,10 +220,27 @@ def _build_session_factory(
 # -------- argv ---------------------------------------------------------
 
 
+EXIT_OK = 0
+EXIT_CONFIG_ERROR = 2
+EXIT_SIGINT = 130
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="agentm-gateway",
-        description="Multi-channel chat gateway for AgentM.",
+        description=(
+            "Multi-channel chat gateway for AgentM. "
+            "Drives Feishu / terminal / future channels through one bus, "
+            "one command router, one approval bridge."
+        ),
+        epilog=(
+            "Shell-driving recipe (no driver/wrapper needed):\n"
+            "  printf '/help\\n/atom:list\\n' | \\\n"
+            "    agentm-gateway --terminal --terminal-format json \\\n"
+            "                   --config gw.yaml 2>/tmp/gw.err\n"
+            "Stdout = one JSON object per line; stderr = logs."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--config", type=Path, help="YAML config (env vars expanded).")
     p.add_argument(
@@ -233,6 +272,28 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "Run the gateway with only the terminal channel (stdin/stdout). "
             "Useful for local validation of slash commands and skill "
             "activation without configuring a chat platform."
+        ),
+    )
+    p.add_argument(
+        "--terminal-format",
+        choices=("text", "json"),
+        default=os.environ.get("AGENTM_GATEWAY_TERMINAL_FORMAT", "text"),
+        help=(
+            "Output format when --terminal is set. 'text' is human-"
+            "friendly (ANSI colors, agent prefix). 'json' emits one "
+            "JSON object per line — use this when a script or another "
+            "agent is driving the gateway. See module docstring for the "
+            "JSON contract."
+        ),
+    )
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help=(
+            "Load config, validate, and exit. No channels are started "
+            "and no LLM is invoked. Exits 0 when the config is OK, 2 "
+            "when something is missing or malformed. Suitable as a "
+            "pre-flight gate in CI or before promoting a deployment."
         ),
     )
     return p.parse_args(argv)
@@ -281,12 +342,15 @@ async def _arun(args: argparse.Namespace) -> int:
         # Terminal mode overrides any YAML/env channels — explicit flag
         # is unambiguous about intent (local validation, single user).
         channels_cfg: dict[str, Any] = {
-            "terminal": {"enabled": True, "allow_from": ["*"]}
+            "terminal": {
+                "enabled": True,
+                "allow_from": ["*"],
+                "format": args.terminal_format,
+            }
         }
-        # Also: a terminal session by definition has just one chat.
-        # Logging to stdout at INFO would interleave with agent replies
-        # and make the channel unreadable; drop the level unless the
-        # operator explicitly raised it.
+        # JSON mode is consumed by parsers; even WARNING-level logging
+        # on stderr is the right home (operator can still see it via
+        # ``2>``). Suppress INFO chatter unless the operator opted in.
         if args.log_level.upper() == "INFO":
             args.log_level = "WARNING"
     else:
@@ -337,6 +401,16 @@ async def _arun(args: argparse.Namespace) -> int:
         ),
     )
 
+    if args.check:
+        # ``--check`` is a dry-run gate: everything above has already
+        # parsed config, validated YAML, instantiated channels (which
+        # is where allow_from / app_id / app_secret checks fire), and
+        # built the session factory. If we got here, the config is
+        # structurally OK. No channels are started → no LLM calls, no
+        # network, no side effects.
+        logger.info("config OK: channels=%s", sorted(manager.channels))
+        return EXIT_OK
+
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -350,13 +424,42 @@ async def _arun(args: argparse.Namespace) -> int:
     logger.info(
         "gateway running with channels: %s", sorted(manager.channels) or "(none)"
     )
+
+    # In ``--terminal`` mode, stdin EOF must teardown the daemon — that
+    # is what makes ``printf '…' | agentm-gateway --terminal`` exit
+    # cleanly without an external ``timeout``. The terminal channel
+    # already sets its ``_stopped`` event on EOF; the manager's
+    # per-channel start tasks complete when it does. So in terminal
+    # mode we race ``stop_event`` (SIGINT/SIGTERM) against "any
+    # channel task finished naturally". Other modes only honour
+    # signals — Feishu's channel.start() blocks forever and an EOF
+    # condition isn't meaningful.
+    if args.terminal:
+        channel_tasks = list(manager._tasks)  # type: ignore[attr-defined]
+        signal_wait = asyncio.create_task(stop_event.wait(), name="gw-signal")
+        try:
+            done, _pending = await asyncio.wait(
+                [signal_wait, *channel_tasks],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if signal_wait in done:
+                logger.info("gateway shutting down (signal)")
+            else:
+                logger.info("gateway shutting down (stdin EOF)")
+        finally:
+            if not signal_wait.done():
+                signal_wait.cancel()
+            await gateway.stop()
+            await manager.stop()
+        return EXIT_OK
+
     try:
         await stop_event.wait()
     finally:
         logger.info("gateway shutting down")
         await gateway.stop()
         await manager.stop()
-    return 0
+    return EXIT_OK
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -374,7 +477,21 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return asyncio.run(_arun(args))
     except KeyboardInterrupt:
-        return 130
+        return EXIT_SIGINT
+    except SystemExit as exc:
+        # Config / argument errors raise SystemExit with a message. Map
+        # to the standardized exit code so callers can distinguish
+        # "config malformed" (2, retry hopeless) from "operational
+        # failure" (other) without parsing stderr.
+        if exc.code is None or exc.code is True:
+            return EXIT_CONFIG_ERROR
+        if isinstance(exc.code, int):
+            return exc.code
+        # Non-int SystemExit code → argparse / SystemExit("message").
+        # argparse already printed to stderr; return the canonical
+        # config-error code.
+        sys.stderr.write(f"{exc.code}\n")
+        return EXIT_CONFIG_ERROR
 
 
 if __name__ == "__main__":  # pragma: no cover
