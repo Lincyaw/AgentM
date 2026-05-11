@@ -196,6 +196,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--log-level", default=os.environ.get("AGENTM_GATEWAY_LOG_LEVEL", "INFO")
     )
+    p.add_argument(
+        "--terminal",
+        action="store_true",
+        help=(
+            "Run the gateway with only the terminal channel (stdin/stdout). "
+            "Useful for local validation of slash commands and skill "
+            "activation without configuring a chat platform."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -226,13 +235,27 @@ async def _arun(args: argparse.Namespace) -> int:
     if args.config is not None:
         cfg = _load_yaml(args.config)
 
-    channels_cfg = cfg.get("channels") or _channels_from_env(dict(os.environ))
-    if not channels_cfg:
-        raise SystemExit(
-            "no channels configured. Pass --config <yaml> with a `channels:` "
-            "section, or set LARK_APP_ID / LARK_APP_SECRET for the one-liner "
-            "Feishu mode."
-        )
+    if args.terminal:
+        # Terminal mode overrides any YAML/env channels — explicit flag
+        # is unambiguous about intent (local validation, single user).
+        channels_cfg: dict[str, Any] = {
+            "terminal": {"enabled": True, "allow_from": ["*"]}
+        }
+        # Also: a terminal session by definition has just one chat.
+        # Logging to stdout at INFO would interleave with agent replies
+        # and make the channel unreadable; drop the level unless the
+        # operator explicitly raised it.
+        if args.log_level.upper() == "INFO":
+            args.log_level = "WARNING"
+    else:
+        channels_cfg = cfg.get("channels") or _channels_from_env(dict(os.environ))
+        if not channels_cfg:
+            raise SystemExit(
+                "no channels configured. Pass --config <yaml> with a "
+                "`channels:` section, set LARK_APP_ID / LARK_APP_SECRET for "
+                "the one-liner Feishu mode, or run with --terminal for local "
+                "validation."
+            )
 
     provider = args.provider or cfg.get("provider") or _default_provider()
     model = (
