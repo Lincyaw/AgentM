@@ -36,6 +36,7 @@ import uuid
 from typing import Any
 from urllib.parse import urlparse
 
+from agentm_channels import DEFAULT_SOCKET_URL
 from agentm_channels.client import AuthError, WireClient
 from agentm_channels.wire import (
     KIND_BYE,
@@ -97,11 +98,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--connect",
-        required=True,
+        default=DEFAULT_SOCKET_URL,
         metavar="URL",
         help=(
             "Gateway socket URL. v1 supports only unix:///abs/path/to/sock; "
-            "other schemes are rejected with exit 2."
+            "other schemes are rejected with exit 2. "
+            f"Default: ``{DEFAULT_SOCKET_URL}`` "
+            "($XDG_RUNTIME_DIR/agentm-gw.sock if set, else "
+            "/tmp/agentm-gw-<uid>.sock — matches `agentm-gateway`'s default)."
         ),
     )
     p.add_argument(

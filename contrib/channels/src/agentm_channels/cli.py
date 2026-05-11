@@ -50,6 +50,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+
+from . import DEFAULT_SOCKET_URL
 from agentm.core.abi import EventBus
 
 from .approval import ApprovalPolicy
@@ -220,19 +222,18 @@ class BindSpec:
 
 def _resolve_bind(
     args: argparse.Namespace, cfg: dict[str, Any]
-) -> BindSpec | None:
-    """Merge CLI flags > yaml ``bind:`` section > absent.
+) -> BindSpec:
+    """Merge CLI flags > yaml ``bind:`` section > shared default.
 
-    Returns ``None`` when neither side requests a wire bind. Raises
-    :class:`SystemExit` (exit code 2) on invalid input — TCP scheme,
-    or conflicting allow-uid flags.
+    The gateway is always a wire-protocol daemon: when neither the CLI
+    flag nor the YAML ``bind:`` section sets a socket, fall back to
+    :data:`DEFAULT_SOCKET_URL`. Raises :class:`SystemExit` (exit code 2)
+    on invalid input — TCP scheme, or conflicting allow-uid flags.
     """
     cli_url = args.bind
     yaml_bind = cfg.get("bind") if isinstance(cfg.get("bind"), dict) else None
     yaml_url = (yaml_bind or {}).get("socket")
-    url = cli_url or yaml_url
-    if not url:
-        return None
+    url = cli_url or yaml_url or DEFAULT_SOCKET_URL
     parsed = urlparse(str(url))
     if parsed.scheme != "unix":
         raise SystemExit(
@@ -334,12 +335,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--bind",
         default=None,
         help=(
-            "Run the wire-protocol server on the given URL (v1 supports "
-            "only ``unix:///abs/path/to/sock``; TCP is deferred). Coexists "
-            "with the v0 channels: section. Authentication is Unix "
-            "peer-cred; by default only the current process's uid may "
-            "connect — override with --bind-allow-uid or "
-            "--bind-allow-any-uid."
+            "Run the wire-protocol server on the given URL. v1 supports "
+            "only ``unix:///abs/path/to/sock`` (TCP is deferred). "
+            f"When omitted, defaults to ``{DEFAULT_SOCKET_URL}`` "
+            "($XDG_RUNTIME_DIR/agentm-gw.sock if set, else "
+            "/tmp/agentm-gw-<uid>.sock). Authentication is Unix peer-cred; "
+            "by default only the current process's uid may connect — "
+            "override with --bind-allow-uid or --bind-allow-any-uid."
         ),
     )
     p.add_argument(
@@ -449,20 +451,9 @@ async def _arun(args: argparse.Namespace) -> int:
             "(agentm-terminal, agentm-feishu)."
         )
 
-    if not getattr(args, "inproc_worker", True) and bind_spec is None:
-        raise SystemExit(
-            "--no-inproc-worker requires --bind: workers connect over "
-            "the wire, so the gateway must run as a daemon. Add "
-            "--bind unix:///abs/path/to/sock."
-        )
-
-    if bind_spec is None:
-        raise SystemExit(
-            "no --bind given. Pass --bind unix:///abs/path/to/sock and "
-            "connect a client (e.g. `agentm-terminal --connect unix://…`, "
-            "`agentm-feishu --connect unix://…`)."
-        )
-
+    # bind_spec is always set now — _resolve_bind falls back to the
+    # shared default socket URL when neither CLI nor YAML supplied one.
+    assert bind_spec is not None
     channels_cfg: dict[str, Any] = raw_channels
 
     provider = args.provider or cfg.get("provider") or _default_provider()
