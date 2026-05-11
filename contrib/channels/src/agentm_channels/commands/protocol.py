@@ -114,6 +114,14 @@ class CommandContext:
     types ``/help`` as their very first message in a fresh chat).
     Used by future ``/approve`` / ``/deny`` text fallbacks."""
 
+    get_extension_api: Callable[[], Any | None] = lambda: None
+    """Live :class:`agentm.harness.extension.ExtensionAPI` for this
+    chat's session, or ``None`` if the session has not been created
+    yet. Used by ``/atom:*`` commands to call ``install_atom`` /
+    ``unload_atom`` / ``list_atoms``. The default no-op lambda keeps
+    test fixtures terse — production code paths through
+    :meth:`Gateway._command_context_for` always set a real callable."""
+
 
 @runtime_checkable
 class CommandHandler(Protocol):

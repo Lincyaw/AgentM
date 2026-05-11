@@ -121,6 +121,36 @@ def _retry_delays(spec: Any) -> tuple[float, ...] | None:
         raise SystemExit(f"send_retry_delays: invalid entry: {exc}") from exc
 
 
+def _commands_section(
+    spec: Any,
+) -> tuple[bool, list[str], list[str]]:
+    """Parse the ``commands:`` block in gateway YAML.
+
+    Schema (every key optional)::
+
+        commands:
+          skill_paths: [/extra/skills]      # extra dirs for /skill:* discovery
+          atoms:
+            enabled: false                  # surface /atom:install etc.
+            allow: [permission, …]          # whitelist; "*" = every mountable
+
+    Returns ``(atom_enabled, atom_allow, skill_paths)``.
+    """
+    if not isinstance(spec, dict):
+        return False, [], []
+    skill_paths = [str(p) for p in spec.get("skill_paths") or []]
+    atoms = spec.get("atoms")
+    if not isinstance(atoms, dict):
+        return False, [], skill_paths
+    enabled = bool(atoms.get("enabled", False))
+    allow_raw = atoms.get("allow") or []
+    if not isinstance(allow_raw, list):
+        raise SystemExit(
+            "commands.atoms.allow must be a list of atom names (or [\"*\"])."
+        )
+    return enabled, [str(x) for x in allow_raw], skill_paths
+
+
 def _approval_policy(spec: Any) -> ApprovalPolicy:
     if not isinstance(spec, dict):
         return ApprovalPolicy()
@@ -273,6 +303,7 @@ async def _arun(args: argparse.Namespace) -> int:
         if retry_delays is not None
         else ChannelManager(channels_cfg, bus)
     )
+    atom_enabled, atom_allow, skill_paths = _commands_section(cfg.get("commands"))
     gateway = Gateway(
         bus=bus,
         config=GatewayConfig(
@@ -283,6 +314,9 @@ async def _arun(args: argparse.Namespace) -> int:
                 or (Path(cfg["state_dir"]) if "state_dir" in cfg else None)
             ),
             approval_policy=_approval_policy(cfg.get("approval")),
+            atom_commands_enabled=atom_enabled,
+            atom_allow=atom_allow,
+            skill_paths=skill_paths,
         ),
         session_factory=_build_session_factory(
             scenario=args.scenario or cfg.get("scenario"),

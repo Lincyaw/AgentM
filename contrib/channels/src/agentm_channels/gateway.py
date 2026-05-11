@@ -72,6 +72,17 @@ class GatewayConfig:
     """Extra skill directories beyond the defaults
     (``<cwd>/.claude/skills``, ``~/.claude/skills``)."""
 
+    atom_commands_enabled: bool = False
+    """Surface ``/atom:install`` / ``/atom:uninstall`` / ``/atom:list``
+    as slash commands. Off by default — exposing kernel-level
+    mutations to chat users requires explicit deployment intent."""
+
+    atom_allow: list[str] = field(default_factory=list)
+    """Atoms that may be surfaced by the ``/atom:*`` commands. Two
+    gates total for any atom to appear: this list AND
+    ``MANIFEST.mountable_via_command = True`` on the atom itself.
+    Use ``["*"]`` in development to surface every mountable atom."""
+
 
 @dataclass
 class _Route:
@@ -111,7 +122,10 @@ class Gateway:
         # :meth:`_dispatch` survives a stale or missed entry.
         self._approval_index: dict[str, ApprovalBridge] = {}
         registry = config.command_registry or discover_commands(
-            config.cwd, skill_paths=config.skill_paths
+            config.cwd,
+            skill_paths=config.skill_paths,
+            atom_commands_enabled=config.atom_commands_enabled,
+            atom_allow=config.atom_allow,
         )
         self._command_router = CommandRouter(registry=registry)
         self._registry = registry
@@ -291,6 +305,19 @@ class Gateway:
                 "_forget_chat_mapping": forget_chat_mapping,
             }
 
+        def get_extension_api() -> Any | None:
+            current = self._routes.get(session_key)
+            if current is None:
+                return None
+            # AgentSession keeps the live ExtensionAPI on a private
+            # attribute; no public accessor exists yet. Reach through
+            # ``getattr`` so a future public ``session.extension_api``
+            # property is picked up automatically if the SDK lands one.
+            api = getattr(current.session, "extension_api", None)
+            if api is not None:
+                return api
+            return getattr(current.session, "_extension_api", None)
+
         return CommandContext(
             route_key=session_key,
             channel=msg.channel,
@@ -300,6 +327,7 @@ class Gateway:
             get_route_stats=get_stats,
             list_commands=self._registry.all,
             approval_bridge=route.bridge if route is not None else None,
+            get_extension_api=get_extension_api,
         )
 
     async def _drop_route(self, session_key: str) -> None:

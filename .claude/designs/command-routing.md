@@ -262,58 +262,64 @@ commands:
 Even if an atom opts in via MANIFEST, deployment must allow it. Both
 gates are required for `/atom:install <name>` to be discoverable.
 
-### 8.3 Runtime scenario overlay
+### 8.3 Runtime overlay: `<cwd>/.agentm/atoms/`
 
-This is the load-bearing piece that makes atom mounting safe.
+The "runtime directory" the gateway should mutate is not a new
+construct — it is the AgentM SDK's existing convention:
+**`ExtensionAPI.install_atom` writes installed-atom source to
+`<cwd>/.agentm/atoms/<name>.py`** via `ResourceWriter` (git-committed
+through the constitution-aware path), and the user-atom
+auto-discovery at session start
+(`discover_user_atoms`) re-mounts everything under that directory.
 
-When the gateway constructs a session for a chat, the scenario is
-**copied** from its source (e.g.
-`contrib/scenarios/feishu_chat/manifest.yaml`) into a per-route
-runtime directory:
+Consequences for ``/atom:*``:
 
-```
-<state_dir>/scenarios/<session_key_safe>/manifest.yaml
-<state_dir>/scenarios/<session_key_safe>/atoms/...       # if needed
-```
+1. The original scenario manifest under `contrib/scenarios/...` is
+   **never modified**. Source files stay read-only. ✓
+2. Source-of-truth catalog locations
+   (`src/agentm/extensions/builtin/...`, `contrib/extensions/...`)
+   are also untouched — the install reads atom source from there but
+   writes a copy into `<cwd>/.agentm/atoms/`.
+3. Across daemon restarts, the next session auto-rediscovers files in
+   `<cwd>/.agentm/atoms/` and re-mounts them.
+4. Per-chat isolation. Tracked but not implemented — today every
+   chat sharing a gateway-`cwd` shares the runtime atoms directory.
+   When per-chat isolation matters, run separate gateway processes
+   with separate `cwd`s. A future per-route subdirectory layered onto
+   `discover_user_atoms` would close this, but is out of scope here.
+5. `/atom:reset` (future) clears `<cwd>/.agentm/atoms/`.
 
-(`<state_dir>` defaults to `<cwd>/.agentm/channels/`; the existing
-`ChatSessionMap` already lives under this root.)
-
-All subsequent mutations driven by `/atom:install` / `/atom:uninstall`
-write to this overlay, not to the source files. Consequences:
-
-1. The original scenario manifest is **read-only** at runtime — it
-   represents the deployment baseline, not the live state.
-2. Each chat session has its own scenario state. Two parallel chats
-   can have different atoms mounted.
-3. On restart, the gateway reads the overlay (not the source) so
-   user-mounted atoms persist across daemon restarts.
-4. `/atom:reset` (future) clears the overlay and re-copies from
-   source.
-
-`AtomCommand.handle` is then:
+`AtomCommand.handle` for `install`:
 
 ```python
-async def handle(self, inv, ctx):
-    overlay = ctx.scenario_overlay()              # facade returns the runtime dir
-    if inv.name in overlay.installed_atoms():
-        return await self._uninstall(overlay, ctx, inv)
-    return await self._install(overlay, ctx, inv, json.loads(inv.args or "{}"))
+api = ctx.get_extension_api()          # ExtensionAPI for this route's session
+src = Path(_resolve_source(atom_name)).read_text()
+result = api.install_atom(
+    name=atom_name,
+    source=src,
+    target_path=None,                  # → <cwd>/.agentm/atoms/<name>.py
+    config=user_config,
+    rationale=f"User {sender_id} invoked /atom:install {atom_name}",
+    agent_initiated=False,             # user-initiated, not the LLM
+)
 ```
 
-The session's `ExtensionAPI` already exposes the install primitive
-used by v3 self-extension (issue #134); `/atom:install` is a thin
-user-facing entry to that same primitive.
+`AtomCommand.handle` for `uninstall` calls `api.unload_atom` — the
+on-disk source file is intentionally left in place (it can be
+`/atom:install`'d again without re-resolving the source). To wipe the
+runtime overlay completely the operator removes
+`<cwd>/.agentm/atoms/` manually.
 
 ### 8.4 What stays off the table
 
 - Installing arbitrary code paths (`pip install foo`) via chat. Atoms
-  must already exist in the catalog.
-- Modifying `core/` paths. The existing
-  `is_constitution_path` validator rejects this regardless of how the
-  call gets in.
-- Per-user atom mounts within a shared chat. The overlay is keyed by
-  `session_key`, not `sender_id`.
+  must already exist in the catalog (`agentm.extensions.discover`
+  must already find them).
+- Modifying `core/` paths. The SDK's `is_constitution_path` validator
+  rejects this regardless of how the call gets in.
+- Per-user atom mounts within a shared chat. `install_atom` is scoped
+  to the route's `AgentSession`, but the *on-disk* overlay is the
+  gateway-wide `<cwd>/.agentm/atoms/` — see point 4 above.
 
 ---
 

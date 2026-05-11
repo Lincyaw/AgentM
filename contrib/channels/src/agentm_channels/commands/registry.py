@@ -15,6 +15,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .atom_command import build_atom_commands
 from .markdown_command import MarkdownPromptCommand
 from .protocol import CommandHandler
 from .skill_command import SkillCommand, walk_skill_dirs
@@ -70,15 +71,20 @@ def discover_commands(
     *,
     skill_paths: Iterable[str | Path] = (),
     include_default_skill_paths: bool = True,
+    atom_commands_enabled: bool = False,
+    atom_allow: Iterable[str] = (),
 ) -> CommandRegistry:
-    """Build the registry. Priority:
+    """Build the registry. Priority (first-wins on collision):
 
     1. Builtin control commands (``commands/builtins/*.py``).
     2. Markdown prompt commands (``<cwd>/.agentm/commands/*.md``).
     3. Skill commands (skill directories).
-
-    Atom commands are intentionally absent in this PR — see
-    ``command-routing.md`` §8.
+    4. Atom commands (``/atom:install`` / ``/atom:uninstall`` /
+       ``/atom:list``) — gated by ``atom_commands_enabled`` *and* a
+       non-empty ``atom_allow`` list. Both required: the atom author's
+       ``MANIFEST.mountable_via_command`` lives one layer deeper
+       (filtered inside :func:`discover_mountable_atoms`), so this
+       layer enforces deployment opt-in.
     """
     registry = CommandRegistry()
     _load_builtins(registry)
@@ -89,8 +95,25 @@ def discover_commands(
         extra=skill_paths,
         include_defaults=include_default_skill_paths,
     )
+    if atom_commands_enabled:
+        _load_atom_commands(registry, allow=atom_allow)
     _load_entry_points(registry)
     return registry
+
+
+def _load_atom_commands(
+    registry: CommandRegistry, *, allow: Iterable[str]
+) -> None:
+    allow_set = frozenset(str(x) for x in allow)
+    if not allow_set:
+        logger.warning(
+            "commands.atoms.enabled is true but allow list is empty; "
+            "no /atom:* commands will be registered. Set "
+            "commands.atoms.allow to a list of atom names (or [\"*\"])."
+        )
+        return
+    for handler in build_atom_commands(allow=allow_set):
+        registry.register(handler)
 
 
 def _load_builtins(registry: CommandRegistry) -> None:
