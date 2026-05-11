@@ -85,7 +85,7 @@ class ToolTerminate(ToolOutcome):
 
     Namespace convention (recommended): prefix ``reason`` with the
     extension or scenario short name and a colon, e.g.
-    ``"rca:final-report-submitted"`` or ``"feishu_chat:reviewed"``.
+    ``"rca:final-report-submitted"`` or ``"agent_env:sandbox-shutdown"``.
     The kernel cannot enumerate scenario-defined reasons, so a
     namespaced string keeps observers safe from collisions when two
     scenarios pick the same bare label. The §11 validator emits a
