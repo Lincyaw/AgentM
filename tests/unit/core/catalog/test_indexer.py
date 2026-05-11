@@ -19,9 +19,9 @@ from agentm.harness.session_manager import InMemorySessionManager
 from agentm.harness.session_runtime import SessionRuntime
 
 
-SHA_TOOL_LS = "a" * 40
+SHA_TOOL_READ = "a" * 40
 SHA_OBS = "b" * 40
-SHA_FIND = "c" * 40
+SHA_TOOL_WRITE = "c" * 40
 LEGACY_HASH = "deadbeef"
 
 
@@ -90,7 +90,7 @@ def test_E5_rebuild_is_idempotent(tmp_path: Path) -> None:
         tmp_path,
         "trace-e5",
         [
-            _fingerprint_record({"tool_ls": SHA_TOOL_LS, "tool_find": SHA_FIND}),
+            _fingerprint_record({"tool_read": SHA_TOOL_READ, "tool_write": SHA_TOOL_WRITE}),
             _record(
                 "llm.request.end",
                 {"usage": {"input_tokens": 120, "output_tokens": 30}},
@@ -118,8 +118,8 @@ def test_index_trace_attributes_to_all_loaded_atoms(tmp_path: Path) -> None:
         [
             _fingerprint_record(
                 {
-                    "tool_ls": SHA_TOOL_LS,
-                    "tool_find": SHA_FIND,
+                    "tool_read": SHA_TOOL_READ,
+                    "tool_write": SHA_TOOL_WRITE,
                     "observability": SHA_OBS,
                 }
             ),
@@ -131,8 +131,8 @@ def test_index_trace_attributes_to_all_loaded_atoms(tmp_path: Path) -> None:
 
     assert result.n_atoms_attributed == 3
     for atom_name, version_hash in {
-        "tool_ls": SHA_TOOL_LS,
-        "tool_find": SHA_FIND,
+        "tool_read": SHA_TOOL_READ,
+        "tool_write": SHA_TOOL_WRITE,
         "observability": SHA_OBS,
     }.items():
         metrics_path = _layout.atom_metrics_path(atom_name, version_hash, root=tmp_path)
@@ -144,14 +144,14 @@ def test_index_trace_marks_mid_session_reload(tmp_path: Path) -> None:
         tmp_path,
         "trace-reload",
         [
-            _fingerprint_record({"tool_ls": SHA_TOOL_LS}),
+            _fingerprint_record({"tool_read": SHA_TOOL_READ}),
             _record(
                 "atom.reload",
                 {
                     "fingerprint_after": {
                         "core": None,
                         "scenario": None,
-                        "atoms": {"tool_ls": f"tool_ls@{SHA_TOOL_LS}"},
+                        "atoms": {"tool_read": f"tool_read@{SHA_TOOL_READ}"},
                     }
                 },
             ),
@@ -161,7 +161,7 @@ def test_index_trace_marks_mid_session_reload(tmp_path: Path) -> None:
 
     index_trace(trace_path, root=tmp_path)
 
-    row = _first_metrics_row(tmp_path, "tool_ls", SHA_TOOL_LS)
+    row = _first_metrics_row(tmp_path, "tool_read", SHA_TOOL_READ)
     assert row["mid_session_reload"] is True
 
 
@@ -231,13 +231,13 @@ def test_extract_stop_reason_handles_new_cause_shapes(
         tmp_path,
         "trace-cause",
         [
-            _fingerprint_record({"tool_ls": SHA_TOOL_LS}),
+            _fingerprint_record({"tool_read": SHA_TOOL_READ}),
             _record("agent_end", {"cause": cause_payload}),
         ],
     )
 
     index_trace(trace_path, root=tmp_path)
-    row = _first_metrics_row(tmp_path, "tool_ls", SHA_TOOL_LS)
+    row = _first_metrics_row(tmp_path, "tool_read", SHA_TOOL_READ)
     assert row["metrics"]["task.completion_rate"] == expected_completion_rate
 
 
@@ -246,7 +246,7 @@ def test_index_trace_skips_legacy_content_hash_fingerprints(tmp_path: Path) -> N
         tmp_path,
         "trace-legacy",
         [
-            _fingerprint_record({"tool_ls": LEGACY_HASH}),
+            _fingerprint_record({"tool_read": LEGACY_HASH}),
             _record("agent_end", {"stop_reason": "end_turn"}),
         ],
     )
@@ -255,7 +255,7 @@ def test_index_trace_skips_legacy_content_hash_fingerprints(tmp_path: Path) -> N
 
     assert result.n_atoms_attributed == 0
     assert result.warnings == [
-        f"atom 'tool_ls' uses pre-migration fingerprint {LEGACY_HASH}; skipping"
+        f"atom 'tool_read' uses pre-migration fingerprint {LEGACY_HASH}; skipping"
     ]
 
 
@@ -264,7 +264,7 @@ def test_cli_rebuild_returns_zero_on_clean_run(tmp_path: Path) -> None:
         tmp_path,
         "trace-cli",
         [
-            _fingerprint_record({"tool_ls": SHA_TOOL_LS}),
+            _fingerprint_record({"tool_read": SHA_TOOL_READ}),
             _record("agent_end", {"stop_reason": "end_turn"}),
         ],
     )

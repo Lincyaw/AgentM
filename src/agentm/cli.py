@@ -1,10 +1,10 @@
 """AgentM CLI (typer-based).
 
-Single runtime: auto-discover every builtin atom by default. A curated
-extension list is opted into via ``--scenario X``. Subsystems are turned
-off via ``--no-*`` flags. Failures during construction emit diagnostics
-through the EventBus rather than raising; only a missing provider is
-fatal.
+Single runtime: load the ``general_purpose`` scenario by default (curated
+minimal atom set, GenericAgent-style). A different curated list is opted
+into via ``--scenario X``. Subsystems are turned off via ``--no-*`` flags.
+Failures during construction emit diagnostics through the EventBus rather
+than raising; only a missing provider is fatal.
 """
 
 from __future__ import annotations
@@ -358,8 +358,8 @@ def run_cmd(
             help=(
                 "Opt-in curated extension list. Bare name resolves under "
                 "<cwd>/contrib/scenarios/<name>/manifest.yaml. An absolute "
-                "path is also accepted. When unset, auto-discovers every "
-                "builtin atom."
+                "path is also accepted. When unset, falls back to the "
+                "``general_purpose`` scenario (minimal default tool set)."
             ),
         ),
     ] = None,
@@ -490,6 +490,12 @@ def run_cmd(
     """Send a single prompt and print the agent's final text."""
 
     extra_extensions = _parse_extensions(extension)
+    # No --scenario? Default to the curated minimal set under
+    # ``contrib/scenarios/general_purpose/`` rather than auto-discovering
+    # every builtin atom. Self-modify, evolution/query, and other
+    # specialised atoms live in dedicated scenarios that compose on top.
+    if scenario is None and not no_extensions:
+        scenario = "general_purpose"
 
     if interactive:
         rc = asyncio.run(

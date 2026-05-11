@@ -1,0 +1,43 @@
+name: general_purpose
+description: |
+  Default scenario for ``agentm "<prompt>"`` (no ``--scenario`` flag).
+
+  Inspired by GenericAgent's "9 atomic tools + ~100-line loop" philosophy:
+  load a small core of always-useful capabilities and trust the LLM to
+  compose the rest via ``bash``. Specialised behaviour (self-modify,
+  evolution/query, plan-only, eval orchestration) lives in dedicated
+  scenarios that compose on top of this base — not in the default set.
+
+  Floor atoms (``compaction_prompts``, ``slash_commands``) are auto-mounted
+  by the session factory and don't need to be listed. User atoms under
+  ``<cwd>/.agentm/atoms/`` are merged on top so ``api.install_atom`` calls
+  persist across restarts.
+
+extensions:
+  # --- file I/O: read whole files; edit by exact-match replace;
+  # write whole files. ls/find/grep are intentionally absent —
+  # delegated to ``bash`` so the agent composes shell commands. ---
+  - module: agentm.extensions.builtin.tool_read
+  - module: agentm.extensions.builtin.tool_edit
+  - module: agentm.extensions.builtin.tool_write
+
+  # --- shell execution: subsumes ls / find / grep / arbitrary scripts. ---
+  - module: agentm.extensions.builtin.tool_bash
+
+  # --- observability: every turn lands in the JSONL trace store so
+  # ``tool_query_traces`` (loaded by evolution/tuner scenarios) can
+  # mine production traces later. ---
+  - module: agentm.extensions.builtin.observability
+
+  # --- prompt assembly: runtime_context surfaces cwd/platform;
+  # system_prompt provides the assembly hook. ---
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: ""
+  - module: agentm.extensions.builtin.runtime_context
+
+  # --- skill / template auto-discovery: SKILL.md files under
+  # ``.claude/skills/`` and prompt templates are picked up
+  # automatically. ---
+  - module: agentm.extensions.builtin.skill_loader
+  - module: agentm.extensions.builtin.prompt_templates

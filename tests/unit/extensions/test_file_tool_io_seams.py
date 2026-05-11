@@ -12,48 +12,8 @@ import pytest
 from agentm.core.abi.resource import PathClass, WriteResult, WriterAuthor
 from agentm.extensions.builtin import (
     tool_edit,
-    tool_find,
-    tool_grep,
-    tool_ls,
-    tool_read,
     tool_write,
 )
-
-
-class _RecordingFileOperations:
-    def __init__(self) -> None:
-        self.reads: list[str] = []
-        self.accesses: list[str] = []
-        self.listed: list[str] = []
-        self.dirs = {"/repo", "/repo/src"}
-        self.files = {
-            "/repo/.gitignore": b"ignored.py\n",
-            "/repo/README.md": b"hello readme\n",
-            "/repo/src/ignored.py": b"needle hidden\n",
-            "/repo/src/target.py": b"needle\nother\n",
-        }
-
-    async def read_file(self, path: str) -> bytes:
-        self.reads.append(path)
-        return self.files[path]
-
-    async def access(self, path: str) -> bool:
-        self.accesses.append(path)
-        return path in self.dirs or path in self.files
-
-    async def is_dir(self, path: str) -> bool:
-        return path in self.dirs
-
-    async def list_dir(self, path: str) -> list[str]:
-        self.listed.append(path)
-        prefix = path.rstrip("/") + "/"
-        names: set[str] = set()
-        for candidate in [*self.dirs, *self.files]:
-            if candidate == path or not candidate.startswith(prefix):
-                continue
-            remainder = candidate[len(prefix) :]
-            names.add(remainder.split("/", 1)[0])
-        return sorted(names)
 
 
 class _FailingFileOperations:
@@ -145,34 +105,6 @@ class _FakeAPI:
         if self._writer is None:
             raise AssertionError("ResourceWriter should not be used for read-only tools")
         return self._writer
-
-
-@pytest.mark.asyncio
-async def test_read_only_file_atoms_use_file_operations() -> None:
-    file_ops = _RecordingFileOperations()
-    api = _FakeAPI(file_ops=file_ops)
-
-    for module in (tool_read, tool_ls, tool_find, tool_grep):
-        module.install(api, {})
-
-    by_name = {tool.name: tool for tool in api.tools}
-    read_result = await by_name["read"].execute({"path": "/repo/README.md"})
-    ls_result = await by_name["ls"].execute({"path": "."})
-    find_result = await by_name["find"].execute({"pattern": "target.py", "path": "."})
-    grep_result = await by_name["grep"].execute({"pattern": "needle", "path": "."})
-
-    assert read_result.is_error is False
-    assert "hello readme" in read_result.content[0].text
-    assert "src/" in ls_result.content[0].text
-    assert "README.md" in ls_result.content[0].text
-    assert "src/target.py" in find_result.content[0].text
-    assert "src/ignored.py" not in find_result.content[0].text
-    assert "src/target.py:1: needle" in grep_result.content[0].text
-    assert "src/ignored.py" not in grep_result.content[0].text
-    assert "/repo/README.md" in file_ops.reads
-    assert "/repo/.gitignore" in file_ops.reads
-    assert "/repo" in file_ops.listed
-    assert "/repo/src" in file_ops.listed
 
 
 @pytest.mark.asyncio

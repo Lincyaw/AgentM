@@ -33,7 +33,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Final, TypedDict
 
 import yaml
 
@@ -105,7 +105,7 @@ MANIFEST = ExtensionManifest(
 )
 
 
-_PARAMETERS: dict[str, Any] = {
+_PARAMETERS: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
         "eval_dir": {
@@ -651,7 +651,7 @@ def _read_trace_cost_usd(cwd: Path, session_id: str) -> float:
     """Sum ``cost_usd`` across all ``llm.request.end`` records in the
     child session's observability JSONL. Returns 0.0 if the trace is
     missing or unreadable — the budget under-counts rather than aborts."""
-    trace_path = cwd / ".agentm" / "observability" / f"{session_id}.jsonl"
+    trace_path = cwd / ".agentm/observability" / f"{session_id}.jsonl"
     if not trace_path.is_file():
         return 0.0
     total = 0.0

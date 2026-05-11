@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
@@ -48,7 +48,7 @@ MANIFEST = ExtensionManifest(
 )
 
 
-_PARAMETERS: dict[str, Any] = {
+_PARAMETERS: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
         "target_scenario": {

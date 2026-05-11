@@ -18,7 +18,7 @@ boundary contract in `.claude/designs/pluggable-architecture.md`.
 
 ```bash
 uv sync                                # install deps
-uv run agentm "<prompt>"               # full mode (auto-discovers builtin atoms)
+uv run agentm "<prompt>"               # default = general_purpose scenario (minimal atom set)
 uv run pytest                          # run tests (excludes nested workspaces, ui)
 uv run pytest -m ui                    # Textual TUI tests (opt-in)
 uv run ruff check src/                 # lint
@@ -73,8 +73,11 @@ code. There is no privileged path between built-in and third-party scenarios.
 - **Built-in atoms**: `src/agentm/extensions/builtin/<name>.py` — one file per atom
   exporting `MANIFEST` and `install(api, config)`. §11 single-file contract:
   no atom-to-atom imports, no `harness.session` import, no `core._internal` import.
-- **Built-in scenarios**: `src/agentm/extensions/scenarios/<name>.yaml` —
-  `general_purpose`, `plan_mode`, `trajectory_analysis`.
+- **Default scenario**: `contrib/scenarios/general_purpose/manifest.yaml` —
+  the curated minimal atom set (read/write/edit/bash + observability +
+  prompt assembly + skills). Loaded when `agentm` runs without
+  `--scenario`. Other scenarios under `contrib/scenarios/` opt-in via
+  `--scenario <name>`.
 
 ## contrib/ layout
 
@@ -87,9 +90,10 @@ contrib/
 ├── extensions/        # third-party-maintained atoms (workspace members)
 │   └── llmharness/    # cognitive-audit package: atoms + adapter + tests
 └── scenarios/         # scenario manifests (loader entry point)
-    ├── plan_mode/
-    ├── rca/           # also a workspace member (agentm_rca/)
-    └── trajectory_analysis/
+    ├── general_purpose/  # default — used when no --scenario is given
+    ├── feishu_chat/      # interactive chat (Feishu/Lark gateway)
+    ├── format_fix/       # toy task class + tuner
+    └── rca/              # also a workspace member (agentm_rca/)
 ```
 
 - `contrib/scenarios/<name>/manifest.yaml` — resolved by `agentm --scenario <name>`.
