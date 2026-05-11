@@ -72,6 +72,7 @@ from .gateway import Gateway, GatewayConfig
 from .manager import ChannelManager
 from .outbox import SqliteInbox, SqliteOutbox
 from .server import WireServer
+from .session_bindings import SessionBindingStore
 from .wire_bridge import DEFAULT_MAX_A2A_HOPS, WireBridge
 
 
@@ -583,10 +584,17 @@ async def _arun(args: argparse.Namespace) -> int:
         state_dir.mkdir(parents=True, exist_ok=True)
         wire_outbox = SqliteOutbox(str(state_dir / "wire-outbox.sqlite"))
         wire_inbox = SqliteInbox(str(state_dir / "wire-inbox.sqlite"))
+        # Routing table: session_key → host_id + resume_id. Lives next
+        # to the outbox so the whole gateway state directory is one
+        # consistent unit on disk. Survives gateway restart by design.
+        session_bindings = SessionBindingStore(
+            state_dir / "session-bindings.sqlite"
+        )
         bridge = WireBridge(
             bus=bus,
             manager=manager,
             outbox=wire_outbox,
+            bindings=session_bindings,
             scenario=args.scenario or cfg.get("scenario") or "",
             allow_inproc=bool(getattr(args, "inproc_worker", True)),
             max_a2a_hops=int(

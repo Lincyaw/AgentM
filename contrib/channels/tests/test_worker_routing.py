@@ -321,9 +321,107 @@ async def test_sticky_session_key(
         inbox.close()
 
 
-async def test_worker_disconnect_releases_sticky_and_emits_error(
+async def test_resume_id_flows_to_replacement_host_after_disconnect(
     socket_path: str, db_path: str
 ) -> None:
+    """End-to-end resume propagation. Worker-A handles a turn and ships
+    back a ``_session_id_hint`` via outbound; the bridge persists it
+    onto the binding. Worker-A disconnects, worker-B comes online; the
+    next inbound for the same session_key arrives at worker-B with
+    ``body["resume_id"]`` set to whatever A reported. This is the
+    invariant that lets a fresh host pick up a dead host's session."""
+    server, bridge, _bus, outbox, inbox = await _start_server(
+        socket_path, db_path, scenario="x", allow_inproc=False
+    )
+    received_a: list[Envelope] = []
+    received_b: list[Envelope] = []
+
+    async def collect_a(env: Envelope) -> None:
+        received_a.append(env)
+
+    async def collect_b(env: Envelope) -> None:
+        received_b.append(env)
+
+    try:
+        worker_a = WireClient(
+            socket_path=socket_path,
+            peer_id="worker-A",
+            peer_kind="agent_worker",
+            capabilities={"scenarios": ["x"]},
+            on_outbound=collect_a,
+        )
+        await worker_a.connect()
+        assert await _wait(lambda: bridge.worker_registry.has("worker-A"))
+
+        chat = WireClient(
+            socket_path=socket_path, peer_id="chat-A", peer_kind="chat_client"
+        )
+        await chat.connect()
+        await chat.send(_make_inbound(peer_id="chat-A", env_id="m1"))
+        assert await _wait(lambda: len(received_a) >= 1, timeout=2.0)
+
+        # Worker-A reports its AgentSession id back via outbound side-
+        # channel. The bridge writes it onto the binding.
+        await worker_a.send(
+            Envelope(
+                v=WIRE_VERSION,
+                id="out-A-1",
+                kind=KIND_OUTBOUND,
+                ts=time.time(),
+                body={
+                    "channel": "terminal",
+                    "chat_id": "c1",
+                    "content": "ack",
+                    "kind": "message",
+                    "_session_id_hint": "sess-xyz-001",
+                },
+            )
+        )
+        assert await _wait(
+            lambda: (
+                bridge.worker_registry.binding("terminal:c1") is not None
+                and bridge.worker_registry.binding("terminal:c1").resume_id  # type: ignore[union-attr]
+                == "sess-xyz-001"
+            ),
+            timeout=2.0,
+        )
+
+        # Worker-A goes away. Worker-B takes over.
+        await worker_a.close()
+        worker_b = WireClient(
+            socket_path=socket_path,
+            peer_id="worker-B",
+            peer_kind="agent_worker",
+            capabilities={"scenarios": ["x"]},
+            on_outbound=collect_b,
+        )
+        await worker_b.connect()
+        assert await _wait(lambda: bridge.worker_registry.has("worker-B"))
+
+        await chat.send(_make_inbound(peer_id="chat-A", env_id="m2"))
+        assert await _wait(lambda: len(received_b) >= 1, timeout=2.0)
+        # The forwarded envelope to worker-B MUST carry the resume_id
+        # we persisted earlier — otherwise worker-B would start a fresh
+        # AgentSession and the conversation loses context.
+        assert isinstance(received_b[0].body, dict)
+        assert received_b[0].body.get("resume_id") == "sess-xyz-001"
+
+        await chat.close()
+        await worker_b.close()
+    finally:
+        await server.stop()
+        outbox.close()
+        inbox.close()
+
+
+async def test_worker_disconnect_rebinds_silently_on_next_inbound(
+    socket_path: str, db_path: str
+) -> None:
+    """Session-as-routing-primary semantics: when the worker holding a
+    session_key disconnects, the binding STAYS in the persistent store.
+    No "worker disconnected" message is sent to chat. The next inbound
+    for that session_key transparently rebinds to any other online host
+    advertising the same scenario."""
     server, bridge, _bus, outbox, inbox = await _start_server(
         socket_path, db_path, scenario="x", allow_inproc=False
     )
@@ -363,23 +461,20 @@ async def test_worker_disconnect_releases_sticky_and_emits_error(
         assert await _wait(lambda: len(received_a) >= 1, timeout=2.0)
         assert bridge.worker_registry.sticky_owner("terminal:c1") == "worker-A"
 
-        # Worker disconnects mid-turn.
+        # Worker A disconnects. The binding row stays — no message to
+        # chat. Confirm no "worker disconnected" outbound is emitted
+        # (would have arrived within a poll cycle or two if it were
+        # going to).
         await worker_a.close()
-        # Wait for the bridge to observe the disconnect and emit the
-        # strict-policy error outbound to the chat client.
-        ok = await _wait(
-            lambda: any(
-                env.kind == KIND_OUTBOUND
-                and "worker disconnected" in str(env.body.get("content", ""))
-                for env in chat_replies
-            ),
-            timeout=3.0,
-        )
-        assert ok, f"chat replies: {[(e.kind, e.body) for e in chat_replies]}"
-        # Sticky binding must be cleared.
-        assert bridge.worker_registry.sticky_owner("terminal:c1") is None
+        await asyncio.sleep(0.3)
+        assert not any(
+            "worker disconnected" in str(e.body.get("content", ""))
+            for e in chat_replies
+        ), f"unexpected worker-lost message: {chat_replies}"
+        assert bridge.worker_registry.sticky_owner("terminal:c1") == "worker-A"
 
-        # Bring up worker-B and a fresh inbound binds to it.
+        # Bring up worker-B. The next inbound for the same session_key
+        # rebinds to worker-B because worker-A is offline.
         worker_b = WireClient(
             socket_path=socket_path,
             peer_id="worker-B",
