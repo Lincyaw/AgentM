@@ -1000,16 +1000,69 @@ test fixture). Phase 4 removes the in-process path entirely.
 
 ### Phase 6 — A2A tool calls
 
-* Ships `tool_peer_send` atom (`MANIFEST.mountable_via_command=False`
-  by default; operators opt in per-deployment for safety).
-* Server enforces the loop guard (`max_a2a_hops`, default 5) and
+* Ships `tool_peer_send` atom (`MANIFEST.mountable_via_command=True`;
+  operators opt in by listing the atom on the gateway's
+  `commands.atoms.allow` so `/atom:install tool_peer_send` succeeds).
+* Server enforces the loop guard (`max_a2a_hops`, default 10) and
   cross-peer approval forwarding (§7.7) — both happen at the
   envelope level, so no changes to existing approval-bridge code.
 * Documents the "agent calls another agent through the bus" pattern
-  as a first-class scenario; ships an example multi-agent scenario
-  YAML.
+  as a first-class scenario; the worker README §A2A shows a
+  researcher → coder → reviewer chain.
 * **Decided** (§10): Should `from_peer` identity be exposed verbatim or
   rewritten across security boundaries? See §7.6.
+
+#### Phase 6 — landed (2026-05-11)
+
+Implementation summary; brief reference of what changed in code so a
+reviewer can audit without re-reading every file. Detailed design
+lives in §7.6 (correlation_id / hops) and §7.7 (cross-peer approval).
+
+* **Gateway (`agentm_channels.wire_bridge.WireBridge`).** Splits
+  inbound handling into a chat-originated path (Phase 5a, with the
+  Phase 6 `root_session_key` tagging and hop bump added) and a
+  worker-originated path that routes by `env.to`. The worker path
+  rejects inbounds missing `root_session_key` with a
+  `KIND_ERROR{reason="missing_root_session_key"}`. Both paths
+  increment `hops` on the forwarded envelope and drop with
+  `KIND_ERROR{reason="hop_limit_exceeded"}` once `hops > max_a2a_hops`
+  (configurable via the new `--max-a2a-hops` CLI flag; default 10).
+* **Approval override (§7.7).** Worker outbounds whose body carries
+  `metadata.kind == "approval_request"` are rewritten to the chat
+  channel/chat_id derived from `root_session_key` and enqueued to
+  the chat client's peer outbox. The original
+  `channel`/`chat_id`/`worker_peer_id` are preserved in
+  `metadata.origin` for auditability. The user's button click flows
+  back to the emitting worker via the existing synthetic-channel
+  send path — no new wire kinds, no new envelope fields.
+* **A2A reply routing.** Worker outbounds with both
+  `correlation_id` and a worker peer_id in `to` are forwarded to
+  that worker so its pending `peer_send` future resolves. Default
+  (Phase 5a) chat-by-channel-name routing remains the fallback.
+* **`tool_peer_send` atom.** Single-file §11 atom at
+  `contrib/channels-clients/worker/src/agentm_worker/peer_send_atom.py`.
+  Looks up the `peer_messaging` service from the session registry at
+  install time; refuses to install when absent so misconfiguration
+  surfaces immediately. The protocol exposes three methods:
+  `new_correlation_id() -> str`, `send_peer(*, to, content,
+  correlation_id) -> None`, `await_peer_reply(correlation_id,
+  timeout_seconds) -> dict`. Mountable via `/atom:install` (gated by
+  the gateway's existing `commands.atoms.allow` list).
+* **Worker runner (`agentm_worker.runner.WorkerRunner`).**
+  Implements `PeerMessaging` directly. Wraps the supplied
+  `session_factory` so every freshly-created `AgentSession` gets the
+  runner stamped in as its `peer_messaging` service via the host-side
+  `AgentSession.set_service` accessor (added in this phase — see
+  ExtensionAPI minimality note). Holds `correlation_id → Future`
+  pending-reply map; `KIND_OUTBOUND` envelopes with a matching id
+  resolve the future instead of feeding into a local session. Late
+  replies are logged and dropped.
+* **ExtensionAPI surface.** Single host-side accessor:
+  `AgentSession.set_service(name, obj)` mirrors the atom-side
+  `ExtensionAPI.set_service` (refuses to clobber). No new Protocols
+  in core; the `peer_messaging` Protocol lives in the atom file and
+  the runner duck-types it. This keeps the SDK surface unchanged
+  except for one already-symmetric method.
 
 ---
 

@@ -22,6 +22,27 @@ The router policy (scenario-equality + sticky session_key) lives in
 applies it on every inbound, and forwards worker-originated
 ``KIND_OUTBOUND`` envelopes back to the originating chat client by
 matching ``body["channel"]`` against the synthetic-channel map.
+
+Phase 6 additions — agent-to-agent (A2A) calls
+----------------------------------------------
+* **Hop limit.** ``max_a2a_hops`` (default 10) bounds delegation depth.
+  The bridge increments ``hops`` on every forwarded inbound; envelopes
+  that would exceed the cap are dropped and a ``KIND_ERROR`` with
+  ``reason="hop_limit_exceeded"`` is sent back to the source peer.
+* **root_session_key propagation.** When a chat client sends an
+  inbound, the bridge fills ``root_session_key = "{channel}:{chat_id}"``
+  on the forwarded envelope. When a worker peer sends an inbound
+  (peer_send), the worker MUST set ``root_session_key`` itself; the
+  bridge rejects worker-originated inbounds without it.
+* **Worker→worker routing.** When the source peer is a worker, route
+  by the envelope's ``to`` field (a peer_id) instead of the scenario
+  registry. Unknown ``to`` → ``KIND_ERROR`` with ``reason="unknown_to"``.
+* **Approval card override.** Outbound envelopes whose
+  ``body.metadata.kind == "approval_request"`` are routed to the chat
+  client owning ``root_session_key``, not to the synthetic channel of
+  the worker that emitted them. The user's button click flows back to
+  the *emitting* worker via the existing channel→peer mapping that the
+  chat client's synthetic channel still owns.
 """
 
 from __future__ import annotations
@@ -36,10 +57,18 @@ from .bus import InboundMessage, MessageBus, OutboundKind, OutboundMessage
 from .manager import ChannelManager
 from .outbox import OutboxStore
 from .peer import PeerSession
-from .wire import KIND_INBOUND, KIND_OUTBOUND, WIRE_VERSION, Envelope
+from .wire import (
+    KIND_ERROR,
+    KIND_INBOUND,
+    KIND_OUTBOUND,
+    WIRE_VERSION,
+    Envelope,
+)
 from .worker_registry import WorkerRegistry
 
 log = logging.getLogger("agentm_channels.wire_bridge")
+
+DEFAULT_MAX_A2A_HOPS: int = 10
 
 
 class _WireChannel(BaseChannel):
@@ -111,6 +140,20 @@ def _outbound_to_envelope(msg: OutboundMessage, *, peer_id: str) -> Envelope:
     )
 
 
+def _is_approval_request(env: Envelope) -> bool:
+    """Return True when ``env.body.metadata.kind == "approval_request"``.
+
+    The approval bridge tags requests this way on the way out so chat
+    renderers know to draw the buttons. Phase 6 reuses the tag to
+    override worker→chat routing for cross-peer (A2A) approvals.
+    """
+    body = env.body if isinstance(env.body, dict) else {}
+    metadata = body.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    return str(metadata.get("kind", "")) == "approval_request"
+
+
 class WireBridge:
     """Glue object: turns wire inbound envelopes into v0 inbound messages.
 
@@ -134,6 +177,7 @@ class WireBridge:
         worker_registry: WorkerRegistry | None = None,
         scenario: str | None = None,
         allow_inproc: bool = True,
+        max_a2a_hops: int = DEFAULT_MAX_A2A_HOPS,
     ) -> None:
         self._bus = bus
         self._manager = manager
@@ -141,6 +185,7 @@ class WireBridge:
         self._workers = worker_registry or WorkerRegistry()
         self._scenario = scenario or ""
         self._allow_inproc = allow_inproc
+        self._max_a2a_hops = max(1, int(max_a2a_hops))
         # peer_id → channel_name registered for that peer (so we can
         # tear it down on disconnect).
         self._peer_channels: dict[str, str] = {}
@@ -151,6 +196,10 @@ class WireBridge:
     @property
     def worker_registry(self) -> WorkerRegistry:
         return self._workers
+
+    @property
+    def max_a2a_hops(self) -> int:
+        return self._max_a2a_hops
 
     # -- WireServer hooks --------------------------------------------
 
@@ -180,9 +229,29 @@ class WireBridge:
         await self.on_peer_disconnect(session.peer_id)
 
     async def handle_inbound(self, peer_session: PeerSession, env: Envelope) -> None:
-        """Invoked by :class:`WireServer` for each ``inbound`` envelope."""
+        """Invoked by :class:`WireServer` for each ``inbound`` envelope.
+
+        Three sources are possible:
+
+        * Chat client → worker (Phase 5a path; resolved by scenario).
+        * Worker → worker (Phase 6 A2A; resolved by ``env.to``).
+        * Worker → chat client (Phase 6 A2A reply; resolved by
+          ``env.to``, peer-kind ``chat_client``).
+        """
         if env.kind != KIND_INBOUND:
             return  # ping/pong/bye are handled by the server already
+
+        if peer_session.peer_kind == "agent_worker":
+            await self._handle_worker_originated_inbound(peer_session, env)
+            return
+
+        # Chat-client (or other non-worker) origin: original Phase 5a
+        # path, with the Phase 6 hop bump + root_session_key tagging.
+        await self._handle_chat_originated_inbound(peer_session, env)
+
+    async def _handle_chat_originated_inbound(
+        self, peer_session: PeerSession, env: Envelope
+    ) -> None:
         body = env.body if isinstance(env.body, dict) else {}
         channel_name = str(body.get("channel") or "")
         chat_id = str(body.get("chat_id") or "")
@@ -201,19 +270,34 @@ class WireBridge:
             return
         await self._ensure_channel(peer_session.peer_id, channel_name)
         session_key = f"{channel_name}:{chat_id}"
+        # Chat clients don't set root_session_key; fill it in here so
+        # downstream peers (workers, peer_send fan-out) have a stable
+        # identifier of the user-facing conversation.
+        root_session_key = env.root_session_key or session_key
 
         worker_peer = self._workers.find_worker(self._scenario, session_key)
         if worker_peer is not None:
-            # Forward the inbound envelope to the worker's outbox. The
-            # body stays the same so the worker reconstructs an
-            # ``InboundMessage`` with the same fields.
+            forwarded_hops = env.hops + 1
+            if forwarded_hops > self._max_a2a_hops:
+                await self._send_error(
+                    peer_session.peer_id,
+                    "hop_limit_exceeded",
+                    {
+                        "max_a2a_hops": self._max_a2a_hops,
+                        "correlation_id": env.correlation_id,
+                        "envelope_id": env.id,
+                    },
+                )
+                return
             forwarded = Envelope(
                 v=WIRE_VERSION,
                 id=f"fwd-{worker_peer}-{int(time.time() * 1_000_000)}",
                 kind=KIND_INBOUND,
                 ts=time.time(),
                 body=dict(body),
-                root_session_key=session_key,
+                root_session_key=root_session_key,
+                correlation_id=env.correlation_id,
+                hops=forwarded_hops,
             )
             await asyncio.to_thread(self._outbox.enqueue, worker_peer, forwarded)
             return
@@ -255,17 +339,160 @@ class WireBridge:
             )
         )
 
+    async def _handle_worker_originated_inbound(
+        self, peer_session: PeerSession, env: Envelope
+    ) -> None:
+        """Worker→peer A2A inbound. Route by ``env.to``."""
+        if not env.root_session_key:
+            await self._send_error(
+                peer_session.peer_id,
+                "missing_root_session_key",
+                {
+                    "envelope_id": env.id,
+                    "correlation_id": env.correlation_id,
+                    "detail": (
+                        "worker-originated inbound must carry "
+                        "root_session_key; copy it from the inbound that "
+                        "triggered this delegation"
+                    ),
+                },
+            )
+            return
+        forwarded_hops = env.hops + 1
+        if forwarded_hops > self._max_a2a_hops:
+            await self._send_error(
+                peer_session.peer_id,
+                "hop_limit_exceeded",
+                {
+                    "max_a2a_hops": self._max_a2a_hops,
+                    "correlation_id": env.correlation_id,
+                    "envelope_id": env.id,
+                },
+            )
+            return
+        target = env.to or ""
+        if not target:
+            await self._send_error(
+                peer_session.peer_id,
+                "missing_to",
+                {"envelope_id": env.id, "correlation_id": env.correlation_id},
+            )
+            return
+        # Resolve ``to``: known worker peer_id, or a chat-client peer_id
+        # that already owns a synthetic channel.
+        if self._workers.has(target):
+            dest_peer_id = target
+        elif target in self._peer_channels:
+            dest_peer_id = target
+        else:
+            await self._send_error(
+                peer_session.peer_id,
+                "unknown_to",
+                {
+                    "to": target,
+                    "envelope_id": env.id,
+                    "correlation_id": env.correlation_id,
+                },
+            )
+            return
+        forwarded = Envelope(
+            v=WIRE_VERSION,
+            id=f"a2a-fwd-{dest_peer_id}-{int(time.time() * 1_000_000)}",
+            kind=KIND_INBOUND,
+            ts=time.time(),
+            body=dict(env.body) if isinstance(env.body, dict) else {},
+            to=target,
+            correlation_id=env.correlation_id,
+            root_session_key=env.root_session_key,
+            peer_kind=env.peer_kind,
+            hops=forwarded_hops,
+        )
+        await asyncio.to_thread(self._outbox.enqueue, dest_peer_id, forwarded)
+
     async def handle_worker_outbound(
         self, worker_session: PeerSession, env: Envelope
     ) -> None:
-        """Route a worker-originated ``KIND_OUTBOUND`` to the chat client.
+        """Route a worker-originated ``KIND_OUTBOUND`` to the right peer.
 
-        Match by ``body["channel"]`` → owning chat_client peer_id and
-        enqueue onto that peer's outbox. The body is forwarded as-is so
-        renderers see the same shape they would have seen from the
-        in-process gateway.
+        Three cases:
+
+        * **Approval request** (``body.metadata.kind == "approval_request"``):
+          route to the chat client identified by ``root_session_key``,
+          NOT to the worker chain. This is the cross-peer approval
+          forwarding described in §7.7 of the design doc.
+        * **A2A reply** (``correlation_id`` is set AND a worker peer
+          named in ``env.to`` is alive): forward to that worker so its
+          pending ``peer_send`` future resolves.
+        * **Default** (Phase 5a): match by ``body["channel"]`` → owning
+          chat_client peer_id and enqueue onto that peer's outbox.
         """
         body = env.body if isinstance(env.body, dict) else {}
+
+        # Case 1: approval routing override. Must come before the
+        # default path because approval-request bodies still carry a
+        # channel field that points at the worker's synthetic channel.
+        if _is_approval_request(env) and env.root_session_key:
+            channel_name, _, chat_id = env.root_session_key.partition(":")
+            chat_peer_id = self._channel_to_peer.get(channel_name)
+            if chat_peer_id is None:
+                log.warning(
+                    "approval_request from worker=%s has no live chat peer "
+                    "for root_session_key=%s",
+                    worker_session.peer_id,
+                    env.root_session_key,
+                )
+                return
+            # Rewrite the body so the chat renderer sees its own
+            # channel/chat_id (not the worker's synthetic ``_a2a`` one)
+            # and can attribute the click back through the existing
+            # synthetic-channel send path. The original channel/chat_id
+            # are preserved under ``metadata.origin`` so a future
+            # auditor can trace the chain if needed.
+            rewritten_body = dict(body)
+            metadata = dict(rewritten_body.get("metadata") or {})
+            metadata.setdefault(
+                "origin",
+                {
+                    "channel": rewritten_body.get("channel"),
+                    "chat_id": rewritten_body.get("chat_id"),
+                    "worker_peer_id": worker_session.peer_id,
+                },
+            )
+            rewritten_body["channel"] = channel_name
+            rewritten_body["chat_id"] = chat_id
+            rewritten_body["metadata"] = metadata
+            forwarded = Envelope(
+                v=WIRE_VERSION,
+                id=f"out-{chat_peer_id}-{int(time.time() * 1_000_000)}",
+                kind=KIND_OUTBOUND,
+                ts=time.time(),
+                body=rewritten_body,
+                correlation_id=env.correlation_id,
+                root_session_key=env.root_session_key,
+            )
+            await asyncio.to_thread(
+                self._outbox.enqueue, chat_peer_id, forwarded
+            )
+            return
+
+        # Case 2: A2A reply — outbound targeted at another worker via
+        # ``to`` and ``correlation_id``.
+        target = env.to or ""
+        if env.correlation_id and target and self._workers.has(target):
+            forwarded = Envelope(
+                v=WIRE_VERSION,
+                id=f"a2a-rep-{target}-{int(time.time() * 1_000_000)}",
+                kind=KIND_OUTBOUND,
+                ts=time.time(),
+                body=dict(body),
+                to=target,
+                correlation_id=env.correlation_id,
+                root_session_key=env.root_session_key,
+            )
+            await asyncio.to_thread(self._outbox.enqueue, target, forwarded)
+            return
+
+        # Case 3 (default Phase 5a path): chat-client by channel name.
         channel_name = str(body.get("channel") or "")
         if not channel_name:
             log.warning(
@@ -293,12 +520,26 @@ class WireBridge:
             kind=KIND_OUTBOUND,
             ts=time.time(),
             body=dict(body),
+            correlation_id=env.correlation_id,
+            root_session_key=env.root_session_key,
         )
         await asyncio.to_thread(
             self._outbox.enqueue, chat_peer_id, forwarded
         )
 
     # -- helpers -----------------------------------------------------
+
+    async def _send_error(
+        self, peer_id: str, reason: str, extra: dict[str, Any]
+    ) -> None:
+        env = Envelope(
+            v=WIRE_VERSION,
+            id=f"err-{peer_id}-{int(time.time() * 1_000_000)}",
+            kind=KIND_ERROR,
+            ts=time.time(),
+            body={"reason": reason, **extra},
+        )
+        await asyncio.to_thread(self._outbox.enqueue, peer_id, env)
 
     async def _emit_worker_lost(self, session_key: str) -> None:
         """Notify the chat side that the worker holding ``session_key``
@@ -373,4 +614,4 @@ class WireBridge:
         log.info("wire peer disconnected: channel %r dropped", channel)
 
 
-__all__ = ["WireBridge", "_WireChannel"]
+__all__ = ["DEFAULT_MAX_A2A_HOPS", "WireBridge", "_WireChannel"]
