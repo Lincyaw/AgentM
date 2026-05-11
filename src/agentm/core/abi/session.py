@@ -2,8 +2,9 @@
 
 These are pure data classes plus a minimal read-only Protocol over the
 session tree. They live in ``core/abi`` so the constitution layer
-(``core/_internal/compaction``, ``core/_internal/catalog``) can manipulate
-session entries without reverse-importing from ``harness``.
+(``core/_internal/catalog`` and the compaction engine inside the
+``llm_compaction`` atom) can manipulate session entries without
+reverse-importing from ``harness``.
 
 The full ``SessionManager`` (with persistence, fork/navigate semantics)
 remains in ``harness/session_manager.py`` and implements ``SessionTree``

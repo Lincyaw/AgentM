@@ -250,7 +250,6 @@ class _InstallApi:
         self.catalog = _DummyCatalog()
         self.prompt_templates = _DummyPromptTemplates()
         self.skills = _DummySkills()
-        self.compaction = object()
         self._services: dict[str, Any] = {}
         self._writer = _DummyWriter()
         self._layout = DefaultProjectLayout(tmp_path)
