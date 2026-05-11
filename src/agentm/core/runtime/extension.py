@@ -64,11 +64,17 @@ from agentm.core.runtime.services import (
 class _OperationsHolder:
     """Mutable single-slot container for the session's ``Operations`` bundle.
 
-    The substrate no longer instantiates a default bundle — an atom must
-    call :meth:`ExtensionAPI.register_operations` exactly once before
-    freeze. All :class:`_ExtensionAPIImpl` instances built for a session
-    share the same holder so that whichever atom registers Operations
-    is visible to every subsequent atom regardless of api capture order.
+    Operations is the **strict-register** axis: the substrate has no sensible
+    "no-op shell" default, so an atom must call
+    :meth:`ExtensionAPI.register_operations` exactly once before freeze or
+    the session refuses to start. All :class:`_ExtensionAPIImpl` instances
+    built for a session share the same holder so that whichever atom
+    registers Operations is visible to every subsequent atom regardless of
+    api capture order.
+
+    Contrast :class:`_ResourceWriterHolder` below, which is **default-pluggable**.
+    See ``.claude/designs/pluggable-architecture.md`` §"Port-default pattern"
+    for the rule that picks between the two shapes.
     """
 
     __slots__ = ("bundle",)
@@ -80,19 +86,31 @@ class _OperationsHolder:
 class _ResourceWriterHolder:
     """Mutable single-slot container for the session's ``ResourceWriter``.
 
-    Pre-populated by the substrate with a default (``GitBackedResourceWriter``)
-    so the writer is always available before any atom installs. An atom may
-    overwrite the slot once via :meth:`ExtensionAPI.register_resource_writer`
-    to redirect writes (e.g. into a sandbox). Sharing the holder across every
-    :class:`_ExtensionAPIImpl` instance for a session means the override is
-    visible to every downstream consumer, including ``AtomReloader``.
+    ResourceWriter is a **default-pluggable** axis: the substrate itself
+    depends on a working writer (catalog freeze, atom reload, etc. — all
+    substrate-side bookkeeping that runs before any atom-driven write), so
+    it pre-populates the slot with :class:`GitBackedResourceWriter` against
+    the host filesystem. An atom may overwrite the slot once via
+    :meth:`ExtensionAPI.register_resource_writer` to redirect writes (e.g.
+    into a sandbox). Catalog and project-layout follow the same shape.
+
+    The ``replaced`` flag exists solely to enforce "register-once": without
+    it, ``register_resource_writer`` couldn't distinguish "an atom is
+    overwriting the substrate default" (allowed) from "a second atom is
+    overwriting an earlier atom's writer" (rejected). The Operations holder
+    doesn't need this because it has no substrate default to disambiguate
+    from.
+
+    Sharing the holder across every :class:`_ExtensionAPIImpl` instance for
+    a session means the override is visible to every downstream consumer,
+    including ``AtomReloader``.
     """
 
-    __slots__ = ("writer", "_replaced")
+    __slots__ = ("writer", "replaced")
 
     def __init__(self, writer: ResourceWriter) -> None:
         self.writer: ResourceWriter = writer
-        self._replaced: bool = False
+        self.replaced: bool = False
 
 
 class _NoopSessionGateway:
@@ -468,14 +486,14 @@ class _ExtensionAPIImpl:
     def register_resource_writer(self, writer: ResourceWriter) -> None:
         """Replace the session's :class:`ResourceWriter` (see ExtensionAPI docs)."""
         self._assert_active()
-        if self._resource_writer_holder._replaced:
+        if self._resource_writer_holder.replaced:
             raise KeyError(
                 "ResourceWriter is already replaced for this session; "
                 "an earlier atom called api.register_resource_writer(...). "
                 "Only one ResourceWriter atom per scenario."
             )
         self._resource_writer_holder.writer = writer
-        self._resource_writer_holder._replaced = True
+        self._resource_writer_holder.replaced = True
 
     # --- Read-only context -------------------------------------------------
 

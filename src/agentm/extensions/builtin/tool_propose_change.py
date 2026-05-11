@@ -39,6 +39,24 @@ incremented on each call. A configured ``rollouts_budget`` /
 Activation records append to ``.agentm/decisions/<scenario>/activations.jsonl``;
 a ``tree.jsonl`` sibling records parent->child edges between candidates.
 Both paths are constitution-protected — only this atom writes here.
+
+ResourceWriter bypass
+---------------------
+The five mutation sites in this module (``activations.jsonl``,
+``candidates/<id>.json``, ``budget.json``, ``tree.jsonl``, the ``.pruned``
+sidecars) deliberately use raw ``Path.open`` / ``os.replace`` / ``unlink``
+calls instead of routing through ``api.get_resource_writer()``. The reason
+is that ``.agentm/decisions/<scenario>/`` is **operator-host state**, not
+agent-output state: the operator inspects evidence on the host filesystem
+where the trace JSONL also lives. When this scenario runs with a
+sandbox-backed writer (e.g. ``operations_agent_env``), routing through it
+would either (a) push decisions/ into the sandbox where the operator
+can't see them, or (b) get refused as a host-path write. Neither is the
+right semantic — decisions/ must always land on host. This atom is the
+sole writer for these paths (see B-7 in the boundary review), so the
+bypass is contained and audit-trail-equivalent to a dedicated
+``DecisionLogWriter`` port (which would be a follow-up if a second writer
+ever needed to participate). Do not migrate these sites to ResourceWriter.
 """
 
 from __future__ import annotations
