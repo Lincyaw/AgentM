@@ -102,7 +102,6 @@ _FORBIDDEN_HARNESS_SERVICE_ISINSTANCE_NAMES: frozenset[str] = frozenset(
         "GitBackedResourceWriter",
         "LocalBashOperations",
         "LocalFileOperations",
-        "_NoopResourceWriter",
     }
 )
 

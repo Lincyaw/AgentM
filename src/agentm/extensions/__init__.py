@@ -62,10 +62,9 @@ class ExtensionManifest:
     """Names of other built-in extensions that MUST NOT be loaded in the
     same session. The runner enforces this."""
 
-    # --- Self-modifiable architecture fields (manifest-schema task) --------
-    # Defaults preserve backward compatibility: every existing atom keeps
-    # building unmodified. See ``.claude/designs/self-modifiable-architecture.md``
-    # §4 (versioned API) and §7 (tier rationale).
+    # --- Self-modifiable architecture fields --------
+    # See ``.claude/designs/self-modifiable-architecture.md`` §4 (versioned
+    # API) and §7 (tier rationale).
 
     api_version: int = 1
     """Integer ABI the atom expects. Validated against
@@ -74,18 +73,16 @@ class ExtensionManifest:
     time rather than crashing on first event delivery."""
 
     affects: tuple[str, ...] = field(default_factory=tuple)
-    """Metric surface this atom influences. Consumed by the Phase 2 indexer
-    when ``compare()`` lands; MVP atoms can leave this empty. Tuple (not
-    list) for the same hashable-value-type reasons as ``registers``. The
-    richer ``{primary, secondary}`` shape from evolution-substrate §3.1 is
-    deferred until ``compare()`` actually consumes it."""
+    """Metric surface this atom influences. Consumed by the catalog
+    indexer; atoms may leave this empty when not yet measured. Tuple (not
+    list) for the same hashable-value-type reasons as ``registers``."""
 
     tier: int = 1
     """Reload-cost classification. ``1`` = freely-editable (validator runs,
-    reload happens). ``2`` = reviewable (reload deferred to a
-    ``propose_change`` decision in Phase 2). The canonical tier-2 list lives
-    in ``core-manifest.yaml::reload.tier_2_atoms``; the validator's
-    §11.4.10 check warns on disagreement between this field and that list."""
+    reload happens). ``2`` = reviewable (reload is deferred to a
+    ``propose_change`` decision). The canonical tier-2 list lives in
+    ``core-manifest.yaml::reload.tier_2_atoms``; the validator's §11.4.10
+    check warns on disagreement between this field and that list."""
 
     mountable_via_command: bool = False
     """Whether deployments may surface this atom as a ``/atom:install``
@@ -99,6 +96,21 @@ class ExtensionManifest:
     semantics — installs route through ``ExtensionAPI.install_atom``,
     which writes to ``<cwd>/.agentm/atoms/<name>.py``, so source scenario
     files are never touched."""
+
+    provides_role: tuple[str, ...] = field(default_factory=tuple)
+    """Singleton roles this atom fulfils in the harness wiring.
+
+    Unlike ``registers`` (capability *tags*, many atoms may register the
+    same kind), each role names a slot the harness expects exactly one
+    atom to fill — e.g. ``"command_parser"``, ``"system_prompt_provider"``,
+    ``"compaction_prompts"``, ``"sub_agent_runtime"``,
+    ``"provider_inheritor"``. The discovery layer indexes atoms by role
+    so the session factory can resolve "which atom is today's command
+    parser?" without hard-coding atom names.
+
+    Use the constants exported from :mod:`agentm.core.abi.roles` rather
+    than raw strings. Empty tuple (default) means the atom claims no
+    singleton role."""
 
 
 # --- Tag parsing helper (used by validator + future tooling) ----------------

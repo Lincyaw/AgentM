@@ -26,7 +26,14 @@ constitution:
     - src/agentm/extensions/validate.py
     # Presenter startup contract
     - src/agentm/cli.py
-    # Catalog data — write-protected against agent edits
+    # Catalog data — agent-spoof barrier. Source-of-truth atom blobs live in
+    # git (under src/agentm/extensions/**.py, listed below as managed); the
+    # catalog tree under .agentm/catalog/** is *derived* (metrics.jsonl, runs/
+    # symlinks, version dirs, migration markers). It is constitution-protected
+    # solely so the agent cannot rewrite its own evaluation evidence via
+    # tool_edit. Harness-internal writes (catalog migrate / indexer / freeze)
+    # are intentionally bypass paths: they live inside the constitution layer
+    # and ResourceWriter never sees them. See .claude/designs/self-modifiable-architecture.md.
     - .agentm/catalog/**
     # Decision log — only tool_propose_change may append, mediated.
     # See .claude/designs/per-task-evolution-loop.md §7.

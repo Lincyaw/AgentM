@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from agentm.core.abi.roles import SYSTEM_PROMPT_PROVIDER
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import BeforeAgentStartEvent
 from agentm.harness.extension import ExtensionAPI
@@ -22,6 +23,7 @@ MANIFEST = ExtensionManifest(
         "additionalProperties": False,
     },
     requires=(),  # Leaf atom: prepends configured prompt text only.
+    provides_role=(SYSTEM_PROMPT_PROVIDER,),
 )
 
 

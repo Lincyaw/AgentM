@@ -10,7 +10,7 @@ from agentm.core.abi import (
     ToolCallBlock,
     ToolCallStart,
 )
-from agentm.core.lib import _to_jsonable
+from agentm.core.lib import to_jsonable
 
 
 @dataclass
@@ -31,13 +31,13 @@ def test_to_jsonable_serializes_assistant_message_blocks() -> None:
         timestamp=1.0,
     )
 
-    assert _to_jsonable(message)["content"] == [{"type": "text", "text": "hi"}]
+    assert to_jsonable(message)["content"] == [{"type": "text", "text": "hi"}]
 
 
 def test_to_jsonable_serializes_tool_call_blocks() -> None:
     block = ToolCallBlock(type="tool_call", id="call-1", name="read", arguments={"path": "x"})
 
-    assert _to_jsonable(block) == {
+    assert to_jsonable(block) == {
         "type": "tool_call",
         "id": "call-1",
         "name": "read",
@@ -46,8 +46,8 @@ def test_to_jsonable_serializes_tool_call_blocks() -> None:
 
 
 def test_to_jsonable_serializes_stream_deltas() -> None:
-    assert _to_jsonable(TextDelta(text="hello")) == {"text": "hello"}
-    assert _to_jsonable(ToolCallStart(id="call-1", name="bash")) == {
+    assert to_jsonable(TextDelta(text="hello")) == {"text": "hello"}
+    assert to_jsonable(ToolCallStart(id="call-1", name="bash")) == {
         "id": "call-1",
         "name": "bash",
     }
@@ -62,8 +62,8 @@ def test_to_jsonable_serializes_message_end_and_dict_backed_objects() -> None:
         )
     )
 
-    assert _to_jsonable(event)["message"]["role"] == "assistant"
-    assert _to_jsonable(_DictBacked()) == {
+    assert to_jsonable(event)["message"]["role"] == "assistant"
+    assert to_jsonable(_DictBacked()) == {
         "name": "dict-backed",
         "child": {"value": 3},
     }

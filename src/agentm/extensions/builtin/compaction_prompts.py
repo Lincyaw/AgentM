@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from agentm.core.abi.roles import COMPACTION_PROMPTS
 from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
@@ -263,6 +264,7 @@ MANIFEST = ExtensionManifest(
         "additionalProperties": True,
     },
     requires=(),  # Leaf atom: publishes prompt templates through api.prompt_templates.
+    provides_role=(COMPACTION_PROMPTS,),
 )
 
 

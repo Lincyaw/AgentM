@@ -10,7 +10,7 @@ from agentm.core.abi import (
     BeforeSendToLlmEvent,
     TextContent,
 )
-from agentm.core.lib import _to_jsonable
+from agentm.core.lib import to_jsonable
 from agentm.extensions import ExtensionManifest
 from agentm.harness.events import AfterCompactEvent, BeforeCompactEvent
 from agentm.harness.extension import ExtensionAPI
@@ -140,4 +140,4 @@ def _estimate_messages(messages: list[AgentMessage]) -> int:
 
 
 def _safe_string(value: Any) -> str:
-    return str(_to_jsonable(value))
+    return str(to_jsonable(value))

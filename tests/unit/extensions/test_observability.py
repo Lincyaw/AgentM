@@ -38,7 +38,9 @@ class _SessionView:
 
 
 def _api(tmp_path: Path) -> _ExtensionAPIImpl:
-    return _ExtensionAPIImpl(
+    from agentm.harness.extension import build_extension_api_scope
+
+    scope = build_extension_api_scope(
         bus=EventBus(),
         cwd=str(tmp_path),
         session_id="session-1",
@@ -51,6 +53,7 @@ def _api(tmp_path: Path) -> _ExtensionAPIImpl:
         model_getter=lambda: None,
         provider_getter=lambda: None,
     )
+    return _ExtensionAPIImpl(scope)
 
 
 def _handler(event: dict[str, Any]) -> dict[str, Any]:

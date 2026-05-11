@@ -225,8 +225,8 @@ def _default_action(
          missing hint → ``Stop(ModelEndTurn())``
     3. Tools ran successfully and none asked to terminate → ``Step()``.
 
-    If ``termination`` is unset (legacy provider adapters), fall back to the
-    raw ``stop_reason`` string for graceful migration.
+    Provider adapters must always populate ``termination``; the raw
+    ``stop_reason`` string is not part of the kernel contract.
     """
 
     for tool_name, out in paired_outcomes:
@@ -236,26 +236,6 @@ def _default_action(
     if not paired_outcomes:
         hint = assistant_msg.termination
         if hint is None:
-            # Back-compat path: providers that haven't migrated to
-            # ``TerminationHint`` yet still populate ``stop_reason`` with the
-            # legacy kernel vocabulary.
-            raw = assistant_msg.stop_reason
-            if raw == "max_tokens":
-                return Stop(ProviderTruncated(kind="max_tokens"))
-            if raw == "error":
-                return Stop(ProviderTruncated(kind="error"))
-            if raw == "tool_use":
-                return Stop(
-                    ProviderProtocolViolation(
-                        detail=(
-                            "provider reported tool_use but no tool_calls were "
-                            "extracted"
-                        )
-                    )
-                )
-            if raw == "pause_turn":
-                # Continuation signal — see ``PauseTurn`` below.
-                return Step()
             return Stop(ModelEndTurn())
 
         if isinstance(hint, MaxTokens):

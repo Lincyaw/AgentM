@@ -65,11 +65,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
         name = str(args["name"])
-        rationale = str(args["rationale"])
+        # ``rationale`` is required by the tool schema for human/audit clarity
+        # but the kernel does not currently consume it; the trajectory captures
+        # the args verbatim.
+        _ = str(args["rationale"])
         try:
-            result = api.unload_atom(
-                name, agent_initiated=True, rationale=rationale
-            )
+            result = api.unload_atom(name, agent_initiated=True)
         except Exception as exc:  # noqa: BLE001
             return _error(f"unload_atom raised: {exc}")
         if not result.ok:

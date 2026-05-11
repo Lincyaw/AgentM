@@ -19,11 +19,19 @@ from agentm.harness.session_manager import SessionManager
 
 
 def default_child_provider_factory(parent_provider: Any) -> tuple[str, dict[str, Any]]:
-    """Return the inherit-provider atom spec for a child session."""
-    from agentm.extensions.discover import discover_builtin
-    from agentm.extensions.builtin.inherit_provider import PARENT_PROVIDER_CONFIG_KEY
+    """Return the spec for whichever atom claims the ``PROVIDER_INHERITOR``
+    role. Looking up by role rather than by atom name lets a scenario ship
+    a customised provider-inheritor without editing the harness."""
 
-    entry = discover_builtin()["inherit_provider"]
+    from agentm.core.abi.roles import PARENT_PROVIDER_CONFIG_KEY, PROVIDER_INHERITOR
+    from agentm.extensions.discover import discover_by_role
+
+    entry = discover_by_role().get(PROVIDER_INHERITOR)
+    if entry is None:
+        raise RuntimeError(
+            f"no atom claims the {PROVIDER_INHERITOR!r} role; cannot build "
+            "a child-session provider spec"
+        )
     return (entry.module_path, {PARENT_PROVIDER_CONFIG_KEY: parent_provider})
 
 

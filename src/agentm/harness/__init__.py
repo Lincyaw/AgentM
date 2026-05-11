@@ -1,8 +1,4 @@
-"""AgentM v2 harness public surface.
-
-Phase 2.5 removed the legacy runtime layer; the only supported entry
-points are listed below.
-"""
+"""AgentM v2 harness public surface."""
 
 from __future__ import annotations
 
@@ -52,16 +48,6 @@ from agentm.harness.session_bootstrap import (
     make_default_session_store,
     resolve_session_state,
 )
-from agentm.harness.session_runtime import AgentSessionRuntime
-from agentm.harness.session_services import (
-    AgentSessionRuntimeDiagnostic,
-    AgentSessionServices,
-    CreateAgentSessionFromServicesOptions,
-    CreateAgentSessionServicesOptions,
-    create_agent_session_from_services,
-    create_agent_session_services,
-)
-
 __all__ = [
     "AgentSession",
     "ApiRegisterEvent",
@@ -92,13 +78,6 @@ __all__ = [
     "SessionManager",
     "SessionTreeNode",
     "UnknownCommandError",
-    "AgentSessionRuntime",
-    "AgentSessionRuntimeDiagnostic",
-    "AgentSessionServices",
-    "CreateAgentSessionFromServicesOptions",
-    "CreateAgentSessionServicesOptions",
-    "create_agent_session_from_services",
-    "create_agent_session_services",
     "events",
     "GitBackedResourceWriter",
     "load_extension",

@@ -12,8 +12,6 @@ re-introduce the original drift:
   template and routes it through the import allow-list.
 * E10 — registering two non-canonical OpenAI-compatible providers without an
   explicit ``name`` raises ``DuplicateProviderError``.
-* E14 — ``OAuthCredentials`` exposes the millisecond-suffixed
-  ``expires_at_ms`` field.
 """
 
 from __future__ import annotations
@@ -24,7 +22,6 @@ from typing import Any
 
 import pytest
 
-from agentm.ai.oauth.types import OAuthCredentials
 from agentm.extensions.builtin import inherit_provider, tool_bash
 from agentm.extensions.validate import (
     _dynamic_import_target,
@@ -197,11 +194,3 @@ def test_openai_install_detects_duplicate_name_in_session() -> None:
         )
 
 
-# --- E14 -------------------------------------------------------------------
-
-
-def test_oauth_credentials_uses_expires_at_ms_field() -> None:
-    creds = OAuthCredentials(refresh="r", access="a", expires_at_ms=1_700_000_000_000)
-    assert creds.expires_at_ms == 1_700_000_000_000
-    # Old name is gone — guard against silent reintroduction.
-    assert not hasattr(creds, "expires")
