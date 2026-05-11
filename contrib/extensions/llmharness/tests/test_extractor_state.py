@@ -307,7 +307,10 @@ def test_commit_rejects_non_genesis_event_with_empty_refs() -> None:
         ]
     )
     assert err is not None
-    assert "events[1].refs must be non-empty" in err
+    assert "events[1].refs is empty" in err
+    assert "non-genesis" in err
+    assert "Candidates you can cite" in err
+    assert "id:1" in err  # the available earlier event is enumerated
     assert state.committed is False
 
 
