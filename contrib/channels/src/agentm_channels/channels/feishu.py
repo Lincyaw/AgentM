@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
 from typing import Any
 
 from ..base import BaseChannel
@@ -93,6 +94,16 @@ class FeishuChannel(BaseChannel):
     async def start(self) -> None:
         if self._running:
             return
+        warnings.warn(
+            "agentm_channels.channels.feishu.FeishuChannel is deprecated as "
+            "of Phase 3 of the gateway/client split. Run the Feishu adapter "
+            "as a separate process: "
+            "`agentm-feishu --connect unix:///path/to/gateway.sock --app-id ... "
+            "--app-secret /path/to/secret-file`. The in-process driver "
+            "remains functional but will be removed in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         try:
             from lark_oapi.channel import FeishuChannel as _Lark
         except ImportError as exc:  # pragma: no cover

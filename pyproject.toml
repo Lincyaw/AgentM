@@ -46,6 +46,7 @@ members = [
     "contrib/scenarios/rca",
     "contrib/channels",
     "contrib/channels-clients/terminal",
+    "contrib/channels-clients/feishu",
 ]
 
 [tool.pytest.ini_options]
