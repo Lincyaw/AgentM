@@ -303,11 +303,17 @@ class AtomListCommand(_AtomVerbBase):
             for atom in mountable:
                 marker = " *(loaded)*" if atom.name in live else ""
                 lines.append(f"  - `{atom.name}`{marker} — {atom.summary}")
-        else:
+        elif not self.allow:
             lines.append(
                 "_no mountable atoms — set `commands.atoms.allow` in the "
-                "gateway config and ensure each atom's MANIFEST sets "
-                "`mountable_via_command=True`._"
+                "gateway config to a list of atom names (or `[\"*\"]`)._"
+            )
+        else:
+            lines.append(
+                "_no atom in the catalog has opted into "
+                "`MANIFEST.mountable_via_command=True` yet. The allow "
+                "list is configured, but every atom must also opt in "
+                "at the source._"
             )
         return self._reply(ctx, "\n".join(lines))
 

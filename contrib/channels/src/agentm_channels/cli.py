@@ -260,10 +260,22 @@ def _channels_from_env(env: dict[str, str]) -> dict[str, Any]:
 
 
 async def _arun(args: argparse.Namespace) -> int:
-    cwd = args.cwd
     cfg: dict[str, Any] = {}
     if args.config is not None:
         cfg = _load_yaml(args.config)
+    # CLI > YAML > env default. The earlier ``args.cwd`` win was a
+    # silent foot-gun: a YAML ``cwd: /tmp/foo`` would be ignored and
+    # the gateway would scan the shell's pwd for ``.agentm/commands``
+    # / ``.claude/skills``. Honour the YAML value when the CLI did
+    # not override.
+    yaml_cwd = cfg.get("cwd")
+    args_cwd_default = (
+        os.environ.get("AGENTM_GATEWAY_CWD") or str(Path.cwd())
+    )
+    if args.cwd == args_cwd_default and isinstance(yaml_cwd, str) and yaml_cwd:
+        cwd = yaml_cwd
+    else:
+        cwd = args.cwd
 
     if args.terminal:
         # Terminal mode overrides any YAML/env channels — explicit flag
