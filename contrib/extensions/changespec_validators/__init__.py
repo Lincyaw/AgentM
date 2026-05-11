@@ -38,9 +38,19 @@ MANIFEST = ExtensionManifest(
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    registry = api.get_service(SERVICE_NAME)
-    if not isinstance(registry, dict):
+    del config
+    # `set_service` raises on duplicate names, so on a second mount (e.g. a
+    # downstream extension that augments the same service) we mutate the
+    # existing dict in place instead of re-registering. ``get_service``
+    # returns the live dict — `update(...)` is visible to every consumer
+    # that already cached the reference.
+    existing = api.get_service(SERVICE_NAME)
+    if isinstance(existing, dict):
+        registry: dict[str, Any] = existing
+        fresh = False
+    else:
         registry = {}
+        fresh = True
     registry.update(
         {
             "atom_source": atom_source.validate,
@@ -49,4 +59,5 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "system_prompt": system_prompt.validate,
         }
     )
-    api.set_service(SERVICE_NAME, registry)
+    if fresh:
+        api.set_service(SERVICE_NAME, registry)
