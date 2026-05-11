@@ -109,6 +109,15 @@ class OutboundMessage:
     :attr:`OutboundKind.MESSAGE` renders ``content`` (+ ``buttons``);
     :attr:`OutboundKind.TURN_COMPLETE` is a control signal (channels
     that don't need it treat it as a no-op).
+
+    :attr:`stream_id` enables "update one logical message in place"
+    semantics. Two outbounds sharing the same ``(chat_id, stream_id)``
+    represent the same on-screen message — the channel sends the first
+    one, then patches the rendered message for every subsequent update
+    (channels that don't support patching fall back to sending each
+    update as a new message). ``final=True`` marks the last update of a
+    stream; channels release the stream→message mapping then. When
+    ``stream_id`` is None the message is one-shot (legacy behaviour).
     """
 
     channel: str
@@ -119,6 +128,8 @@ class OutboundMessage:
     metadata: dict[str, Any] = field(default_factory=dict)
     buttons: list[Button] = field(default_factory=list)
     kind: OutboundKind = OutboundKind.MESSAGE
+    stream_id: str | None = None
+    final: bool = False
 
 
 class MessageBus:

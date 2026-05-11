@@ -132,6 +132,10 @@ def _outbound_to_envelope(msg: OutboundMessage, *, peer_id: str) -> Envelope:
         ]
     if msg.metadata:
         body["metadata"] = dict(msg.metadata)
+    if msg.stream_id is not None:
+        body["stream_id"] = msg.stream_id
+    if msg.final:
+        body["final"] = True
     return Envelope(
         v=WIRE_VERSION,
         id=f"out-{peer_id}-{int(time.time() * 1_000_000)}",
