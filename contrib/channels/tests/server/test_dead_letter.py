@@ -67,10 +67,10 @@ async def test_dead_letter_after_max_attempts(socket_path: str, db_path: str) ->
     # in production. Simulating 5 reconnect cycles for one test would
     # bloat the suite without adding behavioural coverage.
     server = WireServer(
-        socket_path,
-        outbox,
-        inbox,
-        _noop,
+        socket_path=socket_path,
+        outbox=outbox,
+        inbox=inbox,
+        on_inbound=_noop,
         delivery_batch_max=1,
         max_delivery_attempts=1,
     )
@@ -91,7 +91,8 @@ async def test_dead_letter_after_max_attempts(socket_path: str, db_path: str) ->
     try:
         from agentm_channels.client import WireClient
 
-        client = WireClient(socket_path, peer_id="D", peer_kind="chat_client")
+        client = WireClient(
+        socket_path=socket_path, peer_id="D", peer_kind="chat_client")
         await client.connect()
         ok = await wait_for(
             lambda: outbox.dead_letter_count("D") >= 1, timeout=5.0

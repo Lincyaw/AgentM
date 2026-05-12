@@ -107,7 +107,7 @@ async def test_wire_peer_inbound_round_trips_through_gateway() -> None:
             received.append(env)
 
         client = WireClient(
-            sock, peer_id="p1", peer_kind="chat_client", on_outbound=on_outbound
+        socket_path=sock, peer_id="p1", peer_kind="chat_client", on_outbound=on_outbound
         )
         try:
             await client.connect()
@@ -175,7 +175,8 @@ async def test_wire_peer_rejected_by_uid_policy() -> None:
         try:
             from agentm_channels.client import AuthError
 
-            client = WireClient(sock, peer_id="p1", peer_kind="chat_client")
+            client = WireClient(
+        socket_path=sock, peer_id="p1", peer_kind="chat_client")
             with pytest.raises(AuthError) as exc:
                 await client.connect()
             assert exc.value.code == "auth_failed"
