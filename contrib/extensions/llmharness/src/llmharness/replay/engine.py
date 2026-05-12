@@ -19,6 +19,10 @@ from typing import Any
 
 from agentm.core.abi.messages import AgentMessage
 from agentm.core.abi.session_config import AgentSessionConfig
+
+# Both imports are runtime-required: ``AgentSession`` is passed as a
+# positional argument to ``create_agent_session(AgentSession, config)``,
+# so it cannot be hidden behind ``TYPE_CHECKING``.
 from agentm.core.runtime.session import AgentSession
 from agentm.core.runtime.session_factory import create_agent_session
 

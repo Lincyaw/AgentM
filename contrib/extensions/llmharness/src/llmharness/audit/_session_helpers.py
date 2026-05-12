@@ -16,13 +16,14 @@ from typing import Any
 
 from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolCallBlock
 
-from .extractor.extensions import EXTRACTOR_STATE_SERVICE_KEY
+from ._atom_constants import (
+    EXTRACTOR_STATE_SERVICE_KEY,
+    EXTRACTOR_TOOLS_MODULE,
+    SYSTEM_PROMPT_MODULE,
+)
 from .extractor.state import ExtractionState
 
 _logger = logging.getLogger(__name__)
-
-_EXTRACTOR_TOOLS_MODULE = "llmharness.audit.extractor.extensions"
-_SYSTEM_PROMPT_MODULE = "agentm.extensions.builtin.system_prompt"
 
 
 def find_terminal_tool_arguments(
@@ -67,10 +68,10 @@ def bind_extractor_state(
     out: list[tuple[str, dict[str, Any]]] = []
     for module, cfg in base_extensions:
         new_cfg = dict(cfg)
-        if module == _EXTRACTOR_TOOLS_MODULE:
+        if module == EXTRACTOR_TOOLS_MODULE:
             new_cfg["state"] = state
             new_cfg.setdefault(EXTRACTOR_STATE_SERVICE_KEY, state)
-        elif module == _SYSTEM_PROMPT_MODULE:
+        elif module == SYSTEM_PROMPT_MODULE:
             prompt = new_cfg.get("prompt")
             if isinstance(prompt, str) and "{TURN_WINDOW_JSON}" in prompt:
                 new_cfg["prompt"] = prompt.replace(
