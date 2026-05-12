@@ -23,22 +23,19 @@ from .base import ConnectionHandler
 class WebSocketServerTransport:
     """Bind a WebSocket listener on ``host:port``.
 
-    ``path`` is the URL path mounted by the listener. Today we accept
-    any path the client requests (the handler doesn't enforce it) —
-    the field is kept so callers can carry it through configuration
-    and reverse-proxy mappings.
+    URL path routing is intentionally not enforced here — a reverse
+    proxy in front of the listener owns the URL surface today, and the
+    handshake accepts any path the client requests.
     """
 
     def __init__(
         self,
         host: str,
         port: int,
-        path: str = "/",
         ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         self._host = host
         self._port = port
-        self._path = path
         self._ssl = ssl_context
         self._server: object | None = None
 
@@ -54,10 +51,6 @@ class WebSocketServerTransport:
             if sockets:
                 return int(sockets[0].getsockname()[1])
         return self._port
-
-    @property
-    def path(self) -> str:
-        return self._path
 
     async def serve(self, handle: ConnectionHandler) -> None:
         if self._server is not None:

@@ -212,12 +212,14 @@ class BindSpec:
     For unix scheme: ``socket_path`` is set, ``allow_uids`` of ``None``
     means any-uid (peer-cred reads the kernel uid but doesn't filter).
 
-    For ws/wss scheme: ``host`` / ``port`` / ``path`` are set, ``tokens``
+    For ws/wss scheme: ``host`` / ``port`` / ``url`` are set, ``tokens``
     holds the bearer-token allow-list (empty set when anonymous mode
-    is explicitly opted into via ``--bind-allow-anonymous``). TLS
-    material on the server side is cert + key only; there is no
-    client-cert verification today (a server ``--tls-ca`` knob would
-    be a premature feature).
+    is explicitly opted into via ``--bind-allow-anonymous``). The
+    request path is not gated server-side — a reverse proxy owns URL
+    routing — but the original URL is kept on ``url`` for log/check
+    output. TLS material on the server side is cert + key only; there
+    is no client-cert verification today (a server ``--tls-ca`` knob
+    would be a premature feature).
     """
 
     scheme: str
@@ -227,7 +229,7 @@ class BindSpec:
     # ws / wss
     host: str = ""
     port: int = 0
-    ws_path: str = "/"
+    url: str = ""
     tokens: frozenset[str] = frozenset()
     allow_anonymous: bool = False
     tls_cert: str | None = None
@@ -381,13 +383,13 @@ def _resolve_bind(
 
     host = parsed.hostname or "0.0.0.0"
     port = parsed.port or (443 if scheme == "wss" else 80)
-    ws_path = parsed.path or "/"
+    bind_url = f"{scheme}://{host}:{port}{parsed.path or '/'}"
 
     return BindSpec(
         scheme=scheme,
         host=host,
         port=port,
-        ws_path=ws_path,
+        url=bind_url,
         tokens=frozenset(tokens),
         allow_anonymous=bool(bind_allow_anonymous) and not tokens,
         tls_cert=eff_tls_cert,
@@ -411,7 +413,6 @@ def _build_server_transport(spec: BindSpec) -> ServerTransport:
     return WebSocketServerTransport(
         host=spec.host,
         port=spec.port,
-        path=spec.ws_path,
         ssl_context=ssl_context,
     )
 
@@ -811,10 +812,7 @@ async def _arun(
         else:
             bind_payload = {
                 "scheme": bind_spec.scheme,
-                "url": (
-                    f"{bind_spec.scheme}://{bind_spec.host}:{bind_spec.port}"
-                    f"{bind_spec.ws_path}"
-                ),
+                "url": bind_spec.url,
                 "token_count": len(bind_spec.tokens),
                 "allow_anonymous": bind_spec.allow_anonymous,
                 "tls": bind_spec.scheme == "wss",
@@ -878,11 +876,8 @@ async def _arun(
         )
     else:
         logger.info(
-            "wire server bound at %s://%s:%d%s (auth=%s)",
-            bind_spec.scheme,
-            bind_spec.host,
-            bind_spec.port,
-            bind_spec.ws_path,
+            "wire server bound at %s (auth=%s)",
+            bind_spec.url,
             "anonymous"
             if bind_spec.allow_anonymous
             else f"token({len(bind_spec.tokens)})",

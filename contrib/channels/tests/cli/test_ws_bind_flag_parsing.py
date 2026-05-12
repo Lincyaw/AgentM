@@ -118,7 +118,7 @@ def test_resolve_bind_ws_with_token_file_resolves(tmp_path: Path) -> None:
     assert spec.scheme == "ws"
     assert spec.host == "0.0.0.0"
     assert spec.port == 7777
-    assert spec.ws_path == "/agentm"
+    assert spec.url == "ws://0.0.0.0:7777/agentm"
     assert spec.tokens == frozenset({"foo", "bar"})
 
 
