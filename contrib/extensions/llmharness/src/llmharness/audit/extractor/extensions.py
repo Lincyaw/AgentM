@@ -77,21 +77,26 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
 def compose_extractor_extensions(
     *,
-    prompt_override: str | None = None,
+    base_prompt: str | None = None,
     cards_tools_config: dict[str, Any] | None = UNSET,
     observability_config: dict[str, Any] | None = UNSET,
 ) -> list[tuple[str, dict[str, Any]]]:
     """Default order: observability -> cards_tools -> extractor_tools -> system_prompt.
 
+    ``base_prompt`` defaults to :data:`EXTRACTOR_SYSTEM_PROMPT` (the
+    ``default`` variant). Pass an alternate framing — either resolved
+    via :func:`audit.extractor.prompt.load_extractor_prompt` or any
+    custom text — to A/B prompts.
+
     Pass ``None`` for ``cards_tools_config`` / ``observability_config``
     to drop that extension; ``extractor_tools`` and ``system_prompt``
     always survive.
     """
-
+    framing = base_prompt if base_prompt is not None else EXTRACTOR_SYSTEM_PROMPT
     return compose_audit_extensions(
         submit_tool_module=_EXTRACTOR_TOOLS_MODULE,
-        default_prompt=EXTRACTOR_SYSTEM_PROMPT,
-        prompt_override=prompt_override,
+        default_prompt=framing,
+        prompt_override=None,
         cards_tools_config=cards_tools_config,
         observability_config=observability_config,
     )
