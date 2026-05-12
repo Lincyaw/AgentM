@@ -159,6 +159,15 @@ _provider_lock = threading.Lock()
 _provider_installed = False
 _DEFAULT_EXCLUDE_CHANNELS: frozenset[str] = frozenset({StreamDeltaEvent.CHANNEL})
 
+# Cross-session linkage. ``session_id`` is the OTel span_id of the session
+# root span and ``root_session_id`` is the trace_id — by the contract in
+# ``core.abi.extension.ExtensionAPI``. When a child session installs, we
+# look up its parent's session-root SpanContext here and use it as the
+# parent context of the child's ``agentm.session`` span, so Jaeger/Tempo
+# nest sub-agent + cognitive-audit children under the main session.
+_session_ctx_lock = threading.Lock()
+_session_root_contexts: dict[str, Any] = {}
+
 
 def _ensure_provider(
     *,
@@ -232,6 +241,24 @@ def _ensure_provider(
 
 def _now_ns() -> int:
     return time.time_ns()
+
+
+def _resolve_parent_context(parent_session_id: str | None) -> Any:
+    """Return an OTel ``Context`` pointing at the parent session's root
+    span if we have one on record, else ``None`` (= no parent — span will
+    open a fresh trace).
+
+    The parent's root span was registered in :data:`_session_root_contexts`
+    by an earlier ``install`` call in this process. If the parent ran in
+    a *different* process (rare for in-process sub-agent / audit children
+    but possible for embedders), it won't be in the registry — we fall
+    back to no parent and rely on the ``agentm.root_session_id`` /
+    ``agentm.parent_session_id`` attributes for cross-trace correlation.
+    """
+    if not parent_session_id:
+        return None
+    with _session_ctx_lock:
+        return _session_root_contexts.get(parent_session_id)
 
 
 def _handler_label(handler: Handler) -> str:
@@ -389,16 +416,29 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     tracer = trace.get_tracer("agentm", "0.1.0")
 
     # --- session root span ----------------------------------------------------
+    # Surface the AgentM session identifiers as span attributes so trace
+    # backends can correlate a whole agent tree (parent + sub-agents +
+    # audit children) by ``agentm.root_session_id`` even when in-process
+    # parent-context propagation isn't available.
     session_attrs: dict[str, Any] = {
         "agentm.session_id": api.session_id,
+        "agentm.root_session_id": api.root_session_id,
         "agentm.cwd": api.cwd,
     }
+    parent_session_id = api.parent_session_id
+    if parent_session_id:
+        session_attrs["agentm.parent_session_id"] = parent_session_id
+
+    parent_ctx = _resolve_parent_context(parent_session_id)
     session_span = tracer.start_span(
         "agentm.session",
+        context=parent_ctx,
         attributes=session_attrs,
         kind=SpanKind.INTERNAL,
     )
     session_ctx = trace.set_span_in_context(session_span)
+    with _session_ctx_lock:
+        _session_root_contexts[api.session_id] = session_ctx
 
     # Per-session live-span tables. Tool calls and turns can interleave
     # asynchronously, so we cannot rely on the OTel current-span semantics
@@ -662,6 +702,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             span.end()
         extension_install_spans.clear()
         session_span.end()
+        with _session_ctx_lock:
+            _session_root_contexts.pop(api.session_id, None)
         # Force-flush so the collector sees everything before the process
         # exits. The provider may not be ours (host may have installed one);
         # call only if it implements force_flush.

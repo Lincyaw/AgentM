@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 _OBSERVABILITY_MODULE = "agentm.extensions.builtin.observability"
+_OTEL_TRACING_MODULE = "agentm.extensions.builtin.otel_tracing"
 _OPERATIONS_MODULE = "agentm.extensions.builtin.operations_local"
 _SYSTEM_PROMPT_MODULE = "agentm.extensions.builtin.system_prompt"
 _CARDS_TOOLS_MODULE = "llmharness.atoms.cards_tools"
@@ -28,12 +29,21 @@ def compose_audit_extensions(
     prompt_override: str | None,
     cards_tools_config: dict[str, Any] | None,
     observability_config: dict[str, Any] | None,
+    otel_tracing_config: dict[str, Any] | None = UNSET,
 ) -> list[tuple[str, dict[str, Any]]]:
     out: list[tuple[str, dict[str, Any]]] = []
 
     obs_cfg = {} if observability_config is UNSET else observability_config
     if obs_cfg is not None:
         out.append((_OBSERVABILITY_MODULE, dict(obs_cfg)))
+
+    # OTLP span emission, parented to the main session's root span via the
+    # ``_session_root_contexts`` registry inside the otel_tracing atom.
+    # No-op if the ``otel`` extra isn't installed, so this is safe to
+    # always include.
+    otel_cfg = {} if otel_tracing_config is UNSET else otel_tracing_config
+    if otel_cfg is not None:
+        out.append((_OTEL_TRACING_MODULE, dict(otel_cfg)))
 
     # Post harness-collapse (AgentM commit e062913) the session factory
     # fail-stops at freeze unless some atom registered an Operations
