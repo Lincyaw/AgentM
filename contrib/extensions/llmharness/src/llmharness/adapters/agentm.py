@@ -101,7 +101,6 @@ from ..audit.extractor import (
     RawExtractorOutput,
     compose_extractor_extensions,
 )
-from ..audit.extractor.profiles import resolve_tools as _resolve_extractor_tools
 from ..audit.extractor.prompt import load_extractor_prompt
 from ..audit.phase import merge_to_phases
 from ..audit.registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
@@ -160,22 +159,6 @@ MANIFEST = ExtensionManifest(
                     "audit/auditor/prompts/) or an absolute path. "
                     "Default: 'minimal'. Available: 'minimal', 'full'. "
                     "Overridden by prompt_override_auditor when both are set."
-                ),
-            },
-            "extractor_profile": {
-                "type": "string",
-                "description": (
-                    "Named extractor tool profile. Default: 'minimal' "
-                    "(submit_events only). Overridden by extractor_tools."
-                ),
-            },
-            "extractor_tools": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "Explicit list of extractor tool names to mount, "
-                    "overriding extractor_profile. submit_events is "
-                    "force-included."
                 ),
             },
             "auditor_profile": {
@@ -513,17 +496,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         else load_auditor_prompt(auditor_prompt_name)
     )
 
-    extractor_profile_raw = config.get("extractor_profile")
-    extractor_tools_raw = config.get("extractor_tools")
-    extractor_tools = _resolve_extractor_tools(
-        profile=extractor_profile_raw
-        if isinstance(extractor_profile_raw, str)
-        else None,
-        tools=extractor_tools_raw
-        if isinstance(extractor_tools_raw, list)
-        else None,
-    )
-
     auditor_profile_raw = config.get("auditor_profile")
     auditor_tools_raw = config.get("auditor_tools")
     auditor_tools = _resolve_auditor_tools(
@@ -555,10 +527,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         summary_threshold=summary_threshold,
         tools=auditor_tools,
     )
-    # Silence unused-name warning when extractor_tools is recorded for
-    # future symmetry but not consumed by the (single-tool) extractor
-    # compose today.
-    del extractor_tools
 
     extractor_provider = _parse_provider_spec(config.get("extractor_provider"))
     auditor_provider = _parse_provider_spec(config.get("auditor_provider"))

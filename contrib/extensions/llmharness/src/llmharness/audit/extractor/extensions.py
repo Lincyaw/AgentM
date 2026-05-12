@@ -30,7 +30,7 @@ from .._atom_constants import (
     EXTRACTOR_TOOLS_MODULE as _EXTRACTOR_TOOLS_MODULE,
 )
 from .._compose import UNSET, compose_audit_extensions
-from .prompt import EXTRACTOR_SYSTEM_PROMPT
+from .prompt import DEFAULT_PROMPT_NAME, load_extractor_prompt
 from .state import ExtractionState
 from .tools import build_extractor_tools
 
@@ -83,16 +83,19 @@ def compose_extractor_extensions(
 ) -> list[tuple[str, dict[str, Any]]]:
     """Default order: observability -> cards_tools -> extractor_tools -> system_prompt.
 
-    ``base_prompt`` defaults to :data:`EXTRACTOR_SYSTEM_PROMPT` (the
-    ``default`` variant). Pass an alternate framing — either resolved
-    via :func:`audit.extractor.prompt.load_extractor_prompt` or any
-    custom text — to A/B prompts.
+    ``base_prompt`` defaults to the ``default`` variant loaded via
+    :func:`load_extractor_prompt`. Pass an alternate framing — a name,
+    a path resolved via that loader, or raw text — to A/B prompts.
 
     Pass ``None`` for ``cards_tools_config`` / ``observability_config``
     to drop that extension; ``extractor_tools`` and ``system_prompt``
     always survive.
     """
-    framing = base_prompt if base_prompt is not None else EXTRACTOR_SYSTEM_PROMPT
+    framing = (
+        base_prompt
+        if base_prompt is not None
+        else load_extractor_prompt(DEFAULT_PROMPT_NAME)
+    )
     return compose_audit_extensions(
         submit_tool_module=_EXTRACTOR_TOOLS_MODULE,
         default_prompt=framing,

@@ -25,9 +25,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from ..audit.auditor.prompt import AUDITOR_SYSTEM_PROMPT
+from ..audit.auditor.prompt import (
+    DEFAULT_PROMPT_NAME as _AUDITOR_DEFAULT_PROMPT_NAME,
+)
+from ..audit.auditor.prompt import load_auditor_prompt
 from ..audit.auditor.submit_tool import SUBMIT_VERDICT_TOOL_NAME
-from ..audit.extractor.prompt import EXTRACTOR_SYSTEM_PROMPT
+from ..audit.extractor.prompt import (
+    DEFAULT_PROMPT_NAME as _EXTRACTOR_DEFAULT_PROMPT_NAME,
+)
+from ..audit.extractor.prompt import load_extractor_prompt
 from ..audit.extractor.tools import SUBMIT_EVENTS_TOOL_NAME
 
 Phase = Literal["extractor", "auditor"]
@@ -120,7 +126,7 @@ def extractor_records_from_replay(
             sample_id=sample_id,
             root_session_id=str(rec.get("root_session_id") or ""),
             turn_index=int(rec.get("turn_index") or 0),
-            input_system=EXTRACTOR_SYSTEM_PROMPT,
+            input_system=load_extractor_prompt(_EXTRACTOR_DEFAULT_PROMPT_NAME),
             input_user=json.dumps(rec.get("payload") or {}, ensure_ascii=False),
             target_tool_calls=[
                 {
@@ -154,7 +160,7 @@ def auditor_records_from_labels(
             sample_id=str(row.get("sample_id") or ""),
             root_session_id=str(row.get("root_session_id") or ""),
             turn_index=int(row.get("turn_index") or 0),
-            input_system=AUDITOR_SYSTEM_PROMPT,
+            input_system=load_auditor_prompt(_AUDITOR_DEFAULT_PROMPT_NAME),
             input_user=json.dumps(
                 row.get("input_payload") or {}, ensure_ascii=False
             ),

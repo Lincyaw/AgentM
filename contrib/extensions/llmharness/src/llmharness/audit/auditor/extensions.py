@@ -28,7 +28,11 @@ from .profiles import (
     TOOL_GET_TURN,
     resolve_tools,
 )
-from .prompt import AUDITOR_SYSTEM_PROMPT, build_auditor_system_prompt
+from .prompt import (
+    DEFAULT_PROMPT_NAME,
+    build_auditor_system_prompt,
+    load_auditor_prompt,
+)
 
 _SUBMIT_TOOL_MODULE = "llmharness.audit.auditor.submit_tool"
 _GET_TURN_TOOL_MODULE = "llmharness.audit.auditor.get_turn_tool"
@@ -55,8 +59,8 @@ def compose_auditor_extensions(
     ``base_prompt`` is the framing text. When ``events`` / ``edges``
     are provided, it is passed to :func:`build_auditor_system_prompt`
     and the dynamic data sections are appended; otherwise it is used
-    as-is. Default framing is :data:`AUDITOR_SYSTEM_PROMPT` (the
-    ``minimal`` variant).
+    as-is. Default framing is the ``minimal`` variant loaded via
+    :func:`load_auditor_prompt`.
 
     ``tools`` decides which tool atoms are appended. The submit tool
     is always mounted by :func:`compose_audit_extensions`; drill-down
@@ -66,7 +70,11 @@ def compose_auditor_extensions(
     tools_tuple = (
         tools if tools is not None else PROFILES[DEFAULT_PROFILE]
     )
-    framing = base_prompt if base_prompt is not None else AUDITOR_SYSTEM_PROMPT
+    framing = (
+        base_prompt
+        if base_prompt is not None
+        else load_auditor_prompt(DEFAULT_PROMPT_NAME)
+    )
 
     if events is not None or edges is not None:
         prompt_text = build_auditor_system_prompt(
