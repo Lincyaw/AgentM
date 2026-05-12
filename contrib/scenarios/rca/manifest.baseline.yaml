@@ -43,6 +43,9 @@ extensions:
   # ThinkDepthAI has no equivalent shared note-taking surface, so adding
   # the four ``artifact_*`` tools would diverge from the reference.)
   - module: agentm.extensions.builtin.observability
+  # OTLP span export — no-op without ``uv sync --extra otel``. See
+  # ``tools/otel/`` for a local collector + Jaeger compose file.
+  - module: agentm.extensions.builtin.otel_tracing
   - module: contrib.extensions.rcabench_contract
 
   # Inject investigator.md verbatim. ``rcabench_contract`` appends the

@@ -1,0 +1,37 @@
+# Minimal OpenTelemetry Collector config for local AgentM tracing.
+#
+# Receives OTLP from `agentm.extensions.builtin.otel_tracing`, fans out to:
+#   * Jaeger (UI at http://localhost:16686)
+#   * debug exporter (writes a span-summary line per batch to collector stdout
+#     — set `verbosity: detailed` if you want full attributes printed).
+#
+# Run via `tools/otel/docker-compose.yaml`.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    send_batch_size: 512
+    timeout: 2s
+
+exporters:
+  # Jaeger all-in-one exposes OTLP/gRPC on 4317 inside its own container.
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  debug:
+    verbosity: normal
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/jaeger, debug]
