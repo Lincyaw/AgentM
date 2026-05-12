@@ -441,7 +441,10 @@ def run_cmd(
             "       use the channels gateway instead:\n"
             "         agentm-gateway --bind unix:///tmp/agentm/gw.sock\n"
             "         agentm-worker  --connect unix:///tmp/agentm/gw.sock\n"
-            "         agentm-terminal --connect unix:///tmp/agentm/gw.sock --format textual",
+            "         agentm-terminal --connect unix:///tmp/agentm/gw.sock --format textual\n"
+            "       Cross-host (WebSocket + token):\n"
+            "         agentm-gateway --bind ws://0.0.0.0:7777/agentm --bind-token-file /etc/agentm/tokens\n"
+            "         agentm-worker  --connect ws://gw.example.com:7777/agentm --token \"$AGENTM_TOKEN\"",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
