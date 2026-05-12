@@ -1,41 +1,79 @@
 name: mcp_demo
 description: |
-  Smoke-test scenario for the ``contrib.extensions.mcp_bridge`` atom.
+  Real demo for ``contrib.extensions.mcp_bridge``. Wires the default
+  general-purpose atom set together with ONE real MCP server — the
+  official Python ``mcp-server-fetch`` reference server — and gives the
+  agent a single new capability: ``mcp__fetch__fetch`` for retrieving
+  URLs as markdown.
 
-  Composes the default ``general_purpose`` working set with one MCP server
-  connection. The command below is a *placeholder* — supply your own MCP
-  server here before invoking the scenario. The official filesystem
-  reference server (``@modelcontextprotocol/server-filesystem``) is a
-  reasonable starting point.
+  Run it::
 
-  Permission integration is intentionally omitted; mcp_bridge is
-  deny-by-default per design §7 and the scenario author is expected to
-  add a ``permission`` atom configuration allowing the desired
-  ``mcp__*`` tools before pointing this at production.
+      uv run agentm --scenario mcp_demo "Fetch https://example.com and summarise it."
+
+  Prerequisites:
+    - ``uvx`` on PATH (ships with ``uv``).
+    - First invocation downloads ``mcp-server-fetch`` (~5s); subsequent
+      runs are warm.
+    - An LLM provider configured via ``AGENTM_PROVIDER`` / model env
+      (this scenario inherits the default provider resolution).
+
+  Alternative servers (swap the ``servers:`` entry below):
+
+    - Official Anthropic test server (Node, exercises all MCP primitives)::
+
+        - name: everything
+          transport: stdio
+          command: ["npx", "-y", "@modelcontextprotocol/server-everything"]
+
+    - Local filesystem (read/write inside a sandbox dir)::
+
+        - name: filesystem
+          transport: stdio
+          command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+  Permission integration: NOT enabled in this demo. The current
+  ``permission`` atom uses exact-name matching (no globs), and using
+  it as an allowlist would also block AgentM's native tools unless
+  every one of them is enumerated. Production scenarios that expose
+  MCP servers should either (a) wait for glob support in the
+  permission atom or (b) enumerate the full allowed tool set
+  explicitly. Design §7 documents the deny-by-default principle this
+  demo intentionally underdelivers on.
 
 extensions:
-  # Inherit the default working set (operations + read/edit/write + bash +
-  # observability + prompts + skills + memory). Listing it as a nested
-  # manifest reference is *not* supported by the loader; we re-list the
-  # core atoms by hand here so the demo scenario is fully self-contained.
+  # --- environment ports ---
   - module: agentm.extensions.builtin.operations_local
+
+  # --- file I/O + shell (kept from general_purpose so the agent can
+  # actually do work with what it fetches) ---
   - module: agentm.extensions.builtin.tool_read
   - module: agentm.extensions.builtin.tool_edit
   - module: agentm.extensions.builtin.tool_write
   - module: agentm.extensions.builtin.tool_bash
+
+  # --- observability ---
   - module: agentm.extensions.builtin.observability
+
+  # --- prompt assembly ---
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: ""
   - module: agentm.extensions.builtin.runtime_context
 
-  # --- the MCP bridge: placeholder command, replace before real use ---
+  # --- skill / template auto-discovery ---
+  - module: agentm.extensions.builtin.skill_loader
+  - module: agentm.extensions.builtin.prompt_templates
+
+  # --- memory ---
+  - module: agentm.extensions.builtin.memory
+
+  # --- the MCP bridge: one real server, install-time snapshot. ---
   - module: contrib.extensions.mcp_bridge
     config:
       servers:
-        - name: filesystem
+        - name: fetch
           transport: stdio
-          command: ["echo", "REPLACE-ME-WITH-A-REAL-MCP-SERVER"]
+          command: ["uvx", "mcp-server-fetch"]
           env: {}
       naming: "mcp__{server}__{tool}"
-      timeout_seconds: 30
+      timeout_seconds: 60
