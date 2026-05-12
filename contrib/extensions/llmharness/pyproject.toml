@@ -27,6 +27,7 @@ dev = [
 llmharness = "llmharness.cli:main"
 llmharness-replay = "llmharness.replay.cli:main"
 llmharness-distill = "llmharness.distill.cli:main"
+llmharness-aggregate = "llmharness.aggregate.cli:main"
 
 [build-system]
 requires = ["hatchling"]

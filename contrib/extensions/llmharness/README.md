@@ -46,6 +46,7 @@ training a small (~4B) model into the same harness role.
 | [docs/03-distill-recipe.md](docs/03-distill-recipe.md) | End-to-end recipe: from a labeled fault-injection dataset to `sft/{extractor,auditor}.jsonl`. Includes the six design decisions that make the labels safe to learn from. |
 | [docs/04-extending.md](docs/04-extending.md) | Registering a new audit check; adapting the distill flow to a non-rca dataset. |
 | [docs/05-profiles-and-prompts.md](docs/05-profiles-and-prompts.md) | Pluggable tool profiles + prompt variants for the extractor / auditor children. Read this when running A/B experiments. |
+| [docs/06-case-aggregation.md](docs/06-case-aggregation.md) | Per-case directory layout produced by `llmharness-aggregate`. Read this for human review of a run or before exporting trajectories. |
 
 ## CLI entry points
 
@@ -54,6 +55,7 @@ training a small (~4B) model into the same harness role.
 | `llmharness` | one-shot session demo (see `cli.py`) |
 | `llmharness-replay {extractor,auditor}` | replay a recorded phase with a different provider/prompt for A/B |
 | `llmharness-distill {label,export}` | distill pipeline driver |
+| `llmharness-aggregate` | replay sidecar → per-case directories for review + training-data export |
 
 ## Schema stability
 
