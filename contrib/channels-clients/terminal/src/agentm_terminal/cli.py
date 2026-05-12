@@ -37,7 +37,7 @@ import typer
 
 from agentm_channels import DEFAULT_SOCKET_URL, autoload_dotenv
 from agentm_channels.client import AuthError, WireClient
-from agentm_channels.client_cli import ConnectError, resolve_connect
+from agentm_channels.client_cli import ConnectError, ConnectOptions, resolve_connect
 from agentm_channels.wire import (
     KIND_BYE,
     KIND_DELIVERY_BATCH,
@@ -245,9 +245,9 @@ def cli(
     try:
         rc = asyncio.run(
             _arun(
-                connect=connect,
-                token=token,
-                tls_ca=tls_ca,
+                connect_opts=ConnectOptions(
+                    connect=connect, token=token, tls_ca=tls_ca
+                ),
                 output_format=output_format,
                 no_color=no_color,
                 sender_id=sender_id,
@@ -265,15 +265,16 @@ def cli(
 
 async def _arun(
     *,
-    connect: str,
-    token: str | None,
-    tls_ca: str | None,
+    connect_opts: ConnectOptions,
     output_format: str | None,
     no_color: bool,
     sender_id: str,
     chat_id: str,
     no_input: bool,
 ) -> int:
+    connect = connect_opts.connect
+    token = connect_opts.token
+    tls_ca = connect_opts.tls_ca
     fmt = _resolve_format(output_format)
     color = _resolve_color(no_color, fmt)
     renderer = (

@@ -35,7 +35,7 @@ import typer
 from agentm.core.abi import EventBus
 from agentm_channels import DEFAULT_SOCKET_URL, autoload_dotenv
 from agentm_channels.client import AuthError, WireClient
-from agentm_channels.client_cli import ConnectError, resolve_connect
+from agentm_channels.client_cli import ConnectError, ConnectOptions, resolve_connect
 from agentm_channels.wire import (
     KIND_BYE,
     KIND_ERROR,
@@ -286,9 +286,9 @@ def cli(
     try:
         rc = asyncio.run(
             _arun(
-                connect=connect,
-                token=token,
-                tls_ca=tls_ca,
+                connect_opts=ConnectOptions(
+                    connect=connect, token=token, tls_ca=tls_ca
+                ),
                 scenarios=scenarios,
                 cwd=resolved_cwd,
                 provider=provider,
@@ -306,16 +306,16 @@ def cli(
 
 async def _arun(
     *,
-    connect: str,
-    token: str | None,
-    tls_ca: str | None,
+    connect_opts: ConnectOptions,
     scenarios: list[str],
     cwd: str,
     provider: str | None,
     model: str | None,
     max_concurrency: int,
 ) -> int:
-    _spec, transport = _resolve_connect(connect, tls_ca)
+    connect = connect_opts.connect
+    token = connect_opts.token
+    _spec, transport = _resolve_connect(connect, connect_opts.tls_ca)
 
     peer_id = f"worker-{uuid.uuid4().hex[:8]}"
 
