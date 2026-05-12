@@ -31,14 +31,13 @@ description: |
           transport: stdio
           command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
-  Permission integration: NOT enabled in this demo. The current
-  ``permission`` atom uses exact-name matching (no globs), and using
-  it as an allowlist would also block AgentM's native tools unless
-  every one of them is enumerated. Production scenarios that expose
-  MCP servers should either (a) wait for glob support in the
-  permission atom or (b) enumerate the full allowed tool set
-  explicitly. Design §7 documents the deny-by-default principle this
-  demo intentionally underdelivers on.
+  Permission integration: ``deny: mcp__*`` puts the MCP namespace
+  under deny-by-default; ``allow: mcp__fetch__*`` carves out an
+  exception for the fetch server. Native AgentM tools fall through
+  both lists and stay permitted. The permission atom's globbing +
+  allow-overrides-deny precedence makes this idiom safe; replace
+  ``mcp__fetch__*`` with whichever server-namespace prefixes you
+  trust before pointing this at production.
 
 extensions:
   # --- environment ports ---
@@ -66,6 +65,17 @@ extensions:
 
   # --- memory ---
   - module: agentm.extensions.builtin.memory
+
+  # --- permission: deny-by-default for the entire mcp__* namespace,
+  # carve out an exception for the fetch server. Native AgentM tools
+  # match neither pattern and are unaffected (no positive ``allow`` rule
+  # forces a positive-list regime for them). ---
+  - module: agentm.extensions.builtin.permission
+    config:
+      deny:
+        - "mcp__*"
+      allow:
+        - "mcp__fetch__*"
 
   # --- the MCP bridge: one real server, install-time snapshot. ---
   - module: contrib.extensions.mcp_bridge
