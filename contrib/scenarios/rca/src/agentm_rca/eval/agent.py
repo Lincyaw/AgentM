@@ -265,6 +265,19 @@ class AgentMAgent(BaseAgent):
             final_messages=final_messages,
         )
 
+        # ``trace_id`` round-trip: rcabench-platform reserves an
+        # ``evaluation_data.trace_id`` column populated from
+        # ``RolloutResult.trace_id``, but ``BaseAgent.AgentResult`` has no
+        # ``trace_id`` field and ``_wrap_agent`` does not forward one.
+        # We park both values in ``metadata`` and let the wrapper patch
+        # in ``agentm_rca.eval.__init__`` lift ``trace_id`` onto the
+        # ``RolloutResult``. We use the OTel-correct trace_id here
+        # (= ``root_session_id``, shared by all sessions in the rollout
+        # tree) so a single ``trace_id =`` filter recovers the parent
+        # plus every spawned extractor / auditor child. ``session_id`` is
+        # also stamped for completeness — it identifies the parent's
+        # session-root span specifically.
+        trace_id = session.root_session_id
         return AgentResult(
             response=response,
             trajectory=trajectory,
@@ -274,6 +287,8 @@ class AgentMAgent(BaseAgent):
                 "max_turns": max_turns,
                 "submit_final_report_seen": submission is not None,
                 "submission": submission_dump,
+                "trace_id": trace_id,
+                "session_id": session.session_id,
             },
         )
 

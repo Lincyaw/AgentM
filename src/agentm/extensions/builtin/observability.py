@@ -260,12 +260,20 @@ class _Observer(EventBusObserver):
         self,
         sink: _Sink,
         trace_id: str,
+        session_span_id: str,
         include_handlers: bool,
         include_diff: bool,
         exclude_channels: frozenset[str],
     ) -> None:
         self._sink = sink
         self._trace_id = trace_id
+        # ``session_span_id`` (= the AgentSession's session_id) is the
+        # OTel span_id of the session-root span emitted by
+        # ``session.start``. Top-level dispatch spans (those with no
+        # ancestor in the dispatch stack) default their ``parent_span_id``
+        # to this id so the whole within-session tree is anchored to the
+        # session span rather than dangling at ``null``.
+        self._session_span_id = session_span_id
         self._include_handlers = include_handlers
         self._include_diff = include_diff
         self._exclude_channels = exclude_channels
@@ -394,7 +402,7 @@ class _Observer(EventBusObserver):
         # Walk back through the stack for the nearest non-suppressed
         # ancestor — siblings emitted underneath a suppressed parent still
         # link to the closest real span instead of orphaning.
-        parent_span_id: str | None = None
+        parent_span_id: str | None = self._session_span_id
         for ancestor in reversed(self._stack):
             if not ancestor[3]:
                 parent_span_id = ancestor[1]
@@ -527,7 +535,19 @@ def _make_simple_writer(sink: _Sink, trace_id: str, kind: str, name: str = ""): 
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    trace_id = api.session_id
+    # OTel-native projection:
+    #   * ``trace_id`` field on every event line  = ``api.root_session_id``
+    #     (the trace shared by this session + all its children).
+    #   * ``span_id`` on the ``session.start`` line = ``api.session_id``
+    #     (this session's root span; persisted so children can point
+    #     ``parent_span_id`` at it without an external mapping).
+    #   * ``parent_span_id`` on ``session.start`` = ``api.parent_session_id``
+    #     for spawned children; ``None`` for the top-level session.
+    # Result: grouping ``.agentm/observability/*.jsonl`` rows by their
+    # in-line ``trace_id`` recovers the full agent tree across files,
+    # and the span_id / parent_span_id columns wire the sessions into
+    # a proper OTel parent-child relationship.
+    trace_id = api.root_session_id
     raw_path = config.get("path", ".agentm/observability/{session_id}.jsonl")
     materialized = str(raw_path).replace("{session_id}", api.session_id)
     file_path = Path(materialized)
@@ -543,20 +563,39 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     )
 
     sink = _Sink(file_path, max_queue=max_queue)
-    observer = _Observer(sink, trace_id, include_handlers, include_diff, exclude_channels)
+    observer = _Observer(
+        sink,
+        trace_id,
+        api.session_id,
+        include_handlers,
+        include_diff,
+        exclude_channels,
+    )
     api.add_observer(observer)
 
-    # session.start: emitted directly because no other extension is loaded
-    # yet to receive it via the bus, and we want one anchor record.
+    session_start_ns = _now_ns()
     sink.write(
         {
             "schema": "otel/span/v0",
             "kind": "session.start",
             "trace_id": trace_id,
-            "span_id": _new_id(),
+            # span_id == session_id so this row IS the session-root
+            # span — child sessions emit their own ``session.start``
+            # with ``parent_span_id`` set to their parent's session_id
+            # and they all share the same trace_id.
+            "span_id": api.session_id,
+            "parent_span_id": api.parent_session_id,
             "name": "session.start",
-            "start_time_unix_nano": _now_ns(),
-            "attributes": {"cwd": api.cwd, "log_path": str(file_path)},
+            "start_time_unix_nano": session_start_ns,
+            "attributes": {
+                "session_id": api.session_id,
+                "root_session_id": api.root_session_id,
+                "parent_session_id": api.parent_session_id,
+                "purpose": api.purpose,
+                "scenario": api.scenario,
+                "cwd": api.cwd,
+                "log_path": str(file_path),
+            },
             "status": {"code": "OK"},
         }
     )
@@ -720,7 +759,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "status": {"code": "OK"},
             }
         )
-        current_fingerprint = _compute_loaded_fingerprint()
+        current_fingerprint = _compute_loaded_fingerprint(scenario=api.scenario)
         sink.write(
             {
                 "schema": "otel/span/v0",
@@ -784,15 +823,27 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         )
 
     def _on_shutdown(_: SessionShutdownEvent) -> None:
+        # Close the session-root span. ``span_id == api.session_id`` mirrors
+        # the ``session.start`` row so OTel collectors can pair the two as
+        # the start / end of the same span.
+        end_ns = _now_ns()
         sink.write(
             {
                 "schema": "otel/span/v0",
                 "kind": "session.end",
                 "trace_id": trace_id,
-                "span_id": _new_id(),
+                "span_id": api.session_id,
+                "parent_span_id": api.parent_session_id,
                 "name": "session.end",
-                "start_time_unix_nano": _now_ns(),
-                "attributes": {},
+                "start_time_unix_nano": session_start_ns,
+                "end_time_unix_nano": end_ns,
+                "attributes": {
+                    "session_id": api.session_id,
+                    "root_session_id": api.root_session_id,
+                    "parent_session_id": api.parent_session_id,
+                    "purpose": api.purpose,
+                    "scenario": api.scenario,
+                },
                 "status": {"code": "OK"},
             }
         )

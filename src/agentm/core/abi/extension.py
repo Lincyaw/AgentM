@@ -443,7 +443,50 @@ class ExtensionAPI(Protocol):
     @property
     def cwd(self) -> str: ...
     @property
-    def session_id(self) -> str: ...
+    def session_id(self) -> str:
+        """This session's OTel ``span_id`` — 8 bytes / 16 hex chars.
+        Always set; identifies the *session-root span* inside the trace.
+        The observability sink uses it as the JSONL filename so each
+        session lands in ``.agentm/observability/<session_id>.jsonl``.
+        Cross-process embedders that already maintain an OTel span id
+        can supply it on :class:`AgentSessionConfig.session_id`."""
+        ...
+    @property
+    def root_session_id(self) -> str:
+        """The OTel ``trace_id`` — 16 bytes / 32 hex chars — shared
+        across the whole agent tree (this session + every transitive
+        child). The observability sink stamps it as the ``trace_id``
+        field of every event line so a single ``trace_id =`` filter
+        recovers the entire trace regardless of which JSONL file each
+        span lives in. For a session with no parent the substrate
+        generates a fresh trace_id; for spawned children it inherits
+        from the parent verbatim."""
+        ...
+    @property
+    def parent_session_id(self) -> str | None:
+        """``None`` for root sessions; the parent's ``session_id`` for
+        any session created via :meth:`spawn_child_session` — the OTel
+        ``parent_span_id`` of this session-root span. Surfaced so that
+        atoms (notably the observability sink) can chain spans across
+        sessions without an external mapping table."""
+        ...
+    @property
+    def purpose(self) -> str:
+        """Caller-defined label from :class:`AgentSessionConfig.purpose`,
+        defaulting to ``"root"``. Used by the observability sink and any
+        atom that needs to discriminate parent vs spawned child sessions
+        (e.g. ``cognitive_audit_extractor`` / ``cognitive_audit_auditor``)
+        without inferring it from the loaded module list."""
+        ...
+    @property
+    def scenario(self) -> str | None:
+        """Scenario name from :class:`AgentSessionConfig.scenario` (e.g.
+        ``"rca:harness.sync"``), or ``None`` when atoms were assembled
+        directly without going through a manifest. Exposed so the
+        observability sink can stamp it onto ``session.start`` and the
+        fingerprint span — otherwise the trace file gives no in-band
+        signal of which scenario produced it."""
+        ...
     @property
     def tools(self) -> list[Tool]:
         """The live tool-catalog list for the session.

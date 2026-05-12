@@ -187,6 +187,10 @@ class ExtensionAPIScope:
     bus: EventBus
     cwd: str
     session_id: str
+    root_session_id: str
+    parent_session_id: str | None
+    purpose: str
+    scenario: str | None
     session: ReadonlySession
     tools: list[Tool]
     commands: dict[str, CommandSpec]
@@ -209,6 +213,10 @@ def build_extension_api_scope(
     bus: EventBus,
     cwd: str,
     session_id: str,
+    root_session_id: str | None = None,
+    parent_session_id: str | None = None,
+    purpose: str = "root",
+    scenario: str | None = None,
     session: ReadonlySession,
     tools: list[Tool],
     commands: dict[str, CommandSpec],
@@ -237,6 +245,14 @@ def build_extension_api_scope(
         bus=bus,
         cwd=cwd,
         session_id=session_id,
+        # If no trace_id is supplied, the session is its own trace —
+        # collapse to session_id. Callers that want strict OTel shape
+        # (32-hex trace_id vs 16-hex span_id) should supply both
+        # ``session_id`` and ``root_session_id`` on the config.
+        root_session_id=root_session_id or session_id,
+        parent_session_id=parent_session_id,
+        purpose=purpose,
+        scenario=scenario,
         session=session,
         tools=tools,
         commands=commands,
@@ -273,6 +289,10 @@ class _ExtensionAPIImpl:
         self._bus = scope.bus
         self._cwd = scope.cwd
         self._session_id = scope.session_id
+        self._root_session_id = scope.root_session_id
+        self._parent_session_id = scope.parent_session_id
+        self._purpose = scope.purpose
+        self._scenario = scope.scenario
         self._session = scope.session
         self._tools = scope.tools
         self._commands = scope.commands
@@ -505,6 +525,22 @@ class _ExtensionAPIImpl:
     @property
     def session_id(self) -> str:
         return self._session_id
+
+    @property
+    def root_session_id(self) -> str:
+        return self._root_session_id
+
+    @property
+    def parent_session_id(self) -> str | None:
+        return self._parent_session_id
+
+    @property
+    def purpose(self) -> str:
+        return self._purpose
+
+    @property
+    def scenario(self) -> str | None:
+        return self._scenario
 
     @property
     def tools(self) -> list[Tool]:
