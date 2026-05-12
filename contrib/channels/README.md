@@ -64,6 +64,44 @@ options and the literal `value=…` next to each. Type `=<value>` (e.g.
 `=approval-deadbeef:approve`) to click. Less ergonomic than a Feishu
 button, but exercises the exact same code path.
 
+## Cross-host (WebSocket) quickstart
+
+The gateway also speaks WebSocket so workers / clients can connect over
+the network. Authentication is by bearer token — each client must
+present a token from the gateway's allow-list.
+
+```bash
+# Pick / generate tokens, one per line. Blank lines and lines starting
+# with '#' are ignored.
+install -m 0600 /dev/stdin /etc/agentm/tokens <<'EOF'
+# alice's worker
+2c8f9d3a1e4b6f7c2a5d9e1f3b4c7a2d
+# bob's terminal
+8e1d2c4b6a9f3e5d7c1b4a6e9d2f5c8b
+EOF
+
+# Plaintext (terminate TLS in nginx or another reverse proxy):
+agentm-gateway --bind ws://0.0.0.0:7777/agentm \
+    --bind-token-file /etc/agentm/tokens
+
+# Or wss directly:
+agentm-gateway --bind wss://0.0.0.0:7777/agentm \
+    --bind-token-file /etc/agentm/tokens \
+    --tls-cert /etc/agentm/cert.pem --tls-key /etc/agentm/key.pem
+
+# Clients pass the token via env (avoids leaking through `ps`):
+AGENTM_TOKEN="$(sed -n '/^[^#]/p;q' /etc/agentm/tokens)" \
+  agentm-worker --connect ws://gw.example.com:7777/agentm
+```
+
+Reverse-proxying through nginx is supported out of the box because
+each WebSocket binary frame carries exactly one already-framed wire
+envelope — the proxy only needs the standard `proxy_set_header
+Upgrade`/`Connection` block and TLS termination. No example config is
+shipped; the standard
+[`websockets`](https://websockets.readthedocs.io/en/stable/topics/deployment.html)
+recipe applies.
+
 > **Deprecated:** the v0 in-process `channels:` yaml block still loads
 > for backwards compatibility, but emits a `DeprecationWarning` (and
 > an `agentm-gateway: warn: …` line on stderr at startup) and will be

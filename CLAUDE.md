@@ -52,6 +52,7 @@ Precedence per option: **CLI flag > env var > `.env` file > built-in default.**
 | `AGENTM_SCENARIO` | gateway, worker | `--scenario` |
 | `AGENTM_CWD` | gateway, worker | `--cwd` |
 | `AGENTM_SOCKET` | gateway, terminal, worker, feishu | `--bind` / `--connect` |
+| `AGENTM_TOKEN` | worker, terminal, feishu | `--token` |
 | `AGENTM_CONFIG` | gateway | `--config` |
 | `AGENTM_STATE_DIR` | gateway | `--state-dir` |
 | `AGENTM_LOG_LEVEL` | gateway | `--log-level` |
