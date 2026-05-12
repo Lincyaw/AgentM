@@ -42,7 +42,7 @@ import typer
 
 from agentm_channels import DEFAULT_SOCKET_URL, autoload_dotenv
 from agentm_channels.client import AuthError, WireClient
-from agentm_channels.client_cli import ConnectError, resolve_connect
+from agentm_channels.client_cli import ConnectError, ConnectOptions, resolve_connect
 from agentm_channels.wire import (
     KIND_BYE,
     KIND_DELIVERY_BATCH,
@@ -332,9 +332,9 @@ def cli(
     try:
         rc = asyncio.run(
             _arun(
-                connect=connect,
-                token=token,
-                tls_ca=tls_ca,
+                connect_opts=ConnectOptions(
+                    connect=connect, token=token, tls_ca=tls_ca
+                ),
                 app_id=app_id,
                 app_secret_path=app_secret,
                 allow_from=allow_from,
@@ -352,16 +352,16 @@ def cli(
 
 async def _arun(
     *,
-    connect: str,
-    token: str | None,
-    tls_ca: str | None,
+    connect_opts: ConnectOptions,
     app_id: str | None,
     app_secret_path: str | None,
     allow_from: list[str] | None,
     chat_id_prefix: str,
     check_config: bool,
 ) -> int:
-    _spec, transport = _resolve_connect(connect, tls_ca)
+    connect = connect_opts.connect
+    token = connect_opts.token
+    _spec, transport = _resolve_connect(connect, connect_opts.tls_ca)
     cfg = _resolve_config(
         app_id=app_id,
         app_secret_path=app_secret_path,
