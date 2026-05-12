@@ -103,6 +103,17 @@ class AgentSessionConfig:
     """Caller-supplied id of the parent session. Surfaces verbatim in the
     child-lifecycle events. ``None`` becomes ``"unknown"`` in the payload."""
 
+    session_id: str | None = None
+    """Optional caller-supplied session id. When provided, the factory
+    uses it verbatim as the session id (and, by construction, as the
+    observability trace_id and JSONL filename) instead of generating
+    a fresh uuid. Embedders that already maintain a trace identifier
+    (rcabench-platform, an upstream OTel span, a workbuddy job, …) can
+    pass it through so the in-process AgentM trace is identical to the
+    caller's id — no external mapping table required. Must be a
+    lowercase 32-char hex string (uuid4().hex shape); any other format
+    will trip downstream observability assumptions."""
+
     root_session_id: str | None = None
     """Stable root id shared across a session tree. ``None`` means this
     session is itself the root and should use its own session id."""

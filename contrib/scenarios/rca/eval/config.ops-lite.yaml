@@ -1,0 +1,54 @@
+# LLM eval config for the AgentM rca scenario — ops-lite (anon-ops/ops-lite).
+#
+# Companion to ``config.yaml`` (which targets the openrca2-lite slice of
+# the RCABench dataset). This config routes to the local ops-lite
+# datapack that lives under ``datasets/ops-lite/cases/`` and was
+# pre-ingested into ``eval.db`` (table ``data``, dataset ``ops-lite``).
+#
+# Both the agent and the LLM judge use Doubao via the OpenAI-compatible
+# LiteLLM behind Warpgate (driven by ``AGENTM_PROVIDER=openai`` +
+# ``OPENAI_BASE_URL`` from ``.env``). The judge call only fires for the
+# evidence-support rubric (per-evidence judge); the structural axes
+# (service multiset, fault_kind, sql_executable, node_f1, edge_f1) are
+# computed locally and do not hit the LLM.
+#
+# An ``ops-lite`` alias for ``RCABenchProcesser`` is registered at
+# ``agentm_rca.eval`` import time so the processer-factory lookup picks
+# up RCABenchProcesser when ``dataset="ops-lite"``.
+#
+# Run:
+#   envsubst < contrib/scenarios/rca/eval/config.ops-lite.yaml \
+#     | uv run rca llm-eval run - -a agentm --ak scenario=rca:harness.sync
+
+exp_id: "agentm-rca-opslite-harness-sync"
+agent_type: "agentm"
+model_name: "${MODEL_NAME}"
+
+data:
+  dataset: "ops-lite"
+  type: "single"
+  question_field: "question"
+  gt_field: "answer"
+  tags: ["ops-lite"]
+
+# Samples already carry an absolute ``meta.path`` (see the ``data`` table
+# in eval.db) so RCABenchProcesser will use that directly. The pattern
+# below is the documented fallback if a future ingest drops ``path``.
+source_path: "${RCA_DATASET_ROOT}"
+source_path_pattern: "{source_path}/{source}"
+
+concurrency: 5
+judge_concurrency: 5
+
+# Per-evidence judge — Doubao through the same LiteLLM gateway as the
+# agent. ``agentm_rca.eval`` monkey-patches the rcabench-platform judge
+# client at import time to inject ``WARPGATE_TICKET`` as
+# ``default_query`` and to skip TLS verification when
+# ``OPENAI_VERIFY_SSL`` is falsy — neither knob is expressible in
+# rcabench-platform's ``ModelProviderConfig`` schema today.
+judge_model:
+  model_provider:
+    type: "chat.completions"
+    model: "${JUDGE_MODEL}"
+    api_format: "openai"
+    base_url: "${OPENAI_BASE_URL}"
