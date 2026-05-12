@@ -19,17 +19,15 @@ DEFAULT_PROMPT_NAME = "default"
 
 
 def load_extractor_prompt(name_or_path: str = DEFAULT_PROMPT_NAME) -> str:
-    """Load the extractor framing text for the given variant."""
+    """Load the extractor framing text for the given variant.
+
+    Result is cached by :func:`_prompt_loader.load_prompt`, so repeated
+    calls for the same name skip the disk read.
+    """
     return load_prompt("extractor", name_or_path, filename_prefix="extractor")
-
-
-# Eager-loaded module-level constant for callers that don't yet route
-# through the config knob (tests, distill exporter).
-EXTRACTOR_SYSTEM_PROMPT = load_extractor_prompt(DEFAULT_PROMPT_NAME)
 
 
 __all__ = [
     "DEFAULT_PROMPT_NAME",
-    "EXTRACTOR_SYSTEM_PROMPT",
     "load_extractor_prompt",
 ]

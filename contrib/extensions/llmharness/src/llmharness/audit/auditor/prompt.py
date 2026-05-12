@@ -29,13 +29,12 @@ DEFAULT_PROMPT_NAME = "minimal"
 
 
 def load_auditor_prompt(name_or_path: str = DEFAULT_PROMPT_NAME) -> str:
-    """Load the auditor framing text for the given variant."""
+    """Load the auditor framing text for the given variant.
+
+    Result is cached by :func:`_prompt_loader.load_prompt`, so repeated
+    calls for the same name skip the disk read.
+    """
     return load_prompt("auditor", name_or_path, filename_prefix="auditor")
-
-
-# Eager-loaded module-level constants for callers that don't yet route
-# through the config knob (tests, distill exporter).
-AUDITOR_SYSTEM_PROMPT = load_auditor_prompt(DEFAULT_PROMPT_NAME)
 
 
 def _degrade_event(ev_dict: dict[str, object]) -> dict[str, object]:
@@ -69,10 +68,10 @@ def build_auditor_system_prompt(
 ) -> str:
     """Assemble the auditor system prompt for one firing.
 
-    ``base_prompt`` defaults to :data:`AUDITOR_SYSTEM_PROMPT` (the
-    ``minimal`` variant). The dynamic sections are appended after the
-    framing in this order: PHASES (optional), GRAPH, FINDINGS,
-    CONTINUATION_NOTES.
+    ``base_prompt`` defaults to the ``minimal`` variant loaded via
+    :func:`load_auditor_prompt`. The dynamic sections are appended
+    after the framing in this order: PHASES (optional), GRAPH,
+    FINDINGS, CONTINUATION_NOTES.
 
     Degrade behaviour is independent of the framing: when
     ``len(events) > summary_threshold``, witness fields are stripped
@@ -82,7 +81,11 @@ def build_auditor_system_prompt(
     framing tells the auditor to use drill-down tools; the ``minimal``
     framing tells it to reason from what is embedded).
     """
-    framing = base_prompt if base_prompt is not None else AUDITOR_SYSTEM_PROMPT
+    framing = (
+        base_prompt
+        if base_prompt is not None
+        else load_auditor_prompt(DEFAULT_PROMPT_NAME)
+    )
     degraded = len(events) > summary_threshold
 
     if degraded:
@@ -143,7 +146,6 @@ def build_auditor_system_prompt(
 
 
 __all__ = [
-    "AUDITOR_SYSTEM_PROMPT",
     "DEFAULT_PROMPT_NAME",
     "build_auditor_system_prompt",
     "load_auditor_prompt",

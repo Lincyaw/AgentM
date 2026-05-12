@@ -5,12 +5,16 @@ without touching code:
 
 | Knob | Picks | Where it lives |
 |---|---|---|
-| **profile** | tool set (which `register_tool`s the child mounts) | `audit/<phase>/profiles.py` |
+| **profile** | tool set (which `register_tool`s the child mounts) | `audit/auditor/profiles.py` |
 | **prompt** | framing text | `audit/<phase>/prompts/*.md` |
 
 The two are intentionally orthogonal — you can pair the `minimal`
 tool profile with the `full` framing (e.g. to A/B whether the longer
 framing helps even without drill-down), or vice versa.
+
+> The extractor uses a single tool (`submit_events`); there is no
+> extractor profile knob today. Adding one is a one-file change if
+> a future variant (e.g. incremental submission) earns its keep.
 
 ---
 
@@ -21,17 +25,14 @@ All four knobs are read at adapter install time:
 ```bash
 agentm --extension llmharness.adapters.agentm \
   --extension-config llmharness.adapters.agentm='{
-    "extractor_profile": "minimal",
-    "extractor_prompt":  "default",
-    "auditor_profile":   "minimal",
-    "auditor_prompt":    "minimal"
+    "extractor_prompt": "default",
+    "auditor_profile":  "minimal",
+    "auditor_prompt":   "minimal"
   }' ...
 ```
 
 | Key | Default | Effect |
 |---|---|---|
-| `extractor_profile` | `"minimal"` | Resolves to a tool tuple from `audit/extractor/profiles.py::PROFILES`. |
-| `extractor_tools` | `null` | Explicit list overriding the profile. `submit_events` is force-included. |
 | `extractor_prompt` | `"default"` | Named variant (file under `audit/extractor/prompts/`) or absolute path. |
 | `auditor_profile` | `"minimal"` | Resolves to a tool tuple from `audit/auditor/profiles.py::PROFILES`. |
 | `auditor_tools` | `null` | Explicit list overriding the profile. `submit_verdict` is force-included. |
@@ -44,16 +45,6 @@ don't want the file dance.
 ---
 
 ## 2. Built-in profiles
-
-### Extractor
-
-| Profile | Tools |
-|---|---|
-| `minimal` (default) | `submit_events` |
-
-There is only one extractor profile today. The knob exists for
-symmetry and for future A/B (e.g. an incremental
-`register_event` + `add_edge` profile for very small models).
 
 ### Auditor
 

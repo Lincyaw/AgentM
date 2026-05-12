@@ -27,11 +27,6 @@ from .state import ExtractionState
 SUBMIT_EVENTS_TOOL_NAME = "submit_events"
 SUBMIT_EVENTS_REASON = "llmharness:submit_events"
 
-# Back-compat alias — the adapter still imports the old name from a
-# couple of code paths until the rename lands across the tree.
-SUBMIT_EXTRACTION_TOOL_NAME = SUBMIT_EVENTS_TOOL_NAME
-SUBMIT_EXTRACTION_REASON = SUBMIT_EVENTS_REASON
-
 EXTRACTOR_TOOL_NAMES: tuple[str, ...] = (SUBMIT_EVENTS_TOOL_NAME,)
 
 
@@ -206,7 +201,5 @@ __all__ = [
     "EXTRACTOR_TOOL_NAMES",
     "SUBMIT_EVENTS_REASON",
     "SUBMIT_EVENTS_TOOL_NAME",
-    "SUBMIT_EXTRACTION_REASON",
-    "SUBMIT_EXTRACTION_TOOL_NAME",
     "build_extractor_tools",
 ]

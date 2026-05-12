@@ -21,27 +21,23 @@ from .extensions import (
     compose_extractor_extensions,
 )
 from .output import RawExtractorOutput
-from .prompt import EXTRACTOR_SYSTEM_PROMPT
+from .prompt import load_extractor_prompt
 from .state import ExtractionState
 from .tools import (
     EXTRACTOR_TOOL_NAMES,
     SUBMIT_EVENTS_REASON,
     SUBMIT_EVENTS_TOOL_NAME,
-    SUBMIT_EXTRACTION_REASON,
-    SUBMIT_EXTRACTION_TOOL_NAME,
     build_extractor_tools,
 )
 
 __all__ = [
     "EXTRACTOR_STATE_SERVICE_KEY",
-    "EXTRACTOR_SYSTEM_PROMPT",
     "EXTRACTOR_TOOL_NAMES",
     "SUBMIT_EVENTS_REASON",
     "SUBMIT_EVENTS_TOOL_NAME",
-    "SUBMIT_EXTRACTION_REASON",
-    "SUBMIT_EXTRACTION_TOOL_NAME",
     "ExtractionState",
     "RawExtractorOutput",
     "build_extractor_tools",
     "compose_extractor_extensions",
+    "load_extractor_prompt",
 ]
