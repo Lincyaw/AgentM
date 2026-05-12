@@ -13,6 +13,7 @@ authors = [{ name = "rca-autorl" }]
 # than as a PyPI dependency, so it is intentionally not listed here.
 dependencies = [
   "pyyaml>=6",
+  "typer>=0.12",
 ]
 
 [project.optional-dependencies]
