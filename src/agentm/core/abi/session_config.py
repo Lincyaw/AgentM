@@ -104,19 +104,23 @@ class AgentSessionConfig:
     child-lifecycle events. ``None`` becomes ``"unknown"`` in the payload."""
 
     session_id: str | None = None
-    """Optional caller-supplied session id. When provided, the factory
-    uses it verbatim as the session id (and, by construction, as the
-    observability trace_id and JSONL filename) instead of generating
-    a fresh uuid. Embedders that already maintain a trace identifier
-    (rcabench-platform, an upstream OTel span, a workbuddy job, …) can
-    pass it through so the in-process AgentM trace is identical to the
-    caller's id — no external mapping table required. Must be a
-    lowercase 32-char hex string (uuid4().hex shape); any other format
-    will trip downstream observability assumptions."""
+    """Optional caller-supplied OTel **span_id** for the session-root
+    span — lowercase 16-char hex (8 bytes / OTel span_id shape). When
+    provided the factory uses it verbatim as the session id and the
+    observability sink writes ``<session_id>.jsonl``; otherwise it
+    generates ``uuid.uuid4().hex[:16]``. Embedders that already maintain
+    an OTel span id (an upstream collector, rcabench-platform, a
+    workbuddy job …) can pass it through so the AgentM trace is
+    identical to the caller's id without an external mapping. No
+    runtime validation — pass a 16-hex string or downstream OTel
+    tooling will reject the trace."""
 
     root_session_id: str | None = None
-    """Stable root id shared across a session tree. ``None`` means this
-    session is itself the root and should use its own session id."""
+    """Optional caller-supplied OTel **trace_id** — lowercase 32-char
+    hex (16 bytes / OTel trace_id shape). Shared by this session and
+    every transitive child spawned via :meth:`spawn_child_session`.
+    ``None`` means this session is the root of a fresh trace and the
+    factory generates ``uuid.uuid4().hex``."""
 
     task_id: str | None = None
     """Caller-defined task id for sub-agent dispatch provenance."""
