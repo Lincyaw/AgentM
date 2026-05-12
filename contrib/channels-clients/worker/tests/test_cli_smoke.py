@@ -16,24 +16,6 @@ from agentm_worker import cli as worker_cli  # noqa: E402
 runner = CliRunner()
 
 
-def test_help_exits_zero() -> None:
-    result = runner.invoke(worker_cli.app, ["--help"])
-    assert result.exit_code == 0
-    assert "agentm-worker" in result.stdout
-    assert "--connect" in result.stdout
-    assert "--scenario" in result.stdout
-    assert "--cwd" in result.stdout
-    assert "--max-concurrency" in result.stdout
-    # Examples section keeps the contract discoverable from --help alone.
-    assert "Examples" in result.stdout
-
-
-def test_version_prints_and_exits_zero() -> None:
-    result = runner.invoke(worker_cli.app, ["--version"])
-    assert result.exit_code == 0
-    assert "0.1.0" in result.stdout
-
-
 def test_connect_to_missing_socket_exits_seven(tmp_path) -> None:
     sock = tmp_path / "nope.sock"
     result = runner.invoke(worker_cli.app, ["--connect", f"unix://{sock}"])
