@@ -175,6 +175,32 @@ The two pipelines share the same replay sidecar input; they do
 **different** things and can be run independently or together.
 Aggregation does not consume or produce SFT JSONL.
 
+### Working with `rca llm-eval` flows
+
+The rca scenario is usually exercised via
+`rca llm-eval run … --ak scenario=rca:harness.sync` (the
+rcabench-platform driver). That path runs the harness scenario but
+does NOT mount `llmharness.distill.binding`, so no meta sidecar is
+written. Aggregation still works — pass `--sample-id` /
+`--dataset-name` / `--dataset-path` to tag the case correctly:
+
+```bash
+rca llm-eval run config.yaml -a agentm --ak scenario=rca:harness.sync -l 1
+# replay sidecar lands under $AGENTM_CWD/.agentm/audit_replay/<sid>.jsonl
+
+llmharness-aggregate \
+  --cwd "$AGENTM_CWD" \
+  --root-session-id <sid> \
+  --sample-id <sample_id_from_dataset> \
+  --dataset-name rca-openrca2-lite \
+  --dataset-path /abs/path/to/data.jsonl \
+  --out ./cases
+```
+
+If you need the labeler downstream, also pre-write the meta sidecar
+file yourself (`<sid>.meta.json`) — its shape is in
+[02-schemas.md §4](02-schemas.md#4-distill-meta-sidecar).
+
 ---
 
 ## 4. Exporting trajectories for training
