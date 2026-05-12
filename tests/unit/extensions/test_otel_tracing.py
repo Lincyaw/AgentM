@@ -53,13 +53,21 @@ class _SessionView:
         return "entry"
 
 
-def _api(tmp_path: Path) -> _ExtensionAPIImpl:
+def _api(
+    tmp_path: Path,
+    *,
+    session_id: str = "session-otel",
+    root_session_id: str | None = None,
+    parent_session_id: str | None = None,
+) -> _ExtensionAPIImpl:
     from agentm.core.runtime.extension import build_extension_api_scope
 
     scope = build_extension_api_scope(
         bus=EventBus(),
         cwd=str(tmp_path),
-        session_id="session-otel",
+        session_id=session_id,
+        root_session_id=root_session_id,
+        parent_session_id=parent_session_id,
         session=_SessionView(),
         tools=[],
         commands={},
@@ -179,3 +187,69 @@ async def test_otel_spans_cover_session_turn_llm_tool_and_events(
     session_spans = [s for s in spans if s.name == "agentm.session"]
     assert len(session_spans) == 1
     assert session_spans[0].attributes["agentm.session_id"] == "session-otel"
+
+
+@pytest.mark.asyncio
+async def test_w3c_traceparent_env_links_session_to_upstream_trace(
+    tmp_path: Path,
+    exporter: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cross-process linkage uses the standard ``opentelemetry.propagate``
+    API on ``os.environ``. When the host sets the W3C ``TRACEPARENT`` env
+    var (the canonical mechanism for OTel-instrumented hosts launching
+    sub-processes), a fresh AgentM session must continue that trace
+    instead of starting a new one.
+
+    No AgentM-specific propagation: just stock W3C TraceContext.
+    """
+    parent_trace = "11112222333344445555666677778888"  # 32 hex / 16 bytes
+    parent_span = "aaaabbbbccccdddd"  # 16 hex / 8 bytes
+    monkeypatch.setenv(
+        "TRACEPARENT", f"00-{parent_trace}-{parent_span}-01"
+    )
+
+    api = _api(tmp_path, session_id="downstream-session")
+    otel_tracing.install(api, {})
+    await api.events.emit(
+        SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=str(tmp_path))
+    )
+
+    spans = exporter.get_finished_spans()
+    session_spans = [s for s in spans if s.name == "agentm.session"]
+    assert len(session_spans) == 1
+    span = session_spans[0]
+    # Trace continues the upstream W3C trace.
+    assert format(span.get_span_context().trace_id, "032x") == parent_trace
+    # Parent linkage points at the upstream span.
+    assert span.parent is not None
+    assert format(span.parent.span_id, "016x") == parent_span
+    # AgentM's own session_id is preserved as a logical attribute.
+    assert span.attributes["agentm.session_id"] == "downstream-session"
+
+
+@pytest.mark.asyncio
+async def test_top_level_session_starts_fresh_trace_when_no_traceparent(
+    tmp_path: Path,
+    exporter: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without an upstream ``TRACEPARENT``, a top-level session starts a
+    fresh OTel trace — the SDK's IdGenerator picks the trace_id, AgentM
+    doesn't try to influence it.
+    """
+    monkeypatch.delenv("TRACEPARENT", raising=False)
+    api = _api(tmp_path, session_id="solo-session")
+    otel_tracing.install(api, {})
+    await api.events.emit(
+        SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=str(tmp_path))
+    )
+
+    spans = exporter.get_finished_spans()
+    session_spans = [s for s in spans if s.name == "agentm.session"]
+    assert len(session_spans) == 1
+    span = session_spans[0]
+    # Top-level: no parent linkage.
+    assert span.parent is None
+    # SDK-generated trace_id is non-zero.
+    assert span.get_span_context().trace_id != 0
