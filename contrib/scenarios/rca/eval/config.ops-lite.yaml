@@ -41,14 +41,15 @@ concurrency: 5
 judge_concurrency: 5
 
 # Per-evidence judge — Doubao through the same LiteLLM gateway as the
-# agent. ``agentm_rca.eval`` monkey-patches the rcabench-platform judge
-# client at import time to inject ``WARPGATE_TICKET`` as
-# ``default_query`` and to skip TLS verification when
-# ``OPENAI_VERIFY_SSL`` is falsy — neither knob is expressible in
-# rcabench-platform's ``ModelProviderConfig`` schema today.
+# agent. ``extra_query.warpgate-ticket`` + ``verify_ssl: false`` were
+# added to rcabench-platform's ``ModelProviderConfig`` in v0.4.44 so
+# both knobs are declarative now (no in-process monkey-patching).
 judge_model:
   model_provider:
     type: "chat.completions"
     model: "${JUDGE_MODEL}"
     api_format: "openai"
     base_url: "${OPENAI_BASE_URL}"
+    extra_query:
+      warpgate-ticket: "${WARPGATE_TICKET}"
+    verify_ssl: false

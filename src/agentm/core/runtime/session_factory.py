@@ -372,7 +372,12 @@ async def create_agent_session(
             command_names=tuple(commands.keys()),
             extension_module_paths=tuple(module_path for module_path, _ in to_load),
             model=active_provider.model,
-            root_session_id=config.root_session_id or session_id,
+            # Use the canonical ``root_session_id`` computed at line 119
+            # (uuid4().hex when not supplied) — falling back to
+            # ``session_id`` here would emit a 16-hex trace_id on the
+            # bus while the observability sink writes the 32-hex one,
+            # silently breaking any consumer that joins both.
+            root_session_id=root_session_id,
             task_id=config.task_id,
             persona=config.persona,
         ),

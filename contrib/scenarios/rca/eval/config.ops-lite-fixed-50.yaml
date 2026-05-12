@@ -50,3 +50,6 @@ judge_model:
     model: "${JUDGE_MODEL}"
     api_format: "openai"
     base_url: "${OPENAI_BASE_URL}"
+    extra_query:
+      warpgate-ticket: "${WARPGATE_TICKET}"
+    verify_ssl: false
