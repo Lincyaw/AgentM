@@ -97,6 +97,12 @@ from ..audit.extractor import (
 from ..audit.phase import merge_to_phases
 from ..audit.registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
 from ..audit.registry import AuditCheckRegistry, CheckContext
+from ..replay.record import (
+    ReplayRecord,
+    now_ns,
+    replay_log_path,
+    write_record,
+)
 from ..schema import Edge, Event, Phase, Reminder, Verdict
 
 _logger = logging.getLogger(__name__)
@@ -157,6 +163,38 @@ MANIFEST = ExtensionManifest(
                 },
                 "required": ["module"],
                 "additionalProperties": False,
+            },
+            "enable_auditor": {
+                "type": "boolean",
+                "description": (
+                    "Run the auditor phase (default true). Set false to "
+                    "collect a clean extractor-only event graph without "
+                    "auditor LLM cost or reminder side-effects — useful for "
+                    "dataset collection and isolating auditor-quality "
+                    "regressions from extractor coverage."
+                ),
+            },
+            "enable_reminders": {
+                "type": "boolean",
+                "description": (
+                    "Inject auditor verdicts as harness advisories on the "
+                    "main agent (default true). Set false to run the full "
+                    "audit pipeline (extractor + auditor) for data "
+                    "collection while leaving the main agent unaffected. "
+                    "Ignored when ``enable_auditor: false``."
+                ),
+            },
+            "enable_replay_log": {
+                "type": "boolean",
+                "description": (
+                    "Append each phase invocation to "
+                    "``<cwd>/.agentm/audit_replay/<root_session_id>.jsonl`` "
+                    "for offline replay (default true). One record carries "
+                    "the full compose-kwargs + payload + parsed output, so "
+                    "``llmharness-replay {extractor|auditor} --record ...`` "
+                    "can rebuild the exact extension list + payload and "
+                    "swap provider / prompt for A/B."
+                ),
             },
         },
         "additionalProperties": False,
@@ -376,6 +414,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         cards_tools_config=cards_cfg,
         observability_config=obs_cfg,
     )
+    # Captured for replay-log compose_kwargs reconstruction.
+    extractor_compose_kwargs: dict[str, Any] = {
+        "prompt_override": prompt_extractor,
+        "cards_tools_config": cards_cfg,
+        "observability_config": obs_cfg,
+    }
+    api._llmharness_extractor_compose_kwargs = extractor_compose_kwargs  # type: ignore[attr-defined]
     # Auditor extensions are rebuilt per firing in _drain_auditor because
     # the v3 prompt is templated over the live event/edge graph + findings.
     # We pass the knobs through via a lightweight settings struct.
@@ -388,6 +433,18 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     extractor_provider = _parse_provider_spec(config.get("extractor_provider"))
     auditor_provider = _parse_provider_spec(config.get("auditor_provider"))
+
+    enable_auditor = bool(config.get("enable_auditor", True))
+    enable_reminders = bool(config.get("enable_reminders", True))
+    enable_replay_log = bool(config.get("enable_replay_log", True))
+
+    # Pre-resolved replay-log path; None disables recording. Live drain
+    # functions look up this attribute on ``api`` so we don't have to
+    # thread an extra argument through six call sites.
+    if enable_replay_log:
+        api._llmharness_replay_log_path = replay_log_path(api.cwd, api.root_session_id)  # type: ignore[attr-defined]
+    else:
+        api._llmharness_replay_log_path = None  # type: ignore[attr-defined]
 
     # Publish the audit-check registry on the parent session. Atoms in
     # later commits (reference checks etc.) call
@@ -412,13 +469,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 extractor_extensions=extractor_extensions,
                 extractor_provider=extractor_provider,
             )
-            if extractor_ok and (turn_count % k) == 0:
+            if enable_auditor and extractor_ok and (turn_count % k) == 0:
                 await _drain_auditor(
                     api=api,
                     auditor_settings=auditor_settings,
                     auditor_provider=auditor_provider,
                     pending_reminders=pending_reminders,
                     messages=list(messages_snapshot),
+                    enable_reminders=enable_reminders,
                 )
 
         api.on(TurnEndEvent.CHANNEL, _on_turn_end_sync)
@@ -444,6 +502,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     auditor_settings=auditor_settings,
                     extractor_provider=extractor_provider,
                     auditor_provider=auditor_provider,
+                    enable_reminders=enable_reminders,
                 ),
                 name="llmharness-audit-worker",
             )
@@ -454,7 +513,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         _ensure_worker()
         messages_snapshot = tuple(event.messages)
         queue.put_nowait(_ExtractorJob(messages=messages_snapshot))
-        if (turn_count % k) == 0:
+        if enable_auditor and (turn_count % k) == 0:
             queue.put_nowait(_AuditorJob(messages=messages_snapshot))
 
     _on_decide_inject = _make_reminder_injector(api, pending_reminders)
@@ -563,6 +622,7 @@ async def _drain_queue(
     auditor_settings: _AuditorSettings,
     extractor_provider: tuple[str, dict[str, Any]] | None,
     auditor_provider: tuple[str, dict[str, Any]] | None,
+    enable_reminders: bool,
 ) -> None:
     """Serial worker. Owns all session-mutating audit writes."""
     _last_extractor_held_cursor: bool = False
@@ -596,6 +656,7 @@ async def _drain_queue(
                         auditor_provider=auditor_provider,
                         pending_reminders=pending_reminders,
                         messages=list(job.messages),
+                        enable_reminders=enable_reminders,
                     )
         except asyncio.CancelledError:
             raise
@@ -657,6 +718,8 @@ async def _drain_extractor(
         ],
     }
 
+    turn_window_json = json.dumps(new_turn_window, ensure_ascii=False, default=str)
+
     # Inject state + turn-window JSON substitution into the per-firing
     # extensions list. The base list returned by
     # ``compose_extractor_extensions`` is shared across firings; we
@@ -664,8 +727,16 @@ async def _drain_extractor(
     firing_extensions = _bind_extractor_state(
         extractor_extensions,
         state=state,
-        turn_window_json=json.dumps(new_turn_window, ensure_ascii=False, default=str),
+        turn_window_json=turn_window_json,
     )
+
+    # Replay-log compose_kwargs: everything the runner needs to rebuild
+    # ``firing_extensions`` from scratch. Stored under one record per
+    # phase invocation regardless of outcome.
+    base_kwargs = getattr(api, "_llmharness_extractor_compose_kwargs", {})
+    replay_compose_kwargs = dict(base_kwargs)
+    replay_compose_kwargs["turn_window_json"] = turn_window_json
+    replay_compose_kwargs["turn_texts"] = {str(k): v for k, v in state.turn_texts.items()}
 
     try:
         terminator_called = await _spawn_extractor_child(
@@ -681,6 +752,17 @@ async def _drain_extractor(
             _EXTRACTOR_ERROR_ENTRY,
             {"reason": str(exc), "turn_window": turn_window},
         )
+        _record_replay(
+            api,
+            phase="extractor",
+            turn_index=window_hi_inclusive,
+            compose_kwargs=replay_compose_kwargs,
+            payload=payload,
+            provider=extractor_provider,
+            output=None,
+            status="spawn_error",
+            error=str(exc),
+        )
         return False
 
     if not terminator_called:
@@ -692,9 +774,33 @@ async def _drain_extractor(
                 "turn_window": turn_window,
             },
         )
+        _record_replay(
+            api,
+            phase="extractor",
+            turn_index=window_hi_inclusive,
+            compose_kwargs=replay_compose_kwargs,
+            payload=payload,
+            provider=extractor_provider,
+            output=None,
+            status="no_call",
+        )
         return False
 
     output = RawExtractorOutput.from_state(state)
+    _record_replay(
+        api,
+        phase="extractor",
+        turn_index=window_hi_inclusive,
+        compose_kwargs=replay_compose_kwargs,
+        payload=payload,
+        provider=extractor_provider,
+        output={
+            "events": [e.to_dict() for e in output.events],
+            "edges": [ed.to_dict() for ed in output.edges],
+            "dropped_edges": list(output.dropped_edges),
+        },
+        status="ok",
+    )
 
     # Empty submission on a non-trivial window is a typed failure; on a
     # trivial (user-only) window an empty output is normal.
@@ -740,6 +846,44 @@ async def _drain_extractor(
         },
     )
     return True
+
+
+def _record_replay(
+    api: ExtensionAPI,
+    *,
+    phase: str,
+    turn_index: int,
+    compose_kwargs: dict[str, Any],
+    payload: dict[str, Any],
+    provider: tuple[str, dict[str, Any]] | None,
+    output: dict[str, Any] | None,
+    status: str,
+    error: str | None = None,
+) -> None:
+    """Best-effort sidecar append.
+
+    Never raises — the live agent must keep running even if disk is full
+    or the .agentm tree is unwritable.
+    """
+    path = getattr(api, "_llmharness_replay_log_path", None)
+    if path is None:
+        return
+    try:
+        rec = ReplayRecord(
+            phase=phase,  # type: ignore[arg-type]
+            turn_index=turn_index,
+            root_session_id=api.root_session_id,
+            ts_ns=now_ns(),
+            compose_kwargs=compose_kwargs,
+            payload=payload,
+            provider=[provider[0], provider[1]] if provider else None,
+            output=output,
+            status=status,  # type: ignore[arg-type]
+            error=error,
+        )
+        write_record(path, rec)
+    except Exception:  # pragma: no cover - defensive
+        _logger.exception("llmharness replay record write failed; swallowing")
 
 
 class _ExtractorSpawnError(RuntimeError):
@@ -856,6 +1000,7 @@ async def _drain_auditor(
     auditor_provider: tuple[str, dict[str, Any]] | None,
     pending_reminders: list[Reminder],
     messages: list[AgentMessage],
+    enable_reminders: bool = True,
 ) -> None:
     branch = api.session.get_branch()
     branch_state = _scan_branch(branch, recent_verdicts_n=_DEFAULT_RECENT_VERDICTS)
@@ -895,6 +1040,30 @@ async def _drain_auditor(
         summary_threshold=auditor_settings.summary_threshold,
     )
 
+    # Snapshot every input that ``compose_auditor_extensions`` saw, so
+    # offline replay can rebuild the exact extension list — including the
+    # event/edge graph, findings, and the trajectory snapshot baked into
+    # the system prompt. This is what makes "swap model on the same
+    # graph" reproducible.
+    auditor_compose_kwargs: dict[str, Any] = {
+        "prompt_override": auditor_settings.prompt_override,
+        "cards_tools_config": auditor_settings.cards_tools_config,
+        "observability_config": auditor_settings.observability_config,
+        "trajectory_snapshot": trajectory_snapshot,
+        "events": [e.to_dict() for e in events_tuple],
+        "edges": [ed.to_dict() for ed in edges_tuple],
+        "phases": [ph.to_dict() for ph in phases_tuple],
+        "findings": [f.to_dict() for f in findings],
+        "check_errors": dict(check_errors),
+        "continuation_notes": list(branch_state.last_continuation_notes),
+        "summary_threshold": auditor_settings.summary_threshold,
+    }
+    auditor_payload: dict[str, Any] = {
+        "graph": [e.to_dict() for e in branch_state.graph],
+        "recent_verdicts": list(branch_state.recent_verdicts),
+        "continuation_notes_from_prior_firing": list(branch_state.last_continuation_notes),
+    }
+
     verdict = await _run_auditor(
         api=api,
         auditor_extensions=firing_extensions,
@@ -904,10 +1073,37 @@ async def _drain_auditor(
         continuation_notes_from_prior_firing=branch_state.last_continuation_notes,
     )
     if verdict is None:
+        # ``_run_auditor`` already wrote the typed failure entry; capture
+        # the same fact on the replay sidecar so replay tools see a
+        # uniformly-shaped record per invocation.
+        _record_replay(
+            api,
+            phase="auditor",
+            turn_index=len(messages) - 1 if messages else -1,
+            compose_kwargs=auditor_compose_kwargs,
+            payload=auditor_payload,
+            provider=auditor_provider,
+            output=None,
+            status="no_call",
+        )
         return
 
     api.session.append_entry(_VERDICT_ENTRY_TYPE, verdict.to_dict())
-    if verdict.surface_reminder and verdict.reminder_text:
+    _record_replay(
+        api,
+        phase="auditor",
+        turn_index=len(messages) - 1 if messages else -1,
+        compose_kwargs=auditor_compose_kwargs,
+        payload=auditor_payload,
+        provider=auditor_provider,
+        output=verdict.to_dict(),
+        status="ok",
+    )
+    # Verdict is always persisted (for offline replay / dataset use); reminder
+    # injection is gated by ``enable_reminders`` so data-collection runs can
+    # observe what the auditor *would have* surfaced without perturbing the
+    # main agent's trajectory.
+    if enable_reminders and verdict.surface_reminder and verdict.reminder_text:
         pending_reminders.append(Reminder(text=verdict.reminder_text))
 
 

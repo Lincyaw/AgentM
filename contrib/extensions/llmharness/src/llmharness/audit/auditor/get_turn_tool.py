@@ -21,8 +21,8 @@ import json
 from typing import Any
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
+from agentm.extensions import ExtensionManifest
 
 MANIFEST = ExtensionManifest(
     name="auditor_get_turn_tool",
