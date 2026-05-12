@@ -102,7 +102,21 @@ async def create_agent_session(
     def _provider_getter() -> ProviderConfig | None:
         return active_provider_box["value"]
 
-    session_id = uuid.uuid4().hex
+    # OTel-native identity:
+    #   * ``session_id`` is this session's *span_id* — 8 bytes / 16 hex.
+    #   * ``root_session_id`` is the *trace_id* shared across the whole
+    #     agent tree — 16 bytes / 32 hex. For a fresh root session we
+    #     generate a new trace_id; child sessions inherit their parent's
+    #     (the spawn factory below threads it onto ``spec.root_session_id``).
+    #   * ``parent_session_id`` is the parent's span_id and only matters
+    #     for children (root sessions get ``None``).
+    # Honour caller-supplied ids so external systems can reuse their own
+    # trace / span identifiers verbatim — the JSONL filename becomes
+    # ``<session_id>.jsonl`` and the OTel ``trace_id`` field on every
+    # event is the caller's trace_id. Falls back to fresh uuid hex of the
+    # appropriate length when no id is supplied.
+    session_id = config.session_id or uuid.uuid4().hex[:16]
+    root_session_id = config.root_session_id or uuid.uuid4().hex
     session_view: ReadonlySession = SessionView(
         session_manager,
         loop_config_getter=lambda: configured_loop_config,
@@ -152,7 +166,11 @@ async def create_agent_session(
         spec = AgentSessionConfig(**{**child_config.__dict__})
         spec.parent_bus = bus
         spec.parent_session_id = session_id
-        spec.root_session_id = config.root_session_id or session_id
+        # Child inherits the *parent's* trace_id (root_session_id) so the
+        # whole agent tree shares one OTel trace. Never fall back to the
+        # parent's session_id — that would mint a fresh trace per child
+        # and undo the unification.
+        spec.root_session_id = root_session_id
         if spec.provider is None:
             parent_provider = _provider_getter()
             if parent_provider is None:
@@ -167,6 +185,10 @@ async def create_agent_session(
         bus=bus,
         cwd=config.cwd,
         session_id=session_id,
+        root_session_id=root_session_id,
+        parent_session_id=config.parent_session_id,
+        purpose=config.purpose,
+        scenario=config.scenario,
         session=session_view,
         tools=tools,
         commands=commands,

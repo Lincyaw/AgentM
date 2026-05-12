@@ -30,6 +30,7 @@ description: |
 task_class: rca_baseline
 
 extensions:
+  - module: agentm.extensions.builtin.operations_local
   # --- baseline tool surface (kept verbatim from manifest.baseline.yaml) ---
   - module: agentm_rca.tools.thinkdepth_sql
   - module: agentm_rca.tools.finalize

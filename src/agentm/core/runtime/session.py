@@ -112,6 +112,14 @@ class AgentSession:
         self._session_id = session_id
         self._parent_bus = parent_bus
         self._parent_session_id = parent_session_id
+        # OTel trace_id shared with every child session. Stamped by the
+        # session factory (see ``create_agent_session``) onto the API
+        # scope; we mirror it here so embedders can pluck it off the
+        # ``AgentSession`` object directly (e.g. to forward into a
+        # downstream eval row, an upstream OTel exporter, etc.).
+        self._root_session_id: str = (
+            self._extension_api.root_session_id if self._extension_api else session_id
+        )
         # Set by the cost_budget extension via the cost_budget_exceeded
         # channel; checked at the top of ``prompt`` so the next turn
         # short-circuits cleanly with stop_reason="budget".
@@ -192,8 +200,18 @@ class AgentSession:
     def session_id(self) -> str:
         """Stable random id assigned at ``create``. Appears in
         :class:`ChildSessionStartEvent` / :class:`ChildSessionEndEvent`
-        payloads when this session is a child of another."""
+        payloads when this session is a child of another. Equals the
+        session-root OTel ``span_id`` — see :attr:`root_session_id` for
+        the OTel ``trace_id`` shared across the whole agent tree."""
         return self._session_id
+
+    @property
+    def root_session_id(self) -> str:
+        """OTel ``trace_id`` shared by this session and every transitive
+        child. For a root session the substrate generates a fresh 32-hex
+        uuid; spawned children inherit it verbatim so the entire agent
+        tree shows up as a single trace in any OTel-compatible store."""
+        return self._root_session_id
 
     # --- prompt -----------------------------------------------------------
 
