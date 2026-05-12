@@ -21,6 +21,7 @@ We target the modern :mod:`websockets.asyncio` connection class
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 from websockets.asyncio.connection import Connection
@@ -104,6 +105,10 @@ class WebSocketStreamWriter:
         self._ws = ws
         self._buf = bytearray()
         self._closed = False
+        # ``close()`` schedules an async ws.close() task; we keep a
+        # reference so ``wait_closed()`` can join it (and so the loop
+        # doesn't garbage-collect it mid-flight).
+        self._close_task: asyncio.Task[None] | None = None
 
     def write(self, data: bytes) -> None:
         if self._closed:
@@ -129,11 +134,16 @@ class WebSocketStreamWriter:
     def close(self) -> None:
         self._closed = True
         if self._ws.close_code is None:
-            # ``Connection.close()`` is async; fire-and-forget here to
-            # match the sync ``StreamWriter.close()`` contract.
-            asyncio.get_event_loop().create_task(self._ws.close())
+            # ``Connection.close()`` is async; schedule it on the running
+            # loop to match the sync ``StreamWriter.close()`` contract,
+            # and stash the task so ``wait_closed()`` can join it.
+            loop = asyncio.get_running_loop()
+            self._close_task = loop.create_task(self._ws.close())
 
     async def wait_closed(self) -> None:
+        if self._close_task is not None:
+            with contextlib.suppress(Exception):
+                await self._close_task
         try:
             await self._ws.wait_closed()
         except Exception:

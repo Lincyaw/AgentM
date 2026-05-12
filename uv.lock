@@ -115,7 +115,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "typer", specifier = ">=0.25.1" },
-    { name = "websockets", specifier = ">=12" },
+    { name = "websockets", specifier = ">=13" },
 ]
 provides-extras = ["dev"]
 
