@@ -37,12 +37,12 @@ import sys
 import uuid
 import warnings
 from typing import Annotated
-from urllib.parse import urlparse
 
 import typer
 
 from agentm_channels import DEFAULT_SOCKET_URL, autoload_dotenv
 from agentm_channels.client import AuthError, WireClient
+from agentm_channels.client_cli import ConnectError, resolve_connect
 from agentm_channels.wire import (
     KIND_BYE,
     KIND_DELIVERY_BATCH,
@@ -86,26 +86,12 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit(code=EXIT_OK)
 
 
-def _parse_connect_url(url: str) -> str:
-    """Return the absolute socket path. Raises ``typer.Exit(2)`` on
-    invalid input (scheme, missing path)."""
-    parsed = urlparse(url)
-    if parsed.scheme != "unix":
-        _err(
-            "bad-argument",
-            f"--connect scheme {parsed.scheme!r} is not supported",
-            "use unix:///abs/path/to/sock (only unix:// is available in v1)",
-        )
-        raise typer.Exit(code=EXIT_USAGE)
-    socket_path = parsed.path or parsed.netloc
-    if not socket_path or not socket_path.startswith("/"):
-        _err(
-            "bad-argument",
-            f"--connect URL {url!r} has no absolute socket path",
-            "use unix:///abs/path/to/sock",
-        )
-        raise typer.Exit(code=EXIT_USAGE)
-    return socket_path
+def _resolve_connect(url: str, tls_ca: str | None):
+    try:
+        return resolve_connect(url, tls_ca=tls_ca)
+    except ConnectError as exc:
+        _err("bad-argument", str(exc), "see --help for the supported schemes")
+        raise typer.Exit(code=EXIT_USAGE) from exc
 
 
 def _load_app_secret(path: str | None) -> str | None:
@@ -220,12 +206,34 @@ def cli(
             envvar="AGENTM_SOCKET",
             metavar="URL",
             help=(
-                "Gateway socket URL. v1 supports only unix:///abs/path/to/sock; "
-                "other schemes are rejected with exit 2. Default: shared with "
-                "`agentm-gateway`. Env: AGENTM_SOCKET."
+                "Gateway URL. Supported schemes: unix:///abs/path/to/sock, "
+                "ws://host:port/path, wss://host:port/path. Default: shared "
+                "with `agentm-gateway`. Env: AGENTM_SOCKET."
             ),
         ),
     ] = DEFAULT_SOCKET_URL,
+    token: Annotated[
+        str | None,
+        typer.Option(
+            "--token",
+            envvar="AGENTM_TOKEN",
+            help=(
+                "Bearer token sent in the hello envelope. Required for "
+                "ws/wss gateways with token auth. Env: AGENTM_TOKEN."
+            ),
+        ),
+    ] = None,
+    tls_ca: Annotated[
+        str | None,
+        typer.Option(
+            "--tls-ca",
+            metavar="PATH",
+            help=(
+                "CA bundle (PEM) to verify the gateway certificate. Only "
+                "meaningful with wss://."
+            ),
+        ),
+    ] = None,
     app_id: Annotated[
         str | None,
         typer.Option(
@@ -325,6 +333,8 @@ def cli(
         rc = asyncio.run(
             _arun(
                 connect=connect,
+                token=token,
+                tls_ca=tls_ca,
                 app_id=app_id,
                 app_secret_path=app_secret,
                 allow_from=allow_from,
@@ -343,13 +353,15 @@ def cli(
 async def _arun(
     *,
     connect: str,
+    token: str | None,
+    tls_ca: str | None,
     app_id: str | None,
     app_secret_path: str | None,
     allow_from: list[str] | None,
     chat_id_prefix: str,
     check_config: bool,
 ) -> int:
-    socket_path = _parse_connect_url(connect)
+    _spec, transport = _resolve_connect(connect, tls_ca)
     cfg = _resolve_config(
         app_id=app_id,
         app_secret_path=app_secret_path,
@@ -397,9 +409,10 @@ async def _arun(
             return
 
     client = WireClient(
-        socket_path=socket_path,
+        transport=transport,
         peer_id=peer_id,
         peer_kind="chat_client",
+        token=token,
         on_outbound=on_outbound,
     )
 

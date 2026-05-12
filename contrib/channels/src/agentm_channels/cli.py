@@ -55,13 +55,18 @@ from agentm.core.abi import EventBus
 
 from . import DEFAULT_SOCKET_URL, autoload_dotenv
 from .approval import ApprovalPolicy
-from .auth import UnixPeerCredAuthenticator
+from .auth import TokenAuthenticator, UnixPeerCredAuthenticator
 from .bus import MessageBus
 from .gateway import Gateway, GatewayConfig
 from .manager import ChannelManager
 from .outbox import SqliteInbox, SqliteOutbox
-from .server import WireServer
+from .server import Authenticator, WireServer
 from .session_bindings import SessionBindingStore
+from .transport import (
+    ServerTransport,
+    UnixServerTransport,
+    WebSocketServerTransport,
+)
 from .wire_bridge import DEFAULT_MAX_A2A_HOPS, WireBridge
 
 # Pull ``.env`` keys into ``os.environ`` BEFORE typer parses argv. The
@@ -202,11 +207,48 @@ def _build_session_factory(
 
 @dataclass(frozen=True)
 class BindSpec:
-    """Resolved ``--bind`` configuration. ``allow_uids`` of ``None``
-    means any-uid (peer-cred reads the kernel uid but doesn't filter)."""
+    """Resolved ``--bind`` configuration.
 
-    socket_path: str
-    allow_uids: frozenset[int] | None
+    For unix scheme: ``socket_path`` is set, ``allow_uids`` of ``None``
+    means any-uid (peer-cred reads the kernel uid but doesn't filter).
+
+    For ws/wss scheme: ``host`` / ``port`` / ``path`` are set, ``tokens``
+    holds the bearer-token allow-list (empty set when anonymous mode
+    is explicitly opted into via ``--bind-allow-anonymous``).
+    """
+
+    scheme: str
+    # unix
+    socket_path: str = ""
+    allow_uids: frozenset[int] | None = frozenset()
+    # ws / wss
+    host: str = ""
+    port: int = 0
+    ws_path: str = "/"
+    tokens: frozenset[str] = frozenset()
+    allow_anonymous: bool = False
+    tls_cert: str | None = None
+    tls_key: str | None = None
+    tls_ca: str | None = None
+
+
+def _load_tokens_file(path: str) -> set[str]:
+    """One token per line; blank lines and lines starting with ``#``
+    are skipped. Raises ``SystemExit`` on read errors.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(
+            f"--bind-token-file {path!r}: cannot read: {exc.strerror or exc}"
+        ) from exc
+    tokens: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        tokens.add(line)
+    return tokens
 
 
 def _resolve_bind(
@@ -214,64 +256,181 @@ def _resolve_bind(
     bind: str | None,
     bind_allow_uid: list[int] | None,
     bind_allow_any_uid: bool,
+    bind_token_file: str | None = None,
+    bind_allow_anonymous: bool = False,
+    tls_cert: str | None = None,
+    tls_key: str | None = None,
+    tls_ca: str | None = None,
     cfg: dict[str, Any],
 ) -> BindSpec:
     """Merge CLI flags > yaml ``bind:`` section > shared default.
 
-    The gateway is always a wire-protocol daemon: when neither the CLI
-    flag nor the YAML ``bind:`` section sets a socket, fall back to
-    :data:`DEFAULT_SOCKET_URL`. Raises :class:`SystemExit` (exit code 2)
-    on invalid input — TCP scheme, or conflicting allow-uid flags.
+    Supports three schemes: ``unix://``, ``ws://``, ``wss://``. Raises
+    :class:`SystemExit` (exit code 2) on invalid input — unknown scheme,
+    conflicting flags, TLS-with-unix, wss-without-cert, or ws/wss
+    without token configuration.
     """
     yaml_bind = cfg.get("bind") if isinstance(cfg.get("bind"), dict) else None
     yaml_url = (yaml_bind or {}).get("socket")
     url = bind or yaml_url or DEFAULT_SOCKET_URL
     parsed = urlparse(str(url))
-    if parsed.scheme != "unix":
-        raise SystemExit(
-            f"--bind scheme {parsed.scheme!r} not supported; only unix:// is "
-            "available in v1 (TCP is deferred per "
-            ".claude/designs/client-server-architecture.md §5.2)."
-        )
-    socket_path = parsed.path or parsed.netloc
-    if not socket_path:
-        raise SystemExit(
-            f"--bind {url!r} has no socket path; use unix:///abs/path/to/sock"
-        )
+    scheme = parsed.scheme
 
-    cli_uids = list(bind_allow_uid or ())
-    cli_any = bool(bind_allow_any_uid)
-    if cli_uids and cli_any:
-        raise SystemExit(
-            "--bind-allow-uid and --bind-allow-any-uid are mutually exclusive."
-        )
+    yaml_token_auth = (yaml_bind or {}).get("token_auth") if yaml_bind else None
+    yaml_token_auth = yaml_token_auth if isinstance(yaml_token_auth, dict) else None
+    yaml_tls = (yaml_bind or {}).get("tls") if yaml_bind else None
+    yaml_tls = yaml_tls if isinstance(yaml_tls, dict) else None
 
-    if cli_uids or cli_any:
-        allow_uids: frozenset[int] | None = (
-            None if cli_any else frozenset(int(x) for x in cli_uids)
-        )
-    elif yaml_bind is not None and (
-        "allow_uids" in yaml_bind or "allow_any_uid" in yaml_bind
-    ):
-        if yaml_bind.get("allow_any_uid") and yaml_bind.get("allow_uids"):
+    eff_tls_cert = tls_cert or (yaml_tls.get("cert") if yaml_tls else None)
+    eff_tls_key = tls_key or (yaml_tls.get("key") if yaml_tls else None)
+    eff_tls_ca = tls_ca or (yaml_tls.get("ca") if yaml_tls else None)
+
+    if scheme == "unix":
+        if eff_tls_cert or eff_tls_key or eff_tls_ca:
             raise SystemExit(
-                "bind.allow_uids and bind.allow_any_uid are mutually exclusive."
+                "--tls-cert/--tls-key/--tls-ca are only valid with ws://wss:// binds, "
+                f"not {url!r}."
             )
-        if yaml_bind.get("allow_any_uid"):
-            allow_uids = None
-        else:
-            raw = yaml_bind.get("allow_uids") or []
-            if not isinstance(raw, list):
-                raise SystemExit("bind.allow_uids must be a list of integers.")
-            try:
-                allow_uids = frozenset(int(x) for x in raw)
-            except (TypeError, ValueError) as exc:
-                raise SystemExit(f"bind.allow_uids: invalid entry: {exc}") from exc
-    else:
-        # Most-secure default: current process uid only.
-        allow_uids = frozenset({os.geteuid()})
+        socket_path = parsed.path or parsed.netloc
+        if not socket_path:
+            raise SystemExit(
+                f"--bind {url!r} has no socket path; use unix:///abs/path/to/sock"
+            )
 
-    return BindSpec(socket_path=socket_path, allow_uids=allow_uids)
+        cli_uids = list(bind_allow_uid or ())
+        cli_any = bool(bind_allow_any_uid)
+        if cli_uids and cli_any:
+            raise SystemExit(
+                "--bind-allow-uid and --bind-allow-any-uid are mutually exclusive."
+            )
+
+        if cli_uids or cli_any:
+            allow_uids: frozenset[int] | None = (
+                None if cli_any else frozenset(int(x) for x in cli_uids)
+            )
+        elif yaml_bind is not None and (
+            "allow_uids" in yaml_bind or "allow_any_uid" in yaml_bind
+        ):
+            if yaml_bind.get("allow_any_uid") and yaml_bind.get("allow_uids"):
+                raise SystemExit(
+                    "bind.allow_uids and bind.allow_any_uid are mutually exclusive."
+                )
+            if yaml_bind.get("allow_any_uid"):
+                allow_uids = None
+            else:
+                raw = yaml_bind.get("allow_uids") or []
+                if not isinstance(raw, list):
+                    raise SystemExit("bind.allow_uids must be a list of integers.")
+                try:
+                    allow_uids = frozenset(int(x) for x in raw)
+                except (TypeError, ValueError) as exc:
+                    raise SystemExit(
+                        f"bind.allow_uids: invalid entry: {exc}"
+                    ) from exc
+        else:
+            # Most-secure default: current process uid only.
+            allow_uids = frozenset({os.geteuid()})
+
+        return BindSpec(
+            scheme="unix",
+            socket_path=socket_path,
+            allow_uids=allow_uids,
+        )
+
+    if scheme not in ("ws", "wss"):
+        raise SystemExit(
+            f"--bind scheme {scheme!r} not supported; use unix://, ws://, or wss://."
+        )
+
+    if scheme == "wss" and (not eff_tls_cert or not eff_tls_key):
+        raise SystemExit(
+            "wss:// bind requires --tls-cert and --tls-key (or bind.tls.cert/"
+            "bind.tls.key in YAML)."
+        )
+    if scheme == "ws" and (eff_tls_cert or eff_tls_key):
+        raise SystemExit(
+            "ws:// bind cannot use TLS; switch to wss:// or remove --tls-*."
+        )
+
+    # Token resolution: CLI flag > YAML.
+    cli_any_uid = bool(bind_allow_uid) or bool(bind_allow_any_uid)
+    if cli_any_uid:
+        raise SystemExit(
+            "--bind-allow-uid / --bind-allow-any-uid are unix-only; "
+            "use --bind-token-file with ws://wss://."
+        )
+
+    tokens: set[str] = set()
+    if bind_token_file:
+        tokens.update(_load_tokens_file(bind_token_file))
+    elif yaml_token_auth is not None:
+        yaml_tokens = yaml_token_auth.get("tokens")
+        yaml_tokens_file = yaml_token_auth.get("tokens_file")
+        if isinstance(yaml_tokens, list):
+            tokens.update(str(t).strip() for t in yaml_tokens if str(t).strip())
+        if yaml_tokens_file:
+            tokens.update(_load_tokens_file(str(yaml_tokens_file)))
+
+    if not tokens and not bind_allow_anonymous:
+        raise SystemExit(
+            f"{scheme}:// bind requires --bind-token-file (or "
+            "bind.token_auth in YAML). Pass --bind-allow-anonymous to "
+            "opt out (NOT recommended — anyone reachable on the network "
+            "can drive the gateway)."
+        )
+
+    host = parsed.hostname or "0.0.0.0"
+    port = parsed.port or (443 if scheme == "wss" else 80)
+    ws_path = parsed.path or "/"
+
+    return BindSpec(
+        scheme=scheme,
+        host=host,
+        port=port,
+        ws_path=ws_path,
+        tokens=frozenset(tokens),
+        allow_anonymous=bool(bind_allow_anonymous) and not tokens,
+        tls_cert=eff_tls_cert,
+        tls_key=eff_tls_key,
+        tls_ca=eff_tls_ca,
+    )
+
+
+def _build_server_transport(spec: BindSpec) -> ServerTransport:
+    """Materialize a :class:`ServerTransport` for an already-validated
+    :class:`BindSpec`. Pure factory — no side effects beyond constructing
+    the transport (no socket bind yet)."""
+    if spec.scheme == "unix":
+        return UnixServerTransport(spec.socket_path)
+    ssl_context = None
+    if spec.scheme == "wss":
+        import ssl
+
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        assert spec.tls_cert is not None and spec.tls_key is not None
+        ssl_context.load_cert_chain(certfile=spec.tls_cert, keyfile=spec.tls_key)
+        if spec.tls_ca:
+            ssl_context.load_verify_locations(cafile=spec.tls_ca)
+    return WebSocketServerTransport(
+        host=spec.host,
+        port=spec.port,
+        path=spec.ws_path,
+        ssl_context=ssl_context,
+    )
+
+
+def _build_bind_authenticator(spec: BindSpec) -> Authenticator:
+    if spec.scheme == "unix":
+        return UnixPeerCredAuthenticator(
+            allowed_uids=set(spec.allow_uids)
+            if spec.allow_uids is not None
+            else None
+        )
+    if spec.allow_anonymous:
+        from .server import AllowAllAuthenticator
+
+        return AllowAllAuthenticator()
+    return TokenAuthenticator(allowed_tokens=set(spec.tokens))
 
 
 # -------- typer app -----------------------------------------------------
@@ -364,12 +523,62 @@ def cli(
             "--bind",
             envvar="AGENTM_SOCKET",
             help=(
-                "Run the wire-protocol server on the given URL. v1 supports "
-                "only unix:///abs/path/to/sock. Default: $XDG_RUNTIME_DIR/"
-                "agentm-gw.sock or /tmp/agentm-gw-<uid>.sock. Authentication "
-                "is Unix peer-cred; by default only the current process's uid "
-                "may connect — override with --bind-allow-uid or "
-                "--bind-allow-any-uid. Env: AGENTM_SOCKET."
+                "Run the wire-protocol server on the given URL. Supported: "
+                "unix:///abs/path/to/sock (default; peer-cred auth, current uid "
+                "only unless --bind-allow-uid / --bind-allow-any-uid), "
+                "ws://host:port/path (token auth, plaintext — reverse-proxy "
+                "for TLS), wss://host:port/path (token auth, TLS via "
+                "--tls-cert/--tls-key). Env: AGENTM_SOCKET."
+            ),
+        ),
+    ] = None,
+    bind_token_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--bind-token-file",
+            metavar="PATH",
+            help=(
+                "Path to a file containing one bearer token per line "
+                "(blank lines and '#' comments are skipped). Required for "
+                "ws://wss:// binds unless --bind-allow-anonymous is set."
+            ),
+        ),
+    ] = None,
+    bind_allow_anonymous: Annotated[
+        bool,
+        typer.Option(
+            "--bind-allow-anonymous",
+            help=(
+                "Allow ws/wss bind without tokens. NOT recommended — anyone "
+                "reachable on the network can drive the gateway. Intended "
+                "for behind-a-trusted-reverse-proxy setups only."
+            ),
+        ),
+    ] = False,
+    tls_cert: Annotated[
+        Path | None,
+        typer.Option(
+            "--tls-cert",
+            metavar="PATH",
+            help="TLS certificate (PEM) for wss:// binds. Required for wss://.",
+        ),
+    ] = None,
+    tls_key: Annotated[
+        Path | None,
+        typer.Option(
+            "--tls-key",
+            metavar="PATH",
+            help="TLS private key (PEM) for wss:// binds. Required for wss://.",
+        ),
+    ] = None,
+    tls_ca: Annotated[
+        Path | None,
+        typer.Option(
+            "--tls-ca",
+            metavar="PATH",
+            help=(
+                "Optional CA bundle (PEM). Loaded into the server SSL context "
+                "for future client-cert verification; not enforced today."
             ),
         ),
     ] = None,
@@ -447,6 +656,11 @@ def cli(
 
       agentm-gateway --bind unix:///tmp/gw.sock --config gw.yaml
       agentm-terminal --connect unix:///tmp/gw.sock
+
+    For cross-host deployments, use WebSocket:
+
+      agentm-gateway --bind ws://0.0.0.0:7777/agentm --bind-token-file /etc/agentm/tokens
+      agentm-worker  --connect ws://gw.example.com:7777/agentm --token "$AGENTM_TOKEN"
     """
     logging.basicConfig(
         level=getattr(logging, str(log_level).upper(), logging.INFO),
@@ -467,6 +681,11 @@ def cli(
                 bind=bind,
                 bind_allow_uid=bind_allow_uid,
                 bind_allow_any_uid=bind_allow_any_uid,
+                bind_token_file=str(bind_token_file) if bind_token_file else None,
+                bind_allow_anonymous=bind_allow_anonymous,
+                tls_cert=str(tls_cert) if tls_cert else None,
+                tls_key=str(tls_key) if tls_key else None,
+                tls_ca=str(tls_ca) if tls_ca else None,
                 inproc_worker=not no_inproc_worker,
                 max_a2a_hops=max_a2a_hops,
                 check=check,
@@ -502,6 +721,11 @@ async def _arun(
     bind: str | None,
     bind_allow_uid: list[int] | None,
     bind_allow_any_uid: bool,
+    bind_token_file: str | None,
+    bind_allow_anonymous: bool,
+    tls_cert: str | None,
+    tls_key: str | None,
+    tls_ca: str | None,
     inproc_worker: bool,
     max_a2a_hops: int,
     check: bool,
@@ -523,6 +747,11 @@ async def _arun(
         bind=bind,
         bind_allow_uid=bind_allow_uid,
         bind_allow_any_uid=bind_allow_any_uid,
+        bind_token_file=bind_token_file,
+        bind_allow_anonymous=bind_allow_anonymous,
+        tls_cert=tls_cert,
+        tls_key=tls_key,
+        tls_ca=tls_ca,
         cfg=cfg,
     )
 
@@ -585,18 +814,33 @@ async def _arun(
 
     if check:
         logger.info("config OK: channels=%s", sorted(manager.channels))
-        check_payload: dict[str, Any] = {
-            "kind": "check",
-            "channels": sorted(manager.channels),
-            "state_dir": str(resolved_state_dir),
-            "bind": {
+        bind_payload: dict[str, Any]
+        if bind_spec.scheme == "unix":
+            bind_payload = {
+                "scheme": "unix",
                 "socket": f"unix://{bind_spec.socket_path}",
                 "allow_uids": (
                     sorted(bind_spec.allow_uids)
                     if bind_spec.allow_uids is not None
                     else None
                 ),
-            },
+            }
+        else:
+            bind_payload = {
+                "scheme": bind_spec.scheme,
+                "url": (
+                    f"{bind_spec.scheme}://{bind_spec.host}:{bind_spec.port}"
+                    f"{bind_spec.ws_path}"
+                ),
+                "token_count": len(bind_spec.tokens),
+                "allow_anonymous": bind_spec.allow_anonymous,
+                "tls": bind_spec.scheme == "wss",
+            }
+        check_payload: dict[str, Any] = {
+            "kind": "check",
+            "channels": sorted(manager.channels),
+            "state_dir": str(resolved_state_dir),
+            "bind": bind_payload,
         }
         sys.stdout.write(json.dumps(check_payload) + "\n")
         sys.stdout.flush()
@@ -628,13 +872,10 @@ async def _arun(
         allow_inproc=inproc_worker,
         max_a2a_hops=int(max_a2a_hops),
     )
-    authenticator = UnixPeerCredAuthenticator(
-        allowed_uids=set(bind_spec.allow_uids)
-        if bind_spec.allow_uids is not None
-        else None
-    )
+    authenticator = _build_bind_authenticator(bind_spec)
+    server_transport = _build_server_transport(bind_spec)
     wire_server = WireServer(
-        socket_path=bind_spec.socket_path,
+        transport=server_transport,
         outbox=wire_outbox,
         inbox=wire_inbox,
         on_inbound=bridge.handle_inbound,
@@ -644,13 +885,25 @@ async def _arun(
         on_worker_outbound=bridge.handle_worker_outbound,
     )
     await wire_server.start()
-    logger.info(
-        "wire server bound at unix://%s (allow_uids=%s)",
-        bind_spec.socket_path,
-        sorted(bind_spec.allow_uids)
-        if bind_spec.allow_uids is not None
-        else "any",
-    )
+    if bind_spec.scheme == "unix":
+        logger.info(
+            "wire server bound at unix://%s (allow_uids=%s)",
+            bind_spec.socket_path,
+            sorted(bind_spec.allow_uids)
+            if bind_spec.allow_uids is not None
+            else "any",
+        )
+    else:
+        logger.info(
+            "wire server bound at %s://%s:%d%s (auth=%s)",
+            bind_spec.scheme,
+            bind_spec.host,
+            bind_spec.port,
+            bind_spec.ws_path,
+            "anonymous"
+            if bind_spec.allow_anonymous
+            else f"token({len(bind_spec.tokens)})",
+        )
 
     logger.info(
         "gateway running with channels: %s", sorted(manager.channels) or "(none)"
