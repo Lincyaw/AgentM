@@ -58,6 +58,7 @@ agentm = ["py.typed"]
 # up as workspace members.
 members = [
     "contrib/extensions/llmharness",
+    "contrib/extensions/mcp_bridge",
     "contrib/scenarios/rca",
     "contrib/channels",
     "contrib/channels-clients/terminal",
@@ -87,7 +88,7 @@ markers = [
 # Nested workspace projects own their own tests/ trees and pyproject. The
 # top-level pytest must not recurse into them — both define a ``tests``
 # package and the import paths collide.
-addopts = "-m 'not ui' --ignore=contrib/extensions/llmharness --ignore=contrib/scenarios/rca --ignore=contrib/channels --ignore=contrib/channels-clients"
+addopts = "-m 'not ui' --ignore=contrib/extensions/llmharness --ignore=contrib/extensions/mcp_bridge --ignore=contrib/scenarios/rca --ignore=contrib/channels --ignore=contrib/channels-clients"
 
 [tool.mypy]
 python_version = "3.12"
