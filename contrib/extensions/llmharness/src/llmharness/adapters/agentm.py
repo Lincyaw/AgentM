@@ -93,12 +93,16 @@ from ..audit.auditor import (
     RawVerdictOutput,
     compose_auditor_extensions,
 )
+from ..audit.auditor.profiles import resolve_tools as _resolve_auditor_tools
+from ..audit.auditor.prompt import load_auditor_prompt
 from ..audit.extractor import (
     SUBMIT_EVENTS_TOOL_NAME,
     ExtractionState,
     RawExtractorOutput,
     compose_extractor_extensions,
 )
+from ..audit.extractor.profiles import resolve_tools as _resolve_extractor_tools
+from ..audit.extractor.prompt import load_extractor_prompt
 from ..audit.phase import merge_to_phases
 from ..audit.registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
 from ..audit.registry import AuditCheckRegistry, CheckContext
@@ -140,6 +144,57 @@ MANIFEST = ExtensionManifest(
             "audit_summary_threshold": {"type": "integer", "minimum": 0},
             "prompt_override_extractor": {"type": "string"},
             "prompt_override_auditor": {"type": "string"},
+            "extractor_prompt": {
+                "type": "string",
+                "description": (
+                    "Named extractor prompt variant (file under "
+                    "audit/extractor/prompts/) or an absolute path. "
+                    "Default: 'default'. Overridden by "
+                    "prompt_override_extractor when both are set."
+                ),
+            },
+            "auditor_prompt": {
+                "type": "string",
+                "description": (
+                    "Named auditor prompt variant (file under "
+                    "audit/auditor/prompts/) or an absolute path. "
+                    "Default: 'minimal'. Available: 'minimal', 'full'. "
+                    "Overridden by prompt_override_auditor when both are set."
+                ),
+            },
+            "extractor_profile": {
+                "type": "string",
+                "description": (
+                    "Named extractor tool profile. Default: 'minimal' "
+                    "(submit_events only). Overridden by extractor_tools."
+                ),
+            },
+            "extractor_tools": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Explicit list of extractor tool names to mount, "
+                    "overriding extractor_profile. submit_events is "
+                    "force-included."
+                ),
+            },
+            "auditor_profile": {
+                "type": "string",
+                "description": (
+                    "Named auditor tool profile. Default: 'minimal' "
+                    "(submit_verdict only). Available: 'minimal', "
+                    "'with_drill_down'. Overridden by auditor_tools."
+                ),
+            },
+            "auditor_tools": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Explicit list of auditor tool names to mount, "
+                    "overriding auditor_profile. submit_verdict is "
+                    "force-included."
+                ),
+            },
             "cards_tools_config": {"type": ["object", "null"]},
             "observability_config": {"type": ["object", "null"]},
             "shutdown_timeout_s": {"type": "number", "minimum": 0},
@@ -383,10 +438,11 @@ class _AuditorJob:
 class _AuditorSettings:
     """Per-install knobs for assembling a per-firing auditor extension list."""
 
-    prompt_override: str | None
+    base_prompt: str
     cards_tools_config: dict[str, Any] | None
     observability_config: dict[str, Any] | None
     summary_threshold: int
+    tools: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -427,30 +483,82 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     prompt_extractor_raw = config.get("prompt_override_extractor")
     prompt_auditor_raw = config.get("prompt_override_auditor")
-    prompt_extractor = prompt_extractor_raw if isinstance(prompt_extractor_raw, str) else None
-    prompt_auditor = prompt_auditor_raw if isinstance(prompt_auditor_raw, str) else None
+    prompt_extractor_override = (
+        prompt_extractor_raw if isinstance(prompt_extractor_raw, str) else None
+    )
+    prompt_auditor_override = (
+        prompt_auditor_raw if isinstance(prompt_auditor_raw, str) else None
+    )
+
+    extractor_prompt_name_raw = config.get("extractor_prompt")
+    auditor_prompt_name_raw = config.get("auditor_prompt")
+    extractor_prompt_name = (
+        extractor_prompt_name_raw
+        if isinstance(extractor_prompt_name_raw, str) and extractor_prompt_name_raw
+        else "default"
+    )
+    auditor_prompt_name = (
+        auditor_prompt_name_raw
+        if isinstance(auditor_prompt_name_raw, str) and auditor_prompt_name_raw
+        else "minimal"
+    )
+    extractor_base_prompt = (
+        prompt_extractor_override
+        if prompt_extractor_override is not None
+        else load_extractor_prompt(extractor_prompt_name)
+    )
+    auditor_base_prompt = (
+        prompt_auditor_override
+        if prompt_auditor_override is not None
+        else load_auditor_prompt(auditor_prompt_name)
+    )
+
+    extractor_profile_raw = config.get("extractor_profile")
+    extractor_tools_raw = config.get("extractor_tools")
+    extractor_tools = _resolve_extractor_tools(
+        profile=extractor_profile_raw
+        if isinstance(extractor_profile_raw, str)
+        else None,
+        tools=extractor_tools_raw
+        if isinstance(extractor_tools_raw, list)
+        else None,
+    )
+
+    auditor_profile_raw = config.get("auditor_profile")
+    auditor_tools_raw = config.get("auditor_tools")
+    auditor_tools = _resolve_auditor_tools(
+        profile=auditor_profile_raw
+        if isinstance(auditor_profile_raw, str)
+        else None,
+        tools=auditor_tools_raw if isinstance(auditor_tools_raw, list) else None,
+    )
 
     extractor_extensions = compose_extractor_extensions(
-        prompt_override=prompt_extractor,
+        base_prompt=extractor_base_prompt,
         cards_tools_config=cards_cfg,
         observability_config=obs_cfg,
     )
     api.set_service(
         _EXTRACTOR_COMPOSE_KWARGS_SERVICE_KEY,
         {
-            "prompt_override": prompt_extractor,
+            "base_prompt": extractor_base_prompt,
             "cards_tools_config": cards_cfg,
             "observability_config": obs_cfg,
         },
     )
     # Auditor extensions are rebuilt per firing in _drain_auditor because
-    # the v3 prompt is templated over the live event/edge graph + findings.
+    # the prompt is templated over the live event/edge graph + findings.
     auditor_settings = _AuditorSettings(
-        prompt_override=prompt_auditor,
+        base_prompt=auditor_base_prompt,
         cards_tools_config=cards_cfg,
         observability_config=obs_cfg,
         summary_threshold=summary_threshold,
+        tools=auditor_tools,
     )
+    # Silence unused-name warning when extractor_tools is recorded for
+    # future symmetry but not consumed by the (single-tool) extractor
+    # compose today.
+    del extractor_tools
 
     extractor_provider = _parse_provider_spec(config.get("extractor_provider"))
     auditor_provider = _parse_provider_spec(config.get("auditor_provider"))
@@ -1021,7 +1129,7 @@ async def _drain_auditor(
 
     trajectory_snapshot = _serialize_full_trajectory(messages)
     firing_extensions = compose_auditor_extensions(
-        prompt_override=auditor_settings.prompt_override,
+        base_prompt=auditor_settings.base_prompt,
         cards_tools_config=auditor_settings.cards_tools_config,
         observability_config=auditor_settings.observability_config,
         trajectory_snapshot=trajectory_snapshot,
@@ -1032,6 +1140,7 @@ async def _drain_auditor(
         check_errors=dict(check_errors),
         continuation_notes=list(branch_state.last_continuation_notes),
         summary_threshold=auditor_settings.summary_threshold,
+        tools=auditor_settings.tools,
     )
 
     # Build the replay snapshot only when the sidecar is enabled — the
@@ -1042,7 +1151,7 @@ async def _drain_auditor(
     replay_payload: dict[str, Any] | None = None
     if replay_path is not None:
         replay_compose_kwargs = {
-            "prompt_override": auditor_settings.prompt_override,
+            "base_prompt": auditor_settings.base_prompt,
             "cards_tools_config": auditor_settings.cards_tools_config,
             "observability_config": auditor_settings.observability_config,
             "trajectory_snapshot": trajectory_snapshot,
@@ -1053,6 +1162,7 @@ async def _drain_auditor(
             "check_errors": dict(check_errors),
             "continuation_notes": list(branch_state.last_continuation_notes),
             "summary_threshold": auditor_settings.summary_threshold,
+            "tools": list(auditor_settings.tools),
         }
         replay_payload = {
             "graph": [e.to_dict() for e in branch_state.graph],

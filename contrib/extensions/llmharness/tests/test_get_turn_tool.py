@@ -179,15 +179,18 @@ class TestScenarioG:
 
     def test_compose_with_snapshot_includes_get_turn_module(self) -> None:
         """compose_auditor_extensions(trajectory_snapshot=[...]) must
-        include the get_turn module in the returned extension list."""
+        include the get_turn module in the returned extension list
+        when the ``with_drill_down`` tool profile is active."""
         from llmharness.audit.auditor.extensions import compose_auditor_extensions
         from llmharness.audit.auditor.get_turn_tool import GET_TURN_TOOL_NAME
+        from llmharness.audit.auditor.profiles import PROFILES
 
         snapshot = [{"index": 0, "role": "user", "content": []}]
         exts = compose_auditor_extensions(
             cards_tools_config=None,
             observability_config=None,
             trajectory_snapshot=snapshot,
+            tools=PROFILES["with_drill_down"],
         )
         modules = {mod for mod, _cfg in exts}
         assert "llmharness.audit.auditor.get_turn_tool" in modules, (
@@ -225,6 +228,7 @@ class TestScenarioG:
         does when it loads an extension list.
         """
         from llmharness.audit.auditor.extensions import compose_auditor_extensions
+        from llmharness.audit.auditor.profiles import PROFILES
 
         snapshot = [
             {"index": 0, "role": "user", "content": [{"type": "text", "text": "turn-zero"}]},
@@ -235,6 +239,7 @@ class TestScenarioG:
             cards_tools_config=None,
             observability_config=None,
             trajectory_snapshot=snapshot,
+            tools=PROFILES["with_drill_down"],
         )
 
         # Find and install the get_turn_tool module.

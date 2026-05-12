@@ -71,12 +71,16 @@ async def replay_extractor_record(
 
     ck = record.compose_kwargs
     extras = record.extras
-    effective_prompt = prompt_override if prompt_override is not None else ck.get(
-        "prompt_override"
+    # Support both the new ``base_prompt`` key and the legacy
+    # ``prompt_override`` key from pre-profile replay sidecars.
+    effective_prompt = (
+        prompt_override
+        if prompt_override is not None
+        else ck.get("base_prompt") or ck.get("prompt_override")
     )
 
     base = compose_extractor_extensions(
-        prompt_override=effective_prompt,
+        base_prompt=effective_prompt,
         cards_tools_config=ck.get("cards_tools_config"),
         observability_config=ck.get("observability_config"),
     )
@@ -114,12 +118,19 @@ async def replay_auditor_record(
         raise ValueError(f"expected auditor record, got phase={record.phase!r}")
 
     ck = record.compose_kwargs
-    effective_prompt = prompt_override if prompt_override is not None else ck.get(
-        "prompt_override"
+    effective_prompt = (
+        prompt_override
+        if prompt_override is not None
+        else ck.get("base_prompt") or ck.get("prompt_override")
+    )
+
+    tools_raw = ck.get("tools")
+    tools_tuple = (
+        tuple(str(t) for t in tools_raw) if isinstance(tools_raw, list) else None
     )
 
     extensions = compose_auditor_extensions(
-        prompt_override=effective_prompt,
+        base_prompt=effective_prompt,
         cards_tools_config=ck.get("cards_tools_config"),
         observability_config=ck.get("observability_config"),
         trajectory_snapshot=ck.get("trajectory_snapshot"),
@@ -130,6 +141,7 @@ async def replay_auditor_record(
         check_errors=dict(ck.get("check_errors") or {}),
         continuation_notes=list(ck.get("continuation_notes") or []),
         summary_threshold=int(ck.get("summary_threshold", 30)),
+        tools=tools_tuple,
     )
 
     provider = provider_override or _coerce_provider(record)
