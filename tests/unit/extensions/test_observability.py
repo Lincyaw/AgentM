@@ -82,14 +82,14 @@ async def test_observability_trace_snapshot_uses_add_observer(
 
     expected = "\n".join(
         [
-            '{"schema": "otel/span/v0", "kind": "session.start", "trace_id": "session-1", "span_id": "0000000000000000", "name": "session.start", "start_time_unix_nano": 2000, "attributes": {"cwd": "'
+            '{"schema": "otel/span/v0", "kind": "session.start", "trace_id": "session-1", "span_id": "session-1", "parent_span_id": null, "name": "session.start", "start_time_unix_nano": 1000, "attributes": {"session_id": "session-1", "root_session_id": "session-1", "parent_session_id": null, "purpose": "root", "scenario": null, "cwd": "'
             + str(tmp_path)
             + '", "log_path": "'
             + str(tmp_path / "trace.jsonl")
             + '"}, "status": {"code": "OK"}}',
-            '{"schema": "otel/span/v0", "kind": "handler.invoke", "trace_id": "session-1", "span_id": "0000000000000000", "parent_span_id": "0000000000000000", "name": "handler:alpha", "start_time_unix_nano": 6900, "end_time_unix_nano": 7000, "attributes": {"channel": "alpha", "handler": "tests.unit.extensions.test_observability._handler", "extension": null, "result": {"seen": 7}, "duration_ns": 100}, "status": {"code": "OK", "message": null, "traceback": null}}',
-            '{"schema": "otel/span/v0", "kind": "event.dispatch", "trace_id": "session-1", "span_id": "0000000000000000", "parent_span_id": null, "name": "emit:alpha", "start_time_unix_nano": 4000, "end_time_unix_nano": 9000, "attributes": {"channel": "alpha", "event": {"value": 7}, "handler_count": 1}, "status": {"code": "OK"}}',
-            '{"schema": "otel/span/v0", "kind": "session.end", "trace_id": "session-1", "span_id": "0000000000000000", "name": "session.end", "start_time_unix_nano": 14000, "attributes": {}, "status": {"code": "OK"}}',
+            '{"schema": "otel/span/v0", "kind": "handler.invoke", "trace_id": "session-1", "span_id": "0000000000000000", "parent_span_id": "0000000000000000", "name": "handler:alpha", "start_time_unix_nano": 5900, "end_time_unix_nano": 6000, "attributes": {"channel": "alpha", "handler": "tests.unit.extensions.test_observability._handler", "extension": null, "result": {"seen": 7}, "duration_ns": 100}, "status": {"code": "OK", "message": null, "traceback": null}}',
+            '{"schema": "otel/span/v0", "kind": "event.dispatch", "trace_id": "session-1", "span_id": "0000000000000000", "parent_span_id": "session-1", "name": "emit:alpha", "start_time_unix_nano": 3000, "end_time_unix_nano": 8000, "attributes": {"channel": "alpha", "event": {"value": 7}, "handler_count": 1}, "status": {"code": "OK"}}',
+            '{"schema": "otel/span/v0", "kind": "session.end", "trace_id": "session-1", "span_id": "session-1", "parent_span_id": null, "name": "session.end", "start_time_unix_nano": 1000, "end_time_unix_nano": 12000, "attributes": {"session_id": "session-1", "root_session_id": "session-1", "parent_session_id": null, "purpose": "root", "scenario": null}, "status": {"code": "OK"}}',
         ]
     ) + "\n"
     assert (tmp_path / "trace.jsonl").read_text(encoding="utf-8") == expected

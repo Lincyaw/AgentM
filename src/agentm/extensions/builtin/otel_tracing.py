@@ -61,7 +61,7 @@ import logging
 import os
 import threading
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from agentm.core.abi import (
     EventBusObserver,
@@ -191,7 +191,7 @@ _DEFAULT_EXCLUDE_CHANNELS: frozenset[str] = frozenset({StreamDeltaEvent.CHANNEL}
 # ``start_span(context=...)``. For cross-process linkage we don't use
 # this — we go through the standard ``opentelemetry.propagate`` API.
 _session_ctx_lock = threading.Lock()
-_session_root_contexts: dict[str, Any] = {}
+_session_root_contexts: Final[dict[str, Any]] = {}
 
 
 def _ensure_provider(
