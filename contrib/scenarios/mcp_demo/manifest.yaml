@@ -1,0 +1,41 @@
+name: mcp_demo
+description: |
+  Smoke-test scenario for the ``contrib.extensions.mcp_bridge`` atom.
+
+  Composes the default ``general_purpose`` working set with one MCP server
+  connection. The command below is a *placeholder* — supply your own MCP
+  server here before invoking the scenario. The official filesystem
+  reference server (``@modelcontextprotocol/server-filesystem``) is a
+  reasonable starting point.
+
+  Permission integration is intentionally omitted; mcp_bridge is
+  deny-by-default per design §7 and the scenario author is expected to
+  add a ``permission`` atom configuration allowing the desired
+  ``mcp__*`` tools before pointing this at production.
+
+extensions:
+  # Inherit the default working set (operations + read/edit/write + bash +
+  # observability + prompts + skills + memory). Listing it as a nested
+  # manifest reference is *not* supported by the loader; we re-list the
+  # core atoms by hand here so the demo scenario is fully self-contained.
+  - module: agentm.extensions.builtin.operations_local
+  - module: agentm.extensions.builtin.tool_read
+  - module: agentm.extensions.builtin.tool_edit
+  - module: agentm.extensions.builtin.tool_write
+  - module: agentm.extensions.builtin.tool_bash
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: ""
+  - module: agentm.extensions.builtin.runtime_context
+
+  # --- the MCP bridge: placeholder command, replace before real use ---
+  - module: contrib.extensions.mcp_bridge
+    config:
+      servers:
+        - name: filesystem
+          transport: stdio
+          command: ["echo", "REPLACE-ME-WITH-A-REAL-MCP-SERVER"]
+          env: {}
+      naming: "mcp__{server}__{tool}"
+      timeout_seconds: 30
