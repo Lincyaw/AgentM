@@ -206,6 +206,24 @@ def _build_session_factory(
 
 
 @dataclass(frozen=True)
+class BindOptions:
+    """Raw bind-related typer arguments, before resolution.
+
+    ``BindSpec`` is the *resolved* shape (after YAML/CLI/defaults merge);
+    ``BindOptions`` is the *raw* shape the typer callback collects so we
+    don't push 8 kwargs through ``_arun``'s signature.
+    """
+
+    bind: str | None = None
+    bind_allow_uid: list[int] | None = None
+    bind_allow_any_uid: bool = False
+    bind_token_file: str | None = None
+    bind_allow_anonymous: bool = False
+    tls_cert: str | None = None
+    tls_key: str | None = None
+
+
+@dataclass(frozen=True)
 class BindSpec:
     """Resolved ``--bind`` configuration.
 
@@ -656,6 +674,16 @@ def cli(
 
     resolved_cwd = cwd or str(Path.cwd())
 
+    bind_opts = BindOptions(
+        bind=bind,
+        bind_allow_uid=bind_allow_uid,
+        bind_allow_any_uid=bind_allow_any_uid,
+        bind_token_file=str(bind_token_file) if bind_token_file else None,
+        bind_allow_anonymous=bind_allow_anonymous,
+        tls_cert=str(tls_cert) if tls_cert else None,
+        tls_key=str(tls_key) if tls_key else None,
+    )
+
     try:
         rc = asyncio.run(
             _arun(
@@ -665,13 +693,7 @@ def cli(
                 state_dir=state_dir,
                 provider_flag=provider,
                 model_flag=model,
-                bind=bind,
-                bind_allow_uid=bind_allow_uid,
-                bind_allow_any_uid=bind_allow_any_uid,
-                bind_token_file=str(bind_token_file) if bind_token_file else None,
-                bind_allow_anonymous=bind_allow_anonymous,
-                tls_cert=str(tls_cert) if tls_cert else None,
-                tls_key=str(tls_key) if tls_key else None,
+                bind_opts=bind_opts,
                 inproc_worker=not no_inproc_worker,
                 max_a2a_hops=max_a2a_hops,
                 check=check,
@@ -704,13 +726,7 @@ async def _arun(
     state_dir: Path | None,
     provider_flag: str | None,
     model_flag: str | None,
-    bind: str | None,
-    bind_allow_uid: list[int] | None,
-    bind_allow_any_uid: bool,
-    bind_token_file: str | None,
-    bind_allow_anonymous: bool,
-    tls_cert: str | None,
-    tls_key: str | None,
+    bind_opts: BindOptions,
     inproc_worker: bool,
     max_a2a_hops: int,
     check: bool,
@@ -729,13 +745,13 @@ async def _arun(
         resolved_cwd = cwd
 
     bind_spec = _resolve_bind(
-        bind=bind,
-        bind_allow_uid=bind_allow_uid,
-        bind_allow_any_uid=bind_allow_any_uid,
-        bind_token_file=bind_token_file,
-        bind_allow_anonymous=bind_allow_anonymous,
-        tls_cert=tls_cert,
-        tls_key=tls_key,
+        bind=bind_opts.bind,
+        bind_allow_uid=bind_opts.bind_allow_uid,
+        bind_allow_any_uid=bind_opts.bind_allow_any_uid,
+        bind_token_file=bind_opts.bind_token_file,
+        bind_allow_anonymous=bind_opts.bind_allow_anonymous,
+        tls_cert=bind_opts.tls_cert,
+        tls_key=bind_opts.tls_key,
         cfg=cfg,
     )
 

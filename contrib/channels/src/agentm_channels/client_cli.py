@@ -28,6 +28,18 @@ class ConnectSpec:
     uri: str = ""  # ws/wss
 
 
+@dataclass(frozen=True)
+class ConnectOptions:
+    """Raw client-side ``--connect`` typer arguments before resolution.
+
+    Per-CLI ``_arun`` helpers take this in place of three loose kwargs.
+    """
+
+    connect: str
+    token: str | None = None
+    tls_ca: str | None = None
+
+
 def resolve_connect(
     url: str,
     *,
@@ -73,4 +85,4 @@ def resolve_connect(
     )
 
 
-__all__ = ["ConnectError", "ConnectSpec", "resolve_connect"]
+__all__ = ["ConnectError", "ConnectOptions", "ConnectSpec", "resolve_connect"]
