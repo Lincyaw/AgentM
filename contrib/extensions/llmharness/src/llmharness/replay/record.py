@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 Phase = Literal["extractor", "auditor"]
-Status = Literal["ok", "no_call", "spawn_error", "malformed"]
+Status = Literal["ok", "no_call", "spawn_error", "prompt_error"]
 
 
 @dataclass

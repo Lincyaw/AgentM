@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -28,7 +29,7 @@ import typer
 
 from .chain import ChainResult, chain_replay_sync
 from .engine import PhaseResult
-from .record import ReplayRecord, iter_records, read_records
+from .record import Phase, ReplayRecord, iter_records
 from .runner import replay_auditor_record, replay_extractor_record
 
 app = typer.Typer(
@@ -71,20 +72,26 @@ def _load_prompt_override(path: str | None) -> str | None:
 
 
 def _pick_record(
-    path: Path, *, phase: str, turn: int | None, index: int | None
+    path: Path, *, phase: Phase, turn: int | None, index: int | None
 ) -> ReplayRecord:
-    records = read_records(path, phase=phase)  # type: ignore[arg-type]
-    if not records:
-        typer.echo(f"no {phase} records in {path}", err=True)
-        raise typer.Exit(code=1)
+    # When --turn is given we only need the last match — stream-iterate
+    # to avoid loading the entire sidecar (tens of MB on a 50-case run).
     if turn is not None:
-        candidates = [r for r in records if r.turn_index == turn]
-        if not candidates:
+        latest: ReplayRecord | None = None
+        for rec in iter_records(path):
+            if rec.phase == phase and rec.turn_index == turn:
+                latest = rec
+        if latest is None:
             typer.echo(
                 f"no {phase} record with turn_index={turn} in {path}", err=True
             )
             raise typer.Exit(code=1)
-        return candidates[-1]
+        return latest
+
+    records = [r for r in iter_records(path) if r.phase == phase]
+    if not records:
+        typer.echo(f"no {phase} records in {path}", err=True)
+        raise typer.Exit(code=1)
     if index is not None:
         try:
             return records[index]
@@ -147,6 +154,36 @@ _DiffOpt = Annotated[
 # --- commands ----------------------------------------------------------------
 
 
+_RunnerFn = Callable[..., Coroutine[Any, Any, PhaseResult]]
+_PHASE_RUNNERS: dict[Phase, _RunnerFn] = {
+    "extractor": replay_extractor_record,
+    "auditor": replay_auditor_record,
+}
+
+
+def _run_single(
+    phase: Phase,
+    *,
+    record: Path,
+    turn: int | None,
+    index: int | None,
+    cwd: Path,
+    provider: str | None,
+    prompt_override: str | None,
+    diff: bool,
+) -> None:
+    rec = _pick_record(record, phase=phase, turn=turn, index=index)
+    result = asyncio.run(
+        _PHASE_RUNNERS[phase](
+            rec,
+            cwd=str(cwd),
+            provider_override=_parse_provider(provider),
+            prompt_override=_load_prompt_override(prompt_override),
+        )
+    )
+    _print_result(result, rec, diff=diff)
+
+
 @app.command()
 def extractor(
     record: _RecordOpt,
@@ -158,16 +195,16 @@ def extractor(
     diff: _DiffOpt = False,
 ) -> None:
     """Rerun one extractor record."""
-    rec = _pick_record(record, phase="extractor", turn=turn, index=index)
-    result = asyncio.run(
-        replay_extractor_record(
-            rec,
-            cwd=str(cwd),
-            provider_override=_parse_provider(provider),
-            prompt_override=_load_prompt_override(prompt_override),
-        )
+    _run_single(
+        "extractor",
+        record=record,
+        turn=turn,
+        index=index,
+        cwd=cwd,
+        provider=provider,
+        prompt_override=prompt_override,
+        diff=diff,
     )
-    _print_result(result, rec, diff=diff)
 
 
 @app.command()
@@ -181,16 +218,16 @@ def auditor(
     diff: _DiffOpt = False,
 ) -> None:
     """Rerun one auditor record."""
-    rec = _pick_record(record, phase="auditor", turn=turn, index=index)
-    result = asyncio.run(
-        replay_auditor_record(
-            rec,
-            cwd=str(cwd),
-            provider_override=_parse_provider(provider),
-            prompt_override=_load_prompt_override(prompt_override),
-        )
+    _run_single(
+        "auditor",
+        record=record,
+        turn=turn,
+        index=index,
+        cwd=cwd,
+        provider=provider,
+        prompt_override=prompt_override,
+        diff=diff,
     )
-    _print_result(result, rec, diff=diff)
 
 
 @app.command(name="list")
