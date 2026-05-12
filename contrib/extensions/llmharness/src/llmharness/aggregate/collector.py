@@ -103,36 +103,90 @@ def _verdicts_from_auditor(auditor_firings: list[FiringRecord]) -> list[dict[str
     return out
 
 
-def _main_agent_messages(auditor_firings_records: list[ReplayRecord]) -> list[dict[str, Any]]:
-    """Pull the most complete trajectory snapshot.
+def _main_agent_messages(
+    auditor_records: list[ReplayRecord],
+    extractor_records: list[ReplayRecord],
+) -> list[dict[str, Any]]:
+    """Reconstruct the most complete main-agent trajectory.
 
-    The auditor receives the full serialised trajectory as
-    ``compose_kwargs.trajectory_snapshot`` at every firing — the last
-    ok firing's snapshot has the most coverage. Falls back to any
-    snapshot if no ok firings exist.
+    Two-stage stitch:
+
+    1. **Base**: the latest ``compose_kwargs.trajectory_snapshot`` from
+       a successful auditor firing. The auditor's snapshot is the
+       authoritative serialised trajectory at that firing — every
+       message up to ``turn_index`` is present.
+    2. **Tail**: any extractor firing whose ``turn_index`` is greater
+       than the base's last covered turn contributes its
+       ``payload.new_turns`` window. Extractor records are walked in
+       chronological order; messages whose ``index`` is already in the
+       base are skipped (idempotent merge).
+
+    Without the tail stitch, the case directory captures only up to
+    the last auditor firing — trailing main-agent turns disappear
+    when the run ends mid-auditor-interval, which is the common case.
     """
-    for rec in reversed(auditor_firings_records):
+    base: list[dict[str, Any]] = []
+    for rec in reversed(auditor_records):
         if rec.status == "ok":
             snap = (rec.compose_kwargs or {}).get("trajectory_snapshot")
             if isinstance(snap, list):
-                return list(snap)
-    for rec in reversed(auditor_firings_records):
-        snap = (rec.compose_kwargs or {}).get("trajectory_snapshot")
-        if isinstance(snap, list):
-            return list(snap)
-    return []
+                base = list(snap)
+                break
+    if not base:
+        # Fall back to any snapshot if no ok auditor firing.
+        for rec in reversed(auditor_records):
+            snap = (rec.compose_kwargs or {}).get("trajectory_snapshot")
+            if isinstance(snap, list):
+                base = list(snap)
+                break
+
+    # Highest message index already covered by the base.
+    seen_indices: set[int] = set()
+    max_index = -1
+    for msg in base:
+        idx = msg.get("index") if isinstance(msg, dict) else None
+        if isinstance(idx, int):
+            seen_indices.add(idx)
+            if idx > max_index:
+                max_index = idx
+
+    # Append from extractor records strictly after the base, in time
+    # order. ``payload.new_turns`` is the window the extractor saw
+    # since the prior cursor — concatenating in turn-order yields a
+    # continuous tail.
+    tail: list[dict[str, Any]] = []
+    for rec in sorted(extractor_records, key=lambda r: (r.ts_ns, r.turn_index)):
+        new_turns = (rec.payload or {}).get("new_turns")
+        if not isinstance(new_turns, list):
+            continue
+        for msg in new_turns:
+            if not isinstance(msg, dict):
+                continue
+            idx = msg.get("index")
+            if isinstance(idx, int):
+                if idx in seen_indices:
+                    continue
+                seen_indices.add(idx)
+            tail.append(msg)
+
+    return base + tail
 
 
 def collect_case(
     *,
     replay_path: Path,
     meta_path: Path | None = None,
+    sample_id_override: str | None = None,
+    dataset_name_override: str | None = None,
+    dataset_path_override: str | None = None,
 ) -> CaseData:
     """Build a :class:`CaseData` from one replay sidecar.
 
-    ``meta_path`` is optional; when missing, ``sample_id`` /
-    ``dataset_*`` fields fall back to ``None`` and ``case_id`` derives
-    from the replay file stem (the root_session_id).
+    Sample-id resolution precedence: explicit ``sample_id_override`` >
+    meta sidecar > ``None`` (case_id then derives from
+    ``root_session_id``). The overrides let the CLI inject case
+    metadata when the run did not mount ``llmharness.distill.binding``
+    (e.g. rca llm-eval runs).
     """
     records = list(iter_records(replay_path))
     extractor_records = [r for r in records if r.phase == "extractor"]
@@ -146,9 +200,21 @@ def collect_case(
     ]
 
     meta_obj = read_sample_meta(meta_path) if meta_path is not None else None
-    sample_id = meta_obj.sample_id if meta_obj is not None else None
-    dataset_name = meta_obj.dataset_name if meta_obj is not None else None
-    dataset_path = meta_obj.dataset_path if meta_obj is not None else None
+    sample_id = (
+        sample_id_override
+        if sample_id_override
+        else (meta_obj.sample_id if meta_obj is not None else None)
+    )
+    dataset_name = (
+        dataset_name_override
+        if dataset_name_override
+        else (meta_obj.dataset_name if meta_obj is not None else None)
+    )
+    dataset_path = (
+        dataset_path_override
+        if dataset_path_override
+        else (meta_obj.dataset_path if meta_obj is not None else None)
+    )
 
     root_session_id = records[0].root_session_id if records else replay_path.stem
     case_id = sample_id or root_session_id
@@ -177,7 +243,7 @@ def collect_case(
 
     return CaseData(
         meta=meta,
-        main_agent_messages=_main_agent_messages(auditor_records),
+        main_agent_messages=_main_agent_messages(auditor_records, extractor_records),
         extractor_firings=extractor_firings,
         auditor_firings=auditor_firings,
         graph_snapshots=_accumulate_graph(extractor_firings),
