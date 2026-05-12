@@ -39,7 +39,9 @@ _AGENTS_DIR = _RCA_ROOT / "agents"
 
 # ---------------------------------------------------------------------------
 # available_agents XML rendering — inlined from the former
-# agentm.core.lib.available_agents (this scenario is one of two consumers).
+# agentm.core.lib.available_agents. The cc extension keeps its own private
+# copy of the same logic; per-atom inlining is the §11-friendly shape now
+# that the shared core.lib helper is gone.
 # ---------------------------------------------------------------------------
 
 

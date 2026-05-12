@@ -179,6 +179,7 @@ class AgentMAgent(BaseAgent):
         from agentm.core.abi.loop import LoopConfig
         from agentm.core.abi.session_config import AgentSessionConfig
         from agentm.core.runtime.session import AgentSession
+        from agentm.core.runtime.session_factory import create_agent_session
         from rcabench_platform.v3.sdk.evaluation.v2 import AgentRCAOutput
 
         ctx: RunContext | None = kwargs.get("ctx")
@@ -241,7 +242,7 @@ class AgentMAgent(BaseAgent):
             loop_config=LoopConfig(max_turns=max_turns),
         )
 
-        session = await AgentSession.create(config)
+        session = await create_agent_session(AgentSession, config)
         try:
             if ctx is not None:
                 ctx.emit({"type": "running", "run_id": session.session_id})

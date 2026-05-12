@@ -9,7 +9,6 @@ from typing import Any
 from agentm.core.abi.messages import TextContent
 from agentm.core.abi import FunctionTool, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.extensions.builtin.artifact_store import ArtifactStore
 from agentm.core.abi.events import SessionReadyEvent
 from agentm.core.abi.extension import ExtensionAPI
 
@@ -52,20 +51,24 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
     # owned by the ``artifact_store`` extension is registered. Constructing
     # our own would create a parallel state-divergent store (see
     # PR #65 follow-up cleanup).
-    store_cell: list[ArtifactStore | None] = [None]
+    # Why: service-registry contracts are by-shape, not by-class — keep the
+    # by-name lookup and a duck-type guard so the artifact-store atom stays
+    # replaceable (§S4 pluggability). Importing the concrete ArtifactStore
+    # class here would re-create the cross-atom coupling we removed.
+    store_cell: list[Any] = [None]
 
     async def _on_session_ready(_event: SessionReadyEvent) -> None:
         store = api.get_service("artifact_store")
-        if not isinstance(store, ArtifactStore):
+        if store is None or not hasattr(store, "write_artifact"):
             raise RuntimeError(
                 "hypothesis_tools requires the 'artifact_store' extension to "
                 "be loaded for the same session"
             )
         store_cell[0] = store
 
-    def _store() -> ArtifactStore:
+    def _store() -> Any:
         store = store_cell[0]
-        if not isinstance(store, ArtifactStore):
+        if store is None:
             raise RuntimeError("hypothesis_tools called before session_ready")
         return store
 
