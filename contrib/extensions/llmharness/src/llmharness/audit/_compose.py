@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 _OBSERVABILITY_MODULE = "agentm.extensions.builtin.observability"
+_OPERATIONS_MODULE = "agentm.extensions.builtin.operations_local"
 _SYSTEM_PROMPT_MODULE = "agentm.extensions.builtin.system_prompt"
 _CARDS_TOOLS_MODULE = "llmharness.atoms.cards_tools"
 
@@ -33,6 +34,14 @@ def compose_audit_extensions(
     obs_cfg = {} if observability_config is UNSET else observability_config
     if obs_cfg is not None:
         out.append((_OBSERVABILITY_MODULE, dict(obs_cfg)))
+
+    # Post harness-collapse (AgentM commit e062913) the session factory
+    # fail-stops at freeze unless some atom registered an Operations
+    # bundle. Audit children never touch FS/bash, but the substrate
+    # check is unconditional — without this entry every spawn raises
+    # ExtensionLoadError("<operations>") and the audit pipeline becomes
+    # a silent no-op.
+    out.append((_OPERATIONS_MODULE, {}))
 
     cards_cfg = {} if cards_tools_config is UNSET else cards_tools_config
     if cards_cfg is not None:

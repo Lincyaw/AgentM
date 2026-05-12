@@ -58,7 +58,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from agentm.core.abi import (
     DecideTurnActionEvent,
@@ -67,6 +67,8 @@ from agentm.core.abi import (
     Stop,
     TurnEndEvent,
 )
+from agentm.core.abi.events import DiagnosticEvent, SessionShutdownEvent
+from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
@@ -75,10 +77,8 @@ from agentm.core.abi.messages import (
     text_message,
 )
 from agentm.core.abi.session import SessionEntry
-from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import SessionShutdownEvent
-from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.extensions import ExtensionManifest
 
 from ..audit import entry_types as _et
 from ..audit.auditor import (
@@ -266,9 +266,36 @@ def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _Bran
 # --- failure recording ------------------------------------------------------
 
 
+_FAILURE_DIAGNOSTIC_LEVEL: Literal["warning"] = "warning"
+
+
 def _record_failure(api: ExtensionAPI, entry_type: str, payload: dict[str, Any]) -> None:
-    """Single chokepoint for typed failure entries. Append-only; never raises."""
+    """Single chokepoint for typed failure entries.
+
+    Append-only on the session branch (consumed by ``_scan_branch`` and
+    downstream eval), AND simultaneously emit a ``DiagnosticEvent`` so
+    that the failure shows up in the OTel jsonl. Without the diagnostic
+    leg an audit-child crash leaves zero evidence on disk — burning the
+    extractor / auditor LLM quota and producing nothing — exactly the
+    silent-no-op mode that masked the post-harness-collapse Operations
+    fail-stop until a 50-case run was already spent. Never raises.
+    """
     api.session.append_entry(entry_type, payload)
+    reason_raw = payload.get("reason") if isinstance(payload, dict) else None
+    reason = str(reason_raw) if reason_raw is not None else ""
+    message = f"{entry_type}: {reason}" if reason else entry_type
+    try:
+        api.events.emit_sync(
+            DiagnosticEvent.CHANNEL,
+            DiagnosticEvent(
+                level=_FAILURE_DIAGNOSTIC_LEVEL,
+                source="llmharness.audit",
+                message=message,
+            ),
+        )
+    except Exception:
+        # Diagnostics must never break the audit loop. Fall through.
+        _logger.exception("llmharness audit diagnostic emit failed; suppressing.")
 
 
 def _window_is_non_trivial(messages_slice: list[AgentMessage]) -> bool:

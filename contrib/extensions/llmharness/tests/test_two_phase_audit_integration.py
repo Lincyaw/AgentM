@@ -253,6 +253,10 @@ def _build_session_config(*, cwd: str, provider_module: str) -> AgentSessionConf
         cwd=cwd,
         provider=(provider_module, {}),
         extensions=[
+            # Satisfies the harness-collapse Operations fail-stop without
+            # bringing FS/bash into the test surface; the audit child gets
+            # its own Operations from `compose_audit_extensions`.
+            ("agentm.extensions.builtin.operations_local", {}),
             (
                 "llmharness.adapters.agentm",
                 {
