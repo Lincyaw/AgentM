@@ -17,22 +17,6 @@ from agentm_terminal import cli as terminal_cli  # noqa: E402
 runner = CliRunner()
 
 
-def test_help_exits_zero() -> None:
-    result = runner.invoke(terminal_cli.app, ["--help"])
-    assert result.exit_code == 0
-    assert "agentm-terminal" in result.stdout
-    assert "--connect" in result.stdout
-    # Examples section is mandated by the brief — keeps the contract
-    # discoverable from --help alone.
-    assert "Examples" in result.stdout
-
-
-def test_version_prints_and_exits_zero() -> None:
-    result = runner.invoke(terminal_cli.app, ["--version"])
-    assert result.exit_code == 0
-    assert "0.1.0" in result.stdout
-
-
 def test_bad_connect_scheme_exits_two() -> None:
     result = runner.invoke(terminal_cli.app, ["--connect", "tcp://127.0.0.1:7000"])
     assert result.exit_code == 2

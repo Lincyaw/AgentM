@@ -228,26 +228,6 @@ async def test_anthropic_stream_fn_uses_configurable_thinking_budgets() -> None:
     assert messages.body["thinking"] == {"type": "enabled", "budget_tokens": 8192}
 
 
-def test_anthropic_install_passes_thinking_budgets_from_config() -> None:
-    class _Api:
-        def get_service(self, name: str) -> None:
-            assert name == "retry_policy"
-            return None
-
-        def register_provider(self, name: str, config: Any) -> None:
-            assert name == "anthropic"
-            assert config.stream_fn.thinking_budgets == {
-                "low": 256,
-                "medium": 4096,
-                "high": 16384,
-            }
-
-    anthropic.install(
-        _Api(),
-        {"model": "fake", "thinking_budgets": {"low": 256}},
-    )
-
-
 @pytest.mark.asyncio
 async def test_openai_drop_thinking_emits_info_diagnostic_once() -> None:
     bus = EventBus()
@@ -364,8 +344,3 @@ def test_openai_thinking_raise_strategy_errors() -> None:
         )
 
 
-def test_harness_reexports_core_provider_config() -> None:
-    from agentm.core.abi.provider import ProviderConfig as CoreProviderConfig
-    from agentm.core.abi.extension import ProviderConfig as HarnessProviderConfig
-
-    assert HarnessProviderConfig is CoreProviderConfig

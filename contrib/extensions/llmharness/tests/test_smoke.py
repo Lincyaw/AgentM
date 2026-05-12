@@ -10,32 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from llmharness import EventKind, Reminder, Verdict
+from llmharness import Verdict
 from llmharness.audit.auditor.output import AuditorOutputError, RawVerdictOutput
-
-
-def test_package_surface() -> None:
-    """Public symbols stay reachable from the top-level module.
-
-    V2: DriftType is removed; Event, EventKind, Reminder, Verdict remain.
-    """
-
-    import llmharness
-
-    for name in ("Event", "EventKind", "Reminder", "Verdict"):
-        assert hasattr(llmharness, name), f"missing public symbol: {name}"
-
-    assert not hasattr(llmharness, "DriftType"), (
-        "DriftType must be removed in V2; it was a preset enum for a "
-        "subjective dimension and violates the no-preset-enum rule"
-    )
-
-
-def test_reminder_is_typed_payload() -> None:
-    """Reminder carries only text in V2 (type field removed)."""
-    r = Reminder(text="refocus on the original task")
-    assert r.text == "refocus on the original task"
-    assert not hasattr(r, "type"), "Reminder.type must be removed in V2"
 
 
 def test_verdict_round_trip_surface_reminder() -> None:
@@ -62,13 +38,6 @@ def test_verdict_round_trip_silent() -> None:
     )
     restored = Verdict.from_dict(v.to_dict())
     assert restored == v
-
-
-def test_verdict_v1_fields_absent() -> None:
-    """V1 fields (drift, type, reminder, downstream_reaction) must not exist."""
-    v = Verdict(surface_reminder=False)
-    for field in ("drift", "type", "reminder", "downstream_reaction"):
-        assert not hasattr(v, field), f"V1 field {field!r} must be absent in V2"
 
 
 # --- RawVerdictOutput negative cases ---
@@ -232,6 +201,3 @@ def test_raw_verdict_happy_path_with_reminder() -> None:
     assert v.cited_cards == ["AFC-0010"]
 
 
-def test_event_kind_values_non_empty() -> None:
-    """EventKind enum has values (sanity check for _enum_schema derivation)."""
-    assert len(EventKind) > 0

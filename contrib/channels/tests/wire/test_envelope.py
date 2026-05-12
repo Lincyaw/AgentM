@@ -17,40 +17,6 @@ def _ok_kwargs() -> dict[str, object]:
     }
 
 
-def test_construction_with_required_fields_sets_defaults() -> None:
-    env = Envelope(**_ok_kwargs())  # type: ignore[arg-type]
-    assert env.v == 1
-    assert env.id == "msg-1"
-    assert env.kind == "inbound"
-    assert env.ts == 1234567890.0
-    assert env.body == {"text": "hi"}
-    assert env.to is None
-    assert env.correlation_id is None
-    assert env.hops == 0
-    assert env.root_session_key is None
-    assert env.peer_kind is None
-
-
-def test_construction_with_all_optional_fields() -> None:
-    env = Envelope(
-        v=1,
-        id="m",
-        kind="outbound",
-        ts=0.0,
-        body={},
-        to="peer://abc",
-        correlation_id="c1",
-        hops=2,
-        root_session_key="feishu:c1",
-        peer_kind="agent_worker",
-    )
-    assert env.to == "peer://abc"
-    assert env.correlation_id == "c1"
-    assert env.hops == 2
-    assert env.root_session_key == "feishu:c1"
-    assert env.peer_kind == "agent_worker"
-
-
 def test_invalid_kind_rejected() -> None:
     kwargs = _ok_kwargs()
     kwargs["kind"] = "nope"

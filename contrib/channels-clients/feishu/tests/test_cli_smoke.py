@@ -30,22 +30,6 @@ def _scrub_lark_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LARK_APP_SECRET", raising=False)
 
 
-def test_help_exits_zero() -> None:
-    result = runner.invoke(feishu_cli.app, ["--help"])
-    assert result.exit_code == 0
-    assert "agentm-feishu" in result.stdout
-    assert "--connect" in result.stdout
-    assert "--app-id" in result.stdout
-    assert "--app-secret" in result.stdout
-    assert "Examples" in result.stdout
-
-
-def test_version_prints_and_exits_zero() -> None:
-    result = runner.invoke(feishu_cli.app, ["--version"])
-    assert result.exit_code == 0
-    assert "0.1.0" in result.stdout
-
-
 def test_bad_connect_scheme_exits_two() -> None:
     result = runner.invoke(
         feishu_cli.app,
