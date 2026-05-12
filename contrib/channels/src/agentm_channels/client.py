@@ -19,6 +19,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from agentm_channels.transport import ClientTransport, UnixClientTransport
 from agentm_channels.wire import (
     KIND_BYE,
     KIND_DELIVERY_BATCH,
@@ -56,15 +57,31 @@ class WireClient:
 
     def __init__(
         self,
-        socket_path: str,
-        peer_id: str,
-        peer_kind: str,
+        socket_path_or_transport: str | ClientTransport | None = None,
+        peer_id: str = "",
+        peer_kind: str = "",
         *,
+        socket_path: str | None = None,
+        transport: ClientTransport | None = None,
         token: str | None = None,
         on_outbound: OutboundHandler | None = None,
         capabilities: dict[str, Any] | None = None,
     ) -> None:
-        self._socket_path = socket_path
+        # Back-compat positional shim: callers historically passed
+        # ``WireClient(socket_path, peer_id, peer_kind, ...)``. New
+        # callers may pass ``transport=`` (or ``socket_path=``) by keyword.
+        if isinstance(socket_path_or_transport, str):
+            if socket_path is None:
+                socket_path = socket_path_or_transport
+        elif socket_path_or_transport is not None:
+            transport = socket_path_or_transport
+        if transport is None:
+            if socket_path is None:
+                raise TypeError(
+                    "WireClient requires either transport= or socket_path="
+                )
+            transport = UnixClientTransport(socket_path)
+        self._transport = transport
         self._peer_id = peer_id
         self._peer_kind = peer_kind
         self._token = token
@@ -80,9 +97,7 @@ class WireClient:
     # -- lifecycle ----------------------------------------------------
 
     async def connect(self) -> None:
-        self._reader, self._writer = await asyncio.open_unix_connection(
-            path=self._socket_path
-        )
+        self._reader, self._writer = await self._transport.connect()
         hello = Envelope(
             v=WIRE_VERSION,
             id=f"hello-{self._peer_id}-{int(time.time() * 1000)}",
