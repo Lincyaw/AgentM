@@ -23,16 +23,16 @@ from typing import Any
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
+from .._atom_constants import (
+    EXTRACTOR_STATE_SERVICE_KEY,
+)
+from .._atom_constants import (
+    EXTRACTOR_TOOLS_MODULE as _EXTRACTOR_TOOLS_MODULE,
+)
 from .._compose import UNSET, compose_audit_extensions
 from .prompt import EXTRACTOR_SYSTEM_PROMPT
 from .state import ExtractionState
 from .tools import build_extractor_tools
-
-EXTRACTOR_STATE_SERVICE_KEY = "llmharness.extractor_state"
-"""Service key the adapter uses to publish the per-firing ExtractionState."""
-
-_EXTRACTOR_TOOLS_MODULE = "llmharness.audit.extractor.extensions"
-
 
 MANIFEST = ExtensionManifest(
     name="extractor_tools",

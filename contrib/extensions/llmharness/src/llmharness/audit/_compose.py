@@ -11,10 +11,13 @@ from __future__ import annotations
 
 from typing import Any
 
-_OBSERVABILITY_MODULE = "agentm.extensions.builtin.observability"
-_OTEL_TRACING_MODULE = "agentm.extensions.builtin.otel_tracing"
-_OPERATIONS_MODULE = "agentm.extensions.builtin.operations_local"
-_SYSTEM_PROMPT_MODULE = "agentm.extensions.builtin.system_prompt"
+from ._atom_constants import (
+    OBSERVABILITY_MODULE,
+    OPERATIONS_MODULE,
+    OTEL_TRACING_MODULE,
+    SYSTEM_PROMPT_MODULE,
+)
+
 _CARDS_TOOLS_MODULE = "llmharness.atoms.cards_tools"
 
 # Distinguishes "default — include with empty config" from "explicit None
@@ -35,7 +38,7 @@ def compose_audit_extensions(
 
     obs_cfg = {} if observability_config is UNSET else observability_config
     if obs_cfg is not None:
-        out.append((_OBSERVABILITY_MODULE, dict(obs_cfg)))
+        out.append((OBSERVABILITY_MODULE, dict(obs_cfg)))
 
     # OTLP span emission, parented to the main session's root span via the
     # ``_session_root_contexts`` registry inside the otel_tracing atom.
@@ -43,7 +46,7 @@ def compose_audit_extensions(
     # always include.
     otel_cfg = {} if otel_tracing_config is UNSET else otel_tracing_config
     if otel_cfg is not None:
-        out.append((_OTEL_TRACING_MODULE, dict(otel_cfg)))
+        out.append((OTEL_TRACING_MODULE, dict(otel_cfg)))
 
     # Post harness-collapse (AgentM commit e062913) the session factory
     # fail-stops at freeze unless some atom registered an Operations
@@ -51,7 +54,7 @@ def compose_audit_extensions(
     # check is unconditional — without this entry every spawn raises
     # ExtensionLoadError("<operations>") and the audit pipeline becomes
     # a silent no-op.
-    out.append((_OPERATIONS_MODULE, {}))
+    out.append((OPERATIONS_MODULE, {}))
 
     cards_cfg = {} if cards_tools_config is UNSET else cards_tools_config
     if cards_cfg is not None:
@@ -60,7 +63,7 @@ def compose_audit_extensions(
     out.append((submit_tool_module, {}))
     out.append(
         (
-            _SYSTEM_PROMPT_MODULE,
+            SYSTEM_PROMPT_MODULE,
             {"prompt": prompt_override if prompt_override is not None else default_prompt},
         )
     )
