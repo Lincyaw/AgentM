@@ -1,0 +1,276 @@
+"""Fail-stop tests for the case-aggregation pipeline.
+
+Why fail-stop: the aggregator is the source-of-truth view for human
+case review and any downstream training-data export. If sequencing,
+graph accumulation, or per-firing input/output capture drifts, the
+review will not match the run and the SFT data derived from these
+files will be wrong.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from llmharness.aggregate import collect_case, write_case
+from llmharness.aggregate.case import CaseLayout
+
+
+def _replay_record(
+    *,
+    phase: str,
+    turn_index: int,
+    ts_ns: int,
+    root_session_id: str,
+    compose_kwargs: dict[str, Any],
+    payload: dict[str, Any],
+    output: dict[str, Any] | None,
+    status: str = "ok",
+) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "turn_index": turn_index,
+        "root_session_id": root_session_id,
+        "ts_ns": ts_ns,
+        "compose_kwargs": compose_kwargs,
+        "payload": payload,
+        "provider": None,
+        "output": output,
+        "status": status,
+        "error": None,
+        "latency_ms": 100,
+        "extras": {},
+    }
+
+
+@pytest.fixture
+def sample_run(tmp_path: Path) -> tuple[Path, Path]:
+    """One sample's worth of replay log + meta sidecar."""
+    sid = "sess-abc123"
+    replay_path = tmp_path / "audit_replay" / f"{sid}.jsonl"
+    meta_path = tmp_path / "audit_replay" / f"{sid}.meta.json"
+    replay_path.parent.mkdir(parents=True)
+
+    traj_snapshot = [
+        {"index": 0, "role": "user", "content": [{"type": "text", "text": "go"}]},
+        {"index": 1, "role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+    ]
+
+    records = [
+        _replay_record(
+            phase="extractor",
+            turn_index=1,
+            ts_ns=1_000_000_000,
+            root_session_id=sid,
+            compose_kwargs={},
+            payload={"new_turns": traj_snapshot[:1], "recent_graph": []},
+            output={
+                "events": [
+                    {"id": 1, "kind": "task", "summary": "go", "source_turns": [0]}
+                ],
+                "edges": [],
+                "dropped_edges": [],
+            },
+        ),
+        _replay_record(
+            phase="extractor",
+            turn_index=2,
+            ts_ns=2_000_000_000,
+            root_session_id=sid,
+            compose_kwargs={},
+            payload={"new_turns": traj_snapshot[1:], "recent_graph": []},
+            output={
+                "events": [
+                    {"id": 1, "kind": "hyp", "summary": "h", "source_turns": [1]}
+                ],
+                "edges": [],
+                "dropped_edges": [],
+            },
+        ),
+        _replay_record(
+            phase="auditor",
+            turn_index=2,
+            ts_ns=3_000_000_000,
+            root_session_id=sid,
+            compose_kwargs={
+                "trajectory_snapshot": traj_snapshot,
+                "events": [],
+                "edges": [],
+                "findings": [],
+                "check_errors": {},
+                "continuation_notes": [],
+                "summary_threshold": 30,
+                "tools": ["submit_verdict"],
+            },
+            payload={"graph": [], "recent_verdicts": []},
+            output={
+                "surface_reminder": True,
+                "reminder_text": "verify",
+                "matched_event_ids": [1],
+                "continuation_notes": ["watch hyp 1"],
+                "cited_cards": [],
+            },
+        ),
+    ]
+
+    with replay_path.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+
+    meta_path.write_text(
+        json.dumps(
+            {
+                "sample_id": "rca-mysql-001",
+                "dataset_name": "rca-toy",
+                "dataset_path": "/data/rca.jsonl",
+                "root_session_id": sid,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    return replay_path, meta_path
+
+
+# --- collector --------------------------------------------------------------
+
+
+def test_case_id_prefers_sample_id_over_session_id(sample_run: tuple[Path, Path]) -> None:
+    replay_path, meta_path = sample_run
+    case = collect_case(replay_path=replay_path, meta_path=meta_path)
+    assert case.meta.case_id == "rca-mysql-001"
+    assert case.meta.root_session_id == "sess-abc123"
+    assert case.meta.sample_id == "rca-mysql-001"
+
+
+def test_case_id_falls_back_to_session_id_when_meta_missing(
+    sample_run: tuple[Path, Path],
+) -> None:
+    replay_path, _meta = sample_run
+    case = collect_case(replay_path=replay_path, meta_path=None)
+    assert case.meta.case_id == "sess-abc123"
+    assert case.meta.sample_id is None
+
+
+def test_extractor_firings_are_sequenced_in_arrival_order(
+    sample_run: tuple[Path, Path],
+) -> None:
+    replay_path, meta_path = sample_run
+    case = collect_case(replay_path=replay_path, meta_path=meta_path)
+    assert [fr.sequence for fr in case.extractor_firings] == [1, 2]
+    assert [fr.turn_index for fr in case.extractor_firings] == [1, 2]
+
+
+def test_graph_snapshots_accumulate_across_firings(
+    sample_run: tuple[Path, Path],
+) -> None:
+    replay_path, meta_path = sample_run
+    case = collect_case(replay_path=replay_path, meta_path=meta_path)
+    assert len(case.graph_snapshots) == 2
+    assert len(case.graph_snapshots[0].events) == 1
+    # Second snapshot must be cumulative — event from firing 1 still present.
+    assert len(case.graph_snapshots[1].events) == 2
+
+
+def test_main_agent_messages_come_from_last_auditor_trajectory_snapshot(
+    sample_run: tuple[Path, Path],
+) -> None:
+    replay_path, meta_path = sample_run
+    case = collect_case(replay_path=replay_path, meta_path=meta_path)
+    assert len(case.main_agent_messages) == 2
+    assert case.main_agent_messages[0]["role"] == "user"
+    assert case.main_agent_messages[1]["role"] == "assistant"
+
+
+def test_verdict_counts_match_auditor_output(sample_run: tuple[Path, Path]) -> None:
+    replay_path, meta_path = sample_run
+    case = collect_case(replay_path=replay_path, meta_path=meta_path)
+    assert case.meta.surfaced_reminders == 1
+    assert case.meta.silent_verdicts == 0
+    assert case.verdicts[0]["reminder_text"] == "verify"
+
+
+# --- writer ----------------------------------------------------------------
+
+
+def test_write_case_produces_canonical_layout(
+    sample_run: tuple[Path, Path], tmp_path: Path
+) -> None:
+    replay_path, meta_path = sample_run
+    case = collect_case(replay_path=replay_path, meta_path=meta_path)
+    out = tmp_path / "cases"
+    case_dir = write_case(case, out)
+
+    layout = CaseLayout(root=case_dir)
+    assert layout.meta_path.is_file()
+    assert layout.main_agent_path.is_file()
+    assert layout.verdicts_path.is_file()
+    assert layout.trajectory_path.is_file()
+    assert layout.readme_path.is_file()
+    assert layout.firing_path("extractor", 1, 1).is_file()
+    assert layout.firing_path("extractor", 2, 2).is_file()
+    assert layout.firing_path("auditor", 1, 2).is_file()
+    assert layout.snapshot_path(1).is_file()
+    assert layout.snapshot_path(2).is_file()
+
+
+def test_main_agent_jsonl_is_lossless_relative_to_collector(
+    sample_run: tuple[Path, Path], tmp_path: Path
+) -> None:
+    replay_path, meta_path = sample_run
+    case = collect_case(replay_path=replay_path, meta_path=meta_path)
+    case_dir = write_case(case, tmp_path / "cases")
+
+    with (case_dir / "main_agent.jsonl").open(encoding="utf-8") as fh:
+        rows = [json.loads(line) for line in fh if line.strip()]
+    assert rows == case.main_agent_messages
+
+
+def test_trajectory_jsonl_lists_all_firings_with_refs(
+    sample_run: tuple[Path, Path], tmp_path: Path
+) -> None:
+    replay_path, meta_path = sample_run
+    case = collect_case(replay_path=replay_path, meta_path=meta_path)
+    case_dir = write_case(case, tmp_path / "cases")
+
+    with (case_dir / "trajectory.jsonl").open(encoding="utf-8") as fh:
+        rows = [json.loads(line) for line in fh if line.strip()]
+    assert len(rows) == 3  # 2 extractor + 1 auditor
+    sources = [r["source"] for r in rows]
+    assert sources.count("extractor") == 2
+    assert sources.count("auditor") == 1
+    # Every ref must point at an existing file in the case dir.
+    for row in rows:
+        assert (case_dir / row["ref"]).is_file()
+
+
+def test_failed_extractor_firing_does_not_advance_graph_snapshot(
+    tmp_path: Path,
+) -> None:
+    """If an extractor firing errors, the cursor doesn't move and no
+    snapshot is produced — mirrors the live adapter's behavior."""
+    sid = "sess-fail"
+    replay_path = tmp_path / "audit_replay" / f"{sid}.jsonl"
+    replay_path.parent.mkdir(parents=True)
+    records = [
+        _replay_record(
+            phase="extractor",
+            turn_index=1,
+            ts_ns=1,
+            root_session_id=sid,
+            compose_kwargs={},
+            payload={},
+            output=None,
+            status="spawn_error",
+        ),
+    ]
+    with replay_path.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+
+    case = collect_case(replay_path=replay_path, meta_path=None)
+    assert case.meta.extractor_firings == 1
+    assert case.graph_snapshots == []
