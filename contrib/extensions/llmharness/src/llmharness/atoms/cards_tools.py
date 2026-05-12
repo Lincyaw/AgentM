@@ -19,8 +19,8 @@ import json
 from typing import Any
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
+from agentm.extensions import ExtensionManifest
 
 from ..cards import cards_get as _cards_get
 from ..cards import cards_list as _cards_list

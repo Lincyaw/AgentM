@@ -24,6 +24,7 @@ dev = [
 
 [project.scripts]
 llmharness = "llmharness.cli:main"
+llmharness-replay = "llmharness.replay.cli:main"
 
 [build-system]
 requires = ["hatchling"]

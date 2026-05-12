@@ -46,8 +46,8 @@ from agentm.core.abi import (
     ToolCallBlock,
 )
 from agentm.core.abi.extension import ProviderConfig
-from agentm.core.runtime.session import AgentSession
 from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.runtime.session import AgentSession
 
 from llmharness.audit.entry_types import (
     AUDIT_EDGE,
@@ -306,6 +306,26 @@ async def test_happy_path_writes_event_edge_and_cursor(tmp_path: Path) -> None:
 
     assert _entries(session, EXTRACTOR_NO_CALL) == []
     assert _entries(session, EXTRACTOR_EMPTY) == []
+
+    # Replay sidecar contract: the live adapter must write at least one
+    # extractor record under .agentm/audit_replay/<root>.jsonl with the
+    # parsed submit_events output preserved verbatim. Without this the
+    # offline replay CLI would silently have no inputs.
+    from llmharness.replay.record import iter_records
+
+    replay_dir = tmp_path / ".agentm" / "audit_replay"
+    assert replay_dir.exists(), "audit_replay/ directory was not created"
+    sidecars = list(replay_dir.glob("*.jsonl"))
+    assert len(sidecars) == 1, f"expected exactly one sidecar, got {sidecars}"
+    records = list(iter_records(sidecars[0]))
+    assert records, "sidecar file is empty"
+    extractor_records = [r for r in records if r.phase == "extractor"]
+    assert extractor_records, "no extractor record written to sidecar"
+    rec = extractor_records[-1]
+    assert rec.status == "ok"
+    assert rec.output is not None
+    assert "events" in rec.output and len(rec.output["events"]) == 2
+    assert "edges" in rec.output and len(rec.output["edges"]) == 1
 
 
 # --- Scenario 2: partial (witness retry exhausted) -------------------------
