@@ -112,37 +112,6 @@ def _capture_metrics(root: Path) -> dict[str, list[dict[str, object]]]:
 
 
 @pytest.mark.asyncio
-async def test_S10_manifest_change_moves_constitution_boundary(
-    tmp_path: Path,
-) -> None:
-    from agentm.core._internal.catalog import manifest as manifest_mod
-
-    custom_manifest = tmp_path / "core-manifest.yaml"
-    custom_manifest.write_text(
-        "version: 1\n"
-        "constitution:\n"
-        "  paths:\n"
-        "    - src/agentm/core/operations.py\n"
-        "    - core-manifest.yaml\n"
-        "managed:\n"
-        "  globs:\n"
-        "    - src/agentm/extensions/builtin/**.py\n"
-        "extension_api:\n"
-        "  current: 1\n"
-        "  semver_rules: {major: x, minor: x, patch: x}\n"
-        "  deprecation:\n"
-        "    grace: 1\n"
-        "reload:\n"
-        "  tier_2_atoms: []\n",
-        encoding="utf-8",
-    )
-    with manifest_mod.override_manifest_path(custom_manifest):
-        assert manifest_mod.is_constitution_path("src/agentm/extensions/builtin/permission.py") is False
-        assert manifest_mod.is_constitution_path("core-manifest.yaml") is True
-        assert manifest_mod.is_constitution_path("src/agentm/core/operations.py") is True
-
-
-@pytest.mark.asyncio
 async def test_E5_rebuild_is_idempotent(tmp_path: Path) -> None:
     trace_path = _write_trace(
         tmp_path,

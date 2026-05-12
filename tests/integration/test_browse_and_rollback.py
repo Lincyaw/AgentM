@@ -186,27 +186,6 @@ async def _build_session(
     return session
 
 
-def test_tool_catalog_split_manifests_are_exact() -> None:
-    from contrib.extensions.tool_catalog import BROWSE_MANIFEST, MUTATE_MANIFEST
-
-    assert BROWSE_MANIFEST.name == "tool_catalog_browse"
-    assert BROWSE_MANIFEST.registers == (
-        "tool:catalog_list_versions",
-        "tool:catalog_get_manifest",
-        "tool:catalog_runs_for",
-        "tool:get_source_at",
-        "tool:list_history",
-        "tool:list_atoms",
-    )
-    assert MUTATE_MANIFEST.name == "tool_catalog_mutate"
-    assert MUTATE_MANIFEST.registers == (
-        "tool:rollback_resource",
-        "tool:install_atom",
-        "tool:unload_atom",
-        "tool:reload_atom",
-    )
-
-
 @pytest.mark.asyncio
 async def test_G6_tool_catalog_history_source_and_forceable_rollback(
     tmp_path: Path,

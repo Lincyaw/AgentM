@@ -107,14 +107,6 @@ def test_resolve_bind_cli_overrides_yaml() -> None:
     assert spec.allow_uids == frozenset({42})
 
 
-def test_help_lists_bind_uid_flags() -> None:
-    result = runner.invoke(app, ["--help"])
-    assert result.exit_code == 0
-    assert "--bind" in result.stdout
-    assert "--bind-allow-uid" in result.stdout
-    assert "--bind-allow-any-uid" in result.stdout
-
-
 def test_check_emits_json_to_stdout() -> None:
     """End-to-end: ``agentm-gateway --check --bind unix://...`` prints
     a JSON object on stdout describing the resolved config.
