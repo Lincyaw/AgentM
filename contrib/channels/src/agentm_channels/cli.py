@@ -214,7 +214,10 @@ class BindSpec:
 
     For ws/wss scheme: ``host`` / ``port`` / ``path`` are set, ``tokens``
     holds the bearer-token allow-list (empty set when anonymous mode
-    is explicitly opted into via ``--bind-allow-anonymous``).
+    is explicitly opted into via ``--bind-allow-anonymous``). TLS
+    material on the server side is cert + key only; there is no
+    client-cert verification today (a server ``--tls-ca`` knob would
+    be a premature feature).
     """
 
     scheme: str
@@ -229,7 +232,6 @@ class BindSpec:
     allow_anonymous: bool = False
     tls_cert: str | None = None
     tls_key: str | None = None
-    tls_ca: str | None = None
 
 
 def _load_tokens_file(path: str) -> set[str]:
@@ -260,7 +262,6 @@ def _resolve_bind(
     bind_allow_anonymous: bool = False,
     tls_cert: str | None = None,
     tls_key: str | None = None,
-    tls_ca: str | None = None,
     cfg: dict[str, Any],
 ) -> BindSpec:
     """Merge CLI flags > yaml ``bind:`` section > shared default.
@@ -283,12 +284,11 @@ def _resolve_bind(
 
     eff_tls_cert = tls_cert or (yaml_tls.get("cert") if yaml_tls else None)
     eff_tls_key = tls_key or (yaml_tls.get("key") if yaml_tls else None)
-    eff_tls_ca = tls_ca or (yaml_tls.get("ca") if yaml_tls else None)
 
     if scheme == "unix":
-        if eff_tls_cert or eff_tls_key or eff_tls_ca:
+        if eff_tls_cert or eff_tls_key:
             raise SystemExit(
-                "--tls-cert/--tls-key/--tls-ca are only valid with ws://wss:// binds, "
+                "--tls-cert/--tls-key are only valid with ws://wss:// binds, "
                 f"not {url!r}."
             )
         socket_path = parsed.path or parsed.netloc
@@ -392,7 +392,6 @@ def _resolve_bind(
         allow_anonymous=bool(bind_allow_anonymous) and not tokens,
         tls_cert=eff_tls_cert,
         tls_key=eff_tls_key,
-        tls_ca=eff_tls_ca,
     )
 
 
@@ -409,8 +408,6 @@ def _build_server_transport(spec: BindSpec) -> ServerTransport:
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         assert spec.tls_cert is not None and spec.tls_key is not None
         ssl_context.load_cert_chain(certfile=spec.tls_cert, keyfile=spec.tls_key)
-        if spec.tls_ca:
-            ssl_context.load_verify_locations(cafile=spec.tls_ca)
     return WebSocketServerTransport(
         host=spec.host,
         port=spec.port,
@@ -571,17 +568,6 @@ def cli(
             help="TLS private key (PEM) for wss:// binds. Required for wss://.",
         ),
     ] = None,
-    tls_ca: Annotated[
-        Path | None,
-        typer.Option(
-            "--tls-ca",
-            metavar="PATH",
-            help=(
-                "Optional CA bundle (PEM). Loaded into the server SSL context "
-                "for future client-cert verification; not enforced today."
-            ),
-        ),
-    ] = None,
     bind_allow_uid: Annotated[
         list[int] | None,
         typer.Option(
@@ -685,7 +671,6 @@ def cli(
                 bind_allow_anonymous=bind_allow_anonymous,
                 tls_cert=str(tls_cert) if tls_cert else None,
                 tls_key=str(tls_key) if tls_key else None,
-                tls_ca=str(tls_ca) if tls_ca else None,
                 inproc_worker=not no_inproc_worker,
                 max_a2a_hops=max_a2a_hops,
                 check=check,
@@ -725,7 +710,6 @@ async def _arun(
     bind_allow_anonymous: bool,
     tls_cert: str | None,
     tls_key: str | None,
-    tls_ca: str | None,
     inproc_worker: bool,
     max_a2a_hops: int,
     check: bool,
@@ -751,7 +735,6 @@ async def _arun(
         bind_allow_anonymous=bind_allow_anonymous,
         tls_cert=tls_cert,
         tls_key=tls_key,
-        tls_ca=tls_ca,
         cfg=cfg,
     )
 
