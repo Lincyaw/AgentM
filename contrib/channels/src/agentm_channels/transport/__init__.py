@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .base import ClientTransport, ConnectionHandler, ServerTransport
 from .unix import UnixClientTransport, UnixServerTransport
+from .websocket import WebSocketClientTransport, WebSocketServerTransport
 
 __all__ = [
     "ClientTransport",
@@ -17,4 +18,6 @@ __all__ = [
     "ServerTransport",
     "UnixClientTransport",
     "UnixServerTransport",
+    "WebSocketClientTransport",
+    "WebSocketServerTransport",
 ]
