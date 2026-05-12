@@ -139,7 +139,7 @@ One line per phase invocation. Source: `replay/record.py`.
   "ts_ns": 1700000000000000000,
 
   "compose_kwargs": {
-    "prompt_override": null,
+    "base_prompt": "<resolved framing text>",
     "cards_tools_config": {},
     "observability_config": {},
     "trajectory_snapshot": [...],   // auditor only
@@ -149,7 +149,8 @@ One line per phase invocation. Source: `replay/record.py`.
     "findings": [...],              // auditor only
     "check_errors": {},             // auditor only
     "continuation_notes": [],       // auditor only
-    "summary_threshold": 30         // auditor only
+    "summary_threshold": 30,        // auditor only
+    "tools": ["submit_verdict"]     // auditor only — resolved tool list
   },
 
   "payload": {

@@ -1,15 +1,19 @@
-"""Fail-stop tests for the v3 auditor degradation rule (design §4.g).
+"""Fail-stop tests for the auditor degradation rule.
 
 The auditor prompt switches from full to degraded payload when the event
 count crosses ``audit_summary_threshold`` (default 30). In degraded mode,
 witness fields (``cited_entities``, ``cited_quote``) and per-side
-source-turn tuples are stripped from the embedded edge JSON, and a
-note tells the auditor to use ``get_event_detail([ids])`` to recover
-them.
+source-turn tuples are stripped from the embedded edge JSON, and the
+GRAPH section header surfaces a ``degraded — threshold=N, witness fields
+stripped`` marker.
 
 Why fail-stop: getting this wrong makes the auditor either (a) overflow
 its context budget on large graphs, or (b) silently lose witness
 information when degraded — both visible only through prompt inspection.
+
+Drill-down language (``get_event_detail`` etc.) is no longer injected
+dynamically; it lives in the chosen framing file. See
+``test_auditor_prompt_variants.py`` for prompt-file coverage.
 """
 
 from __future__ import annotations
@@ -54,12 +58,9 @@ def test_threshold_off_30_events_full_payload_with_witness_fields() -> None:
         continuation_notes=[],
         summary_threshold=30,
     )
-    # Witness payload reaches the rendered prompt in full mode.
     assert '"widget"' in prompt
     assert '"the widget"' in prompt
-    # No degradation banner.
-    assert "DEGRADED MODE" not in prompt
-    assert "get_event_detail" in prompt  # tool referenced in static section
+    assert "degraded" not in prompt.lower()
 
 
 def test_threshold_on_31_events_degraded_payload_strips_witness_fields() -> None:
@@ -73,12 +74,10 @@ def test_threshold_on_31_events_degraded_payload_strips_witness_fields() -> None
         continuation_notes=[],
         summary_threshold=30,
     )
-    # Witness payload stripped from the degraded edge JSON.
     assert '"widget"' not in prompt
     assert '"the widget"' not in prompt
-    # Degradation banner + drill-down instruction present.
-    assert "DEGRADED MODE" in prompt
-    assert "get_event_detail" in prompt
+    assert "degraded" in prompt.lower()
+    assert "witness fields stripped" in prompt
 
 
 def test_configurable_threshold_cuts_in_at_n_plus_one() -> None:
@@ -102,7 +101,7 @@ def test_configurable_threshold_cuts_in_at_n_plus_one() -> None:
         continuation_notes=[],
         summary_threshold=5,
     )
-    assert "DEGRADED MODE" not in prompt_5
+    assert "degraded" not in prompt_5.lower()
     assert '"widget"' in prompt_5
-    assert "DEGRADED MODE" in prompt_6
+    assert "degraded" in prompt_6.lower()
     assert '"widget"' not in prompt_6
