@@ -20,6 +20,12 @@ Two pieces of glue do the work:
   system prompt is captured separately from the first
   ``before_send_to_llm`` event because :meth:`AgentSession.prompt` does not
   return it.
+
+Boundary: this module is a host-side driver (not a §11 atom — no
+``MANIFEST`` / ``install`` pair, never named in a scenario manifest), so
+the ``agentm.core.runtime.*`` imports inside :func:`run_one` are
+intentional. If this file is ever promoted to an atom, route session
+construction through ``ExtensionAPI`` instead.
 """
 
 from __future__ import annotations

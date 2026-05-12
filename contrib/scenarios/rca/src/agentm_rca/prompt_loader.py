@@ -139,7 +139,11 @@ MANIFEST = ExtensionManifest(
         "required": ["prompt"],
         "additionalProperties": False,
     },
-    tier=2,
+    # tier defaults to 1: this atom is mounted from outside ``extensions/builtin/``
+    # so the validator's §11.4.10 cross-check against
+    # ``core-manifest.yaml::reload.tier_2_atoms`` does not run for it. Opt into
+    # tier-2 hot-reload semantics only by also listing this atom in the core
+    # manifest.
 )
 
 
