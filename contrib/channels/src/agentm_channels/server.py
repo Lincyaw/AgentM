@@ -37,7 +37,12 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, runtime_checkable
 
-from agentm_channels.transport import ServerTransport, UnixServerTransport
+from agentm_channels.auth import UnixPeerCredAuthenticator
+from agentm_channels.transport import (
+    ServerTransport,
+    UnixServerTransport,
+    WebSocketServerTransport,
+)
 from agentm_channels.outbox import (
     InboxLog,
     OutboxRecord,
@@ -174,6 +179,17 @@ class WireServer:
                     "WireServer requires either transport= or socket_path="
                 )
             transport = UnixServerTransport(socket_path)
+        # Peer-cred auth depends on AF_UNIX kernel credentials; pairing
+        # it with a WebSocket transport would silently degrade to
+        # rejection-of-everything (no socket extra_info), which is
+        # confusing. Fail fast at construction.
+        if isinstance(transport, WebSocketServerTransport) and isinstance(
+            authenticator, UnixPeerCredAuthenticator
+        ):
+            raise ValueError(
+                "UnixPeerCredAuthenticator is incompatible with "
+                "WebSocketServerTransport; use TokenAuthenticator over WS"
+            )
         self._transport = transport
         self._outbox = outbox
         self._inbox = inbox
