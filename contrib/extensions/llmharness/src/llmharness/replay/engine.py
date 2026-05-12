@@ -8,6 +8,12 @@ Both paths share :mod:`llmharness.audit.{extractor,auditor}.extensions`
 composers and the helpers in :mod:`llmharness.audit._session_helpers`,
 so the system prompt, tool surface, and payload shape are identical to
 a live firing.
+
+Boundary: this module is a host-side driver (not a §11 atom — no
+``MANIFEST`` / ``install`` pair, never named in a scenario manifest), so
+the ``agentm.core.runtime.*`` imports below are intentional and must not
+be removed. If this file is ever promoted to an atom, route session
+construction through ``ExtensionAPI`` instead.
 """
 
 from __future__ import annotations

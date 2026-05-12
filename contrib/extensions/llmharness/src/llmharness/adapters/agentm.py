@@ -59,7 +59,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import Any, Final, Literal, TypeVar
 
 from agentm.core.abi import (
     DecideTurnActionEvent,
@@ -245,6 +245,17 @@ _EXTRACTOR_PARTIAL_ENTRY = _et.EXTRACTOR_PARTIAL
 _AUDIT_NO_CALL_ENTRY = _et.AUDIT_NO_CALL
 _AUDIT_ERROR_ENTRY = _et.AUDIT_ERROR
 
+# Adapter-internal ExtensionAPI service keys. The audit-check registry has
+# its own public key in ``audit/registry.py`` because external atoms need to
+# resolve it; these two are read only by helpers inside this module, so they
+# stay private to the adapter. Routing through ``api.set_service`` /
+# ``api.get_service`` keeps the per-install state off the public
+# ``ExtensionAPI`` attribute surface (§11.4.D2).
+_EXTRACTOR_COMPOSE_KWARGS_SERVICE_KEY: Final[str] = (
+    "llmharness._extractor_compose_kwargs"
+)
+_REPLAY_LOG_PATH_SERVICE_KEY: Final[str] = "llmharness._replay_log_path"
+
 
 # --- branch state -----------------------------------------------------------
 
@@ -424,11 +435,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         cards_tools_config=cards_cfg,
         observability_config=obs_cfg,
     )
-    api._llmharness_extractor_compose_kwargs = {  # type: ignore[attr-defined]
-        "prompt_override": prompt_extractor,
-        "cards_tools_config": cards_cfg,
-        "observability_config": obs_cfg,
-    }
+    api.set_service(
+        _EXTRACTOR_COMPOSE_KWARGS_SERVICE_KEY,
+        {
+            "prompt_override": prompt_extractor,
+            "cards_tools_config": cards_cfg,
+            "observability_config": obs_cfg,
+        },
+    )
     # Auditor extensions are rebuilt per firing in _drain_auditor because
     # the v3 prompt is templated over the live event/edge graph + findings.
     auditor_settings = _AuditorSettings(
@@ -445,10 +459,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     enable_reminders = bool(config.get("enable_reminders", True))
     enable_replay_log = bool(config.get("enable_replay_log", True))
 
-    if enable_replay_log:
-        api._llmharness_replay_log_path = replay_log_path(api.cwd, api.root_session_id)  # type: ignore[attr-defined]
-    else:
-        api._llmharness_replay_log_path = None  # type: ignore[attr-defined]
+    api.set_service(
+        _REPLAY_LOG_PATH_SERVICE_KEY,
+        replay_log_path(api.cwd, api.root_session_id) if enable_replay_log else None,
+    )
 
     # Publish the audit-check registry on the parent session. Atoms in
     # later commits (reference checks etc.) call
@@ -738,7 +752,7 @@ async def _drain_extractor(
     replay_path = _replay_log_path_for(api)
     if replay_path is not None:
         replay_compose_kwargs: dict[str, Any] | None = dict(
-            getattr(api, "_llmharness_extractor_compose_kwargs", {})
+            api.get_service(_EXTRACTOR_COMPOSE_KWARGS_SERVICE_KEY) or {}
         )
         replay_extras: dict[str, Any] | None = {
             "turn_window_json": turn_window_json,
@@ -850,7 +864,8 @@ async def _drain_extractor(
 
 def _replay_log_path_for(api: ExtensionAPI) -> Path | None:
     """Resolve the per-session replay sidecar path, or None if disabled."""
-    return getattr(api, "_llmharness_replay_log_path", None)
+    path = api.get_service(_REPLAY_LOG_PATH_SERVICE_KEY)
+    return path if isinstance(path, Path) else None
 
 
 def _record_replay_at(

@@ -41,7 +41,7 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": False,
     },
-    tier=2,
+    # tier defaults to 1: out-of-tree atom; see prompt_loader.py for the rationale.
 )
 
 
