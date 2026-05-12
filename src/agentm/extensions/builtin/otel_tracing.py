@@ -27,6 +27,32 @@ Configuration honours the standard ``OTEL_*`` env vars (endpoint, headers,
 service name, resource attributes). Atom config overrides env. If
 :mod:`opentelemetry` is not installed, ``install`` emits a diagnostic and
 becomes a no-op so the session still boots.
+
+Cross-process trace propagation
+===============================
+
+The atom uses **standard OTel context propagation** — no vendor-specific
+IDs, no SpanContext synthesis. Specifically:
+
+* For an in-process child session (``api.parent_session_id`` set and the
+  parent installed earlier in the same process), the parent's
+  session-root ``Context`` is looked up in :data:`_session_root_contexts`
+  and passed as ``start_span(context=...)``. This is just plain OTel
+  Context plumbing — no propagator involved because we never serialise.
+* For a top-level session that should continue an upstream trace
+  (typical when an OTel-instrumented host launches AgentM as a child
+  process / worker), the host injects ``TRACEPARENT`` /
+  ``TRACESTATE`` env vars per the W3C Trace Context spec, and this atom
+  calls :func:`opentelemetry.propagate.extract` on ``os.environ`` to
+  resolve them through whatever propagator chain the SDK is configured
+  with (default: ``tracecontext,baggage``). No bespoke parsing.
+
+AgentM's own ``session_id`` / ``root_session_id`` / ``parent_session_id``
+remain *logical* identifiers (UUIDs minted by ``session_factory``); they
+are surfaced as ``agentm.*`` span attributes for grouping in trace
+backends but are **not** stuffed into OTel's TraceId / SpanId fields.
+The on-the-wire OTel IDs are whatever the SDK's IdGenerator produces
+(or whatever was extracted from the upstream traceparent).
 """
 
 from __future__ import annotations
@@ -159,12 +185,11 @@ _provider_lock = threading.Lock()
 _provider_installed = False
 _DEFAULT_EXCLUDE_CHANNELS: frozenset[str] = frozenset({StreamDeltaEvent.CHANNEL})
 
-# Cross-session linkage. ``session_id`` is the OTel span_id of the session
-# root span and ``root_session_id`` is the trace_id — by the contract in
-# ``core.abi.extension.ExtensionAPI``. When a child session installs, we
-# look up its parent's session-root SpanContext here and use it as the
-# parent context of the child's ``agentm.session`` span, so Jaeger/Tempo
-# nest sub-agent + cognitive-audit children under the main session.
+# In-process parent linkage. Each session's ``install`` registers its
+# session-root ``Context`` here keyed by session_id, so a child session
+# that spawns later in the same process can look it up and pass it as
+# ``start_span(context=...)``. For cross-process linkage we don't use
+# this — we go through the standard ``opentelemetry.propagate`` API.
 _session_ctx_lock = threading.Lock()
 _session_root_contexts: dict[str, Any] = {}
 
@@ -244,21 +269,44 @@ def _now_ns() -> int:
 
 
 def _resolve_parent_context(parent_session_id: str | None) -> Any:
-    """Return an OTel ``Context`` pointing at the parent session's root
-    span if we have one on record, else ``None`` (= no parent — span will
-    open a fresh trace).
+    """Return the OTel ``Context`` to parent the new session span under.
 
-    The parent's root span was registered in :data:`_session_root_contexts`
-    by an earlier ``install`` call in this process. If the parent ran in
-    a *different* process (rare for in-process sub-agent / audit children
-    but possible for embedders), it won't be in the registry — we fall
-    back to no parent and rely on the ``agentm.root_session_id`` /
-    ``agentm.parent_session_id`` attributes for cross-trace correlation.
+    Two paths, both standard OTel:
+
+    1. **In-process child** — ``parent_session_id`` matches a session
+       that installed earlier in this process; reuse the ``Context``
+       captured at its ``start_span`` site. (No serialisation involved
+       — we kept the live Context object around.)
+    2. **Top-level session in a propagated trace** — when no in-process
+       parent matches, fall back to
+       :func:`opentelemetry.propagate.extract` over ``os.environ``. The
+       SDK's globally-configured propagator chain (default
+       ``tracecontext,baggage``) parses ``TRACEPARENT`` /
+       ``TRACESTATE`` if the host set them per W3C TraceContext.
+       ``extract`` returns an empty ``Context`` (not ``None``) when no
+       traceparent is present, which OTel treats as "no parent" — so
+       passing it to ``start_span`` is always safe.
     """
-    if not parent_session_id:
+    if parent_session_id:
+        with _session_ctx_lock:
+            local = _session_root_contexts.get(parent_session_id)
+        if local is not None:
+            return local
+    try:
+        from opentelemetry import propagate
+    except ImportError:
         return None
-    with _session_ctx_lock:
-        return _session_root_contexts.get(parent_session_id)
+    # Standard W3C / B3 / etc. propagators look up *lowercase* keys
+    # (HTTP-header convention) — but POSIX env-var convention is
+    # uppercase. Bridge by exposing the well-known propagation keys in
+    # both cases. Other env vars are left out so unrelated process state
+    # never leaks into a Context lookup.
+    carrier: dict[str, str] = {}
+    for key in ("TRACEPARENT", "TRACESTATE", "BAGGAGE"):
+        value = os.environ.get(key)
+        if value is not None:
+            carrier[key.lower()] = value
+    return propagate.extract(carrier)
 
 
 def _handler_label(handler: Handler) -> str:
