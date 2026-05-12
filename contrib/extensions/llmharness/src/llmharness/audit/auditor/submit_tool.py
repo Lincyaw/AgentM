@@ -22,8 +22,8 @@ from __future__ import annotations
 from typing import Any
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
-from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
+from agentm.extensions import ExtensionManifest
 
 from .output import AuditorOutputError, RawVerdictOutput
 
