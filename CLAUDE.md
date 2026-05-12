@@ -182,25 +182,6 @@ doc, (2) query `index.yaml` for `related_concepts`, (3) update affected docs,
 
 **Cross-references** use relative paths:
 `[concept](other-concept.md)`, `[plan](../plans/YYYY-MM-DD-plan.md)`, etc.
-
-## Custom agents (`.claude/agents/`)
-
-| Agent | Role | Model |
-|-------|------|-------|
-| **architect** | Architecture design, design docs, `index.yaml` upkeep | opus |
-| **planner** | Break designs into executable plans/tasks | sonnet |
-| **tdd** | Write tests first (RED), guide TDD cycle | sonnet |
-| **implementer** | Execute plans, write code following designs | sonnet |
-| **reviewer** | Verify implementation matches design | opus |
-
-Workflow: `architect → planner → tdd → implementer → reviewer` (with feedback
-loops back to architect on design issues).
-
-## Custom slash commands (`.claude/commands/`)
-
-`/design` · `/plan` · `/index [show|check|fix]` · `/status` · `/tdd` ·
-`/eval [define|check|report]` · `/checkpoint [create|verify|list]` · `/learn`
-
 ## Testing philosophy
 
 **Quality over quantity. Only test positions where AgentM's value proposition
