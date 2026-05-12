@@ -32,6 +32,24 @@ llmharness-aggregate \
   --out ./cases
 ```
 
+When the run did NOT mount `llmharness.distill.binding` (e.g. `rca
+llm-eval` runs through rcabench-platform), the meta sidecar is
+missing and `case_id` falls back to the session id. Inject the
+sample-id manually:
+
+```bash
+llmharness-aggregate \
+  --cwd . \
+  --root-session-id eddfe314... \
+  --sample-id ts0-mysql-corrupt-kwx8n5 \
+  --dataset-name rca-openrca2-lite \
+  --dataset-path /abs/path/to/data.jsonl \
+  --out ./cases
+```
+
+The overrides win over any meta sidecar — useful when re-tagging a
+session whose binding was forgotten.
+
 ---
 
 ## 2. Per-case layout
@@ -82,6 +100,19 @@ One AgentM-native message per line. Lossless — every block of every
 message (text, tool_use, tool_result, thinking, etc.) is preserved.
 This is the canonical source for converting to any chat-completions
 or trainer-specific format downstream.
+
+Reconstruction strategy (load-bearing — without this the case dir
+silently truncates runs that end mid-auditor-interval):
+
+1. **Base**: the latest `compose_kwargs.trajectory_snapshot` from a
+   successful auditor firing. Authoritative up to that turn.
+2. **Tail**: every extractor firing whose `turn_index` is greater
+   than the base contributes its `payload.new_turns` window. Walks
+   in chronological order; deduplicates by message `index`.
+
+This stitches in the trailing main-agent turns that occurred after
+the last auditor fired — the common case when runs hit a timeout or
+`submit_final_report` mid-interval.
 
 ### `extractor/NNN_turn_T.json` and `auditor/NNN_turn_T.json`
 
