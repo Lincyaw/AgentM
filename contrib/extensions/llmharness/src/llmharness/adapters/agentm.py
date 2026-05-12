@@ -201,6 +201,19 @@ MANIFEST = ExtensionManifest(
         "event:decide_turn_action",
         "event:session_shutdown",
     ),
+    # Capability dependency declaration: the audit-child composer (see
+    # llmharness.audit._compose) wires these SDK builtin atoms into every
+    # spawned extractor/auditor session. Listing them here makes a host-
+    # side rename surface at manifest-load time instead of at child-
+    # session freeze. Names match the atom ``MANIFEST.name`` (short
+    # identifier), which is what the validator's 11.4.7-requires check
+    # resolves against.
+    requires=(
+        "observability",
+        "otel_tracing",
+        "operations_local",
+        "system_prompt",
+    ),
     api_version=1,
     tier=1,
 )

@@ -34,10 +34,12 @@ _RECENT_VERDICTS_FOR_AUDITOR = _et.RECENT_VERDICTS_FOR_AUDITOR
 
 # --- session-file resolution ------------------------------------------------
 #
-# These helpers must stay in lockstep with
-# ``agentm.harness.session_manager.SessionManager.default_session_dir`` and
-# ``_find_most_recent``. We reproduce the rule here rather than import to
-# keep this CLI a read-only tool with no AgentM-runtime dependency.
+# These helpers reproduce the AgentM session-directory rule (currently
+# ``~/.agentm/sessions/<cwd-slug>/``) so this CLI stays a read-only tool
+# with no AgentM-runtime dependency. Keep in sync if the SDK ever moves
+# the session root. (The legacy ``harness.session_manager`` module was
+# removed in the 2026-05-11 harness collapse; the rule itself is now
+# inlined in core.runtime.session_factory.)
 
 
 def _default_sessions_root() -> Path:
