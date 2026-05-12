@@ -42,7 +42,10 @@ async def test_50_messages_arrive_as_batches(socket_path: str, db_path: str) -> 
 
     BATCH_MAX = 32
     server = WireServer(
-        socket_path, outbox, inbox, _noop, delivery_batch_max=BATCH_MAX
+        socket_path=socket_path,
+        outbox=outbox,
+        inbox=inbox,
+        on_inbound=_noop, delivery_batch_max=BATCH_MAX
     )
     await server.start()
 
@@ -144,7 +147,11 @@ async def test_batch_envelope_carries_reason_and_session_key(
             ),
         )
 
-    server = WireServer(socket_path, outbox, inbox, _noop, delivery_batch_max=32)
+    server = WireServer(
+        socket_path=socket_path,
+        outbox=outbox,
+        inbox=inbox,
+        on_inbound=_noop, delivery_batch_max=32)
     await server.start()
     try:
         reader, writer = await asyncio.open_unix_connection(socket_path)
@@ -200,7 +207,11 @@ async def test_batch_session_key_none_when_records_diverge(
         ),
     )
 
-    server = WireServer(socket_path, outbox, inbox, _noop, delivery_batch_max=32)
+    server = WireServer(
+        socket_path=socket_path,
+        outbox=outbox,
+        inbox=inbox,
+        on_inbound=_noop, delivery_batch_max=32)
     await server.start()
     try:
         reader, writer = await asyncio.open_unix_connection(socket_path)
@@ -236,7 +247,11 @@ async def test_steady_state_single_outbound_not_batched(
     outbox = SqliteOutbox(db_path)
     inbox = SqliteInbox(db_path)
 
-    server = WireServer(socket_path, outbox, inbox, _noop, delivery_batch_max=32)
+    server = WireServer(
+        socket_path=socket_path,
+        outbox=outbox,
+        inbox=inbox,
+        on_inbound=_noop, delivery_batch_max=32)
     await server.start()
     try:
         reader, writer = await asyncio.open_unix_connection(socket_path)

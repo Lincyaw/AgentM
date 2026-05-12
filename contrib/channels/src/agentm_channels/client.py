@@ -57,30 +57,27 @@ class WireClient:
 
     def __init__(
         self,
-        socket_path_or_transport: str | ClientTransport | None = None,
-        peer_id: str = "",
-        peer_kind: str = "",
         *,
-        socket_path: str | None = None,
+        peer_id: str,
+        peer_kind: str,
         transport: ClientTransport | None = None,
+        socket_path: str | None = None,
         token: str | None = None,
         on_outbound: OutboundHandler | None = None,
         capabilities: dict[str, Any] | None = None,
     ) -> None:
-        # Back-compat positional shim: callers historically passed
-        # ``WireClient(socket_path, peer_id, peer_kind, ...)``. New
-        # callers may pass ``transport=`` (or ``socket_path=``) by keyword.
-        if isinstance(socket_path_or_transport, str):
-            if socket_path is None:
-                socket_path = socket_path_or_transport
-        elif socket_path_or_transport is not None:
-            transport = socket_path_or_transport
+        # ``socket_path=`` is a Unix-socket convenience shortcut equivalent to
+        # ``transport=UnixClientTransport(socket_path)``; pass exactly one.
         if transport is None:
             if socket_path is None:
                 raise TypeError(
                     "WireClient requires either transport= or socket_path="
                 )
             transport = UnixClientTransport(socket_path)
+        elif socket_path is not None:
+            raise TypeError(
+                "WireClient: pass either transport= or socket_path=, not both"
+            )
         self._transport = transport
         self._peer_id = peer_id
         self._peer_kind = peer_kind

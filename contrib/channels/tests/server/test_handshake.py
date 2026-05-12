@@ -18,10 +18,15 @@ async def _noop_inbound(_session: object, _env: object) -> None:
 async def test_hello_welcome_roundtrip(socket_path: str, db_path: str) -> None:
     outbox = SqliteOutbox(db_path)
     inbox = SqliteInbox(db_path)
-    server = WireServer(socket_path, outbox, inbox, _noop_inbound)
+    server = WireServer(
+        socket_path=socket_path,
+        outbox=outbox,
+        inbox=inbox,
+        on_inbound=_noop_inbound)
     await server.start()
     try:
-        client = WireClient(socket_path, peer_id="P1", peer_kind="chat_client")
+        client = WireClient(
+        socket_path=socket_path, peer_id="P1", peer_kind="chat_client")
         await client.connect()
         welcome = client.welcome()
         assert welcome is not None
@@ -51,10 +56,15 @@ async def test_authenticator_reject_closes_connection(
 ) -> None:
     outbox = SqliteOutbox(db_path)
     inbox = SqliteInbox(db_path)
-    server = WireServer(socket_path, outbox, inbox, _noop_inbound, authenticator=RejectingAuth())
+    server = WireServer(
+        socket_path=socket_path,
+        outbox=outbox,
+        inbox=inbox,
+        on_inbound=_noop_inbound, authenticator=RejectingAuth())
     await server.start()
     try:
-        client = WireClient(socket_path, peer_id="banned", peer_kind="chat_client")
+        client = WireClient(
+        socket_path=socket_path, peer_id="banned", peer_kind="chat_client")
         with pytest.raises(AuthError) as exc_info:
             await client.connect()
         assert exc_info.value.code == "auth_failed"

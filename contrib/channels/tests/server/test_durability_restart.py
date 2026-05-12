@@ -95,7 +95,10 @@ async def test_durability_across_restart(socket_path: str, db_path: str) -> None
     outbox = SqliteOutbox(db_path, lease_ttl=0.3)
     inbox = SqliteInbox(db_path)
     server = WireServer(
-        socket_path, outbox, inbox, _noop_inbound, delivery_batch_max=1
+        socket_path=socket_path,
+        outbox=outbox,
+        inbox=inbox,
+        on_inbound=_noop_inbound, delivery_batch_max=1
     )
     # Patch register() to swap the writer before delivery starts.
     real_register = server._registry.register
@@ -114,7 +117,7 @@ async def test_durability_across_restart(socket_path: str, db_path: str) -> None
 
     try:
         client = WireClient(
-            socket_path, peer_id="A", peer_kind="chat_client", on_outbound=on_outbound_1
+        socket_path=socket_path, peer_id="A", peer_kind="chat_client", on_outbound=on_outbound_1
         )
         await client.connect()
         # Welcome arrived (1 write). 2 more writes succeed → 2 envelopes.
@@ -137,7 +140,10 @@ async def test_durability_across_restart(socket_path: str, db_path: str) -> None
     outbox = SqliteOutbox(db_path, lease_ttl=0.3)
     inbox = SqliteInbox(db_path)
     server = WireServer(
-        socket_path, outbox, inbox, _noop_inbound, delivery_batch_max=8
+        socket_path=socket_path,
+        outbox=outbox,
+        inbox=inbox,
+        on_inbound=_noop_inbound, delivery_batch_max=8
     )
     await server.start()
 
@@ -146,7 +152,7 @@ async def test_durability_across_restart(socket_path: str, db_path: str) -> None
 
     try:
         client2 = WireClient(
-            socket_path, peer_id="A", peer_kind="chat_client", on_outbound=on_outbound_2
+        socket_path=socket_path, peer_id="A", peer_kind="chat_client", on_outbound=on_outbound_2
         )
         await client2.connect()
         # Expect the leftover envelopes to land.

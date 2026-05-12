@@ -144,13 +144,12 @@ class WireServer:
 
     def __init__(
         self,
-        outbox_or_socket: OutboxStore | str | None = None,
-        outbox: OutboxStore | None = None,
-        inbox: InboxLog | None = None,
-        on_inbound: InboundHandler | None = None,
         *,
-        socket_path: str | None = None,
+        outbox: OutboxStore,
+        inbox: InboxLog,
+        on_inbound: InboundHandler,
         transport: ServerTransport | None = None,
+        socket_path: str | None = None,
         authenticator: Authenticator | None = None,
         delivery_batch_max: int = 32,
         lease_ttl: float = 30.0,
@@ -160,25 +159,18 @@ class WireServer:
         on_peer_disconnect: PeerDisconnectHandler | None = None,
         on_worker_outbound: WorkerOutboundHandler | None = None,
     ) -> None:
-        # Back-compat positional shim: callers that historically passed
-        # ``WireServer(socket_path, outbox, inbox, on_inbound)`` still work.
-        # New callers pass ``transport=`` (or ``socket_path=``) by keyword
-        # along with ``outbox=``/``inbox=``/``on_inbound=``.
-        if isinstance(outbox_or_socket, str):
-            if socket_path is None:
-                socket_path = outbox_or_socket
-        elif outbox_or_socket is not None:
-            outbox = outbox_or_socket
-        if outbox is None or inbox is None or on_inbound is None:
-            raise TypeError(
-                "WireServer requires outbox, inbox, and on_inbound arguments"
-            )
+        # ``socket_path=`` is a Unix-socket convenience shortcut equivalent to
+        # ``transport=UnixServerTransport(socket_path)``; pass exactly one.
         if transport is None:
             if socket_path is None:
                 raise TypeError(
                     "WireServer requires either transport= or socket_path="
                 )
             transport = UnixServerTransport(socket_path)
+        elif socket_path is not None:
+            raise TypeError(
+                "WireServer: pass either transport= or socket_path=, not both"
+            )
         # Peer-cred auth depends on AF_UNIX kernel credentials; pairing
         # it with a WebSocket transport would silently degrade to
         # rejection-of-everything (no socket extra_info), which is
