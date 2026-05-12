@@ -51,6 +51,26 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Aggregate only this session; default = all sessions in --cwd",
     )
+    parser.add_argument(
+        "--sample-id",
+        default=None,
+        help=(
+            "Override case sample_id. Useful when the run did not mount "
+            "llmharness.distill.binding (e.g. rca llm-eval runs). When "
+            "aggregating multiple sessions in one invocation, applies to "
+            "all of them — pair with --root-session-id for per-sample runs."
+        ),
+    )
+    parser.add_argument(
+        "--dataset-name",
+        default=None,
+        help="Override case dataset_name (paired with --sample-id).",
+    )
+    parser.add_argument(
+        "--dataset-path",
+        default=None,
+        help="Override case dataset_path (paired with --sample-id).",
+    )
 
     args = parser.parse_args(argv)
     cwd = Path(args.cwd)
@@ -75,6 +95,9 @@ def main(argv: list[str] | None = None) -> int:
         case = collect_case(
             replay_path=replay_path,
             meta_path=meta_path if meta_path.is_file() else None,
+            sample_id_override=args.sample_id,
+            dataset_name_override=args.dataset_name,
+            dataset_path_override=args.dataset_path,
         )
         case_dir = write_case(case, out_dir)
         print(

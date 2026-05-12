@@ -239,18 +239,19 @@ MANIFEST = ExtensionManifest(
         "event:decide_turn_action",
         "event:session_shutdown",
     ),
-    # Capability dependency declaration: the audit-child composer (see
-    # llmharness.audit._compose) wires these SDK builtin atoms into every
-    # spawned extractor/auditor session. Listing them here makes a host-
-    # side rename surface at manifest-load time instead of at child-
-    # session freeze. Names match the atom ``MANIFEST.name`` (short
-    # identifier), which is what the validator's 11.4.7-requires check
-    # resolves against.
+    # Capability dependency declaration for atoms used on the PARENT
+    # session: the adapter emits DiagnosticEvent / OTel spans on the
+    # parent's bus, so those substrates must be present. ``system_prompt``
+    # is intentionally NOT listed — it's only consumed by spawned audit
+    # children (the composer mounts it by module path directly), so
+    # requiring it here would lock the adapter out of scenarios that use
+    # a scenario-specific prompt atom (e.g. rca's ``prompt_loader``).
+    # Missing audit-child deps surface at child-session freeze, which is
+    # the right scope.
     requires=(
         "observability",
         "otel_tracing",
         "operations_local",
-        "system_prompt",
     ),
     api_version=1,
     tier=1,
