@@ -23,10 +23,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .engine import PhaseResult
-from .record import ReplayRecord, iter_records
+from .record import Phase, ReplayRecord, iter_records
 from .runner import replay_auditor_record, replay_extractor_record
 
-PhaseFilter = Literal["extractor", "auditor", "both"]
+PhaseFilter = Phase | Literal["both"]
 
 
 @dataclass

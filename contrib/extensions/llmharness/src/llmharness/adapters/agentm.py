@@ -58,6 +58,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, TypeVar
 
 from agentm.core.abi import (
@@ -81,6 +82,11 @@ from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.extensions import ExtensionManifest
 
 from ..audit import entry_types as _et
+from ..audit._session_helpers import (
+    bind_extractor_state,
+    find_terminal_tool_arguments,
+    safe_shutdown,
+)
 from ..audit.auditor import (
     SUBMIT_VERDICT_TOOL_NAME,
     AuditorOutputError,
@@ -88,7 +94,6 @@ from ..audit.auditor import (
     compose_auditor_extensions,
 )
 from ..audit.extractor import (
-    EXTRACTOR_STATE_SERVICE_KEY,
     SUBMIT_EVENTS_TOOL_NAME,
     ExtractionState,
     RawExtractorOutput,
@@ -106,14 +111,6 @@ from ..replay.record import (
 from ..schema import Edge, Event, Phase, Reminder, Verdict
 
 _logger = logging.getLogger(__name__)
-
-# Modules whose config dict carries the per-firing ExtractionState. The
-# adapter rewrites the corresponding entry's config at spawn time so the
-# child session's extension install can pick the state up — child
-# sessions get a fresh service-registry so the parent-side
-# ``api.set_service`` does not cross the spawn boundary.
-_EXTRACTOR_TOOLS_MODULE = "llmharness.audit.extractor.extensions"
-_SYSTEM_PROMPT_MODULE = "agentm.extensions.builtin.system_prompt"
 
 MANIFEST = ExtensionManifest(
     name="agentm",
@@ -414,16 +411,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         cards_tools_config=cards_cfg,
         observability_config=obs_cfg,
     )
-    # Captured for replay-log compose_kwargs reconstruction.
-    extractor_compose_kwargs: dict[str, Any] = {
+    api._llmharness_extractor_compose_kwargs = {  # type: ignore[attr-defined]
         "prompt_override": prompt_extractor,
         "cards_tools_config": cards_cfg,
         "observability_config": obs_cfg,
     }
-    api._llmharness_extractor_compose_kwargs = extractor_compose_kwargs  # type: ignore[attr-defined]
     # Auditor extensions are rebuilt per firing in _drain_auditor because
     # the v3 prompt is templated over the live event/edge graph + findings.
-    # We pass the knobs through via a lightweight settings struct.
     auditor_settings = _AuditorSettings(
         prompt_override=prompt_auditor,
         cards_tools_config=cards_cfg,
@@ -438,9 +432,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     enable_reminders = bool(config.get("enable_reminders", True))
     enable_replay_log = bool(config.get("enable_replay_log", True))
 
-    # Pre-resolved replay-log path; None disables recording. Live drain
-    # functions look up this attribute on ``api`` so we don't have to
-    # thread an extra argument through six call sites.
     if enable_replay_log:
         api._llmharness_replay_log_path = replay_log_path(api.cwd, api.root_session_id)  # type: ignore[attr-defined]
     else:
@@ -476,14 +467,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     auditor_provider=auditor_provider,
                     pending_reminders=pending_reminders,
                     messages=list(messages_snapshot),
-                    enable_reminders=enable_reminders,
                 )
 
         api.on(TurnEndEvent.CHANNEL, _on_turn_end_sync)
-        api.on(
-            DecideTurnActionEvent.CHANNEL,
-            _make_reminder_injector(api, pending_reminders),
-        )
+        if enable_reminders:
+            api.on(
+                DecideTurnActionEvent.CHANNEL,
+                _make_reminder_injector(api, pending_reminders),
+            )
         return
 
     # Async path: queue + background worker.
@@ -502,7 +493,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     auditor_settings=auditor_settings,
                     extractor_provider=extractor_provider,
                     auditor_provider=auditor_provider,
-                    enable_reminders=enable_reminders,
                 ),
                 name="llmharness-audit-worker",
             )
@@ -515,8 +505,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         queue.put_nowait(_ExtractorJob(messages=messages_snapshot))
         if enable_auditor and (turn_count % k) == 0:
             queue.put_nowait(_AuditorJob(messages=messages_snapshot))
-
-    _on_decide_inject = _make_reminder_injector(api, pending_reminders)
 
     async def _on_session_shutdown(_event: SessionShutdownEvent) -> None:
         if worker_task is None or worker_task.done():
@@ -538,7 +526,11 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             _logger.exception("llmharness audit worker raised on shutdown")
 
     api.on(TurnEndEvent.CHANNEL, _on_turn_end)
-    api.on(DecideTurnActionEvent.CHANNEL, _on_decide_inject)
+    if enable_reminders:
+        api.on(
+            DecideTurnActionEvent.CHANNEL,
+            _make_reminder_injector(api, pending_reminders),
+        )
     api.on(SessionShutdownEvent.CHANNEL, _on_session_shutdown)
 
 
@@ -622,7 +614,6 @@ async def _drain_queue(
     auditor_settings: _AuditorSettings,
     extractor_provider: tuple[str, dict[str, Any]] | None,
     auditor_provider: tuple[str, dict[str, Any]] | None,
-    enable_reminders: bool,
 ) -> None:
     """Serial worker. Owns all session-mutating audit writes."""
     _last_extractor_held_cursor: bool = False
@@ -656,7 +647,6 @@ async def _drain_queue(
                         auditor_provider=auditor_provider,
                         pending_reminders=pending_reminders,
                         messages=list(job.messages),
-                        enable_reminders=enable_reminders,
                     )
         except asyncio.CancelledError:
             raise
@@ -724,19 +714,41 @@ async def _drain_extractor(
     # extensions list. The base list returned by
     # ``compose_extractor_extensions`` is shared across firings; we
     # never mutate it.
-    firing_extensions = _bind_extractor_state(
+    firing_extensions = bind_extractor_state(
         extractor_extensions,
         state=state,
         turn_window_json=turn_window_json,
     )
 
-    # Replay-log compose_kwargs: everything the runner needs to rebuild
-    # ``firing_extensions`` from scratch. Stored under one record per
-    # phase invocation regardless of outcome.
-    base_kwargs = getattr(api, "_llmharness_extractor_compose_kwargs", {})
-    replay_compose_kwargs = dict(base_kwargs)
-    replay_compose_kwargs["turn_window_json"] = turn_window_json
-    replay_compose_kwargs["turn_texts"] = {str(k): v for k, v in state.turn_texts.items()}
+    # Only materialize the replay snapshot if the sidecar is enabled.
+    # turn_texts can be large in long sessions; skip the copy otherwise.
+    replay_path = _replay_log_path_for(api)
+    if replay_path is not None:
+        replay_compose_kwargs: dict[str, Any] | None = dict(
+            getattr(api, "_llmharness_extractor_compose_kwargs", {})
+        )
+        replay_extras: dict[str, Any] | None = {
+            "turn_window_json": turn_window_json,
+            "turn_texts": {str(k): v for k, v in state.turn_texts.items()},
+        }
+    else:
+        replay_compose_kwargs = None
+        replay_extras = None
+
+    def _record(status: str, output: dict[str, Any] | None, error: str | None = None) -> None:
+        _record_replay_at(
+            replay_path,
+            phase="extractor",
+            turn_index=window_hi_inclusive,
+            root_session_id=api.root_session_id,
+            compose_kwargs=replay_compose_kwargs,
+            payload=payload,
+            provider=extractor_provider,
+            output=output,
+            status=status,
+            error=error,
+            extras=replay_extras,
+        )
 
     try:
         terminator_called = await _spawn_extractor_child(
@@ -752,17 +764,7 @@ async def _drain_extractor(
             _EXTRACTOR_ERROR_ENTRY,
             {"reason": str(exc), "turn_window": turn_window},
         )
-        _record_replay(
-            api,
-            phase="extractor",
-            turn_index=window_hi_inclusive,
-            compose_kwargs=replay_compose_kwargs,
-            payload=payload,
-            provider=extractor_provider,
-            output=None,
-            status="spawn_error",
-            error=str(exc),
-        )
+        _record("spawn_error", output=None, error=str(exc))
         return False
 
     if not terminator_called:
@@ -774,32 +776,17 @@ async def _drain_extractor(
                 "turn_window": turn_window,
             },
         )
-        _record_replay(
-            api,
-            phase="extractor",
-            turn_index=window_hi_inclusive,
-            compose_kwargs=replay_compose_kwargs,
-            payload=payload,
-            provider=extractor_provider,
-            output=None,
-            status="no_call",
-        )
+        _record("no_call", output=None)
         return False
 
     output = RawExtractorOutput.from_state(state)
-    _record_replay(
-        api,
-        phase="extractor",
-        turn_index=window_hi_inclusive,
-        compose_kwargs=replay_compose_kwargs,
-        payload=payload,
-        provider=extractor_provider,
+    _record(
+        "ok",
         output={
             "events": [e.to_dict() for e in output.events],
             "edges": [ed.to_dict() for ed in output.edges],
             "dropped_edges": list(output.dropped_edges),
         },
-        status="ok",
     )
 
     # Empty submission on a non-trivial window is a typed failure; on a
@@ -848,42 +835,46 @@ async def _drain_extractor(
     return True
 
 
-def _record_replay(
-    api: ExtensionAPI,
+def _replay_log_path_for(api: ExtensionAPI) -> Path | None:
+    """Resolve the per-session replay sidecar path, or None if disabled."""
+    return getattr(api, "_llmharness_replay_log_path", None)
+
+
+def _record_replay_at(
+    path: Path | None,
     *,
     phase: str,
     turn_index: int,
-    compose_kwargs: dict[str, Any],
-    payload: dict[str, Any],
+    root_session_id: str,
+    compose_kwargs: dict[str, Any] | None,
+    payload: dict[str, Any] | None,
     provider: tuple[str, dict[str, Any]] | None,
     output: dict[str, Any] | None,
     status: str,
     error: str | None = None,
+    extras: dict[str, Any] | None = None,
 ) -> None:
-    """Best-effort sidecar append.
+    """Append one record; ``path is None`` short-circuits.
 
-    Never raises — the live agent must keep running even if disk is full
-    or the .agentm tree is unwritable.
+    ``write_record`` swallows OSError internally; programmer errors
+    (malformed kwargs) should surface, not be silently dropped.
     """
-    path = getattr(api, "_llmharness_replay_log_path", None)
     if path is None:
         return
-    try:
-        rec = ReplayRecord(
-            phase=phase,  # type: ignore[arg-type]
-            turn_index=turn_index,
-            root_session_id=api.root_session_id,
-            ts_ns=now_ns(),
-            compose_kwargs=compose_kwargs,
-            payload=payload,
-            provider=[provider[0], provider[1]] if provider else None,
-            output=output,
-            status=status,  # type: ignore[arg-type]
-            error=error,
-        )
-        write_record(path, rec)
-    except Exception:  # pragma: no cover - defensive
-        _logger.exception("llmharness replay record write failed; swallowing")
+    rec = ReplayRecord(
+        phase=phase,  # type: ignore[arg-type]
+        turn_index=turn_index,
+        root_session_id=root_session_id,
+        ts_ns=now_ns(),
+        compose_kwargs=compose_kwargs or {},
+        payload=payload or {},
+        provider=[provider[0], provider[1]] if provider else None,
+        output=output,
+        status=status,  # type: ignore[arg-type]
+        error=error,
+        extras=extras or {},
+    )
+    write_record(path, rec)
 
 
 class _ExtractorSpawnError(RuntimeError):
@@ -918,10 +909,10 @@ async def _spawn_extractor_child(
     try:
         messages = await child.prompt(json.dumps(payload, ensure_ascii=False, default=str))
     except Exception as exc:
-        await _safe_shutdown(child)
+        await safe_shutdown(child)
         raise _ExtractorSpawnError(str(exc)) from exc
 
-    await _safe_shutdown(child)
+    await safe_shutdown(child)
     return _has_tool_call(messages, SUBMIT_EVENTS_TOOL_NAME)
 
 
@@ -935,30 +926,6 @@ def _has_tool_call(messages: list[AgentMessage], tool_name: str) -> bool:
     return False
 
 
-def _bind_extractor_state(
-    base_extensions: list[tuple[str, dict[str, Any]]],
-    *,
-    state: ExtractionState,
-    turn_window_json: str,
-) -> list[tuple[str, dict[str, Any]]]:
-    """Return a copy of ``base_extensions`` with state + prompt substitution.
-
-    Mutates neither the input list nor any of its config dicts.
-    """
-    out: list[tuple[str, dict[str, Any]]] = []
-    for module, cfg in base_extensions:
-        new_cfg = dict(cfg)
-        if module == _EXTRACTOR_TOOLS_MODULE:
-            new_cfg["state"] = state
-            # Also expose under the canonical service key so callers
-            # that pre-publish via ``api.set_service`` keep working.
-            new_cfg.setdefault(EXTRACTOR_STATE_SERVICE_KEY, state)
-        elif module == _SYSTEM_PROMPT_MODULE:
-            prompt = new_cfg.get("prompt")
-            if isinstance(prompt, str) and "{TURN_WINDOW_JSON}" in prompt:
-                new_cfg["prompt"] = prompt.replace("{TURN_WINDOW_JSON}", turn_window_json)
-        out.append((module, new_cfg))
-    return out
 
 
 def _render_message_text(msg: AgentMessage) -> str:
@@ -1000,7 +967,6 @@ async def _drain_auditor(
     auditor_provider: tuple[str, dict[str, Any]] | None,
     pending_reminders: list[Reminder],
     messages: list[AgentMessage],
-    enable_reminders: bool = True,
 ) -> None:
     branch = api.session.get_branch()
     branch_state = _scan_branch(branch, recent_verdicts_n=_DEFAULT_RECENT_VERDICTS)
@@ -1040,29 +1006,33 @@ async def _drain_auditor(
         summary_threshold=auditor_settings.summary_threshold,
     )
 
-    # Snapshot every input that ``compose_auditor_extensions`` saw, so
-    # offline replay can rebuild the exact extension list — including the
-    # event/edge graph, findings, and the trajectory snapshot baked into
-    # the system prompt. This is what makes "swap model on the same
-    # graph" reproducible.
-    auditor_compose_kwargs: dict[str, Any] = {
-        "prompt_override": auditor_settings.prompt_override,
-        "cards_tools_config": auditor_settings.cards_tools_config,
-        "observability_config": auditor_settings.observability_config,
-        "trajectory_snapshot": trajectory_snapshot,
-        "events": [e.to_dict() for e in events_tuple],
-        "edges": [ed.to_dict() for ed in edges_tuple],
-        "phases": [ph.to_dict() for ph in phases_tuple],
-        "findings": [f.to_dict() for f in findings],
-        "check_errors": dict(check_errors),
-        "continuation_notes": list(branch_state.last_continuation_notes),
-        "summary_threshold": auditor_settings.summary_threshold,
-    }
-    auditor_payload: dict[str, Any] = {
-        "graph": [e.to_dict() for e in branch_state.graph],
-        "recent_verdicts": list(branch_state.recent_verdicts),
-        "continuation_notes_from_prior_firing": list(branch_state.last_continuation_notes),
-    }
+    # Build the replay snapshot only when the sidecar is enabled — the
+    # to_dict() comprehensions over events/edges/phases/findings dominate
+    # per-firing CPU on large graphs.
+    replay_path = _replay_log_path_for(api)
+    replay_compose_kwargs: dict[str, Any] | None = None
+    replay_payload: dict[str, Any] | None = None
+    if replay_path is not None:
+        replay_compose_kwargs = {
+            "prompt_override": auditor_settings.prompt_override,
+            "cards_tools_config": auditor_settings.cards_tools_config,
+            "observability_config": auditor_settings.observability_config,
+            "trajectory_snapshot": trajectory_snapshot,
+            "events": [e.to_dict() for e in events_tuple],
+            "edges": [ed.to_dict() for ed in edges_tuple],
+            "phases": [ph.to_dict() for ph in phases_tuple],
+            "findings": [f.to_dict() for f in findings],
+            "check_errors": dict(check_errors),
+            "continuation_notes": list(branch_state.last_continuation_notes),
+            "summary_threshold": auditor_settings.summary_threshold,
+        }
+        replay_payload = {
+            "graph": [e.to_dict() for e in branch_state.graph],
+            "recent_verdicts": list(branch_state.recent_verdicts),
+            "continuation_notes_from_prior_firing": list(
+                branch_state.last_continuation_notes
+            ),
+        }
 
     verdict = await _run_auditor(
         api=api,
@@ -1072,16 +1042,15 @@ async def _drain_auditor(
         recent_verdicts=branch_state.recent_verdicts,
         continuation_notes_from_prior_firing=branch_state.last_continuation_notes,
     )
+    turn_index = len(messages) - 1 if messages else -1
     if verdict is None:
-        # ``_run_auditor`` already wrote the typed failure entry; capture
-        # the same fact on the replay sidecar so replay tools see a
-        # uniformly-shaped record per invocation.
-        _record_replay(
-            api,
+        _record_replay_at(
+            replay_path,
             phase="auditor",
-            turn_index=len(messages) - 1 if messages else -1,
-            compose_kwargs=auditor_compose_kwargs,
-            payload=auditor_payload,
+            turn_index=turn_index,
+            root_session_id=api.root_session_id,
+            compose_kwargs=replay_compose_kwargs,
+            payload=replay_payload,
             provider=auditor_provider,
             output=None,
             status="no_call",
@@ -1089,21 +1058,18 @@ async def _drain_auditor(
         return
 
     api.session.append_entry(_VERDICT_ENTRY_TYPE, verdict.to_dict())
-    _record_replay(
-        api,
+    _record_replay_at(
+        replay_path,
         phase="auditor",
-        turn_index=len(messages) - 1 if messages else -1,
-        compose_kwargs=auditor_compose_kwargs,
-        payload=auditor_payload,
+        turn_index=turn_index,
+        root_session_id=api.root_session_id,
+        compose_kwargs=replay_compose_kwargs,
+        payload=replay_payload,
         provider=auditor_provider,
         output=verdict.to_dict(),
         status="ok",
     )
-    # Verdict is always persisted (for offline replay / dataset use); reminder
-    # injection is gated by ``enable_reminders`` so data-collection runs can
-    # observe what the auditor *would have* surfaced without perturbing the
-    # main agent's trajectory.
-    if enable_reminders and verdict.surface_reminder and verdict.reminder_text:
+    if verdict.surface_reminder and verdict.reminder_text:
         pending_reminders.append(Reminder(text=verdict.reminder_text))
 
 
@@ -1218,12 +1184,12 @@ async def _run_phase(
         messages = await child.prompt(json.dumps(payload, ensure_ascii=False, default=str))
     except Exception as exc:
         on_spawn_or_prompt_error(str(exc))
-        await _safe_shutdown(child)
+        await safe_shutdown(child)
         return None
 
-    await _safe_shutdown(child)
+    await safe_shutdown(child)
 
-    arguments = _find_terminal_tool_arguments(messages, terminal_tool)
+    arguments = find_terminal_tool_arguments(messages, terminal_tool)
     if arguments is None:
         on_no_call()
         return None
@@ -1277,25 +1243,6 @@ async def _run_auditor(
     except AuditorOutputError as exc:
         _record_failure(api, _AUDIT_ERROR_ENTRY, {"reason": f"malformed: {exc}"})
         return None
-
-
-def _find_terminal_tool_arguments(
-    messages: list[AgentMessage], tool_name: str
-) -> dict[str, Any] | None:
-    for msg in reversed(messages):
-        if not isinstance(msg, AssistantMessage):
-            continue
-        for block in reversed(msg.content):
-            if isinstance(block, ToolCallBlock) and block.name == tool_name:
-                return dict(block.arguments)
-    return None
-
-
-async def _safe_shutdown(child: Any) -> None:
-    try:
-        await child.shutdown()
-    except Exception:
-        return
 
 
 __all__ = [
