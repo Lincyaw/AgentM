@@ -38,19 +38,22 @@ async def test_wrong_token_rejected(socket_path: str, db_path: str) -> None:
     outbox = SqliteOutbox(db_path)
     inbox = SqliteInbox(db_path)
     server = WireServer(
-        socket_path, outbox, inbox, _noop, authenticator=TokenAuth("good", "trusted")
+        socket_path=socket_path,
+        outbox=outbox,
+        inbox=inbox,
+        on_inbound=_noop, authenticator=TokenAuth("good", "trusted")
     )
     await server.start()
     try:
         evil = WireClient(
-            socket_path, peer_id="evil", peer_kind="chat_client", token="wrong"
+        socket_path=socket_path, peer_id="evil", peer_kind="chat_client", token="wrong"
         )
         with pytest.raises(AuthError) as exc_info:
             await evil.connect()
         assert exc_info.value.code == "auth_failed"
         # Confirm the *good* peer still works.
         good = WireClient(
-            socket_path, peer_id="trusted", peer_kind="chat_client", token="good"
+        socket_path=socket_path, peer_id="trusted", peer_kind="chat_client", token="good"
         )
         await good.connect()
         assert good.welcome() is not None
