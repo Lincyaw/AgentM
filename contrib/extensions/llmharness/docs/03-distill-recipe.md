@@ -77,6 +77,26 @@ What you get under `$RUN_DIR/.agentm/audit_replay/`:
 Run as many samples as you want into the same `$RUN_DIR` — each
 session has its own `<root_session_id>`, so files don't collide.
 
+### Alternative: use the host scenario's eval runner
+
+For scenarios that ship their own eval driver (e.g. rca runs samples
+via `rca llm-eval run …` from rcabench-platform), mounting
+`llmharness.distill.binding` is not always possible — the driver
+controls the extension list. In that case:
+
+1. Run the eval as usual; the replay sidecar still gets written.
+2. **Skip the meta sidecar** and inject the sample-id at aggregation
+   time via the `llmharness-aggregate --sample-id …` override (see
+   [06-case-aggregation.md §1](06-case-aggregation.md)).
+3. Then feed the tagged case dir into the labeler.
+
+The labeler reads its GT join from the meta sidecar by default; for
+the runner-driven flow, pre-write a sidecar alongside the replay
+file (`<sid>.meta.json` with `{"sample_id": "...", ...}`) or extend
+the driver script to call `llmharness.distill.binding.SampleMeta`
+directly. The format is documented in
+[02-schemas.md §4](02-schemas.md#4-distill-meta-sidecar).
+
 ---
 
 ## 3. Stage 1 — offline labeling
