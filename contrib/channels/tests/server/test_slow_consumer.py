@@ -40,10 +40,10 @@ async def test_slow_consumer_logs_and_does_not_lose(
         )
 
     server = WireServer(
-        socket_path,
-        outbox,
-        inbox,
-        _noop,
+        socket_path=socket_path,
+        outbox=outbox,
+        inbox=inbox,
+        on_inbound=_noop,
         delivery_batch_max=1,  # force a slow drip so high-water trips before drain
         slow_consumer_high_water=10,
     )
@@ -57,7 +57,7 @@ async def test_slow_consumer_logs_and_does_not_lose(
 
     try:
         client = WireClient(
-            socket_path, peer_id="C", peer_kind="chat_client", on_outbound=slow_handler
+        socket_path=socket_path, peer_id="C", peer_kind="chat_client", on_outbound=slow_handler
         )
         await client.connect()
         await wait_for(lambda: len(received) >= 30, timeout=10.0)

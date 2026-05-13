@@ -37,6 +37,12 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, runtime_checkable
 
+from agentm_channels.auth import UnixPeerCredAuthenticator
+from agentm_channels.transport import (
+    ServerTransport,
+    UnixServerTransport,
+    WebSocketServerTransport,
+)
 from agentm_channels.outbox import (
     InboxLog,
     OutboxRecord,
@@ -138,11 +144,12 @@ class WireServer:
 
     def __init__(
         self,
-        socket_path: str,
+        *,
         outbox: OutboxStore,
         inbox: InboxLog,
         on_inbound: InboundHandler,
-        *,
+        transport: ServerTransport | None = None,
+        socket_path: str | None = None,
         authenticator: Authenticator | None = None,
         delivery_batch_max: int = 32,
         lease_ttl: float = 30.0,
@@ -152,7 +159,30 @@ class WireServer:
         on_peer_disconnect: PeerDisconnectHandler | None = None,
         on_worker_outbound: WorkerOutboundHandler | None = None,
     ) -> None:
-        self._socket_path = socket_path
+        # ``socket_path=`` is a Unix-socket convenience shortcut equivalent to
+        # ``transport=UnixServerTransport(socket_path)``; pass exactly one.
+        if transport is None:
+            if socket_path is None:
+                raise TypeError(
+                    "WireServer requires either transport= or socket_path="
+                )
+            transport = UnixServerTransport(socket_path)
+        elif socket_path is not None:
+            raise TypeError(
+                "WireServer: pass either transport= or socket_path=, not both"
+            )
+        # Peer-cred auth depends on AF_UNIX kernel credentials; pairing
+        # it with a WebSocket transport would silently degrade to
+        # rejection-of-everything (no socket extra_info), which is
+        # confusing. Fail fast at construction.
+        if isinstance(transport, WebSocketServerTransport) and isinstance(
+            authenticator, UnixPeerCredAuthenticator
+        ):
+            raise ValueError(
+                "UnixPeerCredAuthenticator is incompatible with "
+                "WebSocketServerTransport; use TokenAuthenticator over WS"
+            )
+        self._transport = transport
         self._outbox = outbox
         self._inbox = inbox
         self._on_inbound = on_inbound
@@ -185,7 +215,7 @@ class WireServer:
             _next_retry_at_min if callable(_next_retry_at_min) else lambda _peer_id: None
         )
         self._registry = PeerRegistry()
-        self._server: asyncio.base_events.Server | None = None
+        self._started = False
         self._stopped = False
         self._conn_tasks: set[asyncio.Task[None]] = set()
         self._delivery_tasks: dict[str, asyncio.Task[None]] = {}
@@ -199,26 +229,17 @@ class WireServer:
     # -- lifecycle ----------------------------------------------------
 
     async def start(self) -> None:
-        if self._server is not None:
+        if self._started:
             return
-        # Clean any stale socket left by a crashed predecessor.
-        with contextlib.suppress(FileNotFoundError):
-            if os.path.exists(self._socket_path):
-                os.unlink(self._socket_path)
         self._loop = asyncio.get_running_loop()
-        self._server = await asyncio.start_unix_server(
-            self._handle_connection, path=self._socket_path
-        )
+        await self._transport.serve(self._handle_connection)
+        self._started = True
 
     async def stop(self) -> None:
         if self._stopped:
             return
         self._stopped = True
-        if self._server is not None:
-            self._server.close()
-            with contextlib.suppress(Exception):
-                await self._server.wait_closed()
-            self._server = None
+        await self._transport.close()
         # Cancel all delivery workers and connection tasks.
         for task in list(self._delivery_tasks.values()):
             task.cancel()
@@ -231,8 +252,6 @@ class WireServer:
                 await task
         self._delivery_tasks.clear()
         self._conn_tasks.clear()
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(self._socket_path)
 
     @property
     def registry(self) -> PeerRegistry:

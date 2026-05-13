@@ -19,6 +19,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from agentm_channels.transport import ClientTransport, UnixClientTransport
 from agentm_channels.wire import (
     KIND_BYE,
     KIND_DELIVERY_BATCH,
@@ -56,15 +57,28 @@ class WireClient:
 
     def __init__(
         self,
-        socket_path: str,
+        *,
         peer_id: str,
         peer_kind: str,
-        *,
+        transport: ClientTransport | None = None,
+        socket_path: str | None = None,
         token: str | None = None,
         on_outbound: OutboundHandler | None = None,
         capabilities: dict[str, Any] | None = None,
     ) -> None:
-        self._socket_path = socket_path
+        # ``socket_path=`` is a Unix-socket convenience shortcut equivalent to
+        # ``transport=UnixClientTransport(socket_path)``; pass exactly one.
+        if transport is None:
+            if socket_path is None:
+                raise TypeError(
+                    "WireClient requires either transport= or socket_path="
+                )
+            transport = UnixClientTransport(socket_path)
+        elif socket_path is not None:
+            raise TypeError(
+                "WireClient: pass either transport= or socket_path=, not both"
+            )
+        self._transport = transport
         self._peer_id = peer_id
         self._peer_kind = peer_kind
         self._token = token
@@ -80,9 +94,7 @@ class WireClient:
     # -- lifecycle ----------------------------------------------------
 
     async def connect(self) -> None:
-        self._reader, self._writer = await asyncio.open_unix_connection(
-            path=self._socket_path
-        )
+        self._reader, self._writer = await self._transport.connect()
         hello = Envelope(
             v=WIRE_VERSION,
             id=f"hello-{self._peer_id}-{int(time.time() * 1000)}",
