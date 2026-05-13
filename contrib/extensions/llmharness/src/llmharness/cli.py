@@ -505,6 +505,26 @@ def main(argv: list[str] | None = None) -> int:
         help="Output HTML file path.",
     )
 
+    serve_p = sub.add_parser(
+        "serve",
+        help=(
+            "Serve a llmharness-aggregate cases/ directory over HTTP "
+            "(read-only JSON/NDJSON API for remote reviewers)."
+        ),
+    )
+    serve_p.add_argument(
+        "--root",
+        required=True,
+        help="Path to the cases/ directory to serve.",
+    )
+    serve_p.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1).")
+    serve_p.add_argument("--port", type=int, default=8765, help="Bind port (default: 8765).")
+    serve_p.add_argument(
+        "--allow-origin",
+        default="*",
+        help="Access-Control-Allow-Origin value (default: *).",
+    )
+
     review_ds = sub.add_parser(
         "review-dataset",
         help=(
@@ -560,6 +580,22 @@ def main(argv: list[str] | None = None) -> int:
             skip_verdicts=args.events_only,
         )
         return 0
+
+    if args.cmd == "serve":
+        from .serve import main as serve_main
+
+        return serve_main(
+            [
+                "--root",
+                args.root,
+                "--host",
+                args.host,
+                "--port",
+                str(args.port),
+                "--allow-origin",
+                args.allow_origin,
+            ]
+        )
 
     if args.cmd == "review-html":
         try:
