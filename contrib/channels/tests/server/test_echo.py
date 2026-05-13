@@ -27,7 +27,11 @@ async def test_echo_inbound_to_outbound(socket_path: str, db_path: str) -> None:
         )
         outbox.enqueue(session.peer_id, echo)
 
-    server = WireServer(socket_path, outbox, inbox, on_inbound)
+    server = WireServer(
+        socket_path=socket_path,
+        outbox=outbox,
+        inbox=inbox,
+        on_inbound=on_inbound)
     await server.start()
 
     async def collect(env: Envelope) -> None:
@@ -37,7 +41,7 @@ async def test_echo_inbound_to_outbound(socket_path: str, db_path: str) -> None:
         from agentm_channels.client import WireClient
 
         client = WireClient(
-            socket_path, peer_id="A", peer_kind="chat_client", on_outbound=collect
+        socket_path=socket_path, peer_id="A", peer_kind="chat_client", on_outbound=collect
         )
         await client.connect()
         await client.send_inbound({"text": "hi"}, env_id="m1")

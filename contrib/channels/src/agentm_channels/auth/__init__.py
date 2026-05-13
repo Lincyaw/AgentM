@@ -13,5 +13,6 @@ the only supported deployment shape in v1.
 from __future__ import annotations
 
 from .peercred import UnixPeerCredAuthenticator
+from .token import TokenAuthenticator
 
-__all__ = ["UnixPeerCredAuthenticator"]
+__all__ = ["TokenAuthenticator", "UnixPeerCredAuthenticator"]

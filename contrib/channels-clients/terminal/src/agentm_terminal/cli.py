@@ -32,12 +32,12 @@ import sys
 import time
 import uuid
 from typing import Annotated, Any
-from urllib.parse import urlparse
 
 import typer
 
 from agentm_channels import DEFAULT_SOCKET_URL, autoload_dotenv
 from agentm_channels.client import AuthError, WireClient
+from agentm_channels.client_cli import ConnectError, ConnectOptions, resolve_connect
 from agentm_channels.wire import (
     KIND_BYE,
     KIND_DELIVERY_BATCH,
@@ -109,26 +109,13 @@ def _resolve_color(no_color_flag: bool, fmt: str) -> bool:
     return sys.stdout.isatty()
 
 
-def _parse_connect_url(url: str) -> str:
-    """Return the absolute socket path. Raises ``typer.Exit(2)`` on
-    invalid input (scheme, missing path)."""
-    parsed = urlparse(url)
-    if parsed.scheme != "unix":
-        _err(
-            "bad-argument",
-            f"--connect scheme {parsed.scheme!r} is not supported",
-            "use unix:///abs/path/to/sock (only unix:// is available in v1)",
-        )
-        raise typer.Exit(code=EXIT_USAGE)
-    socket_path = parsed.path or parsed.netloc
-    if not socket_path or not socket_path.startswith("/"):
-        _err(
-            "bad-argument",
-            f"--connect URL {url!r} has no absolute socket path",
-            "use unix:///abs/path/to/sock",
-        )
-        raise typer.Exit(code=EXIT_USAGE)
-    return socket_path
+def _resolve_connect(url: str, tls_ca: str | None):
+    """Wrap :func:`resolve_connect` with CLI-shaped error reporting."""
+    try:
+        return resolve_connect(url, tls_ca=tls_ca)
+    except ConnectError as exc:
+        _err("bad-argument", str(exc), "see --help for the supported schemes")
+        raise typer.Exit(code=EXIT_USAGE) from exc
 
 
 @app.command()
@@ -140,13 +127,36 @@ def cli(
             envvar="AGENTM_SOCKET",
             metavar="URL",
             help=(
-                "Gateway socket URL. v1 supports only unix:///abs/path/to/sock; "
-                "other schemes are rejected with exit 2. Default: shared with "
-                "`agentm-gateway` ($XDG_RUNTIME_DIR/agentm-gw.sock if set, else "
-                "/tmp/agentm-gw-<uid>.sock). Env: AGENTM_SOCKET."
+                "Gateway URL. Supported schemes: unix:///abs/path/to/sock, "
+                "ws://host:port/path, wss://host:port/path. Default: shared "
+                "with `agentm-gateway` ($XDG_RUNTIME_DIR/agentm-gw.sock if "
+                "set, else /tmp/agentm-gw-<uid>.sock). Env: AGENTM_SOCKET."
             ),
         ),
     ] = DEFAULT_SOCKET_URL,
+    token: Annotated[
+        str | None,
+        typer.Option(
+            "--token",
+            envvar="AGENTM_TOKEN",
+            help=(
+                "Bearer token sent in the hello envelope. Required for "
+                "ws/wss gateways with token auth. Env: AGENTM_TOKEN. "
+                "Note: visible in `ps`; prefer the env variable."
+            ),
+        ),
+    ] = None,
+    tls_ca: Annotated[
+        str | None,
+        typer.Option(
+            "--tls-ca",
+            metavar="PATH",
+            help=(
+                "CA bundle (PEM) to verify the gateway certificate. Only "
+                "meaningful with wss://. Default: system trust store."
+            ),
+        ),
+    ] = None,
     output_format: Annotated[
         str | None,
         typer.Option(
@@ -235,7 +245,9 @@ def cli(
     try:
         rc = asyncio.run(
             _arun(
-                connect=connect,
+                connect_opts=ConnectOptions(
+                    connect=connect, token=token, tls_ca=tls_ca
+                ),
                 output_format=output_format,
                 no_color=no_color,
                 sender_id=sender_id,
@@ -253,13 +265,16 @@ def cli(
 
 async def _arun(
     *,
-    connect: str,
+    connect_opts: ConnectOptions,
     output_format: str | None,
     no_color: bool,
     sender_id: str,
     chat_id: str,
     no_input: bool,
 ) -> int:
+    connect = connect_opts.connect
+    token = connect_opts.token
+    tls_ca = connect_opts.tls_ca
     fmt = _resolve_format(output_format)
     color = _resolve_color(no_color, fmt)
     renderer = (
@@ -269,7 +284,7 @@ async def _arun(
         asyncio.Queue() if fmt == "textual" else None
     )
 
-    socket_path = _parse_connect_url(connect)
+    _spec, transport = _resolve_connect(connect, tls_ca)
 
     # Peer id: stable-ish within a single run. The gateway uses this as
     # the synthetic channel name registered on the bus; pairing it with
@@ -319,9 +334,10 @@ async def _arun(
             return
 
     client = WireClient(
-        socket_path=socket_path,
+        transport=transport,
         peer_id=peer_id,
         peer_kind="chat_client",
+        token=token,
         on_outbound=on_outbound,
     )
 
