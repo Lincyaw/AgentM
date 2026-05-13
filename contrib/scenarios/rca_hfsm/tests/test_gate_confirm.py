@@ -1,16 +1,25 @@
-"""Acceptance #2 — confirm-gate downgrade (design §7.1).
+"""Acceptance #2 — confirm-gate downgrade (design §7.1 + §5.2).
 
-Three sub-cases, one per failing precondition:
+Three sub-cases, one per failing precondition the judges now enforce:
 
-1. No negative prediction has been checked → downgrade reason cites the
-   falsification gap.
-2. Only one worker session has produced positive checks → reason cites the
-   independence requirement.
-3. Some symptom is not yet linked through a satisfied prediction → reason
-   cites unexplained symptoms by id.
+1. No negative prediction has been checked →
+   ``rca.judge.falsified_genuinely`` returns ``no_attempt`` and the
+   downgrade reason cites the falsification gap.
+2. Only one worker session has produced positive checks →
+   ``rca.judge.independence`` returns ``redundant`` and the reason
+   cites the independence requirement.
+3. Some symptom is not yet linked through a satisfied prediction →
+   ``rca.judge.coverage`` returns ``gaps`` and the reason names the
+   unexplained symptoms.
 
 Plus one positive-path sub-case so the test file documents what success
 looks like.
+
+Phase-2 semantics flip (design §5.2): a downgraded confirm now returns
+``applied_id=None`` and leaves the parent hypothesis ``open`` (was:
+applied a refine and flipped the parent to ``refined→<child>``). These
+assertions changed in lockstep with the gate refactor; the dedicated
+test for the flip lives in ``test_gate_downgrade_no_apply.py``.
 """
 
 from __future__ import annotations
@@ -79,9 +88,9 @@ def test_confirm_without_negative_check_downgrades_to_refine() -> None:
     assert result.kind == "downgraded"
     assert "falsification gap" in result.reason
     assert result.downgrade is not None and result.downgrade.op == "refine"
-    assert result.applied_id is not None
-    assert read.get_hypothesis(result.applied_id) is not None
-    assert read.get_hypothesis("H1").status.startswith("refined→")
+    # §5.2 flip: the gate proposes a refine but does NOT apply it.
+    assert result.applied_id is None
+    assert read.get_hypothesis("H1").status == "open"
 
 
 def test_confirm_with_single_worker_downgrades_to_refine() -> None:
@@ -92,10 +101,11 @@ def test_confirm_with_single_worker_downgrades_to_refine() -> None:
     result = gate.apply(UpdateProposal(op="confirm", target_id="H1"))
 
     assert result.kind == "downgraded"
-    assert "independence" in result.reason
+    # The judge-mediated reason wraps the structural reason text.
+    assert "independence" in result.reason or "supporting checks" in result.reason
     assert result.downgrade is not None and result.downgrade.op == "refine"
-    assert result.applied_id is not None
-    assert read.get_hypothesis("H1").status.startswith("refined→")
+    assert result.applied_id is None
+    assert read.get_hypothesis("H1").status == "open"
 
 
 def test_confirm_with_unexplained_symptoms_downgrades_to_refine() -> None:
@@ -129,8 +139,8 @@ def test_confirm_with_unexplained_symptoms_downgrades_to_refine() -> None:
     assert "unexplained" in result.reason.lower()
     assert "S2" in result.reason
     assert "S1" not in result.reason  # only the still-unexplained symptom is named
-    assert result.applied_id is not None
-    assert read.get_hypothesis("H1").status.startswith("refined→")
+    assert result.applied_id is None
+    assert read.get_hypothesis("H1").status == "open"
 
 
 def test_confirm_all_preconditions_met_applies() -> None:

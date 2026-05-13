@@ -110,7 +110,15 @@ def test_propose_hypothesis_with_negative_prediction_applies() -> None:
     assert leaves[0].claim == "logrotate failed"
 
 
-def test_propose_hypothesis_without_negative_is_rejected() -> None:
+def test_propose_hypothesis_without_negative_is_applied_under_judge_gate() -> None:
+    """Phase 2: propose-time no longer enforces "≥1 negative prediction".
+
+    The structural rule moved into ``rca.judge.falsified_genuinely`` at
+    confirm-time (design §4.4). Propose now only enforces shape rules,
+    so a positive-only hypothesis IS applied; the equivalent rejection
+    fires later when the orchestrator tries to confirm it.
+    """
+
     api, _, read = install_full_stack()
     tool = _tool(api, "propose_hypothesis")
 
@@ -126,9 +134,10 @@ def test_propose_hypothesis_without_negative_is_rejected() -> None:
     )
 
     text = _text(result)
-    assert text.startswith("status=rejected"), text
-    assert "negative prediction" in text
-    assert read.get_open_leaves() == []
+    assert text.startswith("status=applied"), text
+    leaves = read.get_open_leaves()
+    assert len(leaves) == 1
+    assert leaves[0].claim == "logrotate failed"
 
 
 def test_attach_check_records_observations_and_check() -> None:

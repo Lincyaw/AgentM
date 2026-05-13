@@ -36,14 +36,20 @@ What this test does fail-stop:
    ``rca_hfsm:final-report-submitted`` once coverage holds.
 
 Note on the "independence downgrade" sub-flow originally mentioned in the
-plan: empirically, attempting a confirm before the second worker's check
-is attached leaves the parent hypothesis in a ``refined→`` state from
-which further checks on the *same* prediction id are rejected (its owner
-is no longer an open hypothesis). The independence semantics are already
-fail-stop-covered by ``tests/test_gate_independence.py``. This smoke
-test exercises the gate's downgrade *as a wiring event on the bus* via
-the refute-without-steelman path, which is the structurally equivalent
+plan: the independence semantics are already fail-stop-covered by
+``tests/test_gate_independence.py``. This smoke test exercises the
+gate's downgrade *as a wiring event on the bus* via the
+refute-without-steelman path, which is the structurally equivalent
 shape.
+
+Phase-2 note on side-hypothesis status after a downgrade: prior to the
+LLM-native-judges refactor the gate auto-applied the refine on a
+downgrade and the side hypothesis flipped to ``refined→``; design §5.2
+flipped that so the side hypothesis stays ``open`` and the orchestrator
+decides next steps. The smoke test's step-4 lookup therefore filters
+``open_leaves`` by claim text rather than relying on the side
+hypothesis being out of contention — both hypotheses are open after
+the downgrade.
 """
 
 from __future__ import annotations
@@ -163,8 +169,9 @@ def test_full_falsification_cycle_drives_fsm_to_finalize() -> None:
 
     # 2. Propose a side hypothesis we will *prematurely refute* — that is
     # the structural shape the gate's §7.2 downgrade was designed for, and
-    # it gives the smoke test exactly one downgrade on the bus without
-    # stranding the working hypothesis in a refined→ status.
+    # it gives the smoke test exactly one downgrade on the bus. After the
+    # downgrade the side hypothesis stays ``open`` (design §5.2 semantics
+    # flip); step 4 disambiguates by claim text.
     propose = _tool(api, "propose_hypothesis")
     _run(
         propose.execute(
@@ -199,8 +206,9 @@ def test_full_falsification_cycle_drives_fsm_to_finalize() -> None:
     assert refute_text.startswith("status=downgraded"), refute_text
     assert "steelman" in refute_text or "triggered" in refute_text, refute_text
 
-    # 4. Propose the *real* hypothesis. The side hypothesis is now in a
-    # ``refined→`` state and no longer competes for ``open_leaves``.
+    # 4. Propose the *real* hypothesis. The side hypothesis is still
+    # ``open`` after the downgrade (§5.2 flip); step-4 disambiguates by
+    # claim text below.
     _run(
         propose.execute(
             {

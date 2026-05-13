@@ -1,12 +1,16 @@
-"""Phase 1 independence semantics — ``worker_session_id`` only (design §7.1).
+"""Independence semantics — ``worker_session_id`` distinctness.
 
-The §7.1 confirm gate requires "≥1 independent positive verification". Phase
-1 defines independence as **distinct worker_session_id**; brief-slice
-disjointness (acceptance #9) is Phase 2 and explicitly NOT checked here.
+The confirm gate requires "≥2 independent positive verifications". Under
+Phase 1 the test was implemented by a literal ``worker_session_id`` set
+in ``updates.independent_positive_workers``. After the Phase-2 refactor
+(C2 of the LLM-native-judges work) the gate consults
+``rca.judge.independence`` for this decision; the test fixtures mount the
+Phase-1 mimic judge so the same behaviour is preserved on identical
+inputs.
 
-The test asserts the symmetric pair: two checks with identical observation
-payloads but different session ids ARE treated as independent; two checks
-with the same session id are NOT.
+The test asserts the symmetric pair: two checks with identical
+observation payloads but different session ids ARE treated as
+independent; two checks with the same session id are NOT.
 """
 
 from __future__ import annotations
@@ -18,12 +22,10 @@ from agentm_rca_hfsm.schema import (
     Prediction,
     Symptom,
 )
-from agentm_rca_hfsm.updates import (
-    UpdateProposal,
-    independent_positive_workers,
-)
+from agentm_rca_hfsm.updates import UpdateProposal
 
 from tests._gate_fixtures import install_store_and_gate
+from tests._phase1_mimic_judges import IndependenceMimic
 
 
 _IDENTICAL_OBS = Observation(
@@ -83,21 +85,51 @@ def _h_with_positive_workers(worker_ids: list[str]) -> Hypothesis:
     return Hypothesis(id="H1", claim="logrotate failed", predictions=[neg, pos])
 
 
+def _check_payload(worker_session_id: str) -> dict[str, object]:
+    return {"worker_session_id": worker_session_id, "observations": []}
+
+
 def test_same_session_id_not_independent() -> None:
-    h = _h_with_positive_workers(["w1", "w1"])
-    assert independent_positive_workers(h) == {"w1"}
+    """Mimic of Phase-1 ``independent_positive_workers``: same session id
+    is redundant, not independent.
+    """
+
+    from agentm_rca_hfsm.judges import JudgeContext
+
+    mimic = IndependenceMimic()
+    verdict = mimic.judge(
+        JudgeContext(
+            graph_slice={
+                "check_a": _check_payload("w1"),
+                "check_b": _check_payload("w1"),
+            },
+            operands={},
+        )
+    )
+    assert verdict.verdict == "redundant"
 
 
 def test_distinct_session_ids_are_independent() -> None:
-    h = _h_with_positive_workers(["w1", "w2"])
-    assert independent_positive_workers(h) == {"w1", "w2"}
+    from agentm_rca_hfsm.judges import JudgeContext
+
+    mimic = IndependenceMimic()
+    verdict = mimic.judge(
+        JudgeContext(
+            graph_slice={
+                "check_a": _check_payload("w1"),
+                "check_b": _check_payload("w2"),
+            },
+            operands={},
+        )
+    )
+    assert verdict.verdict == "independent"
 
 
 def test_confirm_blocks_on_single_session_even_with_identical_obs() -> None:
     """End-to-end: identical observation payloads do NOT compensate for a
     shared ``worker_session_id``. This is the load-bearing Phase 1 claim —
-    independence is structural (who ran the check), not semantic (what the
-    check saw).
+    independence is structural (who ran the check), not semantic (what
+    the check saw). The Phase-2 mimic judge enforces the same rule.
     """
 
     _, gate, read = install_store_and_gate()
@@ -110,7 +142,8 @@ def test_confirm_blocks_on_single_session_even_with_identical_obs() -> None:
 
     assert result.kind == "downgraded"
     assert "independence" in result.reason
-    assert read.get_hypothesis("H1").status.startswith("refined→")
+    # §5.2 flip: parent stays open after the downgrade.
+    assert read.get_hypothesis("H1").status == "open"
 
 
 def test_confirm_passes_with_distinct_sessions_and_full_coverage() -> None:

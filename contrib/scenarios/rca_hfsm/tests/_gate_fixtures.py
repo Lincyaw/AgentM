@@ -24,6 +24,8 @@ from agentm_rca_hfsm.atoms import (
     rca_observation_cache,
 )
 
+from tests._phase1_mimic_judges import all_mimics
+
 
 class StubAPI:
     """Minimal ``ExtensionAPI`` shim.
@@ -115,13 +117,20 @@ def install_store_and_gate() -> tuple[StubAPI, Any, Any]:
     """Return ``(api, gate, read_handle)`` after wiring store + gate.
 
     Resets the store's module-level claim registry first so test ordering
-    cannot cross-contaminate. Returns the gate instance directly (via the
-    ``rca.gate`` service) — every gate test pokes at ``gate.apply(...)``.
+    cannot cross-contaminate. Mounts the Phase-1 mimic judges so the gate
+    can install (it requires the 4 ``rca.judge.*`` services to be
+    published before its own install runs) AND so the post-refactor gate
+    behaves identically to the Phase-1 gate on Phase-1 fail-stop test
+    inputs (design §8.2 behavior-preservation acceptance). Returns the
+    gate instance directly (via the ``rca.gate`` service) — every gate
+    test pokes at ``gate.apply(...)``.
     """
 
     rca_hgraph_store._reset_for_tests()
     api = StubAPI()
     rca_hgraph_store.install(api, {})
+    for service_name, mimic in all_mimics().items():
+        api.set_service(service_name, mimic)
     rca_falsification_gate.install(api, {})
     gate = api.get_service("rca.gate")
     read = api.get_service("rca.hgraph.read")
