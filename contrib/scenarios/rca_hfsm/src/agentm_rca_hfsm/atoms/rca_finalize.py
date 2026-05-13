@@ -23,7 +23,7 @@ atom-to-atom imports; L1 is reached via ``api.get_service('rca.hgraph.read')``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, ToolResult, ToolTerminate
 from agentm.core.abi.extension import ExtensionAPI
@@ -48,7 +48,7 @@ MANIFEST = ExtensionManifest(
 )
 
 
-_PARAMS: dict[str, Any] = {
+_PARAMS: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
         "root_cause": {
