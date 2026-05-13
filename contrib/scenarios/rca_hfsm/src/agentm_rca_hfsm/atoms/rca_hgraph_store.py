@@ -34,7 +34,6 @@ from agentm_rca_hfsm.schema import (
     Observation,
     Symptom,
 )
-from agentm_rca_hfsm.updates import is_prediction_satisfied
 
 
 MANIFEST = ExtensionManifest(
@@ -102,18 +101,26 @@ class _ReadHandle:
         ]
 
     def get_unexplained_symptoms(self) -> list[Symptom]:
-        # Tightened to the §7.1 "satisfied prediction of a confirmed
-        # hypothesis" definition now that ``updates.is_prediction_satisfied``
-        # establishes the "satisfied" semantics (≥1 CheckResult; negative
-        # predictions with no triggering verdict; positive predictions with
-        # a supporting verdict).
+        # A symptom is "explained" iff there exists a confirmed hypothesis
+        # whose predictions carry ≥1 CheckResult with ≥1 Observation that
+        # cites the symptom in its ``related_symptoms``. This is a purely
+        # structural read — no regex on free-text, no judgment about
+        # whether the verdict "supports" or "triggers" the claim.
+        #
+        # Phase-2 simplification: the Phase-1 definition layered the
+        # ``is_prediction_satisfied`` regex check on top of this chain.
+        # That regex moved into ``rca.judge.satisfied`` along with every
+        # other free-text semantic check; the store now exposes only the
+        # structural skeleton. The FINALIZE coverage gate
+        # (``rca_finalize``) consumes this method's output as-is — once a
+        # hypothesis is confirmed and its checks carry observations
+        # linking back to a symptom, that symptom is explained for
+        # FINALIZE's purposes.
         explained: set[str] = set()
         for h in self._state.hypotheses.values():
             if h.status != "confirmed":
                 continue
             for p in h.predictions:
-                if not is_prediction_satisfied(p):
-                    continue
                 for c in p.checks:
                     for obs in c.observations:
                         explained.update(obs.related_symptoms)
@@ -129,9 +136,10 @@ class _ReadHandle:
         ]
 
     def get_confirmed(self) -> list[Hypothesis]:
-        # Helper consumed by ``updates.explained_symptom_ids`` (gate-side
-        # coverage check). Added in commit 2; not on the public read-API
-        # surface listed in the design doc, but kept narrow and read-only.
+        # Narrow read-only helper consumed by ``rca.judge.coverage`` (and
+        # by historical Phase-1 callers that have since moved into judge
+        # services). Kept narrow and read-only — not on the public
+        # read-API surface listed in the design doc.
         return [
             h for h in self._state.hypotheses.values()
             if h.status == "confirmed"

@@ -49,8 +49,9 @@ def test_refute_without_steelman_or_trigger_downgrades() -> None:
     assert result.kind == "downgraded"
     assert "steelman" in result.reason.lower() or "triggered" in result.reason.lower()
     assert result.downgrade is not None and result.downgrade.op == "refine"
-    assert result.applied_id is not None
-    assert read.get_hypothesis("H1").status.startswith("refined→")
+    # §5.2 flip: downgrade no longer applies; parent stays open.
+    assert result.applied_id is None
+    assert read.get_hypothesis("H1").status == "open"
 
 
 def test_refute_with_triggered_negative_prediction_applies() -> None:
