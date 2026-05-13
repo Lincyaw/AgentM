@@ -206,18 +206,25 @@ class Gateway:
     async def _dispatch_safely(self, msg: InboundMessage) -> None:
         try:
             await self._dispatch(msg)
-        except Exception:
+        except Exception as exc:
             logger.exception("error handling inbound from %s", msg.session_key)
+            err_type = type(exc).__name__
+            err_msg = str(exc).strip() or "(no message)"
+            # Cap to keep one envelope reasonable; full trace is in the log.
+            if len(err_msg) > 800:
+                err_msg = err_msg[:800] + "… (truncated; see gateway log)"
             try:
                 await self._bus.publish_outbound(
                     OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content=(
-                            "Sorry — your message could not be processed. "
-                            "The error has been logged; please retry or contact "
-                            "the operator if it keeps happening."
-                        ),
+                        content=f"Gateway error — {err_type}: {err_msg}",
+                        metadata={
+                            "error": {
+                                "type": err_type,
+                                "message": err_msg,
+                            }
+                        },
                     )
                 )
             except Exception:
