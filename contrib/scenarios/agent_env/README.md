@@ -26,10 +26,14 @@ dependencies.
    endpoint; that's it. NodePort, port-forward, ingress — any of them work.
    Default `http://localhost:8080`.
 
-2. **A ready WarmPool** whose name matches `pool_ref` in the manifest (or env
-   var `AGENTM_AGENT_ENV_POOL_REF`). The pool's pods must include a `sidecar`
-   container; if you're starting from scratch the agent-env repo ships a
-   sample at `examples/local-test/manifests/warmpool.yaml`.
+2. **Pool source.** Choose one (the atom picks `image` if both are present):
+
+   - **Default (recommended):** an `image` reference for `arl.ManagedSession`.
+     The gateway provisions and scales the pool server-side; you don't have
+     to apply a WarmPool manifest first.
+   - **Legacy / advanced:** a pre-created WarmPool whose name matches
+     `pool_ref`. Use this when the operations team manages pools out-of-band
+     and AgentM should only attach to existing capacity.
 
 3. **Python deps.** From the AgentM repo root:
 
@@ -42,19 +46,65 @@ dependencies.
 
 ## Configuration
 
-All optional except `pool_ref` (which must come from either the manifest or
-the env var):
+Exactly one of `image` or `pool_ref` is required. Both may come from the
+manifest or the env var; atom config wins when both are set. If `image` is
+set, the atom uses `ManagedSession` and ignores `pool_ref`.
 
-| Field         | Env var                          | Default                  |
-| ------------- | -------------------------------- | ------------------------ |
-| `pool_ref`    | `AGENTM_AGENT_ENV_POOL_REF`      | — (required)             |
-| `gateway_url` | `AGENTM_AGENT_ENV_GATEWAY_URL`   | `http://localhost:8080`  |
-| `namespace`   | `AGENTM_AGENT_ENV_NAMESPACE`     | `default`                |
-| `work_dir`    | —                                | `/workspace`             |
-| `timeout`     | —                                | none (no per-step limit) |
+| Field           | Env var                            | Default                  | Notes                                           |
+| --------------- | ---------------------------------- | ------------------------ | ----------------------------------------------- |
+| `image`         | `AGENTM_AGENT_ENV_IMAGE`           | —                        | Container image; selects the managed-pool path. |
+| `experiment_id` | `AGENTM_AGENT_ENV_EXPERIMENT_ID`   | `agentm-default`         | Managed path only; groups sandboxes for cleanup.|
+| `pool_ref`      | `AGENTM_AGENT_ENV_POOL_REF`        | —                        | Legacy path; ignored if `image` is set.         |
+| `gateway_url`   | `AGENTM_AGENT_ENV_GATEWAY_URL`     | `http://localhost:8080`  |                                                 |
+| `namespace`     | `AGENTM_AGENT_ENV_NAMESPACE`       | `default`                |                                                 |
+| `work_dir`      | —                                  | `/workspace`             |                                                 |
+| `timeout`       | —                                  | none (no per-step limit) |                                                 |
+| `idle_timeout_seconds` | —                           | none                     | Legacy path only; managed sessions use server policy. |
 
-Atom config wins when both the manifest and the env var are set, so a
-scenario can pin one knob while leaving the rest to the operator.
+### Recipes
+
+**Managed pool (default).** The server handles the pool — no `kubectl apply`
+needed. The image only needs to ship the sidecar entrypoint (any ARL-executor
+image works).
+
+```yaml
+extensions:
+  - module: _agentm_contrib__operations_agent_env
+    config:
+      image: arl-executor-agent:latest
+      experiment_id: my-experiment      # optional; default agentm-default
+      work_dir: /workspace
+```
+
+Or purely from env:
+
+```bash
+export AGENTM_AGENT_ENV_IMAGE=arl-executor-agent:latest
+export AGENTM_AGENT_ENV_EXPERIMENT_ID=my-experiment
+```
+
+Bulk-clean every sandbox the run produced:
+
+```python
+from arl import GatewayClient
+GatewayClient(base_url="http://localhost:8080").delete_experiment("my-experiment")
+```
+
+**Legacy / advanced — pre-created WarmPool.** Keep using this if your
+infrastructure already exposes named pools.
+
+```yaml
+extensions:
+  - module: _agentm_contrib__operations_agent_env
+    config:
+      pool_ref: python-39-std
+      work_dir: /workspace
+```
+
+Apply a WarmPool manifest first (e.g.
+`agent-env/examples/local-test/manifests/warmpool.yaml`) and wait for at
+least one pod to be `Ready`. The pool's pods must include a `sidecar`
+container.
 
 ## End-to-end bring-up on minikube
 
@@ -138,7 +188,11 @@ kubectl get pods -n arl
 # arl-operator-gateway-...  1/1 Running
 ```
 
-### 4. Create a WarmPool
+### 4. Create a WarmPool (legacy path only)
+
+Skip this step if you'll be running with the **default managed-pool path**
+(`AGENTM_AGENT_ENV_IMAGE` set): the gateway provisions the pool for you on
+the first `create_managed_session` call.
 
 ```bash
 kubectl apply -f ../agent-env/examples/local-test/manifests/warmpool.yaml
@@ -183,7 +237,12 @@ curl -fsS "$AGENTM_AGENT_ENV_GATEWAY_URL/healthz"   # → ok
 # From the AgentM repo root.
 uv sync --extra agent-env                     # installs arl-env SDK
 
-export AGENTM_AGENT_ENV_POOL_REF=python-39-std
+# Managed pool (default, recommended) — no kubectl apply needed for step 4.
+export AGENTM_AGENT_ENV_IMAGE=arl-executor-agent:latest
+export AGENTM_AGENT_ENV_EXPERIMENT_ID=agentm-smoke
+
+# OR legacy / advanced: attach to the WarmPool you applied in step 4.
+# export AGENTM_AGENT_ENV_POOL_REF=python-39-std
 
 # Optional overrides — only needed if you don't want to bake them into the
 # scenario manifest:
@@ -193,17 +252,19 @@ export AGENTM_AGENT_ENV_POOL_REF=python-39-std
 
 The full env-var contract:
 
-| Variable                          | Used by                              | Default                  |
-| --------------------------------- | ------------------------------------ | ------------------------ |
-| `AGENTM_AGENT_ENV_POOL_REF`       | `operations_agent_env` install       | — (required if no manifest config) |
-| `AGENTM_AGENT_ENV_GATEWAY_URL`    | `operations_agent_env` install       | `http://localhost:8080`  |
-| `AGENTM_AGENT_ENV_NAMESPACE`      | `operations_agent_env` install       | `default`                |
-| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | AgentM provider atoms           | — (one is required)      |
+| Variable                              | Used by                              | Default                  |
+| ------------------------------------- | ------------------------------------ | ------------------------ |
+| `AGENTM_AGENT_ENV_IMAGE`              | `operations_agent_env` install (managed, default) | — (one of image / pool_ref required) |
+| `AGENTM_AGENT_ENV_EXPERIMENT_ID`      | `operations_agent_env` install (managed only)     | `agentm-default`         |
+| `AGENTM_AGENT_ENV_POOL_REF`           | `operations_agent_env` install (legacy)           | — (one of image / pool_ref required) |
+| `AGENTM_AGENT_ENV_GATEWAY_URL`        | `operations_agent_env` install       | `http://localhost:8080`  |
+| `AGENTM_AGENT_ENV_NAMESPACE`          | `operations_agent_env` install       | `default`                |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | AgentM provider atoms               | — (one is required)      |
 
 Manifest-config and env-vars are merged at install time, with **atom config
-winning** — useful when the scenario pins a pool but you want to retarget the
-gateway from the shell. (`AGENTM_AGENT_ENV_POOL_REF` only takes effect when
-`pool_ref` is unset in the manifest.)
+winning** — useful when the scenario pins an image but you want to retarget
+the gateway from the shell. When both `image` and `pool_ref` are resolved,
+`image` wins and the atom uses `ManagedSession`.
 
 ### 7. Run a one-shot prompt
 

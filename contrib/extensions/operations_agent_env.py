@@ -1,8 +1,11 @@
 """``operations_agent_env`` atom — backs Operations with the ARL agent-env sandbox.
 
 Replaces the local-stdlib :class:`Operations` bundle (``operations_local``) with
-one whose ``BashOperations`` and ``FileOperations`` run inside an ARL sandbox via
-``arl.SandboxSession``. Use this when the agent must execute in an isolated
+one whose ``BashOperations`` and ``FileOperations`` run inside an ARL sandbox.
+The atom now defaults to ``arl.ManagedSession(image=...)`` — the server-side
+managed pool flow, where the gateway provisions/scales pods automatically — and
+falls back to ``arl.SandboxSession(pool_ref=...)`` for callers that still pin a
+pre-created WarmPool. Use this whenever the agent must execute in an isolated
 Kubernetes-backed environment instead of the operator's host shell.
 
 Lifecycle: ``install`` creates one sandbox per AgentM session; the sandbox is
@@ -17,15 +20,28 @@ write semantics consistent with bash. The sandbox writer refuses any path
 outside ``work_dir`` (including every host path), so an agent in a sandboxed
 session cannot modify its own AgentM code.
 
-Config (all optional except ``pool_ref``, with env-var fallbacks):
-- ``pool_ref``      — WarmPool to allocate from (env: ``AGENTM_AGENT_ENV_POOL_REF``)
+Config (env-var fallbacks shown). Exactly one of ``image`` / ``pool_ref`` is
+required; if both are set, ``image`` wins (managed pool path):
+
+- ``image``         — Container image for the managed pool (env:
+                      ``AGENTM_AGENT_ENV_IMAGE``). When set, the atom uses
+                      ``arl.ManagedSession`` and the server provisions the pool.
+- ``experiment_id`` — Logical experiment grouping for managed sessions (env:
+                      ``AGENTM_AGENT_ENV_EXPERIMENT_ID``, default
+                      ``agentm-default``). Lets you bulk-delete all sandboxes
+                      spawned by one AgentM workload via
+                      ``GatewayClient.delete_experiment``.
+- ``pool_ref``      — Pre-created WarmPool to allocate from (env:
+                      ``AGENTM_AGENT_ENV_POOL_REF``). Legacy / advanced path,
+                      kept for backward compatibility.
 - ``gateway_url``   — ARL Gateway base URL (env: ``AGENTM_AGENT_ENV_GATEWAY_URL``,
                       default ``http://localhost:8080``)
 - ``namespace``     — Kubernetes namespace (env: ``AGENTM_AGENT_ENV_NAMESPACE``,
                       default ``default``)
 - ``work_dir``      — Default cwd inside the sandbox (default ``/workspace``)
 - ``timeout``       — Per-step timeout seconds; ``None`` means no timeout
-- ``idle_timeout_seconds`` — Sandbox idle TTL on the gateway
+- ``idle_timeout_seconds`` — Sandbox idle TTL on the gateway (legacy path only;
+                      ManagedSession handles idle policy server-side).
 
 §11 single-file contract: only stdlib + ``agentm.core.abi.*`` +
 ``agentm.extensions.*`` + ``arl`` (optional 3rd-party). No atom-to-atom imports.
@@ -64,6 +80,8 @@ MANIFEST = ExtensionManifest(
     config_schema={
         "type": "object",
         "properties": {
+            "image": {"type": "string"},
+            "experiment_id": {"type": "string"},
             "pool_ref": {"type": "string"},
             "gateway_url": {"type": "string"},
             "namespace": {"type": "string"},
@@ -515,22 +533,25 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # Deferred import keeps the SDK truly optional — atoms that never run
     # under agent-env shouldn't fail to load just because ``arl`` is absent.
     try:
-        from arl import SandboxSession  # type: ignore[import-not-found]
+        import arl  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover - install-time surface
         raise RuntimeError(
             "operations_agent_env requires the 'arl-env' package. "
             "Install with: uv sync --extra agent-env"
         ) from exc
 
+    image = _resolve(config, "image", "AGENTM_AGENT_ENV_IMAGE", None)
     pool_ref = _resolve(config, "pool_ref", "AGENTM_AGENT_ENV_POOL_REF", None)
-    if not pool_ref:
+    if not image and not pool_ref:
         raise RuntimeError(
-            "operations_agent_env: 'pool_ref' is required (set in atom "
-            "config or via AGENTM_AGENT_ENV_POOL_REF env var)"
+            "operations_agent_env: one of 'image' (managed pool, default) or "
+            "'pool_ref' (legacy pre-created WarmPool) is required. Set the "
+            "atom config field, or use AGENTM_AGENT_ENV_IMAGE / "
+            "AGENTM_AGENT_ENV_POOL_REF."
         )
     gateway_url = _resolve(
         config, "gateway_url", "AGENTM_AGENT_ENV_GATEWAY_URL", "http://localhost:8080"
-    )
+    ) or "http://localhost:8080"
     namespace = _resolve(
         config, "namespace", "AGENTM_AGENT_ENV_NAMESPACE", "default"
     ) or "default"
@@ -540,13 +561,34 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     idle = config.get("idle_timeout_seconds")
     idle_value: int | None = int(idle) if isinstance(idle, int) else None
 
-    session = SandboxSession(
-        pool_ref=pool_ref,
-        namespace=namespace,
-        gateway_url=gateway_url or "http://localhost:8080",
-        keep_alive=False,
-        idle_timeout_seconds=idle_value,
-    )
+    session: Any
+    if image:
+        # Managed pool path: the server creates and scales the pool from
+        # ``image``; ``experiment_id`` groups sandboxes for bulk cleanup.
+        experiment_id = _resolve(
+            config,
+            "experiment_id",
+            "AGENTM_AGENT_ENV_EXPERIMENT_ID",
+            "agentm-default",
+        ) or "agentm-default"
+        session = arl.ManagedSession(
+            image=image,
+            experiment_id=experiment_id,
+            namespace=namespace,
+            gateway_url=gateway_url,
+            workspace_dir=work_dir,
+        )
+    else:
+        # Legacy pre-created WarmPool path. ``pool_ref`` is guaranteed
+        # non-empty by the selection guard above.
+        assert pool_ref is not None
+        session = arl.SandboxSession(
+            pool_ref=pool_ref,
+            namespace=namespace,
+            gateway_url=gateway_url,
+            keep_alive=False,
+            idle_timeout_seconds=idle_value,
+        )
     session.create_sandbox()
 
     api.register_operations(
