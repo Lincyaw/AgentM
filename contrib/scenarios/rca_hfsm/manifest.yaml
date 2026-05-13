@@ -18,9 +18,30 @@ extensions:
   # ``rca.hgraph.write_token`` the gate claims at install time.
   - module: agentm_rca_hfsm.atoms.rca_hgraph_store
 
+  # --- LLM-native judges (Phase 2). Each atom registers exactly one
+  # ``rca.judge.<kind>`` service. The gate's install fetches all four,
+  # so the judges MUST install before the gate. ``mode: llm`` is the
+  # production default; tests substitute Phase-1 mimic judges via the
+  # fixture in tests/_gate_fixtures.py. No ``config.model`` override —
+  # the LLM judge falls through to ``api.provider`` so a single model
+  # change in ``.env`` re-points every judge.
+  - module: agentm_rca_hfsm.atoms.judge_satisfied
+    config:
+      mode: llm
+  - module: agentm_rca_hfsm.atoms.judge_coverage
+    config:
+      mode: llm
+  - module: agentm_rca_hfsm.atoms.judge_independence
+    config:
+      mode: llm
+  - module: agentm_rca_hfsm.atoms.judge_falsified_genuinely
+    config:
+      mode: llm
+
   # --- single writer of the graph. Must install AFTER the store so the
-  # token claim succeeds; must install BEFORE every tool atom so the
-  # tools can resolve ``rca.gate``.
+  # token claim succeeds, AFTER the judges so it can resolve their
+  # ``rca.judge.*`` services at install time, and BEFORE every tool
+  # atom so the tools can resolve ``rca.gate``.
   - module: agentm_rca_hfsm.atoms.rca_falsification_gate
 
   # --- LLM-facing tool surface (record_symptom / record_observation /

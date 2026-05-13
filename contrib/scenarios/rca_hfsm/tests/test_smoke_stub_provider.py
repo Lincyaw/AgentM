@@ -116,8 +116,9 @@ def test_manifest_loads_in_declared_order() -> None:
             os.environ["AGENTM_PROJECT_ROOT"] = prior
 
     modules = [mod for mod, _cfg in extensions]
-    # The whole stack present (12 entries — see manifest.yaml).
-    assert len(modules) == 12, modules
+    # The whole stack present (16 entries — see manifest.yaml).
+    # 12 from Phase 1 + 4 LLM-native judge atoms (C3 of Phase 2).
+    assert len(modules) == 16, modules
     # Critical dependency-order properties:
     assert modules.index(
         "agentm_rca_hfsm.atoms.rca_hgraph_store"
@@ -125,6 +126,15 @@ def test_manifest_loads_in_declared_order() -> None:
     assert modules.index(
         "agentm_rca_hfsm.atoms.rca_falsification_gate"
     ) < modules.index("agentm_rca_hfsm.atoms.rca_evidence_tools")
+    # Judges install AFTER the store (they don't depend on it but the
+    # order keeps the L1 contract together) and BEFORE the gate (gate's
+    # install reads ``rca.judge.*`` services).
+    for kind in ("satisfied", "coverage", "independence", "falsified_genuinely"):
+        judge_module = f"agentm_rca_hfsm.atoms.judge_{kind}"
+        assert judge_module in modules, f"missing judge atom: {judge_module}"
+        assert modules.index(judge_module) < modules.index(
+            "agentm_rca_hfsm.atoms.rca_falsification_gate"
+        ), f"{judge_module} must install before the gate"
     # Sub-agent inherits the evidence-tool surface.
     sub_agent_idx = modules.index("agentm.extensions.builtin.sub_agent")
     sub_agent_cfg = extensions[sub_agent_idx][1]
