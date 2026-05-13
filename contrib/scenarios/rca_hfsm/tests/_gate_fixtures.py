@@ -1,32 +1,111 @@
-"""Shared test fixtures for the falsification-gate test files.
+"""Shared test fixtures for the rca_hfsm scenario tests.
 
 Each test file owns one tiny scenario; this module hosts the
-``_StubAPI`` and the ``install_store_and_gate`` helper they all reuse so the
-test bodies stay focused on the gate behaviour rather than wiring.
+``_StubAPI``, the ``install_store_and_gate`` helper, and the slightly richer
+``install_full_stack`` helper that adds the evidence-tools + observation-cache
+atoms (commit 3). Tests rely on these to stay focused on behaviour rather
+than wiring.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
-from agentm_rca_hfsm.atoms import rca_falsification_gate, rca_hgraph_store
+from agentm.core.abi import Tool
+
+from agentm_rca_hfsm.atoms import (
+    rca_evidence_tools,
+    rca_falsification_gate,
+    rca_hgraph_store,
+    rca_observation_cache,
+)
 
 
 class StubAPI:
-    """Minimal ``ExtensionAPI`` shim covering only ``set_service`` /
-    ``get_service``. Both store and gate atoms touch nothing else at install
-    time (the gate publishes ``rca.gate``, the store publishes
-    ``rca.hgraph.read`` and ``rca.hgraph.write_token``).
+    """Minimal ``ExtensionAPI`` shim.
+
+    Covers the surface every scenario atom actually touches at install /
+    agent_start time:
+
+    * ``set_service`` / ``get_service`` — service publication.
+    * ``register_tool`` / ``tools`` — tool catalog (a plain list the cache
+      atom mutates by index, mirroring the real ``api.tools`` contract).
+    * ``on`` / ``events.emit`` — event subscription + sync emission. The
+      stub's ``StubEventBus`` records every emitted ``DiagnosticEvent`` so
+      tests can assert on the cache's ``tool_call_cached`` diagnostic.
     """
 
     def __init__(self) -> None:
         self._services: dict[str, Any] = {}
+        self._handlers: dict[str, list[Any]] = {}
+        self.tools: list[Tool] = []
+        self.events = StubEventBus(self._handlers)
+
+    # -- Services ----------------------------------------------------------
 
     def set_service(self, name: str, obj: Any) -> None:
         self._services[name] = obj
 
     def get_service(self, name: str) -> Any:
         return self._services.get(name)
+
+    # -- Tools -------------------------------------------------------------
+
+    def register_tool(self, tool: Tool) -> None:
+        self.tools.append(tool)
+
+    # -- Events ------------------------------------------------------------
+
+    def on(self, channel: str, handler: Any, **_: Any) -> Any:
+        self._handlers.setdefault(channel, []).append(handler)
+        return lambda: None
+
+
+class StubEventBus:
+    """Records every emitted event by channel so tests can assert."""
+
+    def __init__(self, handlers: dict[str, list[Any]]) -> None:
+        self._handlers = handlers
+        self.emitted: list[tuple[str, Any]] = []
+
+    async def emit(self, channel: str, event: Any) -> list[Any]:
+        self.emitted.append((channel, event))
+        results: list[Any] = []
+        for handler in list(self._handlers.get(channel, [])):
+            res = handler(event)
+            if asyncio.iscoroutine(res):
+                res = await res
+            results.append(res)
+        return results
+
+    def emit_sync(self, channel: str, event: Any) -> list[Any]:
+        self.emitted.append((channel, event))
+        results: list[Any] = []
+        for handler in list(self._handlers.get(channel, [])):
+            res = handler(event)
+            if asyncio.iscoroutine(res):
+                # The stub does not run a loop here; tests that need async
+                # handlers should use the async ``emit`` path.
+                continue
+            results.append(res)
+        return results
+
+    def fire_handlers(self, channel: str, event: Any) -> list[Any]:
+        """Test-only helper: invoke handlers without recording the event.
+
+        Used to fire ``AgentStartEvent`` so the cache atom wraps registered
+        tools without polluting ``emitted`` with a synthetic kernel event.
+        """
+
+        results: list[Any] = []
+        for handler in list(self._handlers.get(channel, [])):
+            res = handler(event)
+            if asyncio.iscoroutine(res):
+                results.append(asyncio.get_event_loop().run_until_complete(res))
+            else:
+                results.append(res)
+        return results
 
 
 def install_store_and_gate() -> tuple[StubAPI, Any, Any]:
@@ -43,4 +122,19 @@ def install_store_and_gate() -> tuple[StubAPI, Any, Any]:
     rca_falsification_gate.install(api, {})
     gate = api.get_service("rca.gate")
     read = api.get_service("rca.hgraph.read")
+    return api, gate, read
+
+
+def install_full_stack() -> tuple[StubAPI, Any, Any]:
+    """Return ``(api, gate, read_handle)`` after wiring the full commit-3 stack.
+
+    Adds ``rca_evidence_tools`` (registers the five LLM-facing tools) and
+    ``rca_observation_cache`` (subscribes to ``agent_start``) on top of the
+    store + gate. Tests that drive evidence tools or the cache go through
+    this helper.
+    """
+
+    api, gate, read = install_store_and_gate()
+    rca_evidence_tools.install(api, {})
+    rca_observation_cache.install(api, {})
     return api, gate, read
