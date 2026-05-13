@@ -142,7 +142,19 @@ def cli(
             help=(
                 "Bearer token sent in the hello envelope. Required for "
                 "ws/wss gateways with token auth. Env: AGENTM_TOKEN. "
-                "Note: visible in `ps`; prefer the env variable."
+                "NOTE: CLI args leak into /proc and shell history — "
+                "prefer --token-file or AGENTM_TOKEN."
+            ),
+        ),
+    ] = None,
+    token_file: Annotated[
+        str | None,
+        typer.Option(
+            "--token-file",
+            metavar="PATH",
+            help=(
+                "Read the bearer token from PATH (whitespace stripped). "
+                "Mutually exclusive with --token. Preferred for production."
             ),
         ),
     ] = None,
@@ -228,6 +240,13 @@ def cli(
       Piped (auto-selects JSON format):
         printf '/help\\n' | agentm-terminal --connect unix:///tmp/gw.sock
     """
+    from agentm_channels import resolve_token
+
+    try:
+        effective_token = resolve_token(token, token_file)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
     if output_format is not None and output_format not in ("text", "json", "textual"):
         _err(
             "bad-argument",
@@ -246,7 +265,7 @@ def cli(
         rc = asyncio.run(
             _arun(
                 connect_opts=ConnectOptions(
-                    connect=connect, token=token, tls_ca=tls_ca
+                    connect=connect, token=effective_token, tls_ca=tls_ca
                 ),
                 output_format=output_format,
                 no_color=no_color,

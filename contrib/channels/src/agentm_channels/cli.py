@@ -27,11 +27,14 @@ Minimal config (``gateway.yaml``)::
 
 ``.env`` is auto-loaded from the cwd and the AgentM workspace root.
 
-Exit codes (see also ``cli-design`` rule group 3):
+Exit codes (see also ``cli-design`` rule group 3; aligned with the other
+contrib clients ``agentm-worker`` / ``agentm-terminal`` / ``agentm-feishu``):
 
 * ``0`` — clean shutdown
 * ``2`` — argument / config error (bad YAML, conflicting flags, …)
-* ``130`` — SIGINT (Ctrl-C)
+* ``4`` — authentication / authorization failure
+* ``7`` — bind / connect / environment failure
+* ``130`` — SIGINT (Ctrl-C) — Unix convention ``128 + SIGINT``
 """
 
 from __future__ import annotations
@@ -80,6 +83,8 @@ PROG = "agentm-gateway"
 
 EXIT_OK = 0
 EXIT_CONFIG_ERROR = 2
+EXIT_AUTH = 4
+EXIT_BIND = 7
 EXIT_SIGINT = 130
 
 

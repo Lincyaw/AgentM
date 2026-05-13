@@ -31,6 +31,9 @@ dev = [
 [project.scripts]
 agentm-gateway = "agentm_channels.cli:main"
 
+[project.entry-points."agentm.subcommands"]
+gateway = "agentm_channels.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

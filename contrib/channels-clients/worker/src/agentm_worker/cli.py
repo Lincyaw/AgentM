@@ -164,7 +164,20 @@ def cli(
             envvar="AGENTM_TOKEN",
             help=(
                 "Bearer token sent in the hello envelope. Required for "
-                "ws/wss gateways with token auth. Env: AGENTM_TOKEN."
+                "ws/wss gateways with token auth. Env: AGENTM_TOKEN. "
+                "NOTE: CLI args leak into /proc and shell history — "
+                "prefer --token-file or AGENTM_TOKEN."
+            ),
+        ),
+    ] = None,
+    token_file: Annotated[
+        str | None,
+        typer.Option(
+            "--token-file",
+            metavar="PATH",
+            help=(
+                "Read the bearer token from PATH (whitespace stripped). "
+                "Mutually exclusive with --token. Preferred for production."
             ),
         ),
     ] = None,
@@ -267,6 +280,13 @@ def cli(
     Note: every session this worker hosts shares --cwd. To serve
     multiple project roots, start more workers.
     """
+    from agentm_channels import resolve_token
+
+    try:
+        effective_token = resolve_token(token, token_file)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
     resolved_cwd = cwd or str(Path.cwd())
     scenarios: list[str] = list(scenario) if scenario else ["general_purpose"]
     if not scenarios:
@@ -287,7 +307,7 @@ def cli(
         rc = asyncio.run(
             _arun(
                 connect_opts=ConnectOptions(
-                    connect=connect, token=token, tls_ca=tls_ca
+                    connect=connect, token=effective_token, tls_ca=tls_ca
                 ),
                 scenarios=scenarios,
                 cwd=resolved_cwd,
