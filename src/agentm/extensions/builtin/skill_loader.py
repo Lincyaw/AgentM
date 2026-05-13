@@ -379,6 +379,25 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             # paths are silently ignored by ``load_skills``.
             discovered_paths.append(str(Path.home() / ".claude" / "skills"))
             discovered_paths.append(str(Path(api.cwd) / ".claude" / "skills"))
+            # Also walk Claude Code's installed-plugin skills:
+            # ``~/.claude/plugins/cache/<source>/<plugin>/<version>/skills/``.
+            # Plugins are how the bulk of Claude Code's library ships
+            # (autoharness, workbuddy, codex, …) — ignoring them would
+            # leave agentm with only the user's personal ``~/.claude/skills``.
+            plugin_cache = Path.home() / ".claude" / "plugins" / "cache"
+            if plugin_cache.is_dir():
+                for source_dir in plugin_cache.iterdir():
+                    if not source_dir.is_dir():
+                        continue
+                    for plugin_dir in source_dir.iterdir():
+                        if not plugin_dir.is_dir():
+                            continue
+                        for version_dir in plugin_dir.iterdir():
+                            if not version_dir.is_dir():
+                                continue
+                            skills_dir = version_dir / "skills"
+                            if skills_dir.is_dir():
+                                discovered_paths.append(str(skills_dir))
         response_owners: dict[int, str] = {}
 
         class _ResourceResponseObserver:

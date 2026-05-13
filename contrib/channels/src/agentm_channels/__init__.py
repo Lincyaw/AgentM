@@ -98,3 +98,34 @@ def default_socket_url() -> str:
 
 
 DEFAULT_SOCKET_URL = default_socket_url()
+
+
+def resolve_token(token: str | None, token_file: str | None) -> str | None:
+    """Resolve the bearer token shared by every client CLI.
+
+    Precedence: ``--token-file`` > ``--token`` > ``AGENTM_TOKEN`` (env
+    fallback is wired by typer via ``envvar=`` on the ``--token`` flag).
+    The two CLI flags are mutually exclusive — secrets should flow
+    through a file (no /proc / shell-history leak) and ``--token`` is
+    kept only as a backwards-compat path.
+
+    Returns ``None`` when neither source is set. Raises ``ValueError``
+    on mutual-exclusion violation; CLI layers translate that into
+    typer's ``BadParameter`` so the user sees a clean exit-2 error.
+    """
+
+    if token_file and token:
+        raise ValueError(
+            "--token and --token-file are mutually exclusive; "
+            "--token-file is preferred (CLI args leak into /proc and shell history)"
+        )
+    if token_file:
+        try:
+            content = Path(token_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"--token-file {token_file!r}: {exc}") from exc
+        stripped = content.strip()
+        if not stripped:
+            raise ValueError(f"--token-file {token_file!r}: file is empty")
+        return stripped
+    return token
