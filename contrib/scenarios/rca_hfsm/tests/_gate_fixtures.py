@@ -15,8 +15,11 @@ from typing import Any
 from agentm.core.abi import Tool
 
 from agentm_rca_hfsm.atoms import (
+    rca_brief_builder,
     rca_evidence_tools,
     rca_falsification_gate,
+    rca_finalize,
+    rca_fsm_policy,
     rca_hgraph_store,
     rca_observation_cache,
 )
@@ -138,3 +141,19 @@ def install_full_stack() -> tuple[StubAPI, Any, Any]:
     rca_evidence_tools.install(api, {})
     rca_observation_cache.install(api, {})
     return api, gate, read
+
+
+def install_with_fsm() -> tuple[StubAPI, Any, Any, Any]:
+    """Return ``(api, gate, read_handle, fsm)`` after wiring the commit-4 stack.
+
+    Adds ``rca_fsm_policy``, ``rca_brief_builder``, and ``rca_finalize`` on top
+    of :func:`install_full_stack`. Tests that exercise FSM transitions or the
+    finalize coverage check use this helper.
+    """
+
+    api, gate, read = install_full_stack()
+    rca_fsm_policy.install(api, {})
+    rca_brief_builder.install(api, {})
+    rca_finalize.install(api, {})
+    fsm = api.get_service("rca.fsm")
+    return api, gate, read, fsm
