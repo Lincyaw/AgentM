@@ -23,16 +23,18 @@ from __future__ import annotations
 
 import secrets
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 from agentm_rca_hfsm.schema import (
+    CheckResult,
     Hypothesis,
     Observation,
     Symptom,
 )
+from agentm_rca_hfsm.updates import is_prediction_satisfied
 
 
 MANIFEST = ExtensionManifest(
@@ -100,22 +102,39 @@ class _ReadHandle:
         ]
 
     def get_unexplained_symptoms(self) -> list[Symptom]:
-        # A symptom is unexplained until some Observation cites it in
-        # ``related_symptoms`` AND that observation has been attached to a
-        # check of a satisfied prediction of a confirmed hypothesis. The
-        # store does not yet have enough structure to compute the
-        # "satisfied" half (the gate adds it in commit 2); Phase 1 returns
-        # the conservative bound: symptoms with no observation citing them
-        # at all. Callers operating on this view in commit 2+ tighten it.
-        cited: set[str] = set()
-        for obs in self._state.observations:
-            cited.update(obs.related_symptoms)
-        return [s for s in self._state.symptoms.values() if s.id not in cited]
+        # Tightened to the §7.1 "satisfied prediction of a confirmed
+        # hypothesis" definition now that ``updates.is_prediction_satisfied``
+        # establishes the "satisfied" semantics (≥1 CheckResult; negative
+        # predictions with no triggering verdict; positive predictions with
+        # a supporting verdict).
+        explained: set[str] = set()
+        for h in self._state.hypotheses.values():
+            if h.status != "confirmed":
+                continue
+            for p in h.predictions:
+                if not is_prediction_satisfied(p):
+                    continue
+                for c in p.checks:
+                    for obs in c.observations:
+                        explained.update(obs.related_symptoms)
+        return [
+            s for s in self._state.symptoms.values()
+            if s.id not in explained
+        ]
 
     def get_refuted_branches(self) -> list[Hypothesis]:
         return [
             h for h in self._state.hypotheses.values()
             if h.status == "refuted"
+        ]
+
+    def get_confirmed(self) -> list[Hypothesis]:
+        # Helper consumed by ``updates.explained_symptom_ids`` (gate-side
+        # coverage check). Added in commit 2; not on the public read-API
+        # surface listed in the design doc, but kept narrow and read-only.
+        return [
+            h for h in self._state.hypotheses.values()
+            if h.status == "confirmed"
         ]
 
     def get_observation_by_signature(self, signature: str) -> Observation | None:
@@ -155,6 +174,21 @@ class _WriteHandle:
                 observation.tool_signature, observation,
             )
 
+    def attach_check(self, prediction_id: str, check: CheckResult) -> None:
+        """Append ``check`` to the matching prediction (commit 2 gate hook).
+
+        Raises ``KeyError`` if the prediction id is not present on any known
+        hypothesis. The gate atom ensures the prediction is open before
+        calling; the store only enforces existence.
+        """
+
+        for h in self._state.hypotheses.values():
+            for p in h.predictions:
+                if p.id == prediction_id:
+                    p.checks.append(check)
+                    return
+        raise KeyError(f"unknown prediction: {prediction_id}")
+
 
 # ---------------------------------------------------------------------------
 # Single-writer token registry. Module-level because the gate atom does not
@@ -163,8 +197,8 @@ class _WriteHandle:
 # ---------------------------------------------------------------------------
 
 
-_pending: dict[str, _WriteHandle] = {}
-_claimed: set[str] = set()
+_pending: Final[dict[str, _WriteHandle]] = {}
+_claimed: Final[set[str]] = set()
 
 
 def claim_write_handle(token: str) -> _WriteHandle:
