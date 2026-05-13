@@ -29,13 +29,13 @@ import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import urlparse
 
 import typer
 
 from agentm.core.abi import EventBus
 from agentm_channels import DEFAULT_SOCKET_URL, autoload_dotenv
 from agentm_channels.client import AuthError, WireClient
+from agentm_channels.client_cli import ConnectError, ConnectOptions, resolve_connect
 from agentm_channels.wire import (
     KIND_BYE,
     KIND_ERROR,
@@ -75,24 +75,12 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit(code=EXIT_OK)
 
 
-def _parse_connect_url(url: str) -> str:
-    parsed = urlparse(url)
-    if parsed.scheme != "unix":
-        _err(
-            "bad-argument",
-            f"--connect scheme {parsed.scheme!r} is not supported",
-            "use unix:///abs/path/to/sock (only unix:// is available in v1)",
-        )
-        raise typer.Exit(code=EXIT_USAGE)
-    socket_path = parsed.path or parsed.netloc
-    if not socket_path or not socket_path.startswith("/"):
-        _err(
-            "bad-argument",
-            f"--connect URL {url!r} has no absolute socket path",
-            "use unix:///abs/path/to/sock",
-        )
-        raise typer.Exit(code=EXIT_USAGE)
-    return socket_path
+def _resolve_connect(url: str, tls_ca: str | None):
+    try:
+        return resolve_connect(url, tls_ca=tls_ca)
+    except ConnectError as exc:
+        _err("bad-argument", str(exc), "see --help for the supported schemes")
+        raise typer.Exit(code=EXIT_USAGE) from exc
 
 
 # -- session factory --------------------------------------------------
@@ -163,12 +151,34 @@ def cli(
             envvar="AGENTM_SOCKET",
             metavar="URL",
             help=(
-                "Gateway socket URL. v1 supports only unix:///abs/path/to/sock; "
-                "other schemes are rejected with exit 2. Default: shared with "
-                "`agentm-gateway`. Env: AGENTM_SOCKET."
+                "Gateway URL. Supported schemes: unix:///abs/path/to/sock, "
+                "ws://host:port/path, wss://host:port/path. Default: shared "
+                "with `agentm-gateway`. Env: AGENTM_SOCKET."
             ),
         ),
     ] = DEFAULT_SOCKET_URL,
+    token: Annotated[
+        str | None,
+        typer.Option(
+            "--token",
+            envvar="AGENTM_TOKEN",
+            help=(
+                "Bearer token sent in the hello envelope. Required for "
+                "ws/wss gateways with token auth. Env: AGENTM_TOKEN."
+            ),
+        ),
+    ] = None,
+    tls_ca: Annotated[
+        str | None,
+        typer.Option(
+            "--tls-ca",
+            metavar="PATH",
+            help=(
+                "CA bundle (PEM) to verify the gateway certificate. Only "
+                "meaningful with wss://."
+            ),
+        ),
+    ] = None,
     scenario: Annotated[
         list[str] | None,
         typer.Option(
@@ -276,7 +286,9 @@ def cli(
     try:
         rc = asyncio.run(
             _arun(
-                connect=connect,
+                connect_opts=ConnectOptions(
+                    connect=connect, token=token, tls_ca=tls_ca
+                ),
                 scenarios=scenarios,
                 cwd=resolved_cwd,
                 provider=provider,
@@ -294,14 +306,16 @@ def cli(
 
 async def _arun(
     *,
-    connect: str,
+    connect_opts: ConnectOptions,
     scenarios: list[str],
     cwd: str,
     provider: str | None,
     model: str | None,
     max_concurrency: int,
 ) -> int:
-    socket_path = _parse_connect_url(connect)
+    connect = connect_opts.connect
+    token = connect_opts.token
+    _spec, transport = _resolve_connect(connect, connect_opts.tls_ca)
 
     peer_id = f"worker-{uuid.uuid4().hex[:8]}"
 
@@ -341,9 +355,10 @@ async def _arun(
             stop_event.set()
 
     client = WireClient(
-        socket_path=socket_path,
+        transport=transport,
         peer_id=peer_id,
         peer_kind="agent_worker",
+        token=token,
         on_outbound=on_outbound,
         capabilities={"scenarios": scenarios, "cwd": cwd},
     )
