@@ -90,6 +90,10 @@ MANIFEST = ExtensionManifest(
 class _Gate:
     write_handle: Any  # _WriteHandle from the store; opaque here by design
     graph: GraphView
+    # Optional sync-emit hook installed by ``install`` so ``apply`` can
+    # publish ``rca.graph.mutated`` without awaiting. ``None`` when no bus
+    # is wired (e.g. unit tests that instantiate ``_Gate`` directly).
+    emit: Any = None
 
     # -- Public surface ------------------------------------------------------
 
@@ -98,30 +102,52 @@ class _Gate:
 
         op = update.op
         if op == "propose":
-            return self._apply_propose(update)
-        if op == "confirm":
-            return self._apply_confirm(update)
-        if op == "refute":
-            return self._apply_refute(update)
-        if op == "refine":
-            return self._apply_refine(update)
-        if op == "split":
-            return self._apply_split(update)
-        if op == "merge":
-            return self._apply_merge(update)
-        if op == "supersede":
-            return self._apply_supersede(update)
-        if op == "suspend":
-            return self._apply_suspend(update)
-        if op == "record_observation":
-            return self._apply_record_observation(update)
-        if op == "attach_check":
-            return self._apply_attach_check(update)
-        if op == "record_symptom":
+            result = self._apply_propose(update)
+        elif op == "confirm":
+            result = self._apply_confirm(update)
+        elif op == "refute":
+            result = self._apply_refute(update)
+        elif op == "refine":
+            result = self._apply_refine(update)
+        elif op == "split":
+            result = self._apply_split(update)
+        elif op == "merge":
+            result = self._apply_merge(update)
+        elif op == "supersede":
+            result = self._apply_supersede(update)
+        elif op == "suspend":
+            result = self._apply_suspend(update)
+        elif op == "record_observation":
+            result = self._apply_record_observation(update)
+        elif op == "attach_check":
+            result = self._apply_attach_check(update)
+        elif op == "record_symptom":
             # Not in the §3.3 operator table but the gate is the single
             # writer, so symptom intake also routes through it.
-            return self._apply_record_symptom(update)
-        return UpdateResult.rejected(f"unknown operator: {op!r}")
+            result = self._apply_record_symptom(update)
+        else:
+            return UpdateResult.rejected(f"unknown operator: {op!r}")
+        # Single-line emit on success/downgrade so FSM policy can observe
+        # graph mutations without polling the read API. Commit-4 addition.
+        self._emit_mutation(op, result)
+        return result
+
+    def _emit_mutation(self, op: str, result: UpdateResult) -> None:
+        emit = self.emit
+        if emit is None or result.kind == "rejected":
+            return
+        emit(
+            "rca.graph.mutated",
+            {
+                "op": op,
+                "kind": result.kind,
+                "applied_id": result.applied_id,
+                "downgrade_op": (
+                    result.downgrade.op if result.downgrade is not None else None
+                ),
+                "reason": result.reason,
+            },
+        )
 
     # -- Operator handlers ---------------------------------------------------
 
@@ -383,5 +409,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "rca_falsification_gate: rca.hgraph.read is not published; "
             "rca_hgraph_store must install before the gate"
         )
-    gate = _Gate(write_handle=write_handle, graph=read_handle)
+    # Wire emit through the bus's ``emit_sync`` so ``apply`` (synchronous)
+    # can publish ``rca.graph.mutated`` without awaiting. The FSM policy
+    # atom subscribes via ``api.on('rca.graph.mutated', ...)``.
+    bus = api.events
+    emit_fn = bus.emit_sync if bus is not None else None
+    gate = _Gate(write_handle=write_handle, graph=read_handle, emit=emit_fn)
     api.set_service("rca.gate", gate)
