@@ -28,23 +28,69 @@ EXACTLY ONCE as your final action. The whole graph for this firing
 goes in this single call. There is no incremental ``register_event``
 or ``add_edge`` — the LLM-side choreography is one shot.
 
+## Two refs lists, both load-bearing
+
+Every event has TWO ref lists, both first-class:
+
+- ``refs`` — connects to earlier events in THIS firing (id < self.id).
+  Without these the events in this firing read as disconnected nodes.
+- ``external_refs`` — connects to events from PRIOR firings, presented
+  to you in ``recent_graph``. Without these the whole cumulative
+  graph reads as N disconnected per-firing islands and the auditor
+  cannot trace causal chains across firings.
+
+A typical evid event at turn T should expect:
+- 0-1 ``refs`` entries (the act in this firing it answers, if any),
+- 1+ ``external_refs`` entries (the prior firing's act / hyp it
+  closes — these are almost always present in a multi-turn
+  investigation, because evidence in turn T is usually responding to
+  a plan or query emitted before turn T).
+
+Skipping ``external_refs`` when a witness exists is the single most
+common quality bug in this pipeline. Read recent_graph carefully.
+
 Each event carries:
 
 - ``id``: integer 1, 2, 3, ... in submission order. Local to this
-  firing; restarts at 1 every firing. ``recent_graph`` ids are NOT
-  valid here — they live in a separate, read-only namespace.
+  firing; restarts at 1 every firing. ``recent_graph`` items use the
+  same numeric scheme *inside their own firing*, which is why this
+  firing's ``refs`` cannot reach them by id — use ``external_refs``
+  (see below) to cite them by position in ``recent_graph``.
 - ``kind``: closed set (see below), classified by action signature.
 - ``summary``: ≤ 30 words.
 - ``source_turns``: trajectory indices this event was extracted from.
   Non-empty.
-- ``refs``: optional list of references this event makes to EARLIER
-  events. Each ref has:
-    - ``to``: id of an earlier event (must be < this event's id).
+- ``refs``: list of references this event makes to EARLIER events
+  in THIS firing. Each ref has:
+    - ``to``: id of an earlier event in this firing (must be < this
+      event's id).
     - ``kind``: ``"data"`` (data flow, requires ``cited_entities``) or
       ``"ref"`` (verbatim mention, requires ``cited_quote``).
     - ``reason``: one short sentence.
     - ``cited_entities`` / ``cited_quote``: the literal witness — see
       "Witnesses" below.
+- ``external_refs``: optional list of cross-firing references this
+  event makes back into ``recent_graph``. Each external_ref has:
+    - ``to_recent_graph_index``: 1-based index into the
+      ``recent_graph`` array the harness presented this firing.
+    - ``kind`` / ``reason`` / ``cited_entities`` / ``cited_quote``:
+      same shape and witness rules as ``refs``. The witness must
+      appear in BOTH the referenced ``recent_graph`` event's
+      source-turns text and this event's source-turns text.
+
+  Use ``external_refs`` whenever an event in this firing is causally
+  connected to a prior firing's event — e.g. a tool result here that
+  answers a hypothesis emitted earlier, or a decision here that picks
+  between options enumerated earlier. Without these refs the cumulative
+  graph is a collection of disconnected per-firing islands. The offline
+  aggregator turns each accepted external_ref into an edge in the
+  global id space.
+
+Every event with ``id >= 2`` must cite at least one earlier event —
+either via ``refs`` (in-firing) or via ``external_refs`` (cross-firing).
+The genesis event (``id == 1``) may have empty ``refs`` and empty
+``external_refs`` when no causal predecessor is grounded in the turn
+texts; do not invent one.
 
 ## EventKind by action signature
 
@@ -65,6 +111,56 @@ like, not by what the agent calls it.
 
 When in doubt, emit fewer events with sharper summaries.
 
+## Cross-firing connections (REQUIRED when grounded)
+
+You see a tail of the running graph as ``recent_graph``. The graph
+will read as N disconnected islands unless you cite back into it.
+**Treat ``external_refs`` as a first-class part of the contract, not
+an afterthought.** For every event you emit, ask:
+
+> "Does a token in this event's source_turns text *literally appear*
+> in any recent_graph event's source_turns text?"
+
+If yes, and the connection is causally meaningful (e.g. this evid
+answers a prior hyp, this act follows a prior dec, this concl closes
+a prior task), emit an ``external_refs`` entry with that token as
+``cited_entities`` and the 1-based index of the prior event as
+``to_recent_graph_index``.
+
+Worked example. Suppose firing N-2 emitted:
+
+```
+recent_graph[3] = {
+  id: 2, kind: "hyp",
+  summary: "Agent plans to query abnormal_traces for frontend errors.",
+  source_turns: [11],
+}
+```
+
+…and in this firing the tool result lands at turn 18 with text
+"abnormal_traces returned 142 rows". Your new evid for turn 18 SHOULD
+carry:
+
+```
+external_refs: [
+  { to_recent_graph_index: 3, kind: "data",
+    reason: "tool result answers the earlier plan to query abnormal_traces",
+    cited_entities: ["abnormal_traces"] }
+]
+```
+
+Same witness rules apply: the cited token (here ``abnormal_traces``)
+must appear case-normalized in BOTH the recent_graph event's
+source_turns text AND this event's source_turns text. If you cannot
+find a literal witness, do not invent one — drop the ref. Empty
+``external_refs`` is fine when no such grounding exists.
+
+Counter-example. Don't reach across firings on vibes alone:
+
+> BAD: this firing emits "Assistant decides to investigate latency."
+> Recent_graph has "Tool result lists service names." You can't find
+> a shared literal token; no external_ref.
+
 ## Witnesses
 
 A ref is only accepted if its witness appears (case+whitespace
@@ -73,7 +169,10 @@ AND this event's source_turns text.
 
 - ``data`` refs: ``cited_entities`` — concrete tokens (table names,
   identifiers, error messages, file paths, ...) present in BOTH turn
-  texts. Empty entities = ref dropped.
+  texts. **EVERY entity in the list must appear in both** — the
+  validator drops the whole ref if even one entity is missing on
+  either side. Prefer a single entity you're certain of over a wider
+  list. Empty entities = ref dropped.
   GOOD: source event cites tool output containing ``abnormal_traces``;
   this event references the same table by name.
   ``cited_entities=["abnormal_traces"]``.
@@ -101,11 +200,23 @@ AND this event's source_turns text.
 ## Inputs
 
 The next message contains the new-turn window plus a tail of the
-running graph as ``recent_graph``. Treat ``recent_graph`` as
-read-only background context — its ids are NOT valid as ``refs[].to``
-in this firing. The verbatim turn texts the harness will normalize
-against are embedded below as JSON; quote from these when citing
-entities or quotes.
+running graph as ``recent_graph``. ``recent_graph`` is read-only
+background context: its event ids are not addressable from this
+firing's ``refs``, but each entry is addressable by its 1-based
+position via ``external_refs[].to_recent_graph_index``.
+
+Each ``recent_graph[i]`` carries:
+- ``id``, ``kind``, ``summary``, ``source_turns`` — the prior event.
+- ``source_turn_texts`` — the rendered text of those turns, used by
+  the harness's witness validator. **Read these texts when picking a
+  cross-firing witness**: a ``cited_entities`` token MUST appear
+  case+ws-normalized in one of ``source_turn_texts`` AND in this
+  event's source_turns text below. If you cannot find a shared
+  literal token, do not emit the external_ref.
+
+The verbatim turn texts the harness will normalize against are
+embedded below as JSON; quote from these when citing entities or
+quotes.
 
 Embedded turn window:
 
@@ -118,10 +229,32 @@ Embedded turn window:
 1. Read ``new_turns`` and ``recent_graph`` from the next message.
 2. Walk new_turns in order. Plan all events you would emit and assign
    them ids 1..N in extraction order.
-3. For each event, decide whether it refers to any earlier event in
-   THIS firing (id < self.id) AND has a literal witness in both turn
-   texts. Add those refs.
-4. Call ``submit_events(events=[...])`` ONCE with the full list. The
+3. **In-firing refs (``refs``).** For each event with ``id >= 2``,
+   decide whether it refers to any earlier event in THIS firing
+   (id < self.id) with a literal witness in both turn texts. Add the
+   ``refs`` entries.
+4. **Cross-firing refs (``external_refs``) — do this pass, do not
+   skip it.** For each event you are about to emit:
+   a. Look at the literal tokens in this event's source_turns text
+      (table names, identifiers, error fragments, file paths, etc.).
+   b. Scan every item in ``recent_graph``. For each, look at its
+      ``source_turns`` text (the harness has rendered those turns
+      into the witness pool — they are addressable).
+   c. If a token appears literally in BOTH texts AND the connection
+      is causally meaningful (this evid answers that hyp, this act
+      executes that plan, this concl closes that task), emit an
+      ``external_refs`` entry pointing at that recent_graph item by
+      1-based index, with the shared token as ``cited_entities``
+      (kind=data) or a shared verbatim phrase as ``cited_quote``
+      (kind=ref). The most common cases are: (i) a tool_result evid
+      in this firing landing for an act in a prior firing — connect
+      it; (ii) a thinking-block hyp here that references a result
+      seen in a prior firing — connect it.
+   d. Empty ``external_refs`` is acceptable ONLY when no literal
+      witness exists. If you found a token but skipped the ref
+      because the connection felt weak, you are leaving the graph
+      disconnected on purpose — don't.
+5. Call ``submit_events(events=[...])`` ONCE with the full list. The
    loop ends.
 
 If the harness rejects your submission with a shape error, fix the

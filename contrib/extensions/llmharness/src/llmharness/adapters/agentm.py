@@ -795,6 +795,22 @@ async def _drain_extractor(
     for i, msg in enumerate(window_messages, start=window_lo):
         state.turn_texts[i] = _render_message_text(msg)
 
+    # Extend turn_texts with the source turns of every recent_graph
+    # event so external_refs can be witnessed (their source side lives
+    # in prior firings' windows).
+    recent_graph_events = tuple(
+        branch_state.graph[-_RECENT_GRAPH_SLICE_FOR_EXTRACTOR:]
+    )
+    referenced_turns: set[int] = {
+        t for e in recent_graph_events for t in e.source_turns
+    }
+    for t in referenced_turns:
+        if t in state.turn_texts:
+            continue
+        if 0 <= t < len(messages):
+            state.turn_texts[t] = _render_message_text(messages[t])
+    state.recent_graph = recent_graph_events
+
     # Build the new-turn JSON window for the prompt + payload.
     new_turn_window = [
         s
@@ -805,11 +821,22 @@ async def _drain_extractor(
         if s is not None
     ]
 
+    # Enrich each recent_graph entry with the literal text of its
+    # source_turns so the extractor can pick external_refs witnesses
+    # without guessing. Without this the model only sees summaries and
+    # cannot tell which tokens are actually present in the prior turn
+    # texts the witness validator will check against.
+    recent_graph_payload: list[dict[str, Any]] = []
+    for e in recent_graph_events:
+        entry = e.to_dict()
+        entry["source_turn_texts"] = [
+            state.turn_texts.get(t, "") for t in e.source_turns
+        ]
+        recent_graph_payload.append(entry)
+
     payload = {
         "new_turns": new_turn_window,
-        "recent_graph": [
-            e.to_dict() for e in branch_state.graph[-_RECENT_GRAPH_SLICE_FOR_EXTRACTOR:]
-        ],
+        "recent_graph": recent_graph_payload,
     }
 
     turn_window_json = json.dumps(new_turn_window, ensure_ascii=False, default=str)
@@ -1012,7 +1039,21 @@ async def _spawn_extractor_child(
         raise _ExtractorSpawnError(str(exc)) from exc
 
     try:
-        messages = await child.prompt(json.dumps(payload, ensure_ascii=False, default=str))
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+        recent_n = len(payload.get("recent_graph") or [])
+        directive = (
+            "Below is the firing input. Before calling submit_events, do "
+            f"the external_refs pass: recent_graph has {recent_n} entries "
+            "with source_turn_texts; for each event you emit, scan those "
+            "texts for any literal token that also appears in this event's "
+            "source_turns text. When you find one and the connection is "
+            "causally meaningful, emit an external_refs entry pointing to "
+            "that recent_graph entry by 1-based index. Do not skip this "
+            "pass; in a typical multi-turn investigation most evid events "
+            "in this firing answer a hyp/act from earlier firings.\n\n"
+            + payload_json
+        )
+        messages = await child.prompt(directive)
     except Exception as exc:
         await safe_shutdown(child)
         raise _ExtractorSpawnError(str(exc)) from exc

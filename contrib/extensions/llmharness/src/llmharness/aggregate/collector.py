@@ -64,25 +64,105 @@ def _accumulate_graph(
 ) -> list[GraphSnapshot]:
     """One snapshot per ok extractor firing, accumulating events + edges.
 
-    Non-ok firings produce no snapshot — the cursor doesn't advance and
-    nothing new lands in the graph.
+    Each extractor call emits a *local* id space starting at 1 (events
+    1..N and edges referencing those locals). Concatenating raw outputs
+    would collide ids across firings, so renumber every event with a
+    monotonic global id at the moment it enters the cumulative graph,
+    and rewrite the firing's edges (and its cross-firing external_refs)
+    to point at the same globals.
+
+    Cross-firing connectivity arrives via ``events[].external_refs[]``:
+    each ``to_recent_graph_index`` is a 1-based index into the
+    ``recent_graph`` slice the live harness presented to that firing,
+    which the live adapter selects as the most recent
+    ``_RECENT_GRAPH_SLICE_FOR_EXTRACTOR`` events of the running graph.
+    We rebuild that slice here against ``cum_events`` BEFORE this
+    firing's events are merged, so resolution matches what the
+    extractor actually saw.
+
+    The per-firing JSON files on disk are NOT renumbered — they remain
+    the raw extractor output. Only the cumulative snapshot is
+    canonicalised; that's the contract documented in 02-schemas.md.
     """
-    events: list[dict[str, Any]] = []
-    edges: list[dict[str, Any]] = []
+    from ..audit.entry_types import RECENT_GRAPH_SLICE_FOR_EXTRACTOR
+
+    _RECENT_SLICE = RECENT_GRAPH_SLICE_FOR_EXTRACTOR
+
+    cum_events: list[dict[str, Any]] = []
+    cum_edges: list[dict[str, Any]] = []
     snapshots: list[GraphSnapshot] = []
+    next_id = 0
     for fr in extractor_firings:
         if fr.status != "ok" or fr.output is None:
             continue
         new_events = fr.output.get("events") or []
         new_edges = fr.output.get("edges") or []
-        events = [*events, *new_events]
-        edges = [*edges, *new_edges]
+
+        # The recent_graph slice the extractor saw is the tail of the
+        # cumulative graph *before* this firing's contribution lands.
+        recent_slice = cum_events[-_RECENT_SLICE:] if cum_events else []
+
+        local_to_global: dict[int, int] = {}
+        relabelled_events: list[dict[str, Any]] = []
+        external_edges: list[dict[str, Any]] = []
+        for ev in new_events:
+            local_id = ev.get("id")
+            if not isinstance(local_id, int):
+                relabelled_events.append(ev)
+                continue
+            next_id += 1
+            local_to_global[local_id] = next_id
+            # Drop external_refs from the stored event — they only
+            # carry information until we resolve them to edges; keeping
+            # them on the snapshot event would be redundant and confuse
+            # downstream consumers that scan event payloads for edges.
+            event_copy = {k: v for k, v in ev.items() if k != "external_refs"}
+            event_copy["id"] = next_id
+            relabelled_events.append(event_copy)
+
+            ext_refs = ev.get("external_refs") or []
+            for ext in ext_refs:
+                if not isinstance(ext, dict):
+                    continue
+                idx = ext.get("to_recent_graph_index")
+                if not isinstance(idx, int) or idx < 1 or idx > len(recent_slice):
+                    continue
+                src_event = recent_slice[idx - 1]
+                src_global = src_event.get("id")
+                if not isinstance(src_global, int):
+                    continue
+                external_edges.append(
+                    {
+                        "src": src_global,
+                        "dst": next_id,
+                        "kind": str(ext.get("kind", "")),
+                        "reason": str(ext.get("reason", "")),
+                        "src_turns": list(src_event.get("source_turns") or []),
+                        "dst_turns": list(ev.get("source_turns") or []),
+                        "cited_entities": list(ext.get("cited_entities") or []),
+                        "cited_quote": str(ext.get("cited_quote", "") or ""),
+                    }
+                )
+
+        relabelled_edges: list[dict[str, Any]] = []
+        for ed in new_edges:
+            src = ed.get("src")
+            dst = ed.get("dst")
+            new_src = local_to_global.get(src) if isinstance(src, int) else None
+            new_dst = local_to_global.get(dst) if isinstance(dst, int) else None
+            if new_src is None or new_dst is None:
+                relabelled_edges.append(ed)
+                continue
+            relabelled_edges.append({**ed, "src": new_src, "dst": new_dst})
+
+        cum_events = [*cum_events, *relabelled_events]
+        cum_edges = [*cum_edges, *relabelled_edges, *external_edges]
         snapshots.append(
             GraphSnapshot(
                 after_extractor_firing=fr.sequence,
                 turn_index=fr.turn_index,
-                events=events,
-                edges=edges,
+                events=cum_events,
+                edges=cum_edges,
             )
         )
     return snapshots

@@ -77,6 +77,54 @@ _REF_SCHEMA: dict[str, Any] = {
 }
 
 
+_EXTERNAL_REF_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "to_recent_graph_index": {
+            "type": "integer",
+            "description": (
+                "1-based index into the recent_graph slice the harness "
+                "presented this firing. Identifies which prior event is "
+                "the source of this cross-firing relation."
+            ),
+        },
+        "kind": {
+            "type": "string",
+            "enum": list(EDGE_KIND_VALUES),
+            "description": (
+                "Same semantics as refs[].kind. 'data' = data flow "
+                "(requires cited_entities); 'ref' = referential mention "
+                "(requires cited_quote)."
+            ),
+        },
+        "reason": {
+            "type": "string",
+            "description": "One short sentence explaining the connection.",
+        },
+        "cited_entities": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Required non-empty when kind='data'. Each entity must "
+                "appear (case+ws normalized substring) in BOTH the prior "
+                "event's source_turns text and the citing event's "
+                "source_turns text."
+            ),
+        },
+        "cited_quote": {
+            "type": "string",
+            "description": (
+                "Required non-empty when kind='ref'. Must appear "
+                "(case+ws normalized substring) in BOTH the prior event's "
+                "and the citing event's source_turns text."
+            ),
+        },
+    },
+    "required": ["to_recent_graph_index", "kind", "reason"],
+    "additionalProperties": False,
+}
+
+
 _EVENT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -115,12 +163,26 @@ _EVENT_SCHEMA: dict[str, Any] = {
             "items": _REF_SCHEMA,
             "description": (
                 "References this event makes to EARLIER events (smaller "
-                "id within THIS firing). Always required as a field. "
-                "Allowed empty only for events[0] (id=1) — the genesis "
-                "event of this firing has no in-window predecessor. "
-                "Events with id>=2 MUST cite at least one earlier event "
-                "with a literal witness in both turn texts; the validator "
-                "rejects empty refs on non-genesis events."
+                "id within THIS firing). Always required as a field; "
+                "may be empty when the event only cites prior firings "
+                "via external_refs. Events with id>=2 must cite at "
+                "least one earlier event (in-firing OR external) — the "
+                "validator rejects events that have neither."
+            ),
+        },
+        "external_refs": {
+            "type": "array",
+            "items": _EXTERNAL_REF_SCHEMA,
+            "description": (
+                "Cross-firing references this event makes back into the "
+                "recent_graph slice the harness presented. Each entry "
+                "names a prior event by its 1-based index in recent_graph "
+                "and carries the same witness shape as refs[]. Use these "
+                "when an event in this firing is causally connected to a "
+                "prior firing's event (e.g. a tool result evid here "
+                "answers a hypothesis emitted two firings ago). The "
+                "offline aggregator resolves these to edges in the "
+                "cumulative global id space. Optional; default empty."
             ),
         },
     },
@@ -184,10 +246,16 @@ def build_extractor_tools(state: ExtractionState) -> list[FunctionTool]:
             name=SUBMIT_EVENTS_TOOL_NAME,
             description=(
                 "Submit the entire event graph for this firing in ONE call. "
-                "Events embed refs[] linking to earlier events with witness "
-                "fields. The harness validates each ref's witness against "
-                "the literal turn texts; refs that fail witness are dropped "
-                "(events still accepted). Event-shape errors hard-reject "
+                "Each event carries TWO load-bearing ref lists: ``refs[]`` "
+                "for connections to earlier events in THIS firing, and "
+                "``external_refs[]`` for connections back into "
+                "``recent_graph`` (prior firings). Both are witness-validated "
+                "against literal turn texts; refs that fail witness are "
+                "dropped while the events stay. Skipping ``external_refs`` "
+                "leaves the cumulative graph as disconnected per-firing "
+                "islands — emit them whenever a literal token appears in "
+                "both a recent_graph entry's source_turn_texts and this "
+                "event's source_turns text. Event-shape errors hard-reject "
                 "the whole submission and you may retry. Call this exactly "
                 "ONCE as your final action."
             ),

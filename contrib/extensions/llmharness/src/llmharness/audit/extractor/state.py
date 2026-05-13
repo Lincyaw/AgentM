@@ -32,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...schema import Edge, EdgeKind, Event, EventKind
+from ...schema import Edge, EdgeKind, Event, EventKind, ExternalRef
 from .._enum_schema import EDGE_KIND_VALUES, EVENT_KIND_VALUES
 from .witness import witness_data, witness_ref
 
@@ -44,8 +44,16 @@ class ExtractionState:
     # turn_index -> raw turn text used for witness substring checks. The
     # adapter populates this from the trajectory window before spawning
     # the extractor child. Keys are absolute trajectory indices; values
-    # are the rendered text content for that turn.
+    # are the rendered text content for that turn. Includes BOTH this
+    # firing's window AND every turn referenced by ``recent_graph``
+    # source_turns — required so external_refs can be witnessed.
     turn_texts: dict[int, str] = field(default_factory=dict)
+
+    # The recent-graph slice presented to the extractor this firing.
+    # ``external_refs[].to_recent_graph_index`` is a 1-based index into
+    # this list. Empty when no prior events exist (the extractor must
+    # then emit only in-firing refs).
+    recent_graph: tuple[Event, ...] = ()
 
     # Frozen results filled in by ``commit``.
     events: tuple[Event, ...] = ()
@@ -96,37 +104,48 @@ class ExtractionState:
 
         events_by_id = {ev.id: ev for ev in working}
 
-        # Pass 3: validate refs and accumulate edges + dropped.
+        # Pass 3: validate refs + external_refs, accumulate edges + dropped.
         accepted_edges: list[Edge] = []
+        accepted_external: dict[int, list[ExternalRef]] = {ev.id: [] for ev in working}
         dropped: list[dict[str, Any]] = []
+        recent_n = len(self.recent_graph)
         for raw_event, ev in zip(events_payload, working, strict=True):
             refs_raw = raw_event.get("refs", [])
             if refs_raw is None:
                 refs_raw = []
             if not isinstance(refs_raw, list):
                 return f"submit_events: events[{ev.id - 1}].refs must be an array"
-            # Genesis exception: id=1 (first event of this firing) has no
-            # in-window predecessor and may have empty refs. Every other
-            # event MUST cite at least one earlier event — without refs
-            # the auditor cannot trace causal structure across this
-            # firing's window.
-            if ev.id >= 2 and not refs_raw:
+            ext_raw = raw_event.get("external_refs", [])
+            if ext_raw is None:
+                ext_raw = []
+            if not isinstance(ext_raw, list):
+                return (
+                    f"submit_events: events[{ev.id - 1}].external_refs must be "
+                    "an array"
+                )
+            # Every event must connect to the broader graph — either via
+            # an in-firing ref (must exist for id>=2) or via an
+            # external_ref into recent_graph. The genesis exception
+            # (id=1 may have empty refs) still holds for in-firing refs
+            # since id=1 has no in-firing predecessor.
+            if ev.id >= 2 and not refs_raw and not ext_raw:
                 candidates = ", ".join(
                     f"{{id:{c.id}, kind:{c.kind.value}, summary:{c.summary[:60]!r}}}"
                     for c in working
                     if c.id < ev.id
                 )
                 return (
-                    f"submit_events: events[{ev.id - 1}].refs is empty but "
-                    f"id={ev.id} is non-genesis (id>=2) and must cite at least "
-                    "one earlier event from THIS submission.\n"
-                    f"Candidates you can cite: [{candidates}].\n"
+                    f"submit_events: events[{ev.id - 1}] has no refs and no "
+                    f"external_refs but id={ev.id} is non-genesis (id>=2) and "
+                    "must cite at least one earlier event.\n"
+                    f"In-firing candidates: [{candidates}].\n"
+                    f"recent_graph has {recent_n} prior event(s) available via "
+                    "external_refs[].to_recent_graph_index (1-based).\n"
                     f"Each ref needs: {{to:<earlier_id>, kind:'data'|'ref', "
-                    "reason:<short>, and EITHER cited_entities:[...] (for "
-                    "kind='data', e.g. table/column/service names) OR "
-                    "cited_quote:'...' (for kind='ref', a literal substring). "
-                    "The witness must appear in BOTH the cited event's "
-                    "source_turns text and this event's source_turns text."
+                    "reason:<short>, and EITHER cited_entities:[...] OR "
+                    "cited_quote:'...'}}. Witnesses must appear in BOTH the "
+                    "cited event's source_turns text and this event's "
+                    "source_turns text."
                 )
             for ridx, raw_ref in enumerate(refs_raw):
                 if not isinstance(raw_ref, dict):
@@ -171,7 +190,58 @@ class ExtractionState:
                     )
                 )
 
-        self.events = tuple(working)
+            for ridx, raw_ref in enumerate(ext_raw):
+                if not isinstance(raw_ref, dict):
+                    return (
+                        f"submit_events: events[{ev.id - 1}].external_refs"
+                        f"[{ridx}] must be an object"
+                    )
+                err = _validate_external_ref_shape(ev.id, ridx, raw_ref, recent_n)
+                if err is not None:
+                    return err
+                ext_idx_1b = int(raw_ref["to_recent_graph_index"])
+                src_ext = self.recent_graph[ext_idx_1b - 1]
+                kind = EdgeKind(raw_ref["kind"])
+                src_text = self._concat_turn_texts(src_ext.source_turns)
+                dst_text = self._concat_turn_texts(ev.source_turns)
+                cited_entities = list(raw_ref.get("cited_entities", []) or [])
+                cited_quote = str(raw_ref.get("cited_quote", "") or "")
+                if kind is EdgeKind.DATA:
+                    werr = witness_data(cited_entities, src_text, dst_text)
+                else:
+                    werr = witness_ref(cited_quote, src_text, dst_text)
+                if werr is not None:
+                    dropped.append(
+                        {
+                            "src": f"recent_graph[{ext_idx_1b}]",
+                            "dst": ev.id,
+                            "kind": kind.value,
+                            "last_error": werr,
+                        }
+                    )
+                    continue
+                accepted_external[ev.id].append(
+                    ExternalRef(
+                        to_recent_graph_index=ext_idx_1b,
+                        kind=kind,
+                        reason=str(raw_ref.get("reason", "")),
+                        cited_entities=tuple(cited_entities),
+                        cited_quote=cited_quote,
+                    )
+                )
+
+        # Re-bind events with their accepted external_refs attached.
+        finalized: list[Event] = [
+            Event(
+                id=w.id,
+                kind=w.kind,
+                summary=w.summary,
+                source_turns=w.source_turns,
+                external_refs=tuple(accepted_external[w.id]),
+            )
+            for w in working
+        ]
+        self.events = tuple(finalized)
         self.edges = tuple(accepted_edges)
         self.dropped_edges = tuple(dropped)
         self.committed = True
@@ -285,6 +355,68 @@ def _validate_ref_shape(
         return (
             f"submit_events: events[{self_event_id - 1}].refs[{ridx}].reason "
             "must be a string"
+        )
+    return None
+
+
+def _validate_external_ref_shape(
+    self_event_id: int,
+    ridx: int,
+    raw: dict[str, Any],
+    recent_n: int,
+) -> str | None:
+    to_raw = raw.get("to_recent_graph_index")
+    kind_raw = raw.get("kind")
+
+    if isinstance(to_raw, bool) or not isinstance(to_raw, int):
+        return (
+            f"submit_events: events[{self_event_id - 1}].external_refs[{ridx}]"
+            ".to_recent_graph_index must be an integer"
+        )
+    if to_raw < 1 or to_raw > recent_n:
+        return (
+            f"submit_events: events[{self_event_id - 1}].external_refs[{ridx}]"
+            f".to_recent_graph_index={to_raw} out of bounds (recent_graph has "
+            f"{recent_n} entries; valid range is 1..{recent_n})"
+        )
+    if not isinstance(kind_raw, str):
+        return (
+            f"submit_events: events[{self_event_id - 1}].external_refs[{ridx}]"
+            ".kind must be a string"
+        )
+    try:
+        kind = EdgeKind(kind_raw)
+    except ValueError:
+        return (
+            f"submit_events: events[{self_event_id - 1}].external_refs[{ridx}]"
+            f".kind {kind_raw!r} not in {EDGE_KIND_VALUES}"
+        )
+
+    cited_entities = raw.get("cited_entities", [])
+    cited_quote = raw.get("cited_quote", "")
+    if kind is EdgeKind.DATA:
+        if not isinstance(cited_entities, list) or not cited_entities:
+            return (
+                f"submit_events: events[{self_event_id - 1}].external_refs"
+                f"[{ridx}] kind='data' requires non-empty cited_entities"
+            )
+        for e in cited_entities:
+            if not isinstance(e, str) or not e:
+                return (
+                    f"submit_events: events[{self_event_id - 1}].external_refs"
+                    f"[{ridx}].cited_entities must be non-empty strings"
+                )
+    else:
+        if not isinstance(cited_quote, str) or not cited_quote:
+            return (
+                f"submit_events: events[{self_event_id - 1}].external_refs"
+                f"[{ridx}] kind='ref' requires non-empty cited_quote"
+            )
+    reason = raw.get("reason", "")
+    if not isinstance(reason, str):
+        return (
+            f"submit_events: events[{self_event_id - 1}].external_refs"
+            f"[{ridx}].reason must be a string"
         )
     return None
 

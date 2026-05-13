@@ -90,6 +90,39 @@ async def replay_extractor_record(
     for k, v in (extras.get("turn_texts") or {}).items():
         with contextlib.suppress(TypeError, ValueError):
             state.turn_texts[int(k)] = str(v)
+    # Union in any prior-firing turn texts the caller supplied (the
+    # CLI computes this from earlier records in the sidecar so
+    # external_refs can be witnessed during replay — the live adapter
+    # does the same enrichment at firing time).
+    for k, v in (extras.get("prior_turn_texts") or {}).items():
+        with contextlib.suppress(TypeError, ValueError):
+            state.turn_texts.setdefault(int(k), str(v))
+
+    # Mirror live adapter: enrich recent_graph entries with
+    # source_turn_texts and populate state.recent_graph so
+    # external_refs can be validated against trajectory text.
+    from ..schema import Event as _Event
+
+    payload = dict(record.payload)
+    recent_graph_raw = payload.get("recent_graph") or []
+    enriched_recent: list[dict[str, Any]] = []
+    recent_events: list[_Event] = []
+    for entry in recent_graph_raw:
+        if not isinstance(entry, dict):
+            continue
+        copy = dict(entry)
+        copy["source_turn_texts"] = [
+            state.turn_texts.get(int(t), "")
+            for t in (entry.get("source_turns") or [])
+            if isinstance(t, int)
+        ]
+        enriched_recent.append(copy)
+        try:
+            recent_events.append(_Event.from_dict(entry))
+        except (KeyError, ValueError, TypeError):
+            continue
+    payload["recent_graph"] = enriched_recent
+    state.recent_graph = tuple(recent_events)
 
     extensions = bind_extractor_state(
         base, state=state, turn_window_json=extras.get("turn_window_json", "[]")
@@ -100,7 +133,7 @@ async def replay_extractor_record(
         cwd=cwd,
         extensions=extensions,
         provider=provider,
-        payload=record.payload,
+        payload=payload,
         terminal_tool=SUBMIT_EVENTS_TOOL_NAME,
         purpose="cognitive_audit_extractor_replay",
     )
