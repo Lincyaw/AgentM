@@ -86,9 +86,22 @@ async def run_phase_standalone(
         )
 
     try:
-        messages = await session.prompt(
-            json.dumps(payload, ensure_ascii=False, default=str)
-        )
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+        if terminal_tool == "submit_events":
+            recent_n = len(payload.get("recent_graph") or [])
+            payload_json = (
+                "Below is the firing input. Before calling submit_events, do "
+                f"the external_refs pass: recent_graph has {recent_n} entries "
+                "with source_turn_texts; for each event you emit, scan those "
+                "texts for any literal token that also appears in this "
+                "event's source_turns text. When you find one and the "
+                "connection is causally meaningful, emit an external_refs "
+                "entry pointing to that recent_graph entry by 1-based index. "
+                "Do not skip this pass; in a typical multi-turn investigation "
+                "most evid events in this firing answer a hyp/act from "
+                "earlier firings.\n\n" + payload_json
+            )
+        messages = await session.prompt(payload_json)
     except Exception as exc:
         await safe_shutdown(session)
         return PhaseResult(

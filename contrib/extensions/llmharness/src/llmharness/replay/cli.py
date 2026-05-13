@@ -173,6 +173,35 @@ def _run_single(
     diff: bool,
 ) -> None:
     rec = _pick_record(record, phase=phase, turn=turn, index=index)
+    # For extractor replays, union turn_texts from every prior firing
+    # in the sidecar into rec.extras["prior_turn_texts"]. The runner
+    # uses this to populate state.turn_texts for external_refs witness
+    # checks — the live adapter has the full message trajectory, but
+    # replay only has what each firing recorded.
+    if phase == "extractor":
+        prior_texts: dict[str, Any] = {}
+        for prior in iter_records(record):
+            if prior.ts_ns >= rec.ts_ns:
+                continue
+            for k, v in (prior.extras.get("turn_texts") or {}).items():
+                prior_texts.setdefault(str(k), v)
+        if prior_texts:
+            merged_extras = dict(rec.extras)
+            merged_extras["prior_turn_texts"] = prior_texts
+            rec = ReplayRecord(
+                phase=rec.phase,
+                turn_index=rec.turn_index,
+                root_session_id=rec.root_session_id,
+                ts_ns=rec.ts_ns,
+                compose_kwargs=rec.compose_kwargs,
+                payload=rec.payload,
+                provider=rec.provider,
+                output=rec.output,
+                status=rec.status,
+                error=rec.error,
+                latency_ms=rec.latency_ms,
+                extras=merged_extras,
+            )
     result = asyncio.run(
         _PHASE_RUNNERS[phase](
             rec,

@@ -307,9 +307,9 @@ def test_commit_rejects_non_genesis_event_with_empty_refs() -> None:
         ]
     )
     assert err is not None
-    assert "events[1].refs is empty" in err
+    assert "no refs and no external_refs" in err
     assert "non-genesis" in err
-    assert "Candidates you can cite" in err
+    assert "In-firing candidates" in err
     assert "id:1" in err  # the available earlier event is enumerated
     assert state.committed is False
 
@@ -328,3 +328,168 @@ def test_commit_is_one_shot() -> None:
     assert first is None
     second = state.commit([_evid(1, turns=[10])])
     assert second is not None and "already committed" in second
+
+
+# --- external_refs (cross-firing) --------------------------------------------
+
+
+def test_external_ref_accepted_and_attached_to_event() -> None:
+    """A witnessed external_ref must land on the event's ``external_refs``
+    tuple — that's the only carrier of cross-firing connectivity until
+    the aggregator resolves it to a real edge."""
+    from llmharness.schema import EdgeKind, Event, EventKind
+
+    prior = Event(
+        id=1,
+        kind=EventKind("evid"),
+        summary="prior",
+        source_turns=[5],
+    )
+    state = ExtractionState(
+        turn_texts={
+            5: "the abnormal_traces table appears in the prior turn",
+            10: "we now query abnormal_traces again",
+        },
+        recent_graph=(prior,),
+    )
+    err = state.commit(
+        [
+            {
+                "id": 1,
+                "kind": "evid",
+                "summary": "new",
+                "source_turns": [10],
+                "refs": [],
+                "external_refs": [
+                    {
+                        "to_recent_graph_index": 1,
+                        "kind": "data",
+                        "reason": "same table",
+                        "cited_entities": ["abnormal_traces"],
+                    }
+                ],
+            }
+        ]
+    )
+    assert err is None, err
+    assert len(state.events) == 1
+    ev = state.events[0]
+    assert len(ev.external_refs) == 1
+    er = ev.external_refs[0]
+    assert er.to_recent_graph_index == 1
+    assert er.kind is EdgeKind.DATA
+
+
+def test_external_ref_satisfies_non_genesis_connection_requirement() -> None:
+    """id>=2 may have empty in-firing refs as long as it has an
+    external_ref — the connectivity requirement is OR across both."""
+    from llmharness.schema import Event, EventKind
+
+    prior = Event(
+        id=1,
+        kind=EventKind("evid"),
+        summary="prior",
+        source_turns=[5],
+    )
+    state = ExtractionState(
+        turn_texts={
+            5: "abnormal_traces was discussed earlier",
+            10: "id=1 genesis text",
+            11: "id=2 now also mentions abnormal_traces",
+        },
+        recent_graph=(prior,),
+    )
+    err = state.commit(
+        [
+            {
+                "id": 1,
+                "kind": "evid",
+                "summary": "genesis",
+                "source_turns": [10],
+                "refs": [],
+            },
+            {
+                "id": 2,
+                "kind": "evid",
+                "summary": "non-genesis with only external_ref",
+                "source_turns": [11],
+                "refs": [],
+                "external_refs": [
+                    {
+                        "to_recent_graph_index": 1,
+                        "kind": "data",
+                        "reason": "uses prior table",
+                        "cited_entities": ["abnormal_traces"],
+                    }
+                ],
+            },
+        ]
+    )
+    assert err is None, err
+    assert state.events[1].external_refs[0].to_recent_graph_index == 1
+
+
+def test_external_ref_out_of_bounds_rejected() -> None:
+    state = ExtractionState(turn_texts={10: "x"}, recent_graph=())
+    err = state.commit(
+        [
+            {
+                "id": 1,
+                "kind": "evid",
+                "summary": "g",
+                "source_turns": [10],
+                "refs": [],
+                "external_refs": [
+                    {
+                        "to_recent_graph_index": 1,
+                        "kind": "data",
+                        "reason": "r",
+                        "cited_entities": ["x"],
+                    }
+                ],
+            }
+        ]
+    )
+    assert err is not None
+    assert "out of bounds" in err
+
+
+def test_external_ref_witness_failure_drops_into_dropped_edges() -> None:
+    """Witness failures on external_refs DROP the ref (recorded for
+    debugging) but keep the event — partial-success path symmetric with
+    in-firing refs."""
+    from llmharness.schema import Event, EventKind
+
+    prior = Event(
+        id=1,
+        kind=EventKind("evid"),
+        summary="prior",
+        source_turns=[5],
+    )
+    state = ExtractionState(
+        turn_texts={5: "irrelevant prior text", 10: "this turn says nothing"},
+        recent_graph=(prior,),
+    )
+    err = state.commit(
+        [
+            {
+                "id": 1,
+                "kind": "evid",
+                "summary": "g",
+                "source_turns": [10],
+                "refs": [],
+                "external_refs": [
+                    {
+                        "to_recent_graph_index": 1,
+                        "kind": "data",
+                        "reason": "fabricated",
+                        "cited_entities": ["abnormal_traces"],
+                    }
+                ],
+            }
+        ]
+    )
+    assert err is None
+    assert len(state.events[0].external_refs) == 0
+    assert len(state.dropped_edges) == 1
+    assert state.dropped_edges[0]["src"] == "recent_graph[1]"
