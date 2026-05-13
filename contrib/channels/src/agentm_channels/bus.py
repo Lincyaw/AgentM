@@ -36,6 +36,14 @@ class OutboundKind(str, Enum):
     tear down "thinking" affordances (e.g. ACK reactions). Carries no
     user-visible content."""
 
+    TOOL_CALL = "tool_call"
+    """Structured tool-call envelope. ``content`` is unused; the call's
+    name, arguments, status (``"running"`` / ``"ok"`` / ``"error"``) and
+    full ``result_text`` live in :attr:`OutboundMessage.metadata`. The
+    pair of envelopes for one call (start + end) share the same
+    ``stream_id`` so stream-aware channels patch a single card in
+    place; the terminal frame carries ``final=True``."""
+
 
 ButtonStyle = Literal["primary", "danger", "default"]
 
@@ -108,7 +116,10 @@ class OutboundMessage:
     The :attr:`kind` field tells the channel what to do:
     :attr:`OutboundKind.MESSAGE` renders ``content`` (+ ``buttons``);
     :attr:`OutboundKind.TURN_COMPLETE` is a control signal (channels
-    that don't need it treat it as a no-op).
+    that don't need it treat it as a no-op);
+    :attr:`OutboundKind.TOOL_CALL` carries a structured tool-call
+    record in :attr:`metadata` for renderers that want to show args
+    and full results outside the assistant text stream.
 
     :attr:`stream_id` enables "update one logical message in place"
     semantics. Two outbounds sharing the same ``(chat_id, stream_id)``
