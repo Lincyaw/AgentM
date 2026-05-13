@@ -173,6 +173,13 @@ def test_graph_snapshots_accumulate_across_firings(
     assert len(case.graph_snapshots[0].events) == 1
     # Second snapshot must be cumulative — event from firing 1 still present.
     assert len(case.graph_snapshots[1].events) == 2
+    # Each extractor emits local id=1; the cumulative snapshot must
+    # renumber so both events are addressable. Otherwise downstream
+    # consumers (graph viewer, SFT) collide them into a single node.
+    ids = [ev["id"] for ev in case.graph_snapshots[1].events]
+    assert ids == sorted(set(ids)) and len(set(ids)) == 2, (
+        f"snapshot ids must be globally unique, got {ids}"
+    )
 
 
 def test_main_agent_messages_come_from_last_auditor_trajectory_snapshot(
@@ -399,3 +406,142 @@ def test_failed_extractor_firing_does_not_advance_graph_snapshot(
     case = collect_case(replay_path=replay_path, meta_path=None)
     assert case.meta.extractor_firings == 1
     assert case.graph_snapshots == []
+
+
+def test_graph_snapshot_renumbers_events_and_rewrites_edges(
+    tmp_path: Path,
+) -> None:
+    """Two firings each emit local ids 1/2/3 with edges 1→2 and 2→3.
+    The cumulative snapshot after firing 2 must hold 6 distinct event
+    ids and 4 edges, with edges from firing 2 pointing at the
+    renumbered globals (4/5/6) rather than the originals (1/2/3)."""
+    sid = "sess-renum"
+    replay_path = tmp_path / "audit_replay" / f"{sid}.jsonl"
+    replay_path.parent.mkdir(parents=True)
+    triple = {
+        "events": [
+            {"id": 1, "kind": "task", "summary": "t", "source_turns": [0]},
+            {"id": 2, "kind": "hyp", "summary": "h", "source_turns": [1]},
+            {"id": 3, "kind": "act", "summary": "a", "source_turns": [1]},
+        ],
+        "edges": [
+            {"src": 1, "dst": 2, "kind": "data"},
+            {"src": 2, "dst": 3, "kind": "ref"},
+        ],
+        "dropped_edges": [],
+    }
+    records = [
+        _replay_record(
+            phase="extractor",
+            turn_index=1,
+            ts_ns=1,
+            root_session_id=sid,
+            compose_kwargs={},
+            payload={"new_turns": [], "recent_graph": []},
+            output=triple,
+        ),
+        _replay_record(
+            phase="extractor",
+            turn_index=3,
+            ts_ns=2,
+            root_session_id=sid,
+            compose_kwargs={},
+            payload={"new_turns": [], "recent_graph": []},
+            output=triple,
+        ),
+    ]
+    with replay_path.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+
+    case = collect_case(replay_path=replay_path, meta_path=None)
+    snap2 = case.graph_snapshots[1]
+    ids = [ev["id"] for ev in snap2.events]
+    assert ids == [1, 2, 3, 4, 5, 6], ids
+    # Firing-1 edges target the first triple (globals 1..3); firing-2
+    # edges target the second triple (globals 4..6). No edge may carry
+    # the original local ids.
+    pairs = [(e["src"], e["dst"]) for e in snap2.edges]
+    assert pairs == [(1, 2), (2, 3), (4, 5), (5, 6)], pairs
+
+
+def test_external_ref_resolves_to_cross_firing_edge_in_snapshot(
+    tmp_path: Path,
+) -> None:
+    """Two firings: firing 1 emits one event; firing 2 emits an event
+    whose external_refs[0] targets recent_graph[1] (= firing 1's event).
+    The cumulative snapshot after firing 2 must carry a cross-firing
+    edge from firing-1's event to firing-2's event, with src/dst in the
+    renumbered global id space."""
+    sid = "sess-ext"
+    replay_path = tmp_path / "audit_replay" / f"{sid}.jsonl"
+    replay_path.parent.mkdir(parents=True)
+    records = [
+        _replay_record(
+            phase="extractor",
+            turn_index=1,
+            ts_ns=1,
+            root_session_id=sid,
+            compose_kwargs={},
+            payload={"new_turns": [], "recent_graph": []},
+            output={
+                "events": [
+                    {
+                        "id": 1,
+                        "kind": "task",
+                        "summary": "first",
+                        "source_turns": [0],
+                        "external_refs": [],
+                    }
+                ],
+                "edges": [],
+                "dropped_edges": [],
+            },
+        ),
+        _replay_record(
+            phase="extractor",
+            turn_index=3,
+            ts_ns=2,
+            root_session_id=sid,
+            compose_kwargs={},
+            payload={"new_turns": [], "recent_graph": []},
+            output={
+                "events": [
+                    {
+                        "id": 1,
+                        "kind": "evid",
+                        "summary": "follow-up",
+                        "source_turns": [3],
+                        "external_refs": [
+                            {
+                                "to_recent_graph_index": 1,
+                                "kind": "data",
+                                "reason": "answers task",
+                                "cited_entities": ["foo"],
+                                "cited_quote": "",
+                            }
+                        ],
+                    }
+                ],
+                "edges": [],
+                "dropped_edges": [],
+            },
+        ),
+    ]
+    with replay_path.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+
+    case = collect_case(replay_path=replay_path, meta_path=None)
+    snap2 = case.graph_snapshots[1]
+    assert [ev["id"] for ev in snap2.events] == [1, 2]
+    assert len(snap2.edges) == 1
+    edge = snap2.edges[0]
+    assert edge["src"] == 1
+    assert edge["dst"] == 2
+    assert edge["kind"] == "data"
+    assert edge["src_turns"] == [0]
+    assert edge["dst_turns"] == [3]
+    # external_refs metadata should not leak onto the snapshot event;
+    # it has been consumed into an edge.
+    assert "external_refs" not in snap2.events[1] or snap2.events[1]["external_refs"] == []

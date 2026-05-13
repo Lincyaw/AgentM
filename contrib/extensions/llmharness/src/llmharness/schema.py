@@ -34,7 +34,7 @@ V2 breaking changes carried forward unchanged:
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -62,24 +62,71 @@ class EdgeKind(str, Enum):
 
 
 @dataclass(frozen=True)
+class ExternalRef:
+    """A reference from a new event back into ``recent_graph`` — i.e. to
+    an event extracted by a PRIOR firing.
+
+    Stored on :class:`Event` (not as a free-standing ``Edge``) because the
+    referenced event has only a local id from its own firing at the time
+    the extractor submits. The aggregator resolves these to real edges
+    in the cumulative global id space (see ``aggregate.collector``).
+
+    Witnesses are validated by the live harness, same rules as in-firing
+    refs: ``data`` requires non-empty ``cited_entities``; ``ref`` requires
+    a non-empty ``cited_quote``; both anchors must appear in BOTH the
+    source event's source-turns text and this event's source-turns text.
+    """
+
+    to_recent_graph_index: int  # 1-based, into the recent_graph slice presented this firing
+    kind: EdgeKind
+    reason: str = ""
+    cited_entities: tuple[str, ...] = ()
+    cited_quote: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "to_recent_graph_index": self.to_recent_graph_index,
+            "kind": self.kind.value,
+            "reason": self.reason,
+            "cited_entities": list(self.cited_entities),
+            "cited_quote": self.cited_quote,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ExternalRef:
+        return cls(
+            to_recent_graph_index=int(data["to_recent_graph_index"]),
+            kind=EdgeKind(data["kind"]),
+            reason=str(data.get("reason", "")),
+            cited_entities=tuple(str(e) for e in (data.get("cited_entities") or [])),
+            cited_quote=str(data.get("cited_quote", "")),
+        )
+
+
+@dataclass(frozen=True)
 class Event:
     """A compressed semantic event extracted from one or more turns.
 
-    Edges are no longer stored on the event; they are emitted as
-    separate :class:`Edge` records. Use the audit graph
-    (events + edges, see ``audit.registry.CheckContext``) to traverse
-    references.
+    In-firing refs are emitted as separate :class:`Edge` records (see
+    ``audit.registry.CheckContext``). Cross-firing refs live on the
+    event itself as ``external_refs`` and are resolved into edges by
+    the offline aggregator (`_accumulate_graph`).
     """
 
     id: int
     kind: EventKind
     summary: str
     source_turns: list[int] = field(default_factory=list)
+    external_refs: tuple[ExternalRef, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        d = asdict(self)
-        d["kind"] = self.kind.value
-        return d
+        return {
+            "id": self.id,
+            "kind": self.kind.value,
+            "summary": self.summary,
+            "source_turns": list(self.source_turns),
+            "external_refs": [r.to_dict() for r in self.external_refs],
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Event:
@@ -88,6 +135,9 @@ class Event:
             kind=EventKind(data["kind"]),
             summary=data.get("summary", ""),
             source_turns=list(data.get("source_turns") or []),
+            external_refs=tuple(
+                ExternalRef.from_dict(r) for r in (data.get("external_refs") or [])
+            ),
         )
 
 
@@ -266,6 +316,7 @@ __all__ = [
     "EdgeKind",
     "Event",
     "EventKind",
+    "ExternalRef",
     "Finding",
     "Phase",
     "Reminder",
