@@ -550,9 +550,18 @@ class WireServer:
                 writer.write(encode(batch))
                 await writer.drain()
             else:
+                # Drain per record: the WebSocket transport packs each
+                # ``drain()`` as ONE binary message, and the wire spec
+                # requires one envelope per binary message. Batching
+                # multiple ``write()``s into one ``drain()`` would glue
+                # them into a single WS frame and the client would only
+                # decode the first envelope. Unix-socket transport is
+                # byte-oriented (length-prefixed framing on the wire),
+                # so per-record drain is also correct there — just one
+                # extra syscall per record.
                 for r in records:
                     writer.write(encode(r.envelope))
-                await writer.drain()
+                    await writer.drain()
         except asyncio.CancelledError:
             await self._nack_records(records)
             raise
