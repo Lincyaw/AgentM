@@ -26,7 +26,7 @@ from agentm.core.abi.events import TurnEndEvent
 from agentm.core.abi.tool import ToolResult
 
 from agentm_channels.approval import ApprovalPolicy
-from agentm_channels.bus import MessageBus
+from agentm_channels.bus import MessageBus, OutboundKind
 from agentm_channels.gateway import Gateway, GatewayConfig
 from agentm_channels.manager import ChannelManager
 
@@ -52,7 +52,13 @@ class _FakeSession:
             )
             if blocked is None:
                 tr = ToolResult(
-                    content=[TextContent(type="text", text="hi\n")], is_error=False
+                    content=[
+                        TextContent(
+                            type="text",
+                            text="line one\nline two\nline three\n",
+                        )
+                    ],
+                    is_error=False,
                 )
                 await self._bus.emit(
                     ToolResultEvent.CHANNEL,
@@ -190,50 +196,65 @@ async def test_approval_card_round_trip_lets_tool_through(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_tool_call_streams_intermediate_outbound(tmp_path: Path) -> None:
-    """Fail-stop: tool calls produce live stream frames mid-turn.
+async def test_tool_call_emits_structured_envelopes(tmp_path: Path) -> None:
+    """Tool calls are emitted as their own structured outbounds.
 
-    Before this feature the user only saw the assistant's final
-    TurnEnd text — there was no on-screen signal that a tool was
-    running. The contract this test locks down:
+    Contract:
 
-    * a ``🔧 <tool>(…)`` frame is published BEFORE the tool result
-      (i.e. mid-turn, not buffered until TurnEnd)
-    * tool-call frame and result frame share the same ``stream_id``
-      so stream-aware channels patch one card
-    * the final TurnEnd frame carries ``final=True``
+    * Exactly two outbounds with ``kind == OutboundKind.TOOL_CALL`` are
+      published for one tool invocation.
+    * The first carries ``metadata.status == "running"`` and no
+      ``result_text``; the second carries ``status == "ok"`` and the
+      full multi-line ``result_text`` (no one-line truncation).
+    * Both share the same ``stream_id`` (``tc-<tool_call_id>``); only
+      the terminal frame carries ``final=True``.
+    * The structured tool-call envelopes are independent of the
+      assistant text stream — they do not appear inside the assistant
+      message's content body.
     """
     bus, mgr, gw = await _build(tmp_path)
     try:
         stub = mgr.channels["stub"]
         await stub.push(sender_id="u1", chat_id="c1", content="run-tool")  # type: ignore[attr-defined]
         await _wait_for(
-            lambda: any(o.final for o in stub.outbox),  # type: ignore[attr-defined]
+            lambda: any(
+                o.kind == OutboundKind.TOOL_CALL and o.final
+                for o in stub.outbox  # type: ignore[attr-defined]
+            ),
             timeout=2.0,
         )
-        streamed = [
-            o for o in stub.outbox if o.stream_id is not None  # type: ignore[attr-defined]
+        tool_frames = [
+            o
+            for o in stub.outbox  # type: ignore[attr-defined]
+            if o.kind == OutboundKind.TOOL_CALL
         ]
-        assert streamed, "no streamed outbound frames were published"
-        stream_ids = {o.stream_id for o in streamed}
-        assert len(stream_ids) == 1, (
-            f"tool call and final frame must share one stream_id; got {stream_ids}"
+        assert len(tool_frames) == 2, (
+            f"expected exactly 2 tool_call envelopes; got {len(tool_frames)}"
         )
-        tool_frames = [o for o in streamed if "🔧 bash" in o.content]
-        assert tool_frames, "no 🔧 tool-call frame was emitted"
-        # The first 🔧 frame must precede the final frame on the queue,
-        # proving the user sees the intent mid-turn rather than
-        # post-hoc on TurnEnd.
-        first_tool_idx = stub.outbox.index(tool_frames[0])  # type: ignore[attr-defined]
-        final_frames = [o for o in streamed if o.final]
-        assert final_frames, "TurnEnd frame missing final=True"
-        last_final_idx = stub.outbox.index(final_frames[-1])  # type: ignore[attr-defined]
-        assert first_tool_idx < last_final_idx
-        # The final frame should reflect both the tool result (✓ bash …)
-        # and the assistant's reply text, all in one rendered card.
-        last_final = final_frames[-1]
-        assert "✓ bash" in last_final.content
-        assert "ran bash" in last_final.content
+        start, end = tool_frames
+        assert start.stream_id == end.stream_id == "tc-t1"
+        assert start.final is False
+        assert end.final is True
+        assert start.metadata["status"] == "running"
+        assert start.metadata["tool_name"] == "bash"
+        assert start.metadata["args"] == {"cmd": "echo hi"}
+        assert "result_text" not in start.metadata
+        assert end.metadata["status"] == "ok"
+        assert end.metadata["is_error"] is False
+        assert end.metadata["tool_name"] == "bash"
+        assert end.metadata["args"] == {"cmd": "echo hi"}
+        # Full multi-line stdout survives — no first-line truncation.
+        assert end.metadata["result_text"] == "line one\nline two\nline three\n"
+        # Assistant text stream is independent of the tool-call cards.
+        assistant_finals = [
+            o
+            for o in stub.outbox  # type: ignore[attr-defined]
+            if o.kind != OutboundKind.TOOL_CALL and o.final
+        ]
+        assert any("ran bash" in o.content for o in assistant_finals)
+        for o in assistant_finals:
+            assert "bash(" not in o.content
+            assert "line one" not in o.content
     finally:
         await gw.stop()
         await mgr.stop()

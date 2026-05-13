@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -109,9 +110,15 @@ class _TurnStreamState:
     stream_id: str
     channel: str
     chat_id: str
-    lines: list[str] = field(default_factory=list)
-    tool_idx: dict[str, int] = field(default_factory=dict)
     assistant_buf: str = ""
+    tool_started_at: dict[str, float] = field(default_factory=dict)
+    """Per tool_call_id start timestamp, set when the ToolCallEvent
+    arrives and read again on ToolResultEvent so the terminal frame
+    can carry the full lifecycle (``started_at`` + ``ended_at``)."""
+    tool_args: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Per tool_call_id args snapshot. ToolResultEvent does not carry
+    args, but the terminal frame must echo them so renderers can show
+    one self-contained card."""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Token-delta coalescer: TextDelta handlers set ``dirty`` instead of
     # publishing directly; a background flusher publishes at most every
@@ -431,12 +438,13 @@ class Gateway:
             ),
         )
 
-        # Order matters: render the "🔧 calling X(…)" line BEFORE the
-        # approval bridge so the user sees the intent immediately;
+        # Order matters: emit the structured tool-call envelope BEFORE
+        # the approval bridge so the user sees the intent immediately;
         # otherwise the approval bridge would ``await`` on the button
-        # future and block emit-loop progress for several seconds.
-        # The renderer's return value is ignored by the loop, so it
-        # cannot pre-empt the bridge's ``{"block": …}`` short-circuit.
+        # future and block emit-loop progress for several seconds. The
+        # tool-call envelopes are independent of the assistant text
+        # stream (their own ``stream_id``), so renderers display them
+        # as standalone cards rather than as lines inside the text bubble.
         bus.on(ToolCallEvent.CHANNEL, self._make_tool_call_renderer(route))
         bus.on(ToolCallEvent.CHANNEL, route.bridge.handle_tool_call)
         bus.on(ToolResultEvent.CHANNEL, self._make_tool_result_renderer(route))
@@ -479,12 +487,28 @@ class Gateway:
             state = route.stream
             if state is None:
                 return
+            started_at = time.time()
+            args = dict(event.args)
             async with state.lock:
-                line = f"🔧 {event.tool_name}({_args_brief(event.args)})"
-                state.tool_idx[event.tool_call_id] = len(state.lines)
-                state.lines.append(line)
-                content = _render(state)
-            await self._publish_stream_frame(state, content, final=False)
+                state.tool_started_at[event.tool_call_id] = started_at
+                state.tool_args[event.tool_call_id] = args
+            await self._bus.publish_outbound(
+                OutboundMessage(
+                    channel=state.channel,
+                    chat_id=state.chat_id,
+                    content="",
+                    kind=OutboundKind.TOOL_CALL,
+                    stream_id=f"tc-{event.tool_call_id}",
+                    metadata={
+                        "tool_call_id": event.tool_call_id,
+                        "tool_name": event.tool_name,
+                        "args": args,
+                        "status": "running",
+                        "started_at": started_at,
+                    },
+                    final=False,
+                )
+            )
 
         return _h
 
@@ -495,17 +519,34 @@ class Gateway:
             state = route.stream
             if state is None:
                 return
-            preview = _result_preview(event.result)
-            mark = "✗" if event.result.is_error else "✓"
+            ended_at = time.time()
             async with state.lock:
-                idx = state.tool_idx.get(event.tool_call_id)
-                line = f"{mark} {event.tool_name} → {preview}"
-                if idx is not None and 0 <= idx < len(state.lines):
-                    state.lines[idx] = line
-                else:
-                    state.lines.append(line)
-                content = _render(state)
-            await self._publish_stream_frame(state, content, final=False)
+                started_at = state.tool_started_at.pop(
+                    event.tool_call_id, ended_at
+                )
+                args = state.tool_args.pop(event.tool_call_id, {})
+            result_text = _result_text(event.result)
+            status = "error" if event.result.is_error else "ok"
+            await self._bus.publish_outbound(
+                OutboundMessage(
+                    channel=state.channel,
+                    chat_id=state.chat_id,
+                    content="",
+                    kind=OutboundKind.TOOL_CALL,
+                    stream_id=f"tc-{event.tool_call_id}",
+                    metadata={
+                        "tool_call_id": event.tool_call_id,
+                        "tool_name": event.tool_name,
+                        "args": args,
+                        "status": status,
+                        "result_text": result_text,
+                        "is_error": bool(event.result.is_error),
+                        "started_at": started_at,
+                        "ended_at": ended_at,
+                    },
+                    final=True,
+                )
+            )
 
         return _h
 
@@ -645,7 +686,7 @@ class Gateway:
         if state is None:
             return
         async with state.lock:
-            had_content = bool(state.assistant_buf) or bool(state.lines)
+            had_content = bool(state.assistant_buf)
             already_finalized = state.closed
             state.closed = True
         state.dirty.set()  # unblock the flusher if parked
@@ -671,57 +712,36 @@ def _assistant_text(message: AssistantMessage) -> str:
 def _render(state: _TurnStreamState) -> str:
     """Assemble the streamed-card body from per-turn state.
 
-    Tool lines come first (in arrival order), then a blank-line
-    separator, then the assistant text. Either half may be empty
-    (pre-first-token turn, tool-only turn).
+    Only the assistant text stream lives here; structured tool-call
+    envelopes are emitted on their own per-call ``stream_id`` and never
+    fold into this body.
     """
-    head = "\n".join(state.lines)
-    tail = state.assistant_buf
-    if head and tail:
-        return f"{head}\n\n{tail}"
-    return head or tail
+    return state.assistant_buf
 
 
-def _args_brief(args: dict[str, Any], *, limit: int = 60) -> str:
-    """Best-effort one-liner for a tool call's args.
-
-    Avoids dumping multi-KB blobs (file contents, diffs) into chat;
-    keeps the dict-shape so the user can see *what* the agent is
-    calling without scrolling.
-    """
-    if not args:
-        return ""
-    parts: list[str] = []
-    for k, v in args.items():
-        s = repr(v) if not isinstance(v, str) else v
-        if len(s) > 40:
-            s = s[:37] + "…"
-        parts.append(f"{k}={s}")
-        if sum(len(p) for p in parts) > limit:
-            break
-    out = ", ".join(parts)
-    if len(out) > limit:
-        out = out[: limit - 1] + "…"
-    return out
+_RESULT_TEXT_CAP = 32 * 1024
 
 
-def _result_preview(result: Any, *, limit: int = 100) -> str:
-    """First-line, length-capped textual preview of a ToolResult.
+def _result_text(result: Any, *, limit: int = _RESULT_TEXT_CAP) -> str:
+    """Concatenate the full text of a ToolResult.
 
-    Non-text content (images) collapses to ``<image>``. Multi-line
-    text keeps just the first non-empty line so the stream card
-    stays compact.
+    Joins every non-empty ``TextContent`` block with a newline; emits
+    ``<image>`` for image blocks. Caps the total at ``limit`` bytes to
+    bound memory in pathological cases — full multi-line stdout still
+    survives; only multi-MB blobs get trimmed.
     """
     blocks = getattr(result, "content", None) or []
+    parts: list[str] = []
     for block in blocks:
         text = getattr(block, "text", None)
-        if isinstance(text, str) and text.strip():
-            first = text.strip().splitlines()[0]
-            if len(first) > limit:
-                first = first[: limit - 1] + "…"
-            return first
+        if isinstance(text, str) and text:
+            parts.append(text)
+            continue
         if getattr(block, "type", None) == "image":
-            return "<image>"
-    return "(empty)"
+            parts.append("<image>")
+    joined = "\n".join(parts)
+    if len(joined) > limit:
+        joined = joined[:limit] + f"\n…(truncated at {limit} bytes)"
+    return joined
 
 
