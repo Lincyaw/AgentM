@@ -1,0 +1,81 @@
+name: rca_hfsm
+description: >-
+  Falsification-gated, hypothesis-driven RCA scenario (Phase 1). Sibling — not
+  replacement — of contrib/scenarios/rca/. The atom stack is composed in
+  dependency order: the store publishes the write-handle token first; the
+  gate claims the handle and starts emitting rca.graph.mutated; the evidence
+  tools route every mutation through the gate; the observation cache wraps
+  idempotent tools at agent_start; the FSM policy subscribes to graph
+  mutations and injects per-state prompt fragments; the brief builder and
+  finalize atom complete the L2/L3 surface.
+
+extensions:
+  # --- environment port (local FS + asyncio bash). Listed first so any later
+  # atom that needs ``api.get_operations()`` finds it published.
+  - module: agentm.extensions.builtin.operations_local
+
+  # --- L1 store. Publishes ``rca.hgraph.read`` + a one-shot
+  # ``rca.hgraph.write_token`` the gate claims at install time.
+  - module: agentm_rca_hfsm.atoms.rca_hgraph_store
+
+  # --- single writer of the graph. Must install AFTER the store so the
+  # token claim succeeds; must install BEFORE every tool atom so the
+  # tools can resolve ``rca.gate``.
+  - module: agentm_rca_hfsm.atoms.rca_falsification_gate
+
+  # --- LLM-facing tool surface (record_symptom / record_observation /
+  # propose_hypothesis / attach_check / propose_update).
+  - module: agentm_rca_hfsm.atoms.rca_evidence_tools
+
+  # --- L1 memoization. Wraps idempotent tools at AgentStartEvent; the
+  # evidence tools register with ``idempotent=False`` and pass through.
+  - module: agentm_rca_hfsm.atoms.rca_observation_cache
+
+  # --- behavioural spine. Subscribes to ``rca.graph.mutated``; injects
+  # per-state prompt fragments via BeforeAgentStartEvent; filters the
+  # visible tool catalog on FINALIZE.
+  - module: agentm_rca_hfsm.atoms.rca_fsm_policy
+
+  # --- worker brief construction (L2 → L3 boundary).
+  - module: agentm_rca_hfsm.atoms.rca_brief_builder
+
+  # --- the only legal exit from FINALIZE; coverage-gated submit_final_report.
+  - module: agentm_rca_hfsm.atoms.rca_finalize
+
+  # --- observability sinks (JSONL + OTLP). otel_tracing is a no-op
+  # without ``uv sync --extra otel``.
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.otel_tracing
+
+  # --- L3 worker dispatch. The investigator persona uses dispatch_agent
+  # to fan out verification briefs (built by rca_brief_builder) onto
+  # ephemeral worker sessions.
+  - module: agentm.extensions.builtin.sub_agent
+    config:
+      max_workers: 2
+      inherit_extensions:
+        - operations_local
+        - rca_hgraph_store
+        - rca_evidence_tools
+        - observability
+        - otel_tracing
+      available_inherited_extensions:
+        operations_local:
+          module: agentm.extensions.builtin.operations_local
+        rca_hgraph_store:
+          module: agentm_rca_hfsm.atoms.rca_hgraph_store
+        rca_evidence_tools:
+          module: agentm_rca_hfsm.atoms.rca_evidence_tools
+        observability:
+          module: agentm.extensions.builtin.observability
+        otel_tracing:
+          module: agentm.extensions.builtin.otel_tracing
+
+  # --- system prompt. Empty body — the FSM policy atom injects per-state
+  # fragments via BeforeAgentStartEvent so the live prompt always reflects
+  # the current trace state. The investigator persona file (agents/) is
+  # surfaced separately by sub_agent dispatch, not as the orchestrator's
+  # opening message.
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: ""
