@@ -329,12 +329,14 @@ def run_cmd(
         list[str] | None,
         typer.Option(
             "--extension",
+            "-e",
             help=(
                 "Mount an extra atom on top of --scenario / auto-discovery. "
                 "Repeatable. Form: 'dotted.module.path' or "
                 '\'dotted.module.path:{"key":"value"}\' for inline JSON '
-                "config. Example: --extension llmharness.adapters.agentm "
-                "--extension some.atom:'{\"k\":3}'."
+                "config. Example: -e llmharness.adapters.agentm "
+                "-e some.atom:'{\"k\":3}'. Use `agentm list-extensions` "
+                "to browse available atoms."
             ),
         ),
     ] = None,
@@ -472,7 +474,218 @@ def run_cmd(
 _run = run
 
 
+def list_extensions_cmd(
+    source: Annotated[
+        str,
+        typer.Option(
+            "--source",
+            help=(
+                "Which discovery source to list: 'builtin' (src/agentm/"
+                "extensions/builtin/), 'contrib' (<repo>/contrib/extensions/),"
+                " 'user' (<cwd>/.agentm/atoms/), or 'all'."
+            ),
+        ),
+    ] = "all",
+    output_format: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="Output format: 'text' for humans, 'json' for scripts.",
+        ),
+    ] = "text",
+    filter_substr: Annotated[
+        str | None,
+        typer.Option(
+            "--filter",
+            help="Substring filter applied to extension name or description.",
+        ),
+    ] = None,
+    cwd: Annotated[
+        str,
+        typer.Option(
+            "--cwd",
+            help="Working directory used for 'user' source discovery.",
+        ),
+    ] = os.getcwd(),
+) -> None:
+    """List discoverable extensions (atoms) by source.
+
+    Builtins ship under ``src/agentm/extensions/builtin/``; contrib atoms
+    live at ``<repo>/contrib/extensions/<name>.py``; user atoms are
+    committed by ``api.install_atom`` to ``<cwd>/.agentm/atoms/``. Mount
+    any of them via ``agentm -e <module.path>`` (or stack on top of a
+    ``--scenario``).
+    """
+
+    import json
+
+    from agentm.extensions.discover import (
+        BuiltinEntry,
+        discover_builtin,
+        discover_contrib_atoms,
+        discover_user_atoms,
+    )
+
+    valid_sources = {"all", "builtin", "contrib", "user"}
+    if source not in valid_sources:
+        raise typer.BadParameter(
+            f"--source {source!r}: must be one of {sorted(valid_sources)}"
+        )
+    if output_format not in {"text", "json"}:
+        raise typer.BadParameter(
+            f"--format {output_format!r}: must be 'text' or 'json'"
+        )
+
+    buckets: list[tuple[str, dict[str, BuiltinEntry]]] = []
+    try:
+        if source in {"all", "builtin"}:
+            buckets.append(("builtin", discover_builtin()))
+        if source in {"all", "contrib"}:
+            buckets.append(("contrib", discover_contrib_atoms()))
+        if source in {"all", "user"}:
+            buckets.append(("user", discover_user_atoms(Path(cwd))))
+    except Exception as exc:
+        print(f"ERROR: discovery failed: {exc}", file=sys.stderr)
+        raise typer.Exit(code=1) from exc
+
+    needle = filter_substr.lower() if filter_substr else None
+
+    def _matches(entry: BuiltinEntry) -> bool:
+        if needle is None:
+            return True
+        return (
+            needle in entry.name.lower()
+            or needle in entry.manifest.description.lower()
+            or needle in entry.module_path.lower()
+        )
+
+    if output_format == "json":
+        payload = {
+            origin: [
+                {
+                    "name": e.name,
+                    "module_path": e.module_path,
+                    "description": e.manifest.description,
+                    "registers": list(e.manifest.registers),
+                    "tier": e.manifest.tier,
+                    "api_version": e.manifest.api_version,
+                    "affects": list(e.manifest.affects),
+                }
+                for e in entries.values()
+                if _matches(e)
+            ]
+            for origin, entries in buckets
+        }
+        print(json.dumps(payload, indent=2, sort_keys=False))
+        return
+
+    total = 0
+    for origin, entries in buckets:
+        filtered = [e for e in entries.values() if _matches(e)]
+        total += len(filtered)
+        print(f"# {origin} ({len(filtered)})")
+        if not filtered:
+            print("  (none)")
+            continue
+        for entry in sorted(filtered, key=lambda e: e.name):
+            tier = entry.manifest.tier
+            tags = ",".join(entry.manifest.registers) or "-"
+            print(
+                f"  {entry.name:32s} tier={tier} [{tags}]\n"
+                f"    {entry.manifest.description}\n"
+                f"    -e {entry.module_path}"
+            )
+    print(f"\n{total} extension(s) shown.", file=sys.stderr)
+
+
+_BUILTIN_SUBCOMMANDS: dict[str, Any] = {
+    "list-extensions": list_extensions_cmd,
+}
+
+
+def _discover_external_subcommands() -> dict[str, Any]:
+    """Scan ``importlib.metadata`` entry points for additional subcommands.
+
+    Each contrib package registers itself via::
+
+        [project.entry-points."agentm.subcommands"]
+        gateway = "agentm_channels.cli:main"
+
+    Returns ``name → EntryPoint``; the EP is lazily ``.load()``-ed only
+    when the user actually invokes the subcommand, so ``agentm --help``
+    and the default prompt path stay fast.
+    """
+
+    from importlib.metadata import entry_points
+
+    out: dict[str, Any] = {}
+    try:
+        eps = entry_points(group="agentm.subcommands")
+    except Exception:
+        return out
+    for ep in eps:
+        if ep.name in _BUILTIN_SUBCOMMANDS:
+            print(
+                f"WARNING: external subcommand {ep.name!r} from "
+                f"{ep.value!r} shadowed by builtin",
+                file=sys.stderr,
+            )
+            continue
+        out[ep.name] = ep
+    return out
+
+
+def _print_subcommand_help(external: dict[str, Any]) -> None:
+    names = sorted([*_BUILTIN_SUBCOMMANDS.keys(), *external.keys()])
+    if not names:
+        return
+    print("\nSubcommands:", file=sys.stderr)
+    for name in names:
+        if name in _BUILTIN_SUBCOMMANDS:
+            origin = "builtin"
+        else:
+            origin = external[name].value
+        print(f"  agentm {name:24s}  [{origin}]", file=sys.stderr)
+    print(
+        "\nRun `agentm <subcommand> --help` for subcommand options.",
+        file=sys.stderr,
+    )
+
+
 def main() -> None:
-    """Entry point referenced by the ``agentm`` console script."""
+    """Entry point referenced by the ``agentm`` console script.
+
+    Dispatch order:
+
+    1. ``agentm <subcommand> [args...]`` — builtin introspection
+       (``list-extensions``) or any subcommand registered via the
+       ``agentm.subcommands`` entry-point group (contrib clients like
+       ``gateway`` / ``worker`` / ``terminal`` / ``feishu``).
+    2. ``agentm [options] [PROMPT]`` — the legacy single-shot prompt
+       runner. ``agentm "<prompt>"`` stays backwards compatible.
+    """
+
+    argv = sys.argv[1:]
+    external = _discover_external_subcommands()
+
+    if argv and argv[0] in {"--help", "-h"}:
+        try:
+            typer.run(run_cmd)
+        except SystemExit:
+            _print_subcommand_help(external)
+            raise
+        return
+
+    if argv:
+        sub = argv[0]
+        if sub in _BUILTIN_SUBCOMMANDS:
+            sys.argv = [f"{sys.argv[0]} {sub}", *argv[1:]]
+            typer.run(_BUILTIN_SUBCOMMANDS[sub])
+            return
+        if sub in external:
+            target = external[sub].load()
+            sys.argv = [f"{sys.argv[0]} {sub}", *argv[1:]]
+            target()
+            return
 
     typer.run(run_cmd)
