@@ -63,19 +63,46 @@ def test_second_claim_with_different_token_also_raises() -> None:
         rca_hgraph_store.claim_write_handle("not-the-real-token")
 
 
-def test_claim_with_unknown_token_raises_and_locks_registry() -> None:
+def test_claim_with_unknown_token_raises_then_legit_token_still_works() -> None:
     api = _StubAPI()
     rca_hgraph_store.install(api, {})
     token = api.get_service("rca.hgraph.write_token")
 
-    # An attempt with a bogus token must raise.
+    # An attempt with a bogus token must raise (and the bogus token is
+    # marked claimed so a retry with the same bogus value still raises).
+    with pytest.raises(RuntimeError):
+        rca_hgraph_store.claim_write_handle("wrong")
     with pytest.raises(RuntimeError):
         rca_hgraph_store.claim_write_handle("wrong")
 
-    # And the legitimate token can no longer be redeemed afterwards — the
-    # single-writer invariant is "exactly one call succeeds, ever".
+    # The legitimate token is unaffected by tampering on a different
+    # token — the one-shot rule is scoped per token, not registry-wide,
+    # so multiple sessions in the same process can each redeem their own
+    # token (regression test for #156). Per-token poisoning still applies:
+    # claiming the legit token twice raises on the second call.
+    rca_hgraph_store.claim_write_handle(token)
     with pytest.raises(RuntimeError):
         rca_hgraph_store.claim_write_handle(token)
+
+
+def test_multiple_installs_each_redeem_their_own_token() -> None:
+    """Regression for #156 — process-wide registry must not block legit sessions.
+
+    Two ``install`` calls in the same process must each surface a unique
+    write token, and each token must redeem its corresponding handle.
+    """
+    api_a = _StubAPI()
+    rca_hgraph_store.install(api_a, {})
+    token_a = api_a.get_service("rca.hgraph.write_token")
+
+    api_b = _StubAPI()
+    rca_hgraph_store.install(api_b, {})
+    token_b = api_b.get_service("rca.hgraph.write_token")
+
+    assert token_a != token_b
+    handle_a = rca_hgraph_store.claim_write_handle(token_a)
+    handle_b = rca_hgraph_store.claim_write_handle(token_b)
+    assert handle_a is not handle_b
 
 
 def test_read_service_remains_available_after_install() -> None:
