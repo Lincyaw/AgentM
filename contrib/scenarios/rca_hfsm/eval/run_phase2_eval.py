@@ -78,6 +78,10 @@ class CaseResult:
     judge_calls: dict[str, int] = field(default_factory=dict)
     mutation_kinds: dict[str, int] = field(default_factory=dict)
     downgrade_reasons: list[str] = field(default_factory=list)
+    investigation_genuine_rejections: int = 0
+    investigation_genuine_reasons: list[str] = field(default_factory=list)
+    final_report_accepted: bool = False
+    final_report_attempts: int = 0
 
 
 # --- Grader -----------------------------------------------------------------
@@ -302,6 +306,15 @@ def _tabulate_trace(jsonl_path: Path) -> dict[str, Any]:
         "last_stop_reason": None,
         "input_tokens": 0,
         "output_tokens": 0,
+        # C5 — surface investigation_genuine rejections by scanning
+        # tool_result text for the judge's reason marker. The judge does
+        # not currently emit a structured bus event (design §3.4 left
+        # this optional for Phase 2); the rejection text is the only
+        # on-trace signal.
+        "investigation_genuine_rejections": 0,
+        "investigation_genuine_reasons": [],
+        "final_report_accepted": False,
+        "final_report_attempts": 0,
     }
     try:
         with jsonl_path.open("r", encoding="utf-8") as fh:
@@ -350,9 +363,30 @@ def _tabulate_trace(jsonl_path: Path) -> dict[str, Any]:
                             out["dispatch_agent_count"] += 1
                         elif tool_name == "submit_final_report":
                             out["final_report_emitted"] = True
+                            out["final_report_attempts"] += 1
                             args = event.get("args") or {}
                             if isinstance(args, dict):
                                 out["final_report_args"] = args
+                    if name == "emit:tool_result":
+                        tool_name = event.get("tool_name")
+                        if tool_name == "submit_final_report":
+                            result_text = str(event.get("content") or "")
+                            is_error = bool(event.get("is_error"))
+                            if (
+                                is_error
+                                and "judge=investigation_genuine"
+                                in result_text
+                            ):
+                                out["investigation_genuine_rejections"] += 1
+                                # Truncate so the report stays readable.
+                                preview = result_text[:300]
+                                out["investigation_genuine_reasons"].append(
+                                    preview
+                                )
+                            elif not is_error and "status=finalized" in result_text:
+                                out["final_report_accepted"] = True
+                    if name == "emit:rca.final_report":
+                        out["final_report_accepted"] = True
     except OSError as exc:
         out["read_error"] = str(exc)
     return out
@@ -499,6 +533,14 @@ async def _run_one(task: dict[str, Any]) -> CaseResult:
         result.output_tokens = tab.get("output_tokens", 0)
         result.final_report_emitted = bool(tab.get("final_report_emitted"))
         result.final_report_args = tab.get("final_report_args") or {}
+        result.investigation_genuine_rejections = int(
+            tab.get("investigation_genuine_rejections") or 0
+        )
+        result.investigation_genuine_reasons = (
+            tab.get("investigation_genuine_reasons") or []
+        )
+        result.final_report_accepted = bool(tab.get("final_report_accepted"))
+        result.final_report_attempts = int(tab.get("final_report_attempts") or 0)
 
     # Grade with the local scoring rule (mirrors the rca grader's
     # weights but doesn't gate on the broken task_meta.task_id wire).
@@ -535,7 +577,8 @@ def write_report(
     lines.append(f"- **Branch**: feat/rca-hfsm-phase1 at {head_sha}")
     lines.append(
         "- **Manifest**: contrib/scenarios/rca_hfsm/manifest.yaml "
-        "(4 LLM-mode judges mounted before the gate)"
+        "(5 LLM-mode judges mounted before the gate; "
+        "rca.judge.investigation_genuine consulted at finalize time)"
     )
     lines.append(f"- **Provider**: {provider}")
     lines.append(f"- **Model**: {model}")
@@ -634,6 +677,17 @@ def write_report(
         lines.append(
             f"- **Mutation kinds**: {_fmt_kv(r.mutation_kinds)}"
         )
+        lines.append(
+            f"- **submit_final_report**: attempts={r.final_report_attempts}, "
+            f"accepted={r.final_report_accepted}, "
+            f"investigation_genuine_rejections="
+            f"{r.investigation_genuine_rejections}"
+        )
+        if r.investigation_genuine_reasons:
+            preview = r.investigation_genuine_reasons[0]
+            lines.append(
+                f"- **First investigation_genuine rejection**: {preview}"
+            )
         if r.final_report_args:
             root_cause = str(r.final_report_args.get("root_cause") or "")[:300]
             if root_cause:
@@ -658,6 +712,23 @@ def write_report(
 
     # Cross-case patterns
     lines.append("## Cross-case patterns")
+    lines.append("")
+    lines.append("### C5 — investigation_genuine judge effect")
+    lines.append("")
+    total_rej = sum(r.investigation_genuine_rejections for r in results)
+    total_accept = sum(1 for r in results if r.final_report_accepted)
+    lines.append(
+        f"Across the {len(results)} cases: "
+        f"{total_rej} ``submit_final_report`` calls rejected by "
+        f"``rca.judge.investigation_genuine``, "
+        f"{total_accept} accepted with ``status=finalized``. "
+        "The judge fires from inside ``rca_finalize`` whenever the LLM "
+        "tries to submit; a rejection means the trajectory shape "
+        "(symptoms / hypotheses / checks / gate-mutations) did not pass "
+        "the 'genuine investigation' question. The orchestrator sees "
+        "the judge's free-text reason in the tool result and is "
+        "expected to course-correct."
+    )
     lines.append("")
     lines.append("### Judge call patterns")
     lines.append("")

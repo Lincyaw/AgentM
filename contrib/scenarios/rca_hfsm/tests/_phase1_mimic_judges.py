@@ -198,6 +198,87 @@ class CoverageMimic:
         )
 
 
+class InvestigationGenuineMimic:
+    """Mimic of "the orchestrator did something" structural rule.
+
+    Phase-1 had no equivalent — C4 showed the orchestrator could bypass
+    the FSM entirely and submit_final_report on an empty trajectory.
+    This mimic encodes the simplest structural rule the C5 judge
+    replaces with LLM judgment: the trace is genuine iff there is at
+    least one symptom AND at least one hypothesis AND at least one
+    hypothesis has at least one prediction with at least one check.
+    Anything weaker is speculation; the mimic only returns ``unclear``
+    on the contradictory shape (no symptoms but mutations were applied).
+
+    Documentation of what we now use LLM judgment to subsume — not
+    production code.
+    """
+
+    kind = "investigation_genuine"
+
+    def judge(self, context: JudgeContext) -> Verdict:
+        gs = context.graph_slice
+        symptom_count = int(gs.get("symptom_count", 0) or 0)
+        hypotheses = gs.get("hypotheses") or []
+        mutations = gs.get("gate_mutations") or {}
+        applied = int(mutations.get("applied", 0) or 0)
+
+        # Contradictory: applied mutations but no symptoms. Likely a
+        # bus-ordering anomaly — return unclear so the caller treats this
+        # as not-genuine without spuriously blaming the LLM.
+        if symptom_count == 0 and applied > 0:
+            return Verdict(
+                verdict="unclear",
+                reason=(
+                    "phase1_mimic: gate applied mutations but no symptoms "
+                    "are recorded — trajectory shape is contradictory"
+                ),
+                confidence="low",
+            )
+
+        if symptom_count == 0:
+            return Verdict(
+                verdict="speculation",
+                reason=(
+                    "phase1_mimic: no symptoms recorded — call "
+                    "record_symptom for each reported error before "
+                    "concluding"
+                ),
+                confidence="high",
+            )
+        if not hypotheses:
+            return Verdict(
+                verdict="speculation",
+                reason=(
+                    "phase1_mimic: zero hypotheses proposed — propose a "
+                    "falsifiable hypothesis and attach checks before "
+                    "submitting"
+                ),
+                confidence="high",
+            )
+        has_checked_prediction = any(
+            int(h.get("checks_count", 0) or 0) > 0 for h in hypotheses
+        )
+        if not has_checked_prediction:
+            return Verdict(
+                verdict="speculation",
+                reason=(
+                    "phase1_mimic: hypotheses proposed but no checks "
+                    "attached to their predictions — verify with "
+                    "attach_check before submitting"
+                ),
+                confidence="high",
+            )
+        return Verdict(
+            verdict="genuine_investigation",
+            reason=(
+                "phase1_mimic: symptoms recorded, hypotheses proposed, "
+                "and at least one prediction has been checked"
+            ),
+            confidence="high",
+        )
+
+
 class FalsifiedGenuinelyMimic:
     """Mimic of Phase-1 falsification / refute structural rules.
 
@@ -273,6 +354,7 @@ def all_mimics() -> dict[str, Judge]:
         "rca.judge.coverage": CoverageMimic(),
         "rca.judge.independence": IndependenceMimic(),
         "rca.judge.falsified_genuinely": FalsifiedGenuinelyMimic(),
+        "rca.judge.investigation_genuine": InvestigationGenuineMimic(),
     }
 
 
@@ -281,5 +363,6 @@ __all__ = [
     "IndependenceMimic",
     "CoverageMimic",
     "FalsifiedGenuinelyMimic",
+    "InvestigationGenuineMimic",
     "all_mimics",
 ]

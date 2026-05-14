@@ -40,6 +40,12 @@ extensions:
   - module: agentm_rca_hfsm.atoms.judge_falsified_genuinely
     config:
       mode: llm
+  # C5 — investigation-genuine judge. Consulted by rca_finalize at
+  # submit_final_report time (not by the gate). Mounted alongside the
+  # other 4 judges so the worker-inherit list stays a single block.
+  - module: agentm_rca_hfsm.atoms.judge_investigation_genuine
+    config:
+      mode: llm
 
   # --- single writer of the graph. Must install AFTER the store so the
   # token claim succeeds, AFTER the judges so it can resolve their
@@ -100,6 +106,7 @@ extensions:
         - judge_coverage
         - judge_independence
         - judge_falsified_genuinely
+        - judge_investigation_genuine
         - rca_falsification_gate
         - rca_evidence_tools
         - duckdb_sql
@@ -119,6 +126,8 @@ extensions:
           module: agentm_rca_hfsm.atoms.judge_independence
         judge_falsified_genuinely:
           module: agentm_rca_hfsm.atoms.judge_falsified_genuinely
+        judge_investigation_genuine:
+          module: agentm_rca_hfsm.atoms.judge_investigation_genuine
         rca_falsification_gate:
           module: agentm_rca_hfsm.atoms.rca_falsification_gate
         rca_evidence_tools:

@@ -116,10 +116,11 @@ def test_manifest_loads_in_declared_order() -> None:
             os.environ["AGENTM_PROJECT_ROOT"] = prior
 
     modules = [mod for mod, _cfg in extensions]
-    # The whole stack present (17 entries — see manifest.yaml).
+    # The whole stack present (18 entries — see manifest.yaml).
     # 12 from Phase 1 + 4 LLM-native judge atoms (C3 of Phase 2)
-    # + 1 data-access atom (duckdb_sql, C4 of Phase 2 — design §13 reuse).
-    assert len(modules) == 17, modules
+    # + 1 data-access atom (duckdb_sql, C4 of Phase 2 — design §13 reuse)
+    # + 1 investigation_genuine judge (C5 of Phase 2).
+    assert len(modules) == 18, modules
     # Critical dependency-order properties:
     assert modules.index(
         "agentm_rca_hfsm.atoms.rca_hgraph_store"
@@ -130,7 +131,13 @@ def test_manifest_loads_in_declared_order() -> None:
     # Judges install AFTER the store (they don't depend on it but the
     # order keeps the L1 contract together) and BEFORE the gate (gate's
     # install reads ``rca.judge.*`` services).
-    for kind in ("satisfied", "coverage", "independence", "falsified_genuinely"):
+    for kind in (
+        "satisfied",
+        "coverage",
+        "independence",
+        "falsified_genuinely",
+        "investigation_genuine",
+    ):
         judge_module = f"agentm_rca_hfsm.atoms.judge_{kind}"
         assert judge_module in modules, f"missing judge atom: {judge_module}"
         assert modules.index(judge_module) < modules.index(
