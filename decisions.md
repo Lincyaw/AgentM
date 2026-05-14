@@ -152,3 +152,68 @@ between sessions. L4 entries also get the `[flagged]` prefix.
   needs context propagation through the `sub_agent` atom; the user
   hasn't asked for it and over-engineering the first cut violates the
   "simple and pluggable" memory.
+
+## 2026-05-13 — rca_hfsm Phase 2 (LLM-native judges) session
+
+Driven by `/autoharness:long-horizon` high-autonomy. User pushed back on
+Phase 1 wobbles: "不能靠正则。所有的都靠大模型来判断". Phase 2 reframed
+as a refactor toward LLM-native, not a feature add.
+
+- **Stack Phase 2 on `feat/rca-hfsm-phase1`** (L2: memory rule
+  `feedback_no_new_pr_when_open` + Phase 1 commit pattern). PR #154 is
+  open; don't open a sibling. Extends the PR description after merge.
+- **[flagged] Ship 4 judges only** (L4: north-star "simple +
+  pluggable"). `judge.satisfied` / `judge.coverage` / `judge.independence`
+  / `judge.falsified_genuinely`. `judge.next_to_verify` and
+  `judge.explains` deferred — Phase 1 scheduler (overlap-counting) is
+  already a heuristic-judge and not on the regex-removal critical path;
+  ship after eval data shows it matters.
+- **[flagged] One atom per judge kind, mode-toggled** (L4: pluggability
+  vs file-count trade-off). 4 atom files, each registers ONE judge for
+  ONE role. `config.mode: llm | stub` toggles backing implementation.
+  Rejected: single atom registering all 4 (loses per-judge swap);
+  rejected: 8 separate atoms (one llm + one stub × 4 = file explosion).
+- **Judges return structured output via LLM tool_use** (L4: avoid
+  ironic regex parsing of judge output). Each LLM-backed judge defines
+  a tiny tool the LLM is forced to call, payload `{verdict, reason}`.
+  Verdict is free-text per CLAUDE.md "no preset enums for subjective
+  dimensions". Tool_use is the LLM API mechanism, not a regex.
+- **3-commit Phase 2 split** (L4: mirror Phase 1 discipline). C1 =
+  Judge port + 4 atoms (llm + stub modes); C2 = gate refactor (remove
+  all regex/structural rules, consult judges); C3 = eval integration
+  + 10-case run + results report. Plus C0 docs commit.
+- **Eval cases selected by implementing agent** (L2: codebase
+  research at implementation time). Agent reads `contrib/scenarios/rca
+  /eval/tasks/` and picks 10 representative — not random.
+- **Results file lands in-tree** (L2: convention). `contrib/scenarios/
+  rca_hfsm/eval/phase2_results.md` — traceable, scrollable in git.
+- **Default model whatever .env / scenario default provides** (L2:
+  don't override what the user configured). LLM judges use
+  `api.get_provider()` like other LLM-using atoms.
+- **No automatic merge of #154 + rebase Phase 2 onto main** (L2:
+  user explicitly requested PR + Phase 2 thinking in same breath; they
+  haven't merged #154 yet, so stacking is the answer).
+
+## 2026-05-13 (cont) — Phase 2 C4 manifest fix + eval re-run
+
+C3 ran 3 baseline cases (only 3 YAML tasks exist in rca eval) but judges
+never fired. Root cause: rca_hfsm manifest is missing both data-access
+tools (duckdb_sql / worker_finalize) AND sub_agent inheritance entries
+for the gate + judges. Phase 1 oversight, not Phase 2 regression.
+
+- **[flagged] Add C4 manifest-fix commit** (L4: user's stated goal
+  "看看效果" is structurally blocked; long-horizon high-autonomy
+  authorizes fixing rather than asking). Touches only the manifest
+  + a small persona update if needed. Reuses existing rca atoms
+  (duckdb_sql, worker_finalize) per design §13 — design always
+  intended this reuse; Phase 1 just didn't wire it.
+- **Do NOT modify core** to fix Bug 2 (SessionReadyEvent eval_task_id
+  drop). The C3 agent's local-scoring workaround survives; core
+  changes are not in scope per CLAUDE.md, and the workaround already
+  produces meaningful per-case scores.
+- **Cost cap for re-run**: same budget as C3 (max_turns + max_cost_usd
+  per task YAML); if a case exceeds 8 min wall, kill it and report
+  partial. 3 cases × 10 min = 30 min worst case.
+- **Re-eval results land in the SAME phase2_results.md, overwriting
+  C3's** (L2: file is the deliverable, not the history; git preserves
+  history). Commit message references C3 as the prior version.
