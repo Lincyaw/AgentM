@@ -116,9 +116,10 @@ def test_manifest_loads_in_declared_order() -> None:
             os.environ["AGENTM_PROJECT_ROOT"] = prior
 
     modules = [mod for mod, _cfg in extensions]
-    # The whole stack present (16 entries — see manifest.yaml).
-    # 12 from Phase 1 + 4 LLM-native judge atoms (C3 of Phase 2).
-    assert len(modules) == 16, modules
+    # The whole stack present (17 entries — see manifest.yaml).
+    # 12 from Phase 1 + 4 LLM-native judge atoms (C3 of Phase 2)
+    # + 1 data-access atom (duckdb_sql, C4 of Phase 2 — design §13 reuse).
+    assert len(modules) == 17, modules
     # Critical dependency-order properties:
     assert modules.index(
         "agentm_rca_hfsm.atoms.rca_hgraph_store"

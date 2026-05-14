@@ -193,3 +193,27 @@ as a refactor toward LLM-native, not a feature add.
 - **No automatic merge of #154 + rebase Phase 2 onto main** (L2:
   user explicitly requested PR + Phase 2 thinking in same breath; they
   haven't merged #154 yet, so stacking is the answer).
+
+## 2026-05-13 (cont) — Phase 2 C4 manifest fix + eval re-run
+
+C3 ran 3 baseline cases (only 3 YAML tasks exist in rca eval) but judges
+never fired. Root cause: rca_hfsm manifest is missing both data-access
+tools (duckdb_sql / worker_finalize) AND sub_agent inheritance entries
+for the gate + judges. Phase 1 oversight, not Phase 2 regression.
+
+- **[flagged] Add C4 manifest-fix commit** (L4: user's stated goal
+  "看看效果" is structurally blocked; long-horizon high-autonomy
+  authorizes fixing rather than asking). Touches only the manifest
+  + a small persona update if needed. Reuses existing rca atoms
+  (duckdb_sql, worker_finalize) per design §13 — design always
+  intended this reuse; Phase 1 just didn't wire it.
+- **Do NOT modify core** to fix Bug 2 (SessionReadyEvent eval_task_id
+  drop). The C3 agent's local-scoring workaround survives; core
+  changes are not in scope per CLAUDE.md, and the workaround already
+  produces meaningful per-case scores.
+- **Cost cap for re-run**: same budget as C3 (max_turns + max_cost_usd
+  per task YAML); if a case exceeds 8 min wall, kill it and report
+  partial. 3 cases × 10 min = 30 min worst case.
+- **Re-eval results land in the SAME phase2_results.md, overwriting
+  C3's** (L2: file is the deliverable, not the history; git preserves
+  history). Commit message references C3 as the prior version.
