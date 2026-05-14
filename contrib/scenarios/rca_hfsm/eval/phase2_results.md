@@ -1,244 +1,331 @@
-# rca_hfsm Phase 2 — eval results on rca:baseline tasks (C4 re-run)
+# rca_hfsm Phase 2 — eval results on rca:baseline tasks (C5 re-run)
 
-- **Run date**: 2026-05-14 01:22:10 UTC
-- **Branch**: feat/rca-hfsm-phase1 at cfcf5eb (C4 manifest fix landing in
-  this commit)
-- **Manifest**: contrib/scenarios/rca_hfsm/manifest.yaml — 17 atoms.
-  Phase 1 baseline + 4 LLM-mode judges (C3) + duckdb_sql at orchestrator
-  level (C4) + worker inheritance for store/judges/gate/evidence-tools/
-  duckdb_sql/worker_finalize.
+- **Run date**: 2026-05-14 02:12:45 UTC
+- **Branch**: feat/rca-hfsm-phase1 at dad7584 (with this commit's
+  changes uncommitted)
+- **Manifest**: contrib/scenarios/rca_hfsm/manifest.yaml — 18 atoms.
+  Phase 1 baseline + 4 confirm-path LLM judges (C3) + duckdb_sql (C4) +
+  the C5 ``judge.investigation_genuine`` consulted by ``rca_finalize``
+  at submit-time. Operational investigator persona (C5) rewritten from
+  role-description to a 6-step executable workflow.
 - **Provider**: openai (LiteLLM via OPENAI_BASE_URL)
 - **Model**: Doubao-Seed-2.0-pro
-- **Wall time**: 273.3s for 3 cases
+- **Wall time**: 618.3s for 3 cases
 
-## Selection criteria
+## What C5 changed vs C4
 
-Same as the C3 run. The only YAML-defined task suite is
-`contrib/scenarios/rca/eval/baseline/tasks/` (three cases). The 50-case
-`ops-lite-fixed-50` set lives in HuggingFace-dataset form and is driven
-by `rca llm-eval run` from `rcabench-platform`, not this runner. The
-three baseline tasks span: a multi-service propagation fault (mysql
-network_corrupt) for judge.independence/judge.coverage stress, a
-single-service pod-failure for judge.satisfied focus, and a JVM-level
-stress case for judge.falsified_genuinely on container-vs-JVM
-disambiguation.
+C4's diagnosis: 0/3 grader-ok, zero judge invocations, FSM stuck at
+INTAKE on every case. The orchestrator skipped ``record_symptom``,
+went straight from SQL queries to ``submit_final_report``, and the
+structural coverage check was vacuously true on empty symptom sets.
 
-## Manifest baseline (C4 fix)
+C5's fix is one new judge + one persona rewrite — no structural rules,
+no regex:
 
-C3 ran on a manifest that was missing the data-access tools
-(`agentm_rca.tools.duckdb_sql`) and sub-agent inheritance entries for
-`rca_falsification_gate` plus the four judge atoms. Workers refused to
-start because `rca_evidence_tools` declares
-`requires=("rca_falsification_gate",)` and the gate wasn't in the
-worker's inheritance list. **C4 fixes both gaps**: the orchestrator now
-carries `list_tables` / `query_sql` directly, and workers inherit the
-store → judges → gate → evidence-tools → duckdb_sql → worker_finalize
-chain in the same dependency order as the orchestrator. This eval
-re-run is the first time the rca_hfsm orchestrator has had SQL access
-under the LLM-native gate; compare the per-case rows below against the
-C3 results in git history (commit cfcf5eb).
+1. **``judge.investigation_genuine``** — a 5th judge of the same
+   Protocol shape as C1's existing four. Its prompt reads the
+   trajectory shape (symptom set, hypothesis tree, observations, gate
+   mutation counts, proposed final report) and returns
+   ``genuine_investigation`` / ``speculation`` / ``unclear``. The
+   discipline question — "did this trace actually investigate?" —
+   becomes LLM judgment, not a ``len(symptoms) > 0`` check at the
+   call site.
+2. **``rca_finalize.submit_final_report`` consults the judge.** After
+   the existing structural coverage check passes (or vacuously
+   passes), the judge fires. Non-``genuine_investigation`` verdicts
+   produce a rejection whose text carries the judge's free-text
+   reason verbatim so the orchestrator has an actionable next step.
+3. **Investigator persona rewritten** from two paragraphs of role
+   framing to a 6-step executable workflow: record_symptom →
+   list_tables/query_sql → propose_hypothesis (with negative
+   prediction) → attach_check → propose_update(confirm) →
+   submit_final_report.
 
-`AGENTM_RCA_DATA_DIR` is now wired per-case from each YAML's
-`input.fixtures[0]` so `query_sql` resolves to the right dataset
-directory.
+The new judge mounts in the manifest alongside the existing four;
+workers inherit it for parity (though only the orchestrator's finalize
+path consults it).
 
 ## Summary
 
 - Total cases: 3
-- Grader verdict `ok`: 0/3
-- Cases producing `submit_final_report`: 2/3
-- Cases reaching FSM `FINALIZE`: 0/3
-- Cases with infrastructure errors: 0/3
-- Aggregate token spend: ~245k in, ~8k out
-- Aggregate cost (rough, Doubao-Seed-2.0-pro at ~$0.5/1M in,
-  ~$1.5/1M out): ~$0.13
+- Grader verdict ``ok``: 0/3
+- Cases producing ``submit_final_report``: 2/3
+- Cases where the judge **accepted** a final report: **0/3**
+- Cases where the judge **rejected** a final report: **2/3** (4
+  rejections total — cases 2 and 3, two each)
+- Cases reaching FSM ``FINALIZE``: 0/3 (the FSM still depends on
+  ``rca.graph.mutated`` advancing, which gate emits only when its
+  ``api.events.emit_sync`` is wired — see "Substrate observations"
+  below)
+- Aggregate token spend: ~725k in, ~15k out
+- Aggregate cost: ~$0.38 (Doubao-Seed-2.0-pro at ~$0.5/1M in, ~$1.5/1M
+  out)
+- Wall time: 10 min 18 s (~3x C4 due to cases 2/3 looping after
+  judge rejections — by design)
 
 ## Per-case results
 
 ### Case 1: 01_mysql_corrupt
 
-- **Prompt summary**: HTTP POST endpoints across travel/travelplan
-  services experiencing SLO violations.
+- **Prompt**: HTTP POST endpoints across travel/travelplan services
+  experiencing SLO violations.
 - **Expected**: services=['mysql', 'ts-station-service'],
   fault_kind='network_corrupt'.
-- **Verdict**: grader=runtime, score=0.00, elapsed=26.5s.
+- **Verdict**: grader=runtime, score=0.00, elapsed=18.5s.
 - **Trajectory shape**: turns=2, symptoms=5, observations=0,
   hypotheses=0, dispatch_agent_calls=0, final_report=False,
   fsm_final=OBSERVE, last_stop=stop.
-- **Tokens**: in=5914 out=982.
-- **Mutation kinds**: `applied=5` (all `record_symptom`).
-- **Grader feedback**: no `submit_final_report` reached.
-- **What happened**: The orchestrator recorded all five reported
-  symptoms in two turns, then stopped with `stop_reason=stop` (model
-  decided the conversation was complete). It never called `list_tables`
-  or `query_sql`, never proposed a hypothesis, never dispatched a
-  worker. The OBSERVE-state prompt fragment told it to gather L1 facts
-  but did not surface that SQL tools were available — under the old
-  fragment the model treated "the symptoms are recorded" as "the task
-  is done".
+- **Tokens**: in=5950, out=543.
+- **Tool catalog size at LLM time**: **13 tools** (the full set —
+  record_symptom, record_observation, propose_hypothesis, attach_check,
+  propose_update, submit_final_report, list_tables, query_sql + 5
+  sub_agent tools).
+- **Mutation kinds**: ``applied=5`` (all record_symptom).
+- **Judge effects**: ``investigation_genuine`` never invoked because
+  the LLM never called ``submit_final_report``.
+- **What happened**: same shape as C4. The orchestrator recorded all
+  five symptoms in two turns, then stopped with ``stop_reason=stop``
+  (model decided the task was complete). It never proposed a
+  hypothesis. The new persona's step 1 ("record symptoms first")
+  worked; step 2 ("query the data") did not — the model didn't take
+  the OBSERVE-state prompt fragment as an instruction to act, only to
+  pause.
 
 ### Case 2: 02_pod_failure
 
-- **Prompt summary**: HTTP GET on contactservice account endpoint
-  experiencing SLO violation.
+- **Prompt**: HTTP GET on contactservice account endpoint experiencing
+  SLO violation.
 - **Expected**: services=['ts-contacts-service'], fault_kind='pod_failure'.
-- **Verdict**: grader=correctness, score=0.70, elapsed=123.3s.
-- **Trajectory shape**: turns=10, symptoms=0, observations=0,
-  hypotheses=0, dispatch_agent_calls=0, final_report=True,
-  fsm_final=INTAKE, last_stop=tool_calls.
-- **Tokens**: in=101216 out=3717.
-- **Mutation kinds**: `{}` — zero graph mutations.
-- **Final report excerpt**: "The root cause … is insufficient replica
-  count for the ts-contacts-service. The service is running with only
-  1 replica, which is unable to handle the incoming request volume."
-- **Grader feedback**: named expected service (ts-contacts-service)
-  but called the fault `insufficient replica count` rather than
-  `pod_failure`.
-- **What happened**: The orchestrator bypassed the FSM entirely. It
-  never called `record_symptom`, so the FSM stayed in INTAKE and the
-  coverage check on `submit_final_report` was vacuously satisfied
-  (zero unexplained symptoms because zero symptoms recorded). 101k
-  input tokens over 10 turns strongly implies it spent the budget
-  running `query_sql` and reading data — but those tool calls do not
-  produce `rca.graph.mutated` events, so the mutation-kinds row is
-  empty. The model went straight from "look at data" to "submit
-  report" with no symptom / observation / hypothesis trail. Service
-  was named correctly; fault_kind was named in human language
-  ("insufficient replicas") rather than the rcabench enum
-  (`pod_failure`).
+- **Verdict**: grader=correctness, score=0.70, elapsed=302.6s.
+- **Trajectory shape**: turns=25, symptoms=1 attempted (rejected
+  ``unknown_tool``), observations=0, hypotheses=0,
+  dispatch_agent_calls=0, final_report=True, fsm_final=INTAKE,
+  last_stop=tool_calls.
+- **Tokens**: in=308605, out=7959.
+- **Tool catalog size at LLM time**: **8 tools** (missing
+  record_symptom, record_observation, propose_hypothesis,
+  attach_check, propose_update). This is a substrate-level
+  non-determinism — see "Substrate observations".
+- **Tool call sequence**: ``record_symptom`` (returned
+  ``unknown_tool``), ``list_tables``, ``query_sql`` × 11,
+  ``submit_final_report`` (rejected by judge), ``query_sql`` × 5,
+  ``submit_final_report`` (rejected by judge), more ``query_sql``,
+  ``stop_reason=tool_calls`` exit.
+- **Mutation kinds**: ``{}`` (record_symptom never made it to the
+  gate; the LLM's call hit ``unknown_tool`` before gate.apply).
+- **``investigation_genuine`` rejections**: **2**.
+  - First rejection verdict text:
+    ```
+    judge=investigation_genuine verdict=speculation reason=No
+    symptoms recorded — call record_symptom for each reported error
+    before concluding. No hypotheses proposed — use
+    propose_hypothesis to generate possible explanations and verify
+    them with attach_check. gate_mutations.applied is zero —
+    advance the FSM through the proper protocol steps before
+    submitting a report.
+    ```
+  - Second rejection verdict text:
+    ```
+    judge=investigation_genuine verdict=speculation reason=No
+    symptoms are recorded, zero hypotheses were proposed, and
+    gate_mutations.applied is 0 indicating no required
+    investigation protocol steps were followed.
+    ```
+- **Final report excerpt** (last attempted): "The SLO violation for
+  the HTTP GET ... is caused by database access layer delays for the
+  ts-contacts-service. Evidence: 1) Endpoint durations are consistently
+  5-11 seconds (well above typical sub-1s SLO thresholds)..."
+- **Grader feedback**: named expected service but
+  fault_kind="pod_failure" missed (model said "database access layer
+  delays" — wrong family). Score 0.70 is from the grader's substring
+  scan of the **rejected** ``submit_final_report.args`` — the grader
+  doesn't know the judge rejected it.
+- **What happened**: The orchestrator's persona-driven first step was
+  ``record_symptom``, but the tool wasn't in the LLM's tool catalog
+  (only 8 of the 13 installed tools made it to the request). The LLM
+  got ``unknown_tool``, moved on to SQL queries, ran 11 of them,
+  submitted a final report. **The judge correctly identified
+  speculation and rejected.** The LLM tried submitting again with
+  slightly more context; **rejected again with similar reasoning.**
+  Eventually exited at turn 25.
 
 ### Case 3: 03_service_stress
 
-- **Prompt summary**: HTTP POST on auth-service login endpoint
-  experiencing SLO violation.
+- **Prompt**: HTTP POST on auth-service login endpoint experiencing
+  SLO violation.
 - **Expected**: services=['ts-auth-service'], fault_kind='jvm_heap_stress'.
-- **Verdict**: grader=correctness, score=0.70, elapsed=123.3s.
-- **Trajectory shape**: turns=12, symptoms=0, observations=0,
-  hypotheses=0, dispatch_agent_calls=0, final_report=True,
-  fsm_final=INTAKE, last_stop=tool_calls.
-- **Tokens**: in=137935 out=3501.
-- **Mutation kinds**: `{}` — zero graph mutations.
-- **Final report excerpt**: "The root cause … is excessive load/stress
-  on the ts-auth-service. The service is processing a high volume of
-  login requests, leading to increased latency in the
-  `UserController.getToken` method (which accounts for the majority
-  of the …)."
-- **Grader feedback**: named expected service (ts-auth-service) but
-  attributed the fault to load/stress on the application layer rather
-  than `jvm_heap_stress` specifically. The container-vs-JVM
-  disambiguation this case was meant to stress never reached the
-  judge.
-- **What happened**: same shape as case 2. Bypassed FSM, large input
-  token count consistent with extensive SQL probing, jumped to final
-  report without graph mutations.
+- **Verdict**: grader=correctness, score=0.70, elapsed=297.1s.
+- **Trajectory shape**: turns=25, symptoms=2 attempted (both
+  rejected ``unknown_tool``), observations=0, hypotheses=0,
+  dispatch_agent_calls=0, final_report=True, fsm_final=INTAKE,
+  last_stop=tool_calls.
+- **Tokens**: in=410271, out=6657.
+- **Tool catalog size at LLM time**: **8 tools** (same gap as case 2).
+- **Mutation kinds**: ``{}``.
+- **``investigation_genuine`` rejections**: **2**.
+- **Final report excerpt**: "elevated processing latency in the
+  ``UserController.getToken`` method of the ts-auth-service under
+  stress load".
+- **Grader feedback**: named expected service but missed
+  fault_kind=jvm_heap_stress; the model said "stress load" but didn't
+  trace to JVM heap pressure specifically. Same scoring caveat as
+  case 2.
+- **What happened**: same shape as case 2. Two ``submit_final_report``
+  attempts, both rejected with the same "no symptoms, no hypotheses,
+  gate_mutations.applied=0" reason. The judge worked; the protocol
+  couldn't be executed because the relevant tools weren't visible.
 
 ## Cross-case patterns
 
-### Judge call patterns
+### C5 — investigation_genuine judge effect
 
-**Zero judge invocations across the run.** The judges fire from inside
-`gate.apply` on the `propose` / `attach_check` / `refute` / `confirm`
-update paths. Cases 2 and 3 made zero such calls (no graph mutations
-of any kind); case 1 made only `record_symptom` calls which the gate
-applies without consulting any judge (record_symptom is a pure L1
-write, never gate-judged). So the LLM-native judges are wired
-correctly — the manifest smoke test confirms each `rca.judge.*`
-service resolves to a `_LlmJudge` instance — but the orchestrator
-never reached any state in which the gate would consult them.
+The judge fires every time ``submit_final_report`` is called. Across
+the run:
 
-This is the same result as C3 in terms of judge-call counts, but the
-reason has shifted. In C3 the workers couldn't launch (manifest
-missing the gate + judges). In this run the orchestrator simply chose
-not to use the protocol, despite having every tool available.
+- **4 judge invocations** (cases 2 + 3, two each).
+- **4 rejections, 0 acceptances.** All four returned
+  ``verdict=speculation`` with structurally similar reasons (no
+  symptoms, no hypotheses, no applied mutations).
+- The judge's reason text **propagated to the orchestrator** as the
+  ``submit_final_report`` tool result. We can see the orchestrator
+  read it (turn 12 → 13 in case 2, etc.) and **tried to course-correct
+  by running more SQL queries** — but it still didn't call
+  ``record_symptom`` again (presumably because the model remembered the
+  earlier ``unknown_tool`` error). It then re-submitted a slightly
+  refined report; rejected again.
+- **The judge's verdict is consistent with the actual trajectory:**
+  zero hypotheses proposed, zero gate-applied mutations of the kind
+  the protocol expects. Even if record_symptom had succeeded, the
+  judge would still have called this "speculation" because the LLM
+  never proposed a falsifiable hypothesis.
 
-### Downgrade patterns
+### Other 4 judges (satisfied / coverage / independence / falsified_genuinely)
 
-No `downgraded` mutation events across the run. Vacuously: nothing
-got past `propose` so no `confirm` / `refute` could be downgraded.
+Still 0 invocations. They sit on the gate's confirm/refute paths,
+which require ``propose_hypothesis`` + ``attach_check`` to have run
+first. No case got that far. Same as C4.
 
-### FSM state distribution
+### Tool catalog non-determinism
 
-Final FSM states: `INTAKE=2`, `OBSERVE=1`. Zero traces reached
-HYPOTHESIZE / VERIFY / JUDGE / FINALIZE. The FSM machinery did its
-job — it never advanced to FINALIZE — but the orchestrator submitted
-final reports anyway via the coverage-check loophole (no symptoms
-recorded → no symptoms unexplained → coverage passes).
+Case 1 saw 13 tools; cases 2 and 3 saw 8 tools. Same scenario, same
+manifest, same provider — the difference is which subset of installed
+extensions' ``api.register_tool`` calls landed in the active catalog
+by the time the loop started its first request. This is a
+substrate-level race we did not investigate in C5 (the plan forbids
+core changes). When tool_count=13, the LLM can follow the persona's
+step 1. When tool_count=8, it can't, and falls back to free-form SQL
++ submit_final_report — which is exactly the case the new judge was
+built to catch.
 
-### Honest observations
+### Mutation-event emission on the bus
 
-This run measures one thing cleanly: **whether the C4 manifest fix
-unblocks the orchestrator that C3 documented as stuck.** It does not.
-The orchestrator's failure mode shifted from "blocked by missing
-worker extension" (C3) to "ignores the FSM protocol and submits
-free-form final reports without graph mutations" (this run). Both
-failure modes prevent the LLM-native judges from firing on a
-confirm/refute path, so the Phase 2 acceptance question (§8 of the
-design doc — "do the LLM-native judges *behave reasonably* when
-exercised?") cannot be answered from baseline behaviour alone. The
-substrate is correct (services register, smoke tests pass, install
-order respected); the policy layer that should drive the LLM through
-INTAKE → OBSERVE → HYPOTHESIZE → VERIFY → JUDGE → FINALIZE is too
-weak under the current per-state prompt fragments.
+Case 1 emitted 5 ``rca.graph.mutated`` events (one per
+record_symptom). Cases 2 and 3 emitted **zero** — record_symptom
+failed at the loop layer with ``unknown_tool`` before reaching
+gate.apply. The judge's view of "gate_mutations.applied=0" was
+literally correct for those cases. (The earlier C4 report claimed
+the bus was missing mutation events generally; with C5 visibility, we
+can see it's specifically the cases where the tool was unreachable.)
 
-### Where an LLM-driven judge would clearly help over regex
+### Pass rate change vs C4
 
-Not exercised in this run because the gate paths that consult judges
-were never reached. The closest thing observed: in case 2, the
-orchestrator's free-form final report says "insufficient replica
-count" rather than the rcabench enum `pod_failure`. A Phase-1 regex
-would never have caught this — it would have to know every fault_kind
-synonym. A `judge.coverage` invocation on the (would-be) confirm path
-could in principle catch "your conclusion uses a vocabulary the
-symptoms can't validate" — but again, this is hypothetical; the gate
-was never asked.
+- C4: 0/3 grader-ok, 2/3 ``submit_final_report`` emitted, 0 judge
+  invocations, FSM stuck at INTAKE on the 2 cases that finalized.
+- C5: 0/3 grader-ok, 2/3 ``submit_final_report`` emitted (but
+  **rejected**), 4 judge invocations, FSM still stuck at INTAKE.
 
-### Where the LLM judges still wouldn't catch what a human RCA expert would
+**The grader pass-rate did not move.** What moved is the discipline
+floor: in C4 the LLM's free-form final reports went through and were
+graded on substring match; in C5 the same reports are intercepted by
+the judge, which correctly identifies them as speculation. The grader
+score is unchanged because the grader doesn't know about the judge —
+it scores the args of any ``submit_final_report`` call regardless of
+whether the tool result accepted or rejected. **The judge fired; the
+orchestrator could not produce a non-speculation trajectory.**
 
-The same case 2 failure — "insufficient replicas" vs `pod_failure` —
-is a fault-kind disambiguation problem, not a coverage problem. The
-correct disambiguator is the one the existing rca scenario's critic
-persona spells out in `agents/critic.md` ("pod_failure → pod restart
-count / phase transitions visible; pod_unavailable → pod status
-reachable but readiness=0"). None of the four current judges know
-about pod_failure vs pod_unavailable vs deployment-scaling. They
-operate on graph structure (was the falsification real, are the
-checks independent, is every symptom covered) — they don't critique
-the *content* of a fault_kind claim. A human RCA expert would
-immediately challenge "the service is running with only 1 replica" by
-asking for `kubectl get pod -w` output showing the restart-count
-delta. The current judges have no analogue.
+## Honest answer to the diagnosis question
 
-### Phase 3 candidates
+**Was the persona rewrite enough?** No. In case 1 the persona's
+step-1 instruction worked (5 record_symptom calls, then stop without
+step 2). In cases 2 and 3 the persona's step-1 didn't matter because
+the tool wasn't available. The persona is necessary but not
+sufficient.
 
-1. **Strengthen per-state prompt fragments** to (a) name the data-access
-   tools available in each state and (b) make explicit that
-   `submit_final_report` requires a non-empty symptom set. The OBSERVE
-   fragment in particular should require at least one `query_sql` call
-   before allowing transition to HYPOTHESIZE. This is the cheapest
-   change and the one most likely to unblock the next layer.
-2. **Tighten the FINALIZE-coverage check** to require symptoms recorded
-   > 0 (rather than only "every recorded symptom is explained"). This
-   plugs the loophole cases 2 and 3 used. Belongs in `rca_finalize`,
-   not in any judge — it's a structural precondition, not a semantic
-   one.
-3. **Add `rca.judge.invoked` bus telemetry** so the eval runner can
-   count judge calls directly rather than via the mutation-kinds proxy.
-   Design §3.4 envisaged this; Phase 2 deferred it. With the
-   fragmentation / FSM-bypass issues above, this becomes urgent —
-   without it we cannot distinguish "judges fired and approved" from
-   "judges were never consulted because the gate path wasn't taken".
-4. **Add a fault_kind disambiguator judge** modeled after the rca
-   critic persona's family cheatsheet. This would address the case-2
-   "insufficient replicas" failure mode that the four current judges
-   structurally cannot catch.
+**Did the judge's rejections do the heavy lifting?** Partially. The
+judge fired on every rejected report, the reason text reached the
+orchestrator, but the orchestrator could not act on the reason
+because the protocol tools (``record_symptom``,
+``propose_hypothesis``) were not in its catalog. So the judge's
+"please call record_symptom first" was technically un-actionable
+those turns. **The judge's value is now visible** — it stopped two
+speculative reports from being treated as legitimate finalizations —
+**but its corrective channel is blocked** by the tool-visibility
+issue below.
 
-### Substrate notes (unchanged from C3)
+## Substrate observations (outside C5 scope)
 
-- `task_meta.task_id` wiring in core is still broken (`SessionReadyEvent`
-  declares the field but the emit at
-  `src/agentm/core/runtime/session_factory.py` L366 does not forward
-  `eval_task_id`). This runner works around the gap with a local
-  scoring helper that locates the trace by case-cwd. Independent
-  substrate fix; out of scope here.
-- Judge telemetry is still missing on the bus (see Phase 3 candidate
-  #3).
+- **Non-deterministic tool catalog size.** Case 1 had 13 tools at
+  LLM time; cases 2 and 3 had 8. The scenario, manifest, model, and
+  prompt are identical. The 8-tool subset is missing exactly the 5
+  rca_evidence_tools (record_symptom, record_observation,
+  propose_hypothesis, attach_check, propose_update). This points at
+  a race in session bootstrap — probably between async install of
+  rca_evidence_tools and the catalog freeze step — that drops
+  registrations silently. **Without those tools the FSM cannot
+  advance and the judges cannot fire on confirm/refute paths.** This
+  was masked in C4 by the broken grader (every case looked like
+  ``runtime``); with C5's judge visibility it surfaces.
+
+- **task_meta.task_id wiring still broken** (same as C4). Workaround
+  via local grader by case-cwd remains.
+
+- **Judge invocations are not on the bus.** Adding
+  ``rca.judge.invoked`` telemetry from inside ``judge()`` would let
+  this report give a clean "judge fired N times" line for each of the
+  5 judges. Today we infer C5's judge from
+  ``submit_final_report``'s rejection text and the other 4 from
+  ``mutation_kinds.downgraded``. Phase 3 candidate (still).
+
+## Phase 4 candidates
+
+In rough priority order based on this run's data:
+
+1. **Investigate the tool-catalog race.** Same scenario, same
+   manifest, different run → different tool count. This is the
+   single blocker preventing the FSM from advancing on cases 2 and
+   3. The fix is substrate-level and the bug existed before C5; C5
+   just made it visible. Worth a focused investigation before any
+   further policy-layer tuning.
+
+2. **Add ``rca.judge.invoked`` bus telemetry.** Without it, every
+   future eval has to grep tool-result text or downgrade counts to
+   guess what each judge did. C5 specifically benefits — its single
+   judge call per finalize is invisible in the current trace except
+   through rejection text.
+
+3. **Re-run after #1.** Once tool-visibility is deterministic, the
+   persona's 6-step workflow should reach
+   propose_hypothesis/attach_check on at least cases 2 and 3.
+   That's when the confirm-path judges (satisfied / coverage /
+   independence / falsified_genuinely) finally get exercised on
+   real traces.
+
+4. **Surprise candidate: the OBSERVE-state prompt fragment.**
+   Case 1 (where all tools were present) recorded 5 symptoms and
+   then stopped at turn 2 — the model decided the conversation was
+   over. The OBSERVE prompt fragment doesn't push hard enough.
+   This is the cheapest knob to twist if #1 makes cases 2 and 3
+   look like case 1.
+
+## Where the LLM judges still wouldn't catch what a human RCA expert would
+
+Same caveat as the C4 report. The judges operate on graph structure
+and trajectory shape. They do not yet critique the **content** of a
+``fault_kind`` claim (pod_failure vs pod_unavailable vs
+deployment-scaling; jvm_heap_stress vs application-layer load). The
+case-2 "database access layer delays" → fault_kind=pod_failure miss
+and case-3 "stress load" → fault_kind=jvm_heap_stress miss are
+exactly that family of error. A fault_kind disambiguator judge
+modelled after the existing rca scenario's ``critic.md`` cheatsheet
+remains an open Phase 4 candidate, deferred until the substrate gap
+above is closed (otherwise it would never get the chance to fire).

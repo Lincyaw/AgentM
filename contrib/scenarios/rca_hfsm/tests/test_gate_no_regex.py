@@ -45,6 +45,13 @@ _UPDATES_FILE = (
     / "agentm_rca_hfsm"
     / "updates.py"
 )
+_FINALIZE_FILE = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "agentm_rca_hfsm"
+    / "atoms"
+    / "rca_finalize.py"
+)
 
 
 _BANNED_REGEX_TOKENS = (
@@ -105,6 +112,15 @@ def _updates_body() -> str:
     return source
 
 
+def _finalize_body() -> str:
+    source = _read(_FINALIZE_FILE)
+    if source.startswith('"""'):
+        end = source.find('"""', 3)
+        if end != -1:
+            return source[end + 3 :]
+    return source
+
+
 @pytest.mark.parametrize("token", _BANNED_REGEX_TOKENS)
 def test_gate_source_contains_no_regex_machinery(token: str) -> None:
     body = _gate_body()
@@ -147,4 +163,23 @@ def test_updates_source_contains_no_phase1_lemmas(token: str) -> None:
     assert token not in body, (
         f"updates.py contains banned Phase-1 lemma {token!r}; semantic "
         f"checks moved to rca.judge.* services"
+    )
+
+
+@pytest.mark.parametrize("token", _BANNED_REGEX_TOKENS)
+def test_finalize_source_contains_no_regex_machinery(token: str) -> None:
+    body = _finalize_body()
+    assert token not in body, (
+        f"rca_finalize.py contains banned regex token {token!r}; the C5 "
+        f"refactor moved the 'genuine investigation' check to "
+        f"rca.judge.investigation_genuine, not regex / structural rules"
+    )
+
+
+@pytest.mark.parametrize("token", _BANNED_LEMMA_TOKENS)
+def test_finalize_source_contains_no_phase1_lemmas(token: str) -> None:
+    body = _finalize_body()
+    assert token not in body, (
+        f"rca_finalize.py contains banned Phase-1 lemma {token!r}; the "
+        f"discipline-question is the judge's job, not a string check"
     )
