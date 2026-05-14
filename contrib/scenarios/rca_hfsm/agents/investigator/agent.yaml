@@ -1,0 +1,45 @@
+# Investigator persona — orchestrator-side configuration.
+#
+# Phase 1 ships the persona file alongside the per-state prompts injected
+# by rca_fsm_policy; the live runtime composes the system prompt from
+# state-specific fragments (intake.md / observe.md / hypothesize.md /
+# verify.md / judge.md / finalize.md) and uses this file as the
+# investigator's orienting framing. A future Phase 2 prompt_loader-style
+# atom may consume the ``inherit_extensions`` block below verbatim.
+
+name: investigator
+description: >-
+  Lead orchestrator for the rca_hfsm scenario. Owns the hypothesis-graph
+  conversation; dispatches L3 worker sessions for prediction verification;
+  submits the final report only when every symptom is structurally
+  explained.
+
+# Worker dispatch surface (matches sub_agent.config.inherit_extensions in
+# manifest.yaml). The investigator's L3 workers see the evidence-tool
+# surface plus observability; they do NOT see sub_agent itself (no nested
+# dispatch) or the finalize tool (only the orchestrator can submit).
+# Phase 2 C4: ``list_tables`` / ``query_sql`` from duckdb_sql let the
+# investigator query the case's parquet fixtures directly before deciding
+# whether to dispatch a worker for deeper drilldown.
+tools:
+  - record_symptom
+  - record_observation
+  - propose_hypothesis
+  - attach_check
+  - propose_update
+  - submit_final_report
+  - dispatch_agent
+  - list_tables
+  - query_sql
+
+input_schema:
+  required: [objective, current_state]
+  optional: [prior_hypothesis_ids, no_go_branches]
+
+budget_defaults:
+  # Phase 1: the orchestrator runs the full trace in one session. Bump
+  # only when an eval case demonstrably needs more — premature widening
+  # invites the LLM to drift off the falsification discipline.
+  max_turns: 60
+
+artifact_kinds: [hypothesis, observation, check_result, final_report]
