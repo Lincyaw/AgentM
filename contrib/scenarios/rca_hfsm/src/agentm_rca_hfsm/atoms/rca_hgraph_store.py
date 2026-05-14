@@ -10,7 +10,10 @@ The token mechanism is the structural reply to "any atom that calls
 ``api.get_service('rca.hgraph.write')`` becomes a writer". Instead, this atom
 publishes a per-install random token via ``rca.hgraph.write_token`` and the
 write handle is only obtainable by calling ``claim_write_handle(token)``
-*once* per token. A second claim (with any token) raises ``RuntimeError``.
+*once* per token. Each call to :func:`install` mints a fresh token, so
+multiple sessions in the same process each get an independent (token, handle)
+pair; the one-shot rule is per token, not per process. A second claim of the
+same token (or any unknown token) raises ``RuntimeError``.
 
 §11 single-file contract: stdlib + ``agentm.core.abi.*`` +
 ``agentm.extensions.*`` only. The sibling ``schema`` import is a pure-data
@@ -212,8 +215,10 @@ _claimed: Final[set[str]] = set()
 def claim_write_handle(token: str) -> _WriteHandle:
     """Return the write handle for the install whose token matches ``token``.
 
-    First successful claim consumes the token: any subsequent call — with
-    the same token, a different token, or an unknown token — raises
+    The one-shot rule is scoped to the token, not the process: each
+    ``install`` mints a fresh token, so multiple sessions in the same
+    process each get an independent (token, handle) pair. Any subsequent
+    claim of the **same** token — or of an unknown token — raises
     ``RuntimeError``. This is the structural enforcement of design §7.4
     (single-writer property) without exposing the write API as a service.
 
@@ -221,22 +226,22 @@ def claim_write_handle(token: str) -> _WriteHandle:
     ``tests/test_store_single_writer.py``.
     """
 
-    if _claimed:
+    if token in _claimed:
         raise RuntimeError(
-            "rca.hgraph write handle has already been claimed; "
-            "the falsification gate is the only legal writer (design §7.4)"
+            f"rca.hgraph write handle for token={token!r} has already been "
+            "claimed; the falsification gate is the only legal writer "
+            "(design §7.4) and may only claim its own token once"
         )
     handle = _pending.pop(token, None)
     if handle is None:
-        # No pending install matches; mark the registry consumed so a
-        # legitimate later claim with the right token also raises.
-        # Concretely: a misconfigured atom that calls claim_write_handle
-        # before the store installs, or with a stale token, must not be
-        # able to retry and silently win the race.
+        # Mark the offending token as consumed so a retry with the same
+        # bogus value still raises. A misconfigured atom that calls
+        # claim_write_handle before the store installs (or with a stale
+        # token) must not be able to silently win the race on retry.
         _claimed.add(token)
         raise RuntimeError(
             f"no pending rca.hgraph install matches token={token!r}; "
-            "single-writer registry is now locked"
+            "token rejected"
         )
     _claimed.add(token)
     return handle
