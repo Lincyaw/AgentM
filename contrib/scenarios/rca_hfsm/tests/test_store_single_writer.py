@@ -1,0 +1,94 @@
+"""Acceptance #6 — single-writer property of the rca_hgraph_store atom.
+
+A second ``claim_write_handle`` call (with any token, matching the original
+or not) must raise. The read service stays usable to anyone who can fetch
+``rca.hgraph.read`` from the ExtensionAPI.
+
+These are the fail-stop tests for design §7.4. If the single-writer property
+breaks, two atoms can race on the graph and the falsification gate's
+preconditions become merely advisory.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from agentm_rca_hfsm.atoms import rca_hgraph_store
+
+
+class _StubAPI:
+    """Minimal ``ExtensionAPI`` shim covering only the calls this atom makes."""
+
+    def __init__(self) -> None:
+        self._services: dict[str, Any] = {}
+
+    def set_service(self, name: str, obj: Any) -> None:
+        self._services[name] = obj
+
+    def get_service(self, name: str) -> Any:
+        return self._services.get(name)
+
+
+@pytest.fixture(autouse=True)
+def _reset_registry() -> None:
+    rca_hgraph_store._reset_for_tests()
+    yield
+    rca_hgraph_store._reset_for_tests()
+
+
+def test_first_claim_returns_handle_second_claim_raises() -> None:
+    api = _StubAPI()
+    rca_hgraph_store.install(api, {})
+    token = api.get_service("rca.hgraph.write_token")
+    assert isinstance(token, str) and token
+
+    handle = rca_hgraph_store.claim_write_handle(token)
+    assert handle is not None
+
+    # Second claim with the same (now-consumed) token must raise.
+    with pytest.raises(RuntimeError):
+        rca_hgraph_store.claim_write_handle(token)
+
+
+def test_second_claim_with_different_token_also_raises() -> None:
+    api = _StubAPI()
+    rca_hgraph_store.install(api, {})
+    token = api.get_service("rca.hgraph.write_token")
+
+    rca_hgraph_store.claim_write_handle(token)
+
+    with pytest.raises(RuntimeError):
+        rca_hgraph_store.claim_write_handle("not-the-real-token")
+
+
+def test_claim_with_unknown_token_raises_and_locks_registry() -> None:
+    api = _StubAPI()
+    rca_hgraph_store.install(api, {})
+    token = api.get_service("rca.hgraph.write_token")
+
+    # An attempt with a bogus token must raise.
+    with pytest.raises(RuntimeError):
+        rca_hgraph_store.claim_write_handle("wrong")
+
+    # And the legitimate token can no longer be redeemed afterwards — the
+    # single-writer invariant is "exactly one call succeeds, ever".
+    with pytest.raises(RuntimeError):
+        rca_hgraph_store.claim_write_handle(token)
+
+
+def test_read_service_remains_available_after_install() -> None:
+    api = _StubAPI()
+    rca_hgraph_store.install(api, {})
+
+    read_handle = api.get_service("rca.hgraph.read")
+    assert read_handle is not None
+    # The read API methods listed in the plan are present and callable on a
+    # freshly-installed empty graph.
+    assert read_handle.get_symptoms() == []
+    assert read_handle.get_open_leaves() == []
+    assert read_handle.get_unexplained_symptoms() == []
+    assert read_handle.get_refuted_branches() == []
+    assert read_handle.get_hypothesis("nope") is None
+    assert read_handle.get_observation_by_signature("nope") is None

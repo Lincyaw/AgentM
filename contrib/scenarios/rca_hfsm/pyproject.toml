@@ -1,0 +1,23 @@
+[project]
+name = "agentm-rca-hfsm"
+version = "0.1.0"
+description = "Hypothesis-driven, falsification-gated RCA scenario for AgentM"
+readme = "README.md"
+authors = [{ name = "Aoyang Fang", email = "aoyangfang@gmail.com" }]
+requires-python = ">=3.12"
+dependencies = [
+    "agentm",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+agentm = { workspace = true }
