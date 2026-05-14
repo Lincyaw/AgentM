@@ -167,6 +167,16 @@ A ref is only accepted if its witness appears (case+whitespace
 normalized substring) in BOTH the source event's source_turns text
 AND this event's source_turns text.
 
+**Copy entities and quotes verbatim from the turn texts.** Do not
+paraphrase, expand abbreviations, normalize hyphenation, drop or add
+prefixes/suffixes (e.g. ``ts-``, ``-service``), or substitute display
+names for ids. If the source turn says ``ts-train-food-service`` and
+the destination turn says ``train-food``, those are NOT a shared
+witness — drop the ref. The validator is a literal substring check
+after case+whitespace normalization only; nothing else is normalized.
+Before listing each ``cited_entity``, locate the exact same character
+sequence in both turn texts and copy it from there.
+
 - ``data`` refs: ``cited_entities`` — concrete tokens (table names,
   identifiers, error messages, file paths, ...) present in BOTH turn
   texts. **EVERY entity in the list must appear in both** — the

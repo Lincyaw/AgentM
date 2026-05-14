@@ -71,7 +71,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             f"config['state'] or service key {EXTRACTOR_STATE_SERVICE_KEY!r}; "
             "the adapter must supply one before mounting this extension."
         )
-    for tool in build_extractor_tools(state):
+    raw_budget = (
+        config.get("witness_retry_budget") if isinstance(config, dict) else None
+    )
+    witness_retry_budget = int(raw_budget) if isinstance(raw_budget, int) else 0
+    for tool in build_extractor_tools(
+        state, witness_retry_budget=witness_retry_budget
+    ):
         api.register_tool(tool)
 
 

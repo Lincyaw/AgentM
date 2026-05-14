@@ -217,10 +217,26 @@ def _err(payload: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=payload)], is_error=True)
 
 
-def build_extractor_tools(state: ExtractionState) -> list[FunctionTool]:
-    """Build the v3.1 single-tool extractor surface, closed over ``state``."""
+def build_extractor_tools(
+    state: ExtractionState, *, witness_retry_budget: int = 0
+) -> list[FunctionTool]:
+    """Build the v3.1 single-tool extractor surface, closed over ``state``.
+
+    ``witness_retry_budget`` controls how many times a submission with
+    non-empty ``dropped_edges`` is bounced back as a tool error so the
+    LLM can fix the offending ``cited_entities`` / ``cited_quote`` and
+    re-submit. Default ``0`` preserves the V3.1 single-shot contract
+    (drops are accepted silently). Set to ``1`` for one bounded retry
+    — caps total LLM calls per firing at 2 instead of V3's 8-12 while
+    recovering most semantically-valid but literally-mis-cited refs.
+    Hard-reject errors (event-shape) are always retryable via the
+    kernel's attempt budget; this only governs soft (witness) drops.
+    """
+
+    attempts_used = 0
 
     async def _submit_events(args: dict[str, Any]) -> ToolResult | ToolTerminate:
+        nonlocal attempts_used
         events_payload = args.get("events")
         if not isinstance(events_payload, list):
             return _err("submit_events: 'events' must be an array (may be empty)")
@@ -229,6 +245,20 @@ def build_extractor_tools(state: ExtractionState) -> list[FunctionTool]:
             # Hard reject — return as tool error so the LLM may retry
             # within the caller's attempt budget.
             return _err(err)
+
+        # Soft drops: bounce back once if budget allows so the LLM can
+        # fix entity selection. Reset the committed flag + frozen
+        # results so the second commit overwrites cleanly.
+        if state.dropped_edges and attempts_used < witness_retry_budget:
+            dropped_snapshot = list(state.dropped_edges)
+            state.committed = False
+            state.events = ()
+            state.edges = ()
+            state.dropped_edges = ()
+            attempts_used += 1
+            feedback = _format_witness_feedback(dropped_snapshot)
+            return _err(feedback)
+
         # Success (full or partial). Echo a concise digest so the LLM
         # has a deterministic stop signal.
         digest = (
@@ -263,6 +293,34 @@ def build_extractor_tools(state: ExtractionState) -> list[FunctionTool]:
             fn=_submit_events,
         ),
     ]
+
+
+def _format_witness_feedback(dropped: list[dict[str, Any]]) -> str:
+    """Render a structured retry directive listing every dropped ref.
+
+    Surfaces each ``last_error`` so the LLM knows which entity / quote
+    failed and on which side, lets it locate the literal token in the
+    turn text, and re-submit the entire ``events`` payload with the
+    correction. Keep the message terse so it fits the next prompt
+    cleanly.
+    """
+    lines = [
+        "submit_events: witness failed on "
+        f"{len(dropped)} ref(s). Re-submit the FULL events payload with "
+        "corrected cited_entities / cited_quote. Each failed ref below "
+        "lists src -> dst and the validator's diagnostic; replace the "
+        "cited token with the exact literal substring that appears in "
+        "BOTH source_turns texts after case+whitespace normalization, "
+        "or drop the ref if no shared literal token exists.",
+        "",
+    ]
+    for d in dropped:
+        src = d.get("src")
+        dst = d.get("dst")
+        kind = d.get("kind")
+        err = d.get("last_error") or ""
+        lines.append(f"- {src} -> {dst} ({kind}): {err}")
+    return "\n".join(lines)
 
 
 __all__ = [
