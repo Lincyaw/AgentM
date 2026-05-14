@@ -134,6 +134,10 @@ def install_store_and_gate() -> tuple[StubAPI, Any, Any]:
     rca_falsification_gate.install(api, {})
     gate = api.get_service("rca.gate")
     read = api.get_service("rca.hgraph.read")
+    # The C5 ``rca.judge.investigation_genuine`` mimic is registered by
+    # ``all_mimics`` above. ``rca_finalize.install`` will look it up; the
+    # mimic's structural rule (symptoms+hypotheses+checks) keeps the
+    # behavior-preservation property intact for Phase-1 fail-stop tests.
     return api, gate, read
 
 
