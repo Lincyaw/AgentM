@@ -19,4 +19,6 @@ Avoid vacuous negatives ("the universe still exists") and avoid framing
 your prediction in a way no realistic observation could violate.
 
 Once your hypothesis is accepted, the trace advances to VERIFY. Available
-tools: `propose_hypothesis`, `record_observation`.
+tools: `propose_hypothesis`, `record_observation`, `query_sql`,
+`list_tables` (run a quick SQL check before proposing if you need to
+sanity-check a prediction is observable).

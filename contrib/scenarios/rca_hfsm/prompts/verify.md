@@ -25,4 +25,8 @@ Independence rule: a `confirm` later in JUDGE requires two distinct
 worker session for both positive checks will be downgraded.
 
 Once a check is attached, the trace advances to JUDGE. Available tools:
-`attach_check`, `record_observation`, `dispatch_agent`.
+`attach_check`, `record_observation`, `dispatch_agent`, `query_sql`,
+`list_tables` (cheap predictions you can probe yourself — but two
+positive checks for `confirm` later still need distinct
+`worker_session_id`s, so `dispatch_agent` is required for at least one
+of them).
