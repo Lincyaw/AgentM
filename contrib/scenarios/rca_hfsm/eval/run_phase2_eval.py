@@ -381,6 +381,19 @@ async def _run_one(task: dict[str, Any]) -> CaseResult:
     budget = task.get("budget") or {}
     max_turns = int(budget.get("max_turns") or 25)
 
+    # Wire the per-case parquet fixture into the orchestrator's duckdb_sql
+    # tool. C4 added duckdb_sql to the rca_hfsm manifest so the
+    # investigator can actually query metrics/traces/logs; the tool reads
+    # ``AGENTM_RCA_DATA_DIR`` when no explicit ``data_dir`` is set on the
+    # atom config (manifest leaves it unset so the env var path wins per
+    # case). The rca scenario's eval/agent.py uses the same env-var
+    # handshake, see contrib/scenarios/rca/src/agentm_rca/eval/agent.py.
+    fixtures = (task.get("input") or {}).get("fixtures") or []
+    if fixtures and isinstance(fixtures, list):
+        fx = str(fixtures[0])
+        if Path(fx).is_dir():
+            os.environ["AGENTM_RCA_DATA_DIR"] = fx
+
     case_dir = _TRACE_ROOT / task_id
     case_dir.mkdir(parents=True, exist_ok=True)
 
@@ -423,8 +436,19 @@ async def _run_one(task: dict[str, Any]) -> CaseResult:
         return result
 
     final: list[Any] = []
+    # Wall-clock cap per case — C4 budget discipline. 8 minutes is large
+    # enough for a 25-turn trace under a slow provider but small enough
+    # that one stuck case can't burn the whole 30-minute budget.
+    case_timeout_sec = float(os.environ.get("AGENTM_HFSM_EVAL_CASE_TIMEOUT", "480"))
     try:
-        final = await session.prompt(user_msg)
+        final = await asyncio.wait_for(
+            session.prompt(user_msg), timeout=case_timeout_sec
+        )
+    except asyncio.TimeoutError:
+        result.error = (
+            f"wall-clock timeout after {case_timeout_sec:.0f}s "
+            "(C4 per-case cap)"
+        )
     except Exception as exc:
         result.error = f"prompt failed: {exc}\n{traceback.format_exc()}"
     finally:
@@ -540,27 +564,23 @@ def write_report(
         "disambiguation."
     )
     lines.append("")
-    lines.append("## Important caveat on rca_hfsm capability gap")
+    lines.append("## Manifest baseline (C4 fix)")
     lines.append("")
     lines.append(
-        "The rca scenario this eval suite was built for has the "
-        "``duckdb_sql`` tool wired in and reads parquet fixtures "
-        "(``abnormal_traces.parquet``, ``metrics_sum.parquet``, etc.) "
-        "to investigate. **The rca_hfsm scenario has NO data-access "
-        "tools** — its orchestrator only sees the 5 graph-mutation "
-        "tools (``record_symptom`` / ``record_observation`` / "
-        "``propose_hypothesis`` / ``attach_check`` / "
-        "``propose_update``) plus ``submit_final_report`` and "
-        "``dispatch_agent``. Workers spawned via ``dispatch_agent`` "
-        "inherit ``operations_local`` but no LLM-callable SQL/bash "
-        "tools either. This means the eval here is **not measuring "
-        "diagnostic accuracy** — accuracy is bounded by whatever the "
-        "orchestrator can reason out from the user message alone. What "
-        "this eval IS measuring is **judge behaviour and FSM "
-        "trajectory shape** when LLM-mode judges replace the Phase-1 "
-        "structural rules. Treat pass-rate numbers below as "
-        "lower-bound trajectory-completion signals, not as RCA "
-        "competence signals."
+        "C3 ran on a manifest that was missing the data-access tools "
+        "(``agentm_rca.tools.duckdb_sql``) and sub-agent inheritance "
+        "entries for ``rca_falsification_gate`` plus the four judge "
+        "atoms. Workers refused to start because "
+        "``rca_evidence_tools`` declares ``requires=(\"rca_falsification_"
+        "gate\",)`` and the gate wasn't in the worker's inheritance "
+        "list. **C4 fixes both gaps**: the orchestrator now carries "
+        "``list_tables`` / ``query_sql`` directly, and workers inherit "
+        "the store → judges → gate → evidence-tools → duckdb_sql → "
+        "worker_finalize chain in the same dependency order as the "
+        "orchestrator. This eval re-run is the first time judges have "
+        "had a real opportunity to fire on a confirm/refute path, so "
+        "compare the mutation-kinds and judge-call rows below against "
+        "the prior commit's report (preserved in git history)."
     )
     lines.append("")
     # Summary
@@ -724,18 +744,12 @@ def write_report(
     if platform_error_reports > 0:
         surprises.append(
             f"- **{platform_error_reports}/{total_n} ``submit_final_report`` "
-            "calls were platform-error reports, not RCA verdicts.** The "
-            "workers failed to launch because the production manifest's "
-            "``sub_agent.inherit_extensions`` block does not list "
-            "``rca_falsification_gate``, yet ``rca_evidence_tools`` "
-            "(also inherited) declares ``requires=(\"rca_falsification_"
-            "gate\",)``. This is a **pre-existing Phase 1 manifest bug**, "
-            "not a regression introduced by Phase 2 C3 — the C3 commit "
-            "added only the four judge atoms before the gate. Fix is one "
-            "manifest line; outside this commit's surgical scope. Without "
-            "the fix the orchestrator never reaches HYPOTHESIZE/VERIFY/"
-            "JUDGE on tasks that require dispatch_agent — every case "
-            "stops at INTAKE or OBSERVE."
+            "calls were still platform-error reports despite the C4 "
+            "manifest fix.** Worth investigating whether the worker is "
+            "now bouncing off a *different* requires() chain or the "
+            "orchestrator is generating the platform-error wording from "
+            "stale context. The manifest-load smoke test confirms every "
+            "service registers; live behaviour may diverge."
         )
     if any(r.hypothesis_count == 0 for r in results) and not any(
         r.hypothesis_count > 0 for r in results

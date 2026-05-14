@@ -1,13 +1,16 @@
 name: rca_hfsm
 description: >-
-  Falsification-gated, hypothesis-driven RCA scenario (Phase 1). Sibling — not
+  Falsification-gated, hypothesis-driven RCA scenario (Phase 2). Sibling — not
   replacement — of contrib/scenarios/rca/. The atom stack is composed in
   dependency order: the store publishes the write-handle token first; the
-  gate claims the handle and starts emitting rca.graph.mutated; the evidence
+  4 LLM-native judges register their ``rca.judge.*`` services; the gate
+  claims the handle and starts emitting rca.graph.mutated; the evidence
   tools route every mutation through the gate; the observation cache wraps
   idempotent tools at agent_start; the FSM policy subscribes to graph
   mutations and injects per-state prompt fragments; the brief builder and
-  finalize atom complete the L2/L3 surface.
+  finalize atom complete the L2/L3 surface. Data-access (``duckdb_sql``)
+  is reused verbatim from the existing rca/ scenario per design §13 — the
+  investigator must be able to query parquet fixtures.
 
 extensions:
   # --- environment port (local FS + asyncio bash). Listed first so any later
@@ -63,6 +66,17 @@ extensions:
   # --- the only legal exit from FINALIZE; coverage-gated submit_final_report.
   - module: agentm_rca_hfsm.atoms.rca_finalize
 
+  # --- data-access for the orchestrator. Reused verbatim from
+  # contrib/scenarios/rca/manifest.yaml — same exclude rule so the
+  # ground-truth ``conclusion.parquet`` (when present in a fixture
+  # directory) cannot be queried to shortcut the eval. ``data_dir``
+  # falls through to the ``AGENTM_RCA_DATA_DIR`` env var which the
+  # eval harness sets per-case.
+  - module: agentm_rca.tools.duckdb_sql
+    config:
+      exclude:
+        - conclusion.parquet
+
   # --- observability sinks (JSONL + OTLP). otel_tracing is a no-op
   # without ``uv sync --extra otel``.
   - module: agentm.extensions.builtin.observability
@@ -70,27 +84,53 @@ extensions:
 
   # --- L3 worker dispatch. The investigator persona uses dispatch_agent
   # to fan out verification briefs (built by rca_brief_builder) onto
-  # ephemeral worker sessions.
+  # ephemeral worker sessions. Worker-side inheritance MUST preserve
+  # the same dependency order as the orchestrator: store → judges →
+  # gate → evidence tools, plus duckdb_sql so workers can actually
+  # gather evidence, plus worker_finalize so they can terminate
+  # cleanly via ``return_response`` (otherwise they loop until budget
+  # exhaustion and the orchestrator sees no observations).
   - module: agentm.extensions.builtin.sub_agent
     config:
       max_workers: 2
       inherit_extensions:
         - operations_local
         - rca_hgraph_store
+        - judge_satisfied
+        - judge_coverage
+        - judge_independence
+        - judge_falsified_genuinely
+        - rca_falsification_gate
         - rca_evidence_tools
+        - duckdb_sql
         - observability
         - otel_tracing
+        - worker_finalize
       available_inherited_extensions:
         operations_local:
           module: agentm.extensions.builtin.operations_local
         rca_hgraph_store:
           module: agentm_rca_hfsm.atoms.rca_hgraph_store
+        judge_satisfied:
+          module: agentm_rca_hfsm.atoms.judge_satisfied
+        judge_coverage:
+          module: agentm_rca_hfsm.atoms.judge_coverage
+        judge_independence:
+          module: agentm_rca_hfsm.atoms.judge_independence
+        judge_falsified_genuinely:
+          module: agentm_rca_hfsm.atoms.judge_falsified_genuinely
+        rca_falsification_gate:
+          module: agentm_rca_hfsm.atoms.rca_falsification_gate
         rca_evidence_tools:
           module: agentm_rca_hfsm.atoms.rca_evidence_tools
+        duckdb_sql:
+          module: agentm_rca.tools.duckdb_sql
         observability:
           module: agentm.extensions.builtin.observability
         otel_tracing:
           module: agentm.extensions.builtin.otel_tracing
+        worker_finalize:
+          module: agentm_rca.tools.worker_finalize
 
   # --- system prompt. Empty body — the FSM policy atom injects per-state
   # fragments via BeforeAgentStartEvent so the live prompt always reflects

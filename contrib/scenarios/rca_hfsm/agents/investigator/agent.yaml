@@ -18,6 +18,9 @@ description: >-
 # manifest.yaml). The investigator's L3 workers see the evidence-tool
 # surface plus observability; they do NOT see sub_agent itself (no nested
 # dispatch) or the finalize tool (only the orchestrator can submit).
+# Phase 2 C4: ``list_tables`` / ``query_sql`` from duckdb_sql let the
+# investigator query the case's parquet fixtures directly before deciding
+# whether to dispatch a worker for deeper drilldown.
 tools:
   - record_symptom
   - record_observation
@@ -26,6 +29,8 @@ tools:
   - propose_update
   - submit_final_report
   - dispatch_agent
+  - list_tables
+  - query_sql
 
 input_schema:
   required: [objective, current_state]
