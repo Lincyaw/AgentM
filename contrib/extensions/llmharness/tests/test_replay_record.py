@@ -73,6 +73,62 @@ def test_replay_log_path_layout(tmp_path: Path) -> None:
     assert p.name == "trace-xyz.jsonl"
 
 
+def test_replay_record_thinking_roundtrip(tmp_path: Path) -> None:
+    """raw_assistant_messages survives JSONL roundtrip with thinking + tool_call.
+
+    Disaster guarded: if the field is dropped on either side of the
+    serialization, downstream SFT exporters (Qwen/GLM-style ``<think>``
+    targets) silently lose every reasoning trace and the trained model
+    can't reproduce the teacher's thought process.
+    """
+    path = tmp_path / "replay.jsonl"
+    blocks = [
+        {"type": "thinking", "text": "let me check the second turn"},
+        {
+            "type": "tool_call",
+            "id": "call-1",
+            "name": "submit_events",
+            "arguments": {"events": [{"id": 1, "kind": "task"}]},
+        },
+    ]
+    rec = ReplayRecord(
+        phase="extractor",
+        turn_index=2,
+        root_session_id="abc",
+        ts_ns=42,
+        compose_kwargs={},
+        payload={"new_turns": []},
+        provider=None,
+        output={"events": []},
+        status="ok",
+        raw_assistant_messages=blocks,
+    )
+    write_record(path, rec)
+    [back] = list(iter_records(path))
+    assert back.raw_assistant_messages == blocks
+
+
+def test_replay_record_omits_raw_assistant_messages_when_empty(tmp_path: Path) -> None:
+    """Empty list ⇒ key absent on disk so old sidecars stay byte-identical."""
+    path = tmp_path / "replay.jsonl"
+    write_record(path, _make_record("auditor", turn=1))
+    raw = path.read_text(encoding="utf-8")
+    assert "raw_assistant_messages" not in raw
+
+
+def test_replay_record_back_compat_with_old_sidecar(tmp_path: Path) -> None:
+    """A pre-existing sidecar without raw_assistant_messages must load as []."""
+    path = tmp_path / "replay.jsonl"
+    path.write_text(
+        '{"phase":"extractor","turn_index":0,"root_session_id":"old",'
+        '"ts_ns":0,"compose_kwargs":{},"payload":{},"provider":null,'
+        '"output":null,"status":"ok","error":null,"latency_ms":0}\n',
+        encoding="utf-8",
+    )
+    [rec] = list(iter_records(path))
+    assert rec.raw_assistant_messages == []
+
+
 def test_malformed_lines_ignored(tmp_path: Path) -> None:
     path = tmp_path / "replay.jsonl"
     write_record(path, _make_record("extractor", turn=0))
