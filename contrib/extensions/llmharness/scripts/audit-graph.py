@@ -14,11 +14,21 @@ config comes from the raw records.jsonl (any extractor record) so the
 ticket/base_url match the captured run; ``WARPGATE_TICKET`` /
 ``OPENAI_BASE_URL`` env vars override.
 
-Output layout per row::
+Outputs in two places (both written by default):
 
-    <out-root>/<row>/verdict.json     — submit_verdict args + status
-    <out-root>/<row>/messages.jsonl   — full transcript (assistant turns)
-    <out-root>/summary.json           — per-row roll-up
+1. **Debug output** at ``<out-root>/<row>/{verdict.json,messages.jsonl}``
+   plus ``<out-root>/summary.json`` — full transcript, raw tool args,
+   prompt snapshot. For human review of the audit run.
+
+2. **Frontend-visible firing** at
+   ``<cases-root>/<row>/auditor/<NNN>_turn_<T>.json`` shaped exactly
+   like ``AuditorFiring`` in the aegis-ui schema. The case's
+   ``meta.json`` is patched to bump ``auditor_firings`` /
+   ``surfaced_reminders`` / ``silent_verdicts``. The /cases UI
+   ``mode=auditor`` view picks these up automatically once the cases/
+   dir is re-uploaded to blob.
+
+Pass ``--skip-case-write`` to only produce the debug output.
 
 Usage::
 
@@ -98,16 +108,62 @@ def _provider_from_raw(
     return None
 
 
-def _load_graph(case_dir: Path) -> tuple[list[Event], list[Edge]]:
+def _load_graph(case_dir: Path) -> tuple[list[Event], list[Edge], int]:
+    """Returns (events, edges, extractor_firing_seq).
+
+    The seq is the sequence number of the extractor firing whose graph
+    snapshot we audit — it becomes ``graph_snapshot_ref`` on the
+    AuditorFiring so the UI can pivot back to the source firing.
+    """
     eg_dir = case_dir / "event_graph"
     candidates = sorted(eg_dir.glob("after_extractor_*.json"))
     if not candidates:
         raise FileNotFoundError(f"no event_graph for {case_dir}")
-    # Last firing's snapshot — the cumulative graph.
-    payload = json.loads(candidates[-1].read_text(encoding="utf-8"))
+    last = candidates[-1]
+    payload = json.loads(last.read_text(encoding="utf-8"))
     events = [Event.from_dict(e) for e in payload.get("events", [])]
     edges = [Edge.from_dict(e) for e in payload.get("edges", [])]
-    return events, edges
+    # filename shape: after_extractor_NNN.json
+    seq = int(last.stem.split("_")[-1])
+    return events, edges, seq
+
+
+def _next_auditor_seq_and_turn(case_dir: Path, fallback_turn: int) -> tuple[int, int]:
+    """Pick the next auditor firing sequence (1-based) for this case and
+    the turn_index to file it under.
+
+    For now we fire after the *last* extractor — same turn_index as that
+    firing — so the auditor view sits next to its source graph in the
+    timeline. If prior auditor firings exist (rerun, multiple prompts),
+    we append at the next sequence rather than overwriting.
+    """
+    aud_dir = case_dir / "auditor"
+    existing = list(aud_dir.glob("*_turn_*.json")) if aud_dir.exists() else []
+    next_seq = len(existing) + 1
+    # Match the on-disk turn-index of the most recent extractor firing,
+    # since this audit is "as if" it fired right after that extractor.
+    ext_dir = case_dir / "extractor"
+    if ext_dir.exists():
+        ext_files = sorted(ext_dir.glob("*_turn_*.json"))
+        if ext_files:
+            try:
+                return next_seq, int(ext_files[-1].stem.split("_turn_")[-1])
+            except (ValueError, IndexError):
+                pass
+    return next_seq, fallback_turn
+
+
+def _patch_meta(case_dir: Path, surfaced: bool) -> None:
+    meta_path = case_dir / "meta.json"
+    if not meta_path.is_file():
+        return
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["auditor_firings"] = int(meta.get("auditor_firings", 0)) + 1
+    if surfaced:
+        meta["surfaced_reminders"] = int(meta.get("surfaced_reminders", 0)) + 1
+    else:
+        meta["silent_verdicts"] = int(meta.get("silent_verdicts", 0)) + 1
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 async def _audit_one_row(
@@ -120,11 +176,12 @@ async def _audit_one_row(
     cwd: str,
     semaphore: asyncio.Semaphore,
     max_output_tokens: int | None,
+    write_to_case_dir: bool,
 ) -> dict[str, Any]:
     async with semaphore:
         out_dir.mkdir(parents=True, exist_ok=True)
         try:
-            events, edges = _load_graph(case_dir)
+            events, edges, extractor_seq = _load_graph(case_dir)
         except FileNotFoundError as exc:
             err = {"row_id": row_id, "status": "no_graph", "error": str(exc)}
             (out_dir / "verdict.json").write_text(
@@ -162,6 +219,13 @@ async def _audit_one_row(
         )
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
+        # ``submit_verdict`` tool args are ``{"verdict": {...real fields...}}``;
+        # unwrap once so the inner block matches the AuditorFiring schema.
+        outer = result.output if isinstance(result.output, dict) else None
+        inner_verdict = (
+            outer.get("verdict") if isinstance(outer, dict) and isinstance(outer.get("verdict"), dict) else None
+        )
+
         verdict_record = {
             "row_id": row_id,
             "status": result.status,
@@ -193,6 +257,40 @@ async def _audit_one_row(
                     )
                 except (TypeError, ValueError):
                     continue
+
+        # Write the frontend-visible AuditorFiring file into the case dir
+        # so /cases UI ``mode=auditor`` view picks it up. Skip on failure
+        # — leaving meta.json untouched is preferable to recording a
+        # malformed firing.
+        if write_to_case_dir and result.status == "ok" and inner_verdict is not None:
+            aud_dir = case_dir / "auditor"
+            aud_dir.mkdir(parents=True, exist_ok=True)
+            seq, turn_index = _next_auditor_seq_and_turn(case_dir, fallback_turn=0)
+            firing = {
+                "phase": "auditor",
+                "sequence": seq,
+                "turn_index": turn_index,
+                "ts_ns": time.time_ns(),
+                "status": result.status,
+                "error": result.error,
+                "latency_ms": result.latency_ms,
+                "input": {
+                    "graph_snapshot_ref": extractor_seq,
+                    "findings": [],
+                    "continuation_notes": [],
+                    "check_errors": {},
+                    "tools_profile": "minimal",
+                    "trajectory_snapshot_len": 0,
+                    "prompt_variant": "detective",
+                },
+                "output": inner_verdict,
+            }
+            firing_path = aud_dir / f"{seq:03d}_turn_{turn_index:03d}.json"
+            firing_path.write_text(
+                json.dumps(firing, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            _patch_meta(case_dir, surfaced=bool(inner_verdict.get("surface_reminder")))
+
         return verdict_record
 
 
@@ -226,6 +324,7 @@ async def _main_async(args: argparse.Namespace) -> int:
                     cwd=cwd,
                     semaphore=semaphore,
                     max_output_tokens=args.max_output_tokens,
+                    write_to_case_dir=not args.skip_case_write,
                 )
             )
         )
@@ -283,6 +382,12 @@ def main() -> int:
         type=int,
         default=8192,
         help="cap on model output tokens; detective prompts need 4-8k",
+    )
+    p.add_argument(
+        "--skip-case-write",
+        action="store_true",
+        help="skip writing the AuditorFiring file + meta.json patch into "
+        "the case dir; only produce the debug --out artefacts",
     )
     args = p.parse_args()
     return asyncio.run(_main_async(args))
