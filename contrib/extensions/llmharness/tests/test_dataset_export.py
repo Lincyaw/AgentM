@@ -247,6 +247,85 @@ def test_dataset_export_thinking_in_extractor_target() -> None:
     assert [ev["id"] for ev in args["events"]] == [1]
 
 
+def test_distill_cli_export_preserves_thinking_through_sidecar(tmp_path: Path) -> None:
+    """End-to-end: replay sidecar with raw_assistant_messages → distill CLI
+    → SFT row content carries the ``<think>`` wrapping.
+
+    Disaster guarded: the unit tests above feed dicts directly into
+    ``extractor_records_from_replay``, so a regression in
+    ``distill.cli._replay_record_dicts`` (e.g. forgetting to forward
+    ``raw_assistant_messages`` when converting ReplayRecord → dict) goes
+    unnoticed. This test runs the actual CLI ``export`` subcommand
+    against a synthesized sidecar so the conversion layer is exercised.
+    """
+    from llmharness.distill.cli import main as distill_main
+
+    sid = "sess-thinking-regression"
+    replay_dir = tmp_path / ".agentm" / "audit_replay"
+    replay_dir.mkdir(parents=True)
+    sidecar = replay_dir / f"{sid}.jsonl"
+    record = {
+        "phase": "extractor",
+        "turn_index": 4,
+        "root_session_id": sid,
+        "ts_ns": 1,
+        "compose_kwargs": {},
+        "payload": {"new_turns": [], "recent_graph": []},
+        "provider": None,
+        "output": {
+            "events": [
+                {"id": 1, "kind": "task", "summary": "go", "source_turns": [0]}
+            ],
+            "edges": [],
+            "dropped_edges": [],
+        },
+        "status": "ok",
+        "error": None,
+        "latency_ms": 0,
+        "raw_assistant_messages": [
+            {"type": "thinking", "text": "reason about the turn"},
+            {
+                "type": "tool_call",
+                "id": "call-1",
+                "name": "submit_events",
+                "arguments": {"events": []},
+            },
+        ],
+    }
+    sidecar.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    (replay_dir / f"{sid}.meta.json").write_text(
+        json.dumps(
+            {
+                "sample_id": "s-regression",
+                "dataset_name": "test",
+                "dataset_path": "",
+                "root_session_id": sid,
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "sft"
+    rc = distill_main(
+        [
+            "export",
+            "--labels",
+            str(tmp_path / "labels-empty"),
+            "--replay-dir",
+            str(replay_dir),
+            "--out",
+            str(out_dir),
+            "--phase",
+            "extractor",
+        ]
+    )
+    assert rc == 0
+    extractor_jsonl = out_dir / "extractor.jsonl"
+    rows = [json.loads(line) for line in extractor_jsonl.read_text().splitlines() if line]
+    assert len(rows) == 1
+    content = rows[0]["target"]["messages"][0]["content"]
+    assert content == "<think>reason about the turn</think>\n\n"
+
+
 def test_dataset_export_extractor_no_thinking_fallback() -> None:
     """Older sidecars + spawn_error firings carry no thinking blocks.
 
