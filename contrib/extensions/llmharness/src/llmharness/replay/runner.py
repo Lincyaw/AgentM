@@ -124,9 +124,7 @@ async def replay_extractor_record(
     payload["recent_graph"] = enriched_recent
     state.recent_graph = tuple(recent_events)
 
-    extensions = bind_extractor_state(
-        base, state=state, turn_window_json=extras.get("turn_window_json", "[]")
-    )
+    extensions = bind_extractor_state(base, state=state)
 
     provider = provider_override or _coerce_provider(record)
     return await run_phase_standalone(

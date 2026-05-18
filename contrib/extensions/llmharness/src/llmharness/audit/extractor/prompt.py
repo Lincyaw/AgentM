@@ -2,10 +2,10 @@
 
 The framing text lives in markdown files under
 :mod:`audit.extractor.prompts`. Pick a variant by name (default
-``"default"``) or by an absolute path. The adapter substitutes
-``{TURN_WINDOW_JSON}`` at child-session-spawn time with the JSON list
-of the new-turn window — that substitution is the same shape the
-prompt file embeds.
+``"default"``) or by an absolute path. The prompt is pure static
+framing — the new-turn window and ``recent_graph`` are delivered as
+the child's user message by the adapter / replay runner, so there is
+no per-firing substitution.
 
 Drop in a new variant by adding ``audit/extractor/prompts/extractor_<name>.md``
 and pointing the adapter config at it.

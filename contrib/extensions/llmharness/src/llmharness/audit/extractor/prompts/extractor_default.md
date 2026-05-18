@@ -215,14 +215,9 @@ Each ``recent_graph[i]`` carries:
   literal token, do not emit the external_ref.
 
 The verbatim turn texts the harness will normalize against are
-embedded below as JSON; quote from these when citing entities or
-quotes.
-
-Embedded turn window:
-
-```
-{TURN_WINDOW_JSON}
-```
+delivered with that next user message; quote from those when citing
+entities or quotes. The new-turn window arrives in the next user
+message as JSON; do not look for it in this system prompt.
 
 ## Procedure
 
