@@ -33,6 +33,9 @@ source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
     { name = "openai" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp" },
+    { name = "opentelemetry-sdk" },
     { name = "pathspec" },
     { name = "python-dotenv" },
     { name = "python-frontmatter" },
@@ -43,11 +46,6 @@ dependencies = [
 [package.optional-dependencies]
 agent-env = [
     { name = "arl-env" },
-]
-otel = [
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-exporter-otlp" },
-    { name = "opentelemetry-sdk" },
 ]
 
 [package.dev-dependencies]
@@ -66,16 +64,16 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.86.0" },
     { name = "arl-env", marker = "extra == 'agent-env'", specifier = ">=0.2.0" },
     { name = "openai", specifier = ">=1.50.0" },
-    { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.27.0" },
-    { name = "opentelemetry-exporter-otlp", marker = "extra == 'otel'", specifier = ">=1.27.0" },
-    { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.27.0" },
+    { name = "opentelemetry-api", specifier = ">=1.27.0" },
+    { name = "opentelemetry-exporter-otlp", specifier = ">=1.27.0" },
+    { name = "opentelemetry-sdk", specifier = ">=1.27.0" },
     { name = "pathspec", specifier = ">=1.0.4" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "python-frontmatter", specifier = ">=1.1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "typer", specifier = ">=0.25.1" },
 ]
-provides-extras = ["agent-env", "otel"]
+provides-extras = ["agent-env"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2598,6 +2596,7 @@ requires-dist = [
     { name = "python-dateutil", marker = "extra == 'analysis'", specifier = ">=2.9.0.post0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
     { name = "pyvis", marker = "extra == 'analysis'", specifier = ">=0.3.2" },
+    { name = "pyyaml", marker = "extra == 'detector'", specifier = ">=6.0.0" },
     { name = "pyyaml", marker = "extra == 'llm-eval'", specifier = ">=6.0.0" },
     { name = "questionary", marker = "extra == 'llm-eval'", specifier = ">=2.1.0" },
     { name = "rcabench", marker = "extra == 'detector'", specifier = ">=1.1.51" },
@@ -2605,6 +2604,7 @@ requires-dist = [
     { name = "rcabench-platform", extras = ["sdk", "internal", "analysis", "llm-eval"], marker = "extra == 'all'" },
     { name = "requests", marker = "extra == 'llm-eval'", specifier = ">=2.32.4" },
     { name = "rich", marker = "extra == 'llm-eval'", specifier = ">=13.7.0" },
+    { name = "s3fs", marker = "extra == 'detector'", specifier = ">=2024.10.0" },
     { name = "s3fs", marker = "extra == 'sdk'", specifier = ">=2024.10.0" },
     { name = "scipy", marker = "extra == 'detector'", specifier = ">=1.15.0" },
     { name = "scipy", marker = "extra == 'sdk'", specifier = ">=1.15.0" },
