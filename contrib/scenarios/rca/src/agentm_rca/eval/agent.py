@@ -240,10 +240,40 @@ class AgentMAgent(BaseAgent):
             self._provider, self._model
         )
 
+        # Auto-write a distill meta sidecar so ``llmharness-distill export``
+        # can pair this rollout's replay sidecar to ground truth without a
+        # hand-fabricated ``meta.json``. ``data_dir`` is the only stable
+        # per-sample identifier rcabench-platform exposes to agents (it does
+        # not forward ``sample.id`` via kwargs), so we use its basename as
+        # ``sample_id``. The binding atom is mounted dynamically per session
+        # rather than statically in the manifest because each sample needs a
+        # distinct id and an env-var fallback would race under ``-n>1``.
+        # Mount conditionally — binding is dead weight without the harness
+        # adapter that produces the replay sidecar in the first place.
+        extra_extensions: list[tuple[str, dict[str, Any]]] = []
+        if "harness" in self._scenario:
+            sample_id = os.path.basename(data_dir.rstrip("/")) or "unknown"
+            extra_extensions.append(
+                (
+                    "llmharness.distill.binding",
+                    {
+                        "sample_id": sample_id,
+                        # No clean dataset_name source exists in this codepath
+                        # (rcabench-platform does not forward sample.dataset
+                        # to agents). Leave blank rather than hardcode a
+                        # single dataset; consumers that need it can read
+                        # ``dataset_path`` instead.
+                        "dataset_name": "",
+                        "dataset_path": data_dir,
+                    },
+                )
+            )
+
         config = AgentSessionConfig(
             cwd=os.getcwd(),
             provider=(provider_module, provider_config),
             scenario=self._scenario,
+            extra_extensions=extra_extensions,
             bus=bus,
             loop_config=LoopConfig(max_turns=max_turns),
         )
