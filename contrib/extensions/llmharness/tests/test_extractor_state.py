@@ -7,7 +7,8 @@ load-bearing positions:
 
 - event-shape errors hard-reject the whole submission (state
   unchanged → LLM may retry with the error message)
-- id ordering must be 1..N strictly increasing
+- ids are GLOBAL — must be >= ``next_event_id``, strictly increasing
+  in submission order, and disjoint from ``recent_graph`` ids
 - refs may only point to EARLIER events (id < self.id) — this is the
   cycle prevention by construction
 - per-kind witness fields are required (data → cited_entities,
@@ -80,17 +81,50 @@ def test_commit_with_empty_events_is_accepted() -> None:
 # --- event-shape hard rejects (state unchanged) ----------------------------
 
 
-def test_commit_rejects_non_sequential_ids() -> None:
+def test_commit_rejects_id_below_next_event_id() -> None:
+    state = _state()
+    state.next_event_id = 41
+    err = state.commit([_evid(1, turns=[10])])  # below cursor
+    assert err is not None and "below next_event_id" in err
+    assert state.committed is False
+    assert state.events == ()
+
+
+def test_commit_rejects_non_increasing_ids() -> None:
+    state = _state()
+    state.next_event_id = 41
+    err = state.commit(
+        [
+            _evid(41, turns=[10]),
+            _evid(41, turns=[11]),  # duplicate — must strictly increase
+        ]
+    )
+    assert err is not None and "strictly greater" in err
+    assert state.committed is False
+
+
+def test_commit_allows_gaps_in_id_sequence() -> None:
+    """Strictly increasing ≠ contiguous. Gaps are fine."""
     state = _state()
     err = state.commit(
         [
-            _evid(1, turns=[10]),
-            _evid(3, turns=[11]),  # gap: should have been 2
+            _evid(1, turns=[10], summary="src"),
+            {
+                **_evid(5, turns=[11], summary="dst"),
+                "refs": [
+                    {
+                        "to": 1,
+                        "kind": "data",
+                        "reason": "ok",
+                        "cited_entities": ["abnormal_traces"],
+                    }
+                ],
+            },
         ]
     )
-    assert err is not None and "1, 2, 3" in err
-    assert state.committed is False
-    assert state.events == ()
+    assert err is None
+    assert len(state.events) == 2
+    assert state.events[0].id == 1 and state.events[1].id == 5
 
 
 def test_commit_rejects_unknown_event_kind() -> None:
@@ -292,12 +326,10 @@ def test_commit_partial_keeps_witnessed_refs_and_drops_failing_ones() -> None:
 # --- refs presence rule (genesis exception) --------------------------------
 
 
-def test_commit_rejects_non_genesis_event_with_empty_refs() -> None:
-    """id>=2 events MUST cite at least one earlier event in this firing.
-
-    Empty / missing refs on non-genesis events leave the auditor without
-    a causal trace across the window — see schema description on
-    ``_EVENT_SCHEMA.refs``.
+def test_commit_rejects_non_first_event_with_empty_refs() -> None:
+    """Every event after the first MUST cite at least one earlier event
+    (in this firing or via external_refs to recent_graph). Empty refs
+    on a later event leave the auditor without a causal trace.
     """
     state = _state()
     err = state.commit(
@@ -308,9 +340,29 @@ def test_commit_rejects_non_genesis_event_with_empty_refs() -> None:
     )
     assert err is not None
     assert "no refs and no external_refs" in err
-    assert "non-genesis" in err
-    assert "In-firing candidates" in err
+    assert "genesis exemption" in err
+    assert "Earlier-event candidates" in err
     assert "id:1" in err  # the available earlier event is enumerated
+    assert state.committed is False
+
+
+def test_commit_rejects_first_event_when_recent_graph_non_empty() -> None:
+    """Genesis exemption only applies when there are NO priors at all.
+    A new firing with recent_graph entries must connect its first
+    event to the cumulative graph via external_refs, otherwise the
+    cumulative graph grows a stray root.
+    """
+    from llmharness.schema import Event, EventKind
+
+    prior = Event(id=1, kind=EventKind("evid"), summary="prior", source_turns=[5])
+    state = ExtractionState(
+        turn_texts={5: "irrelevant prior text", 10: "irrelevant new text"},
+        recent_graph=(prior,),
+        next_event_id=2,
+    )
+    err = state.commit([_evid(2, turns=[10])])  # first-of-firing, NO refs
+    assert err is not None
+    assert "genesis exemption" in err
     assert state.committed is False
 
 
@@ -362,7 +414,7 @@ def test_external_ref_accepted_and_attached_to_event() -> None:
                 "refs": [],
                 "external_refs": [
                     {
-                        "to_recent_graph_index": 1,
+                        "to_recent_event_id": 1,
                         "kind": "data",
                         "reason": "same table",
                         "cited_entities": ["abnormal_traces"],
@@ -376,13 +428,15 @@ def test_external_ref_accepted_and_attached_to_event() -> None:
     ev = state.events[0]
     assert len(ev.external_refs) == 1
     er = ev.external_refs[0]
-    assert er.to_recent_graph_index == 1
+    assert er.to_recent_event_id == 1
     assert er.kind is EdgeKind.DATA
 
 
-def test_external_ref_satisfies_non_genesis_connection_requirement() -> None:
-    """id>=2 may have empty in-firing refs as long as it has an
-    external_ref — the connectivity requirement is OR across both."""
+def test_external_ref_alone_satisfies_connection_requirement() -> None:
+    """An event can satisfy the connection requirement via external_ref
+    alone — refs (in-firing) and external_refs are OR'd. Important for
+    the first event of any firing N>=2 where the only available parents
+    live in recent_graph."""
     from llmharness.schema import Event, EventKind
 
     prior = Event(
@@ -394,29 +448,22 @@ def test_external_ref_satisfies_non_genesis_connection_requirement() -> None:
     state = ExtractionState(
         turn_texts={
             5: "abnormal_traces was discussed earlier",
-            10: "id=1 genesis text",
-            11: "id=2 now also mentions abnormal_traces",
+            11: "now also mentions abnormal_traces",
         },
         recent_graph=(prior,),
+        next_event_id=2,
     )
     err = state.commit(
         [
             {
-                "id": 1,
-                "kind": "evid",
-                "summary": "genesis",
-                "source_turns": [10],
-                "refs": [],
-            },
-            {
                 "id": 2,
                 "kind": "evid",
-                "summary": "non-genesis with only external_ref",
+                "summary": "first event of this firing, external_ref only",
                 "source_turns": [11],
                 "refs": [],
                 "external_refs": [
                     {
-                        "to_recent_graph_index": 1,
+                        "to_recent_event_id": 1,
                         "kind": "data",
                         "reason": "uses prior table",
                         "cited_entities": ["abnormal_traces"],
@@ -426,10 +473,10 @@ def test_external_ref_satisfies_non_genesis_connection_requirement() -> None:
         ]
     )
     assert err is None, err
-    assert state.events[1].external_refs[0].to_recent_graph_index == 1
+    assert state.events[0].external_refs[0].to_recent_event_id == 1
 
 
-def test_external_ref_out_of_bounds_rejected() -> None:
+def test_external_ref_unknown_id_rejected() -> None:
     state = ExtractionState(turn_texts={10: "x"}, recent_graph=())
     err = state.commit(
         [
@@ -441,7 +488,7 @@ def test_external_ref_out_of_bounds_rejected() -> None:
                 "refs": [],
                 "external_refs": [
                     {
-                        "to_recent_graph_index": 1,
+                        "to_recent_event_id": 99,
                         "kind": "data",
                         "reason": "r",
                         "cited_entities": ["x"],
@@ -451,7 +498,7 @@ def test_external_ref_out_of_bounds_rejected() -> None:
         ]
     )
     assert err is not None
-    assert "out of bounds" in err
+    assert "not found in recent_graph" in err
 
 
 def test_external_ref_witness_failure_drops_into_dropped_edges() -> None:
@@ -480,7 +527,7 @@ def test_external_ref_witness_failure_drops_into_dropped_edges() -> None:
                 "refs": [],
                 "external_refs": [
                     {
-                        "to_recent_graph_index": 1,
+                        "to_recent_event_id": 1,
                         "kind": "data",
                         "reason": "fabricated",
                         "cited_entities": ["abnormal_traces"],
@@ -492,4 +539,4 @@ def test_external_ref_witness_failure_drops_into_dropped_edges() -> None:
     assert err is None
     assert len(state.events[0].external_refs) == 0
     assert len(state.dropped_edges) == 1
-    assert state.dropped_edges[0]["src"] == "recent_graph[1]"
+    assert state.dropped_edges[0]["src"] == "recent_graph_event#1"

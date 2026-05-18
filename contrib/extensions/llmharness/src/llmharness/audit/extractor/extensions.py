@@ -71,7 +71,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             f"config['state'] or service key {EXTRACTOR_STATE_SERVICE_KEY!r}; "
             "the adapter must supply one before mounting this extension."
         )
-    for tool in build_extractor_tools(state):
+    raw_budget = (
+        config.get("witness_retry_budget") if isinstance(config, dict) else None
+    )
+    witness_retry_budget = int(raw_budget) if isinstance(raw_budget, int) else 0
+    for tool in build_extractor_tools(
+        state, witness_retry_budget=witness_retry_budget
+    ):
         api.register_tool(tool)
 
 
@@ -80,6 +86,7 @@ def compose_extractor_extensions(
     base_prompt: str | None = None,
     cards_tools_config: dict[str, Any] | None = UNSET,
     observability_config: dict[str, Any] | None = UNSET,
+    witness_retry_budget: int | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     """Default order: observability -> cards_tools -> extractor_tools -> system_prompt.
 
@@ -90,18 +97,28 @@ def compose_extractor_extensions(
     Pass ``None`` for ``cards_tools_config`` / ``observability_config``
     to drop that extension; ``extractor_tools`` and ``system_prompt``
     always survive.
+
+    ``witness_retry_budget`` is forwarded into the extractor_tools atom
+    config (see :mod:`audit.extractor.tools`). Default ``None`` lets the
+    atom keep its own default of 0 (no bounce-back) to preserve the
+    legacy single-shot contract; replay paths pass a positive value to
+    give the LLM a chance to fix soft (witness) drops.
     """
     framing = (
         base_prompt
         if base_prompt is not None
         else load_extractor_prompt(DEFAULT_PROMPT_NAME)
     )
+    submit_cfg: dict[str, Any] | None = None
+    if witness_retry_budget is not None:
+        submit_cfg = {"witness_retry_budget": int(witness_retry_budget)}
     return compose_audit_extensions(
         submit_tool_module=_EXTRACTOR_TOOLS_MODULE,
         default_prompt=framing,
         prompt_override=None,
         cards_tools_config=cards_tools_config,
         observability_config=observability_config,
+        submit_tool_config=submit_cfg,
     )
 
 
