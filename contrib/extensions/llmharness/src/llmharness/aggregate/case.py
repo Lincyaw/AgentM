@@ -46,6 +46,13 @@ class FiringRecord:
     status: FiringStatus
     error: str | None
     latency_ms: int
+    raw_assistant_messages: list[dict[str, Any]] = field(default_factory=list)
+    """Chronological list of serialized assistant content blocks (thinking
+    + tool_call + text) from the child loop. Forwarded from the replay
+    sidecar; downstream SFT exporters consume the thinking blocks to
+    produce Qwen/GLM-style ``<think>...</think>`` training targets.
+    Empty when the firing pre-dates the field or the child made no LLM
+    call (spawn_error)."""
 
 
 @dataclass(frozen=True)

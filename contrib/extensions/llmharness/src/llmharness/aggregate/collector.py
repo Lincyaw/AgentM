@@ -56,6 +56,7 @@ def _to_firing(rec: ReplayRecord, sequence: int) -> FiringRecord:
         status=_firing_status(rec),
         error=rec.error,
         latency_ms=int(rec.latency_ms or 0),
+        raw_assistant_messages=list(rec.raw_assistant_messages),
     )
 
 
