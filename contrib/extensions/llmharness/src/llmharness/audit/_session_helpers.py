@@ -59,11 +59,16 @@ def bind_extractor_state(
     *,
     state: ExtractionState,
     turn_window_json: str,
+    witness_retry_budget: int | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     """Inject a fresh ``ExtractionState`` + substitute ``{TURN_WINDOW_JSON}``.
 
     Returns a copy; the input list and its config dicts are never mutated.
     Called once per extractor firing, both in live spawning and in replay.
+
+    ``witness_retry_budget`` is forwarded to the extractor_tools atom; pass
+    ``1`` to enable one bounded retry on witness drops. ``None`` (default)
+    leaves the base config untouched (V3.1 single-shot behaviour).
     """
     out: list[tuple[str, dict[str, Any]]] = []
     for module, cfg in base_extensions:
@@ -71,6 +76,8 @@ def bind_extractor_state(
         if module == EXTRACTOR_TOOLS_MODULE:
             new_cfg["state"] = state
             new_cfg.setdefault(EXTRACTOR_STATE_SERVICE_KEY, state)
+            if witness_retry_budget is not None:
+                new_cfg["witness_retry_budget"] = int(witness_retry_budget)
         elif module == SYSTEM_PROMPT_MODULE:
             prompt = new_cfg.get("prompt")
             if isinstance(prompt, str) and "{TURN_WINDOW_JSON}" in prompt:

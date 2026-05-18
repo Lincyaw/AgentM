@@ -1,0 +1,9 @@
+# Smoke set for the standalone auditor — three rows with distinct
+# failure modes:
+#   row1: agent locked onto wrong service entirely
+#   row3: agent identified right service but wrong fault mechanism
+#   row10: agent picked wrong service with a loud DNS-style symptom
+
+1
+3
+10
