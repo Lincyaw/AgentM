@@ -19,7 +19,6 @@ from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolCallBlo
 from ._atom_constants import (
     EXTRACTOR_STATE_SERVICE_KEY,
     EXTRACTOR_TOOLS_MODULE,
-    SYSTEM_PROMPT_MODULE,
 )
 from .extractor.state import ExtractionState
 
@@ -58,12 +57,14 @@ def bind_extractor_state(
     base_extensions: list[tuple[str, dict[str, Any]]],
     *,
     state: ExtractionState,
-    turn_window_json: str,
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Inject a fresh ``ExtractionState`` + substitute ``{TURN_WINDOW_JSON}``.
+    """Inject a fresh ``ExtractionState`` into the extractor extensions.
 
     Returns a copy; the input list and its config dicts are never mutated.
     Called once per extractor firing, both in live spawning and in replay.
+    The new-turn window is delivered as the child's user message (see
+    the adapter / replay runner) rather than substituted into the system
+    prompt, so this helper has nothing to do with prompt text.
     """
     out: list[tuple[str, dict[str, Any]]] = []
     for module, cfg in base_extensions:
@@ -71,11 +72,5 @@ def bind_extractor_state(
         if module == EXTRACTOR_TOOLS_MODULE:
             new_cfg["state"] = state
             new_cfg.setdefault(EXTRACTOR_STATE_SERVICE_KEY, state)
-        elif module == SYSTEM_PROMPT_MODULE:
-            prompt = new_cfg.get("prompt")
-            if isinstance(prompt, str) and "{TURN_WINDOW_JSON}" in prompt:
-                new_cfg["prompt"] = prompt.replace(
-                    "{TURN_WINDOW_JSON}", turn_window_json
-                )
         out.append((module, new_cfg))
     return out

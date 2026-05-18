@@ -839,16 +839,14 @@ async def _drain_extractor(
         "recent_graph": recent_graph_payload,
     }
 
-    turn_window_json = json.dumps(new_turn_window, ensure_ascii=False, default=str)
-
-    # Inject state + turn-window JSON substitution into the per-firing
-    # extensions list. The base list returned by
-    # ``compose_extractor_extensions`` is shared across firings; we
-    # never mutate it.
+    # Inject state into the per-firing extensions list. The base list
+    # returned by ``compose_extractor_extensions`` is shared across
+    # firings; we never mutate it. The new-turn window is shipped as
+    # the child's user message (see ``payload`` above), not embedded
+    # into the system prompt.
     firing_extensions = bind_extractor_state(
         extractor_extensions,
         state=state,
-        turn_window_json=turn_window_json,
     )
 
     # Only materialize the replay snapshot if the sidecar is enabled.
@@ -859,7 +857,6 @@ async def _drain_extractor(
             api.get_service(_EXTRACTOR_COMPOSE_KWARGS_SERVICE_KEY) or {}
         )
         replay_extras: dict[str, Any] | None = {
-            "turn_window_json": turn_window_json,
             "turn_texts": {str(k): v for k, v in state.turn_texts.items()},
         }
     else:
