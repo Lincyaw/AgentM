@@ -1,0 +1,21 @@
+# Pinned case set for extractor prompt iteration.
+#
+# Format: one row id per line; blank lines and `#`-comments ignored.
+# The eval-db source is fixed below; bump it when you switch datasets.
+#
+# Source: openrca-2-lite-n500-t20 (judged, claude-opus-4-7-passthrough)
+# Set name (used as the iter prefix slug): pinned-10
+#
+# Keep this list stable between iterations so prompt changes show up as
+# diffs in the same cases, not in different cases.
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10

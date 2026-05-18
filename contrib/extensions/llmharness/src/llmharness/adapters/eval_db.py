@@ -46,12 +46,6 @@ from ..schema import Event as SchemaEvent
 
 logger = logging.getLogger(__name__)
 
-# Mirror the live adapter's rolling tail of prior events surfaced to a
-# new firing as ``recent_graph``. Bigger window = richer external_refs,
-# longer payload. 20 matches ``entry_types.RECENT_GRAPH_SLICE_FOR_EXTRACTOR``.
-_RECENT_GRAPH_TAIL: int = 20
-
-
 # --------------------------------------------------------------------------
 # .env autoload (mirror agentm/cli.py:30) so AGENTM_PROVIDER / AGENTM_MODEL /
 # OPENAI_* are picked up when this CLI is invoked from any subdir of the
@@ -262,6 +256,7 @@ async def extract_trajectory(
     sink_path: Path,
     compose_kwargs_for_record: dict[str, Any],
     witness_retry_budget: int = 1,
+    graph_accumulator: list[dict[str, Any]] | None = None,
 ) -> list[ReplayRecord]:
     """Run extractor over a folded trajectory; emit one ReplayRecord per firing.
 
@@ -337,7 +332,14 @@ async def extract_trajectory(
                 "dropped_edges": list(out.dropped_edges),
             }
             recent_graph_events.extend(out.events)
-            recent_graph_events = recent_graph_events[-_RECENT_GRAPH_TAIL:]
+            if graph_accumulator is not None:
+                graph_accumulator.append(
+                    {
+                        "window_lo": lo,
+                        "window_hi_inclusive": hi - 1,
+                        **output_payload,
+                    }
+                )
         else:
             output_payload = None
 
@@ -494,8 +496,16 @@ app = typer.Typer(
 @app.command()
 def extract(
     db: Annotated[Path, typer.Option("--db", help="Path to eval.db (read-only).")],
-    out: Annotated[
-        Path, typer.Option("--out", help="Output JSONL of ReplayRecord lines.")
+    out_dir: Annotated[
+        Path,
+        typer.Option(
+            "--out-dir",
+            help=(
+                "Output directory. Each row writes to "
+                "<out-dir>/<exp_id>/<row_id>/ with records.jsonl, graph.json, "
+                "and meta.json."
+            ),
+        ),
     ],
     exp_id: Annotated[
         str | None, typer.Option("--exp-id", help="Filter evaluation_data.exp_id.")
@@ -573,6 +583,14 @@ def extract(
             ),
         ),
     ] = 1,
+    concurrency: Annotated[
+        int,
+        typer.Option(
+            "--concurrency",
+            "-j",
+            help="Max trajectories processed in parallel (each row independent).",
+        ),
+    ] = 1,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Extract event graphs from one or more eval.db rows."""
@@ -587,11 +605,8 @@ def extract(
         raise typer.Exit(2)
 
     cwd_abs = str((cwd or Path.cwd()).resolve())
-    out_abs = out.resolve()
-    out_abs.parent.mkdir(parents=True, exist_ok=True)
-    # Truncate so reruns are idempotent — write_record appends.
-    with out_abs.open("w", encoding="utf-8"):
-        pass
+    out_root = out_dir.resolve()
+    out_root.mkdir(parents=True, exist_ok=True)
 
     if prompt_override is not None:
         base_prompt = prompt_override.read_text(encoding="utf-8")
@@ -626,17 +641,22 @@ def extract(
         typer.echo("no rows matched the filter", err=True)
         raise typer.Exit(1)
 
-    logger.info("processing %d rows -> %s", len(rows), out_abs)
+    logger.info(
+        "processing %d rows -> %s (concurrency=%d)",
+        len(rows),
+        out_root,
+        max(concurrency, 1),
+    )
 
-    async def _run() -> tuple[int, int]:
-        ok = 0
-        fired = 0
-        for row in rows:
+    sem = asyncio.Semaphore(max(concurrency, 1))
+
+    async def _process_row(row: DBRow) -> tuple[int, int]:
+        async with sem:
             try:
                 raw_events = _events_from_row(row)
             except ValueError as exc:
                 logger.warning("skip row %d: %s", row.row_id, exc)
-                continue
+                return 0, 0
             folded = fold_events(raw_events)
             logger.info(
                 "row=%d exp=%s agent=%s model=%s turns=%d",
@@ -658,11 +678,20 @@ def extract(
                         default=str,
                     )
                 )
-                continue
+                return 0, 0
             if not folded.turns:
                 logger.warning("row %d folded to 0 turns; skipping", row.row_id)
-                continue
+                return 0, 0
+
+            row_dir = out_root / row.exp_id / str(row.row_id)
+            row_dir.mkdir(parents=True, exist_ok=True)
+            records_path = row_dir / "records.jsonl"
+            with records_path.open("w", encoding="utf-8"):
+                pass  # truncate for idempotent reruns
+
             assert provider_tuple is not None
+            graph_firings: list[dict[str, Any]] = []
+            t0 = time.monotonic()
             recs = await extract_trajectory(
                 folded,
                 cwd=cwd_abs,
@@ -670,18 +699,90 @@ def extract(
                 base_prompt=base_prompt,
                 window=window,
                 root_session_id=_root_session_id_for(row),
-                sink_path=out_abs,
+                sink_path=records_path,
                 compose_kwargs_for_record=compose_kwargs_for_record,
                 witness_retry_budget=witness_retry,
+                graph_accumulator=graph_firings,
             )
-            fired += len(recs)
-            if recs and recs[-1].status == "ok":
-                ok += 1
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+            terminal_ok = bool(recs) and recs[-1].status == "ok"
+            total_events = sum(len(f["events"]) for f in graph_firings)
+            total_edges = sum(len(f["edges"]) for f in graph_firings)
+            total_dropped = sum(len(f["dropped_edges"]) for f in graph_firings)
+
+            graph_path = row_dir / "graph.json"
+            graph_path.write_text(
+                json.dumps(
+                    {
+                        "root_session_id": _root_session_id_for(row),
+                        "row_id": row.row_id,
+                        "exp_id": row.exp_id,
+                        "window": window,
+                        "firings": graph_firings,
+                        "totals": {
+                            "events": total_events,
+                            "edges": total_edges,
+                            "dropped_edges": total_dropped,
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                ),
+                encoding="utf-8",
+            )
+
+            meta_path = row_dir / "meta.json"
+            meta_path.write_text(
+                json.dumps(
+                    {
+                        "row_id": row.row_id,
+                        "exp_id": row.exp_id,
+                        "dataset": row.dataset,
+                        "dataset_index": row.dataset_index,
+                        "agent_type": row.agent_type,
+                        "model_name": row.model_name,
+                        "stage": row.stage,
+                        "n_turns": len(folded.turns),
+                        "n_firings": len(recs),
+                        "terminal_ok": terminal_ok,
+                        "elapsed_ms": elapsed_ms,
+                        "provider": [
+                            provider_tuple[0],
+                            {
+                                k: ("***" if "key" in k.lower() else v)
+                                for k, v in provider_tuple[1].items()
+                            },
+                        ],
+                        "witness_retry_budget": witness_retry,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                ),
+                encoding="utf-8",
+            )
+
+            return (1 if terminal_ok else 0), len(recs)
+
+    async def _run() -> tuple[int, int]:
+        results = await asyncio.gather(
+            *[_process_row(r) for r in rows], return_exceptions=True
+        )
+        ok = 0
+        fired = 0
+        for r in results:
+            if isinstance(r, BaseException):
+                logger.error("row task failed: %s", r)
+                continue
+            ok += r[0]
+            fired += r[1]
         return ok, fired
 
     ok, fired = asyncio.run(_run())
     typer.echo(
-        f"done: rows_ok={ok}/{len(rows)} firings={fired} sidecar={out_abs}"
+        f"done: rows_ok={ok}/{len(rows)} firings={fired} out_dir={out_root}"
     )
 
 

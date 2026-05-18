@@ -84,7 +84,7 @@ def sample_run(tmp_path: Path) -> tuple[Path, Path]:
             payload={"new_turns": traj_snapshot[1:], "recent_graph": []},
             output={
                 "events": [
-                    {"id": 1, "kind": "hyp", "summary": "h", "source_turns": [1]}
+                    {"id": 2, "kind": "hyp", "summary": "h", "source_turns": [1]}
                 ],
                 "edges": [],
                 "dropped_edges": [],
@@ -173,9 +173,9 @@ def test_graph_snapshots_accumulate_across_firings(
     assert len(case.graph_snapshots[0].events) == 1
     # Second snapshot must be cumulative — event from firing 1 still present.
     assert len(case.graph_snapshots[1].events) == 2
-    # Each extractor emits local id=1; the cumulative snapshot must
-    # renumber so both events are addressable. Otherwise downstream
-    # consumers (graph viewer, SFT) collide them into a single node.
+    # Globally-unique ids come straight from the live adapter — the
+    # collector concatenates without renumbering. Two distinct ids in,
+    # two distinct ids out.
     ids = [ev["id"] for ev in case.graph_snapshots[1].events]
     assert ids == sorted(set(ids)) and len(set(ids)) == 2, (
         f"snapshot ids must be globally unique, got {ids}"
@@ -408,17 +408,17 @@ def test_failed_extractor_firing_does_not_advance_graph_snapshot(
     assert case.graph_snapshots == []
 
 
-def test_graph_snapshot_renumbers_events_and_rewrites_edges(
+def test_graph_snapshot_concatenates_globally_unique_ids(
     tmp_path: Path,
 ) -> None:
-    """Two firings each emit local ids 1/2/3 with edges 1→2 and 2→3.
-    The cumulative snapshot after firing 2 must hold 6 distinct event
-    ids and 4 edges, with edges from firing 2 pointing at the
-    renumbered globals (4/5/6) rather than the originals (1/2/3)."""
-    sid = "sess-renum"
+    """Two firings already emit globally-unique ids (LIVE adapter
+    contract): firing 1 = ids 1..3, firing 2 = ids 4..6. The collector
+    concatenates without renumbering; the cumulative snapshot after
+    firing 2 holds 6 distinct ids and 4 edges, src/dst preserved."""
+    sid = "sess-concat"
     replay_path = tmp_path / "audit_replay" / f"{sid}.jsonl"
     replay_path.parent.mkdir(parents=True)
-    triple = {
+    fr1 = {
         "events": [
             {"id": 1, "kind": "task", "summary": "t", "source_turns": [0]},
             {"id": 2, "kind": "hyp", "summary": "h", "source_turns": [1]},
@@ -430,6 +430,18 @@ def test_graph_snapshot_renumbers_events_and_rewrites_edges(
         ],
         "dropped_edges": [],
     }
+    fr2 = {
+        "events": [
+            {"id": 4, "kind": "task", "summary": "t", "source_turns": [2]},
+            {"id": 5, "kind": "hyp", "summary": "h", "source_turns": [3]},
+            {"id": 6, "kind": "act", "summary": "a", "source_turns": [3]},
+        ],
+        "edges": [
+            {"src": 4, "dst": 5, "kind": "data"},
+            {"src": 5, "dst": 6, "kind": "ref"},
+        ],
+        "dropped_edges": [],
+    }
     records = [
         _replay_record(
             phase="extractor",
@@ -438,7 +450,7 @@ def test_graph_snapshot_renumbers_events_and_rewrites_edges(
             root_session_id=sid,
             compose_kwargs={},
             payload={"new_turns": [], "recent_graph": []},
-            output=triple,
+            output=fr1,
         ),
         _replay_record(
             phase="extractor",
@@ -447,7 +459,7 @@ def test_graph_snapshot_renumbers_events_and_rewrites_edges(
             root_session_id=sid,
             compose_kwargs={},
             payload={"new_turns": [], "recent_graph": []},
-            output=triple,
+            output=fr2,
         ),
     ]
     with replay_path.open("w", encoding="utf-8") as fh:
@@ -458,9 +470,6 @@ def test_graph_snapshot_renumbers_events_and_rewrites_edges(
     snap2 = case.graph_snapshots[1]
     ids = [ev["id"] for ev in snap2.events]
     assert ids == [1, 2, 3, 4, 5, 6], ids
-    # Firing-1 edges target the first triple (globals 1..3); firing-2
-    # edges target the second triple (globals 4..6). No edge may carry
-    # the original local ids.
     pairs = [(e["src"], e["dst"]) for e in snap2.edges]
     assert pairs == [(1, 2), (2, 3), (4, 5), (5, 6)], pairs
 
@@ -508,13 +517,13 @@ def test_external_ref_resolves_to_cross_firing_edge_in_snapshot(
             output={
                 "events": [
                     {
-                        "id": 1,
+                        "id": 2,
                         "kind": "evid",
                         "summary": "follow-up",
                         "source_turns": [3],
                         "external_refs": [
                             {
-                                "to_recent_graph_index": 1,
+                                "to_recent_event_id": 1,
                                 "kind": "data",
                                 "reason": "answers task",
                                 "cited_entities": ["foo"],
