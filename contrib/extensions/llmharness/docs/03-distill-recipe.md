@@ -240,9 +240,12 @@ After Stage 2, sanity-check that the audit-only fields didn't leak
 into the student-visible files:
 
 ```bash
-# These should print zero matches (or only matches inside `meta` blocks)
+# These should print zero matches (or only matches inside `meta` blocks).
+# target.messages[0].tool_calls[0].function.arguments is a JSON string
+# (OpenAI-compatible tool-call shape) — no extra parse needed for a
+# substring grep.
 jq -r '.input.user' sft/auditor.jsonl | grep -ci "$ROOT_CAUSE_KEYWORD" || echo OK
-jq -r '.target.tool_calls[0].arguments | tostring' sft/auditor.jsonl \
+jq -r '.target.messages[0].tool_calls[0].function.arguments' sft/auditor.jsonl \
   | grep -ci "$FAULT_TYPE_KEYWORD" || echo OK
 ```
 

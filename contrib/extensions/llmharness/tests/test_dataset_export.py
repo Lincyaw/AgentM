@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 
 from llmharness.cli import main as cli_main
+from llmharness.distill.export import extractor_records_from_replay
 
 
 def _write_session(path: Path, records: list[dict]) -> None:
@@ -185,3 +186,87 @@ def test_dataset_export_pairs_inputs_with_outputs(tmp_path: Path) -> None:
     assert a0["input"]["recent_verdicts"] == []
     assert a0["output"]["verdict"]["surface_reminder"] is True
     assert a0["output"]["verdict"]["reminder_text"] == "loop detected"
+
+
+# --- SFT distill export (extractor_records_from_replay) ----------------------
+
+
+def _ok_extractor_replay_record(
+    *,
+    raw_assistant_messages: list[dict] | None = None,
+) -> dict:
+    """One ok extractor replay-record dict; thinking is opt-in per test."""
+    rec: dict = {
+        "phase": "extractor",
+        "status": "ok",
+        "root_session_id": "sess-x",
+        "turn_index": 4,
+        "ts_ns": 1,
+        "payload": {"new_turns": [], "recent_graph": []},
+        "output": {
+            "events": [
+                {"id": 1, "kind": "task", "summary": "go", "source_turns": [0]}
+            ],
+            "edges": [],
+            "dropped_edges": [],
+        },
+    }
+    if raw_assistant_messages is not None:
+        rec["raw_assistant_messages"] = raw_assistant_messages
+    return rec
+
+
+def test_dataset_export_thinking_in_extractor_target() -> None:
+    """``<think>`` wrapping is the load-bearing contract between
+    raw_assistant_messages and the Qwen / GLM SFT target.
+
+    Disaster guarded: if the thinking blocks are dropped from the
+    assistant content, the trained model never sees the teacher's
+    reasoning and degrades to a tool-call mimic.
+    """
+    rec = _ok_extractor_replay_record(
+        raw_assistant_messages=[
+            {"type": "thinking", "text": "step 1"},
+            {"type": "tool_call", "name": "submit_events", "arguments": {}},
+            {"type": "thinking", "text": " step 2"},
+        ]
+    )
+    [sft] = list(extractor_records_from_replay([rec], sample_id="s-1"))
+    out = json.loads(sft.to_jsonl())
+    messages = out["target"]["messages"]
+    assert len(messages) == 1
+    msg = messages[0]
+    assert msg["role"] == "assistant"
+    assert msg["content"] == "<think>step 1 step 2</think>\n\n"
+    [tc] = msg["tool_calls"]
+    assert tc["type"] == "function"
+    assert tc["function"]["name"] == "submit_events"
+    # arguments is a JSON string per the OpenAI tool-call convention —
+    # parse it to assert the events round-trip without escaping issues.
+    args = json.loads(tc["function"]["arguments"])
+    assert [ev["id"] for ev in args["events"]] == [1]
+
+
+def test_dataset_export_extractor_no_thinking_fallback() -> None:
+    """Older sidecars + spawn_error firings carry no thinking blocks.
+
+    Disaster guarded: an empty raw_assistant_messages list (or the
+    field missing entirely from older sidecars) must still produce a
+    valid SFT row — content collapses to empty string so the chat
+    template doesn't emit stray ``<think></think>`` tags.
+    """
+    # Field present but empty.
+    rec_empty = _ok_extractor_replay_record(raw_assistant_messages=[])
+    [sft_empty] = list(extractor_records_from_replay([rec_empty], sample_id="s-1"))
+    msg_empty = json.loads(sft_empty.to_jsonl())["target"]["messages"][0]
+    assert msg_empty["content"] == ""
+    assert msg_empty["tool_calls"][0]["function"]["name"] == "submit_events"
+
+    # Field missing (back-compat with pre-thinking sidecars).
+    rec_missing = _ok_extractor_replay_record()
+    [sft_missing] = list(
+        extractor_records_from_replay([rec_missing], sample_id="s-1")
+    )
+    msg_missing = json.loads(sft_missing.to_jsonl())["target"]["messages"][0]
+    assert msg_missing["content"] == ""
+    assert msg_missing["tool_calls"][0]["function"]["name"] == "submit_events"

@@ -176,7 +176,13 @@ One line per phase invocation. Source: `replay/record.py`.
   "status": "ok" | "no_call" | "spawn_error" | "prompt_error",
   "error": null | "<stringified exception>",
   "latency_ms": 1234,
-  "extras": {}
+  "extras": {},
+
+  "raw_assistant_messages": [
+    {"type": "thinking", "text": "let me re-read turn 4 first"},
+    {"type": "tool_call", "id": "call-1", "name": "submit_events",
+     "arguments": {"events": [...]}}
+  ]                                                  // optional; omitted when empty
 }
 ```
 
@@ -187,6 +193,16 @@ Two practical points:
   child input. That is what `llmharness-replay` does for A/B.
 * The schema is intentionally string-keyed JSON, not pickled
   dataclasses, so consumers can be written in any language.
+
+`raw_assistant_messages` carries the child loop's serialized
+`AssistantMessage.content` blocks (thinking + tool_call + text) in
+chronological order. The field is omitted when the list would be
+empty — historical sidecars (pre-thinking) stay byte-identical and
+loaders treat the missing key as `[]`. Downstream SFT exporters
+recover `<think>...</think>` reasoning traces from the thinking
+blocks (§6 below). User / tool-result messages are intentionally
+not duplicated here — they are reconstructable from `payload` and
+`output`.
 
 ---
 
@@ -272,6 +288,13 @@ appear in the final SFT files — the exporter filters them out.
 
 Two student-visible files, one audit-only file:
 
+Both `extractor.jsonl` and `auditor.jsonl` carry a Qwen / GLM
+chat-template shape under `target.messages`: a list of assistant
+messages whose `content` holds the teacher's reasoning trace
+wrapped in `<think>...</think>` and whose `tool_calls` array
+follows the OpenAI-compatible function-call convention
+(`arguments` is a JSON string). Today the list is always length 1.
+
 ### `sft/extractor.jsonl`
 
 ```json
@@ -285,28 +308,37 @@ Two student-visible files, one audit-only file:
     "user":   "<json.dumps(payload) verbatim>"
   },
   "target": {
-    "tool_calls": [
-      {"name": "submit_events",
-       "arguments": {
-         "events": [
-           {"id": 1, "kind": "task", "summary": "...",
-            "source_turns": [0],
-            "refs": [{"dst": 2, "kind": "ref", "reason": "...",
-                      "src_turns": [0], "dst_turns": [1],
-                      "cited_entities": ["..."], "cited_quote": "..."},
-                     ...]},
-           ...
-         ]
-       }}
+    "messages": [
+      {
+        "role": "assistant",
+        "content": "<think>step 1: scan turns ...\nstep 2: emit task event ...</think>\n\n",
+        "tool_calls": [
+          {
+            "type": "function",
+            "function": {
+              "name": "submit_events",
+              "arguments": "{\"events\": [{\"id\": 1, \"kind\": \"task\", \"summary\": \"...\", \"source_turns\": [0], \"refs\": [{\"dst\": 2, \"kind\": \"ref\", \"reason\": \"...\", \"src_turns\": [0], \"dst_turns\": [1], \"cited_entities\": [\"...\"], \"cited_quote\": \"...\"}]}]}"
+            }
+          }
+        ]
+      }
     ]
   },
   "meta": {"replay_ts_ns": 1700000000000000000}
 }
 ```
 
-Events carry edges as embedded `refs[]` (the v3.1 `submit_events`
-shape). The exporter re-attaches them from the recorded `edges`
-list.
+* `content`'s `<think>` block is the concatenated text of every
+  `{"type": "thinking", "text": "..."}` entry in the replay
+  sidecar's `raw_assistant_messages` (§3 above), in chronological
+  order. When the sidecar predates thinking capture or the child
+  produced no reasoning, `content` collapses to `""` so the chat
+  template does not emit empty tags.
+* `arguments` is always rebuilt from the witness-filtered
+  `output.events` / `output.edges` — the student learns the
+  *committed* graph, not the raw (possibly invalid) tool-call args
+  the teacher emitted. Events carry edges as embedded `refs[]`
+  (the v3.1 `submit_events` shape).
 
 ### `sft/auditor.jsonl`
 
@@ -321,20 +353,31 @@ list.
     "user":   "<json.dumps(input_payload) verbatim>"   // causal snapshot, no GT
   },
   "target": {
-    "tool_calls": [
-      {"name": "submit_verdict",
-       "arguments": {"verdict": {
-         "surface_reminder": true,
-         "reminder_text": "...",
-         "matched_event_ids": [2, 7],
-         "continuation_notes": [],
-         "cited_cards": []
-       }}}
+    "messages": [
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "type": "function",
+            "function": {
+              "name": "submit_verdict",
+              "arguments": "{\"verdict\": {\"surface_reminder\": true, \"reminder_text\": \"...\", \"matched_event_ids\": [2, 7], \"continuation_notes\": [], \"cited_cards\": []}}"
+            }
+          }
+        ]
+      }
     ]
   },
   "meta": {"fault_type": "NetworkCorrupt", "fault_category": "NetworkChaos"}
 }
 ```
+
+`content` is empty for the auditor today — the auditor child's
+`raw_assistant_messages` are persisted (see §3) but the SFT
+exporter does not yet surface them here. That hook will land
+together with auditor-side thinking-trace work; the schema is
+forward-compatible because trainers ignore empty `content`.
 
 The `user` field is a JSON string identical to the rewriter's
 input — the student sees exactly the surface it must learn to
