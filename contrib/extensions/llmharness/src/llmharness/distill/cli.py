@@ -100,6 +100,7 @@ def _replay_record_dicts(path: Path) -> list[dict[str, Any]]:
             "error": r.error,
             "latency_ms": r.latency_ms,
             "extras": r.extras,
+            "raw_assistant_messages": r.raw_assistant_messages,
         }
         for r in iter_records(path)
     ]
