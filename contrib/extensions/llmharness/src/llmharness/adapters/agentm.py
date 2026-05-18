@@ -863,6 +863,8 @@ async def _drain_extractor(
         replay_compose_kwargs = None
         replay_extras = None
 
+    raw_assistant_messages: list[dict[str, Any]] = []
+
     def _record(status: str, output: dict[str, Any] | None, error: str | None = None) -> None:
         _record_replay_at(
             replay_path,
@@ -876,10 +878,11 @@ async def _drain_extractor(
             status=status,
             error=error,
             extras=replay_extras,
+            raw_assistant_messages=raw_assistant_messages,
         )
 
     try:
-        terminator_called = await _spawn_extractor_child(
+        terminator_called, raw_assistant_messages = await _spawn_extractor_child(
             api=api,
             extensions=firing_extensions,
             provider=extractor_provider,
@@ -982,6 +985,7 @@ def _record_replay_at(
     status: str,
     error: str | None = None,
     extras: dict[str, Any] | None = None,
+    raw_assistant_messages: list[dict[str, Any]] | None = None,
 ) -> None:
     """Append one record; ``path is None`` short-circuits.
 
@@ -1002,6 +1006,7 @@ def _record_replay_at(
         status=status,  # type: ignore[arg-type]
         error=error,
         extras=extras or {},
+        raw_assistant_messages=list(raw_assistant_messages or []),
     )
     write_record(path, rec)
 
@@ -1017,11 +1022,14 @@ async def _spawn_extractor_child(
     provider: tuple[str, dict[str, Any]] | None,
     payload: dict[str, Any],
     turn_window: list[int],
-) -> bool:
-    """Run the extractor child. Returns True iff submit_events was called.
+) -> tuple[bool, list[dict[str, Any]]]:
+    """Run the extractor child. Returns ``(submit_events_called, raw_blocks)``.
 
-    Raises :class:`_ExtractorSpawnError` for spawn / prompt failures so
-    the caller can route them to the typed failure path.
+    ``raw_blocks`` is the chronological flattened list of serialized
+    assistant content blocks (thinking + tool_call + text) captured from
+    the child's message stream. It is empty when spawn / prompt fail —
+    those paths raise :class:`_ExtractorSpawnError` so the caller can
+    route them to the typed failure entry.
     """
     del turn_window  # surfaced by caller via _record_failure context
     child_config = AgentSessionConfig(
@@ -1056,7 +1064,31 @@ async def _spawn_extractor_child(
         raise _ExtractorSpawnError(str(exc)) from exc
 
     await safe_shutdown(child)
-    return _has_tool_call(messages, SUBMIT_EVENTS_TOOL_NAME)
+    return (
+        _has_tool_call(messages, SUBMIT_EVENTS_TOOL_NAME),
+        _flatten_assistant_blocks(messages),
+    )
+
+
+def _flatten_assistant_blocks(messages: list[AgentMessage]) -> list[dict[str, Any]]:
+    """Flatten every AssistantMessage's content into a chronological block list.
+
+    Used by ReplayRecord.raw_assistant_messages to persist child thinking
+    + tool_call traces for downstream SFT. User / tool_result messages
+    are skipped — the payload + output fields already carry them.
+    """
+    blocks: list[dict[str, Any]] = []
+    for msg in messages:
+        if not isinstance(msg, AssistantMessage):
+            continue
+        content = getattr(msg, "content", None)
+        if not isinstance(content, list):
+            continue
+        for blk in content:
+            serialized = _serialize_block(blk)
+            if serialized is not None:
+                blocks.append(serialized)
+    return blocks
 
 
 def _has_tool_call(messages: list[AgentMessage], tool_name: str) -> bool:
@@ -1179,7 +1211,7 @@ async def _drain_auditor(
             ),
         }
 
-    verdict = await _run_auditor(
+    verdict, raw_blocks = await _run_auditor(
         api=api,
         auditor_extensions=firing_extensions,
         provider=auditor_provider,
@@ -1199,6 +1231,7 @@ async def _drain_auditor(
             provider=auditor_provider,
             output=None,
             status="no_call",
+            raw_assistant_messages=raw_blocks,
         )
         return
 
@@ -1213,6 +1246,7 @@ async def _drain_auditor(
         provider=auditor_provider,
         output=verdict.to_dict(),
         status="ok",
+        raw_assistant_messages=raw_blocks,
     )
     if verdict.surface_reminder and verdict.reminder_text:
         pending_reminders.append(Reminder(text=verdict.reminder_text))
@@ -1311,8 +1345,14 @@ async def _run_phase(
     on_spawn_or_prompt_error: Callable[[str], None],
     on_no_call: Callable[[], None],
     on_malformed: Callable[[str], None],
-) -> _T | None:
-    """Spawn child, drive to terminal_tool, coerce, return result."""
+) -> tuple[_T | None, list[dict[str, Any]]]:
+    """Spawn child, drive to terminal_tool, coerce, return ``(result, raw_blocks)``.
+
+    ``raw_blocks`` is the chronological flattened assistant content
+    block list captured from the child's reply (thinking + tool_calls +
+    text). Empty list when the child never produced an assistant
+    message (spawn / prompt failure paths).
+    """
     child_config = AgentSessionConfig(
         cwd=api.cwd,
         provider=provider,
@@ -1323,27 +1363,29 @@ async def _run_phase(
         child = await api.spawn_child_session(child_config)
     except Exception as exc:
         on_spawn_or_prompt_error(str(exc))
-        return None
+        return None, []
 
     try:
         messages = await child.prompt(json.dumps(payload, ensure_ascii=False, default=str))
     except Exception as exc:
         on_spawn_or_prompt_error(str(exc))
         await safe_shutdown(child)
-        return None
+        return None, []
 
     await safe_shutdown(child)
+
+    raw_blocks = _flatten_assistant_blocks(messages)
 
     arguments = find_terminal_tool_arguments(messages, terminal_tool)
     if arguments is None:
         on_no_call()
-        return None
+        return None, raw_blocks
 
     try:
-        return coerce(arguments)
+        return coerce(arguments), raw_blocks
     except coerce_error as exc:
         on_malformed(str(exc))
-        return None
+        return None, raw_blocks
 
 
 async def _run_auditor(
@@ -1354,13 +1396,21 @@ async def _run_auditor(
     graph_events: list[Event],
     recent_verdicts: list[dict[str, Any]],
     continuation_notes_from_prior_firing: list[str],
-) -> Verdict | None:
+) -> tuple[Verdict | None, list[dict[str, Any]]]:
+    """Run one auditor firing; return ``(verdict, raw_assistant_blocks)``.
+
+    ``raw_assistant_blocks`` is forwarded for replay-sidecar persistence
+    so downstream SFT exporters can recover the auditor's thinking
+    trace. The verdict-coercion branch keeps it intact even on
+    malformed-output / no-call paths so the sidecar still captures what
+    the LLM produced.
+    """
     payload = {
         "graph": [e.to_dict() for e in graph_events],
         "recent_verdicts": list(recent_verdicts),
         "continuation_notes_from_prior_firing": list(continuation_notes_from_prior_firing),
     }
-    raw = await _run_phase(
+    raw, raw_blocks = await _run_phase(
         api=api,
         extensions=auditor_extensions,
         provider=provider,
@@ -1382,12 +1432,12 @@ async def _run_auditor(
         ),
     )
     if raw is None:
-        return None
+        return None, raw_blocks
     try:
-        return raw.to_verdict()
+        return raw.to_verdict(), raw_blocks
     except AuditorOutputError as exc:
         _record_failure(api, _AUDIT_ERROR_ENTRY, {"reason": f"malformed: {exc}"})
-        return None
+        return None, raw_blocks
 
 
 __all__ = [

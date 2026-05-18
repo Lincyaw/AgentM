@@ -21,6 +21,29 @@ def _write_jsonl(path: Path, rows: list[Any]) -> None:
             fh.write("\n")
 
 
+def _firing_payload(fr: FiringRecord) -> dict[str, Any]:
+    """Serialize one firing for on-disk persistence.
+
+    ``raw_assistant_messages`` is included only when non-empty so older
+    cases (collected before child thinking was captured) stay byte-for-byte
+    identical and consumers can use key presence as a capability check.
+    """
+    payload: dict[str, Any] = {
+        "phase": fr.phase,
+        "sequence": fr.sequence,
+        "turn_index": fr.turn_index,
+        "ts_ns": fr.ts_ns,
+        "status": fr.status,
+        "error": fr.error,
+        "latency_ms": fr.latency_ms,
+        "input": fr.input_payload,
+        "output": fr.output,
+    }
+    if fr.raw_assistant_messages:
+        payload["raw_assistant_messages"] = fr.raw_assistant_messages
+    return payload
+
+
 def _firing_summary(fr: FiringRecord) -> str:
     """One-line human summary for the trajectory timeline + README."""
     if fr.phase == "extractor":
@@ -129,36 +152,10 @@ def write_case(case: CaseData, out_dir: Path) -> Path:
 
     for fr in case.extractor_firings:
         path = layout.firing_path("extractor", fr.sequence, fr.turn_index)
-        _write_json(
-            path,
-            {
-                "phase": fr.phase,
-                "sequence": fr.sequence,
-                "turn_index": fr.turn_index,
-                "ts_ns": fr.ts_ns,
-                "status": fr.status,
-                "error": fr.error,
-                "latency_ms": fr.latency_ms,
-                "input": fr.input_payload,
-                "output": fr.output,
-            },
-        )
+        _write_json(path, _firing_payload(fr))
     for fr in case.auditor_firings:
         path = layout.firing_path("auditor", fr.sequence, fr.turn_index)
-        _write_json(
-            path,
-            {
-                "phase": fr.phase,
-                "sequence": fr.sequence,
-                "turn_index": fr.turn_index,
-                "ts_ns": fr.ts_ns,
-                "status": fr.status,
-                "error": fr.error,
-                "latency_ms": fr.latency_ms,
-                "input": fr.input_payload,
-                "output": fr.output,
-            },
-        )
+        _write_json(path, _firing_payload(fr))
     for snap in case.graph_snapshots:
         _write_json(
             layout.snapshot_path(snap.after_extractor_firing),

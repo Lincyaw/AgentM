@@ -42,6 +42,18 @@ class ReplayRecord:
     error: str | None = None
     latency_ms: int = 0
     extras: dict[str, Any] = field(default_factory=dict)
+    raw_assistant_messages: list[dict[str, Any]] = field(default_factory=list)
+    """Serialized AssistantMessage content blocks from the child loop, in
+    chronological order. Each entry is the JSON-friendly view of one block
+    produced by ``adapters.agentm._serialize_block`` — thinking blocks keep
+    ``{"type": "thinking", "text": "..."}``, tool_call blocks keep
+    ``{"type": "tool_call", "name": ..., "arguments": {...}}``.
+
+    Empty list when the child made no LLM call (e.g. spawn_error) or when
+    the sidecar pre-dates this field. Only the assistant side is captured;
+    user / tool_result messages are reconstructable from ``payload`` and
+    ``output``.
+    """
 
     def to_jsonl(self) -> str:
         d: dict[str, Any] = {
@@ -59,10 +71,16 @@ class ReplayRecord:
         }
         if self.extras:
             d["extras"] = self.extras
+        if self.raw_assistant_messages:
+            d["raw_assistant_messages"] = self.raw_assistant_messages
         return json.dumps(d, ensure_ascii=False, default=str)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ReplayRecord:
+        raw = d.get("raw_assistant_messages")
+        raw_blocks: list[dict[str, Any]] = (
+            [b for b in raw if isinstance(b, dict)] if isinstance(raw, list) else []
+        )
         return cls(
             phase=d["phase"],
             turn_index=int(d["turn_index"]),
@@ -76,6 +94,7 @@ class ReplayRecord:
             error=d.get("error"),
             latency_ms=int(d.get("latency_ms") or 0),
             extras=dict(d.get("extras") or {}),
+            raw_assistant_messages=raw_blocks,
         )
 
 
