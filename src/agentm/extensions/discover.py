@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import logging
 import pkgutil
 import sys
 from dataclasses import dataclass
@@ -25,6 +26,8 @@ from types import ModuleType
 from typing import Any
 
 from agentm.extensions import ExtensionManifest
+
+logger = logging.getLogger(__name__)
 
 CONTRIB_ATOM_MODULE_PREFIX = "_agentm_contrib__"
 """Synthetic module-name prefix for atoms discovered under
@@ -58,6 +61,7 @@ class BuiltinEntry:
 
 
 _CACHE: dict[str, BuiltinEntry] | None = None
+_LAST_DISCOVERY_FAILURES: list[tuple[str, BaseException]] = []
 
 
 def reset_cache() -> None:
@@ -66,6 +70,20 @@ def reset_cache() -> None:
 
     global _CACHE
     _CACHE = None
+    _LAST_DISCOVERY_FAILURES.clear()
+
+
+def last_discovery_failures() -> list[tuple[str, BaseException]]:
+    """Return ``(module_path, exception)`` for every atom that failed to
+    import during the most recent :func:`discover_builtin` /
+    :func:`discover_contrib_atoms` / :func:`discover_user_atoms` call.
+
+    Callers (CLI startup banner, validator, tests) inspect this to surface
+    per-atom failures without the whole catalog dying. The list is reset
+    on each top-level discovery call so it always reflects the latest pass.
+    """
+
+    return list(_LAST_DISCOVERY_FAILURES)
 
 
 def discover_builtin() -> dict[str, BuiltinEntry]:
@@ -77,15 +95,22 @@ def discover_builtin() -> dict[str, BuiltinEntry]:
     - any name starting with ``_`` (test fixtures, private staging files)
 
     Errors:
-    - ``ImportError`` propagates if a module fails to import (the validator
-      reports this more gently; this function intentionally does not).
-    - ``RuntimeError`` if a module declares no ``MANIFEST`` symbol or its
-      name disagrees with the module stem.
+    - Per-atom :class:`ImportError`, :class:`RuntimeError`, and
+      :class:`SyntaxError` are **caught and logged**, not propagated.
+      A single broken atom must not deny the whole CLI: that violates the
+      "loading replacements is the only unreplaceable substrate" axiom.
+      Failures are accumulated and exposed via
+      :func:`last_discovery_failures`.
+    - A module that imports cleanly but lacks ``MANIFEST`` or whose
+      ``MANIFEST.name`` disagrees with the module stem is recorded as a
+      failure the same way.
     """
 
     global _CACHE
     if _CACHE is not None:
         return _CACHE
+
+    _LAST_DISCOVERY_FAILURES.clear()
 
     pkg = importlib.import_module("agentm.extensions.builtin")
     pkg_path = Path(pkg.__file__).parent if pkg.__file__ else None
@@ -104,19 +129,45 @@ def discover_builtin() -> dict[str, BuiltinEntry]:
             continue
 
         module_path = f"agentm.extensions.builtin.{info.name}"
-        module = importlib.import_module(module_path)
+        try:
+            module = importlib.import_module(module_path)
+        except (ImportError, RuntimeError, SyntaxError) as exc:
+            _LAST_DISCOVERY_FAILURES.append((module_path, exc))
+            logger.warning(
+                "discover_builtin: failed to import %s (%s: %s)",
+                module_path,
+                type(exc).__name__,
+                exc,
+            )
+            continue
         manifest_obj: Any = getattr(module, "MANIFEST", None)
         if not isinstance(manifest_obj, ExtensionManifest):
-            raise RuntimeError(
+            failure: BaseException = RuntimeError(
                 f"extension {module_path!r} is missing a module-level "
                 f"MANIFEST: ExtensionManifest constant"
             )
+            _LAST_DISCOVERY_FAILURES.append((module_path, failure))
+            logger.warning(
+                "discover_builtin: skipping %s (%s: %s)",
+                module_path,
+                type(failure).__name__,
+                failure,
+            )
+            continue
         if manifest_obj.name != info.name:
-            raise RuntimeError(
+            failure = RuntimeError(
                 f"extension {module_path!r} has MANIFEST.name="
                 f"{manifest_obj.name!r} which disagrees with module stem "
                 f"{info.name!r}"
             )
+            _LAST_DISCOVERY_FAILURES.append((module_path, failure))
+            logger.warning(
+                "discover_builtin: skipping %s (%s: %s)",
+                module_path,
+                type(failure).__name__,
+                failure,
+            )
+            continue
         entries[info.name] = BuiltinEntry(
             name=info.name,
             module_path=module_path,
@@ -139,12 +190,14 @@ def _discover_flat_atoms(
     so reload paths can address it without re-executing.
 
     Errors:
-    - File-level :class:`SyntaxError` / :class:`ImportError` propagate so
-      the caller can decide whether to skip or fail loudly.
-    - ``RuntimeError`` if the module declares no ``MANIFEST``, the
-      manifest's ``name`` disagrees with the file stem, or the file
-      declares ``tier >= 2`` (auto-discovery refuses to silently load
-      anything privileged — re-install via a scenario manifest if intended).
+    - Per-file :class:`SyntaxError`, :class:`ImportError`, and
+      :class:`RuntimeError` are caught, logged, and recorded via
+      :func:`last_discovery_failures`. A single broken atom must not deny
+      every other contrib/user atom, mirroring the resilience contract of
+      :func:`discover_builtin`.
+    - Missing/mismatched ``MANIFEST`` and ``tier >= 2`` violations are
+      also recorded as failures rather than raised — auto-discovery
+      refuses to silently load tier>=2 atoms regardless.
     """
 
     if not atoms_dir.is_dir():
@@ -164,38 +217,59 @@ def _discover_flat_atoms(
         if existing is not None:
             module = existing
         else:
-            spec = importlib.util.spec_from_file_location(module_path, path)
-            if spec is None or spec.loader is None:
-                raise RuntimeError(f"could not build import spec for {path!s}")
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[module_path] = module
             try:
-                spec.loader.exec_module(module)
-            except Exception:
-                sys.modules.pop(module_path, None)
-                raise
+                spec = importlib.util.spec_from_file_location(module_path, path)
+                if spec is None or spec.loader is None:
+                    raise RuntimeError(f"could not build import spec for {path!s}")
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_path] = module
+                try:
+                    spec.loader.exec_module(module)
+                except Exception:
+                    sys.modules.pop(module_path, None)
+                    raise
+            except (ImportError, RuntimeError, SyntaxError) as exc:
+                _LAST_DISCOVERY_FAILURES.append((module_path, exc))
+                logger.warning(
+                    "%s: failed to import %s from %s (%s: %s)",
+                    label,
+                    module_path,
+                    path,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
 
         manifest_obj: Any = getattr(module, "MANIFEST", None)
         if not isinstance(manifest_obj, ExtensionManifest):
             sys.modules.pop(module_path, None)
-            raise RuntimeError(
+            failure: BaseException = RuntimeError(
                 f"{label} {path!s} is missing a module-level "
                 f"MANIFEST: ExtensionManifest constant"
             )
+            _LAST_DISCOVERY_FAILURES.append((module_path, failure))
+            logger.warning("%s: skipping %s (%s)", label, module_path, failure)
+            continue
         if manifest_obj.name != stem:
             sys.modules.pop(module_path, None)
-            raise RuntimeError(
+            failure = RuntimeError(
                 f"{label} {path!s} has MANIFEST.name="
                 f"{manifest_obj.name!r} which disagrees with file stem "
                 f"{stem!r}"
             )
+            _LAST_DISCOVERY_FAILURES.append((module_path, failure))
+            logger.warning("%s: skipping %s (%s)", label, module_path, failure)
+            continue
         if manifest_obj.tier >= 2:
             sys.modules.pop(module_path, None)
-            raise RuntimeError(
+            failure = RuntimeError(
                 f"{label} {path!s} declares tier={manifest_obj.tier}; "
                 "auto-discovery refuses to load tier>=2 atoms — re-install "
                 "them explicitly through a scenario manifest if intended"
             )
+            _LAST_DISCOVERY_FAILURES.append((module_path, failure))
+            logger.warning("%s: skipping %s (%s)", label, module_path, failure)
+            continue
         entries[stem] = BuiltinEntry(
             name=stem,
             module_path=module_path,
@@ -297,5 +371,6 @@ __all__ = [
     "discover_by_role",
     "discover_contrib_atoms",
     "discover_user_atoms",
+    "last_discovery_failures",
     "reset_cache",
 ]

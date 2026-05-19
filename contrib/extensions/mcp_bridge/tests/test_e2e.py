@@ -209,3 +209,40 @@ async def test_install_snapshot_and_call_roundtrip(tmp_path: Path) -> None:
 
     # Quiet asyncio's "task was never awaited" linter in case of partial fail.
     await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_test_factory_survives_malformed_spec(tmp_path: Path) -> None:
+    """Regression: a parse failure must not drain the test seam.
+
+    Previously ``consume_test_session_factory()`` ran before
+    ``parse_server_spec``, so a malformed spec ate the factory and the
+    next ``install()`` (with a valid spec) had nothing to fall back on
+    — confusing as hell to debug from a test failure. Now the factory
+    is consumed only after every spec parses cleanly.
+    """
+
+    stub = _StubSession(tools=[])
+
+    async def _factory(_spec: Any, _stack: Any) -> _StubSession:
+        return stub
+
+    set_test_session_factory(_factory)
+    api = _make_api(tmp_path, [])
+
+    # Malformed: ``transport`` missing → parse_server_spec raises.
+    bad_config = {"servers": [{"name": "fs"}]}
+    with pytest.raises(Exception):
+        await install(api, bad_config)
+
+    # Factory must still be available for the next attempt.
+    good_config = {
+        "servers": [
+            {"name": "fs", "transport": "stdio", "command": ["unused"]}
+        ],
+    }
+    await install(api, good_config)
+    # If the factory had been drained, ``connect_all`` would have tried
+    # to spawn a real subprocess for ``unused`` and failed; reaching here
+    # with the stub initialised proves the factory survived.
+    assert stub.initialized is True
