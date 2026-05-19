@@ -84,7 +84,7 @@ from agentm.core.abi.events import (
     SessionShutdownEvent,
 )
 from agentm.core.abi.extension import ExtensionAPI, Handler
-from agentm.core.lib import to_jsonable
+from agentm.core.lib import redact_headers, to_jsonable
 from agentm.extensions import ExtensionManifest
 
 logger = logging.getLogger(__name__)
@@ -169,6 +169,16 @@ MANIFEST = ExtensionManifest(
                     "Channels whose event-dispatch spans are suppressed. "
                     "Defaults to {'stream_delta'} — one span per LLM token "
                     "is rarely useful."
+                ),
+            },
+            "redact_prompts": {
+                "type": "boolean",
+                "description": (
+                    "When True (default), any LLM-body content surfaced as "
+                    "span attributes is replaced with "
+                    "{chars, sha256_prefix} stubs. Mirrors the same option "
+                    "on the observability atom; set False on a trusted "
+                    "collector to capture raw prompts for debugging."
                 ),
             },
         },
@@ -483,6 +493,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     exclude_channels = frozenset(_DEFAULT_EXCLUDE_CHANNELS) | (
         frozenset(str(ch) for ch in user_excludes) if user_excludes else frozenset()
     )
+    redact_prompts = bool(config.get("redact_prompts", True))
+    # ``headers`` is used in two places: (1) raw form, passed to the OTLP
+    # exporter on the wire; (2) scrubbed form, surfaced as a session-span
+    # attribute so an audit trail records *which* OTLP credentials were
+    # configured without echoing the secrets themselves. ``redact_headers``
+    # handles the scrub.
+    scrubbed_headers = redact_headers(headers) if headers is not None else None
 
     ok = _ensure_provider(
         service_name=service_name,
@@ -517,6 +534,17 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     parent_session_id = api.parent_session_id
     if parent_session_id:
         session_attrs["agentm.parent_session_id"] = parent_session_id
+    if scrubbed_headers:
+        # Record the set of OTLP header keys (values redacted) so audit
+        # consumers can tell whether auth was configured without ever
+        # seeing the bearer token.
+        session_attrs["agentm.otlp.headers"] = ",".join(sorted(scrubbed_headers))
+    # Surface the redaction mode on the session span so trace consumers
+    # know whether prompt bodies in *future* attribute writes would be
+    # stubbed or raw. Today no per-span prompt-body attribute is emitted
+    # by this atom (LLM spans carry counts only), but the flag is
+    # threaded so subsequent additions stay safe-by-default.
+    session_attrs["agentm.redact_prompts"] = redact_prompts
 
     parent_ctx = _resolve_parent_context(parent_session_id)
     session_span = tracer.start_span(
