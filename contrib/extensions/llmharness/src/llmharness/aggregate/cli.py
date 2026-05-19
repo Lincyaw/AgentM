@@ -34,13 +34,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 
 from .collector import collect_case
 from .writer import write_case
-
 
 app = typer.Typer(
     add_completion=False,
@@ -61,10 +60,10 @@ def _aggregate_one(
     replay_path: Path,
     out_dir: Path,
     *,
-    meta_path: Optional[Path] = None,
-    sample_id: Optional[str] = None,
-    dataset_name: Optional[str] = None,
-    dataset_path: Optional[str] = None,
+    meta_path: Path | None = None,
+    sample_id: str | None = None,
+    dataset_name: str | None = None,
+    dataset_path: str | None = None,
 ) -> None:
     case = collect_case(
         replay_path=replay_path,
@@ -95,14 +94,14 @@ def replay(
         typer.Option("--out", help="Output cases/ root.", resolve_path=True),
     ],
     root_session_id: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--root-session-id",
             help="Aggregate only this session; default = every sidecar in --cwd.",
         ),
     ] = None,
     sample_id: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--sample-id",
             help=(
@@ -113,11 +112,11 @@ def replay(
         ),
     ] = None,
     dataset_name: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--dataset-name", help="Override case dataset_name."),
     ] = None,
     dataset_path: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--dataset-path", help="Override case dataset_path."),
     ] = None,
 ) -> None:
@@ -179,14 +178,14 @@ def eval_db(
         ),
     ] = "{exp_id}-row{row_id}",
     dataset_name: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--dataset-name",
             help="Override dataset_name on every case. Default = meta.json `dataset`.",
         ),
     ] = None,
     dataset_path: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--dataset-path", help="Override dataset_path on every case."),
     ] = None,
     limit: Annotated[
@@ -194,7 +193,7 @@ def eval_db(
         typer.Option("--limit", help="Cap row count after row-id filtering; 0 = no cap."),
     ] = 0,
     row_ids: Annotated[
-        Optional[list[int]],
+        list[int] | None,
         typer.Option(
             "--id",
             help="Specific row_id (repeatable). Default = every row under --src.",
@@ -272,20 +271,20 @@ def one(
         typer.Option("--out", help="Output cases/ root.", resolve_path=True),
     ],
     meta_path: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option(
             "--meta-path",
             help="Optional .meta.json sidecar (distill.binding shape).",
         ),
     ] = None,
     sample_id: Annotated[
-        Optional[str], typer.Option("--sample-id", help="Override case sample_id.")
+        str | None, typer.Option("--sample-id", help="Override case sample_id.")
     ] = None,
     dataset_name: Annotated[
-        Optional[str], typer.Option("--dataset-name", help="Override case dataset_name.")
+        str | None, typer.Option("--dataset-name", help="Override case dataset_name.")
     ] = None,
     dataset_path: Annotated[
-        Optional[str], typer.Option("--dataset-path", help="Override case dataset_path.")
+        str | None, typer.Option("--dataset-path", help="Override case dataset_path.")
     ] = None,
 ) -> None:
     """Aggregate a single replay-format JSONL into one case directory."""
