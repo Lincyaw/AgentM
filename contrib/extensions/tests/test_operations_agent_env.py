@@ -233,3 +233,56 @@ def test_env_vars_drive_managed_default(monkeypatch: pytest.MonkeyPatch) -> None
     session = instances["managed"][0]
     assert session.kwargs["image"] == "img-from-env:2"
     assert session.kwargs["experiment_id"] == "exp-from-env"
+
+
+# ---------------------------------------------------------------------------
+# Versioning-token script (fail-stop): two same-second writes with different
+# content must yield different tokens. The previous ``stat -c '%Y'`` token
+# had 1-second resolution, so ``current_version_for_path`` reported
+# "unchanged" after a fast rewrite. The script is exercised through a real
+# bash subprocess to validate the actual shell string, not a Python
+# re-implementation.
+# ---------------------------------------------------------------------------
+
+
+def test_mtime_token_distinguishes_same_second_writes(tmp_path: Any) -> None:
+    import os as _os
+    import shutil
+    import subprocess
+
+    if shutil.which("bash") is None or shutil.which("sha256sum") is None:
+        pytest.skip("bash + sha256sum required for the mtime-token script")
+
+    atom = _load_atom()
+    script = atom._MTIME_TOKEN_SCRIPT
+
+    p = tmp_path / "f.txt"
+    p.write_bytes(b"hello")
+    # Pin mtime so both writes share the same whole-second mtime; the
+    # nanosecond component will differ between the two writes (the kernel
+    # records ns precision on modern filesystems), but the previous
+    # ``%Y``-only token collapsed to seconds and missed it.
+    fixed_s = 1_700_000_000
+    _os.utime(p, (fixed_s, fixed_s))
+    token1 = subprocess.run(
+        ["bash", "-lc", script, "bash", str(p)],
+        capture_output=True, check=True,
+    ).stdout.decode().strip()
+
+    p.write_bytes(b"world!")
+    _os.utime(p, (fixed_s, fixed_s))
+    token2 = subprocess.run(
+        ["bash", "-lc", script, "bash", str(p)],
+        capture_output=True, check=True,
+    ).stdout.decode().strip()
+
+    # Same mtime, different content → tokens MUST differ (the sha16
+    # suffix carries the content signal).
+    assert token1 != token2, (
+        f"mtime-token collision on same-second rewrite: {token1!r} == {token2!r}"
+    )
+    assert "-" in token1 and "-" in token2
+    # Format: <mtime_ns_digits>-<16-hex>
+    m1, h1 = token1.rsplit("-", 1)
+    assert m1.isdigit()
+    assert len(h1) == 16 and all(c in "0123456789abcdef" for c in h1)

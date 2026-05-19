@@ -106,6 +106,28 @@ def _resolve(config: dict[str, Any], key: str, env_var: str, default: str | None
     return default
 
 
+# Versioning-token script. Emits ``<mtime_ns>-<sha16>`` for files up to
+# ``_MTIME_TOKEN_SIZE_CAP`` bytes, ``<mtime_ns>-size<size>`` for larger
+# files. The mtime component uses GNU stat's ``%.Y`` format (fractional
+# seconds) so we get nanosecond resolution; we strip the decimal point so
+# the token is a plain ``<digits>-<rest>`` string. Invoked as
+# ``bash -lc <script> bash <path>`` — the trailing ``bash`` sets ``$0``
+# so ``$1`` is the path argument.
+_MTIME_TOKEN_SIZE_CAP = 16 * 1024 * 1024
+_MTIME_TOKEN_SCRIPT = (
+    "set -e; "
+    'P="$1"; '
+    'MNS=$(stat -c %.Y -- "$P" | tr -d .); '
+    'SZ=$(stat -c %s -- "$P"); '
+    f'if [ "$SZ" -le {_MTIME_TOKEN_SIZE_CAP} ]; then '
+    '  H=$(sha256sum -- "$P" | cut -c1-16); '
+    '  printf "%s-%s" "$MNS" "$H"; '
+    "else "
+    '  printf "%s-size%s" "$MNS" "$SZ"; '
+    "fi"
+)
+
+
 class _AgentEnvBashOperations:
     """``BashOperations`` impl that executes commands inside an ARL sandbox.
 
@@ -279,7 +301,20 @@ class _AgentEnvResourceWriter:
         return out.stdout.encode("utf-8"), out.stderr.encode("utf-8"), out.exit_code
 
     async def _mtime_token(self, path: str) -> str | None:
-        stdout, _stderr, code = await self._run(["stat", "-c", "%Y", "--", path])
+        # Versioning token: ``<mtime_ns>-<sha16>`` for files <= the size
+        # cap, ``<mtime_ns>-<size>`` otherwise. Combining mtime with a
+        # content digest defeats the 1-second-resolution collision that
+        # ``stat -c '%Y'`` alone suffered (two writes inside the same
+        # second produced identical tokens, so
+        # ``current_version_for_path`` reported "unchanged" when content
+        # had actually changed). ``stat -c '%.Y'`` gives fractional
+        # seconds on GNU coreutils, which we encode as nanoseconds. The
+        # 16 MiB cap keeps the digest cost bounded; above it we fall
+        # back to ``(mtime_ns, size)`` — collisions are still possible
+        # for same-second writes that preserve size, documented limit.
+        stdout, _stderr, code = await self._run(
+            ["bash", "-lc", _MTIME_TOKEN_SCRIPT, "bash", path]
+        )
         if code != 0:
             return None
         text = stdout.decode("utf-8", "replace").strip()
@@ -443,12 +478,23 @@ class _AgentEnvResourceWriter:
         # GitBackedResourceWriter, which can read mtime synchronously). The
         # ARL SDK is sync, so we shell out directly via a single execute()
         # without involving asyncio.
+        #
+        # Uses the same ``<mtime_ns>-<sha16>`` token shape as the async
+        # ``_mtime_token`` so a write's ``commit_sha_after`` and a later
+        # ``current_version_for_path`` compare equal when (and only when)
+        # the file is byte-identical to the just-written content.
         try:
             response = self._session.execute(
                 [
                     {
                         "name": "agentm_stat",
-                        "command": ["stat", "-c", "%Y", "--", self._resolve(path)],
+                        "command": [
+                            "bash",
+                            "-lc",
+                            _MTIME_TOKEN_SCRIPT,
+                            "bash",
+                            self._resolve(path),
+                        ],
                         "work_dir": self._work_dir,
                     }
                 ]
