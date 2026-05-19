@@ -115,7 +115,11 @@ async def test_wire_peer_inbound_round_trips_through_gateway() -> None:
                 {
                     "channel": "wire-test",
                     "chat_id": "c1",
-                    "sender_id": "u1",
+                    # sender_id is bound to peer_id by the wire bridge
+                    # (issue #1 spoof guard). For this e2e the chat
+                    # client peer is p1, so we drop sender_id from the
+                    # body and let the gateway fill it from the
+                    # authenticated principal.
                     "content": "hello",
                 },
                 env_id="msg-1",

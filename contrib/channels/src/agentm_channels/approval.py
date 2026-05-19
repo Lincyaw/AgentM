@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -126,7 +127,12 @@ class ApprovalBridge:
         future: asyncio.Future[_PendingResult] = (
             asyncio.get_running_loop().create_future()
         )
-        approval_id = f"approval-{id(future):x}"
+        # Use a UUID rather than id(future): CPython recycles object
+        # ids after gc, so a long-lived gateway can hand out the same
+        # approval_id to two distinct futures and have a stale click
+        # resolve a fresh approval. UUID4 makes collisions astronomical
+        # and removes the dependence on object lifetime.
+        approval_id = f"approval-{uuid.uuid4().hex}"
         async with self._lock:
             self._pending[approval_id] = future
         if self._index is not None:
