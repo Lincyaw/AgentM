@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import IO, Any
 
 from agentm.core.abi import (
+    BeforeSendToLlmEvent,
     ContextEvent,
     EventBusObserver,
     LlmRequestEndEvent,
@@ -30,7 +31,7 @@ from agentm.core.abi import (
     TurnStartEvent,
 )
 from agentm.core.abi.messages import ToolCallBlock
-from agentm.core.lib import to_jsonable
+from agentm.core.lib import redact_messages, to_jsonable
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
 from agentm.core.abi.events import (
@@ -104,6 +105,17 @@ MANIFEST = ExtensionManifest(
                 "type": "array",
                 "items": {"type": "string"},
             },
+            "redact_prompts": {
+                "type": "boolean",
+                "description": (
+                    "When True (default), LLM request/response bodies and "
+                    "api_send_user_message content are recorded as "
+                    "{chars, sha256_prefix} stubs instead of full text. Set "
+                    "False to capture raw prompt content for debugging "
+                    "(only do this on a trusted machine — operators must "
+                    "explicitly opt in to logging user-pasted secrets)."
+                ),
+            },
         },
         "additionalProperties": False,
     },
@@ -117,6 +129,23 @@ MANIFEST = ExtensionManifest(
 # raw deltas are pure bloat for trace consumers. Anything in this set is
 # skipped from BOTH ``event.dispatch`` and ``handler.invoke`` records.
 _DEFAULT_EXCLUDE_CHANNELS: frozenset[str] = frozenset({StreamDeltaEvent.CHANNEL})
+
+
+# Channels whose serialized event payload can carry user-supplied prompt
+# content (pasted API keys, .env contents, private file paths). When
+# ``redact_prompts=True`` (default), :func:`redact_messages` rewrites the
+# payload to a ``{role, chars, sha256_prefix}`` stub before it hits disk.
+_REDACTED_CHANNELS: frozenset[str] = frozenset(
+    {
+        BeforeSendToLlmEvent.CHANNEL,
+        LlmRequestStartEvent.CHANNEL,
+        LlmRequestEndEvent.CHANNEL,
+        # ApiSendUserMessageEvent.CHANNEL added below — string literal to
+        # avoid a forward-ref cycle since the events module is already
+        # imported above.
+        "api_send_user_message",
+    }
+)
 
 
 def _new_id() -> str:
@@ -264,9 +293,11 @@ class _Observer(EventBusObserver):
         include_handlers: bool,
         include_diff: bool,
         exclude_channels: frozenset[str],
+        redact_prompts: bool,
     ) -> None:
         self._sink = sink
         self._trace_id = trace_id
+        self._redact_prompts = redact_prompts
         # ``session_span_id`` (= the AgentSession's session_id) is the
         # OTel span_id of the session-root span emitted by
         # ``session.start``. Top-level dispatch spans (those with no
@@ -407,6 +438,9 @@ class _Observer(EventBusObserver):
             if not ancestor[3]:
                 parent_span_id = ancestor[1]
                 break
+        event_payload = to_jsonable(event)
+        if self._redact_prompts and ch in _REDACTED_CHANNELS:
+            event_payload = redact_messages(event_payload)
         self._sink.write(
             {
                 "schema": "otel/span/v0",
@@ -419,7 +453,7 @@ class _Observer(EventBusObserver):
                 "end_time_unix_nano": end_ns,
                 "attributes": {
                     "channel": ch,
-                    "event": to_jsonable(event),
+                    "event": event_payload,
                     "handler_count": len(results),
                 },
                 "status": {"code": "OK"},
@@ -561,6 +595,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     exclude_channels = frozenset(_DEFAULT_EXCLUDE_CHANNELS) | (
         frozenset(str(ch) for ch in user_excludes) if user_excludes else frozenset()
     )
+    # Default redacted. Operators must opt in to raw prompt logging via
+    # ``redact_prompts: false`` — the trace file lives under .agentm/ which
+    # is commonly checked into evidence bundles, so the safe default wins.
+    redact_prompts = bool(config.get("redact_prompts", True))
 
     sink = _Sink(file_path, max_queue=max_queue)
     observer = _Observer(
@@ -570,6 +608,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         include_handlers,
         include_diff,
         exclude_channels,
+        redact_prompts,
     )
     api.add_observer(observer)
 
@@ -686,6 +725,17 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         )
 
     def _on_api_send(event: ApiSendUserMessageEvent) -> None:
+        raw_content: Any = to_jsonable(event.content)
+        content_chars = (
+            len(event.content) if isinstance(event.content, str) else None
+        )
+        if redact_prompts:
+            # Round-trip through the shared redactor so the stub shape
+            # matches what redact_messages emits for embedded ``content``.
+            stub_payload = redact_messages({"content": raw_content})
+            attributes_content: Any = stub_payload["content"]
+        else:
+            attributes_content = raw_content
         sink.write(
             {
                 "schema": "otel/span/v0",
@@ -696,16 +746,17 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "start_time_unix_nano": _now_ns(),
                 "attributes": {
                     "extension": event.extension,
-                    "content": to_jsonable(event.content),
-                    "content_chars": (
-                        len(event.content) if isinstance(event.content, str) else None
-                    ),
+                    "content": attributes_content,
+                    "content_chars": content_chars,
                 },
                 "status": {"code": "OK"},
             }
         )
 
     def _on_llm_start(event: LlmRequestStartEvent) -> None:
+        payload = to_jsonable(event)
+        if redact_prompts:
+            payload = redact_messages(payload)
         sink.write(
             {
                 "schema": "otel/span/v0",
@@ -714,13 +765,16 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "span_id": _new_id(),
                 "name": "llm.request",
                 "start_time_unix_nano": _now_ns(),
-                "attributes": to_jsonable(event),
+                "attributes": payload,
                 "status": {"code": "OK"},
             }
         )
 
     def _on_llm_end(event: LlmRequestEndEvent) -> None:
         now = _now_ns()
+        payload = to_jsonable(event)
+        if redact_prompts:
+            payload = redact_messages(payload)
         sink.write(
             {
                 "schema": "otel/span/v0",
@@ -730,7 +784,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "name": "llm.request.end",
                 "start_time_unix_nano": now - event.duration_ns,
                 "end_time_unix_nano": now,
-                "attributes": to_jsonable(event),
+                "attributes": payload,
                 "status": {
                     "code": "ERROR" if event.error else "OK",
                     "message": event.error,
