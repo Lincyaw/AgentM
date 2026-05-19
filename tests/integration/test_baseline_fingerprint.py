@@ -148,7 +148,7 @@ def _seed_eval_runs(cwd: Path) -> None:
 def _setup_repo(tmp_path: Path) -> tuple[Path, Path]:
     """Init a real git repo with v1 of the atom committed. Returns
     (atom_path, scenario_dir)."""
-    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "init", "-q", "-b", "agent-tests")
     _git(tmp_path, "config", "user.email", "t@t")
     _git(tmp_path, "config", "user.name", "t")
     scenario_dir = tmp_path / "contrib" / "scenarios" / "format_fix"

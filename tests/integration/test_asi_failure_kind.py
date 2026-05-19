@@ -98,7 +98,7 @@ def _install_static_provider() -> str:
 
 def _git_init(path: Path) -> None:
     subprocess.run(
-        ["git", "init", "-q", str(path)], check=True, capture_output=True
+        ["git", "init", "-q", "-b", "agent-tests", str(path)], check=True, capture_output=True
     )
     subprocess.run(
         ["git", "-C", str(path), "config", "user.email", "test@example.com"],
