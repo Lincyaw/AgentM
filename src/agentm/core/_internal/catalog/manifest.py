@@ -13,6 +13,18 @@ manifest path onto :data:`_MANIFEST_PATH_VAR` (a :class:`ContextVar`) at
 session start. A ``ContextVar`` rather than a module global so concurrent
 sessions in different cwds don't race on a process-wide write — each
 asyncio task / thread sees the path bound by its own session.
+
+Caching policy: the YAML is small (single-digit kilobytes) and parsed in
+~milliseconds; :func:`is_constitution_path` fires at most once per write
+operation, not per turn. We therefore parse on every call rather than
+maintain a process-global cache. The earlier ``functools.cache`` keyed
+on path alone had two bugs the constitution boundary cannot tolerate:
+(1) two concurrent sessions binding different cwds via
+``configure_manifest_path`` would ``cache_clear`` each other, and
+(2) an on-disk manifest edit (the exact path a self-modifying agent
+would take) returned a stale parse because the key didn't include
+``mtime_ns``. Dropping the cache eliminates both failure modes for
+negligible cost.
 """
 
 from __future__ import annotations
@@ -74,13 +86,18 @@ def load_core_manifest(manifest_path: Path | None = None) -> CoreManifest:
             "override_manifest_path() for scoped overrides, or pass "
             "manifest_path explicitly."
         )
-    return _load_cached(path)
+    return _parse_manifest(path)
 
 
 def reload_manifest(manifest_path: Path | None = None) -> CoreManifest:
-    """Drop the cache and reload (optionally against a new path)."""
+    """Reload the manifest (optionally against a new path).
 
-    _load_cached.cache_clear()
+    Retained for backwards compatibility — the parser no longer caches,
+    so this is now a thin alias for :func:`load_core_manifest`. Tests and
+    long-running tooling that previously called it for cache-busting
+    semantics will still get a fresh parse.
+    """
+
     return load_core_manifest(manifest_path)
 
 
@@ -100,8 +117,7 @@ def matches_manifest_glob(pattern: str, path: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-@cache
-def _load_cached(manifest_path: Path) -> CoreManifest:
+def _parse_manifest(manifest_path: Path) -> CoreManifest:
     with manifest_path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
 
@@ -197,7 +213,6 @@ def configure_manifest_path(manifest_path: Path) -> Token[Path | None]:
     """
 
     token = _MANIFEST_PATH_VAR.set(Path(manifest_path))
-    _load_cached.cache_clear()
     return token
 
 
@@ -205,7 +220,6 @@ def reset_manifest_path(token: Token[Path | None]) -> None:
     """Undo a :func:`configure_manifest_path` call."""
 
     _MANIFEST_PATH_VAR.reset(token)
-    _load_cached.cache_clear()
 
 
 @contextmanager

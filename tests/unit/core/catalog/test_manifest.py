@@ -19,6 +19,7 @@ code uses :func:`configure_manifest_path` once at session startup.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -27,9 +28,11 @@ import pytest
 from agentm.core._internal.catalog import manifest as manifest_mod
 from agentm.core._internal.catalog.manifest import (
     CoreManifest,
+    configure_manifest_path,
     is_constitution_path,
     load_core_manifest,
     reload_manifest,
+    reset_manifest_path,
 )
 
 
@@ -169,3 +172,131 @@ def test_S10_manifest_change_moves_constitution_boundary(
         # ...but lib/ paths and the manifest itself are still protected.
         assert is_constitution_path("src/agentm/core/lib/frontmatter.py") is True
         assert is_constitution_path(MANIFEST_FILENAME) is True
+
+
+# ---------------------------------------------------------------------------
+# Cache-correctness fail-stops (constitution write barrier)
+# ---------------------------------------------------------------------------
+
+
+def _write_manifest(target: Path, constitution_paths: list[str]) -> None:
+    body = "version: 1\nconstitution:\n  paths:\n"
+    for entry in constitution_paths:
+        body += f"    - {entry}\n"
+    body += (
+        "extension_api:\n"
+        "  current: 1\n"
+        "  deprecation:\n"
+        "    grace: 1\n"
+        "reload:\n"
+        "  tier_2_atoms: []\n"
+    )
+    target.write_text(body, encoding="utf-8")
+
+
+def test_cross_cwd_bindings_do_not_thrash(tmp_path: Path) -> None:
+    """Switching the ContextVar binding back and forth must answer each
+    binding's question correctly.
+
+    Regression: the old implementation paired a ContextVar with a
+    process-global ``@functools.cache`` and ``cache_clear`` on every
+    bind, so two concurrent sessions in different cwds could observe
+    each other's stale data. Dropping the cache means the binding alone
+    determines the answer; re-binding the same path must continue to
+    work.
+    """
+    manifest_a = tmp_path / "a" / "core-manifest.yaml"
+    manifest_b = tmp_path / "b" / "core-manifest.yaml"
+    manifest_a.parent.mkdir()
+    manifest_b.parent.mkdir()
+    _write_manifest(manifest_a, ["src/agentm/core/abi/**", "core-manifest.yaml"])
+    _write_manifest(manifest_b, ["src/agentm/core/lib/**", "core-manifest.yaml"])
+
+    token_a = configure_manifest_path(manifest_a)
+    try:
+        assert is_constitution_path("src/agentm/core/abi/loop.py") is True
+        assert is_constitution_path("src/agentm/core/lib/frontmatter.py") is False
+
+        token_b = configure_manifest_path(manifest_b)
+        try:
+            # B's binding shadows A's — only B's globs apply now.
+            assert is_constitution_path("src/agentm/core/abi/loop.py") is False
+            assert is_constitution_path("src/agentm/core/lib/frontmatter.py") is True
+        finally:
+            reset_manifest_path(token_b)
+
+        # Re-bound to A's view; the answer must flip back without
+        # depending on any prior cache_clear having fired.
+        assert is_constitution_path("src/agentm/core/abi/loop.py") is True
+        assert is_constitution_path("src/agentm/core/lib/frontmatter.py") is False
+    finally:
+        reset_manifest_path(token_a)
+
+
+def test_on_disk_edit_visible_without_explicit_reload(tmp_path: Path) -> None:
+    """Editing the manifest file on disk must be reflected on the next
+    query, without an explicit ``reload_manifest()`` call.
+
+    Regression: the old ``@functools.cache`` was keyed on path alone, so
+    a self-modifying agent that rewrote ``core-manifest.yaml`` would
+    keep seeing the pre-edit policy. The dropped cache means each query
+    reparses, so the new policy applies immediately.
+    """
+    manifest = tmp_path / "core-manifest.yaml"
+    _write_manifest(manifest, ["src/agentm/core/abi/**", "core-manifest.yaml"])
+
+    with manifest_mod.override_manifest_path(manifest):
+        assert is_constitution_path("src/agentm/core/abi/loop.py") is True
+        assert is_constitution_path("src/agentm/core/lib/frontmatter.py") is False
+
+        # Rewrite the manifest in place — same path, new policy. No
+        # cache_clear / reload_manifest call: the next query must see
+        # the new globs purely from the on-disk content.
+        _write_manifest(manifest, ["src/agentm/core/lib/**", "core-manifest.yaml"])
+
+        assert is_constitution_path("src/agentm/core/abi/loop.py") is False
+        assert is_constitution_path("src/agentm/core/lib/frontmatter.py") is True
+
+
+def test_concurrent_asyncio_bindings_do_not_leak(tmp_path: Path) -> None:
+    """Two coroutines with different manifest bindings must each see
+    their own answer under interleaved execution.
+
+    Forces interleaving with ``await asyncio.sleep(0)`` between the bind
+    and the query so the scheduler gets a chance to run the other
+    coroutine before the assertion. ContextVar scoping is the only
+    mechanism keeping the two views apart — any process-global state
+    (the old cache) would surface here.
+    """
+    manifest_a = tmp_path / "a" / "core-manifest.yaml"
+    manifest_b = tmp_path / "b" / "core-manifest.yaml"
+    manifest_a.parent.mkdir()
+    manifest_b.parent.mkdir()
+    _write_manifest(manifest_a, ["src/agentm/core/abi/**", "core-manifest.yaml"])
+    _write_manifest(manifest_b, ["src/agentm/core/lib/**", "core-manifest.yaml"])
+
+    async def session(manifest: Path, probe_true: str, probe_false: str) -> None:
+        token = configure_manifest_path(manifest)
+        try:
+            await asyncio.sleep(0)
+            assert is_constitution_path(probe_true) is True
+            await asyncio.sleep(0)
+            assert is_constitution_path(probe_false) is False
+        finally:
+            reset_manifest_path(token)
+
+    async def driver() -> None:
+        await asyncio.gather(
+            session(
+                manifest_a,
+                probe_true="src/agentm/core/abi/loop.py",
+                probe_false="src/agentm/core/lib/frontmatter.py",
+            ),
+            session(
+                manifest_b,
+                probe_true="src/agentm/core/lib/frontmatter.py",
+                probe_false="src/agentm/core/abi/loop.py",
+            ),
+        )
+
+    asyncio.run(driver())
