@@ -267,7 +267,10 @@ async def extract_trajectory(
     if not turns:
         return []
 
-    base_extensions = compose_extractor_extensions(base_prompt=base_prompt)
+    base_extensions = compose_extractor_extensions(
+        base_prompt=base_prompt,
+        witness_retry_budget=witness_retry_budget,
+    )
     records: list[ReplayRecord] = []
     recent_graph_events: list[SchemaEvent] = []
 
@@ -301,8 +304,6 @@ async def extract_trajectory(
         extensions = bind_extractor_state(
             base_extensions,
             state=state,
-            turn_window_json=turn_window_json,
-            witness_retry_budget=witness_retry_budget,
         )
 
         ts_ns = now_ns()
