@@ -6,9 +6,9 @@ the constitution side of the boundary.
 
 Layer purity: this module imports only stdlib + ``yaml``. It does **not**
 touch the filesystem at import time and does not reach into the
-extensions / harness packages.
+extensions / runtime packages.
 
-Path resolution policy lives in the harness. The harness pushes a
+Path resolution policy lives in the runtime. The runtime pushes a
 manifest path onto :data:`_MANIFEST_PATH_VAR` (a :class:`ContextVar`) at
 session start. A ``ContextVar`` rather than a module global so concurrent
 sessions in different cwds don't race on a process-wide write — each
@@ -27,8 +27,8 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-# Test/harness seam — default ``None`` so importing this module never
-# touches the filesystem. The harness binds this per-session via
+# Test/runtime seam — default ``None`` so importing this module never
+# touches the filesystem. The runtime binds this per-session via
 # :func:`configure_manifest_path`; tests use :func:`override_manifest_path`
 # for scoped overrides.
 _MANIFEST_PATH_VAR: ContextVar[Path | None] = ContextVar(
@@ -59,7 +59,7 @@ def current_manifest_path() -> Path | None:
 def load_core_manifest(manifest_path: Path | None = None) -> CoreManifest:
     """Load the manifest from ``manifest_path`` or the current context.
 
-    Passing ``manifest_path`` explicitly is preferred — the harness owns
+    Passing ``manifest_path`` explicitly is preferred — the runtime owns
     the policy of where ``core-manifest.yaml`` lives. The fall-back to
     :data:`_MANIFEST_PATH_VAR` exists for callers that don't have a
     handle (atoms reading the manifest indirectly via
@@ -70,7 +70,7 @@ def load_core_manifest(manifest_path: Path | None = None) -> CoreManifest:
     if path is None:
         raise CoreManifestPathUnsetError(
             "core-manifest.yaml path not configured: call "
-            "configure_manifest_path() during harness startup, use "
+            "configure_manifest_path() during runtime startup, use "
             "override_manifest_path() for scoped overrides, or pass "
             "manifest_path explicitly."
         )
@@ -191,7 +191,7 @@ def configure_manifest_path(manifest_path: Path) -> Token[Path | None]:
     """Bind ``manifest_path`` to the current async/thread context.
 
     Returns the :class:`Token` so the caller can reset the binding on
-    teardown. The harness uses this at session construction and resets in
+    teardown. The runtime uses this at session construction and resets in
     ``AgentSession.shutdown``; tests prefer :func:`override_manifest_path`
     which wraps the same call in a context manager.
     """
