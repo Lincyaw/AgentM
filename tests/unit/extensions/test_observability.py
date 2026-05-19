@@ -135,3 +135,101 @@ async def test_observability_records_mutation_diff_without_api_on_patch(
         "value",
         "added",
     }
+
+
+# --- prompt-redaction integration ----------------------------------------
+
+_LEAK_SECRET = "sk-proj-FAKE_SECRET_xxx"
+
+
+def _trace_records(path: Path) -> list[dict[str, Any]]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def _build_before_send_event(text: str) -> Any:
+    """Construct a real ``BeforeSendToLlmEvent`` so the test exercises the
+    same serialization path the production loop uses."""
+
+    from agentm.core.abi.events import BeforeSendToLlmEvent
+    from agentm.core.abi.messages import TextContent, UserMessage
+    from agentm.core.abi.stream import Model
+
+    msg = UserMessage(
+        role="user",
+        content=[TextContent(type="text", text=text)],
+        timestamp=0.0,
+    )
+    model = Model(
+        id="m",
+        provider="stub",
+        context_window=1000,
+        max_output_tokens=100,
+    )
+    return BeforeSendToLlmEvent(
+        messages=[msg],
+        model=model,
+        tools=[],
+        system="sys",
+    )
+
+
+@pytest.mark.asyncio
+async def test_observability_redacts_prompt_body_by_default(
+    tmp_path: Path,
+) -> None:
+    """A leaked secret in messages must NOT reach the JSONL file under
+    the default redact_prompts=True policy."""
+
+    from agentm.core.abi.events import (
+        BeforeSendToLlmEvent,
+        SessionShutdownEvent as _Shut,
+    )
+
+    api = _api(tmp_path)
+    observability.install(api, {"path": "trace.jsonl"})
+    event = _build_before_send_event(f"leak: {_LEAK_SECRET}")
+    await api.events.emit(BeforeSendToLlmEvent.CHANNEL, event)
+    await api.events.emit(_Shut.CHANNEL, _Shut(cwd=str(tmp_path)))
+
+    raw = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
+    assert _LEAK_SECRET not in raw, "secret must not appear in default trace"
+
+    dispatch_records = [
+        r
+        for r in _trace_records(tmp_path / "trace.jsonl")
+        if r["kind"] == "event.dispatch" and r["attributes"]["channel"] == "before_send_to_llm"
+    ]
+    assert len(dispatch_records) == 1
+    redacted = dispatch_records[0]["attributes"]["event"]
+    assert redacted["messages"][0]["role"] == "user"
+    assert redacted["messages"][0]["chars"] > 0
+    assert len(redacted["messages"][0]["sha256_prefix"]) == 16
+    # System prompt stubbed too.
+    assert redacted["system"] == {
+        "chars": len("sys"),
+        "sha256_prefix": __import__("hashlib").sha256(b"sys").hexdigest()[:16],
+    }
+
+
+@pytest.mark.asyncio
+async def test_observability_keeps_prompt_body_when_redaction_disabled(
+    tmp_path: Path,
+) -> None:
+    """Operator opt-in: ``redact_prompts=False`` restores raw content."""
+
+    from agentm.core.abi.events import (
+        BeforeSendToLlmEvent,
+        SessionShutdownEvent as _Shut,
+    )
+
+    api = _api(tmp_path)
+    observability.install(api, {"path": "trace.jsonl", "redact_prompts": False})
+    event = _build_before_send_event(f"leak: {_LEAK_SECRET}")
+    await api.events.emit(BeforeSendToLlmEvent.CHANNEL, event)
+    await api.events.emit(_Shut.CHANNEL, _Shut(cwd=str(tmp_path)))
+
+    raw = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
+    assert _LEAK_SECRET in raw, "raw content must reappear when opt-out is set"
