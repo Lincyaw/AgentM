@@ -52,7 +52,7 @@ class Operations:
     """Bundle of operation backends an extension may need.
 
     Returned from ``ExtensionAPI.get_operations()``. The default bundle wraps
-    the local stdlib-backed implementations; the harness may inject a different
+    the local stdlib-backed implementations; the runtime may inject a different
     bundle when constructing a session. Atoms can consume the active bundle but
     cannot replace it via ``ExtensionAPI`` in v0.
     """

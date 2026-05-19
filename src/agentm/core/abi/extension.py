@@ -356,13 +356,9 @@ class ExtensionAPI(Protocol):
 
         ``config`` is an ``AgentSessionConfig`` (typed ``Any`` here to avoid
         pulling ``agentm.core.runtime.session`` into the §11 import allow-list).
-        The harness fills in ``parent_bus`` and ``parent_session_id`` from
+        The runtime fills in ``parent_bus`` and ``parent_session_id`` from
         the current session — caller-supplied values for those fields are
         ignored. Returns the constructed child session.
-
-        Replaces the legacy pattern of dynamically importing
-        ``agentm.core.runtime.session`` from inside an extension, which used to
-        bypass the §11.4.5 import contract.
         """
         ...
 
@@ -392,7 +388,7 @@ class ExtensionAPI(Protocol):
         is the full module text. ``target_path`` is filesystem path (relative
         to ``cwd`` or absolute) where the source will be written through
         ``ResourceWriter`` so it lands as a git commit. When omitted the
-        harness writes to ``<cwd>/.agentm/atoms/<name>.py`` so agent-installed
+        runtime writes to ``<cwd>/.agentm/atoms/<name>.py`` so agent-installed
         atoms are isolated from the framework's builtin tree.
 
         Hard rejections (return ``ok=False`` with an explanatory ``error``):

@@ -1,4 +1,4 @@
-"""Skill record types — public ABI shared between the harness, the
+"""Skill record types — public ABI shared between the runtime, the
 ``skill_loader`` atom, and any peer atom that contributes skill records via
 the ``resources_discover`` event channel.
 
