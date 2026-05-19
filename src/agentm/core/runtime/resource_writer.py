@@ -1,4 +1,4 @@
-"""Git-backed chokepoint for writes to managed harness resources."""
+"""Git-backed chokepoint for writes to managed runtime resources."""
 
 from __future__ import annotations
 

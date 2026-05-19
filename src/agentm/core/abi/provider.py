@@ -13,7 +13,7 @@ ProviderT = TypeVar("ProviderT", contravariant=True)
 
 @dataclass(frozen=True, slots=True)
 class ProviderConfig:
-    """LLM provider registration record shared across provider and harness layers."""
+    """LLM provider registration record shared across provider and runtime layers."""
 
     stream_fn: StreamFn
     model: Model

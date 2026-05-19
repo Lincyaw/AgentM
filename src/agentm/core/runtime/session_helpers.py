@@ -1,4 +1,4 @@
-"""Private helpers for ``harness.session``."""
+"""Private helpers for :class:`AgentSession`."""
 
 from __future__ import annotations
 

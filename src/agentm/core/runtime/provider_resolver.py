@@ -1,4 +1,4 @@
-"""Default harness provider resolver."""
+"""Default runtime provider resolver."""
 
 from __future__ import annotations
 
