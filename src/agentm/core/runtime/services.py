@@ -79,7 +79,7 @@ def default_catalog_service() -> CatalogService:
 
 
 def default_project_layout(cwd: str) -> ProjectLayout:
-    """Return the harness's default :class:`ProjectLayout` for ``cwd``."""
+    """Return the runtime's default :class:`ProjectLayout` for ``cwd``."""
 
     from agentm.core.runtime.catalog import default_project_layout as _impl
 

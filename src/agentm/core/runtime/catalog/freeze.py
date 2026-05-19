@@ -36,8 +36,8 @@ def freeze_current(
 
     if writer is None:
         # Default-impl escape hatch for the catalog freeze CLI / unit tests:
-        # the harness owns the concrete ``GitBackedResourceWriter``. This
-        # local import keeps the dependency edge inside the harness layer.
+        # the runtime owns the concrete ``GitBackedResourceWriter``. This
+        # local import keeps the dependency edge inside the runtime layer.
         from agentm.core.runtime.resource_writer import GitBackedResourceWriter
 
         writer = GitBackedResourceWriter(

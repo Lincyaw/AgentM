@@ -1,15 +1,15 @@
-"""Session-tree data shapes shared by the kernel and harness.
+"""Session-tree data shapes shared by the kernel and runtime.
 
 These are pure data classes plus a minimal read-only Protocol over the
 session tree. They live in ``core/abi`` so the constitution layer
 (``core/_internal/catalog`` and the compaction engine inside the
 ``llm_compaction`` atom) can manipulate session entries without
-reverse-importing from ``harness``.
+reverse-importing from ``core.runtime``.
 
 The full ``SessionManager`` (with persistence, fork/navigate semantics)
-remains in ``harness/session_manager.py`` and implements ``SessionTree``
-implicitly. Atoms that need the read-only surface should depend on
-``SessionTree`` rather than the concrete manager.
+lives in ``core/runtime/session_manager.py`` and implements
+``SessionTree`` implicitly. Atoms that need the read-only surface should
+depend on ``SessionTree`` rather than the concrete manager.
 """
 
 from __future__ import annotations
@@ -123,7 +123,7 @@ class SessionTree(Protocol):
 
     The full ``SessionManager`` implements this implicitly. Constitution-
     layer modules (compaction, branch summarization) depend only on this
-    surface so they don't need to import from ``harness``.
+    surface so they don't need to import from ``core.runtime``.
     """
 
     def get_branch(self, leaf_id: str | None = None) -> list[SessionEntry]: ...
@@ -135,7 +135,7 @@ class EntryMaterializer(Protocol):
     """Convert a ``SessionEntry`` into an ``AgentMessage`` (or ``None``).
 
     Atoms register one materializer per ``entry.type`` they own. Both
-    ``compaction.get_message_from_entry`` and the harness's
+    ``compaction.get_message_from_entry`` and the runtime's
     ``build_session_context`` consult the global ``ENTRY_MATERIALIZERS``
     registry so the kernel does not branch on string-literal entry types.
     """
