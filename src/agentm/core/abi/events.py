@@ -144,7 +144,7 @@ class ProviderProtocolViolation(TerminationCause):
 @dataclass(slots=True, frozen=True)
 class BudgetExhausted(TerminationCause):
     """A budget cap was reached. ``detail`` names which budget — e.g.
-    ``"cost"`` (harness session-level cost cap) or ``"max_tool_calls"``
+    ``"cost"`` (runtime session-level cost cap) or ``"max_tool_calls"``
     (kernel-loop tool-call cap). Cannot be overridden; extensions can cap
     budgets but not un-cap them once tripped.
     """
@@ -354,7 +354,7 @@ class BeforeSendToLlmEvent(Event):
     """Fires after context handlers have rewritten messages, immediately
     before the StreamFn is invoked. Handlers MAY mutate ``messages`` in
     place to make a final adjustment. This is the last hook before bytes
-    leave the harness.
+    leave the runtime.
 
     The ``messages`` list is the same instance the loop will pass to
     ``StreamFn``; mutate it cautiously.
@@ -448,13 +448,13 @@ class DiagnosticEvent(Event):
     message: str
 
 
-# --- Harness-level event payloads ------------------------------------------
+# --- Runtime-level event payloads ------------------------------------------
 #
-# The events below are emitted by harness-level subsystems (compaction,
+# The events below are emitted by runtime-level subsystems (compaction,
 # child-session lifecycle, cost budget, plan-mode, install/reload/unload,
 # resource writes). They live in the ABI module — alongside the kernel
 # events — so atoms have a single canonical import for every event payload.
-# Per the layer rule (kernel does not import harness), the kernel ``EventBus``
+# Per the layer rule (kernel does not import runtime), the kernel ``EventBus``
 # does not have typed ``emit`` overloads for these; they flow through the
 # ``str`` fallback channel.
 
@@ -465,7 +465,7 @@ class BeforeAgentStartEvent(Event):
 
     Mutability: this event is intentionally **not frozen**. Handlers may mutate
     ``system`` in place; alternatively they may return a ``dict[str, str]`` of
-    shape ``{"system": "..."}`` and the harness will use the last non-None
+    shape ``{"system": "..."}`` and the runtime will use the last non-None
     replacement to overwrite the system prompt. ``messages`` is the live list
     that will be passed to the loop — handlers should generally not rewrite it
     here (use ``context`` / ``before_send_to_llm`` for that).
@@ -858,11 +858,11 @@ class EventBus:
         """
         self._strict_sync_handlers = strict
 
-    # Typed overloads for kernel-owned channels. Harness-level channels
+    # Typed overloads for kernel-owned channels. Runtime-level channels
     # (``before_agent_start``, ``session_shutdown``, ``before_compact``,
     # ``after_compact``, ``child_session_*``, ``cost_budget_exceeded``,
     # ``plan_submitted``, ``session_ready``) fall through to the ``str``
-    # fallback to preserve the layer rule (kernel does not import harness).
+    # fallback to preserve the layer rule (kernel does not import runtime).
     # Extensions may also invent their own channels — the ``str`` fallback
     # also preserves that escape hatch.
     @overload
@@ -1001,7 +1001,7 @@ class EventBus:
 
     def subscriptions_for(self, channel: str) -> list[_Subscription]:
         """Return a fresh shallow copy of subscriptions on ``channel`` in
-        dispatch order. Used by harness internals (atom_reloader) that need
+        dispatch order. Used by runtime internals (atom_reloader) that need
         to inspect or rearrange the live order — e.g. for the reload-time
         within-tier FIFO position-preservation pass. The returned list is a
         copy; mutating it does not affect the bus.
@@ -1013,7 +1013,7 @@ class EventBus:
     ) -> None:
         """Replace the bus's subscription list for ``channel`` with the
         caller-supplied list. Companion to :meth:`subscriptions_for` for
-        harness internals that need to splice handlers back in a specific
+        runtime internals that need to splice handlers back in a specific
         order. The list is stored by reference; do not mutate after handing
         it over.
         """

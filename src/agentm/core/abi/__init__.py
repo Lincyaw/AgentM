@@ -2,7 +2,7 @@
 
 Public surface for the kernel layer described in
 `.claude/designs/pluggable-architecture.md` §3. Everything exported here is
-considered stable API for higher layers (harness, scenarios, presenters).
+considered stable API for higher layers (runtime, scenarios, presenters).
 
 The kernel is the bottom layer: it does not import from any other AgentM
 module. It exposes:

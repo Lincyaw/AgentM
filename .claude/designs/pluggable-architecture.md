@@ -131,7 +131,7 @@ class BashOperations(Protocol):
     async def exec(self, cmd, cwd, *, on_data, signal, timeout, env) -> ExecResult: ...
 ```
 
-- `ToolDefinition` is the harness/UI-facing record.
+- `ToolDefinition` is the runtime/UI-facing record.
 - `Tool` is the bare execution interface used by the agent loop.
 - `XxxOperations` is the **smallest possible port** for swapping environments (local FS → SSH → sandbox → in-memory). It is replaceable through `api.register_operations(file=..., bash=...)`, called by an early atom in the scenario manifest (default: `operations_local`). The substrate enforces "registered at most once before freeze" and "must be registered by freeze time, else fail loud".
 
@@ -220,8 +220,8 @@ class ExtensionAPI(Protocol):
 Registered slash-command execution is itself a policy port: the
 `slash_commands` atom parses `/cmd args`, but command lookup, ownership, and
 handler execution go through the typed `CommandDispatcher` service facade. The
-harness default owns the live command registry and owner API selection; atoms do
-not read raw harness registry dictionaries.
+runtime default owns the live command registry and owner API selection; atoms do
+not read raw runtime registry dictionaries.
 
 Retry policy follows the same service-facade rule: `agentm.core.abi.retry.RetryPolicy`
 is a tiny async port, the built-in `retry_policy` atom registers the default
@@ -371,7 +371,7 @@ concrete provider name or `Local*Operations` class.
 CLI and Textual remain presenters, so shared display decisions live in pure
 `agentm.core.lib.render` helpers rather than in either mode. The helpers produce
 headless strings and token reports only; they do not import Rich, Textual,
-harness, filesystem state, or pricing tables.
+runtime, filesystem state, or pricing tables.
 
 Cost is a policy concern exposed as an ExtensionAPI service named
 `cost_query`. The `cost_budget` atom owns pricing configuration and registers a

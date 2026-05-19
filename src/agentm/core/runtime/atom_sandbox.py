@@ -9,7 +9,7 @@ redirected path as ``unmanaged`` (no git mutation, no working-tree
 change). The caller is responsible for tearing the sandbox down on
 session shutdown.
 
-Layer rule: this module sits in the harness layer alongside the
+Layer rule: this module sits in the runtime layer alongside the
 reloader. It imports only stdlib + ``agentm.core.runtime.atom_reloader`` +
 ``agentm.core.abi.events`` so it can be invoked from session
 bootstrap without crossing layer boundaries.

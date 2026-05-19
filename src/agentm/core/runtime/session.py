@@ -66,10 +66,9 @@ logger = logging.getLogger(__name__)
 
 
 # --- Config -----------------------------------------------------------------
-# ``AgentSessionConfig`` lives in ``harness.session_config`` so extensions
+# ``AgentSessionConfig`` lives in ``core.abi.session_config`` so extensions
 # (which cannot import this module per §11.4.5) can still construct one for
-# ``api.spawn_child_session``. Re-exported below for backward-compatible
-# imports from ``agentm.core.runtime.session``.
+# ``api.spawn_child_session``. Re-exported here for ergonomic access.
 
 from agentm.core.abi.session_config import (  # noqa: E402
     AgentSessionConfig,
@@ -172,7 +171,7 @@ class AgentSession:
         """Publish a host-supplied service into the session's registry.
 
         Mirrors :meth:`ExtensionAPI.set_service` but is callable from the
-        embedding process (the harness host), not just from inside an
+        embedding process (the runtime host), not just from inside an
         atom. Used by ``agentm-worker`` to inject a ``peer_messaging``
         handle so the optional ``tool_peer_send`` atom can call out to
         the gateway. Refuses to clobber an existing entry — keep service

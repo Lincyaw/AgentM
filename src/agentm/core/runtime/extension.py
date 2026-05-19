@@ -419,7 +419,7 @@ class _ExtensionAPIImpl:
     async def spawn_child_session(
         self, config: Any | None = None, **kwargs: Any
     ) -> Any:
-        """Spawn a child session via the harness-injected factory."""
+        """Spawn a child session via the runtime-injected factory."""
         self._assert_active()
         if config is not None and kwargs:
             raise TypeError(

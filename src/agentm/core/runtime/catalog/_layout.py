@@ -1,6 +1,6 @@
 """Catalog path contract for the on-disk storage tree.
 
-Lives in the harness layer: filesystem-shaped helpers used by freeze /
+Lives in the runtime layer: filesystem-shaped helpers used by freeze /
 migrate / indexer. The kernel boundary uses this only via the
 :class:`agentm.core.abi.project_layout.ProjectLayout` Protocol.
 """

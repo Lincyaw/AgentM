@@ -44,7 +44,7 @@ class ToolResult:
     """The result of one tool execution.
 
     ``content`` is the user-visible payload (text and/or images) that becomes
-    a ``ToolResultBlock``. ``extras`` is opaque structured data the harness
+    a ``ToolResultBlock``. ``extras`` is opaque structured data the runtime
     or extensions may use (e.g. for richer rendering); the kernel never reads
     it.
     """

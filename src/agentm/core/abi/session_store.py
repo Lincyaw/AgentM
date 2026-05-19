@@ -11,7 +11,7 @@ from agentm.core.abi.messages import AgentMessage
 
 @runtime_checkable
 class SessionState(Protocol):
-    """Mutable session state consumed by the harness."""
+    """Mutable session state consumed by the runtime."""
 
     @property
     def session_file(self) -> Path | None: ...
