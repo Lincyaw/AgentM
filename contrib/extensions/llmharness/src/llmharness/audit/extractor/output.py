@@ -26,6 +26,7 @@ class RawExtractorOutput:
     events: tuple[Event, ...]
     edges: tuple[Edge, ...]
     dropped_edges: tuple[dict[str, Any], ...]
+    block_plan: tuple[dict[str, Any], ...]
 
     @classmethod
     def from_state(cls, state: ExtractionState) -> RawExtractorOutput:
@@ -33,6 +34,7 @@ class RawExtractorOutput:
             events=tuple(state.events),
             edges=tuple(state.edges),
             dropped_edges=tuple(state.dropped_edges),
+            block_plan=tuple(state.block_plan),
         )
 
 

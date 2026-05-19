@@ -260,7 +260,6 @@ MANIFEST = ExtensionManifest(
 
 _DEFAULT_AUDIT_INTERVAL_TURNS = 3
 _DEFAULT_RECENT_VERDICTS = _et.RECENT_VERDICTS_FOR_AUDITOR
-_RECENT_GRAPH_SLICE_FOR_EXTRACTOR = _et.RECENT_GRAPH_SLICE_FOR_EXTRACTOR
 _DEFAULT_SHUTDOWN_TIMEOUT_S = 60.0
 _DEFAULT_MODE = "async"
 _DEFAULT_AUDIT_SUMMARY_THRESHOLD = 30
@@ -797,10 +796,11 @@ async def _drain_extractor(
 
     # Extend turn_texts with the source turns of every recent_graph
     # event so external_refs can be witnessed (their source side lives
-    # in prior firings' windows).
-    recent_graph_events = tuple(
-        branch_state.graph[-_RECENT_GRAPH_SLICE_FOR_EXTRACTOR:]
-    )
+    # in prior firings' windows). recent_graph carries the full prior
+    # graph — letting the LLM cite any earlier event, not just a tail
+    # window — so conclusions can attach back to the original evidence
+    # rather than whichever events happened to be in the last slice.
+    recent_graph_events = tuple(branch_state.graph)
     referenced_turns: set[int] = {
         t for e in recent_graph_events for t in e.source_turns
     }
@@ -810,6 +810,14 @@ async def _drain_extractor(
         if 0 <= t < len(messages):
             state.turn_texts[t] = _render_message_text(messages[t])
     state.recent_graph = recent_graph_events
+
+    # Globally-unique event ids: this firing's events must continue the
+    # global sequence rather than restart at 1. Pick the smallest id
+    # not yet present in the running graph (treat ids as a contiguous
+    # claim — a hole is fine, but reusing a live id is not).
+    state.next_event_id = (
+        max((g.id for g in branch_state.graph), default=0) + 1
+    )
 
     # Build the new-turn JSON window for the prompt + payload.
     new_turn_window = [
@@ -835,6 +843,7 @@ async def _drain_extractor(
         recent_graph_payload.append(entry)
 
     payload = {
+        "next_event_id": state.next_event_id,
         "new_turns": new_turn_window,
         "recent_graph": recent_graph_payload,
     }
@@ -917,6 +926,7 @@ async def _drain_extractor(
             "events": [e.to_dict() for e in output.events],
             "edges": [ed.to_dict() for ed in output.edges],
             "dropped_edges": list(output.dropped_edges),
+            "block_plan": list(output.block_plan),
         },
     )
 
@@ -1046,16 +1056,29 @@ async def _spawn_extractor_child(
     try:
         payload_json = json.dumps(payload, ensure_ascii=False, default=str)
         recent_n = len(payload.get("recent_graph") or [])
+        next_id = payload.get("next_event_id")
         directive = (
-            "Below is the firing input. Before calling submit_events, do "
-            f"the external_refs pass: recent_graph has {recent_n} entries "
+            "Below is the firing input. Workflow:\n"
+            "(1) Call submit_plan ONCE with the block_plan partitioning "
+            "the new-turn window. The plan is CoT scaffolding; structural "
+            "enforcement happens on the events you emit, not on the plan.\n"
+            "(2) Call submit_events_batch one or more times to append "
+            "events. Each batch is validated standalone — a hard reject "
+            "only invalidates THAT batch, previously accepted batches "
+            "stay. Set done=true on the final batch to terminate. "
+            "Internal events must be true branch points (in-degree>=2 "
+            "or out-degree>=2); passthrough (in=1, out=1) events are "
+            "rejected on done=true.\n"
+            f"(3) Start event ids at {next_id} and increment strictly — "
+            "do NOT restart at 1 and do NOT reuse any id from recent_graph.\n"
+            f"(4) external_refs pass: recent_graph has {recent_n} entries "
             "with source_turn_texts; for each event you emit, scan those "
             "texts for any literal token that also appears in this event's "
             "source_turns text. When you find one and the connection is "
-            "causally meaningful, emit an external_refs entry pointing to "
-            "that recent_graph entry by 1-based index. Do not skip this "
-            "pass; in a typical multi-turn investigation most evid events "
-            "in this firing answer a hyp/act from earlier firings.\n\n"
+            "causally meaningful, emit an external_refs entry whose "
+            "to_recent_event_id copies that recent_graph entry's .id field. "
+            "In a typical multi-turn investigation most evid events in this "
+            "firing answer a hyp/act from earlier firings.\n\n"
             + payload_json
         )
         messages = await child.prompt(directive)

@@ -62,6 +62,7 @@ MESSAGE = "message"
 # Audit cadence / window sizes. The adapter emits payloads using these
 # slices at firing time; the dataset exporter MUST reproduce the same
 # cuts when reconstructing each case, otherwise the recorded inputs and
-# the runtime inputs diverge.
-RECENT_GRAPH_SLICE_FOR_EXTRACTOR = 20
+# the runtime inputs diverge. recent_graph is no longer truncated — the
+# extractor sees the full prior graph each firing — so only the auditor
+# tail constant lives here.
 RECENT_VERDICTS_FOR_AUDITOR = 5

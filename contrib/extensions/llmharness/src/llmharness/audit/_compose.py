@@ -33,6 +33,7 @@ def compose_audit_extensions(
     cards_tools_config: dict[str, Any] | None,
     observability_config: dict[str, Any] | None,
     otel_tracing_config: dict[str, Any] | None = UNSET,
+    submit_tool_config: dict[str, Any] | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     out: list[tuple[str, dict[str, Any]]] = []
 
@@ -60,7 +61,9 @@ def compose_audit_extensions(
     if cards_cfg is not None:
         out.append((_CARDS_TOOLS_MODULE, dict(cards_cfg)))
 
-    out.append((submit_tool_module, {}))
+    out.append(
+        (submit_tool_module, dict(submit_tool_config) if submit_tool_config else {})
+    )
     out.append(
         (
             SYSTEM_PROMPT_MODULE,
