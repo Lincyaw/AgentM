@@ -148,6 +148,17 @@ class ChannelManager:
         )
         self._tasks.append(task)
 
+    def remove_channel(self, name: str) -> BaseChannel | None:
+        """Remove and return the channel registered under ``name``.
+
+        Returns ``None`` if no channel was registered. Public so
+        callers (notably :class:`WireBridge`) don't have to reach into
+        the private ``_channels`` dict. Does NOT stop the channel —
+        the caller owns lifecycle, same contract as
+        :meth:`inject_channel`.
+        """
+        return self._channels.pop(name, None)
+
     async def _safe_start(self, ch: BaseChannel) -> None:
         try:
             await ch.start()
