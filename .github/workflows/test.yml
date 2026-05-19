@@ -30,10 +30,15 @@ jobs:
         run: uv sync --frozen
 
       - name: Lint (ruff)
-        run: uv run ruff check src/ contrib/channels/src/
+        run: uv run ruff check src/ contrib/channels/src/ contrib/extensions/llmharness/src contrib/scenarios/rca/src
 
       - name: Type check (mypy)
-        run: uv run mypy src/ contrib/channels/src/
+        # Workspace members ship their own mypy config; check each from its
+        # own root so per-package overrides apply.
+        run: |
+          uv run mypy src/ contrib/channels/src/
+          cd contrib/extensions/llmharness && uv run mypy src/llmharness
+          cd ../../scenarios/rca && uv run mypy src/agentm_rca
 
       - name: Tests (pytest)
         run: uv run pytest --tb=short
