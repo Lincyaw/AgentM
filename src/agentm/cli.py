@@ -25,14 +25,57 @@ from agentm.core.lib.render import final_summary
 from agentm.core.abi.events import ExtensionInstallEvent
 
 
-# Walk up from cwd to find the nearest .env. Existing env vars win
-# (override=False), so explicit ``KEY=... agentm`` still beats file values.
-_cur = Path.cwd().resolve()
-for _candidate in (_cur, *_cur.parents):
-    _env_path = _candidate / ".env"
-    if _env_path.is_file():
-        load_dotenv(_env_path, override=False)
-        break
+# Default scenario when the user does not pass ``--scenario`` and does
+# not opt out via ``--no-extensions``. Module-level constant so it can
+# be patched from tests and referenced by env-var fallthrough below.
+DEFAULT_SCENARIO = "general_purpose"
+
+_PACKAGE_WALK_DEPTH = 8
+
+
+def autoload_dotenv(cwd: Path | None = None) -> None:
+    """Load ``.env`` files for the ``agentm`` CLI.
+
+    Honoured order (each call uses ``override=False`` so the first value
+    wins across both files and the already-set process env):
+
+    1. Process env (always wins — explicit ``KEY=... agentm`` keeps top
+       priority because ``load_dotenv(..., override=False)`` is a no-op
+       on already-set names).
+    2. ``<cwd>/.env`` — cwd-local file wins on conflict with the
+       workspace-root file because it is loaded first.
+    3. Workspace-root ``.env`` — the ``.env`` next to the nearest
+       ``[tool.uv.workspace]`` pyproject, walked up at most
+       ``_PACKAGE_WALK_DEPTH`` levels from ``cwd``.
+
+    Disabled entirely when ``AGENTM_SKIP_DOTENV`` is truthy. The env-var
+    check happens **before** any filesystem call (including ``Path.cwd()``
+    resolution of the caller-supplied path) so tests can short-circuit
+    without leaking cwd-noise into the candidate list.
+    """
+
+    if os.environ.get("AGENTM_SKIP_DOTENV"):
+        return
+    base = (cwd if cwd is not None else Path.cwd()).resolve()
+    candidates: list[Path] = [base / ".env"]
+    walker = base
+    for _ in range(_PACKAGE_WALK_DEPTH):
+        manifest = walker / "pyproject.toml"
+        if manifest.exists():
+            try:
+                if "[tool.uv.workspace]" in manifest.read_text(encoding="utf-8"):
+                    workspace_env = walker / ".env"
+                    if workspace_env != candidates[0]:
+                        candidates.append(workspace_env)
+                    break
+            except OSError:
+                pass
+        if walker.parent == walker:
+            break
+        walker = walker.parent
+    for path in candidates:
+        if path.is_file():
+            load_dotenv(path, override=False)
 
 
 def _print_final(
@@ -111,17 +154,36 @@ def _parse_extensions(values: list[str] | None) -> list[tuple[str, dict[str, Any
     return out
 
 
-def _provider_default() -> str:
-    return os.environ.get(
-        "AGENTM_PROVIDER", DEFAULT_PROVIDER_REGISTRY.default_provider().id
-    )
+def _resolve_provider_model_cwd(
+    *,
+    provider_flag: str | None,
+    model_flag: str | None,
+    cwd_flag: str | None,
+    registry: ProviderRegistry = DEFAULT_PROVIDER_REGISTRY,
+) -> tuple[str, str, str]:
+    """Apply ``CLI flag > env var > built-in default`` for provider/model/cwd.
 
+    Resolved at command-invocation time, NOT at module import — so:
 
-def _model_default() -> str:
-    provider = _provider_default()
-    return os.environ.get(
-        "AGENTM_MODEL", DEFAULT_PROVIDER_REGISTRY.default_model(provider)
+    * ``--provider openai`` (without ``AGENTM_MODEL``) picks the OpenAI
+      registry's ``default_model`` rather than inheriting whichever
+      provider happened to win at import time;
+    * ``--cwd`` honours the directory the user names, not the process
+      cwd when ``agentm`` was first imported.
+    """
+
+    provider = (
+        provider_flag
+        or os.environ.get("AGENTM_PROVIDER")
+        or registry.default_provider().id
     )
+    model = (
+        model_flag
+        or os.environ.get("AGENTM_MODEL")
+        or registry.default_model(provider)
+    )
+    cwd = cwd_flag or os.environ.get("AGENTM_CWD") or os.getcwd()
+    return provider, model, cwd
 
 
 def _make_default_session_store(cwd: str) -> SessionStore:
@@ -369,35 +431,41 @@ def run_cmd(
         ),
     ] = None,
     provider: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--provider",
             help=(
-                "LLM provider to register. Defaults to the provider registry. Builtins include 'anthropic' (respects "
+                "LLM provider to register. Defaults (via AGENTM_PROVIDER or "
+                "the provider registry) include 'anthropic' (respects "
                 "ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY) or 'openai' (respects "
                 "OPENAI_BASE_URL/OPENAI_API_KEY plus WARPGATE_TICKET and "
                 "OPENAI_VERIFY_SSL for self-signed gateways like Warpgate)."
             ),
         ),
-    ] = _provider_default(),
+    ] = None,
     model: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--model",
             help=(
-                "Model id passed to the active provider. Defaults to the "
-                "selected provider registry descriptor; override for alternates (e.g. "
-                "'gpt-4o', 'Kimi-K2', 'deepseek-chat')."
+                "Model id passed to the active provider. Defaults (via "
+                "AGENTM_MODEL or the registry's default_model for the "
+                "resolved provider) include 'claude-sonnet-4-6' / 'gpt-4o'; "
+                "override for alternates (e.g. 'Kimi-K2', 'deepseek-chat')."
             ),
         ),
-    ] = _model_default(),
+    ] = None,
     cwd: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--cwd",
-            help="Working directory exposed to extensions.",
+            help=(
+                "Working directory exposed to extensions. Defaults to "
+                "AGENTM_CWD when set, otherwise the process cwd at "
+                "invocation time."
+            ),
         ),
-    ] = os.getcwd(),
+    ] = None,
     quiet: Annotated[
         bool,
         typer.Option("--quiet", help="Suppress final-output printout."),
@@ -428,13 +496,28 @@ def run_cmd(
 ) -> None:
     """Send a single prompt and print the agent's final text."""
 
+    # Resolve provider/model/cwd at invocation time so ``--cwd /b`` actually
+    # selects ``/b/.env`` (rather than whichever directory the process was
+    # launched from), and so ``--provider openai`` picks OpenAI's default
+    # model instead of inheriting another provider's default that happened
+    # to be frozen into the typer signature at import.
+    provider, model, cwd = _resolve_provider_model_cwd(
+        provider_flag=provider,
+        model_flag=model,
+        cwd_flag=cwd,
+    )
+    # Run dotenv autoload AFTER --cwd is known: ``cd /a && agentm --cwd /b``
+    # must consult ``/b/.env``, not ``/a/.env``. Honours AGENTM_SKIP_DOTENV.
+    autoload_dotenv(Path(cwd))
+
     extra_extensions = _parse_extensions(extension)
-    # No --scenario? Default to the curated minimal set under
-    # ``contrib/scenarios/general_purpose/`` rather than auto-discovering
-    # every builtin atom. Self-modify, evolution/query, and other
-    # specialised atoms live in dedicated scenarios that compose on top.
+    # No --scenario? Resolve via AGENTM_SCENARIO, falling back to the
+    # curated minimal set under ``contrib/scenarios/general_purpose/``
+    # rather than auto-discovering every builtin atom. Self-modify,
+    # evolution/query, and other specialised atoms live in dedicated
+    # scenarios that compose on top.
     if scenario is None and not no_extensions:
-        scenario = "general_purpose"
+        scenario = os.environ.get("AGENTM_SCENARIO") or DEFAULT_SCENARIO
 
     if not prompt:
         print(
