@@ -13,6 +13,14 @@ dependencies = [
     "pathspec>=1.0.4",
     "typer>=0.25.1",
     "python-dotenv>=1.0",
+    # Backs the ``otel_tracing`` atom. Picks up standard ``OTEL_*`` env
+    # vars; ships spans to an OTel collector over OTLP (gRPC by default,
+    # HTTP/protobuf if configured). Ships by default so the atom never
+    # falls back to its no-op path; if you really don't want OTel
+    # dependencies, run with the atom disabled.
+    "opentelemetry-api>=1.27.0",
+    "opentelemetry-sdk>=1.27.0",
+    "opentelemetry-exporter-otlp>=1.27.0",
 ]
 
 [project.optional-dependencies]
@@ -20,15 +28,6 @@ dependencies = [
 # Install with: ``uv sync --extra agent-env``.
 agent-env = [
     "arl-env>=0.2.0",
-]
-
-# Backs the ``otel_tracing`` atom. Install with: ``uv sync --extra otel``.
-# Picks up standard ``OTEL_*`` env vars; ships spans to an OTel collector
-# over OTLP (gRPC by default, HTTP/protobuf if configured).
-otel = [
-    "opentelemetry-api>=1.27.0",
-    "opentelemetry-sdk>=1.27.0",
-    "opentelemetry-exporter-otlp>=1.27.0",
 ]
 
 [dependency-groups]

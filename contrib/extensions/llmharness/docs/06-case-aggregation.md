@@ -12,8 +12,13 @@ A **case** = one main-agent session run on one input. Identified by
 
 ## 1. CLI
 
+Three input layouts via subcommands; every command writes the same
+canonical case-directory shape.
+
+### `replay` — live-run sidecars
+
 ```bash
-llmharness-aggregate \
+llmharness-aggregate replay \
   --cwd /path/to/run-dir \
   --out ./cases
 ```
@@ -26,7 +31,7 @@ file (no destructive cleanup of stray files).
 Aggregate a single session:
 
 ```bash
-llmharness-aggregate \
+llmharness-aggregate replay \
   --cwd /path/to/run-dir \
   --root-session-id abc123def \
   --out ./cases
@@ -38,7 +43,7 @@ missing and `case_id` falls back to the session id. Inject the
 sample-id manually:
 
 ```bash
-llmharness-aggregate \
+llmharness-aggregate replay \
   --cwd . \
   --root-session-id eddfe314... \
   --sample-id ts0-mysql-corrupt-kwx8n5 \
@@ -49,6 +54,37 @@ llmharness-aggregate \
 
 The overrides win over any meta sidecar — useful when re-tagging a
 session whose binding was forgotten.
+
+### `eval-db` — output of `llmharness adapter eval-db extract`
+
+```bash
+llmharness-aggregate eval-db \
+  --src runs/eval_db/openrca-2-lite-n500-t20 \
+  --out ./cases
+```
+
+Walks every `<row_id>/records.jsonl` under `--src` (a ReplayRecord
+stream, same shape as live-run sidecars) and writes one case per row.
+Each row's `meta.json` supplies `exp_id` / `row_id` / `dataset` for
+sample-id derivation; the default template is `{exp_id}-row{row_id}`.
+
+Slice for spot-checking:
+
+```bash
+llmharness-aggregate eval-db --src ... --out ./cases \
+  --id 1 --id 7 --id 42         # specific rows only
+llmharness-aggregate eval-db --src ... --out ./cases --limit 5
+```
+
+### `one` — a single replay-format JSONL file
+
+```bash
+llmharness-aggregate one \
+  --replay-path /tmp/abc.jsonl \
+  --out ./cases \
+  --sample-id rca-mysql-001 \
+  --dataset-name rca-openrca2-lite
+```
 
 ---
 
@@ -188,7 +224,7 @@ written. Aggregation still works — pass `--sample-id` /
 rca llm-eval run config.yaml -a agentm --ak scenario=rca:harness.sync -l 1
 # replay sidecar lands under $AGENTM_CWD/.agentm/audit_replay/<sid>.jsonl
 
-llmharness-aggregate \
+llmharness-aggregate replay \
   --cwd "$AGENTM_CWD" \
   --root-session-id <sid> \
   --sample-id <sample_id_from_dataset> \

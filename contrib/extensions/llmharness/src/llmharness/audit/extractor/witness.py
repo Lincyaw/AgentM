@@ -34,11 +34,19 @@ def witness_data(
     src_text: str,
     dst_text: str,
 ) -> str | None:
-    """Verify every entity in ``cited_entities`` appears in both src and dst.
+    """Verify every entity in ``cited_entities`` appears in src OR dst.
 
     Returns ``None`` on pass, a structured error string on first failure.
     Empty ``cited_entities`` is rejected — callers must enforce
     non-emptiness before calling so the error is precise.
+
+    Earlier versions required the witness in BOTH turn texts. That rule
+    systematically dropped ``act → evid`` edges where the tool_call text
+    names a table / tool / file but the tool_result text is just data —
+    a structural mismatch that punished the LLM for picking the most
+    natural anchor. The relaxed rule keeps the "must literally exist in
+    the trace" guarantee (no pure hallucination) while accepting edges
+    where the anchor sits on only one side.
     """
 
     if not cited_entities:
@@ -49,10 +57,11 @@ def witness_data(
         ent_norm = normalize(entity)
         if not ent_norm:
             return "witness/data: cited entity is empty after normalization"
-        if ent_norm not in src_norm:
-            return f"witness/data: cited entity {entity!r} not found in normalized src_turns text"
-        if ent_norm not in dst_norm:
-            return f"witness/data: cited entity {entity!r} not found in normalized dst_turns text"
+        if ent_norm not in src_norm and ent_norm not in dst_norm:
+            return (
+                f"witness/data: cited entity {entity!r} not found in normalized "
+                "src_turns OR dst_turns text"
+            )
     return None
 
 
@@ -61,10 +70,11 @@ def witness_ref(
     src_text: str,
     dst_text: str,
 ) -> str | None:
-    """Verify ``cited_quote`` appears verbatim (mod normalize) in both texts.
+    """Verify ``cited_quote`` appears verbatim (mod normalize) in src OR dst.
 
     Returns ``None`` on pass, a structured error string on first failure.
-    Empty quote is rejected up front.
+    Empty quote is rejected up front. See :func:`witness_data` for the
+    rationale behind the single-sided rule.
     """
 
     if not cited_quote:
@@ -74,10 +84,11 @@ def witness_ref(
         return "witness/ref: cited_quote is empty after normalization"
     src_norm = normalize(src_text)
     dst_norm = normalize(dst_text)
-    if quote_norm not in src_norm:
-        return f"witness/ref: cited_quote {cited_quote!r} not found in normalized src_turns text"
-    if quote_norm not in dst_norm:
-        return f"witness/ref: cited_quote {cited_quote!r} not found in normalized dst_turns text"
+    if quote_norm not in src_norm and quote_norm not in dst_norm:
+        return (
+            f"witness/ref: cited_quote {cited_quote!r} not found in normalized "
+            "src_turns OR dst_turns text"
+        )
     return None
 
 

@@ -77,7 +77,7 @@ class ExternalRef:
     source event's source-turns text and this event's source-turns text.
     """
 
-    to_recent_graph_index: int  # 1-based, into the recent_graph slice presented this firing
+    to_recent_event_id: int  # global event id from a recent_graph[i].id
     kind: EdgeKind
     reason: str = ""
     cited_entities: tuple[str, ...] = ()
@@ -85,7 +85,7 @@ class ExternalRef:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "to_recent_graph_index": self.to_recent_graph_index,
+            "to_recent_event_id": self.to_recent_event_id,
             "kind": self.kind.value,
             "reason": self.reason,
             "cited_entities": list(self.cited_entities),
@@ -95,7 +95,7 @@ class ExternalRef:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ExternalRef:
         return cls(
-            to_recent_graph_index=int(data["to_recent_graph_index"]),
+            to_recent_event_id=int(data["to_recent_event_id"]),
             kind=EdgeKind(data["kind"]),
             reason=str(data.get("reason", "")),
             cited_entities=tuple(str(e) for e in (data.get("cited_entities") or [])),
