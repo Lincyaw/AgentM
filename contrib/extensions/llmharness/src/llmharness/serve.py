@@ -103,15 +103,15 @@ class _Handler(BaseHTTPRequestHandler):
 
     # --- dispatch ---------------------------------------------------------
 
-    def do_OPTIONS(self) -> None:  # noqa: N802 — http.server contract
+    def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self._cors()
         self.end_headers()
 
-    def do_HEAD(self) -> None:  # noqa: N802
+    def do_HEAD(self) -> None:
         self.do_GET()
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         parts = [unquote(p) for p in self.path.split("?", 1)[0].strip("/").split("/") if p]
         try:
             self._route(parts)
@@ -236,7 +236,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     # --- logging ----------------------------------------------------------
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+    def log_message(self, format: str, *args: Any) -> None:
         _log.info("%s - %s", self.address_string(), format % args)
 
 
