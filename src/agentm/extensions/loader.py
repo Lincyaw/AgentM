@@ -61,6 +61,7 @@ def _candidate_roots() -> list[Path]:
     """
 
     roots: list[Path] = []
+    # TODO(doc): add AGENTM_PROJECT_ROOT to the CLAUDE.md env-var table.
     project_root_env = os.environ.get("AGENTM_PROJECT_ROOT")
     if project_root_env:
         roots.append(Path(project_root_env))
