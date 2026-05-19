@@ -176,7 +176,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._not_found(f"case {case_id} not found")
             return
         # ``GET /api/cases/<id>/{meta,main_agent,verdicts,trajectory}``
-        flat = {
+        flat: dict[tuple[str, ...], tuple[str, str]] = {
             ("meta",): ("meta.json", "application/json; charset=utf-8"),
             ("main_agent",): ("main_agent.jsonl", "application/x-ndjson; charset=utf-8"),
             ("verdicts",): ("verdicts.jsonl", "application/x-ndjson; charset=utf-8"),
