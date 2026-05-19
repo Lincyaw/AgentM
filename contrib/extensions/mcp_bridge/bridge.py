@@ -41,6 +41,10 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "mcp_bridge: 'servers' must be a non-empty list of server "
             "specifications"
         )
+    # Parse first; consume the test seam only on the path where it is
+    # actually used. Previously ``consume_test_session_factory`` ran
+    # before ``parse_server_spec`` — a malformed spec would silently
+    # drain the factory and the next ``install()`` would get nothing.
     specs: list[ServerSpec] = [parse_server_spec(s) for s in servers_raw]
 
     naming_template = str(config.get("naming") or _DEFAULT_NAMING)
@@ -53,6 +57,8 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     # Module-level test hook (single-shot, consumed here). Production
     # callers never set this; the public config schema rejects it.
+    # Consumed *after* parse_server_spec so a parse failure leaves the
+    # factory in place for the next install() attempt.
     session_factory = consume_test_session_factory()
 
     manager = MCPSessionManager()
