@@ -96,7 +96,7 @@ session_create → for each configured extension: call install(api, config)
               → session_shutdown: emit event; extensions clean up via on("session_shutdown")
 ```
 
-Extensions are stateless from the harness's view. If they need state, they capture it in closures or attach it via `api.events` (cross-extension EventBus).
+Extensions are stateless from the runtime's view. If they need state, they capture it in closures or attach it via `api.events` (cross-extension EventBus).
 
 ### 2.3 Loading
 
@@ -161,8 +161,8 @@ class ExtensionAPI(Protocol):
 ```
 
 `add_observer` is the typed surface for passive event-bus observation; atoms
-must not patch `EventBus` internals. `spawn_child_session` accepts the legacy
-dataclass or a kwargs mapping so atoms do not import harness internals.
+must not patch `EventBus` internals. `spawn_child_session` accepts an
+`AgentSessionConfig` or a kwargs mapping so atoms do not import runtime internals.
 `set_service` / `get_service` provide a per-session registry for atom-owned
 state that should not live in module globals.
 
@@ -518,7 +518,7 @@ Provider re-use: a child session is constructed with `provider=parent.provider` 
 To honour `pluggable-architecture.md` §3.2 (acceptance scenario 2 — bash over SSH), the `general_purpose` scenario's `read`/`bash`/`edit`/`write` tools must NOT call `subprocess`/`pathlib` directly. Instead:
 
 ```python
-# src/agentm/core/abi/operations.py  — Protocols (atom + harness import)
+# src/agentm/core/abi/operations.py  — Protocols (atom + runtime import)
 class FileOperations(Protocol):
     async def read_file(self, path: str) -> bytes: ...
     async def access(self, path: str) -> bool: ...
@@ -560,7 +560,7 @@ It returns the new entry id (compaction needs the id to build parent_id chains).
 
 ### 10b.8 cost_budget overflow mechanism
 
-`cost_budget` raises a custom event `cost_budget_exceeded` (carrying `{used: float, limit: float, currency: str}`) when accumulated cost crosses the limit. The agent loop subscribes (in `AgentSession.prompt`) to this channel and, on first emission, flips an internal flag that causes the next iteration to terminate with `agent_end(stop_reason="budget")`. Pure event-bus-based — no exceptions thrown across handler boundaries. Document the channel name and payload in `harness/events.py`.
+`cost_budget` raises a custom event `cost_budget_exceeded` (carrying `{used: float, limit: float, currency: str}`) when accumulated cost crosses the limit. The agent loop subscribes (in `AgentSession.prompt`) to this channel and, on first emission, flips an internal flag that causes the next iteration to terminate with `agent_end(stop_reason="budget")`. Pure event-bus-based — no exceptions thrown across handler boundaries. Document the channel name and payload in `core/abi/events.py`.
 
 ### 10b.9 plan_mode as a scenario recipe (not an atom)
 
@@ -671,7 +671,7 @@ Discovery is **memoized per process** so production loads pay the directory walk
 10. AST hygiene rejects private ExtensionAPI reflection, ExtensionAPI attribute
    overwrites, mutable module-level dict/list/set globals without `Final`,
    f-string dynamic imports under `agentm.*`, and `isinstance` downcasts to
-   concrete harness service classes. Atoms must consume harness capabilities
+   concrete runtime service classes. Atoms must consume runtime capabilities
    through ExtensionAPI and Protocol methods.
 
 Test integration: `tests/unit/extensions/test_extension_contract.py` calls `validate_builtin()` and fails the suite on any issue. **This is the gate every new extension PR must pass mechanically — an agent self-editing an extension knows it broke the contract before any human reads the diff.**
@@ -682,7 +682,7 @@ Adding a new atom = exactly one new file at `src/agentm/extensions/builtin/<name
 
 - `agentm/extensions/loader.py` (auto-discovery)
 - `agentm/extensions/__init__.py` (public surface stays fixed)
-- Any harness file
+- Any runtime file (under `src/agentm/core/runtime/`)
 - Any other extension
 
 The PR may add **one** test file under `tests/unit/extensions/builtin/<name>/test_*.py` (path locked, §10b.10) plus optionally edit a scenario YAML to opt the new atom in. That is the entire allowable diff surface.
