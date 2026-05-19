@@ -121,10 +121,18 @@ async def create_agent_session(
         session_manager,
         loop_config_getter=lambda: configured_loop_config,
     )
+    from agentm.core.runtime.resource_writer import DEFAULT_PROTECTED_BRANCHES
+
     resource_writer = config.resource_writer or GitBackedResourceWriter(
         cwd=config.cwd,
         session_id=session_id,
         bus=bus,
+        auto_commit=config.auto_commit,
+        protected_branches=(
+            config.protected_branches
+            if config.protected_branches is not None
+            else DEFAULT_PROTECTED_BRANCHES
+        ),
     )
 
     _configure_manifest(config.cwd)

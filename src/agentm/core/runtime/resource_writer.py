@@ -33,6 +33,37 @@ from agentm.core.abi.events import ResourceWriteEvent
 logger = logging.getLogger(__name__)
 
 
+# Author / committer identity overrides leak from the user's shell into git
+# subprocesses by default; per `git-commit(1)` docs, GIT_AUTHOR_NAME silently
+# overrides the `--author=` flag. We strip them so the writer's identity
+# (`agent <session_id@agentm>`) is preserved verbatim. GPG_TTY is stripped so
+# a global `commit.gpgsign=true` can't block on a passphrase prompt — the
+# matching `commit.gpgsign=false` override is set per-call where applicable.
+_GIT_ENV_BLOCKLIST: tuple[str, ...] = (
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_AUTHOR_DATE",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+    "GIT_COMMITTER_DATE",
+    "GPG_TTY",
+)
+
+
+DEFAULT_PROTECTED_BRANCHES: frozenset[str] = frozenset({"main", "master"})
+
+
+class ProtectedBranchError(RuntimeError):
+    """Raised internally to signal a refusal to commit on a protected branch."""
+
+    def __init__(self, branch: str) -> None:
+        super().__init__(
+            f"refusing to auto-commit to protected branch {branch!r}; "
+            "pass --no-auto-commit or switch branches"
+        )
+        self.branch = branch
+
+
 @dataclass(frozen=True, slots=True)
 class GitCommandResult:
     stdout: str
@@ -102,10 +133,14 @@ class GitBackedResourceWriter:
         cwd: str,
         session_id: str,
         bus: EventBus,
+        auto_commit: bool = True,
+        protected_branches: frozenset[str] = DEFAULT_PROTECTED_BRANCHES,
     ) -> None:
         self._cwd = Path(cwd).resolve()
         self._session_id = session_id
         self._bus = bus
+        self._auto_commit = auto_commit
+        self._protected_branches = protected_branches
         self._git_prefix: tuple[str, ...] = ()
         self._shadow_git_dir = self._cwd / ".agentm" / "repo"
         self._advisory_mode = False
@@ -115,6 +150,13 @@ class GitBackedResourceWriter:
         git_bin = shutil.which("git")
         if git_bin is None:
             self._enter_advisory_mode("git binary missing")
+            return
+
+        # auto_commit=False short-circuits everything below: we treat the
+        # working tree as read-write-through and never call `git commit`.
+        # Managed paths fall into the existing advisory-mode write-through.
+        if not auto_commit:
+            self._enter_advisory_mode("auto_commit disabled")
             return
 
         if (self._cwd / ".git").exists():
@@ -407,6 +449,12 @@ class GitBackedResourceWriter:
             else:
                 unmanaged_ops.append((op, resolved))
 
+        # Refuse the entire batch up-front if any managed op would commit to
+        # a protected branch — surfacing the failure before mutating any
+        # unmanaged paths keeps the batch atomic from the caller's view.
+        if managed_ops:
+            await asyncio.to_thread(self._check_protected_branch)
+
         unmanaged_restore: list[_RestoreState] = []
         try:
             for op, resolved in unmanaged_ops:
@@ -474,6 +522,17 @@ class GitBackedResourceWriter:
         resolved = self._resolve_path(path)
         relative = resolved.relative_to(self._cwd)
         relative_posix = PurePosixPath(relative).as_posix()
+        try:
+            await asyncio.to_thread(self._check_protected_branch)
+        except ProtectedBranchError as exc:
+            return WriteResult(
+                path=path,
+                path_class="managed",
+                committed=False,
+                commit_sha_before=None,
+                commit_sha_after=None,
+                error=str(exc),
+            )
         await asyncio.to_thread(self._ensure_git_ready)
         pre_sha = await asyncio.to_thread(self._head_sha)
         restore_exists = resolved.exists()
@@ -564,12 +623,36 @@ class GitBackedResourceWriter:
 
     def _ensure_git_ready(self) -> None:
         if self._initial_snapshot_needed:
+            self._check_protected_branch()
             self._run_git_sync(("add", "-A"))
             if self._is_index_clean():
                 self._commit("agentm: initial snapshot", "agent", allow_empty=True)
             else:
                 self._commit("agentm: initial snapshot", "agent")
             self._initial_snapshot_needed = False
+
+    def _is_real_user_repo(self) -> bool:
+        """True when commits would land in the user's real repo (no shadow prefix)."""
+        return self._git_prefix == ()
+
+    def _current_branch_sync(self) -> str | None:
+        """Resolve current branch via symbolic-ref. Returns None on detached HEAD."""
+        try:
+            result = self._run_git_sync(("symbolic-ref", "--short", "HEAD"))
+        except GitOperationError:
+            return None
+        branch = result.stdout.strip()
+        return branch or None
+
+    def _check_protected_branch(self) -> None:
+        """Raise ProtectedBranchError if we'd commit on a protected branch of user's repo."""
+        if not self._is_real_user_repo():
+            return
+        if not self._protected_branches:
+            return
+        branch = self._current_branch_sync()
+        if branch is not None and branch in self._protected_branches:
+            raise ProtectedBranchError(branch)
 
     def _has_head_sync(self) -> bool:
         try:
@@ -733,6 +816,19 @@ class GitBackedResourceWriter:
     ) -> GitCommandResult:
         command = ["git", *self._git_prefix, *args]
         merged_env = os.environ.copy()
+        # Strip identity / signing leaks from the user's shell so the
+        # writer's `--author` and synthetic committer identity are not
+        # silently overridden (see `_GIT_ENV_BLOCKLIST` docstring).
+        for key in _GIT_ENV_BLOCKLIST:
+            merged_env.pop(key, None)
+        # For the shadow-repo path we own the repo and don't want the
+        # user's ~/.gitconfig (commit.gpgsign, core.hooksPath, signingkey,
+        # ...) to interfere with internal commits. For the real-user-repo
+        # path, leave global config alone — that's the user's repo and
+        # their conventions apply.
+        if not self._is_real_user_repo():
+            merged_env.setdefault("GIT_CONFIG_GLOBAL", "/dev/null")
+            merged_env.setdefault("GIT_CONFIG_SYSTEM", "/dev/null")
         if env is not None:
             merged_env.update(env)
         completed = subprocess.run(
@@ -755,9 +851,11 @@ class GitBackedResourceWriter:
 
 __all__ = [
     "BatchHandle",
+    "DEFAULT_PROTECTED_BRANCHES",
     "GitBackedResourceWriter",
     "GitOperationError",
     "PathClass",
+    "ProtectedBranchError",
     "ResourceWriter",
     "WriteResult",
     "WriterAuthor",

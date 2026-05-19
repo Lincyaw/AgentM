@@ -85,6 +85,22 @@ class AgentSessionConfig:
     (pre-atom-install) policy: `AtomReloader` and write-path tool atoms
     consume it via `api.get_resource_writer()`, but atoms cannot replace
     it via `register_*` because it must exist before atoms install."""
+
+    auto_commit: bool = True
+    """When False, the default `GitBackedResourceWriter` is constructed in
+    advisory mode: managed writes still land bytes-on-disk but no `git
+    commit` is ever issued. Lets callers safely point AgentM at a real
+    user repo without auto-modifying its history. Ignored when
+    `resource_writer` is explicitly supplied — the override is honoured
+    verbatim."""
+
+    protected_branches: frozenset[str] | None = None
+    """Branch names that the default writer refuses to auto-commit to when
+    pointed at the user's real repo. `None` keeps the writer's built-in
+    default (`{'main', 'master'}`). An empty `frozenset()` disables the
+    guard entirely. The check is a no-op when `auto_commit` is False or
+    when commits flow through the internal shadow repo under
+    `.agentm/repo/`."""
     loop_config: LoopConfig | None = None
     bus: EventBus | None = None
 
