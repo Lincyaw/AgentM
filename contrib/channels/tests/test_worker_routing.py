@@ -82,7 +82,10 @@ def _make_inbound(
         body={
             "channel": channel,
             "chat_id": chat_id,
-            "sender_id": "u1",
+            # Bridge binds sender_id to the authenticated peer (issue
+            # #1 spoof guard); mirror peer_id so the envelope is
+            # accepted.
+            "sender_id": peer_id,
             "content": content,
         },
     )

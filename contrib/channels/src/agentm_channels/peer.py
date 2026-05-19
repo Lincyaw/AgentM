@@ -29,6 +29,24 @@ class PeerSession:
     # below high_water / 2.
     backpressure: bool = False
     capabilities: dict[str, object] = field(default_factory=dict)
+    # Authoritative principal bound to the peer at connect time. Used
+    # by the wire bridge to refuse chat clients that try to spoof
+    # someone else's ``sender_id`` in inbound bodies. ``None`` means
+    # "derive from peer_id" — the current default for every transport
+    # (unix/peercred/ws/token) because none of them yet carry a
+    # distinct user identity. When a future authenticator does (e.g.
+    # OIDC subject claim), it should set this field directly so the
+    # bridge picks it up without code changes.
+    principal: str | None = None
+
+    @property
+    def bound_principal(self) -> str:
+        """The identity the bridge will accept as ``sender_id``.
+
+        Defaults to :attr:`peer_id` when no transport-level principal
+        was set. Centralised so callers don't reimplement the fallback.
+        """
+        return self.principal if self.principal is not None else self.peer_id
 
 
 class PeerRegistry:
