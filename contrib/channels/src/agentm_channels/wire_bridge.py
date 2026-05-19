@@ -72,6 +72,24 @@ log = logging.getLogger("agentm_channels.wire_bridge")
 DEFAULT_MAX_A2A_HOPS: int = 10
 
 
+class _ChannelSquattingRefused(Exception):
+    """Raised by :meth:`WireBridge._ensure_channel` when a second peer
+    tries to claim a ``channel_name`` already bound to a different peer.
+
+    Internal sentinel — the chat-originated inbound handler catches it
+    and turns it into a ``KIND_ERROR`` envelope back to the offender so
+    a misconfigured client gets a diagnostic instead of silent dropping.
+    """
+
+    def __init__(self, channel_name: str, bound_peer_id: str) -> None:
+        super().__init__(
+            f"channel_name {channel_name!r} already bound to peer "
+            f"{bound_peer_id!r}"
+        )
+        self.channel_name = channel_name
+        self.bound_peer_id = bound_peer_id
+
+
 class _WireChannel(BaseChannel):
     """Outbound sink for one wire peer.
 
@@ -272,7 +290,38 @@ class WireBridge:
         body = env.body if isinstance(env.body, dict) else {}
         channel_name = str(body.get("channel") or "")
         chat_id = str(body.get("chat_id") or "")
-        sender_id = str(body.get("sender_id") or peer_session.peer_id)
+        # Spoofing guard (issue #1): sender_id is bound to the
+        # authenticated peer's principal. A peer MAY omit sender_id
+        # entirely (we fill it in from the principal), but if it
+        # supplies one that disagrees we refuse the envelope rather
+        # than silently overwriting — silent overwrite hides attacks
+        # from observability.
+        bound_principal = peer_session.bound_principal
+        body_sender = body.get("sender_id")
+        if body_sender is not None and str(body_sender) != bound_principal:
+            log.warning(
+                "wire inbound rejected: sender_id=%r does not match "
+                "bound principal=%r (peer=%s id=%s)",
+                body_sender,
+                bound_principal,
+                peer_session.peer_id,
+                env.id,
+            )
+            await self._send_error(
+                peer_session.peer_id,
+                "sender_id_mismatch",
+                {
+                    "envelope_id": env.id,
+                    "correlation_id": env.correlation_id,
+                    "bound_principal": bound_principal,
+                    "detail": (
+                        "body.sender_id must equal the peer's authenticated "
+                        "principal; omit the field to have the gateway fill it"
+                    ),
+                },
+            )
+            return
+        sender_id = bound_principal
         content = str(body.get("content") or "")
         button_value_raw = body.get("button_value")
         button_value = (
@@ -285,7 +334,32 @@ class WireBridge:
                 env.id,
             )
             return
-        await self._ensure_channel(peer_session.peer_id, channel_name)
+        try:
+            await self._ensure_channel(peer_session.peer_id, channel_name)
+        except _ChannelSquattingRefused as exc:
+            log.warning(
+                "wire inbound rejected: channel_name=%r already bound to "
+                "peer=%s (rejecting peer=%s id=%s)",
+                channel_name,
+                exc.bound_peer_id,
+                peer_session.peer_id,
+                env.id,
+            )
+            await self._send_error(
+                peer_session.peer_id,
+                "channel_name_conflict",
+                {
+                    "envelope_id": env.id,
+                    "correlation_id": env.correlation_id,
+                    "channel_name": channel_name,
+                    "detail": (
+                        "channel_name is already bound to a different peer; "
+                        "pick a unique name or wait for the prior peer to "
+                        "disconnect"
+                    ),
+                },
+            )
+            return
         session_key = f"{channel_name}:{chat_id}"
         # Chat clients don't set root_session_key; fill it in here so
         # downstream peers (workers, peer_send fan-out) have a stable
@@ -313,6 +387,10 @@ class WireBridge:
             # AgentSession instead of starting a fresh one — the whole
             # point of session-as-routing-primary.
             forwarded_body = dict(body)
+            # Stamp the server-side bound sender_id onto the forwarded
+            # envelope so downstream workers see the authenticated
+            # principal, not whatever the peer originally put in body.
+            forwarded_body["sender_id"] = sender_id
             if resume_id is not None:
                 forwarded_body["resume_id"] = resume_id
             forwarded = Envelope(
@@ -586,6 +664,17 @@ class WireBridge:
         existing = self._peer_channels.get(peer_id)
         if existing == channel_name:
             return
+        # Squatting guard (issue #2): a different peer must not be able
+        # to take a name another live peer already owns. We reject the
+        # new claim with a typed exception so the caller can surface a
+        # diagnostic error envelope. The prior peer keeps its binding.
+        # TODO: per-peer channel-name allow-list (config-driven) would
+        # let operators pin "feishu"/"terminal" to specific peers. Out
+        # of scope here — the binding-by-first-claim policy is enough
+        # to close the silent-failure footgun.
+        bound_peer = self._channel_to_peer.get(channel_name)
+        if bound_peer is not None and bound_peer != peer_id:
+            raise _ChannelSquattingRefused(channel_name, bound_peer)
         if existing is not None:
             # Peer renamed; drop the old synthetic channel first.
             await self._drop_channel(existing)
@@ -608,7 +697,10 @@ class WireBridge:
         )
 
     async def _drop_channel(self, channel_name: str) -> None:
-        ch = self._manager.channels.pop(channel_name, None)
+        # Use the public manager API instead of reaching into the
+        # private ``channels`` dict — keeps the squatting-guard logic
+        # consistent with how channels are registered.
+        ch = self._manager.remove_channel(channel_name)
         # Drop reverse mapping if it points at any peer (we don't know
         # which one without a scan, but channel_name itself is the key).
         self._channel_to_peer.pop(channel_name, None)
