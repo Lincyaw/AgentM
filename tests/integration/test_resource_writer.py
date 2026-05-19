@@ -101,7 +101,10 @@ def _git(
 
 
 def _init_repo(root: Path) -> None:
-    _git(root, "init", "-q")
+    # Use a non-protected initial branch so the writer's protected-branch
+    # guard does not block legacy tests. Tests that exercise the guard
+    # explicitly check out `main` / `master` themselves.
+    _git(root, "init", "-q", "-b", "agent-tests")
     _git(root, "config", "user.name", "Test User")
     _git(root, "config", "user.email", "test@example.com")
     (root / "README.md").write_text("baseline\n", encoding="utf-8")
@@ -412,4 +415,140 @@ async def test_current_version_for_path_returns_commit_sha(tmp_path: Path) -> No
     assert result.commit_sha_after is not None
     assert writer.current_version_for_path("notes.md") == result.commit_sha_after
 
+
+def _seed_managed_skill(repo: Path) -> Path:
+    skill_path = repo / "skills" / "foo" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True, exist_ok=True)
+    skill_path.write_text("seed\n", encoding="utf-8")
+    _git(repo, "add", "skills/foo/SKILL.md")
+    _git(repo, "commit", "-m", "seed skill", "--quiet")
+    return skill_path
+
+
+@pytest.mark.asyncio
+async def test_protected_branch_refuses_managed_write_on_main(tmp_path: Path) -> None:
+    """Auto-commit must not land on `main` in the user's real repo."""
+
+    _init_repo(tmp_path)
+    skill_path = _seed_managed_skill(tmp_path)
+    _git(tmp_path, "checkout", "-q", "-B", "main")
+    before_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+    before_bytes = skill_path.read_bytes()
+
+    writer = GitBackedResourceWriter(
+        cwd=str(tmp_path),
+        session_id="protected-test",
+        bus=EventBus(),
+    )
+    result = await writer.write(
+        "skills/foo/SKILL.md",
+        b"hostile rewrite\n",
+        rationale="should be refused",
+    )
+
+    assert result.committed is False
+    assert result.error is not None
+    assert "protected branch" in result.error
+    assert "main" in result.error
+    assert skill_path.read_bytes() == before_bytes
+    assert _git(tmp_path, "rev-parse", "HEAD").stdout.strip() == before_sha
+
+
+@pytest.mark.asyncio
+async def test_protected_branch_allows_managed_write_on_feature_branch(
+    tmp_path: Path,
+) -> None:
+    """Non-protected branch in user's real repo writes and commits normally."""
+
+    _init_repo(tmp_path)
+    skill_path = _seed_managed_skill(tmp_path)
+    _git(tmp_path, "checkout", "-q", "-b", "feature/x")
+    before_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+    writer = GitBackedResourceWriter(
+        cwd=str(tmp_path),
+        session_id="feature-test",
+        bus=EventBus(),
+    )
+    result = await writer.write(
+        "skills/foo/SKILL.md",
+        b"feature rewrite\n",
+        rationale="land on feature branch",
+    )
+
+    after_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+    assert result.committed is True
+    assert result.error is None
+    assert after_sha != before_sha
+    assert skill_path.read_text(encoding="utf-8") == "feature rewrite\n"
+
+
+@pytest.mark.asyncio
+async def test_auto_commit_disabled_writes_without_committing(tmp_path: Path) -> None:
+    """`auto_commit=False` puts the writer in advisory mode: bytes land, no commit."""
+
+    _init_repo(tmp_path)
+    skill_path = _seed_managed_skill(tmp_path)
+    _git(tmp_path, "checkout", "-q", "-b", "feature/y")
+    log_before = _git(tmp_path, "log", "--oneline").stdout.strip().splitlines()
+
+    writer = GitBackedResourceWriter(
+        cwd=str(tmp_path),
+        session_id="no-auto-commit",
+        bus=EventBus(),
+        auto_commit=False,
+    )
+    result = await writer.write(
+        "skills/foo/SKILL.md",
+        b"advisory bytes\n",
+        rationale="should not commit",
+    )
+
+    log_after = _git(tmp_path, "log", "--oneline").stdout.strip().splitlines()
+    assert result.committed is False
+    assert result.error is None
+    assert skill_path.read_text(encoding="utf-8") == "advisory bytes\n"
+    assert len(log_after) == len(log_before)
+
+
+@pytest.mark.asyncio
+async def test_hostile_git_author_env_does_not_override_writer_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User shell's `GIT_AUTHOR_NAME` must not leak into the writer's commit."""
+
+    _init_repo(tmp_path)
+    skill_path = _seed_managed_skill(tmp_path)
+    _git(tmp_path, "checkout", "-q", "-b", "feature/z")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Hostile")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "hostile@evil.test")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Hostile")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "hostile@evil.test")
+
+    session_id = "identity-test"
+    writer = GitBackedResourceWriter(
+        cwd=str(tmp_path),
+        session_id=session_id,
+        bus=EventBus(),
+    )
+    result = await writer.write(
+        "skills/foo/SKILL.md",
+        b"identity check\n",
+        rationale="check author identity",
+    )
+
+    assert result.committed is True
+    log_line = _git(
+        tmp_path,
+        "log",
+        "--format=%an|%ae|%cn|%ce",
+        "-n",
+        "1",
+        "--",
+        "skills/foo/SKILL.md",
+    ).stdout.strip()
+    expected_email = f"{session_id}@agentm"
+    assert log_line == f"agent|{expected_email}|agent|{expected_email}"
+    assert skill_path.read_text(encoding="utf-8") == "identity check\n"
 

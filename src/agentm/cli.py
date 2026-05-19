@@ -186,6 +186,18 @@ def _resolve_provider_model_cwd(
     return provider, model, cwd
 
 
+def _auto_commit_default() -> bool:
+    """Read `AGENTM_AUTO_COMMIT` env var; truthy → True, 0/false/no → False.
+
+    Default when the var is unset: True (preserves existing sandbox
+    workflows where agentm auto-commits during sessions).
+    """
+    raw = os.environ.get("AGENTM_AUTO_COMMIT")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
 def _make_default_session_store(cwd: str) -> SessionStore:
     from agentm.core.runtime.session_bootstrap import make_default_session_store
 
@@ -262,6 +274,7 @@ def _build_session_config(
     continue_recent: bool = False,
     session_store: SessionStore | None = None,
     provider_registry: ProviderRegistry = DEFAULT_PROVIDER_REGISTRY,
+    auto_commit: bool = True,
 ) -> tuple[Any, SessionState]:
     from agentm.core.abi.session_config import AgentSessionConfig
 
@@ -300,6 +313,7 @@ def _build_session_config(
             session_manager=cast(Any, session_state),
             resource_loader=resource_loader,
             bus=bus,
+            auto_commit=auto_commit,
         ),
         session_state,
     )
@@ -320,6 +334,7 @@ async def run(
     quiet: bool,
     resume: str | None,
     continue_recent: bool,
+    auto_commit: bool = True,
     output: TextIO = sys.stdout,
 ) -> int:
     from agentm.core.runtime.session import AgentSession
@@ -340,6 +355,7 @@ async def run(
         bus=bus,
         resume=resume,
         continue_recent=continue_recent,
+        auto_commit=auto_commit,
     )
     if not quiet and session_manager.session_file is not None:
         print(f"INFO: session log: {session_manager.session_file}", file=sys.stderr)
@@ -493,6 +509,20 @@ def run_cmd(
             ),
         ),
     ] = False,
+    auto_commit: Annotated[
+        bool,
+        typer.Option(
+            "--auto-commit/--no-auto-commit",
+            help=(
+                "Whether the resource writer should auto-commit managed "
+                "writes to the working tree. When disabled the writer falls "
+                "back to advisory mode (bytes-on-disk, no `git commit`). "
+                "When enabled (default) the writer still refuses to commit "
+                "to protected branches ('main', 'master') in the user's real "
+                "repo. Reads `AGENTM_AUTO_COMMIT` when the flag is unset."
+            ),
+        ),
+    ] = _auto_commit_default(),
 ) -> None:
     """Send a single prompt and print the agent's final text."""
 
@@ -549,6 +579,7 @@ def run_cmd(
             quiet=quiet,
             resume=resume,
             continue_recent=continue_recent,
+            auto_commit=auto_commit,
         )
     )
     raise typer.Exit(code=rc)
