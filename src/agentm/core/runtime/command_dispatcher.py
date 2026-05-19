@@ -1,4 +1,4 @@
-"""Default harness slash-command dispatcher service."""
+"""Default runtime slash-command dispatcher service."""
 
 from __future__ import annotations
 

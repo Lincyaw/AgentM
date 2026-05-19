@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 def default_child_provider_factory(parent_provider: Any) -> tuple[str, dict[str, Any]]:
     """Return the spec for whichever atom claims the ``PROVIDER_INHERITOR``
     role. Looking up by role rather than by atom name lets a scenario ship
-    a customised provider-inheritor without editing the harness."""
+    a customised provider-inheritor without editing the runtime."""
 
     from agentm.core.abi.roles import PARENT_PROVIDER_CONFIG_KEY, PROVIDER_INHERITOR
     from agentm.extensions.discover import discover_by_role

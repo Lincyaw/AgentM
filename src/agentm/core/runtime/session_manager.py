@@ -1,6 +1,6 @@
 """Tree-shaped session storage, context reconstruction, and persistence.
 
-AgentM's v2 harness session model: append-only entries with parent
+AgentM's v2 runtime session model: append-only entries with parent
 pointers, a movable active leaf, branch-aware context reconstruction,
 and optional JSONL persistence.
 

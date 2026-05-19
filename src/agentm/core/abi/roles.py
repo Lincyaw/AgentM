@@ -1,13 +1,13 @@
 """Singleton-role identifiers + cross-boundary config keys.
 
-These constants name the harness "slots" an atom can fulfil. Each role
+These constants name the runtime "slots" an atom can fulfil. Each role
 is filled by exactly one atom per session; the discovery layer indexes
-atoms by ``MANIFEST.provides_role`` so the harness asks for a role
+atoms by ``MANIFEST.provides_role`` so the runtime asks for a role
 ("who is today's command parser?") rather than a specific atom name.
 
 Constants live in ``agentm.core.abi`` — *not* in any individual atom —
 because they cross the SDK/scenario boundary. A scenario that ships its
-own command parser needs the same role string the harness checks for.
+own command parser needs the same role string the runtime checks for.
 """
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ builtin module."""
 # --- Service registry keys -------------------------------------------------
 
 SLASH_COMMAND_DISPATCHER_SERVICE: Final = "slash_commands"
-"""``service_registry`` key under which the harness publishes the
+"""``service_registry`` key under which the runtime publishes the
 :class:`HarnessCommandDispatcher`. Atoms that need to invoke registered
 slash commands programmatically look it up via
 ``api.get_service(SLASH_COMMAND_DISPATCHER_SERVICE)``."""
