@@ -65,6 +65,10 @@ def bind_extractor_state(
     The new-turn window is delivered as the child's user message (see
     the adapter / replay runner) rather than substituted into the system
     prompt, so this helper has nothing to do with prompt text.
+
+    Note: ``witness_retry_budget`` is wired through
+    :func:`compose_extractor_extensions` (replay path) and the
+    extractor_tools atom config (live path), not through this helper.
     """
     out: list[tuple[str, dict[str, Any]]] = []
     for module, cfg in base_extensions:

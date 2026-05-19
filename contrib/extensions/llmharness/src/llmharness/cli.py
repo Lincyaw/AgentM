@@ -28,7 +28,6 @@ _VERDICT_ENTRY_TYPE = _et.VERDICT
 _EXTRACTOR_CURSOR_ENTRY_TYPE = _et.EXTRACTOR_CURSOR
 _MESSAGE_ENTRY_TYPE = _et.MESSAGE
 
-_RECENT_GRAPH_SLICE_FOR_EXTRACTOR = _et.RECENT_GRAPH_SLICE_FOR_EXTRACTOR
 _RECENT_VERDICTS_FOR_AUDITOR = _et.RECENT_VERDICTS_FOR_AUDITOR
 
 
@@ -267,7 +266,7 @@ def _walk_dataset(
                 {
                     "input": {
                         "new_turns": new_turns,
-                        "recent_graph": audit_events[-_RECENT_GRAPH_SLICE_FOR_EXTRACTOR:],
+                        "recent_graph": list(audit_events),
                     },
                     "output": {"events": pending_extractor_events},
                     "meta": {

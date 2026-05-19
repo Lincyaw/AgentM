@@ -17,6 +17,7 @@ from ..audit._session_helpers import bind_extractor_state
 from ..audit.auditor.extensions import compose_auditor_extensions
 from ..audit.auditor.submit_tool import SUBMIT_VERDICT_TOOL_NAME
 from ..audit.extractor.extensions import compose_extractor_extensions
+from ..audit.extractor.output import RawExtractorOutput
 from ..audit.extractor.state import ExtractionState
 from ..audit.extractor.tools import SUBMIT_EVENTS_TOOL_NAME
 from ..schema import Edge, Event, Finding, Phase
@@ -59,12 +60,19 @@ async def replay_extractor_record(
     cwd: str,
     provider_override: tuple[str, dict[str, Any]] | None = None,
     prompt_override: str | None = None,
+    witness_retry_budget: int | None = None,
 ) -> PhaseResult:
     """Run extractor on a recorded payload.
 
     ``provider_override`` / ``prompt_override`` let callers swap model or
     system prompt while keeping the input payload + tool surface identical
     — the A/B knobs that motivate this whole module.
+
+    ``witness_retry_budget`` forwards into the extractor_tools atom so
+    the LLM can re-cite refs that failed witness validation. Default
+    ``None`` keeps the atom's own default (0, single-shot); replay
+    callers typically pass 3 to recover causally-correct edges where
+    the LLM picked a witness that only exists on one side of the edge.
     """
     if record.phase != "extractor":
         raise ValueError(f"expected extractor record, got phase={record.phase!r}")
@@ -83,9 +91,17 @@ async def replay_extractor_record(
         base_prompt=effective_prompt,
         cards_tools_config=ck.get("cards_tools_config"),
         observability_config=ck.get("observability_config"),
+        witness_retry_budget=witness_retry_budget,
     )
 
     state = ExtractionState()
+    # Mirror the live adapter's id-cursor: replay payloads include
+    # ``next_event_id`` so each firing's events get globally-unique
+    # ids that continue the post-replay running counter. Falls back to
+    # 1 for legacy captures without the field.
+    nxt = record.payload.get("next_event_id")
+    if isinstance(nxt, int) and nxt >= 1:
+        state.next_event_id = nxt
     # JSON loaded turn_texts has string keys; ExtractionState expects ints.
     for k, v in (extras.get("turn_texts") or {}).items():
         with contextlib.suppress(TypeError, ValueError):
@@ -127,7 +143,7 @@ async def replay_extractor_record(
     extensions = bind_extractor_state(base, state=state)
 
     provider = provider_override or _coerce_provider(record)
-    return await run_phase_standalone(
+    result = await run_phase_standalone(
         cwd=cwd,
         extensions=extensions,
         provider=provider,
@@ -135,6 +151,27 @@ async def replay_extractor_record(
         terminal_tool=SUBMIT_EVENTS_TOOL_NAME,
         purpose="cognitive_audit_extractor_replay",
     )
+    # ``run_phase_standalone`` returns the raw submit_events tool args
+    # — i.e. ``{"events": [...]}`` only. The live adapter additionally
+    # snapshots the bound ``ExtractionState`` to recover ``edges`` /
+    # ``dropped_edges`` (the witness validator populates these on state
+    # as the tool runs). Replay mirrors that to keep the on-disk output
+    # shape parallel to the live capture.
+    if result.status == "ok":
+        snapshot = RawExtractorOutput.from_state(state)
+        result = PhaseResult(
+            output={
+                "events": [e.to_dict() for e in snapshot.events],
+                "edges": [ed.to_dict() for ed in snapshot.edges],
+                "dropped_edges": list(snapshot.dropped_edges),
+                "block_plan": list(snapshot.block_plan),
+            },
+            status=result.status,
+            error=result.error,
+            latency_ms=result.latency_ms,
+            messages=result.messages,
+        )
+    return result
 
 
 async def replay_auditor_record(

@@ -208,6 +208,9 @@ class _V31StubProvider:
 
 
 def _submit_events_call(*, events: list[dict[str, Any]]) -> AssistantMessage:
+    # The v18 wire is ``submit_events_batch`` with ``done=true`` for a
+    # one-shot submission (the integration stubs never split across
+    # batches). SUBMIT_EVENTS_TOOL_NAME aliases the batch tool.
     return AssistantMessage(
         role="assistant",
         content=[
@@ -215,7 +218,7 @@ def _submit_events_call(*, events: list[dict[str, Any]]) -> AssistantMessage:
                 type="tool_call",
                 id="submit-1",
                 name=SUBMIT_EVENTS_TOOL_NAME,
-                arguments={"events": events},
+                arguments={"events": events, "done": True},
             )
         ],
         timestamp=600.0,
