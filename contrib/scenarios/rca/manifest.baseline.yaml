@@ -1,7 +1,6 @@
 name: rca:baseline
 description: |
-  ThinkDepthAI-parity baseline. Tracks
-  ``/home/ddq/AoyangSpace/ThinkDepthAI/src/thinkdepthai/`` exactly:
+  ThinkDepthAI-parity baseline. Tracks upstream ThinkDepthAI exactly:
 
     * Prompt = RCA_ANALYSIS_SP (prompts/investigator.md, verbatim).
     * Tools  = the four tools from ThinkDepthAI:
