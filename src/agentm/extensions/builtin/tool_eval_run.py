@@ -27,7 +27,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
-import os
 import statistics
 import sys
 import time
@@ -492,15 +491,23 @@ async def _run_single_sample(
     tool_errors = 0
     turns = 0
     child_session_id: str | None = None
-    # Per-task env vars: tasks may declare top-level ``env: {KEY: VAL}`` or
-    # rely on the ``input.fixtures: [path]`` convention (rca-style scenarios
-    # consume AGENTM_RCA_DATA_DIR). Set them on os.environ around the spawn
-    # so atoms loaded by the child see them at install time, then restore.
-    env_overrides = _collect_task_env(task)
-    saved_env: dict[str, str | None] = {}
-    for k, v in env_overrides.items():
-        saved_env[k] = os.environ.get(k)
-        os.environ[k] = v
+    # Per-task env: this generic eval runner refuses to silently mutate
+    # ``os.environ`` to ferry knobs into a child session — that pattern is
+    # process-global, racy under parallel evals, and leaks on crashes
+    # mid-call. ``AgentSessionConfig`` does not yet carry a child-env
+    # field, so tasks that declare ``env:`` get a clear failure rather
+    # than a wrong-environment success. Scenario-specific wire protocols
+    # (e.g. RCA's fixtures → AGENTM_RCA_DATA_DIR convention) belong in
+    # a scenario-local atom that wraps this runner; see
+    # ``contrib/scenarios/rca/`` for the appropriate home.
+    if _task_declares_env(task):
+        raise NotImplementedError(
+            "tool_eval_run: task declares 'env' but the current "
+            "AgentSessionConfig has no field for per-child environment "
+            "overrides. Set the variables in the parent process before "
+            "invoking the eval, or extend AgentSessionConfig and route "
+            "them through spawn_child_session."
+        )
     try:
         child = await api.spawn_child_session(child_config)
     except Exception as exc:  # noqa: BLE001
@@ -535,11 +542,6 @@ async def _run_single_sample(
             await child.shutdown()
         except Exception:  # noqa: BLE001 - best effort
             pass
-        for k, prev in saved_env.items():
-            if prev is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = prev
 
     return {
         "final_text": final_text,
@@ -549,28 +551,21 @@ async def _run_single_sample(
     }
 
 
-def _collect_task_env(task: dict[str, Any]) -> dict[str, str]:
-    """Resolve per-task environment overrides.
+def _task_declares_env(task: dict[str, Any]) -> bool:
+    """True if the task YAML declares a non-empty top-level ``env`` mapping.
 
-    Honors two sources, in this precedence:
-
-    1. Explicit ``env: {KEY: VAL}`` mapping at the top of the task YAML.
-    2. Convention: ``input.fixtures: [path, ...]`` → ``AGENTM_RCA_DATA_DIR``
-       points at the first entry. This keeps existing rca eval YAMLs
-       working without an explicit ``env`` block.
+    Used purely to fail loudly when a task asks for per-child environment
+    overrides — ``AgentSessionConfig`` currently has no field to plumb
+    them through, and the previous ``os.environ`` mutation pattern was
+    racy under parallel evals and leaked on mid-call crashes. Scenario-
+    specific conventions (e.g. RCA's ``input.fixtures`` →
+    ``AGENTM_RCA_DATA_DIR`` mapping) belong in a small scenario-local
+    atom that wraps this runner; do not re-introduce them here.
     """
-    out: dict[str, str] = {}
-    fixtures = (task.get("input") or {}).get("fixtures") if isinstance(task.get("input"), dict) else None
-    if isinstance(fixtures, list) and fixtures:
-        first = fixtures[0]
-        if isinstance(first, str) and first:
-            out["AGENTM_RCA_DATA_DIR"] = first
     explicit = task.get("env")
-    if isinstance(explicit, dict):
-        for k, v in explicit.items():
-            if isinstance(k, str) and isinstance(v, (str, int, float)):
-                out[k] = str(v)
-    return out
+    if not isinstance(explicit, dict):
+        return False
+    return any(isinstance(k, str) and k for k in explicit)
 
 
 def _extract_user_message(task: dict[str, Any]) -> str:

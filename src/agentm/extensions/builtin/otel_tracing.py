@@ -36,7 +36,7 @@ IDs, no SpanContext synthesis. Specifically:
 
 * For an in-process child session (``api.parent_session_id`` set and the
   parent installed earlier in the same process), the parent's
-  session-root ``Context`` is looked up in :data:`_session_root_contexts`
+  session-root ``Context`` is looked up in :data:`_SESSION_CONTEXT_REGISTRY`
   and passed as ``start_span(context=...)``. This is just plain OTel
   Context plumbing — no propagator involved because we never serialise.
 * For a top-level session that should continue an upstream trace
@@ -190,8 +190,50 @@ _DEFAULT_EXCLUDE_CHANNELS: frozenset[str] = frozenset({StreamDeltaEvent.CHANNEL}
 # that spawns later in the same process can look it up and pass it as
 # ``start_span(context=...)``. For cross-process linkage we don't use
 # this — we go through the standard ``opentelemetry.propagate`` API.
-_session_ctx_lock = threading.Lock()
-_session_root_contexts: Final[dict[str, Any]] = {}
+#
+# The registry must be process-singleton because parent and child sessions
+# install separately and need to find each other by session_id. The
+# previous design exposed the underlying dict as a module-level
+# ``Final[dict[str, Any]]``, which obscured ownership and made the
+# per-session pop on ``SessionShutdownEvent`` look like incidental
+# bookkeeping. Wrapping it in a named owner makes the lifecycle explicit:
+# ``install`` registers via ``register``, ``_on_shutdown`` discards via
+# ``discard``, and tests can introspect via ``snapshot``. The wrapper is
+# also exposed as the ``otel_tracing_contexts`` service so an out-of-tree
+# observer (or a test) can read live state without poking module privates.
+
+
+class _SessionContextRegistry:
+    """Process-singleton owning the session-id → OTel ``Context`` map.
+
+    Thread-safe. Methods are kept tiny on purpose: this object only
+    stores and serves; the lifecycle (register on session-root span open,
+    discard on ``SessionShutdownEvent``) is wired up inside
+    :func:`install`.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._contexts: dict[str, Any] = {}
+
+    def register(self, session_id: str, ctx: Any) -> None:
+        with self._lock:
+            self._contexts[session_id] = ctx
+
+    def get(self, session_id: str) -> Any | None:
+        with self._lock:
+            return self._contexts.get(session_id)
+
+    def discard(self, session_id: str) -> None:
+        with self._lock:
+            self._contexts.pop(session_id, None)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._contexts)
+
+
+_SESSION_CONTEXT_REGISTRY: Final[_SessionContextRegistry] = _SessionContextRegistry()
 
 
 def _ensure_provider(
@@ -288,8 +330,7 @@ def _resolve_parent_context(parent_session_id: str | None) -> Any:
        passing it to ``start_span`` is always safe.
     """
     if parent_session_id:
-        with _session_ctx_lock:
-            local = _session_root_contexts.get(parent_session_id)
+        local = _SESSION_CONTEXT_REGISTRY.get(parent_session_id)
         if local is not None:
             return local
     try:
@@ -485,8 +526,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         kind=SpanKind.INTERNAL,
     )
     session_ctx = trace.set_span_in_context(session_span)
-    with _session_ctx_lock:
-        _session_root_contexts[api.session_id] = session_ctx
+    _SESSION_CONTEXT_REGISTRY.register(api.session_id, session_ctx)
+    # Expose the registry as a service so tests / out-of-tree observers
+    # can introspect live state without touching module privates.
+    api.set_service("otel_tracing_contexts", _SESSION_CONTEXT_REGISTRY)
 
     # Per-session live-span tables. Tool calls and turns can interleave
     # asynchronously, so we cannot rely on the OTel current-span semantics
@@ -750,8 +793,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             span.end()
         extension_install_spans.clear()
         session_span.end()
-        with _session_ctx_lock:
-            _session_root_contexts.pop(api.session_id, None)
+        _SESSION_CONTEXT_REGISTRY.discard(api.session_id)
         # Force-flush so the collector sees everything before the process
         # exits. The provider may not be ours (host may have installed one);
         # call only if it implements force_flush.
