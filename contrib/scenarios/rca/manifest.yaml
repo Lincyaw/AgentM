@@ -1,5 +1,11 @@
 name: rca
 description: Root-cause analysis over parquet observability data via DuckDB SQL.
+# NOTE: ``tool_eval_run`` (the generic eval runner) deliberately does NOT
+# translate a task's ``input.fixtures[0]`` into ``AGENTM_RCA_DATA_DIR`` —
+# that scenario-specific wire is RCA's responsibility. If we need to ferry
+# per-task fixture paths into child eval sessions, add a small atom under
+# ``contrib/scenarios/rca/`` that pre-sets the env from the task YAML (or
+# extend AgentSessionConfig with a child-env field).
 extensions:
   # --- environment ports: register the local-FS / asyncio-bash Operations
   # bundle. Must be listed first because ``tool_read`` (below) and sub_agent
