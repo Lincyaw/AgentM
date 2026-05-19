@@ -146,7 +146,7 @@ def _git_init(path: Path) -> None:
     so ResourceWriter classifies as managed when applicable."""
 
     subprocess.run(
-        ["git", "init", "-q", str(path)],
+        ["git", "init", "-q", "-b", "agent-tests", str(path)],
         check=True,
         capture_output=True,
     )

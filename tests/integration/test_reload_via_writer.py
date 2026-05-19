@@ -119,7 +119,7 @@ def _git(cwd: Path, *args: str) -> str:
 
 
 def _init_repo(root: Path) -> None:
-    _git(root, "init", "-q")
+    _git(root, "init", "-q", "-b", "agent-tests")
     _git(root, "config", "user.name", "Test User")
     _git(root, "config", "user.email", "test@example.com")
     (root / "README.md").write_text("baseline\n", encoding="utf-8")
