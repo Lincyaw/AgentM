@@ -35,6 +35,5 @@ jobs:
       - name: Type check (mypy)
         run: uv run mypy src/ contrib/channels/src/
 
-      # TODO: remove deselect once test_issue_102_rca_cli is fixed (agentm_rca.prompt_loader import broken on PYTHONPATH copy).
       - name: Tests (pytest)
-        run: uv run pytest --tb=short --deselect tests/integration/test_issue_102_rca_cli.py::test_rca_cli_critic_inherits_parent_duckdb_config_in_trace
+        run: uv run pytest --tb=short
