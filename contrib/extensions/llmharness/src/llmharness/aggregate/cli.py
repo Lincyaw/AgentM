@@ -48,6 +48,16 @@ app = typer.Typer(
 )
 
 
+def _resolve_dataset_name(
+    cli_override: str | None, row_meta: dict[str, object]
+) -> str | None:
+    """CLI flag wins; otherwise fall back to row_meta['dataset'] if it's a string."""
+    if cli_override:
+        return cli_override
+    ds = row_meta.get("dataset")
+    return ds if isinstance(ds, str) else None
+
+
 def _emit(replay_path: Path, case_dir: Path, case_meta) -> None:  # type: ignore[no-untyped-def]
     typer.echo(
         f"{replay_path} → {case_dir}/ "
@@ -212,10 +222,11 @@ def eval_db(
             continue
         if not (child / "records.jsonl").is_file():
             continue
+        row_int: int | None
         try:
             row_int = int(child.name)
         except ValueError:
-            row_int = None  # type: ignore[assignment]
+            row_int = None
         if row_ids and (row_int is None or row_int not in row_ids):
             continue
         rows.append(child)
@@ -248,7 +259,7 @@ def eval_db(
             out,
             meta_path=None,  # eval-db meta.json is run-level, not the distill.binding shape
             sample_id=sid,
-            dataset_name=dataset_name or (row_meta.get("dataset") if isinstance(row_meta.get("dataset"), str) else None),
+            dataset_name=_resolve_dataset_name(dataset_name, row_meta),
             dataset_path=dataset_path,
         )
 

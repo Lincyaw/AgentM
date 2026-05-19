@@ -324,20 +324,22 @@ async def extract_trajectory(
             error = str(exc)
             latency_ms = int((time.monotonic() - t0) * 1000)
 
+        output_payload: dict[str, Any] | None
         if status == "ok":
             out = RawExtractorOutput.from_state(state)
-            output_payload: dict[str, Any] | None = {
+            payload_dict: dict[str, Any] = {
                 "events": [e.to_dict() for e in out.events],
                 "edges": [ed.to_dict() for ed in out.edges],
                 "dropped_edges": list(out.dropped_edges),
             }
+            output_payload = payload_dict
             recent_graph_events.extend(out.events)
             if graph_accumulator is not None:
                 graph_accumulator.append(
                     {
                         "window_lo": lo,
                         "window_hi_inclusive": hi - 1,
-                        **output_payload,
+                        **payload_dict,
                     }
                 )
         else:
