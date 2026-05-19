@@ -115,7 +115,10 @@ def _make_chat_inbound(
         body={
             "channel": channel,
             "chat_id": chat_id,
-            "sender_id": "u1",
+            # Bridge binds sender_id to the authenticated peer (issue
+            # #1). Mirror the peer_id here so the spoof guard accepts
+            # the envelope.
+            "sender_id": peer_id,
             "content": content,
         },
         correlation_id=correlation_id,

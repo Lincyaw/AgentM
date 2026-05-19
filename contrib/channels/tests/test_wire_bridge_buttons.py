@@ -137,7 +137,9 @@ async def test_wirebridge_forwards_button_value_inbound() -> None:
         body={
             "channel": "terminal",
             "chat_id": "user:42",
-            "sender_id": "user:42",
+            # sender_id is bound to peer_id by the spoof guard (issue
+            # #1); use peer-2 so the envelope is accepted.
+            "sender_id": "peer-2",
             "content": "[card click: appr-1:approve]",
             "button_value": "appr-1:approve",
         },
@@ -163,7 +165,7 @@ async def test_wirebridge_forwards_button_value_inbound() -> None:
         body={
             "channel": "terminal",
             "chat_id": "user:42",
-            "sender_id": "user:42",
+            "sender_id": "peer-2",
             "content": "hello",
         },
     )
