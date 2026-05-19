@@ -2526,7 +2526,7 @@ wheels = [
 
 [[package]]
 name = "rcabench-platform"
-version = "0.4.44"
+version = "0.4.46"
 source = { editable = "../aegis/rcabench-platform" }
 dependencies = [
     { name = "loguru" },
