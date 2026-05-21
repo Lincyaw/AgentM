@@ -258,3 +258,168 @@ def test_cli_resume_with_prompt_still_accepted(
         ],
     )
     assert "prompt is required" not in (result.stderr or result.output)
+
+
+# ---------------------------------------------------------------------------
+# CLI dispatch — path discrimination (prompt vs tick)
+#
+# These are the load-bearing assertions for the prefix-replay flow. The CLI
+# guard's contract is not just "accepts the args" — it MUST route
+# resume-only invocations through ``tick`` and prompt-bearing invocations
+# through ``prompt``. A future refactor that always calls ``tick`` would
+# silently break the multi-turn CLI experience; a refactor that always
+# calls ``prompt`` would silently re-break the prefix-replay flow.
+# ---------------------------------------------------------------------------
+
+
+class _DispatchSpy:
+    """Lightweight stand-in for :class:`AgentSession` that records which of
+    ``prompt`` / ``tick`` the CLI invoked. Patched in via
+    ``AgentSession.create``."""
+
+    def __init__(self) -> None:
+        self.prompt_calls: list[str] = []
+        self.tick_calls: int = 0
+        # CLI inspects session.get_service and session.model after the call;
+        # short-circuit those so we don't need a real provider behind the scope.
+        self.model = None
+
+    async def prompt(
+        self,
+        text: str,
+        *,
+        images: Any | None = None,
+        signal: Any | None = None,
+    ) -> list[Any]:
+        del images, signal
+        self.prompt_calls.append(text)
+        return []
+
+    async def tick(self, *, signal: Any | None = None) -> list[Any]:
+        del signal
+        self.tick_calls += 1
+        return []
+
+    def get_service(self, name: str) -> Any | None:
+        del name
+        return None
+
+    async def shutdown(self) -> None:
+        return None
+
+
+def _install_dispatch_spy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> _DispatchSpy:
+    """Patch ``AgentSession.create`` to yield a spy and bypass session-config
+    bootstrap. Returns the spy so the test can assert on it after ``run``."""
+
+    spy = _DispatchSpy()
+
+    from agentm.core.runtime.session_manager import SessionManager
+
+    fake_state = SessionManager.in_memory(str(tmp_path))
+
+    def _fake_build_session_config(**kwargs: Any) -> tuple[Any, Any]:
+        del kwargs
+        # The CLI inspects session_manager.session_file and .get_session_id
+        # for log-line printing; SessionManager.in_memory provides both.
+        return (object(), fake_state)
+
+    async def _fake_create(config: Any) -> _DispatchSpy:
+        del config
+        return spy
+
+    monkeypatch.setattr(
+        "agentm.cli._build_session_config", _fake_build_session_config
+    )
+    monkeypatch.setattr(
+        "agentm.core.runtime.session.AgentSession.create",
+        classmethod(lambda cls, config: _fake_create(config)),
+    )
+    return spy
+
+
+@pytest.mark.asyncio
+async def test_cli_run_routes_resume_without_prompt_to_tick(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from agentm.cli import run
+
+    spy = _install_dispatch_spy(monkeypatch, tmp_path)
+    rc = await run(
+        prompt="",
+        scenario=None,
+        extra_extensions=[],
+        no_extensions=True,
+        no_skills=True,
+        no_prompt_templates=True,
+        tool_allowlist=None,
+        provider="stub",
+        model="stub",
+        cwd=str(tmp_path),
+        quiet=True,
+        resume="deadbeef-fake-sid",
+        continue_recent=False,
+    )
+    assert rc == 0
+    assert spy.tick_calls == 1
+    assert spy.prompt_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cli_run_routes_prompt_bearing_resume_to_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mirror of the resume-only test: a prompt-bearing resume must still
+    route through ``prompt``. Guards against a regression where the
+    dispatch branch is collapsed to always-tick."""
+    from agentm.cli import run
+
+    spy = _install_dispatch_spy(monkeypatch, tmp_path)
+    rc = await run(
+        prompt="hello",
+        scenario=None,
+        extra_extensions=[],
+        no_extensions=True,
+        no_skills=True,
+        no_prompt_templates=True,
+        tool_allowlist=None,
+        provider="stub",
+        model="stub",
+        cwd=str(tmp_path),
+        quiet=True,
+        resume="deadbeef-fake-sid",
+        continue_recent=False,
+    )
+    assert rc == 0
+    assert spy.prompt_calls == ["hello"]
+    assert spy.tick_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_cli_run_routes_fresh_prompt_to_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """And a plain fresh prompt (no resume) routes through ``prompt``."""
+    from agentm.cli import run
+
+    spy = _install_dispatch_spy(monkeypatch, tmp_path)
+    rc = await run(
+        prompt="hi",
+        scenario=None,
+        extra_extensions=[],
+        no_extensions=True,
+        no_skills=True,
+        no_prompt_templates=True,
+        tool_allowlist=None,
+        provider="stub",
+        model="stub",
+        cwd=str(tmp_path),
+        quiet=True,
+        resume=None,
+        continue_recent=False,
+    )
+    assert rc == 0
+    assert spy.prompt_calls == ["hi"]
+    assert spy.tick_calls == 0
