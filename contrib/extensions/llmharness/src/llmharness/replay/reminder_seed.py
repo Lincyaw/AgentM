@@ -26,7 +26,6 @@ ships no ``MANIFEST``), no ``agentm.core.runtime.*`` import, no
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
 
 from agentm.core.abi import DecideTurnActionEvent, Inject, LoopAction, Stop
@@ -118,7 +117,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 type(default.cause).__name__,
             )
             return None
-        message = build_reminder_message(text, timestamp=time.time())
+        message = build_reminder_message(text)
         try:
             api.session.append_entry(REMINDER_DELIVERED, {"text": text})
         except Exception:
