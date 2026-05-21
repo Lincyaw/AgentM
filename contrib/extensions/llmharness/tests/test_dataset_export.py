@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from llmharness.audit.extractor import SUBMIT_EVENTS_TOOL_NAME
 from llmharness.cli import main as cli_main
 from llmharness.distill.export import extractor_records_from_replay
 
@@ -240,7 +241,7 @@ def test_dataset_export_thinking_in_extractor_target() -> None:
     assert msg["content"] == "<think>step 1 step 2</think>\n\n"
     [tc] = msg["tool_calls"]
     assert tc["type"] == "function"
-    assert tc["function"]["name"] == "submit_events"
+    assert tc["function"]["name"] == SUBMIT_EVENTS_TOOL_NAME
     # arguments is a JSON string per the OpenAI tool-call convention —
     # parse it to assert the events round-trip without escaping issues.
     args = json.loads(tc["function"]["arguments"])
@@ -339,7 +340,7 @@ def test_dataset_export_extractor_no_thinking_fallback() -> None:
     [sft_empty] = list(extractor_records_from_replay([rec_empty], sample_id="s-1"))
     msg_empty = json.loads(sft_empty.to_jsonl())["target"]["messages"][0]
     assert msg_empty["content"] == ""
-    assert msg_empty["tool_calls"][0]["function"]["name"] == "submit_events"
+    assert msg_empty["tool_calls"][0]["function"]["name"] == SUBMIT_EVENTS_TOOL_NAME
 
     # Field missing (back-compat with pre-thinking sidecars).
     rec_missing = _ok_extractor_replay_record()
@@ -348,4 +349,4 @@ def test_dataset_export_extractor_no_thinking_fallback() -> None:
     )
     msg_missing = json.loads(sft_missing.to_jsonl())["target"]["messages"][0]
     assert msg_missing["content"] == ""
-    assert msg_missing["tool_calls"][0]["function"]["name"] == "submit_events"
+    assert msg_missing["tool_calls"][0]["function"]["name"] == SUBMIT_EVENTS_TOOL_NAME
