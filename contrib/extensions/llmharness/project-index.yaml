@@ -612,6 +612,69 @@ requirements:
       - tests/test_reminder_injector.py
     depends_on: [REQ-019, REQ-021]
 
+  - id: REQ-035
+    title: Prefix replay from auditor verdict
+    description: |
+      Iterate on auditor / reminder behaviour without re-running the
+      whole trajectory: given a recorded ``ReplayRecord`` whose
+      auditor surfaced a reminder at turn ``t``, materialise a new
+      persisted session whose entry tree mirrors the original prefix
+      and resume it with the reminder seeded as the first injection of
+      turn ``t+1``.
+
+      Decomposition:
+
+      - ``llmharness.replay.reminder_seed`` — §11 single-file atom,
+        one-shot ``DecideTurnActionEvent`` handler that drains the
+        configured ``text`` exactly once and then unsubscribes.
+        Mirrors the live adapter's Inject path (including the
+        final-cause Stop guard) and persists a
+        ``REMINDER_DELIVERED`` entry. Train/inference parity is
+        enforced by sourcing the message format from the shared
+        ``audit/_reminder_format.py`` helper.
+
+      - ``llmharness.replay.prefix_replay`` — orchestration helpers.
+        Picks the auditor record at ``turn=t`` whose
+        ``output.surface_reminder`` is set, locates the source session
+        file under ``<session-dir>/*_<root_session_id>.jsonl``, finds
+        the leaf entry that ends turn ``t`` (the ``t``-th ``message``
+        entry on the active branch — same indexing convention as
+        ``adapters.agentm``), and calls
+        ``SessionManager.create_branched_session(leaf_id)``. Non-
+        message entries on the branch (audit_event, audit_edge, ...)
+        are copied through verbatim — the audit context up to that
+        point is part of the prefix.
+
+      - ``llmharness-replay agent-from-reminder`` — typer subcommand
+        that drives the above and prints (and optionally writes) the
+        ``agentm --resume`` command shape that re-runs the tail with
+        the seed atom mounted. The composed command pairs
+        ``enable_reminders:false`` (so the live auditor does not
+        inject a second reminder over the seed) with
+        ``enable_auditor:true`` (so the still-active auditor keeps
+        observing for downstream evidence).
+
+      No ``agentm.core`` change required: existing
+      ``SessionManager.create_branched_session`` already does
+      persisted truncation + entry-id rewrite + ``parent_session``
+      header linkage.
+
+      Test fail-stop: branch length of the new session must equal the
+      expected prefix length. Wrong → student model sees a different
+      prefix at inference than at training, breaking the whole
+      iteration loop's purpose.
+    priority: P1
+    status: tested
+    code:
+      - src/llmharness/replay/reminder_seed.py
+      - src/llmharness/replay/prefix_replay.py
+      - src/llmharness/replay/cli.py
+      - src/llmharness/audit/_reminder_format.py
+    tests:
+      - tests/test_reminder_seed_atom.py
+      - tests/test_prefix_replay_cli.py
+    depends_on: [REQ-019, REQ-034]
+
   # ---------------------------------------------------------------------------
   # Removed in the 2026-05-08 SDK-native cleanup. Kept here for traceability;
   # downstream consumers should depend on REQ-017 / REQ-018 / REQ-001 instead.

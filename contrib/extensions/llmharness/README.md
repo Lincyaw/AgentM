@@ -47,6 +47,7 @@ training a small (~4B) model into the same harness role.
 | [docs/04-extending.md](docs/04-extending.md) | Registering a new audit check; adapting the distill flow to a non-rca dataset. |
 | [docs/05-profiles-and-prompts.md](docs/05-profiles-and-prompts.md) | Pluggable tool profiles + prompt variants for the extractor / auditor children. Read this when running A/B experiments. |
 | [docs/06-case-aggregation.md](docs/06-case-aggregation.md) | Per-case directory layout produced by `llmharness-aggregate`. Read this for human review of a run or before exporting trajectories. |
+| [docs/07-prefix-replay.md](docs/07-prefix-replay.md) | Iterate on auditor / reminder behaviour without re-running the whole trajectory: branch a session at the verdict-firing turn and replay only the tail. |
 
 ## CLI entry points
 
@@ -54,6 +55,7 @@ training a small (~4B) model into the same harness role.
 |---|---|
 | `llmharness` | one-shot session demo (see `cli.py`) |
 | `llmharness-replay {extractor,auditor}` | replay a recorded phase with a different provider/prompt for A/B |
+| `llmharness-replay agent-from-reminder` | branch a main-agent session at the end of turn t and emit a resume command that seeds the recorded auditor reminder (see [docs/07-prefix-replay.md](docs/07-prefix-replay.md)) |
 | `llmharness-distill {label,export}` | distill pipeline driver |
 | `llmharness-aggregate` | replay sidecar → per-case directories for review + training-data export |
 
