@@ -54,7 +54,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -75,13 +74,14 @@ from agentm.core.abi.messages import (
     AssistantMessage,
     ToolCallBlock,
     ToolResultMessage,
-    text_message,
 )
 from agentm.core.abi.session import SessionEntry
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.extensions import ExtensionManifest
 
 from ..audit import entry_types as _et
+from ..audit._reminder_format import REMINDER_PREAMBLE as _SHARED_REMINDER_PREAMBLE
+from ..audit._reminder_format import build_reminder_message
 from ..audit._session_helpers import (
     bind_extractor_state,
     find_terminal_tool_arguments,
@@ -264,9 +264,12 @@ _DEFAULT_SHUTDOWN_TIMEOUT_S = 60.0
 _DEFAULT_MODE = "async"
 _DEFAULT_AUDIT_SUMMARY_THRESHOLD = 30
 
-_REMINDER_PREAMBLE = (
-    "[harness advisory — meta-injection from cognitive audit, not from the human user]\n"
-)
+# Canonical preamble lives in ``audit/_reminder_format.py`` so the
+# replay.reminder_seed atom can build byte-identical messages without
+# importing from this adapter (§11 atom-to-atom-import ban). Re-exported
+# here under the long-standing private name to keep existing tests
+# (test_reminder_injector) and call sites stable.
+_REMINDER_PREAMBLE = _SHARED_REMINDER_PREAMBLE
 
 # Entry-type bindings (every literal must come from entry_types.py).
 _AUDIT_EVENT_ENTRY_TYPE = _et.AUDIT_EVENT
@@ -691,11 +694,11 @@ def _make_reminder_injector(
         injected: list[AgentMessage] = []
         while pending_reminders:
             reminder = pending_reminders.pop(0)
-            injected.append(
-                text_message(
-                    _REMINDER_PREAMBLE + reminder.text, timestamp=time.time()
-                )
-            )
+            # Route through the shared builder so the seed atom in
+            # ``llmharness.replay.reminder_seed`` and this live path stay
+            # byte-identical — train/inference parity is the fail-stop
+            # for the prefix-replay iteration loop.
+            injected.append(build_reminder_message(reminder.text))
             try:
                 api.session.append_entry(
                     _REMINDER_DELIVERED_ENTRY_TYPE,
