@@ -29,6 +29,7 @@ import typer
 
 from .chain import ChainResult, chain_replay_sync
 from .engine import PhaseResult
+from .prefix_replay import PrefixReplayError, make_plan
 from .record import Phase, ReplayRecord, iter_records
 from .runner import replay_auditor_record, replay_extractor_record
 
@@ -352,6 +353,107 @@ def chain(
         f"\n# chain: {len(results)} records replayed, "
         f"{diffs} outputs differ, {errors} replay failures"
     )
+
+
+@app.command(name="agent-from-reminder")
+def agent_from_reminder(
+    audit_replay: Annotated[
+        Path,
+        typer.Option(
+            ...,
+            "--audit-replay",
+            help="Path to .agentm/audit_replay/<root_session_id>.jsonl",
+        ),
+    ],
+    turn: Annotated[
+        int,
+        typer.Option(
+            ..., "--turn", help="turn_index of the auditor record carrying the reminder"
+        ),
+    ],
+    session_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--session-dir",
+            help=(
+                "Directory holding the source main-agent session JSONLs. "
+                "Defaults to ``<audit-replay-dir>/../sessions/``."
+            ),
+        ),
+    ] = None,
+    out_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--out-dir",
+            help=(
+                "Directory to write the resume-command script into. "
+                "Defaults to the audit-replay file's parent dir."
+            ),
+        ),
+    ] = None,
+    print_only: Annotated[
+        bool,
+        typer.Option(
+            "--print-only",
+            help="Only print the resume command; do not write a script file.",
+        ),
+    ] = False,
+) -> None:
+    """Branch a session at the end of turn ``t`` + emit a resume command.
+
+    Given an auditor record that surfaced a reminder at turn ``t``, this
+    command:
+
+    1. Opens the source main-agent session JSONL.
+    2. Picks the leaf entry that ends turn ``t`` (the ``t``-th
+       ``message`` entry on the active branch — same indexing convention
+       as ``llmharness.adapters.agentm``).
+    3. Calls ``SessionManager.create_branched_session`` to materialise
+       a new persisted session whose tree mirrors the original prefix
+       and whose header carries ``parent_session`` pointing at the
+       source file.
+    4. Prints (and, by default, writes) an ``agentm`` invocation that
+       resumes the branched session with
+       ``llmharness.replay.reminder_seed`` mounted — so the recorded
+       reminder is delivered as the first injection of the next turn.
+    """
+    resolved_session_dir = (
+        session_dir
+        if session_dir is not None
+        else (audit_replay.parent.parent / "sessions").resolve()
+    )
+    try:
+        plan = make_plan(
+            audit_replay_path=audit_replay,
+            turn=turn,
+            session_dir=resolved_session_dir,
+        )
+    except PrefixReplayError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    typer.echo(f"# source session: {plan.source_session_file}")
+    typer.echo(f"# branched session: {plan.branched_session_file}")
+    typer.echo(f"# branched session id: {plan.branched_session_id}")
+    typer.echo("# reminder text:")
+    for line in plan.reminder_text.splitlines() or [""]:
+        typer.echo(f"#   {line}")
+    typer.echo("")
+    typer.echo(plan.command)
+
+    if print_only:
+        return
+    resolved_out_dir = out_dir if out_dir is not None else audit_replay.parent
+    resolved_out_dir.mkdir(parents=True, exist_ok=True)
+    script_path = (
+        resolved_out_dir
+        / f"replay-{plan.branched_session_id}-t{turn}.sh"
+    )
+    script_path.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n" + plan.command + "\n",
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+    typer.echo(f"\n# wrote: {script_path}")
 
 
 def main() -> None:

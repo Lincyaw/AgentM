@@ -1,0 +1,231 @@
+"""Integration test for ``llmharness-replay agent-from-reminder``.
+
+Fail-stop position: the BRANCH LENGTH (count of entries ≤ turn t) on
+the new session's active branch MUST equal what was on the source
+branch up to that point. If this drifts, the student model sees a
+different prefix at inference (the branched-session replay) than during
+training (the original live session) — train/inference parity is the
+whole reason prefix-replay exists.
+
+The test synthesises a small persisted session + matching audit_replay
+sidecar, invokes the CLI command in ``--print-only`` mode, and asserts
+the new session file was written, the branched branch length matches,
+and the printed command carries the right ``--resume`` id + the right
+reminder text.
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+from agentm.core.abi.messages import (
+    AssistantMessage,
+    TextContent,
+    UserMessage,
+    text_message,
+)
+from agentm.core.abi.session import ENTRY_TYPE_MESSAGE, message_entry
+from agentm.core.runtime.session_manager import SessionManager
+from typer.testing import CliRunner
+
+from llmharness.audit import entry_types as et
+from llmharness.replay.cli import app
+from llmharness.replay.record import ReplayRecord, write_record
+
+
+def _make_assistant_message(text: str) -> AssistantMessage:
+    return AssistantMessage(
+        role="assistant",
+        content=[TextContent(type="text", text=text)],
+        timestamp=time.time(),
+        stop_reason=None,
+        usage=None,
+    )
+
+
+def _make_source_session(
+    *, session_dir: Path, cwd: str, n_turns: int
+) -> tuple[SessionManager, Path]:
+    """Build a persisted session with 2*n_turns + 1 message entries.
+
+    Layout: user, assistant, user, assistant, ..., assistant.
+    The k-th assistant message corresponds to turn_index = 2k+1 in the
+    ``len(messages) - 1`` convention.
+    """
+    mgr = SessionManager.create(cwd, session_dir)
+    mgr.append(message_entry(text_message("start"), parent_id=None))
+    for i in range(n_turns):
+        mgr.append(message_entry(_make_assistant_message(f"reply {i}"), mgr.get_leaf_id()))
+        # Sprinkle an audit_event entry between turns so we exercise the
+        # "non-message entries on the branch get copied through" path —
+        # the brief is explicit that filtering them out by hand is wrong.
+        mgr.append_custom_entry(et.AUDIT_EVENT, {"id": i + 1, "kind": "evid"})
+        if i < n_turns - 1:
+            mgr.append(message_entry(text_message(f"user {i+1}"), mgr.get_leaf_id()))
+    session_file = mgr.session_file
+    assert session_file is not None
+    return mgr, session_file
+
+
+def _write_audit_record(
+    *, sidecar_path: Path, root_session_id: str, turn: int, reminder: str
+) -> None:
+    rec = ReplayRecord(
+        phase="auditor",
+        turn_index=turn,
+        root_session_id=root_session_id,
+        ts_ns=int(time.time_ns()),
+        compose_kwargs={},
+        payload={},
+        provider=None,
+        output={
+            "surface_reminder": True,
+            "reminder_text": reminder,
+            "continuation_notes": [],
+            "matched_event_ids": [],
+            "cited_cards": [],
+        },
+        status="ok",
+    )
+    write_record(sidecar_path, rec)
+
+
+def test_agent_from_reminder_branches_at_turn_and_prints_command(
+    tmp_path: Path,
+) -> None:
+    cwd = str(tmp_path)
+    session_dir = tmp_path / ".agentm" / "sessions"
+    audit_dir = tmp_path / ".agentm" / "audit_replay"
+    audit_dir.mkdir(parents=True)
+
+    source_mgr, source_file = _make_source_session(
+        session_dir=session_dir, cwd=cwd, n_turns=5
+    )
+    root_id = source_mgr.get_session_id()
+
+    # turn=3 means the auditor record was emitted at trajectory index 3
+    # (the second assistant message in the session — message indices 0,
+    # 1, 2, 3 = user, assistant, user, assistant).
+    target_turn = 3
+    reminder_text = "please re-check assumption A in light of evidence E"
+    sidecar = audit_dir / f"{root_id}.jsonl"
+    _write_audit_record(
+        sidecar_path=sidecar,
+        root_session_id=root_id,
+        turn=target_turn,
+        reminder=reminder_text,
+    )
+
+    # Expected branch length on the new session: every entry up to and
+    # including the (target_turn)-th message entry on the source branch.
+    branch = source_mgr.get_active_branch()
+    message_positions: list[int] = []
+    for i, entry in enumerate(branch):
+        if entry.type == ENTRY_TYPE_MESSAGE:
+            message_positions.append(i)
+    expected_prefix_len = message_positions[target_turn] + 1
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "agent-from-reminder",
+            "--audit-replay",
+            str(sidecar),
+            "--turn",
+            str(target_turn),
+            "--session-dir",
+            str(session_dir),
+            "--print-only",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    # New session file must exist under the session dir.
+    new_files = sorted(p for p in session_dir.glob("*.jsonl") if p != source_file)
+    assert len(new_files) == 1, f"expected one branched session file; got {new_files}"
+    branched_file = new_files[0]
+
+    branched_mgr = SessionManager.open(branched_file)
+    new_branch = branched_mgr.get_active_branch()
+    assert len(new_branch) == expected_prefix_len, (
+        f"branched branch length {len(new_branch)} != expected "
+        f"{expected_prefix_len} — prefix drift would break train/inference parity"
+    )
+
+    # Header must record parent_session linkage.
+    header = branched_mgr.get_header()
+    assert header is not None
+    assert header.parent_session == str(source_file)
+
+    # Printed command must wire the new session id + the reminder text.
+    new_sid = branched_mgr.get_session_id()
+    assert f"--resume {new_sid}" in result.stdout or new_sid in result.stdout
+    assert reminder_text in result.stdout
+    assert "llmharness.replay.reminder_seed" in result.stdout
+    assert "llmharness.adapters.agentm" in result.stdout
+    assert "enable_reminders" in result.stdout
+
+
+def test_missing_reminder_record_errors(tmp_path: Path) -> None:
+    cwd = str(tmp_path)
+    session_dir = tmp_path / ".agentm" / "sessions"
+    audit_dir = tmp_path / ".agentm" / "audit_replay"
+    audit_dir.mkdir(parents=True)
+    source_mgr, _ = _make_source_session(
+        session_dir=session_dir, cwd=cwd, n_turns=3
+    )
+    root_id = source_mgr.get_session_id()
+    sidecar = audit_dir / f"{root_id}.jsonl"
+    # Write a record without surface_reminder.
+    rec = ReplayRecord(
+        phase="auditor",
+        turn_index=1,
+        root_session_id=root_id,
+        ts_ns=int(time.time_ns()),
+        compose_kwargs={},
+        payload={},
+        provider=None,
+        output={"surface_reminder": False, "reminder_text": ""},
+        status="ok",
+    )
+    write_record(sidecar, rec)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "agent-from-reminder",
+            "--audit-replay",
+            str(sidecar),
+            "--turn",
+            "1",
+            "--session-dir",
+            str(session_dir),
+            "--print-only",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "did not surface a reminder" in result.stdout or "did not surface a reminder" in (
+        result.stderr if hasattr(result, "stderr") else ""
+    )
+
+
+def test_user_message_only_branch_smoke(tmp_path: Path) -> None:
+    """Ensure UserMessage payloads also count in the message-index walk."""
+    cwd = str(tmp_path)
+    session_dir = tmp_path / ".agentm" / "sessions"
+    session_dir.mkdir(parents=True)
+    mgr = SessionManager.create(cwd, session_dir)
+    # 4 messages total — alternating user / assistant.
+    mgr.append(message_entry(UserMessage(role="user", content=[TextContent(type="text", text="q0")], timestamp=time.time()), None))
+    mgr.append(message_entry(_make_assistant_message("a0"), mgr.get_leaf_id()))
+    mgr.append(message_entry(UserMessage(role="user", content=[TextContent(type="text", text="q1")], timestamp=time.time()), mgr.get_leaf_id()))
+    mgr.append(message_entry(_make_assistant_message("a1"), mgr.get_leaf_id()))
+
+    from llmharness.replay.prefix_replay import find_leaf_entry_for_turn
+
+    leaf = find_leaf_entry_for_turn(mgr, turn=2)
+    # turn=2 → 3rd message (0-indexed) which is the second user message.
+    assert isinstance(leaf.payload, UserMessage)
