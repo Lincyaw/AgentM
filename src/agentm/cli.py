@@ -323,6 +323,10 @@ async def run(
     *,
     prompt: str,
     scenario: str | None,
+    # NOTE: when ``prompt`` is empty we drive the session via
+    # ``AgentSession.tick`` instead of ``prompt``. The CLI layer enforces
+    # that this only happens when ``resume`` or ``continue_recent`` is set
+    # (a fresh session with no input is still rejected at parse time).
     extra_extensions: list[tuple[str, dict[str, Any]]],
     no_extensions: bool,
     no_skills: bool,
@@ -363,7 +367,14 @@ async def run(
 
     session = await AgentSession.create(config)
     try:
-        final = await session.prompt(prompt)
+        if prompt:
+            final = await session.prompt(prompt)
+        else:
+            # Resume-without-prompt path: let any extension's
+            # decide_turn_action handler inject the first message; if
+            # nothing injects, ``tick`` returns the trajectory unchanged
+            # and emits AgentEnd(NoPendingInput).
+            final = await session.tick()
         cost_service = session.get_service("cost_query")
         provider_name = session.model.provider if session.model is not None else None
         if not quiet:
@@ -386,7 +397,10 @@ def run_cmd(
         str,
         typer.Argument(
             help=(
-                "User prompt to send to the agent. For multi-turn / TUI "
+                "User prompt to send to the agent. Optional when --resume / "
+                "--continue is set — in that case extensions on "
+                "decide_turn_action (e.g. llmharness.replay.reminder_seed) "
+                "supply the first message via Inject. For multi-turn / TUI "
                 "use, run the channels gateway + agentm-terminal --format textual."
             ),
         ),
@@ -549,9 +563,17 @@ def run_cmd(
     if scenario is None and not no_extensions:
         scenario = os.environ.get("AGENTM_SCENARIO") or DEFAULT_SCENARIO
 
-    if not prompt:
+    if not prompt and not resume and not continue_recent:
+        # Fresh session with no input: still rejected. ``--resume`` /
+        # ``--continue`` are the only ways to legally omit the prompt —
+        # they let event-driven extensions (e.g. the prefix-replay
+        # ``reminder_seed`` atom) supply the first message via Inject on
+        # the synthetic ``decide_turn_action`` ``AgentSession.tick``
+        # fires.
         print(
-            "ERROR: prompt is required.\n"
+            "ERROR: prompt is required for a fresh session.\n"
+            "       Pass --resume <sid> (or --continue) to advance an existing\n"
+            "       session whose first message is supplied by an extension.\n"
             "       The in-process Textual TUI (--interactive) was removed —\n"
             "       use the channels gateway instead:\n"
             "         agentm-gateway --bind unix:///tmp/agentm/gw.sock\n"
