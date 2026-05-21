@@ -125,6 +125,11 @@ def test_agent_from_reminder_branches_at_turn_and_prints_command(
         if entry.type == ENTRY_TYPE_MESSAGE:
             message_positions.append(i)
     expected_prefix_len = message_positions[target_turn] + 1
+    # Capture the *content* of the expected leaf entry; ``create_branched_session``
+    # rewrites entry ids on the way out, so a leaf-id equality assert would
+    # always fail. The leaf must instead carry the same (type, payload) as
+    # the source-branch entry that ends turn t.
+    expected_leaf_entry = branch[message_positions[target_turn]]
 
     runner = CliRunner()
     result = runner.invoke(
@@ -153,6 +158,16 @@ def test_agent_from_reminder_branches_at_turn_and_prints_command(
         f"branched branch length {len(new_branch)} != expected "
         f"{expected_prefix_len} — prefix drift would break train/inference parity"
     )
+    # Leaf identity — by content, not by id (create_branched_session
+    # rewrites ids). A count-only drift (off-by-one on a non-message
+    # entry, e.g. the audit_event between turns) would slip past the
+    # length check but be caught here: the leaf payload must match the
+    # source-side entry that ends turn t.
+    branched_leaf = branched_mgr.get_leaf_entry()
+    assert branched_leaf is not None
+    assert branched_mgr.get_leaf_id() == new_branch[-1].id
+    assert branched_leaf.type == expected_leaf_entry.type
+    assert branched_leaf.payload == expected_leaf_entry.payload
 
     # Header must record parent_session linkage.
     header = branched_mgr.get_header()
