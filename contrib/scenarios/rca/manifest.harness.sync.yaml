@@ -8,7 +8,7 @@ description: |
   for the extractor (always) and auditor (every k turns) to finish
   before it issues the next LLM call. That guarantees:
 
-    * Every turn has a paired ``llmharness.audit_event`` set persisted.
+    * Every configured extractor interval has a paired ``llmharness.audit_event`` set persisted.
     * Every k turns has a paired ``llmharness.verdict``.
     * No data is lost on session shutdown timeouts (nothing is queued).
 
@@ -48,7 +48,10 @@ extensions:
   # The only line that differs from manifest.harness.yaml: ``mode: sync``.
   # Per-turn wall time grows by the extractor child latency (~10-15s for a
   # haiku-class model, ~20-30s for a frontier model); plan budgets
-  # accordingly. Auditor child fires every ``audit_interval_turns`` turns.
+  # accordingly. Extractor and auditor both fire every 5 main-agent turns;
+  # extractor runs first, then auditor judges the freshly updated graph.
   - module: llmharness.adapters.agentm
     config:
       mode: sync
+      extractor_interval_turns: 5
+      audit_interval_turns: 5

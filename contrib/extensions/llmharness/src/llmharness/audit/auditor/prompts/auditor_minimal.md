@@ -50,6 +50,13 @@ ids. Triggers worth flagging (non-exhaustive):
 - A repeated `act` signature already shown to be unproductive.
 - A `concl` overreaching what the cited `evid` actually establishes.
 - An imminent irreversible `act` with no precondition verification.
+- A narrowing drift: earlier `evid` names multiple material symptoms,
+  affected services, failing endpoints, or candidate causes, but later
+  `hyp` / `dec` events pursue only one branch while another named branch
+  remains unresolved. Surface only when the unresolved branch is concrete
+  and material, not when it is merely low-priority noise. The suggestion
+  should tell the agent to resolve or explicitly rule out that branch
+  before committing to a final causal story.
 
 If you cannot name a specific concern with specific ids, stay silent.
 A missed real drift costs less than a wrong reminder that erodes
