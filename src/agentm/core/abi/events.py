@@ -142,6 +142,18 @@ class ProviderProtocolViolation(TerminationCause):
 
 
 @dataclass(slots=True, frozen=True)
+class NoPendingInput(TerminationCause):
+    """Resume-without-prompt found nothing to do.
+
+    Surfaced by :meth:`AgentSession.tick` when no extension responded to the
+    synthetic ``decide_turn_action`` with an :class:`Inject`. Non-final so a
+    future extension on the same channel can still override via Inject — this
+    matches reminder_seed's expectation that a non-final ``Stop`` is
+    overridable.
+    """
+
+
+@dataclass(slots=True, frozen=True)
 class BudgetExhausted(TerminationCause):
     """A budget cap was reached. ``detail`` names which budget — e.g.
     ``"cost"`` (runtime session-level cost cap) or ``"max_tool_calls"``
@@ -1252,6 +1264,7 @@ __all__ = [
     "LoopAction",
     "MaxTurnsExhausted",
     "ModelEndTurn",
+    "NoPendingInput",
     "ObserverCallback",
     "ObserverRegistration",
     "PlanSubmittedEvent",
