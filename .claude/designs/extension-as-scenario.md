@@ -558,6 +558,8 @@ def append_entry(self, type: str, payload: Any, parent_id: str | None = None) ->
 
 It returns the new entry id (compaction needs the id to build parent_id chains). Implementation delegates to the underlying `SessionManager.append`. Done in Phase 2 Group B alongside `micro_compact` (smallest blast radius — one method on one Protocol).
 
+**2026-05-21 addition — `get_session_id() -> str`.** Atoms that maintain a sidecar file keyed on the session JSONL stem (e.g. llmharness `audit_replay/<id>.jsonl`) need the persisted `SessionManager.header.id` so the sidecar name lines up with the on-disk session file. `api.root_session_id` (the OTel trace_id) is generated independently at session-construction time and diverges from the header id on every real run. The new `ReadonlySession.get_session_id()` returns the header id when persisted and an empty string when in-memory; the substrate impl (`SessionView`) delegates to `SessionManager.get_session_id()`.
+
 ### 10b.8 cost_budget overflow mechanism
 
 `cost_budget` raises a custom event `cost_budget_exceeded` (carrying `{used: float, limit: float, currency: str}`) when accumulated cost crosses the limit. The agent loop subscribes (in `AgentSession.prompt`) to this channel and, on first emission, flips an internal flag that causes the next iteration to terminate with `agent_end(stop_reason="budget")`. Pure event-bus-based — no exceptions thrown across handler boundaries. Document the channel name and payload in `core/abi/events.py`.

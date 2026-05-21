@@ -52,6 +52,9 @@ class SessionView:
     def get_leaf_id(self) -> str | None:
         return self._sm.get_leaf_id()
 
+    def get_session_id(self) -> str:
+        return self._sm.get_session_id()
+
     def get_entry(self, entry_id: str) -> SessionEntry | None:
         return self._sm.get_entry(entry_id)
 

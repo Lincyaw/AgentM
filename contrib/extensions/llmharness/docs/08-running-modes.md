@@ -209,6 +209,21 @@ overrides.
 
 ### Sanity check before/after a model swap
 
+Like `agentm`, the replay CLI bridges `AGENTM_PROVIDER` / `AGENTM_MODEL`
+and provider-specific env vars (`OPENAI_BASE_URL`, `OPENAI_VERIFY_SSL`,
+`WARPGATE_TICKET`, ...) into the provider config automatically. So if
+your shell already targets a Warpgate-fronted or self-signed endpoint
+for `agentm`, the same shell can run replay without re-stuffing each knob:
+
+```bash
+# Pulls AGENTM_PROVIDER/AGENTM_MODEL + OPENAI_* from env, same as `agentm`.
+llmharness-replay extractor --record <sidecar> --turn <t>
+
+# Explicit override (config dict wins; no env bridging).
+llmharness-replay extractor --record <sidecar> --turn <t> \
+    --provider 'agentm.extensions.builtin.llm_openai:{"model":"sft-4b","base_url":"http://vllm:8000"}'
+```
+
 The extractor SFT contract is `{system, user} → submit_events_batch(events[...])`.
 The auditor SFT contract is `{system, user} → submit_verdict(...)`. If
 the SFT'd model's tool-call name or schema drifts, the replay record's
