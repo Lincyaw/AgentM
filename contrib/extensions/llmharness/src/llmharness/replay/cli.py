@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Coroutine
+import os
+from collections.abc import Callable, Coroutine, Mapping
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -45,10 +46,61 @@ app = typer.Typer(
 # --- shared option helpers --------------------------------------------------
 
 
-def _parse_provider(spec: str | None) -> tuple[str, dict[str, Any]] | None:
-    """``module`` or ``module:json_config`` → coerced provider tuple."""
-    if not spec:
+def resolve_default_provider_spec(
+    env: Mapping[str, str] | None = None,
+) -> tuple[str, dict[str, Any]] | None:
+    """Build a default provider tuple from ``AGENTM_*`` / ``OPENAI_*`` env vars.
+
+    Mirrors the precedence ``agentm`` CLI uses in
+    :func:`agentm.cli._resolve_provider_model_cwd` + ``ProviderRegistry.build``:
+    pulls ``AGENTM_PROVIDER`` (default = registry default), ``AGENTM_MODEL``
+    (default = provider's ``default_model``), then routes through the
+    descriptor so ``OPENAI_BASE_URL`` / ``OPENAI_VERIFY_SSL`` /
+    ``WARPGATE_TICKET`` etc. become entries in the returned config dict.
+
+    Returns ``None`` (deferring to runner defaults) when the registry has no
+    extension module for the resolved provider, e.g. ``amazon-bedrock``
+    which is currently descriptor-only.
+    """
+    # Late import: agentm is an optional dependency for the replay package
+    # (rca-autorl installs llmharness without the full agentm runtime).
+    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+
+    source = os.environ if env is None else env
+    registry = DEFAULT_PROVIDER_REGISTRY
+    provider_id = source.get("AGENTM_PROVIDER") or registry.default_provider().id
+    try:
+        descriptor = registry.resolve(provider_id)
+    except KeyError:
         return None
+    if descriptor.extension_module is None:
+        return None
+    model = source.get("AGENTM_MODEL") or descriptor.default_model
+    if not isinstance(model, str) or not model:
+        return None
+    try:
+        return registry.build(provider_id, {"model": model}, env=source)
+    except KeyError:
+        return None
+
+
+def _parse_provider(spec: str | None) -> tuple[str, dict[str, Any]] | None:
+    """Coerce ``--provider`` to a ``(module_path, config)`` tuple.
+
+    Forms:
+
+    * ``None`` (flag omitted) — pull ``AGENTM_PROVIDER`` / ``AGENTM_MODEL``
+      from env and apply the same ``ProviderRegistry`` enrichment the
+      ``agentm`` CLI uses, so ``OPENAI_BASE_URL`` etc. flow through
+      automatically.
+    * ``"module:{json_cfg}"`` — explicit config wins; no env bridging.
+    * ``"name"`` — bare provider id: look it up in
+      :data:`agentm.ai.DEFAULT_PROVIDER_REGISTRY` to env-bridge (matching
+      ``agentm --provider <name>`` behaviour); if it isn't a known
+      provider, treat as a bare module path with empty config (legacy).
+    """
+    if not spec:
+        return resolve_default_provider_spec()
     if ":" in spec:
         module, payload = spec.split(":", 1)
         try:
@@ -60,7 +112,23 @@ def _parse_provider(spec: str | None) -> tuple[str, dict[str, Any]] | None:
         if not isinstance(cfg, dict):
             raise typer.BadParameter("--provider config JSON must be an object")
         return module.strip(), cfg
-    return spec.strip(), {}
+    bare = spec.strip()
+    # Try registry resolve so ``--provider openai`` env-bridges identically
+    # to ``agentm --provider openai``; fall back to "bare module path" for
+    # backward compat with third-party providers not in the registry.
+    try:
+        from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+
+        registry = DEFAULT_PROVIDER_REGISTRY
+        descriptor = registry.resolve(bare)
+        if descriptor.extension_module is None:
+            return bare, {}
+        model = os.environ.get("AGENTM_MODEL") or descriptor.default_model
+        if not isinstance(model, str) or not model:
+            return bare, {}
+        return registry.build(bare, {"model": model})
+    except KeyError:
+        return bare, {}
 
 
 def _load_prompt_override(path: str | None) -> str | None:
