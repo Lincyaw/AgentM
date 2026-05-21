@@ -41,11 +41,17 @@ from typing import Any
 from agentm.core.abi import (
     AgentEndEvent,
     AgentMessage,
+    AgentStartEvent,
+    DecideTurnActionEvent,
     EventBus,
     ImageContent,
+    Inject,
     Model,
+    NoPendingInput,
+    Stop,
     TextContent,
     Tool,
+    TurnObservation,
     UserMessage,
 )
 from agentm.core.abi.events import (
@@ -53,6 +59,7 @@ from agentm.core.abi.events import (
     ChildSessionEndEvent,
     SessionShutdownEvent,
 )
+from agentm.core.abi.loop import _resolve_action
 from agentm.core.runtime.resource_loader import ResourceLoader
 from agentm.core.runtime.session_helpers import (
     collect_start_veto,
@@ -287,6 +294,121 @@ class AgentSession:
         # they appear in the returned list.
         persisted_context = self._session_manager.build_session_context().messages
         cursor: str | None = self._session_manager.get_leaf_id() or entry.id
+        for msg in final_messages:
+            if id(msg) in pre_run_ids:
+                continue
+            if msg in persisted_context:
+                continue
+            if cursor is None:
+                self._session_manager.reset_leaf()
+            else:
+                self._session_manager.branch(cursor)
+            child = self._session_manager.append_message(msg)
+            cursor = child.id
+
+        return final_messages
+
+    # --- tick (resume-without-prompt) -------------------------------------
+
+    async def tick(
+        self,
+        *,
+        signal: asyncio.Event | None = None,
+    ) -> list[AgentMessage]:
+        """Advance the session by one decide-cycle without new user input.
+
+        Used by the CLI when ``agentm --resume <sid>`` is invoked with no
+        positional prompt: harness-injected messages (e.g. the prefix-replay
+        ``reminder_seed`` atom) are the source of the first message, and the
+        kernel must give extensions a chance to ``Inject`` BEFORE any LLM
+        call. Fires :class:`AgentStartEvent` then a synthetic
+        :class:`DecideTurnActionEvent` whose default is
+        ``Stop(NoPendingInput())``; resolves the decision via the same
+        lattice the kernel uses post-turn.
+
+        * On ``Inject(messages=[...])`` — append the injected messages to
+          the live context and hand off to :meth:`AgentLoop.run` for one
+          (or more) normal turns. The next assistant message is persisted
+          identically to the ``prompt`` path.
+        * Otherwise — emit :class:`AgentEndEvent` with
+          ``NoPendingInput()`` and return the unchanged message list. No
+          user / assistant message is appended to the session log.
+        """
+
+        # Drain queued send_user_messages so atoms that pushed content via
+        # the standard queue still get to drive this tick. Harmless when
+        # the queue is empty.
+        await self._drain_pending_user_messages()
+
+        # Build the live context + system prompt — symmetric with ``prompt``
+        # so before_agent_start handlers see the same state they always do.
+        messages = self._session_manager.build_session_context().messages
+        system_prompt = self._build_system_prompt()
+        before_returns = await self._bus.emit(
+            BeforeAgentStartEvent.CHANNEL,
+            BeforeAgentStartEvent(messages=messages, system=system_prompt),
+        )
+        veto_cause = collect_start_veto(before_returns)
+        if veto_cause is not None:
+            await self._bus.emit(
+                AgentEndEvent.CHANNEL,
+                AgentEndEvent(messages=messages, cause=veto_cause),
+            )
+            return messages
+        replacement_system = collect_system_replacement(before_returns)
+        if replacement_system is not None:
+            system_prompt = replacement_system
+
+        await self._bus.emit(
+            AgentStartEvent.CHANNEL, AgentStartEvent(messages=messages)
+        )
+
+        default_action = Stop(NoPendingInput())
+        observation = TurnObservation(
+            turn_index=0,
+            assistant_message=None,
+            tool_outcomes=[],
+            default_action=default_action,
+        )
+        returns = await self._bus.emit(
+            DecideTurnActionEvent.CHANNEL,
+            DecideTurnActionEvent(observation=observation),
+        )
+        action = _resolve_action(default_action, returns)
+
+        if not isinstance(action, Inject):
+            # No extension provided input → terminate cleanly. The default
+            # ``NoPendingInput`` cause is the literal that observers should
+            # match on. A non-Inject override (Stop / Step) is also treated
+            # as "no work" — Step has no meaning here because there is no
+            # assistant turn to chain off of.
+            cause = action.cause if isinstance(action, Stop) else default_action.cause
+            await self._bus.emit(
+                AgentEndEvent.CHANNEL,
+                AgentEndEvent(messages=messages, cause=cause),
+            )
+            return messages
+
+        # Inject — splice the injected messages into the live context and
+        # run the kernel loop. Snapshot identities BEFORE the run so the
+        # post-loop diff is consistent with the ``prompt`` path. The
+        # injected messages themselves were materialised here in
+        # ``tick`` (not by the kernel loop), so they must be persisted as
+        # session entries — include them in the diff by NOT capturing
+        # their ids in the pre-run snapshot.
+        pre_run_ids: set[int] = {id(m) for m in messages}
+        messages.extend(action.messages)
+
+        final_messages = await self._loop.run(
+            messages=messages,
+            model=self._require_model(),
+            tools=self._tools,
+            system=system_prompt,
+            signal=signal,
+        )
+
+        persisted_context = self._session_manager.build_session_context().messages
+        cursor: str | None = self._session_manager.get_leaf_id()
         for msg in final_messages:
             if id(msg) in pre_run_ids:
                 continue
