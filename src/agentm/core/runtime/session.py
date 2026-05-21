@@ -59,7 +59,7 @@ from agentm.core.abi.events import (
     ChildSessionEndEvent,
     SessionShutdownEvent,
 )
-from agentm.core.abi.loop import _resolve_action
+from agentm.core.abi.loop import resolve_loop_action
 from agentm.core.runtime.resource_loader import ResourceLoader
 from agentm.core.runtime.session_helpers import (
     collect_start_veto,
@@ -374,7 +374,7 @@ class AgentSession:
             DecideTurnActionEvent.CHANNEL,
             DecideTurnActionEvent(observation=observation),
         )
-        action = _resolve_action(default_action, returns)
+        action = resolve_loop_action(default_action, returns)
 
         if not isinstance(action, Inject):
             # No extension provided input → terminate cleanly. The default
