@@ -72,3 +72,39 @@ default via `Inject` (matches reminder_seed's existing assumption).
   * Drives a tiny persisted session through the emitted resume command
     (in-process, stub provider), asserts `REMINDER_DELIVERED` entry written
     and one assistant turn ran.
+
+## Addendum 2026-05-21 (post-review)
+
+Corrections to "Tests added" above. The shipped tests deviated from the
+plan and review surfaced both gaps; recording the reality here rather
+than rewriting the original section keeps the design log honest.
+
+* `contrib/extensions/llmharness/tests/test_replay_cli_resume.py` was
+  **not** shipped. The equivalent integration was instead written as
+  `contrib/extensions/llmharness/tests/test_reminder_seed_tick_integration.py`,
+  which mounts `llmharness.replay.reminder_seed` on a stub-provider
+  `AgentSession` and calls `tick()` directly (no subprocess, no CLI
+  argv plumbing). The integration boundary it pins — that
+  `reminder_seed` survives the tick semantics and persists
+  `REMINDER_DELIVERED` after one assistant turn — is the load-bearing
+  invariant from the harness side. The agentm-side CLI dispatch contract
+  is pinned by the dispatch-spy tests below; together they cover the
+  same ground as the proposed subprocess test without the stub-HTTP
+  server scaffolding.
+* `tests/unit/test_resume_without_prompt.py` gained three CLI
+  **dispatch** tests (post-review fix): they drive `agentm.cli.run`
+  with a session-spy patched in via `AgentSession.create` and assert
+  which of `prompt` / `tick` was called for `resume`-only,
+  `resume + prompt`, and fresh-`prompt` invocations. The original
+  arg-parsing test only checked the guard's negative — it would have
+  silently passed a regression that always routed through `tick`.
+
+## Addendum 2026-05-21 (post-review, naming)
+
+`_resolve_action` and `_default_action` in `core/abi/loop.py` were
+promoted to public names (`resolve_loop_action`,
+`default_loop_action`) and re-exported via `__all__`. The
+``AgentSession.tick`` caller in this plan was the second external
+caller, and a leading underscore stops carrying its meaning at that
+point. The in-module `AgentLoop._dispatch_decision` caller and the
+existing `test_decide_turn_action.py` were updated accordingly.
