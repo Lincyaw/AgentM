@@ -180,7 +180,17 @@ MANIFEST = ExtensionManifest(
             },
             "cards_tools_config": {"type": ["object", "null"]},
             "observability_config": {"type": ["object", "null"]},
-            "shutdown_timeout_s": {"type": "number", "minimum": 0},
+            "shutdown_timeout_s": {
+                "type": "number",
+                "minimum": 0,
+                "description": (
+                    "Seconds to wait for the async audit worker to drain "
+                    "queued jobs at session shutdown. Default 600 to "
+                    "accommodate slow LLM endpoints (Warpgate-fronted "
+                    "providers can take ~14s/call); lower it if your "
+                    "provider is fast and you want quicker teardown."
+                ),
+            },
             "extractor_provider": {
                 "type": ["object", "null"],
                 "properties": {
@@ -260,7 +270,10 @@ MANIFEST = ExtensionManifest(
 
 _DEFAULT_AUDIT_INTERVAL_TURNS = 3
 _DEFAULT_RECENT_VERDICTS = _et.RECENT_VERDICTS_FOR_AUDITOR
-_DEFAULT_SHUTDOWN_TIMEOUT_S = 60.0
+# 600s (10min) accommodates slow / proxied LLM endpoints (e.g. Warpgate-
+# fronted OpenAI-compatible servers at ~14s/call); a low default drops
+# audit jobs at session teardown. Override via ``shutdown_timeout_s``.
+_DEFAULT_SHUTDOWN_TIMEOUT_S = 600.0
 _DEFAULT_MODE = "async"
 _DEFAULT_AUDIT_SUMMARY_THRESHOLD = 30
 
