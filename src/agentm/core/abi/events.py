@@ -142,6 +142,22 @@ class ProviderProtocolViolation(TerminationCause):
 
 
 @dataclass(slots=True, frozen=True)
+class NoPendingInput(TerminationCause):
+    """Resume-without-prompt found nothing to do.
+
+    Surfaced by :meth:`AgentSession.tick` as the **default action** of the
+    synthetic ``decide_turn_action`` it fires before any LLM call.
+    ``final = False`` is load-bearing, not symmetric padding: it is what
+    permits an extension handler on the same channel (e.g.
+    ``llmharness.replay.reminder_seed``) to return :class:`Inject` and
+    override the default — without that override, the loop never runs and
+    the resume produces no new turn. The cause only appears on
+    :class:`AgentEndEvent` when no handler injected; in that case the
+    trajectory is intentionally untouched (see ``tick`` docstring).
+    """
+
+
+@dataclass(slots=True, frozen=True)
 class BudgetExhausted(TerminationCause):
     """A budget cap was reached. ``detail`` names which budget — e.g.
     ``"cost"`` (runtime session-level cost cap) or ``"max_tool_calls"``
@@ -1252,6 +1268,7 @@ __all__ = [
     "LoopAction",
     "MaxTurnsExhausted",
     "ModelEndTurn",
+    "NoPendingInput",
     "ObserverCallback",
     "ObserverRegistration",
     "PlanSubmittedEvent",

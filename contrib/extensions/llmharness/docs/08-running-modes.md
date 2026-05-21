@@ -127,6 +127,14 @@ The one-shot `reminder_seed` atom drains its configured reminder on the
 live adapter uses, then unsubscribes — so the resumed agent's first
 visible message is byte-identical to what it would have been live.
 
+Note: the emitted `agentm --resume <sid>` command carries no positional
+prompt argument. Since agentm v0.1.x the CLI accepts resume-only
+invocations and routes them through `AgentSession.tick`, giving
+extensions on `decide_turn_action` (the seed atom here) the first
+chance to supply input via `Inject`. If no extension injects, the
+session exits cleanly with `NoPendingInput` and the trajectory is
+unchanged.
+
 ---
 
 ## 5. Run them together
