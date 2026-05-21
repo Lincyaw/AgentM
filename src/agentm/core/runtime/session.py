@@ -332,7 +332,16 @@ class AgentSession:
           identically to the ``prompt`` path.
         * Otherwise — emit :class:`AgentEndEvent` with
           ``NoPendingInput()`` and return the unchanged message list. No
-          user / assistant message is appended to the session log.
+          message for this tick is appended to the session log.
+
+        Drain caveat: ``tick`` still drains the ``send_user_message``
+        queue first, so atoms that pushed content into the queue via
+        :meth:`ExtensionAPI.send_user_message` BEFORE the tick will have
+        their messages persisted as session entries even on the no-
+        injector exit path. That is by design (the queue is the
+        documented entry point for out-of-band content) and matches what
+        ``prompt`` does. The "unchanged trajectory" guarantee above
+        applies only when the queue was empty entering ``tick``.
         """
 
         # Drain queued send_user_messages so atoms that pushed content via
