@@ -39,8 +39,8 @@ from agentm.core.abi import (
     text_message,
 )
 from agentm.core.abi.loop import (
-    _default_action,
-    _resolve_action,
+    default_loop_action as _default_action,
+    resolve_loop_action as _resolve_action,
 )
 from agentm.core.abi.termination import PauseTurn, VendorSpecific
 from agentm.core.abi.tool import ToolContinue
