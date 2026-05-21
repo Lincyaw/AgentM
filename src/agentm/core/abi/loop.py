@@ -202,7 +202,7 @@ def _outcome_result(outcome: ToolOutcome) -> ToolResult:
     raise TypeError(f"unknown ToolOutcome subclass: {type(outcome).__name__}")
 
 
-def _default_action(
+def default_loop_action(
     assistant_msg: AssistantMessage,
     paired_outcomes: list[tuple[str, ToolOutcome]],
 ) -> LoopAction:
@@ -272,7 +272,7 @@ def _default_action(
     return Step()
 
 
-def _resolve_action(default: LoopAction, returns: list[Any]) -> LoopAction:
+def resolve_loop_action(default: LoopAction, returns: list[Any]) -> LoopAction:
     """Reconcile the kernel default with handler-supplied overrides.
 
     Resolution lattice (see ``.claude/designs/agent-loop.md``):
@@ -771,7 +771,7 @@ class AgentLoop:
     ) -> LoopAction:
         """Compute the default action, fire the hook, resolve overrides."""
 
-        default = _default_action(assistant_msg, paired_outcomes)
+        default = default_loop_action(assistant_msg, paired_outcomes)
         observation = TurnObservation(
             turn_index=turn_index,
             assistant_message=assistant_msg,
@@ -783,7 +783,7 @@ class AgentLoop:
             DecideTurnActionEvent.CHANNEL,
             DecideTurnActionEvent(observation=observation),
         )
-        return _resolve_action(default, returns)
+        return resolve_loop_action(default, returns)
 
     async def _finish_with_cause(
         self, messages: list[AgentMessage], cause: TerminationCause
@@ -833,4 +833,4 @@ class AgentLoop:
         return await self._finish_with_cause(messages, cause)
 
 
-__all__ = ["AgentLoop", "LoopConfig"]
+__all__ = ["AgentLoop", "LoopConfig", "default_loop_action", "resolve_loop_action"]

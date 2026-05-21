@@ -5,7 +5,7 @@ vendor's stop-reason vocabulary. ``TerminationHint`` is the kernel-canonical
 shape that LLM provider adapters translate their raw ``stop_reason`` /
 ``finish_reason`` strings into; the mapping table for each provider lives in
 that adapter's module. The agent loop dispatches on this sum-type (see
-``agentm.core.abi.loop._default_action``); providers MUST set the
+``agentm.core.abi.loop.default_loop_action``); providers MUST set the
 ``AssistantMessage.termination`` field on the final ``MessageEnd`` event.
 
 Variants are intentionally narrow:
