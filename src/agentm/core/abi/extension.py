@@ -253,6 +253,19 @@ class ReadonlySession(Protocol):
 
     def get_leaf_id(self) -> str | None: ...
 
+    def get_session_id(self) -> str:
+        """Return the persisted ``SessionManager`` header id, or empty
+        string when the session is in-memory / not yet persisted.
+
+        Distinct from :attr:`ExtensionAPI.root_session_id` (the OTel
+        trace_id assigned by the substrate at session-construction time):
+        atoms that need to correlate sidecar files with the on-disk
+        session JSONL must use this id, since the persisted file name is
+        derived from the manager header — see
+        ``JsonlSessionManager.new_session``.
+        """
+        ...
+
     def get_entry(self, entry_id: str) -> Any | None: ...
 
     def get_loop_config(self) -> LoopConfig: ...
