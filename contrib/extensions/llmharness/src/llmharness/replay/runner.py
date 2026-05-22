@@ -15,7 +15,7 @@ from typing import Any, TypeVar
 
 from ..audit._session_helpers import bind_extractor_state
 from ..audit.auditor.extensions import compose_auditor_extensions
-from ..audit.auditor.submit_tool import SUBMIT_VERDICT_TOOL_NAME
+from ..audit.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
 from ..audit.extractor.extensions import compose_extractor_extensions
 from ..audit.extractor.output import RawExtractorOutput
 from ..audit.extractor.state import ExtractionState

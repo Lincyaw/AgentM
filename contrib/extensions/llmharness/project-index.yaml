@@ -235,7 +235,7 @@ requirements:
       - src/llmharness/audit/auditor/prompt.py
       - src/llmharness/audit/auditor/extensions.py
       - src/llmharness/audit/auditor/output.py
-      - src/llmharness/audit/auditor/submit_tool.py
+      - src/llmharness/audit/auditor/submit_verdict.py
     tests:
       - tests/test_auditor_degradation.py
       - tests/test_auditor_findings.py
@@ -270,7 +270,7 @@ requirements:
       added in v3 (data | ref) so the extractor's ``add_edge`` schema
       stays in lockstep with EdgeKind. The auditor's submit_verdict
       schema uses no drift-type enum — the verdict shape is defined
-      in full in audit/auditor/submit_tool.py without referencing
+      in full in audit/auditor/submit_verdict.py without referencing
       _enum_schema.py for drift classification.
     priority: P0
     status: implemented
@@ -332,7 +332,7 @@ requirements:
     code:
       - src/llmharness/schema.py
       - src/llmharness/audit/_enum_schema.py
-      - src/llmharness/audit/auditor/submit_tool.py
+      - src/llmharness/audit/auditor/submit_verdict.py
       - src/llmharness/audit/auditor/output.py
       - src/llmharness/audit/auditor/prompt.py
       - src/llmharness/adapters/agentm.py
@@ -389,7 +389,7 @@ requirements:
       turn at index idx — role, content, thinking blocks — so the
       auditor can verify event source_turns references against the
       actual trajectory text without bulk-loading the full trajectory
-      into the auditor context. Module: audit/auditor/get_turn_tool.py.
+      into the auditor context. Module: audit/auditor/get_turn.py.
       Registered via compose_auditor_extensions(trajectory_snapshot=...).
       Out-of-range idx returns a structured tool-result error
       (is_error=True), not a crash. bool idx also rejected (bool is a
@@ -401,7 +401,7 @@ requirements:
     priority: P1
     status: tested
     code:
-      - src/llmharness/audit/auditor/get_turn_tool.py
+      - src/llmharness/audit/auditor/get_turn.py
       - src/llmharness/audit/auditor/extensions.py
       - src/llmharness/adapters/agentm.py
     tests:
@@ -474,7 +474,7 @@ requirements:
     title: get_event_detail([ids]) drill-down tool for the auditor
     description: |
       Issue #134 commit 4 (P0). New §11 single-file extension at
-      ``audit/auditor/get_event_detail_tool.py`` registered in the
+      ``audit/auditor/get_event_detail.py`` registered in the
       auditor child session. Returns the full ``Event.to_dict()`` plus
       outgoing+incoming ``Edge.to_dict()`` lists (with witness fields)
       for every requested event id. Used by the auditor when the prompt
@@ -496,7 +496,7 @@ requirements:
     priority: P0
     status: tested
     code:
-      - src/llmharness/audit/auditor/get_event_detail_tool.py
+      - src/llmharness/audit/auditor/get_event_detail.py
       - src/llmharness/audit/auditor/extensions.py
       - src/llmharness/adapters/agentm.py
     tests:
