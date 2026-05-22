@@ -25,18 +25,10 @@ from agentm.core.abi import ToolResult
 
 
 def _get_turn_fn(snapshot: list[dict[str, Any]]) -> Any:
-    """Install ``get_turn_tool`` with ``snapshot`` and return the tool's ``fn``."""
-    from llmharness.audit.auditor.get_turn_tool import install
+    """Mint a ``get_turn`` tool over ``snapshot`` and return its ``fn``."""
+    from llmharness.audit.auditor.get_turn import build_get_turn_tool
 
-    captured: list[Any] = []
-
-    class _CapturAPI:
-        def register_tool(self, tool: Any) -> None:
-            captured.append(tool)
-
-    install(_CapturAPI(), {"trajectory_snapshot": snapshot})  # type: ignore[arg-type]
-    assert len(captured) == 1, "get_turn_tool must register exactly one tool"
-    return captured[0].fn
+    return build_get_turn_tool(snapshot).fn
 
 
 # ---------------------------------------------------------------------------
@@ -177,12 +169,13 @@ class TestScenarioG:
     invocation) which covers the same structural requirement.
     """
 
-    def test_compose_with_snapshot_includes_get_turn_module(self) -> None:
+    def test_compose_with_snapshot_includes_get_turn_in_atom_tools(self) -> None:
         """compose_auditor_extensions(trajectory_snapshot=[...]) must
-        include the get_turn module in the returned extension list
-        when the ``with_drill_down`` tool profile is active."""
+        request the merged auditor_tools atom to mount ``get_turn`` and
+        forward the snapshot in the atom's config when the
+        ``with_drill_down`` profile is active."""
         from llmharness.audit.auditor.extensions import compose_auditor_extensions
-        from llmharness.audit.auditor.get_turn_tool import GET_TURN_TOOL_NAME
+        from llmharness.audit.auditor.get_turn import GET_TURN_TOOL_NAME
         from llmharness.audit.auditor.profiles import PROFILES
 
         snapshot = [{"index": 0, "role": "user", "content": []}]
@@ -192,33 +185,31 @@ class TestScenarioG:
             trajectory_snapshot=snapshot,
             tools=PROFILES["with_drill_down"],
         )
-        modules = {mod for mod, _cfg in exts}
-        assert "llmharness.audit.auditor.get_turn_tool" in modules, (
-            f"get_turn_tool module not in auditor extensions: {modules}"
+        atom_cfgs = [cfg for mod, cfg in exts if mod == "llmharness.audit.auditor.atom"]
+        assert atom_cfgs, "auditor_tools atom not present in extensions list"
+        cfg = atom_cfgs[0]
+        assert "get_turn" in cfg["tools"], f"get_turn not selected: {cfg['tools']!r}"
+        assert cfg.get("trajectory_snapshot") == snapshot, (
+            f"trajectory_snapshot not forwarded in atom config: {cfg}"
         )
-        # Config must carry the snapshot.
-        for mod, cfg in exts:
-            if mod == "llmharness.audit.auditor.get_turn_tool":
-                assert cfg.get("trajectory_snapshot") == snapshot, (
-                    f"trajectory_snapshot not forwarded in config: {cfg}"
-                )
-
-        # Confirm the tool name constant is exported.
+        # Confirm the tool name constant is still exported under the new path.
         assert GET_TURN_TOOL_NAME == "get_turn"
 
-    def test_compose_without_snapshot_omits_get_turn_module(self) -> None:
+    def test_compose_without_snapshot_omits_get_turn_from_atom_tools(self) -> None:
         """compose_auditor_extensions(trajectory_snapshot=None) must NOT
-        include the get_turn module — auditor prompt's 'may not be
-        available' caveat is correct by default."""
+        include ``get_turn`` in the merged atom's ``tools`` list — the
+        auditor prompt's 'may not be available' caveat is correct by
+        default."""
         from llmharness.audit.auditor.extensions import compose_auditor_extensions
 
         exts = compose_auditor_extensions(
             cards_tools_config=None,
             observability_config=None,
         )
-        modules = {mod for mod, _cfg in exts}
-        assert "llmharness.audit.auditor.get_turn_tool" not in modules, (
-            "get_turn_tool must not be registered when trajectory_snapshot=None"
+        atom_cfgs = [cfg for mod, cfg in exts if mod == "llmharness.audit.auditor.atom"]
+        assert atom_cfgs
+        assert "get_turn" not in atom_cfgs[0]["tools"], (
+            "get_turn must not be requested when trajectory_snapshot=None"
         )
 
     def test_get_turn_tool_returns_correct_snapshot_entry_via_compose(self) -> None:
@@ -242,7 +233,8 @@ class TestScenarioG:
             tools=PROFILES["with_drill_down"],
         )
 
-        # Find and install the get_turn_tool module.
+        # Find and install the merged auditor_tools atom, capture the
+        # ``get_turn`` tool it registers.
         import importlib
 
         captured: list[Any] = []
@@ -252,13 +244,16 @@ class TestScenarioG:
                 captured.append(tool)
 
         for mod_path, cfg in exts:
-            if mod_path == "llmharness.audit.auditor.get_turn_tool":
+            if mod_path == "llmharness.audit.auditor.atom":
                 mod = importlib.import_module(mod_path)
                 mod.install(_CapturAPI(), cfg)  # type: ignore[attr-defined]
                 break
 
-        assert len(captured) == 1
-        fn = captured[0].fn
+        get_turn_tools = [t for t in captured if t.name == "get_turn"]
+        assert len(get_turn_tools) == 1, (
+            f"expected exactly one get_turn tool, got {[t.name for t in captured]!r}"
+        )
+        fn = get_turn_tools[0].fn
 
         # Call get_turn(2) — must return snapshot[2].
         result: ToolResult = asyncio.run(fn({"idx": 2}))

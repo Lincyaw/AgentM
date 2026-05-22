@@ -37,7 +37,7 @@ from ..audit.auditor.prompt import (
     DEFAULT_PROMPT_NAME as _AUDITOR_DEFAULT_PROMPT_NAME,
 )
 from ..audit.auditor.prompt import load_auditor_prompt
-from ..audit.auditor.submit_tool import SUBMIT_VERDICT_TOOL_NAME
+from ..audit.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
 from ..audit.extractor.prompt import (
     DEFAULT_PROMPT_NAME as _EXTRACTOR_DEFAULT_PROMPT_NAME,
 )

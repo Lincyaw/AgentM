@@ -73,7 +73,14 @@ def test_submit_verdict_is_force_included_even_when_omitted() -> None:
 # --- compose wiring ---------------------------------------------------------
 
 
-def test_minimal_compose_omits_drill_down_modules() -> None:
+def _atom_cfg(exts: list[tuple[str, dict[str, object]]]) -> dict[str, object]:
+    """Return the merged auditor_tools atom's config from a compose result."""
+    matches = [cfg for mod, cfg in exts if mod == "llmharness.audit.auditor.atom"]
+    assert len(matches) == 1, f"expected exactly one auditor_tools atom, got {len(matches)}"
+    return matches[0]
+
+
+def test_minimal_compose_selects_only_submit_verdict() -> None:
     exts = compose_auditor_extensions(
         trajectory_snapshot=[{"index": 0, "role": "user", "content": []}],
         events=_ev(),
@@ -83,13 +90,14 @@ def test_minimal_compose_omits_drill_down_modules() -> None:
         continuation_notes=[],
         # tools=None -> minimal default
     )
-    modules = {mod for mod, _cfg in exts}
-    assert "llmharness.audit.auditor.submit_tool" in modules
-    assert "llmharness.audit.auditor.get_event_detail_tool" not in modules
-    assert "llmharness.audit.auditor.get_turn_tool" not in modules
+    cfg = _atom_cfg(exts)
+    selected = set(cfg["tools"])  # type: ignore[arg-type]
+    assert "submit_verdict" in selected
+    assert "get_event_detail" not in selected
+    assert "get_turn" not in selected
 
 
-def test_with_drill_down_compose_mounts_all_three_modules() -> None:
+def test_with_drill_down_compose_selects_all_three_tools() -> None:
     exts = compose_auditor_extensions(
         trajectory_snapshot=[{"index": 0, "role": "user", "content": []}],
         events=_ev(),
@@ -99,10 +107,11 @@ def test_with_drill_down_compose_mounts_all_three_modules() -> None:
         continuation_notes=[],
         tools=PROFILES["with_drill_down"],
     )
-    modules = {mod for mod, _cfg in exts}
-    assert "llmharness.audit.auditor.submit_tool" in modules
-    assert "llmharness.audit.auditor.get_event_detail_tool" in modules
-    assert "llmharness.audit.auditor.get_turn_tool" in modules
+    cfg = _atom_cfg(exts)
+    selected = set(cfg["tools"])  # type: ignore[arg-type]
+    assert "submit_verdict" in selected
+    assert "get_event_detail" in selected
+    assert "get_turn" in selected
 
 
 # --- prompt-file loading ----------------------------------------------------
