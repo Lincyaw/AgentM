@@ -53,7 +53,7 @@ sequenceDiagram
     autonumber
     participant Main as Main agent loop
     participant Bus as EventBus
-    participant Adapter as Adapter (adapters/agentm.py)
+    participant Adapter as Adapter adapters_agentm
     participant Ext as Extractor child
     participant Aud as Auditor child
     participant Reg as AuditCheckRegistry
@@ -62,7 +62,8 @@ sequenceDiagram
 
     Main->>Bus: TurnEnd(messages, turn_count)
     Bus->>Adapter: _on_turn_end(event)
-    Note over Adapter: extractor_due = turn % extractor_k == 0; auditor_due = turn % audit_k == 0; auditor_due forces extractor
+    Note over Adapter: compute extractor_due and auditor_due
+    Note over Adapter: auditor_due forces extractor to run too
 
     alt extractor_due
         Adapter->>Adapter: scan branch, slice new-turn window
