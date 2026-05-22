@@ -49,6 +49,7 @@ from agentm.core.abi.extension import ProviderConfig
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
 
+from llmharness.audit.auditor import SUBMIT_VERDICT_TOOL_NAME
 from llmharness.audit.entry_types import (
     AUDIT_EDGE,
     AUDIT_EVENT,
@@ -58,7 +59,6 @@ from llmharness.audit.entry_types import (
     EXTRACTOR_PARTIAL,
     VERDICT,
 )
-from llmharness.audit.auditor import SUBMIT_VERDICT_TOOL_NAME
 from llmharness.audit.extractor import SUBMIT_EVENTS_TOOL_NAME
 
 # --- shared constants -------------------------------------------------------
