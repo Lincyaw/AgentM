@@ -307,11 +307,12 @@ def write_strict_ab_replay(
     the viewer sees one auditor firing per extractor firing — only the
     surfaced-reminder turn is special.
 
-    If the branch sidecar happens to be empty of post-reminder
-    extractor records (e.g. the branch terminated immediately on the
-    seeded reminder), the entire branch sidecar is written verbatim
-    as a fallback so the viewer still has *something* on the branch
-    side. Returns the output path.
+    If the branch produces no post-reminder extractor records (e.g.
+    it terminated immediately on the seeded reminder), the sidecar
+    carries only the control prefix + surfaced reminder — no fallback
+    write of branch records with ``turn_index <= reminder.turn_index``,
+    because those collide with the control prefix and corrupt any
+    downstream turn-keyed view. Returns the output path.
     """
 
     if out_path.exists():
@@ -343,13 +344,20 @@ def write_strict_ab_replay(
                 _rebind_record(auditor, root_session_id=branch_session_log_id),
             )
 
-    branch_tail_written = False
+    # Strictly post-cut: ``turn_index > reminder.turn_index`` only.
+    # An empty branch tail (early termination, no post-reminder
+    # extractor firing) is a valid outcome — the sidecar then carries
+    # only the control prefix + surfaced reminder, and consumers can
+    # distinguish "no branch-side audit signal" from "branch disagreed
+    # with control" cleanly. We do NOT fall back to dumping branch
+    # records with turn_index <= reminder.turn_index: those collide
+    # with the control prefix's turn-keyed records and corrupt any
+    # downstream ``{turn_index: record}`` view of the sidecar.
     for record in branch_records:
         if record.phase != "extractor":
             continue
         if int(record.turn_index) <= reminder.turn_index:
             continue
-        branch_tail_written = True
         write_record(
             out_path,
             _rebind_record(record, root_session_id=branch_session_log_id),
@@ -360,24 +368,6 @@ def write_strict_ab_replay(
                 out_path,
                 _rebind_record(auditor, root_session_id=branch_session_log_id),
             )
-
-    if not branch_tail_written:
-        # Branch produced no post-reminder extractor records — emit
-        # whatever extractor / auditor pairs it does have so the
-        # viewer can still show the branch side.
-        for record in branch_records:
-            if record.phase != "extractor":
-                continue
-            write_record(
-                out_path,
-                _rebind_record(record, root_session_id=branch_session_log_id),
-            )
-            auditor = branch_auditors_by_turn.get(int(record.turn_index))
-            if auditor is not None:
-                write_record(
-                    out_path,
-                    _rebind_record(auditor, root_session_id=branch_session_log_id),
-                )
 
     return out_path
 

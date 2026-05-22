@@ -186,12 +186,17 @@ def test_strict_ab_drops_control_records_strictly_after_cut(tmp_path: Path) -> N
     assert ext_turns == [0, 1, 2, 3]
 
 
-def test_strict_ab_falls_back_to_full_branch_when_tail_empty(tmp_path: Path) -> None:
-    """If the branch happens to produce no post-reminder extractor
-    records (e.g. it terminated immediately on the seeded reminder),
-    the viewer would otherwise see only the control prefix and miss
-    that the branch ran at all. The fallback writes the branch
-    extractors verbatim so the comparison is still visible."""
+def test_strict_ab_no_branch_tail_means_no_branch_records(tmp_path: Path) -> None:
+    """When the branch produces no post-reminder extractor records,
+    the sidecar must carry only the control prefix. The previous
+    'dump branch verbatim as a fallback' behavior duplicated
+    turn_index keys with the control prefix and silently corrupted
+    downstream ``{turn_index: record}`` views (the eval driver builds
+    one in ``_run_baseline_fork``).
+
+    Fail-stop: every extractor turn in the strict-A/B sidecar must
+    appear exactly once, and every branch-side record must have
+    ``turn_index > reminder.turn_index``."""
 
     control_path = tmp_path / "control.jsonl"
     branch_path = tmp_path / "branch.jsonl"
@@ -215,13 +220,17 @@ def test_strict_ab_falls_back_to_full_branch_when_tail_empty(tmp_path: Path) -> 
         out_path=out_path,
     )
     written = list(iter_records(out_path))
-    # Control prefix (turns 0, 1) + branch fallback (turn 0).
     ext_turns = [rec.turn_index for rec in written if rec.phase == "extractor"]
-    assert 0 in ext_turns and 1 in ext_turns
-    # Branch fallback wrote its turn-0 extractor under branch-sid:
-    assert any(
-        rec.phase == "extractor" and rec.root_session_id == "branch-sid"
-        for rec in written
+
+    # Exactly the control prefix turns 0 and 1, no duplicates.
+    assert ext_turns == [0, 1]
+
+    # And there must be no record with turn_index <= reminder.turn_index
+    # that was sourced from the branch — that would collide with the
+    # control prefix's turn-keyed records.
+    assert all(rec.turn_index <= reminder.turn_index for rec in written), (
+        f"branch tail leaked records with turn_index > {reminder.turn_index}: "
+        f"{[(r.phase, r.turn_index) for r in written]}"
     )
 
 
