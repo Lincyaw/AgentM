@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agentm.core.abi import AgentMessage, EventBus, LoopConfig, TerminationCause
-from agentm.core.abi.events import DiagnosticEvent
+from agentm.core.abi.events import DiagnosticEvent, EntryAppendedEvent
 from agentm.core.runtime.extension import ExtensionLoadError, ProviderConfig, ReadonlySession
 from agentm.core.runtime.session_manager import SessionEntry, SessionManager
 
@@ -39,9 +39,15 @@ class SessionView:
         sm: SessionManager,
         *,
         loop_config_getter: Callable[[], LoopConfig],
+        bus: EventBus | None = None,
     ) -> None:
         self._sm = sm
         self._loop_config_getter = loop_config_getter
+        # Bus is optional so the embedded ``ReadonlySession`` constructed
+        # in tests / non-session contexts (e.g. session_factory pre-bus
+        # construction) keeps working. Production sessions always pass
+        # their event bus through so ``EntryAppendedEvent`` fires.
+        self._bus = bus
 
     def get_messages(self) -> list[AgentMessage]:
         return self._sm.get_messages()
@@ -78,6 +84,21 @@ class SessionView:
             payload=payload,
         )
         self._sm.append(entry)
+        # Fire AFTER the entry is durably appended — handler crashes
+        # cannot corrupt session state. ``emit_sync`` because
+        # ``append_entry`` is a sync API and we don't want to force the
+        # caller into an async context.
+        if self._bus is not None:
+            self._bus.emit_sync(
+                EntryAppendedEvent.CHANNEL,
+                EntryAppendedEvent(
+                    session_id=self._sm.get_session_id(),
+                    entry_type=type,
+                    entry_id=entry.id,
+                    parent_id=parent_id,
+                    payload=payload,
+                ),
+            )
         return entry.id
 
 
