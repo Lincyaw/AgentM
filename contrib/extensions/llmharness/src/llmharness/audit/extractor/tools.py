@@ -25,6 +25,7 @@ from .._enum_schema import EDGE_KIND_VALUES, EVENT_KIND_VALUES
 from .state import ExtractionState
 
 SUBMIT_PLAN_TOOL_NAME = "submit_plan"
+GRAPH_EDIT_TOOL_NAME = "graph_edit"
 SUBMIT_EVENTS_BATCH_TOOL_NAME = "submit_events_batch"
 RESET_EXTRACTION_TOOL_NAME = "reset_extraction"
 SUBMIT_EVENTS_REASON = "llmharness:submit_events_batch_done"
@@ -36,6 +37,7 @@ SUBMIT_EVENTS_TOOL_NAME = SUBMIT_EVENTS_BATCH_TOOL_NAME
 
 EXTRACTOR_TOOL_NAMES: tuple[str, ...] = (
     SUBMIT_PLAN_TOOL_NAME,
+    GRAPH_EDIT_TOOL_NAME,
     SUBMIT_EVENTS_BATCH_TOOL_NAME,
     RESET_EXTRACTION_TOOL_NAME,
 )
@@ -348,6 +350,69 @@ _RESET_EXTRACTION_PARAMETERS: dict[str, Any] = {
 }
 
 
+_EDGE_SELECTOR_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "src": {"type": "integer"},
+        "dst": {"type": "integer"},
+        "kind": {"type": "string", "enum": list(EDGE_KIND_VALUES)},
+    },
+    "additionalProperties": False,
+}
+
+
+_GRAPH_EDGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "src": {"type": "integer"},
+        "dst": {"type": "integer"},
+        "kind": {"type": "string", "enum": list(EDGE_KIND_VALUES)},
+        "reason": {"type": "string"},
+        "cited_entities": {"type": "array", "items": {"type": "string"}},
+        "cited_quote": {"type": "string"},
+    },
+    "required": ["src", "dst", "kind", "reason"],
+    "additionalProperties": False,
+}
+
+
+_GRAPH_EDIT_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "op": {
+            "type": "string",
+            "enum": [
+                "add_node",
+                "update_node",
+                "delete_node",
+                "add_edge",
+                "update_edge",
+                "delete_edge",
+            ],
+            "description": "One graph mutation to apply to the pending extractor graph.",
+        },
+        "node": {
+            "type": "object",
+            "description": (
+                "Full node for add_node, or patch for update_node. Node fields "
+                "match submit_events_batch events: id, kind, summary, source_turns."
+            ),
+        },
+        "node_id": {"type": "integer", "description": "Target node id for update/delete."},
+        "edge": {
+            "oneOf": [_GRAPH_EDGE_SCHEMA],
+            "description": "Full edge for add_edge, or patch for update_edge.",
+        },
+        "edge_selector": {
+            "oneOf": [_EDGE_SELECTOR_SCHEMA],
+            "description": "Select an existing pending edge for update/delete.",
+        },
+    },
+    "required": ["op"],
+    "additionalProperties": False,
+}
+
+
 def _ok(payload: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=payload)])
 
@@ -465,6 +530,15 @@ def build_extractor_tools(
             reason=SUBMIT_EVENTS_REASON,
         )
 
+    async def _graph_edit(args: dict[str, Any]) -> ToolResult:
+        op = str(args.get("op") or "")
+        result = state.apply_graph_edit(op, args)
+        if isinstance(result, str):
+            return _err(result)
+        import json
+
+        return _ok(json.dumps(result, ensure_ascii=False))
+
     async def _reset_extraction(args: dict[str, Any]) -> ToolResult:
         del args
         if state.committed:
@@ -491,6 +565,18 @@ def build_extractor_tools(
             ),
             parameters=_SUBMIT_PLAN_PARAMETERS,
             fn=_submit_plan,
+        ),
+        FunctionTool(
+            name=GRAPH_EDIT_TOOL_NAME,
+            description=(
+                "Apply one direct edit to the pending extractor graph. "
+                "Use this when you need to revise the graph incrementally: "
+                "add/update/delete event nodes or witness-bearing edges. "
+                "After graph_edit operations, call submit_events_batch with "
+                "events=[] and done=true to finalize the edited pending graph."
+            ),
+            parameters=_GRAPH_EDIT_PARAMETERS,
+            fn=_graph_edit,
         ),
         FunctionTool(
             name=SUBMIT_EVENTS_BATCH_TOOL_NAME,
@@ -559,6 +645,7 @@ def _format_witness_feedback(dropped: list[dict[str, Any]]) -> str:
 
 __all__ = [
     "EXTRACTOR_TOOL_NAMES",
+    "GRAPH_EDIT_TOOL_NAME",
     "RESET_EXTRACTION_TOOL_NAME",
     "SUBMIT_EVENTS_BATCH_TOOL_NAME",
     "SUBMIT_EVENTS_REASON",
