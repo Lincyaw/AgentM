@@ -33,11 +33,19 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Final, Literal, Protocol, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, Protocol, overload
 
 from .messages import AgentMessage, AssistantMessage
 from .stream import Model
 from .tool import Tool, ToolOutcome, ToolResult
+
+if TYPE_CHECKING:
+    # ``AgentSessionConfig`` is imported only for type hints —
+    # ``session_config`` itself imports from ``agentm.core.abi`` (this
+    # package's ``__init__``), so a runtime import would close the cycle.
+    # All annotations on this module already use ``from __future__ import
+    # annotations`` (PEP 563), so the type-only import is sufficient.
+    from .session_config import AgentSessionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -541,6 +549,39 @@ class ChildSessionStartEvent(Event):
     child_session_id: str
     parent_session_id: str
     purpose: str  # e.g. "subagent:worker", caller-defined
+
+
+@dataclass(frozen=True, slots=True)
+class ChildSessionExtendingEvent(Event):
+    """Fires synchronously on the parent bus BEFORE the substrate spawns a
+    child session, so extensions can contribute additional atoms to the
+    child's load order.
+
+    Handlers should return either ``None`` (no opinion) or a list of
+    ``(module_path, config)`` tuples that the substrate will append to
+    the child's ``AgentSessionConfig.extensions`` before the factory
+    runs. Multiple handlers' contributions are concatenated in
+    registration order. The substrate dedupes by ``module_path``: if an
+    entry is already present in ``child_config.extensions`` (operator
+    override) OR contributed by an earlier handler, later contributions
+    of the same module are dropped — handlers don't need to dedupe
+    themselves.
+
+    The ``child_config`` is exposed read-only on the event; handlers
+    MUST NOT mutate it. The substrate clones the extensions list before
+    appending, so even if a misbehaving handler mutates the field in
+    place the live config the factory sees is the substrate-controlled
+    one.
+
+    Emitted via ``bus.emit_sync`` because the spawn path needs the
+    contributions to be settled before ``session_cls.create`` runs;
+    async handlers are skipped (matching the rest of the ``emit_sync``
+    contract).
+    """
+
+    CHANNEL: ClassVar[Literal["child_session_extending"]] = "child_session_extending"
+    parent_session_id: str
+    child_config: "AgentSessionConfig"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1282,6 +1323,7 @@ __all__ = [
     "BudgetExhausted",
     "BusPriority",
     "ChildSessionEndEvent",
+    "ChildSessionExtendingEvent",
     "ChildSessionStartEvent",
     "CommandDispatchedEvent",
     "ContextEvent",

@@ -3,7 +3,7 @@ description: |
   ``rca:harness.sync`` plus the live-inspector atom — for interactive
   debugging / aegis-ui dev. Identical atom set to ``manifest.harness.sync.yaml``;
   the only addition is ``contrib.extensions.live_inspector``, which opens a
-  TCP newline-JSON socket the UI can connect to and stream the agent tree.
+  WebSocket the UI can connect to and stream the agent tree.
 
   Do NOT use this for dataset-collection runs: the inspector buffers a
   backlog of events in-process for late-connecting clients (capped, but
@@ -11,7 +11,7 @@ description: |
   ``manifest.harness.sync.yaml``.
 
   The inspector publishes its URL to stderr at session start, of the form
-  ``LIVE INSPECT: tcp://127.0.0.1:<port>/inspect?root=<root_session_id>``.
+  ``LIVE INSPECT: ws://127.0.0.1:<port>/inspect?root=<root_session_id>``.
   Set ``AGENTM_LIVE_INSPECT_URL_FILE`` to also write the URL to a sidecar
   file so a UI runner can poll for it without scraping stderr.
 

@@ -54,12 +54,16 @@ logged — slow clients cannot deadlock the broadcaster.
 Child sessions
 --------------
 
-In ``install()`` we wrap ``api.spawn_child_session`` so every child config
-gets the inspector appended to its ``extensions`` list (root host:port + the
-parent's ``root_session_id`` baked in). The child's ``install()`` then
-finds the existing server via the process-level ``_SERVERS`` registry keyed
-by ``root_session_id`` and registers its own bus instead of starting a
-second server. Net effect: one WebSocket socket, the whole agent tree.
+The root ``install()`` subscribes to :class:`ChildSessionExtendingEvent` on
+the parent bus — a typed bus channel the substrate fires synchronously
+before spawning each child. Our handler returns one
+``(module, config)`` tuple contributing the inspector to the child's load
+order with ``role: "child"`` + ``parent_root`` + ``parent_port`` baked in.
+The substrate dedupes by module path (operator override on the child
+config wins), then runs the factory. The child's own ``install()`` finds
+the existing server via the process-level ``_SERVERS`` registry keyed by
+``root_session_id`` and joins instead of binding a fresh one. Net effect:
+one WebSocket socket, the whole agent tree.
 
 Entry broadcasting
 ------------------
@@ -98,6 +102,7 @@ from websockets.asyncio.server import ServerConnection, serve
 
 from agentm.core.abi.events import (
     ChildSessionEndEvent,
+    ChildSessionExtendingEvent,
     ChildSessionStartEvent,
     EntryAppendedEvent,
     EventBusObserver,
@@ -120,6 +125,7 @@ MANIFEST = ExtensionManifest(
     registers=(
         f"event:{ChildSessionStartEvent.CHANNEL}",
         f"event:{ChildSessionEndEvent.CHANNEL}",
+        f"event:{ChildSessionExtendingEvent.CHANNEL}",
         f"event:{EntryAppendedEvent.CHANNEL}",
         f"event:{SessionShutdownEvent.CHANNEL}",
     ),
@@ -266,10 +272,22 @@ class _Server:
 
     async def _handle_client(self, ws: ServerConnection) -> None:
         client = _Client(queue=asyncio.Queue(maxsize=_QUEUE_HIGHWATER))
-        self.clients.add(client)
 
-        # Send hello + replay backlog + backlog_done.
-        await self._enqueue_one(
+        # Replay-ordering invariant: hello + backlog snapshot + backlog_done
+        # must reach the client BEFORE any live broadcast that fires during
+        # the handshake. We achieve this by enqueueing the prologue under a
+        # single atomic block of ``put_nowait`` calls (no awaits) and only
+        # THEN adding the client to ``self.clients``. Live broadcasts
+        # (``_fanout``) only iterate clients present in that set, so they
+        # cannot interleave with the prologue — the asyncio event loop is
+        # single-threaded and we never yield between the prologue and the
+        # set insertion. Any broadcast that fires concurrently with the
+        # handshake will land in ``_backlog`` first (the broadcaster
+        # appends to ``_backlog`` before scheduling ``_fanout``), so our
+        # backlog snapshot picks it up — and then ``_fanout`` will skip
+        # this client because it's not yet in ``self.clients``, so no
+        # duplicate delivery.
+        self._enqueue_sync(
             client,
             {
                 "type": "hello",
@@ -278,8 +296,9 @@ class _Server:
             },
         )
         for record in list(self._backlog):
-            await self._enqueue_one(client, record)
-        await self._enqueue_one(client, {"type": "backlog_done"})
+            self._enqueue_sync(client, record)
+        self._enqueue_sync(client, {"type": "backlog_done"})
+        self.clients.add(client)
 
         # Drain client subscribe frame(s) so the socket doesn't stall on
         # chatty clients. We don't act on subscribe content in v1.
@@ -304,11 +323,22 @@ class _Server:
                     return
         finally:
             reader_task.cancel()
+            # Await the cancelled reader so a stray exception surfaces in
+            # the log instead of slipping out as an unhandled-task warning
+            # when the loop tears down.
+            await asyncio.gather(reader_task, return_exceptions=True)
             self.clients.discard(client)
             with contextlib.suppress(Exception):
                 await ws.close()
 
-    async def _enqueue_one(self, client: _Client, record: dict[str, Any]) -> None:
+    def _enqueue_sync(self, client: _Client, record: dict[str, Any]) -> None:
+        """Synchronous variant — used by the connect prologue.
+
+        Identical drop-newest backpressure as :meth:`_enqueue_one`; the
+        only difference is the lack of ``async`` so callers can run a
+        batch (hello + backlog + backlog_done) atomically on the loop
+        thread without yielding control.
+        """
         try:
             line = json.dumps(record, default=str, ensure_ascii=False)
         except Exception:
@@ -325,6 +355,9 @@ class _Server:
                     self.root_session_id,
                 )
 
+    async def _enqueue_one(self, client: _Client, record: dict[str, Any]) -> None:
+        self._enqueue_sync(client, record)
+
     def broadcast(self, record: dict[str, Any]) -> None:
         """Thread-safe broadcast to every connected client.
 
@@ -335,6 +368,15 @@ class _Server:
         """
         if self._closed or self.loop is None:
             return
+        # The truncate-then-append pair runs across multiple bytecode ops
+        # and ``broadcast()`` may be called from non-loop threads (any
+        # sync event handler on the agent thread). We rely on CPython's
+        # GIL atomicity on list ops — at worst a concurrent broadcast
+        # sees one stale length-cap check and inserts an extra record;
+        # the backlog never drops below ``_backlog_cap * 3/4`` so the
+        # invariant "late-joining client gets a recent window" is safe.
+        # If this ever moves to free-threaded Python, swap in a
+        # ``threading.Lock``.
         if len(self._backlog) >= self._backlog_cap:
             del self._backlog[: max(1, self._backlog_cap // 4)]
         self._backlog.append(record)
@@ -486,69 +528,6 @@ class _BusObserver(EventBusObserver):
         )
 
 
-def _wrap_spawn_child_session(
-    api: ExtensionAPI,
-    bind: str,
-    actual_port: int,
-    root_session_id: str,
-) -> None:
-    """Wrap ``api.spawn_child_session`` so children auto-load the inspector.
-
-    The wrap appends a ``contrib.extensions.live_inspector`` extension entry
-    to the child's ``AgentSessionConfig.extensions`` list with ``role:
-    "child"``, ``parent_root``, and ``parent_port`` set. The child's
-    ``install()`` reads those and joins the existing per-root server
-    instead of starting another one.
-
-    Idempotent: if the child config already lists the inspector, we leave
-    it alone (operator override wins).
-    """
-
-    original = api.spawn_child_session
-    child_entry = (
-        "contrib.extensions.live_inspector",
-        {
-            "bind": bind,
-            "port": actual_port,
-            "role": "child",
-            "parent_root": root_session_id,
-            "parent_port": actual_port,
-        },
-    )
-
-    async def wrapped(config: Any = None, **kwargs: Any) -> Any:
-        # Two call styles: positional ``AgentSessionConfig`` or kwargs.
-        # Mutating an attrs/dataclass: best-effort — if ``extensions`` is
-        # accessible we append; otherwise we fall through unchanged.
-        target = config if config is not None else kwargs
-        if target is not None:
-            extensions = _get_extensions_list(target)
-            if extensions is not None:
-                # Skip if already present (operator override).
-                if not any(
-                    isinstance(e, tuple) and e and e[0] == child_entry[0]
-                    for e in extensions
-                ):
-                    extensions.append(child_entry)
-        return await original(config, **kwargs) if config is not None else await original(**kwargs)
-
-    api.spawn_child_session = wrapped  # type: ignore[method-assign]
-
-
-def _get_extensions_list(target: Any) -> list[Any] | None:
-    """Return a mutable extensions list from an ``AgentSessionConfig`` or
-    a kwargs dict. ``None`` if the target doesn't expose one we can mutate.
-    """
-    if isinstance(target, dict):
-        ext = target.get("extensions")
-        if ext is None:
-            target["extensions"] = []
-            ext = target["extensions"]
-        return ext if isinstance(ext, list) else None
-    ext = getattr(target, "extensions", None)
-    return ext if isinstance(ext, list) else None
-
-
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     bind = str(config.get("bind", "127.0.0.1"))
     port = int(config.get("port", 0))
@@ -612,10 +591,16 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             payload = to_jsonable(event.payload)
         except Exception:
             payload = {"_repr": repr(event.payload)}
+        # Forward the event's session_id (the SessionManager header id
+        # under which the entry was written) verbatim, rather than the
+        # install-time-captured ``session_id`` (api.session_id, the OTel
+        # span id). They can differ — get_session_id() returns the
+        # persisted header id; the inspector should report the id the
+        # entry was actually written under.
         server.broadcast(
             {
                 "type": "entry",
-                "session_id": session_id,
+                "session_id": event.session_id,
                 "ts": _now(),
                 "entry_id": event.entry_id,
                 "entry_type": event.entry_type,
@@ -663,14 +648,37 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     api.on(ChildSessionEndEvent.CHANNEL, _on_child_end)
     api.on(SessionShutdownEvent.CHANNEL, _on_shutdown)
 
-    # Wrap spawn_child_session so children auto-attach the inspector and
-    # share the SAME server (looked up by root_session_id in their own
-    # install()). Only wraps from the root install — children don't need
-    # to wrap further; transitive grandchildren walk back to the same root.
+    # Auto-attach the inspector to every spawned child session so the
+    # whole agent tree publishes to the same WebSocket. The substrate
+    # fires ``ChildSessionExtendingEvent`` on the parent bus before
+    # spawning; our handler contributes one ``(module, config)`` tuple,
+    # the substrate dedupes by module so operator overrides on the
+    # child config win, and the child's own ``install()`` finds the
+    # per-root server via ``_SERVERS`` lookup instead of binding a new
+    # one. Only the ROOT install registers the contributor — children
+    # don't need to (transitive grandchildren walk back to the same
+    # root via the trace_id). Replaces the previous monkey-wrap of
+    # ``api.spawn_child_session``: this is a typed bus channel, no
+    # api-method overwrite, no fragility.
     if role == "root":
-        _wrap_spawn_child_session(
-            api=api,
-            bind=bind,
-            actual_port=server.actual_port,
-            root_session_id=api.root_session_id,
-        )
+        root_port = server.actual_port
+        root_bind = bind
+        root_id = api.root_session_id
+
+        def _on_child_extending(
+            _event: ChildSessionExtendingEvent,
+        ) -> list[tuple[str, dict[str, Any]]]:
+            return [
+                (
+                    "contrib.extensions.live_inspector",
+                    {
+                        "bind": root_bind,
+                        "port": root_port,
+                        "role": "child",
+                        "parent_root": root_id,
+                        "parent_port": root_port,
+                    },
+                )
+            ]
+
+        api.on(ChildSessionExtendingEvent.CHANNEL, _on_child_extending)
