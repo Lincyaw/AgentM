@@ -19,17 +19,9 @@ from llmharness.schema import Edge, EdgeKind, Event, EventKind
 
 def _install_and_capture(*, events: list[Event], edges: list[Edge]) -> Any:
     """Return the registered tool's ``fn`` callback."""
-    from llmharness.audit.auditor.get_event_detail_tool import install
+    from llmharness.audit.auditor.get_event_detail import build_get_event_detail_tool
 
-    captured: list[Any] = []
-
-    class _CapturAPI:
-        def register_tool(self, tool: Any) -> None:
-            captured.append(tool)
-
-    install(_CapturAPI(), {"events": events, "edges": edges})  # type: ignore[arg-type]
-    assert len(captured) == 1
-    return captured[0].fn
+    return build_get_event_detail_tool(events, edges).fn
 
 
 def _ev(i: int) -> Event:
@@ -108,7 +100,8 @@ def test_empty_event_ids_list_returns_structured_error() -> None:
     result: ToolResult = asyncio.run(fn({"event_ids": []}))
 
     assert result.is_error is True
-    assert "non-empty" in result.content[0].text
+    # Pydantic v2's stock min_length error message.
+    assert "at least 1" in result.content[0].text
 
 
 def test_non_int_id_returns_structured_error() -> None:
@@ -117,4 +110,5 @@ def test_non_int_id_returns_structured_error() -> None:
     result: ToolResult = asyncio.run(fn({"event_ids": ["1"]}))
 
     assert result.is_error is True
-    assert "must" in result.content[0].text
+    # Pydantic strict-mode message for str-where-int.
+    assert "integer" in result.content[0].text.lower()
