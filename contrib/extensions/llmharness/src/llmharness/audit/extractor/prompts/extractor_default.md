@@ -477,17 +477,12 @@ only; nothing else is normalized.
 
 ---
 
-## The block plan
+## Basic blocks — emit one event per block
 
-Before any event is written, partition the new-turn window into
-contiguous **basic blocks** (Principle 3). The plan is submitted
-as the `block_plan` field of `submit_events`, declared in the
-schema BEFORE `events` so that it is token-generated first. This
-turns "plan before emit" from advice into a generation-order
-constraint: by the time you start writing events, the partition is
-already committed.
-
-Two block kinds:
+Before any event is written, mentally partition the new-turn
+window into contiguous **basic blocks** (Principle 3). You do
+NOT submit the partition as a tool call; it is your own working
+discipline. Two block kinds:
 
 - **`linear`** — **one investigation thread**: a sustained run
   of tool calls in service of the same bet. A thread can be many
@@ -509,87 +504,75 @@ Two block kinds:
   concl reached. Usually one turn. Becomes **one atomic event**
   of the corresponding kind.
 
-Rules:
+Working rules:
 
-1. **Use branch blocks at thread boundaries.** Switching from one
-   investigation thread to another usually passes through a branch
-   block. The branch carries the *why* of the switch: a new
+1. **Use branch events at thread boundaries.** Switching from one
+   investigation thread to another usually passes through a
+   reasoning move that carries the *why* of the switch: a new
    choice-shaped hyp when the agent picks a target from candidates,
    a dec when prior evidence forces the switch, a concl when the
-   thread ends. This is no longer enforced on the plan itself — the
-   v18 validator runs on the emitted event graph (every internal
-   event must be a true branch point, no `(in=1, out=1)`
-   passthroughs). But a well-shaped plan still avoids drawn-out
-   linear runs without branches, since those typically produce
-   passthrough events that the validator will then reject.
-2. Every turn in the new-turn window appears in at least one
-   block. Blocks are usually disjoint — but a **choice-point
-   branch block** may share its single turn with the first turn
-   of the linear block it commits to. That overlap is the one
-   exception, and it specifically captures the choice-shaped hyp
-   pattern (see the passthrough example below).
-3. Blocks are listed in turn order.
-4. The `note` field names what the block is *about* in one short
-   sentence (target / bet for linear blocks; move kind + topic
-   for branch blocks). This is your own anchor — write it crisply
-   so the events you emit afterward respect it.
+   thread ends. The validator runs on the emitted event graph —
+   every internal event must be a true branch point (no
+   `(in=1, out=1)` passthroughs). A drawn-out linear run without
+   any branch typically produces passthrough events the validator
+   will then reject.
+2. Every turn in the new-turn window should be covered by at
+   least one event's `source_turns`. A **choice-point** hyp may
+   share its single turn with the first turn of the linear block
+   it commits to — that is the choice-shaped hyp pattern (see the
+   passthrough worked example below).
+3. Each event's `summary` names what the block is *about* in one
+   short sentence (target / bet for linear acts/evids; move kind
+   + topic for hyp/dec/concl).
 
-Read rule 1 carefully: it is the structural backbone of the
-plan. Each linear block is a thread; each branch block is the
-joint between threads. A 10-turn window will often be 1–3 linear
-blocks plus the branches that join and terminate them — not 5
-linear blocks each covering one tool_call batch. If you find
-yourself writing five linear notes that all describe the same
+Each linear block is a thread; each branch event is the joint
+between threads. A 10-turn window will often be 1–3 linear blocks
+plus the branches that join and terminate them — not 5 linear
+blocks each covering one tool_call batch. If you find yourself
+emitting five act/evid pairs that all describe the same
 underlying question ("probing latency", "checking metrics for
 the latency", "comparing latency across services"), they are
-one thread, not five. Merge them.
+one thread, not five. Merge them into a single act + evid pair
+whose `source_turns` covers the whole stretch.
 
-Example plan for the ts-consign / ts-order trajectory from
-Principle 3:
+Example for the ts-consign / ts-order trajectory from Principle
+3 — 4 acts/evids (one pair per linear stretch) plus 1 hyp + 1
+concl = 6 events total, instead of one event per turn (would be
+13):
 
-```
-[
-  {"turns": [8,9,10,11,12,13],  "kind": "linear",
-   "note": "probing ts-consign error logs across three time windows"},
-  {"turns": [14,15],             "kind": "linear",
-   "note": "target shift: probing ts-order timeouts in same window"},
-  {"turns": [16],                "kind": "branch",
-   "note": "hyp: ts-order timeouts cascade from ts-consign blocking"},
-  {"turns": [17,18,19],          "kind": "linear",
-   "note": "verifying cascade by querying ts-route call patterns"},
-  {"turns": [20],                "kind": "branch",
-   "note": "concl: ts-consign is the root cause, ts-order is downstream"}
-]
-```
+- linear, turns 8-13: probing ts-consign error logs across three
+  time windows → act + evid covering [8..13]
+- linear, turns 14-15: target shift, probing ts-order timeouts →
+  act + evid covering [14, 15]
+- branch, turn 16: hyp — ts-order timeouts cascade from
+  ts-consign blocking
+- linear, turns 17-19: verifying cascade by querying ts-route
+  call patterns → act + evid covering [17..19]
+- branch, turn 20: concl — ts-consign is root cause, ts-order is
+  downstream
 
-This plan produces 4 acts/evids (one pair per linear block) plus
-1 hyp + 1 concl = 6 events total — instead of one event per turn
-(would be 13). The basic-block discipline lives in the plan; the
-event list mechanically follows.
-
-If a block is `linear` but spans many turns with no real
-investigation (e.g., the agent merely chatted), drop it — emit no
-events for it. Empty `events` is acceptable when no block has a
+If a linear stretch spans many turns with no real investigation
+(e.g., the agent merely chatted), drop it — emit no events for
+it. An empty firing is acceptable when no stretch has a
 substantive move.
 
-### Choice-shaped hyp in plans (passthrough traces)
+### Choice-shaped hyp (passthrough traces)
 
 Many traces have no thinking blocks — only tool calls and tool
 results. In those traces the agent's hypotheses live in the
-**shape of its choices** (Principle 4). The plan must surface
-those choices as their own branch blocks, otherwise the hyp
-gets absorbed into the act and the auditor loses the commitment
-signal entirely.
+**shape of its choices** (Principle 4). You must surface those
+choices as their own hyp events, otherwise the hyp gets absorbed
+into the act and the auditor loses the commitment signal
+entirely.
 
 Whenever a linear investigation begins after the agent had
 multiple candidates available (e.g., the prior evid listed five
-suspects and the agent picks one), the linear block is preceded
-by a **branch block carrying a choice-shaped hyp**. The branch
-block's turn equals the first turn of the linear block (the
-tool_call turn that names the chosen target) — this is the rule-1
-exception. The hyp event's `source_turns` is just that one turn;
-the act AND evid events both list the same contiguous range
-covering the whole linear block (including that first turn).
+suspects and the agent picks one), emit a **choice-shaped hyp**
+event whose `source_turns` is the single turn where the choice
+was made (the tool_call turn that names the chosen target). The
+hyp event's `source_turns` is just that one turn; the act AND
+evid events both list the same contiguous range covering the
+whole linear stretch (including that first turn).
 
 A worked example. Passthrough trajectory:
 
@@ -605,19 +588,6 @@ turn 12 (tool_call):   read_metrics(service=ts-route)
 turn 13 (tool_result): db connection pool saturated
 ```
 
-Plan:
-
-```
-[
-  {"turns": [7],         "kind": "linear",
-   "note": "evid: top-5 high-latency service candidates surfaced"},
-  {"turns": [8],         "kind": "branch",
-   "note": "hyp (choice-shaped): agent picks ts-route from the five candidates"},
-  {"turns": [8,9,10,11,12,13], "kind": "linear",
-   "note": "ts-route deep probe — logs, traces, db metrics"}
-]
-```
-
 Events:
 
 ```
@@ -631,31 +601,31 @@ evid[N+3] turns 8-13:         error rows + slow spans + db saturation
                               refs = [act[N+2]]
 ```
 
-Notice: the branch block at turn 8 and the linear block [8-13]
-share turn 8. The hyp event and the first tool_call of the act
-share the same turn — the hyp captures the *commitment* (witness
-"ts-route" in the turn-8 tool_call args), the act captures the
-*execution body*. Without the branch block, only `act[N+2]` and
-`evid[N+3]` get emitted; the commitment vanishes and the auditor
-cannot tell whether the agent ever weighed alternatives. **In
-passthrough traces every linear probe block that follows a
-multi-candidate evid should be preceded by a choice-shaped hyp
-branch block.**
+Notice: the hyp at turn 8 and the linear block [8-13] share turn
+8. The hyp event and the first tool_call of the act share the
+same turn — the hyp captures the *commitment* (witness "ts-route"
+in the turn-8 tool_call args), the act captures the *execution
+body*. Without the hyp, only `act[N+2]` and `evid[N+3]` get
+emitted; the commitment vanishes and the auditor cannot tell
+whether the agent ever weighed alternatives. **In passthrough
+traces every linear probe stretch that follows a multi-candidate
+evid should be preceded by a choice-shaped hyp.**
 
-### Thread switches and the no-adjacent-linear rule
+### Thread switches — avoid adjacent acts without a branch between
 
 The hardest discipline is to *not* split a single investigation
 thread when the agent's tool calls cosmetically diverge (different
 service, different metric, different aspect). If the agent is
 still pursuing the same bet — "what's making latency spike?" —
-all of those probes belong in one linear block, even if they span
-many turns. The block's `note` should name the bet, not the
-batch.
+all of those probes belong in one linear stretch (one act + one
+evid), even if they span many turns. The summary should name the
+bet, not the batch.
 
-The validator enforces this by rejecting any plan with two
-adjacent linear blocks. If you want to start a new linear block,
-you must first emit a branch block that names *why* the agent is
-switching threads.
+If you want to start a new linear stretch (a new act/evid pair),
+emit a branch event between them — a hyp/dec/concl that names
+*why* the agent is switching threads. Two adjacent act events
+with no branching event between them typically produce
+passthroughs and get rejected at finalize.
 
 A worked example. The agent has been hunting a latency root
 cause and runs three turns of broad latency probes, then —
@@ -676,37 +646,38 @@ turn 29 (tool_result): p99 query latency 800ms, p50 12ms
 turn 30 (tool_call):   submit_thinking — "root cause is ts-route DB pool"
 ```
 
-WRONG plan (five adjacent linear blocks, no branches):
+WRONG (five adjacent act/evid pairs, no branches):
 
 ```
-[20,21]  linear  latency stats for 8 services
-[22,23]  linear  span breakdown for top 3
-[24,25]  linear  CPU+memory probe
-[26,27]  linear  ts-route DB pool metrics
-[28,29]  linear  ts-route DB query latency
-[30]     branch  concl: ts-route DB pool root cause
+[20,21]  act+evid  latency stats for 8 services
+[22,23]  act+evid  span breakdown for top 3
+[24,25]  act+evid  CPU+memory probe
+[26,27]  act+evid  ts-route DB pool metrics
+[28,29]  act+evid  ts-route DB query latency
+[30]     concl     ts-route DB pool root cause
 ```
 
-Rejected: blocks 0–1, 1–2, 2–3, 3–4 are all adjacent linear.
-This is the per-batch antipattern.
+Rejected: every middle act/evid is a passthrough — the validator
+will reject these as `(in=1, out=1)`. This is the per-batch
+antipattern.
 
-RIGHT plan:
+RIGHT:
 
 ```
-[20-25]  linear  broad latency hunt — survey services for spike source
-[26]     branch  hyp: ts-route is the bottleneck (chose it from prior survey;
-                 nothing else looked saturated)
-[26-29]  linear  ts-route deep probe — DB pool + query latency
-[30]     branch  concl: ts-route DB pool exhaustion is root cause
+[20-25]  act+evid  broad latency hunt — survey services for spike source
+[26]     hyp       ts-route is the bottleneck (chose it from prior survey;
+                   nothing else looked saturated)
+[26-29]  act+evid  ts-route deep probe — DB pool + query latency
+[30]     concl     ts-route DB pool exhaustion is root cause
 ```
 
-2 linear blocks + 2 branch blocks, total 4. The first linear block
+2 linear stretches + 2 branch events. The first linear stretch
 spans 6 turns (3 tool_call batches) and represents one bet ("find
 the spike source"); the second spans 4 turns and represents the
-next bet ("verify ts-route is it"). The branch at turn 26 is the
+next bet ("verify ts-route is it"). The hyp at turn 26 is the
 choice-shaped hyp — the agent picks ts-route from the survey
-results to deep-probe. The branch at turn 30 is the terminating
-concl.
+results to deep-probe. The concl at turn 30 is the terminating
+branch.
 
 Events:
 
@@ -743,31 +714,24 @@ started.
 
 Core tools plus four atomic graph-edit tools:
 
-1. `submit_plan(block_plan=[...])` — call ONCE. Partitions the
-   new-turn window into basic blocks (see "The block plan" above).
-   The plan is CoT scaffolding for you; structural rules are NOT
-   enforced on it (the v17 "no adjacent linear blocks" check was
-   dropped — the real check moved to the emitted events). Use the
-   plan to commit to a structure before token-generating events.
-
-2. `upsert_node(id=..., kind=..., summary=..., source_turns=[...])`
+1. `upsert_node(id=..., kind=..., summary=..., source_turns=[...])`
    — insert or replace one pending event node. Use the same event
    fields described below. If the id is new it adds a node; if the id
    already exists it updates that node.
 
-3. `delete_node(id=...)` — delete one pending event node. Pending
+2. `delete_node(id=...)` — delete one pending event node. Pending
    edges touching that node are removed automatically.
 
-4. `upsert_edge(src=..., dst=..., kind=..., reason=..., ...)` —
+3. `upsert_edge(src=..., dst=..., kind=..., reason=..., ...)` —
    insert or replace one pending edge keyed by `(src, dst, kind)`.
    The edge must include the correct witness: `cited_entities` for
    `data`, `cited_quote` for `ref`.
 
-5. `delete_edge(src=..., dst=..., kind=...)` — delete one pending
+4. `delete_edge(src=..., dst=..., kind=...)` — delete one pending
    edge. `kind` is optional when `src` and `dst` identify a single
    pending edge.
 
-6. `submit_events_batch(events=[...], done=bool)` — call ONE OR
+5. `submit_events_batch(events=[...], done=bool)` — call ONE OR
    MORE times. Each batch appends to the firing's pending graph;
    accepted batches accumulate across calls. A hard reject (event
    shape, id sequence, ref shape) fails ONLY the offending batch —
@@ -853,27 +817,23 @@ message as JSON; do not look for it in this system prompt.
 
 ## How to work
 
-Read `new_turns` end to end before composing anything. The
-extraction is a two-pass exercise — partition first, then emit.
+Read `new_turns` end to end before composing anything. Mentally
+partition the window into basic blocks (linear stretches +
+branch moves; see "Basic blocks — emit one event per block"
+above), then build the graph directly with the atomic edit
+tools — there is no plan-submission step.
 
-**Pass 1 — submit_plan.** Scan the full window. Mark where the
-agent's target shifts (Principle 3), where a hyp is formed, where
-a dec is made, where a concl lands. The runs between those marks
-are linear blocks; the marks themselves are branch blocks. Call
-`submit_plan(block_plan=[...])` to commit your partition.
-
-**Pass 2 — build the graph.** Walk the plan in order. You may use
-the atomic graph-edit tools (`upsert_node`, `delete_node`,
-`upsert_edge`, `delete_edge`) for incremental construction/revision,
-or `submit_events_batch` for append-only batches. Prefer the graph
-edit tools when you need to change or delete a node/edge after seeing
-a better structure. For each block:
+Use the atomic graph-edit tools (`upsert_node`, `delete_node`,
+`upsert_edge`, `delete_edge`) for incremental construction;
+prefer them over `submit_events_batch` whenever you may need to
+revise a node/edge after seeing a better structure. Walk the
+basic blocks in turn order. For each block:
 
 1. **Emit per block kind.** Linear → one act + one evid covering
    the block's turns. Branch → one atomic hyp / dec / concl on
    the block's turn(s). Decorative moves with no later reference
    (Principle 3) should not be branches — fold them into the
-   surrounding linear block.
+   surrounding linear stretch.
 
 2. **Pick parents by causal dependency** (Principle 1) — the
    earlier event whose absence would change this one. Continuation

@@ -10,7 +10,6 @@ session.
 
 Tool set, all stateful (each closes over the same ``ExtractionState``):
 
-* ``submit_plan`` — captures the block plan (called once per firing).
 * ``upsert_node`` / ``delete_node`` — direct node edits against the
   folded view (this firing's pending ops + prior firings).
 * ``upsert_edge`` / ``delete_edge`` — witness-bearing edge edits.
@@ -27,7 +26,7 @@ and the top-level :mod:`llmharness` package):
   the child loop emits when the model calls ``finalize_extraction``.
 
 §11 contract: single file, no atom-to-atom imports; the sibling tool
-modules (``submit_plan.py`` / ``upsert_node.py`` / ...) and the
+modules (``upsert_node.py`` / ``upsert_edge.py`` / ...) and the
 ``_state_echo.py`` / ``_tool_decorator.py`` / ``_witness_errors.py``
 helpers are NOT atoms — they expose pure builders this module imports.
 """
@@ -52,12 +51,10 @@ from .reset_extraction import (
     build_reset_extraction_tool,
 )
 from .state import ExtractionState
-from .submit_plan import SUBMIT_PLAN_TOOL_NAME, build_submit_plan_tool
 from .upsert_edge import UPSERT_EDGE_TOOL_NAME, build_upsert_edge_tool
 from .upsert_node import UPSERT_NODE_TOOL_NAME, build_upsert_node_tool
 
 EXTRACTOR_TOOL_NAMES: tuple[str, ...] = (
-    SUBMIT_PLAN_TOOL_NAME,
     UPSERT_NODE_TOOL_NAME,
     DELETE_NODE_TOOL_NAME,
     UPSERT_EDGE_TOOL_NAME,
@@ -101,7 +98,6 @@ MANIFEST = ExtensionManifest(
 
 
 _BUILDERS: dict[str, Any] = {
-    SUBMIT_PLAN_TOOL_NAME: build_submit_plan_tool,
     UPSERT_NODE_TOOL_NAME: build_upsert_node_tool,
     DELETE_NODE_TOOL_NAME: build_delete_node_tool,
     UPSERT_EDGE_TOOL_NAME: build_upsert_edge_tool,

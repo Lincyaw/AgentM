@@ -92,9 +92,9 @@ class _V31StubProvider:
         self.auditor_calls = 0
         # Cursor into the scripted extractor message sequence — bumps once
         # per extractor child turn so a multi-tool firing yields the
-        # planned tool_calls in order (submit_plan -> upsert_node -> ...
-        # -> finalize_extraction). Reset per child firing because each
-        # spawn rebuilds the script from scratch.
+        # planned tool_calls in order (upsert_node -> upsert_edge ->
+        # ... -> finalize_extraction). Reset per child firing because
+        # each spawn rebuilds the script from scratch.
         self._extractor_step = 0
         self._last_extractor_mode: str | None = None
 

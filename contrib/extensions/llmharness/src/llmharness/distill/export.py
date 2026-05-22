@@ -5,8 +5,8 @@ Two outputs:
 * ``extractor.jsonl`` — straight from replay records, no oracle needed.
   Input is the extractor system prompt + the recorded payload; target
   is a **multi-turn** assistant trajectory replayed from the recorded
-  tool-call sequence (``submit_plan`` -> ``upsert_node`` /
-  ``upsert_edge`` / ``delete_*`` -> ``finalize_extraction``). Each
+  tool-call sequence (``upsert_node`` / ``upsert_edge`` /
+  ``delete_*`` -> ``finalize_extraction``). Each
   assistant message carries ``<think>`` wrapping reconstructed from the
   matching block of ``raw_assistant_messages``. The student learns to
   drive an incremental graph build, not to dump one batch — that was

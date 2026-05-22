@@ -163,7 +163,6 @@ async def replay_extractor_record(
                 "events": [e.to_dict() for e in snapshot.events],
                 "edges": [ed.to_dict() for ed in snapshot.edges],
                 "dropped_edges": list(snapshot.dropped_edges),
-                "block_plan": list(snapshot.block_plan),
             },
             status=result.status,
             error=result.error,

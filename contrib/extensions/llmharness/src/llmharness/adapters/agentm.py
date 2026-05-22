@@ -1042,7 +1042,6 @@ async def _drain_extractor(
             "events": [e.to_dict() for e in output.events],
             "edges": [ed.to_dict() for ed in output.edges],
             "dropped_edges": list(output.dropped_edges),
-            "block_plan": list(output.block_plan),
         },
     )
 
@@ -1234,23 +1233,20 @@ async def _spawn_extractor_child(
         next_id = payload.get("next_event_id")
         directive = (
             "Below is the firing input. Workflow:\n"
-            "(1) Call submit_plan ONCE with the block_plan partitioning "
-            "the new-turn window. The plan is CoT scaffolding; structural "
-            "enforcement happens on the events you emit, not on the plan.\n"
-            "(2) Build the graph incrementally with upsert_node / "
+            "(1) Build the graph incrementally with upsert_node / "
             "upsert_edge (and delete_node / delete_edge as needed). Every "
             "edit is validated immediately; errors come back as a "
             "three-section actionable message naming concrete next "
             "options. Internal events must be true branch points "
             "(in-degree>=2 or out-degree>=2); passthrough (in=1, out=1) "
             "events are rejected at finalize.\n"
-            "(3) Call finalize_extraction (no payload) when you are done. "
+            "(2) Call finalize_extraction (no payload) when you are done. "
             "On a clean degree check the firing terminates; on rejection "
             "the firing stays alive so you can promote passthrough nodes "
             "with further upserts and re-call.\n"
-            f"(4) Start event ids at {next_id} and increment strictly — "
+            f"(3) Start event ids at {next_id} and increment strictly — "
             "do NOT restart at 1 and do NOT reuse any id from recent_graph.\n"
-            f"(5) Cross-firing references: recent_graph has {recent_n} "
+            f"(4) Cross-firing references: recent_graph has {recent_n} "
             "entries. To link this firing's events to prior firings, emit "
             "upsert_edge with src/dst spanning the boundary — the folded "
             "view already contains prior-firing nodes by id. Most evid "

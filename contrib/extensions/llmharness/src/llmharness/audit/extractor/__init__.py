@@ -4,7 +4,6 @@ The extractor child runs once per main-agent turn (or every k turns,
 adapter-configurable), walks the new turn window, and emits a graph via
 incremental edits:
 
-* ``submit_plan`` — captures the block plan once per firing.
 * ``upsert_node`` / ``delete_node`` — node-level edits (this firing or
   any prior firing — the id resolves against the folded view).
 * ``upsert_edge`` / ``delete_edge`` — witness-bearing edge edits.
