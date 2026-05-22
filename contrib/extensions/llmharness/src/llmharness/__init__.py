@@ -1,26 +1,31 @@
 """LLM-as-harness: cognitive-audit AgentM extension.
 
-Public surface is the typed payloads from :mod:`llmharness.schema`
-(``Event``, ``Edge``, ``Finding``, ``Verdict``, ``Reminder``,
-``EventKind``, ``EdgeKind``, ``Phase``), the AFC card loader, and the
-top-level entry points consumers need to drive an offline auditor pass
-or a fork-and-replay over recorded trajectories:
+Public surface — kept deliberately small. Re-export rule: a symbol
+appears here only if at least one in-tree consumer (rca eval, the
+strict-A/B test suite, smoke tests) imports it through the top-level
+package. Everything else stays reachable via its submodule path and
+gets promoted on demand.
 
-* :func:`flatten_assistant_blocks` / :func:`serialize_full_trajectory` —
-  trajectory helpers re-exported from :mod:`llmharness.adapters.agentm`
-  so downstream eval drivers don't reach into the adapter module.
-* :class:`AuditorOutputError` / :class:`RawVerdictOutput` — typed view
-  over the auditor's terminal-tool payload.
-* :func:`merge_to_phases` — fold ``Event`` records into ``Phase``
-  windows (re-exported from :mod:`llmharness.audit.phase`).
-* :class:`ReplayRecord`, :func:`iter_records`, :func:`write_record`,
-  :func:`now_ns` — replay-sidecar record format and IO helpers.
-* :func:`replay_auditor_record` — re-run a recorded auditor firing.
-* :class:`ReminderCandidate` / :class:`OfflineAuditRun` /
-  :func:`run_offline_auditor_over_control` /
-  :func:`write_strict_ab_replay` / :func:`strict_ab_replay_path` —
-  strict-A/B fork orchestration (replay auditor against a fixed
-  control trajectory, then stitch a unified replay sidecar).
+Currently exported:
+
+* Wire-type dataclasses from :mod:`llmharness.schema` —
+  ``Event`` / ``EventKind`` / ``Edge`` / ``EdgeKind`` / ``Finding`` /
+  ``Phase`` / ``Reminder`` / ``Verdict``. These define the
+  replay-record / audit-graph data model and are the typed view every
+  consumer needs.
+* :class:`ReplayRecord` + :func:`iter_records` / :func:`write_record`
+  — replay sidecar record format and I/O. Used directly by both the
+  strict-A/B helpers and downstream consumers that read sidecars.
+* Strict-A/B fork orchestration — :class:`ReminderCandidate`,
+  :class:`OfflineAuditRun`, :func:`run_offline_auditor_over_control`,
+  :func:`write_strict_ab_replay`, :func:`strict_ab_replay_path`. The
+  primary entry points the rca eval driver calls.
+
+Other helpers (``AuditorOutputError``, ``RawVerdictOutput``,
+``merge_to_phases``, ``flatten_assistant_blocks``,
+``serialize_full_trajectory``, ``now_ns``, ``replay_auditor_record``)
+remain available via their submodules. Promote them here when an
+in-tree caller actually needs them through the top-level surface.
 
 The runtime entry point is the AgentM extension at
 ``llmharness.adapters.agentm``, loaded via
@@ -29,11 +34,7 @@ The runtime entry point is the AgentM extension at
 V2 breaking change (issue #134, 2026-05-10): ``DriftType`` is removed.
 """
 
-from .adapters.agentm import flatten_assistant_blocks, serialize_full_trajectory
-from .audit.auditor.output import AuditorOutputError, RawVerdictOutput
-from .audit.phase import merge_to_phases
-from .replay.record import ReplayRecord, iter_records, now_ns, write_record
-from .replay.runner import replay_auditor_record
+from .replay.record import ReplayRecord, iter_records, write_record
 from .replay.strict_ab import (
     OfflineAuditRun,
     ReminderCandidate,
@@ -53,7 +54,6 @@ from .schema import (
 )
 
 __all__ = [
-    "AuditorOutputError",
     "Edge",
     "EdgeKind",
     "Event",
@@ -61,18 +61,12 @@ __all__ = [
     "Finding",
     "OfflineAuditRun",
     "Phase",
-    "RawVerdictOutput",
     "Reminder",
     "ReminderCandidate",
     "ReplayRecord",
     "Verdict",
-    "flatten_assistant_blocks",
     "iter_records",
-    "merge_to_phases",
-    "now_ns",
-    "replay_auditor_record",
     "run_offline_auditor_over_control",
-    "serialize_full_trajectory",
     "strict_ab_replay_path",
     "write_record",
     "write_strict_ab_replay",

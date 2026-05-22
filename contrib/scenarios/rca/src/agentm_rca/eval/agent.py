@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 import os
 from typing import Any
 
@@ -47,6 +48,8 @@ from rcabench_platform.v3.sdk.llm_eval.trajectory.schema import (
     Trajectory,
     Turn,
 )
+
+_logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 # RCA investigations dispatch workers, poll, and run many SQL queries; the
@@ -235,11 +238,28 @@ class AgentMAgent(BaseAgent):
         else:
             self._intervention_mode = None
         self._fork_policy = fork_policy
-        self._control_scenario = (
-            control_scenario
-            or os.environ.get("AGENTM_FORK_CONTROL_SCENARIO")
-            or _default_control_scenario(scenario)
+        explicit_control = (
+            control_scenario or os.environ.get("AGENTM_FORK_CONTROL_SCENARIO")
         )
+        if explicit_control:
+            self._control_scenario = explicit_control
+        else:
+            mapped_control = _HARNESS_VARIANT_TO_CONTROL.get(scenario)
+            if (
+                self._intervention_mode == _INTERVENTION_BASELINE_FORK
+                and mapped_control is None
+            ):
+                raise ValueError(
+                    f"strict-A/B fork requested for scenario={scenario!r}, "
+                    "but no control scenario is registered for that variant. "
+                    "Either pick a variant in _HARNESS_VARIANT_TO_CONTROL (see "
+                    "contrib/scenarios/rca/_VARIANTS.md), or pass "
+                    "control_scenario=... explicitly "
+                    "(--ak control_scenario=... / AGENTM_FORK_CONTROL_SCENARIO)."
+                )
+            # Non-fork rollouts: control scenario is just the requested
+            # scenario itself — it is unused by ``run``.
+            self._control_scenario = mapped_control or scenario
         self._branch_scenario = (
             branch_scenario
             or os.environ.get("AGENTM_FORK_BRANCH_SCENARIO")
@@ -598,11 +618,6 @@ class AgentMAgent(BaseAgent):
         )
 
 
-def _default_control_scenario(scenario: str) -> str:
-    """Pick a no-auditor control scenario for strict A/B fork mode."""
-    return _HARNESS_VARIANT_TO_CONTROL.get(scenario, scenario)
-
-
 def _scenario_mounts_harness(scenario: str) -> bool:
     """True iff ``scenario`` mounts the llmharness cognitive-audit adapter.
 
@@ -610,15 +625,33 @@ def _scenario_mounts_harness(scenario: str) -> bool:
     ``llmharness.adapters.agentm`` in its extensions list. Replaces the
     historical ``"harness" in scenario_name`` string-sniff so new harness
     variants (or renames) don't silently miss the distill-binding wire-up.
+
+    Error policy: a malformed scenario manifest is a hard error — we let
+    ``ScenarioLoadError`` propagate so the rollout fails loudly rather
+    than silently producing an unjoinable replay sidecar. The only
+    swallowed case is "manifest legitimately not found on disk": the
+    loader wraps the underlying ``FileNotFoundError`` as
+    ``ScenarioLoadError(..., cause=FileNotFoundError(...))``. We
+    recognise this shape via the ``.cause`` attribute (the loader does
+    not chain with ``from exc``, so ``__cause__`` is None — inspect the
+    explicit attribute instead). The not-found case is logged at
+    WARNING so the wire-up failure is observable in stderr.
     """
-    try:
-        from agentm.extensions.loader import ScenarioLoadError, load_scenario
-    except ImportError:
-        return False
+    from agentm.extensions.loader import ScenarioLoadError, load_scenario
+
     try:
         extensions = load_scenario(scenario)
-    except (ScenarioLoadError, FileNotFoundError, OSError):
-        return False
+    except ScenarioLoadError as exc:
+        if isinstance(exc.cause, FileNotFoundError):
+            _logger.warning(
+                "rca eval: scenario %r not found; treating as non-harness "
+                "(distill binding will not be mounted). Check "
+                "AGENTM_PROJECT_ROOT and contrib/scenarios/ layout. (%s)",
+                scenario,
+                exc,
+            )
+            return False
+        raise
     return any(module == _HARNESS_ADAPTER_MODULE for module, _ in extensions)
 
 
