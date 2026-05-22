@@ -5,14 +5,28 @@ is a port; every port has a default; every default is a replaceable extension.
 
 See `.claude/designs/pluggable-architecture.md` for the boundary contract.
 
----
+## Two concepts
 
-## Mental model
+Everything in AgentM is built out of two things:
 
-An `AgentSession` is built by installing a list of **atoms** (one-file
-extensions) onto a substrate. A **scenario** is just a YAML file naming which
-atoms to install with which config — there is no privileged "built-in" path
-into the substrate.
+**Extension** (also called **atom**). One Python file that registers behavior
+on the substrate — a tool, a policy, an LLM provider, a compaction strategy,
+an observability subscriber, ... Each file exports a `MANIFEST` (name, version,
+deps) and an `install(api, config)` function. The §11 contract requires it to
+be *one file* — no atom-to-atom imports, no reach into the runtime substrate.
+This is the atomic unit of policy.
+
+**Scenario**. A YAML file naming which extensions to install, in what order,
+with what config. A scenario is just a *composition*; it has no Python code
+of its own (apart from optional scenario-private `local:` atoms next to the
+manifest). Switching scenarios switches the entire policy stack without
+changing the substrate.
+
+The substrate (in `agentm.core`) is the only unreplaceable part. Extensions
+reach stateful subsystems only through `ExtensionAPI` services (`api.bus`,
+`api.get_operations()`, `api.skills`, `api.catalog`, ...). A mechanical
+validator rejects any extension that imports `core.runtime.*` or
+`core._internal.*` directly.
 
 ```mermaid
 flowchart LR
@@ -25,102 +39,38 @@ flowchart LR
     I --> S["AgentSession ready"]
 ```
 
-The substrate (in `agentm.core`) is unreplaceable; atoms reach stateful
-subsystems only through `ExtensionAPI` services (`api.bus`,
-`api.get_operations()`, `api.skills`, `api.catalog`, ...). A mechanical
-validator rejects any atom that imports `core.runtime.*` or `core._internal.*`
-directly.
-
----
-
-## Enabling scenarios
-
-The default scenario is `general_purpose` — no flag needed:
-
-```bash
-uv run agentm "list files in src/"
-```
-
-Pick another by name (resolves to `contrib/scenarios/<name>/manifest.yaml`):
-
-```bash
-uv run agentm --scenario rca "diagnose this trace"
-```
-
-A scenario can have **variants** via `<name>:<variant>` shorthand
-(resolves to `manifest.<variant>.yaml` in the same directory):
-
-```bash
-uv run agentm --scenario rca:harness.sync "..."
-```
-
-You **cannot** stack scenarios — only one is loaded. Compose by writing a
-new manifest, or by using `--extension` (below).
-
-Bypass scenarios entirely with `--no-extensions` for kernel-floor diagnosis:
-
-```bash
-uv run agentm --no-extensions "explain core/abi/loop.py"
-```
-
-This loads only the LLM provider — no tools, no skills, no observability.
-Useful when a scenario is broken.
-
----
-
-## Enabling extensions
-
-Four sources feed the install list, in this precedence order:
-
-| Source | When | Notes |
-|---|---|---|
-| `AgentSessionConfig.extensions` (programmatic) | always wins if non-empty | **hard override** — suppresses scenario, auto-discovery, and `--extension` |
-| `--scenario <name>` (or default) | when programmatic list is empty | resolves a manifest; declaration order preserved, then topo-sorted |
-| Auto-discovery | only when no scenario AND no programmatic list | scans `extensions/builtin/*.py` + `contrib/extensions/*.py` + `~/.agentm/atoms/*.py` |
-| `--extension <dotted>[:JSON]` | always appended (except `--no-extensions` and programmatic override) | repeatable; cannot remove or reorder, only stack |
-
-After merging, the full list is **topologically sorted by `MANIFEST.requires`**
-(by atom *name*, not module path), and any missing floor atoms
-(`prompt_registry`, `compaction_prompts`, `command_parser`,
-`system_prompt_provider`) are injected via `provides_role`.
-
-**User atoms** under `<cwd>/.agentm/atoms/*.py` are auto-layered on every
-scenario (not on programmatic override). This is how an agent can install
-its own atoms across restarts.
-
-```bash
-uv run agentm --scenario rca \
-              --extension contrib.extensions.llmharness.adapters.agentm:'{"mode":"sync"}' \
-              "..."
-```
-
----
-
-## Atom = one file
+## Extension: one file
 
 ```python
+# src/agentm/extensions/builtin/my_atom.py
 from agentm.core.abi.extension import ExtensionAPI, ExtensionManifest
 
 MANIFEST = ExtensionManifest(
-    name="my_atom",          # must equal the filename stem
+    name="my_atom",                    # must equal the filename stem
     version="0.1.0",
-    requires=("operations_local",),   # by atom name; topo-sorted
-    provides_role=(),
+    requires=("operations_local",),    # by atom NAME; topo-sorted
+    provides_role=(),                  # optional capability advertisement
 )
 
 def install(api: ExtensionAPI, config: dict) -> None:
     api.bus.subscribe(SomeEvent, handler)
-    # config came straight from the manifest's per-atom block
+    # `config` came straight from the manifest's per-atom block
 ```
 
-The `extensions.validate` checker enforces the §11 contract: no atom-to-atom
-imports, no `core.runtime.*`, no `core._internal`. The allowlist is
+Extensions live in three places, all on the same auto-discovery path:
+
+| Location | Who owns it | Mounted by |
+|---|---|---|
+| `src/agentm/extensions/builtin/<name>.py` | SDK | scenario manifest, `-e`, or auto-discovery |
+| `contrib/extensions/<name>.py` (flat) | repo contributors | scenario manifest, `-e`, or auto-discovery |
+| `contrib/extensions/<pkg>/...` (nested) | third-party packages | scenario manifest or `-e` only (no auto-discovery) |
+| `<cwd>/.agentm/atoms/*.py` | the running agent itself | auto-layered on top of any scenario |
+
+The `extensions.validate` checker enforces the §11 contract: allowlist is
 `core.abi` + `core.lib` + the public `extensions` surface. Stateful
 subsystems are reached only via `ExtensionAPI` services.
 
----
-
-## Scenario = YAML recipe
+## Scenario: a YAML composition of extensions
 
 ```yaml
 # contrib/scenarios/general_purpose/manifest.yaml
@@ -134,19 +84,111 @@ extensions:
   - module: agentm.extensions.builtin.observability
 ```
 
-Entries are `module:` (dotted path) or `local:` (scenario-private `.py` next
-to the manifest). The optional `config:` block is passed verbatim into the
-atom's `install(api, config)` call.
+Each entry is `module:` (fully-qualified dotted path) or `local:`
+(scenario-private `.py` next to the manifest). The optional `config:` block
+is passed verbatim into that extension's `install(api, config)` call.
 
 Variants live in the same directory as `manifest.<variant>.yaml` and must
-declare `name: <scenario>:<variant>` (e.g. `name: rca:harness.sync`).
+declare `name: <scenario>:<variant>` (e.g. `name: rca:harness.sync`). Two
+scenarios that share most of their stack typically ship one base manifest +
+several variant files differing only in a few extensions or configs.
 
----
+**Order matters.** Extensions are installed in the `extensions:` declaration
+order, then re-ordered only as much as `MANIFEST.requires` forces (a
+dependency must install before its dependent — otherwise position is
+preserved). Two practical consequences:
+
+- For axes where **last registration wins** (notably the LLM provider, and
+  any `api.register_*` hook called more than once), an override must appear
+  *after* the default in the list.
+- For event-bus subscribers, earlier-installed extensions register their
+  handlers first, so they see events ahead of later ones. This is how
+  interceptors / filters slot in.
+
+Two extensions **cannot** both claim the same `provides_role` — that is a
+hard load-time error, not a silent override. Use `requires` to express
+"install B after A"; use `provides_role` to claim a floor capability
+(`command_parser`, `system_prompt_provider`, ...) so the substrate skips
+its default injection.
+
+**Extension vs Scenario — recap:**
+
+|  | Extension | Scenario |
+|---|---|---|
+| What it is | one Python file | one YAML file |
+| What it produces | behavior at runtime (tool / policy / event subscriber / ...) | a list of extensions to install |
+| Composition | atomic — does one thing | combines many extensions |
+| Mounted by | scenario manifest, `--extension`, auto-discovery | `--scenario <name>` (one at a time) |
+| Substitutable | yes, by another extension claiming the same role | yes, by another scenario |
+
+## Enabling: from CLI to a running session
+
+The default scenario is `general_purpose` — no flag needed:
+
+```bash
+uv run agentm "list files in src/"
+```
+
+Pick another by name (resolves to `contrib/scenarios/<name>/manifest.yaml`):
+
+```bash
+uv run agentm --scenario rca "diagnose this trace"
+uv run agentm --scenario rca:harness.sync "..."         # variant shorthand
+```
+
+Stack extra extensions on top with `-e` / `--extension` (repeatable). Takes
+a **fully-qualified dotted module path** — there is no short-name resolution.
+
+```bash
+uv run agentm --scenario rca \
+              -e contrib.extensions.llmharness.adapters.agentm:'{"mode":"sync"}' \
+              "..."
+```
+
+Four sources feed the install list, in this precedence order:
+
+| Source | When | Notes |
+|---|---|---|
+| `AgentSessionConfig.extensions` (programmatic) | always wins if non-empty | **hard override** — suppresses scenario, auto-discovery, and `--extension` |
+| `--scenario <name>` (or default) | when programmatic list is empty | resolves a manifest; declaration order preserved, then topo-sorted |
+| Auto-discovery | only when no scenario AND no programmatic list | scans builtin + flat-file contrib + user-atom dirs |
+| `--extension <dotted>[:JSON]` | always appended (except `--no-extensions` / programmatic override) | repeatable; cannot remove or reorder, only stack |
+
+After merging, the list is **topologically sorted by `MANIFEST.requires`**
+(by atom *name*), and missing floor atoms are injected via `provides_role`.
+You **cannot** stack scenarios — only one loads at a time; compose by writing
+a new manifest.
+
+`--no-extensions` bypasses everything for kernel-floor diagnosis (only the
+LLM provider — no tools, no skills, no observability):
+
+```bash
+uv run agentm --no-extensions "explain core/abi/loop.py"
+```
+
+## Discovering what's available
+
+```bash
+agentm list-extensions          # every auto-discoverable atom, with its
+                                # tier, registered hooks, and the exact
+                                # `-e <dotted.path>` form to mount it
+
+agentm --help                   # full flag list (--scenario, --extension,
+                                # --resume, --continue, --tools, ...)
+
+ls contrib/scenarios/           # shipped scenarios: general_purpose,
+                                # agent_env, format_fix, mcp_demo,
+                                # rca, rca_hfsm
+```
+
+Other subcommands ship from sibling packages: `agentm gateway`,
+`agentm terminal`, `agentm worker`, `agentm feishu`. Run
+`agentm <sub> --help` for their flags.
 
 ## Five pluggability axes
 
 Each axis is a `typing.Protocol` in `core.abi`. The scenario manifest decides
-which atom fills each role; atoms register via `api.register_*` hooks.
+which extension fills each role; extensions register via `api.register_*` hooks.
 
 | # | Axis                | Protocol / Port             | Default impl                                          |
 |---|---------------------|-----------------------------|-------------------------------------------------------|
@@ -161,21 +203,17 @@ flows through the **same** `EventBus`. The `observability` builtin is a pure
 subscriber writing OTel-flavored JSONL to
 `<cwd>/.agentm/observability/<trace_id>.jsonl`.
 
----
-
 ## Showcase
 
 - **`contrib/scenarios/rca/`** — root-cause-analysis scenario over
   observability traces, with optional `llmharness` audit overlay. Manifest
-  variants (`manifest.harness.*.yaml`) compose the same atom set with
+  variants (`manifest.harness.*.yaml`) compose the same extension set with
   different audit topologies. See its [README](contrib/scenarios/rca/README.md).
 - **`contrib/extensions/llmharness/`** — cognitive-audit pipeline. Mounts
   via `llmharness.adapters.agentm`; subscribes `TurnEndEvent` to spawn
   extractor/auditor children and `DecideTurnActionEvent` to inject
   reminders into the main loop. Loose-coupled — rca scenarios opt in by
   manifest only. See its [README](contrib/extensions/llmharness/README.md).
-
----
 
 ## Quick start
 
@@ -205,4 +243,3 @@ await session.shutdown()
 Setting `extensions=[...]` is a **hard override** — scenario, auto-discovery,
 and `--extension` are all suppressed. Use it for tests; use scenarios in
 production.
-
