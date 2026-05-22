@@ -216,6 +216,123 @@ class ExtractionState:
         self._external_refs_pending = {}
         self._dropped_pending = []
 
+    def apply_graph_edit(self, op: str, payload: dict[str, Any]) -> dict[str, Any] | str:
+        """Apply one direct edit to the pending extractor graph.
+
+        This is the state-side primitive behind the RL-friendly
+        ``graph_edit`` tool. It edits the same pending graph that
+        ``submit_events_batch`` uses, so finalization and downstream
+        snapshots remain unchanged.
+        """
+        if self.committed:
+            return "graph_edit: firing already finalized"
+        if op == "add_node":
+            raw = payload.get("node")
+            if not isinstance(raw, dict):
+                return "graph_edit/add_node: 'node' must be an object"
+            err, ev = _validate_event_shape(len(self._events_pending), raw)
+            if err is not None:
+                return err.replace("submit_events", "graph_edit/add_node", 1)
+            assert ev is not None
+            if any(existing.id == ev.id for existing in self._events_pending):
+                return f"graph_edit/add_node: node id {ev.id} already exists"
+            min_id = self._events_pending[-1].id + 1 if self._events_pending else self.next_event_id
+            if ev.id < min_id:
+                return f"graph_edit/add_node: node id {ev.id} must be >= {min_id}"
+            self._events_pending.append(ev)
+            return self._graph_edit_digest(op)
+
+        if op == "update_node":
+            node_id = _coerce_int(payload.get("node_id"))
+            raw_patch = payload.get("node")
+            if node_id is None:
+                return "graph_edit/update_node: 'node_id' must be an integer"
+            if not isinstance(raw_patch, dict):
+                return "graph_edit/update_node: 'node' patch must be an object"
+            idx, current = self._pending_event(node_id)
+            if current is None:
+                return f"graph_edit/update_node: unknown node_id {node_id}"
+            merged = {
+                "id": current.id,
+                "kind": current.kind.value,
+                "summary": current.summary,
+                "source_turns": list(current.source_turns),
+                **raw_patch,
+            }
+            merged["id"] = current.id
+            err, updated = _validate_event_shape(idx, merged)
+            if err is not None:
+                return err.replace("submit_events", "graph_edit/update_node", 1)
+            assert updated is not None
+            self._events_pending[idx] = updated
+            return self._graph_edit_digest(op)
+
+        if op == "delete_node":
+            node_id = _coerce_int(payload.get("node_id"))
+            if node_id is None:
+                return "graph_edit/delete_node: 'node_id' must be an integer"
+            idx, current = self._pending_event(node_id)
+            if current is None:
+                return f"graph_edit/delete_node: unknown node_id {node_id}"
+            del self._events_pending[idx]
+            self._edges_pending = [
+                e for e in self._edges_pending if e.src != node_id and e.dst != node_id
+            ]
+            self._external_refs_pending.pop(node_id, None)
+            return self._graph_edit_digest(op)
+
+        if op == "add_edge":
+            raw = payload.get("edge")
+            if not isinstance(raw, dict):
+                return "graph_edit/add_edge: 'edge' must be an object"
+            err, edge = self._build_pending_edge(raw)
+            if err is not None:
+                return err
+            assert edge is not None
+            self._edges_pending.append(edge)
+            return self._graph_edit_digest(op)
+
+        if op == "update_edge":
+            selector = payload.get("edge_selector")
+            patch = payload.get("edge")
+            if not isinstance(selector, dict):
+                return "graph_edit/update_edge: 'edge_selector' must be an object"
+            if not isinstance(patch, dict):
+                return "graph_edit/update_edge: 'edge' patch must be an object"
+            idx = self._pending_edge_index(selector)
+            if idx is None:
+                return "graph_edit/update_edge: edge not found"
+            current = self._edges_pending[idx]
+            merged = {
+                "src": current.src,
+                "dst": current.dst,
+                "kind": current.kind.value,
+                "reason": current.reason,
+                "src_turns": list(current.src_turns),
+                "dst_turns": list(current.dst_turns),
+                "cited_entities": list(current.cited_entities),
+                "cited_quote": current.cited_quote,
+                **patch,
+            }
+            err, updated = self._build_pending_edge(merged)
+            if err is not None:
+                return err
+            assert updated is not None
+            self._edges_pending[idx] = updated
+            return self._graph_edit_digest(op)
+
+        if op == "delete_edge":
+            selector = payload.get("edge_selector")
+            if not isinstance(selector, dict):
+                return "graph_edit/delete_edge: 'edge_selector' must be an object"
+            idx = self._pending_edge_index(selector)
+            if idx is None:
+                return "graph_edit/delete_edge: edge not found"
+            del self._edges_pending[idx]
+            return self._graph_edit_digest(op)
+
+        return f"graph_edit: unsupported op {op!r}"
+
     # ------------------------------------------------------------------
     # Legacy single-shot API (kept for v17 tests and direct callers).
 
@@ -464,6 +581,81 @@ class ExtractionState:
         # Missing turn texts contribute the empty string — the witness
         # check will then naturally fail rather than KeyError out.
         return " ".join(self.turn_texts.get(idx, "") for idx in turn_indices)
+
+    def _pending_event(self, event_id: int) -> tuple[int, Event | None]:
+        for idx, event in enumerate(self._events_pending):
+            if event.id == event_id:
+                return idx, event
+        return -1, None
+
+    def _pending_edge_index(self, selector: dict[str, Any]) -> int | None:
+        src = _coerce_int(selector.get("src"))
+        dst = _coerce_int(selector.get("dst"))
+        kind = selector.get("kind")
+        for idx, edge in enumerate(self._edges_pending):
+            if src is not None and edge.src != src:
+                continue
+            if dst is not None and edge.dst != dst:
+                continue
+            if kind is not None and edge.kind.value != str(kind):
+                continue
+            return idx
+        return None
+
+    def _build_pending_edge(self, raw: dict[str, Any]) -> tuple[str | None, Edge | None]:
+        src = _coerce_int(raw.get("src"))
+        dst = _coerce_int(raw.get("dst"))
+        kind_raw = raw.get("kind")
+        if src is None or dst is None:
+            return "graph_edit/edge: 'src' and 'dst' must be integers", None
+        src_event = self._pending_event(src)[1]
+        dst_event = self._pending_event(dst)[1]
+        if src_event is None or dst_event is None:
+            return f"graph_edit/edge: src={src} and dst={dst} must both be pending nodes", None
+        try:
+            kind = EdgeKind(kind_raw)
+        except ValueError:
+            return f"graph_edit/edge: kind {kind_raw!r} not in {EDGE_KIND_VALUES}", None
+        cited_entities = raw.get("cited_entities", [])
+        cited_quote = str(raw.get("cited_quote", "") or "")
+        if kind is EdgeKind.DATA:
+            if not isinstance(cited_entities, list) or not cited_entities:
+                return "graph_edit/edge: kind='data' requires non-empty cited_entities", None
+            if any(not isinstance(e, str) or not e for e in cited_entities):
+                return "graph_edit/edge: cited_entities must be non-empty strings", None
+        else:
+            if not cited_quote:
+                return "graph_edit/edge: kind='ref' requires non-empty cited_quote", None
+        reason = raw.get("reason", "")
+        if not isinstance(reason, str):
+            return "graph_edit/edge: reason must be a string", None
+        return None, Edge(
+            src=src,
+            dst=dst,
+            kind=kind,
+            reason=reason,
+            src_turns=tuple(src_event.source_turns),
+            dst_turns=tuple(dst_event.source_turns),
+            cited_entities=tuple(cited_entities or []),
+            cited_quote=cited_quote,
+        )
+
+    def _graph_edit_digest(self, op: str) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "op": op,
+            "pending_nodes": len(self._events_pending),
+            "pending_edges": len(self._edges_pending),
+            "pending_dropped": len(self._dropped_pending),
+        }
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
 
 
 def _validate_event_shape(idx: int, raw: dict[str, Any]) -> tuple[str | None, Event | None]:
