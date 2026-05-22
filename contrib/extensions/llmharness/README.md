@@ -125,16 +125,18 @@ sequenceDiagram
     participant Engine as replay/engine.py
     participant Child as Extractor or Auditor child
 
-    User->>CLI: replay extractor|auditor --record LINE [--provider X] [--prompt Y]
+    User->>CLI: replay extractor or auditor with overrides
     CLI->>Sidecar: read one ReplayRecord
-    CLI->>Runner: replay_*_record(record, overrides)
-    Note over Runner: rebuild compose_extensions(...) — same fn the live adapter used; extractor mints fresh ExtractionState, auditor reuses compose_kwargs graph
+    CLI->>Runner: replay_extractor_record / replay_auditor_record
+    Note over Runner: rebuild compose_extensions with recorded kwargs
+    Note over Runner: extractor mints fresh ExtractionState
+    Note over Runner: auditor reuses recorded graph payload
     Runner->>Engine: run_phase_standalone(extensions, payload)
     Engine->>Child: top-level session.prompt(payload)
-    Child-->>Engine: assistant messages + tool calls
+    Child-->>Engine: assistant messages and tool calls
     Engine-->>Runner: PhaseResult(messages, output, status)
     Runner-->>CLI: PhaseResult
-    CLI-->>User: print / diff output
+    CLI-->>User: print or diff output
 ```
 
 The same machinery backs the **strict A/B fork**: the eval driver
@@ -167,9 +169,9 @@ sequenceDiagram
     CLI->>Meta: read_sample_meta(...) if present
     CLI->>Coll: collect_case(replay, meta, overrides)
     Coll->>Coll: partition records by phase
-    Coll->>Coll: _attach_auditor_graph_refs — pair each auditor with its graph snapshot
-    Coll->>Coll: _accumulate_graph(extractor_firings) → GraphSnapshot per firing
-    Coll->>Coll: stitch main_agent_messages (latest auditor snapshot + extractor tails)
+    Coll->>Coll: _attach_auditor_graph_refs pairs each auditor with its graph snapshot
+    Coll->>Coll: _accumulate_graph(extractor_firings) yields one GraphSnapshot per firing
+    Coll->>Coll: stitch main_agent_messages from latest auditor snapshot plus extractor tails
     Coll-->>CLI: CaseData(meta, firings, snapshots, verdicts)
     CLI->>Writer: write_case(case_data, out_dir)
     Writer->>Case: write meta.json, firings/, graph/, verdicts/, messages/
