@@ -74,21 +74,6 @@ class ExtractionState:
     # prior history).
     next_event_id: int = 1
 
-    # The LLM's basic-block partition of the new-turn window, submitted
-    # alongside ``events`` in the same ``submit_events`` payload. JSON
-    # field ordering in the schema places this BEFORE ``events`` so the
-    # model commits to a partition before token-generating events,
-    # turning the basic-block discipline (Principle 3) from a soft
-    # instruction into a generation-order constraint. Stored verbatim
-    # for offline inspection; v15 keeps validation soft (no rejection
-    # on plan/event mismatch).
-    block_plan: tuple[dict[str, Any], ...] = ()
-
-    # Plan-committed flag — set by ``commit_plan``. Allows the v18+ two-
-    # tool flow (``submit_plan`` then ``submit_events_batch``); the
-    # legacy single-shot ``commit`` bypasses this and skips the flag.
-    plan_committed: bool = False
-
     # Frozen results — populated by ``finalize`` (or by the legacy
     # one-shot ``commit`` for backwards compatibility with the v17 tests).
     events: tuple[Event, ...] = ()
@@ -154,52 +139,6 @@ class ExtractionState:
 
     # ------------------------------------------------------------------
     # Public mutators
-
-    def commit_plan(self, plan_payload: list[dict[str, Any]]) -> str | None:
-        """Validate + capture the block plan; called once per firing.
-
-        The plan is informational — the structural invariant (every
-        internal event must be a true branch point) is enforced on the
-        emitted graph in :meth:`finalize`, not on the plan. Returns
-        ``None`` on success; an error string on a malformed payload
-        (state unchanged).
-        """
-        if self.plan_committed:
-            return "submit_plan: already committed; one plan per firing"
-        if not isinstance(plan_payload, list):
-            return "submit_plan: 'block_plan' must be an array"
-        sanitized: list[dict[str, Any]] = []
-        for idx, entry in enumerate(plan_payload):
-            if not isinstance(entry, dict):
-                return f"submit_plan: block_plan[{idx}] must be an object"
-            kind = entry.get("kind")
-            if kind not in ("linear", "branch"):
-                return (
-                    f"submit_plan: block_plan[{idx}].kind must be "
-                    f"'linear' or 'branch'; got {kind!r}"
-                )
-            turns = entry.get("turns")
-            if not isinstance(turns, list) or not turns:
-                return (
-                    f"submit_plan: block_plan[{idx}].turns must be a "
-                    "non-empty array of integers"
-                )
-            for t in turns:
-                if isinstance(t, bool) or not isinstance(t, int):
-                    return (
-                        f"submit_plan: block_plan[{idx}].turns contains "
-                        f"non-integer entry {t!r}"
-                    )
-            note = entry.get("note")
-            if not isinstance(note, str) or not note.strip():
-                return (
-                    f"submit_plan: block_plan[{idx}].note must be a "
-                    "non-empty string"
-                )
-            sanitized.append(entry)
-        self.block_plan = tuple(sanitized)
-        self.plan_committed = True
-        return None
 
     def commit_batch(self, events_payload: list[dict[str, Any]]) -> str | None:
         """Validate one batch and append to pending on success.

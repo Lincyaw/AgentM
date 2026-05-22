@@ -91,7 +91,7 @@ async def run_phase_standalone(
             recent_n = len(payload.get("recent_graph") or [])
             payload_json = (
                 "Below is the firing input. Build the graph incrementally "
-                "with submit_plan -> upsert_node / upsert_edge (and "
+                "with upsert_node / upsert_edge (and "
                 "delete_node / delete_edge as needed), then call "
                 "finalize_extraction with no payload to terminate. recent_graph "
                 f"carries {recent_n} prior-firing entries you can ref-link by "

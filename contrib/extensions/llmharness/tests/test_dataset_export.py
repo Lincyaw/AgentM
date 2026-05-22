@@ -233,17 +233,17 @@ def test_dataset_export_emits_multi_turn_extractor_trajectory() -> None:
     """
     rec = _ok_extractor_replay_record(
         raw_assistant_messages=[
-            {"type": "thinking", "text": "plan: one linear block"},
-            {
-                "type": "tool_call",
-                "name": "submit_plan",
-                "arguments": {"block_plan": []},
-            },
-            {"type": "thinking", "text": "emit the act"},
+            {"type": "thinking", "text": "scan window"},
             {
                 "type": "tool_call",
                 "name": "upsert_node",
                 "arguments": {"id": 1, "kind": "act"},
+            },
+            {"type": "thinking", "text": "emit the evid"},
+            {
+                "type": "tool_call",
+                "name": "upsert_node",
+                "arguments": {"id": 2, "kind": "evid"},
             },
             {
                 "type": "tool_call",
@@ -256,12 +256,12 @@ def test_dataset_export_emits_multi_turn_extractor_trajectory() -> None:
     out = json.loads(sft.to_jsonl())
     messages = out["target"]["messages"]
     assert [m["tool_calls"][0]["function"]["name"] for m in messages] == [
-        "submit_plan",
+        "upsert_node",
         "upsert_node",
         "finalize_extraction",
     ]
-    assert messages[0]["content"] == "<think>plan: one linear block</think>\n\n"
-    assert messages[1]["content"] == "<think>emit the act</think>\n\n"
+    assert messages[0]["content"] == "<think>scan window</think>\n\n"
+    assert messages[1]["content"] == "<think>emit the evid</think>\n\n"
     # finalize had no preceding thinking — empty content (not stray tags).
     assert messages[2]["content"] == ""
 
