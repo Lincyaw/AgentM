@@ -586,6 +586,39 @@ class PlanSubmittedEvent(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class EntryAppendedEvent(Event):
+    """Fires after :meth:`ReadonlySession.append_entry` persists an entry.
+
+    Lets extensions observe every write to the session entry tree —
+    assistant messages, ``llmharness.audit_event`` / ``llmharness.verdict`` /
+    ``llmharness.audit_graph_op`` entries, plan submissions, etc. — without
+    polling ``get_branch()`` or tailing the on-disk JSONL.
+
+    Emitted via :meth:`EventBus.emit_sync` from inside the sync
+    ``append_entry`` codepath. Handlers must therefore be sync (an async
+    handler is skipped with a diagnostic, matching the rest of the
+    ``emit_sync`` contract). The event fires AFTER the entry has been
+    durably written so handler crashes cannot corrupt session state.
+
+    ``payload`` is the raw object passed to ``append_entry`` — observers
+    that need a JSON-serialisable view should run it through
+    :func:`agentm.core.lib.to_jsonable` themselves; we don't pre-serialise
+    on the hot path since most subscribers (e.g. ``live_inspector``) need
+    a custom shape anyway.
+    """
+
+    CHANNEL: ClassVar[Literal["entry_appended"]] = "entry_appended"
+    session_id: str
+    """The persisted session-manager header id (``ReadonlySession.get_session_id``),
+    not the OTel span id. Distinct from the bus-owning session's
+    ``api.session_id`` for embedded callers."""
+    entry_type: str
+    entry_id: str
+    parent_id: str | None
+    payload: Any
+
+
+@dataclass(frozen=True, slots=True)
 class SessionReadyEvent(Event):
     """Fires once after ``AgentSession.create`` has loaded every extension
     and the active provider has been picked, but before the first ``prompt``.
@@ -1255,6 +1288,7 @@ __all__ = [
     "CostBudgetExceededEvent",
     "DecideTurnActionEvent",
     "DiagnosticEvent",
+    "EntryAppendedEvent",
     "Event",
     "EventBus",
     "EventBusObserver",

@@ -120,6 +120,7 @@ async def create_agent_session(
     session_view: ReadonlySession = SessionView(
         session_manager,
         loop_config_getter=lambda: configured_loop_config,
+        bus=bus,
     )
     from agentm.core.runtime.resource_writer import DEFAULT_PROTECTED_BRANCHES
 

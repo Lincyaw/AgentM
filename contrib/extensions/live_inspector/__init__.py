@@ -1,90 +1,80 @@
-"""Live-inspector atom — broadcast a session's events over a TCP socket so
-an external UI can render the agent tree in real time.
+"""Live-inspector atom — broadcast a session's events over a WebSocket so
+an external UI (aegis-ui) can render the agent tree in real time.
 
-This is the substrate for live audit visualization. UI / aegis-ui work is
-out of scope; this atom defines the wire protocol and gets the events flowing.
+This is the substrate for live audit visualization. UI work is out of scope;
+this atom defines the wire protocol and gets the events flowing.
 
-Why raw asyncio TCP (no ``websockets`` / ``aiohttp``)
----------------------------------------------------
+Why WebSocket (not raw TCP)
+---------------------------
 
-The AgentM tree currently does not depend on either library and the §11
-single-file atom contract restricts atoms to standard-library + ABI imports.
-Rather than pull in a new runtime dependency just for the first cut, we ship
-a newline-delimited-JSON over raw TCP server. The protocol is trivial enough
-that a thin browser-side shim can adapt it to WebSocket later; for current
-internal tooling a plain ``nc`` / Python client suffices.
+Browsers cannot speak raw TCP, so the UI's backend would otherwise need to
+run a TCP-to-WS bridge — defeating the "scenario atom → UI direct connect"
+design. ``websockets>=12.0`` is pure-Python, ~70 KB, no transitive deps;
+listed in the top-level ``[project] dependencies`` so it ships with every
+install.
 
 Wire protocol (v1)
 ------------------
 
-Transport: TCP, newline-delimited UTF-8 JSON. One JSON object per line in
-each direction. The server URL is logged to stderr at startup as
-``LIVE INSPECT: tcp://<host>:<port>/inspect?root=<root_session_id>``.
+Transport: WebSocket text frames; one JSON object per frame. The server URL
+is logged to stderr at startup as
+``LIVE INSPECT: ws://<host>:<port>/inspect?root=<root_session_id>``.
 
-Client → server (first line, optional):
+Client → server (first frame, optional):
     ``{"type": "subscribe", "root_session_id": "<id>"}``
-    If omitted, the client subscribes to whichever root this server is
-    bound to (one server == one root in v1, so this is informational).
+    Informational in v1 (one server per root). Sent or omitted, the
+    connection is bound to whichever root this server serves.
 
 Server → client (every connection, in order):
     1. Hello:
        ``{"type": "hello", "root_session_id": "<id>", "schema_version": 1}``
-    2. For every session in the tree (root + children) as they start:
+    2. For every session in the tree (root + spawned children) as they start:
        ``{"type": "session_started", "session_id", "parent_session_id",
            "purpose", "cwd", "ts"}``
     3. For every EventBus dispatch in any session:
        ``{"type": "event", "session_id", "ts", "kind": "<event class name>",
            "channel": "<bus channel>", "payload": {...}}``
-    4. For every entry appended to a session's entry tree (messages,
-       ``llmharness.audit_event``, ``llmharness.verdict``, …):
+    4. For every entry appended to a session's entry tree (assistant
+       messages, ``llmharness.audit_event``, ``llmharness.verdict``,
+       ``llmharness.audit_graph_op``, plan submissions, …):
        ``{"type": "entry", "session_id", "ts", "entry_type": "<type>",
-           "entry_id", "payload": {...}}``
+           "entry_id", "parent_id", "payload": {...}}``
     5. When a session ends:
        ``{"type": "session_ended", "session_id", "ts"}``
+    6. After initial backlog replay:
+       ``{"type": "backlog_done"}``
 
 Backpressure
 ------------
 
-Each connection has a bounded outbound queue (``_QUEUE_HIGHWATER``). When the
-queue is full the NEWEST message is dropped and a warning logged — slow
-clients never deadlock the broadcasting hot path.
+Each connection has a bounded outbound queue (cap ``_QUEUE_HIGHWATER`` =
+256). When the queue is full the NEWEST message is dropped and a warning
+logged — slow clients cannot deadlock the broadcaster.
 
-Open design question: ``entry`` broadcasting
---------------------------------------------
+Child sessions
+--------------
 
-There is no ABI event today for ``ReadonlySession.append_entry``. For this
-first cut we POLL ``api.session.get_branch()`` after every bus dispatch and
-broadcast newly-appended entries. The boundary stays clean (ABI-only — no
-``core.runtime.*`` import, no file tail) and it captures every entry source
-(message bodies, llmharness audit entries, plan submissions). The cost is
-one branch-length comparison per bus emit, which is O(1) amortised.
+In ``install()`` we wrap ``api.spawn_child_session`` so every child config
+gets the inspector appended to its ``extensions`` list (root host:port + the
+parent's ``root_session_id`` baked in). The child's ``install()`` then
+finds the existing server via the process-level ``_SERVERS`` registry keyed
+by ``root_session_id`` and registers its own bus instead of starting a
+second server. Net effect: one WebSocket socket, the whole agent tree.
 
-The cleaner long-term fix is option (c) in the design call: an
-``EntryAppendedEvent`` fired by ``SessionView.append_entry`` so atoms can
-subscribe directly. That requires a small core/ABI change and is logged as
-a follow-up. Option (b) — tail the on-disk JSONL — was rejected: the file
-is rewritten (``_rewrite_file``) on session creation and forks, which
-breaks naive tailers.
+Entry broadcasting
+------------------
 
-Child sessions (extractor / auditor / tool_eval_run)
-----------------------------------------------------
+Subscribes to :class:`EntryAppendedEvent` on each session's bus. Replaced
+the v0 polling approach the moment we added the core ABI event — no more
+O(branch_length) walk per bus emit.
 
-``ChildSessionStartEvent`` fires on the parent bus with the child's
-``session_id`` and ``purpose`` — we broadcast that as a ``session_started``
-event so the UI can render the child node. However the inspector atom does
-NOT receive the child's internal events unless it is also installed in the
-child session's extension set. ``llmharness`` currently builds its child
-``AgentSessionConfig`` with a fixed extension list and does not propagate
-the parent's scenario. Full child-tree visibility requires either:
+Auth (v2)
+---------
 
-  * a follow-up to ``llmharness.adapters.agentm`` to append
-    ``contrib.extensions.live_inspector`` to ``extractor_extensions`` /
-    ``auditor_extensions`` when the parent has the inspector loaded, or
-  * a core mechanism for "session-tree-wide observers" that the substrate
-    auto-installs in spawned children.
-
-This first cut documents the gap; child lifecycle is visible, child internal
-events are not.
+This first cut is unauthenticated and binds ``127.0.0.1`` by default. v2
+will add ``?token=`` to the connect URL, validated against
+``AGENTM_LIVE_INSPECT_TOKEN``. Operators who flip the bind to ``0.0.0.0``
+today do so at their own risk.
 """
 
 from __future__ import annotations
@@ -94,16 +84,22 @@ import contextlib
 import json
 import logging
 import os
-import socket
 import sys
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
+# WebSocket transport. ``websockets`` ships in the top-level ``[project]
+# dependencies`` so this import is guaranteed to resolve in any AgentM
+# install — no try/except fallback needed.
+import websockets
+from websockets.asyncio.server import ServerConnection, serve
+
 from agentm.core.abi.events import (
     ChildSessionEndEvent,
     ChildSessionStartEvent,
+    EntryAppendedEvent,
     EventBusObserver,
     SessionShutdownEvent,
 )
@@ -118,12 +114,13 @@ MANIFEST = ExtensionManifest(
     name="live_inspector",
     description=(
         "Stream session events (bus dispatches + entry-tree appends + "
-        "child-session lifecycle) over a TCP newline-JSON socket so an "
-        "external UI can render the agent tree live."
+        "child-session lifecycle) over a WebSocket so an external UI "
+        "can render the agent tree live."
     ),
     registers=(
         f"event:{ChildSessionStartEvent.CHANNEL}",
         f"event:{ChildSessionEndEvent.CHANNEL}",
+        f"event:{EntryAppendedEvent.CHANNEL}",
         f"event:{SessionShutdownEvent.CHANNEL}",
     ),
     config_schema={
@@ -132,26 +129,33 @@ MANIFEST = ExtensionManifest(
             "bind": {"type": "string"},
             "port": {"type": "integer"},
             "url_file": {"type": ["string", "null"]},
+            # Set internally by the spawn-wrap when this atom is auto-
+            # attached to a child session. Tells ``install()`` to skip
+            # the URL stderr/file announcement (the root already did it)
+            # and to look up the existing server by ``parent_root``
+            # rather than create a new one.
+            "role": {"type": "string"},
+            "parent_root": {"type": ["string", "null"]},
+            "parent_port": {"type": ["integer", "null"]},
         },
         "additionalProperties": False,
     },
 )
 
 
-# Channels whose payloads we skip from the broadcast — these are pure
-# per-token noise (``stream_delta``) or handler-internal signals that add no
-# value to a UI viewer and would otherwise dominate the wire.
+# Channels whose payloads we skip from the broadcast — pure per-token noise
+# (``stream_delta``) that would otherwise dominate the wire.
 _NOISY_CHANNELS: frozenset[str] = frozenset({"stream_delta"})
 
 
 # Per-connection outbound queue cap. Exceeding this drops the NEWEST message
-# (so a slow client never starves the broadcaster).
+# so a slow client never starves the broadcaster.
 _QUEUE_HIGHWATER: int = 256
 
 
 # Process-level registry: one server per root_session_id. Child sessions in
-# the same process share the parent's server (when the atom is loaded in
-# them, which it isn't by default — see module docstring).
+# the same process share the parent's server by looking up their root id
+# here in their own ``install()``.
 _SERVERS: dict[str, _Server] = {}
 _SERVERS_LOCK = threading.Lock()
 
@@ -160,10 +164,12 @@ def _now() -> float:
     return time.time()
 
 
-# Sentinel pushed onto a client's queue to signal "drain and close".
-# Identity-checked (``msg is _CLOSE_SENTINEL``); a real broadcast payload
-# is always at least ``b"{...}\n"`` so there's no collision risk.
-_CLOSE_SENTINEL: bytes = b"\x00__close__\x00"
+# Sentinel pushed onto a client's outbound queue to signal "drain & close".
+class _CloseSentinel:
+    __slots__ = ()
+
+
+_CLOSE: _CloseSentinel = _CloseSentinel()
 
 
 @dataclass(eq=False)
@@ -171,18 +177,17 @@ class _Client:
     # ``eq=False`` so instances stay hashable by identity — they live in
     # ``_Server.clients`` (a set). The default dataclass ``__eq__`` would
     # make the class unhashable and ``set.add`` would raise.
-    writer: asyncio.StreamWriter
-    queue: asyncio.Queue[bytes]
+    queue: asyncio.Queue[Any]
     dropped: int = 0
 
 
 @dataclass
 class _Server:
-    """One TCP server bound to one root session.
+    """One WebSocket server bound to one root session.
 
     Owns its own asyncio event loop in a background thread so the AgentM
-    runtime (which may or may not be inside an asyncio context at install
-    time, depending on caller) stays out of its way.
+    runtime stays out of its way (atoms install synchronously, may or may
+    not be inside an asyncio context).
     """
 
     root_session_id: str
@@ -191,7 +196,7 @@ class _Server:
     refcount: int = 0  # number of sessions in this root tree that hold us
     loop: asyncio.AbstractEventLoop | None = None
     thread: threading.Thread | None = None
-    server: asyncio.base_events.Server | None = None
+    server: Any = None  # websockets.asyncio.server.Server
     actual_port: int = 0
     clients: set[_Client] = field(default_factory=set)
     _backlog: list[dict[str, Any]] = field(default_factory=list)
@@ -203,17 +208,35 @@ class _Server:
         ready = threading.Event()
         bind_error: list[BaseException] = []
 
+        async def _bootstrap() -> Any:
+            # ``serve(...)`` constructs a ``Server`` object whose __init__
+            # calls ``asyncio.get_running_loop()`` — so it must be invoked
+            # inside a coroutine, not from ``run_until_complete(serve(...))``.
+            srv = serve(
+                self._handle_client,
+                host=self.bind,
+                port=self.port,
+                # Only serve ``/inspect``; everything else gets a 404.
+                process_request=_only_inspect_path,
+            )
+            # ``srv`` is an async context manager. Start it; entering the
+            # ctx binds the listening socket. We hold the entered ctx for
+            # the lifetime of the server and rely on ``shutdown()`` to
+            # call ``.close()`` explicitly.
+            await srv.__aenter__()
+            return srv
+
         def runner() -> None:
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
             try:
-                self.server = self.loop.run_until_complete(
-                    asyncio.start_server(
-                        self._handle_client, host=self.bind, port=self.port
-                    )
-                )
-                # Resolve actual port (in case port=0).
-                sockets = self.server.sockets or ()
+                # ``self.server`` holds the ``websockets.asyncio.server.serve``
+                # context-manager wrapper; the live ``asyncio.Server`` is at
+                # ``self.server.server`` (Server.sockets is the listening
+                # socket tuple).
+                self.server = self.loop.run_until_complete(_bootstrap())
+                asyncio_server = getattr(self.server, "server", None)
+                sockets = (asyncio_server.sockets if asyncio_server else None) or ()
                 if sockets:
                     sockname = sockets[0].getsockname()
                     self.actual_port = (
@@ -225,11 +248,6 @@ class _Server:
                 bind_error.append(exc)
                 ready.set()
             finally:
-                try:
-                    if self.server is not None:
-                        self.server.close()
-                except Exception:
-                    pass
                 try:
                     if self.loop is not None and not self.loop.is_closed():
                         self.loop.close()
@@ -246,12 +264,11 @@ class _Server:
         if bind_error:
             raise bind_error[0]
 
-    async def _handle_client(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        client = _Client(writer=writer, queue=asyncio.Queue(maxsize=_QUEUE_HIGHWATER))
+    async def _handle_client(self, ws: ServerConnection) -> None:
+        client = _Client(queue=asyncio.Queue(maxsize=_QUEUE_HIGHWATER))
         self.clients.add(client)
-        # Send hello + backlog.
+
+        # Send hello + replay backlog + backlog_done.
         await self._enqueue_one(
             client,
             {
@@ -264,46 +281,36 @@ class _Server:
             await self._enqueue_one(client, record)
         await self._enqueue_one(client, {"type": "backlog_done"})
 
-        # Drain client subscribe line (optional, ignored content) so the
-        # socket buffer doesn't fill on chatty clients.
+        # Drain client subscribe frame(s) so the socket doesn't stall on
+        # chatty clients. We don't act on subscribe content in v1.
         async def drain_reads() -> None:
             try:
-                while True:
-                    line = await reader.readline()
-                    if not line:
-                        return
-                    # Best-effort decode; ignore malformed.
-                    try:
-                        json.loads(line.decode("utf-8"))
-                    except Exception:
-                        pass
-            except (ConnectionResetError, asyncio.IncompleteReadError):
+                async for message in ws:
+                    with contextlib.suppress(Exception):
+                        json.loads(message)
+            except websockets.ConnectionClosed:
                 return
 
         reader_task = asyncio.create_task(drain_reads())
 
         try:
             while True:
-                payload = await client.queue.get()
-                if payload is _CLOSE_SENTINEL:
+                item = await client.queue.get()
+                if isinstance(item, _CloseSentinel):
                     return
                 try:
-                    writer.write(payload)
-                    await writer.drain()
-                except (ConnectionResetError, BrokenPipeError):
+                    await ws.send(item)
+                except websockets.ConnectionClosed:
                     return
         finally:
             reader_task.cancel()
             self.clients.discard(client)
             with contextlib.suppress(Exception):
-                writer.close()
-                await writer.wait_closed()
+                await ws.close()
 
     async def _enqueue_one(self, client: _Client, record: dict[str, Any]) -> None:
         try:
-            line = (json.dumps(record, default=str, ensure_ascii=False) + "\n").encode(
-                "utf-8"
-            )
+            line = json.dumps(record, default=str, ensure_ascii=False)
         except Exception:
             logger.exception("live_inspector: failed to serialize record")
             return
@@ -321,13 +328,13 @@ class _Server:
     def broadcast(self, record: dict[str, Any]) -> None:
         """Thread-safe broadcast to every connected client.
 
-        Cheap on the hot path: schedules one coroutine on the server's loop
-        and returns. The coroutine fan-outs to per-client queues; per-client
-        writes happen on the loop thread.
+        Cheap on the hot path: appends to the backlog (under the loop
+        thread's natural single-writer guarantee — we only call this from
+        the agent thread / from sync handlers) and schedules a fanout
+        coroutine on the server's loop.
         """
         if self._closed or self.loop is None:
             return
-        # Append to backlog (capped) so late connecters get state.
         if len(self._backlog) >= self._backlog_cap:
             del self._backlog[: max(1, self._backlog_cap // 4)]
         self._backlog.append(record)
@@ -356,14 +363,14 @@ class _Server:
         self._closed = True
 
         async def _close() -> None:
-            # Signal every client to drain & close.
             for client in list(self.clients):
                 with contextlib.suppress(Exception):
-                    client.queue.put_nowait(_CLOSE_SENTINEL)
+                    client.queue.put_nowait(_CLOSE)
             if self.server is not None:
-                self.server.close()
+                # Exit the async-CM the ``serve(...)`` wrapper returned;
+                # that calls ``Server.close()`` + ``wait_closed()``.
                 with contextlib.suppress(Exception):
-                    await self.server.wait_closed()
+                    await self.server.__aexit__(None, None, None)
 
         if self.loop is not None and not self.loop.is_closed():
             try:
@@ -382,10 +389,27 @@ class _Server:
                 _SERVERS.pop(self.root_session_id, None)
 
 
+async def _only_inspect_path(connection: ServerConnection, request: Any) -> Any:
+    """Reject any HTTP path that isn't ``/inspect``.
+
+    Hook into ``websockets.serve(process_request=...)``: returning ``None``
+    lets the handshake proceed; returning a Response short-circuits with
+    that response.
+    """
+    path = getattr(request, "path", "/")
+    # Strip query string before comparing.
+    base = path.split("?", 1)[0]
+    if base != "/inspect":
+        return connection.respond(404, "not found\n")
+    return None
+
+
 def _get_or_create_server(
     root_session_id: str,
     bind: str,
     port: int,
+    *,
+    announce: bool,
     url_file: str | None,
 ) -> _Server:
     with _SERVERS_LOCK:
@@ -398,19 +422,21 @@ def _get_or_create_server(
         srv.acquire()
         _SERVERS[root_session_id] = srv
 
-    # Side effects outside the lock.
-    url = f"tcp://{bind}:{srv.actual_port}/inspect?root={root_session_id}"
-    try:
-        sys.stderr.write(f"LIVE INSPECT: {url}\n")
-        sys.stderr.flush()
-    except Exception:
-        pass
-    if url_file:
+    if announce:
+        url = f"ws://{bind}:{srv.actual_port}/inspect?root={root_session_id}"
         try:
-            with open(url_file, "w", encoding="utf-8") as fh:
-                fh.write(url + "\n")
-        except OSError:
-            logger.warning("live_inspector: failed to write url_file=%s", url_file)
+            sys.stderr.write(f"LIVE INSPECT: {url}\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        if url_file:
+            try:
+                with open(url_file, "w", encoding="utf-8") as fh:
+                    fh.write(url + "\n")
+            except OSError:
+                logger.warning(
+                    "live_inspector: failed to write url_file=%s", url_file
+                )
     return srv
 
 
@@ -420,16 +446,8 @@ class _BusObserver(EventBusObserver):
     def __init__(self, session_id: str, server: _Server) -> None:
         self._session_id = session_id
         self._server = server
-        # Entry-tree polling state. The branch is a list of SessionEntry-like
-        # objects with stable ``.id`` (uuid4 hex); we track the set we've
-        # already broadcast so a new append yields exactly one ``entry`` msg.
-        self._seen_entry_ids: set[str] = set()
-        self._branch_getter: Any = None  # set by install()
 
-    def attach_branch_getter(self, getter: Any) -> None:
-        self._branch_getter = getter
-
-    def on_emit_start(self, channel: str, event: Any) -> None:  # noqa: D401
+    def on_emit_start(self, channel: str, event: Any) -> None:
         return None
 
     def on_handler_done(
@@ -445,49 +463,90 @@ class _BusObserver(EventBusObserver):
     def on_emit_end(
         self, channel: str, event: Any, results: list[Any]
     ) -> None:
-        if channel not in _NOISY_CHANNELS:
-            try:
-                payload = to_jsonable(event)
-            except Exception:
-                payload = {"_repr": repr(event)}
-            self._server.broadcast(
-                {
-                    "type": "event",
-                    "session_id": self._session_id,
-                    "ts": _now(),
-                    "kind": type(event).__name__,
-                    "channel": channel,
-                    "payload": payload,
-                }
-            )
-        self._poll_entries()
-
-    def _poll_entries(self) -> None:
-        if self._branch_getter is None:
+        if channel in _NOISY_CHANNELS:
+            return
+        # ``EntryAppendedEvent`` is handled on its own typed channel where
+        # the inspector emits a richer ``entry`` record; skip the generic
+        # event broadcast so we don't double-publish entry writes.
+        if channel == EntryAppendedEvent.CHANNEL:
             return
         try:
-            branch = self._branch_getter()
+            payload = to_jsonable(event)
         except Exception:
-            return
-        for entry in branch:
-            entry_id = getattr(entry, "id", None)
-            if entry_id is None or entry_id in self._seen_entry_ids:
-                continue
-            self._seen_entry_ids.add(entry_id)
-            try:
-                payload = to_jsonable(getattr(entry, "payload", None))
-            except Exception:
-                payload = {"_repr": repr(getattr(entry, "payload", None))}
-            self._server.broadcast(
-                {
-                    "type": "entry",
-                    "session_id": self._session_id,
-                    "ts": _now(),
-                    "entry_id": entry_id,
-                    "entry_type": getattr(entry, "type", "unknown"),
-                    "payload": payload,
-                }
-            )
+            payload = {"_repr": repr(event)}
+        self._server.broadcast(
+            {
+                "type": "event",
+                "session_id": self._session_id,
+                "ts": _now(),
+                "kind": type(event).__name__,
+                "channel": channel,
+                "payload": payload,
+            }
+        )
+
+
+def _wrap_spawn_child_session(
+    api: ExtensionAPI,
+    bind: str,
+    actual_port: int,
+    root_session_id: str,
+) -> None:
+    """Wrap ``api.spawn_child_session`` so children auto-load the inspector.
+
+    The wrap appends a ``contrib.extensions.live_inspector`` extension entry
+    to the child's ``AgentSessionConfig.extensions`` list with ``role:
+    "child"``, ``parent_root``, and ``parent_port`` set. The child's
+    ``install()`` reads those and joins the existing per-root server
+    instead of starting another one.
+
+    Idempotent: if the child config already lists the inspector, we leave
+    it alone (operator override wins).
+    """
+
+    original = api.spawn_child_session
+    child_entry = (
+        "contrib.extensions.live_inspector",
+        {
+            "bind": bind,
+            "port": actual_port,
+            "role": "child",
+            "parent_root": root_session_id,
+            "parent_port": actual_port,
+        },
+    )
+
+    async def wrapped(config: Any = None, **kwargs: Any) -> Any:
+        # Two call styles: positional ``AgentSessionConfig`` or kwargs.
+        # Mutating an attrs/dataclass: best-effort — if ``extensions`` is
+        # accessible we append; otherwise we fall through unchanged.
+        target = config if config is not None else kwargs
+        if target is not None:
+            extensions = _get_extensions_list(target)
+            if extensions is not None:
+                # Skip if already present (operator override).
+                if not any(
+                    isinstance(e, tuple) and e and e[0] == child_entry[0]
+                    for e in extensions
+                ):
+                    extensions.append(child_entry)
+        return await original(config, **kwargs) if config is not None else await original(**kwargs)
+
+    api.spawn_child_session = wrapped  # type: ignore[method-assign]
+
+
+def _get_extensions_list(target: Any) -> list[Any] | None:
+    """Return a mutable extensions list from an ``AgentSessionConfig`` or
+    a kwargs dict. ``None`` if the target doesn't expose one we can mutate.
+    """
+    if isinstance(target, dict):
+        ext = target.get("extensions")
+        if ext is None:
+            target["extensions"] = []
+            ext = target["extensions"]
+        return ext if isinstance(ext, list) else None
+    ext = getattr(target, "extensions", None)
+    return ext if isinstance(ext, list) else None
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
@@ -495,27 +554,41 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     port = int(config.get("port", 0))
     url_file_raw = config.get("url_file")
     url_file = str(url_file_raw) if url_file_raw else None
+    role = str(config.get("role", "root"))
+    parent_port_raw = config.get("parent_port")
 
-    # Env-var overrides so an operator can flip the bind/port without
-    # rewriting the manifest. Useful for the aegis-ui dev loop where the
-    # UI binds a known port and the agent should publish there.
-    env_bind = os.environ.get("AGENTM_LIVE_INSPECT_BIND")
-    env_port = os.environ.get("AGENTM_LIVE_INSPECT_PORT")
-    env_url_file = os.environ.get("AGENTM_LIVE_INSPECT_URL_FILE")
-    if env_bind:
-        bind = env_bind
-    if env_port:
-        try:
-            port = int(env_port)
-        except ValueError:
-            pass
-    if env_url_file:
-        url_file = env_url_file
+    # Env-var overrides for ROOT only. Children inherit the resolved
+    # bind:port from the spawn-wrap config so they cannot drift.
+    if role == "root":
+        env_bind = os.environ.get("AGENTM_LIVE_INSPECT_BIND")
+        env_port = os.environ.get("AGENTM_LIVE_INSPECT_PORT")
+        env_url_file = os.environ.get("AGENTM_LIVE_INSPECT_URL_FILE")
+        if env_bind:
+            bind = env_bind
+        if env_port:
+            try:
+                port = int(env_port)
+            except ValueError:
+                pass
+        if env_url_file:
+            url_file = env_url_file
+    else:
+        # For child role: use the parent's already-resolved port verbatim.
+        # This is the unambiguous join key — we never re-bind in a child.
+        if parent_port_raw is not None:
+            try:
+                port = int(parent_port_raw)
+            except (TypeError, ValueError):
+                pass
 
+    # For a child, the per-root server already exists in this process; the
+    # registry-keyed-by-root lookup finds it. For a root, we bind a fresh
+    # server.
     server = _get_or_create_server(
         root_session_id=api.root_session_id,
         bind=bind,
         port=port,
+        announce=(role == "root"),
         url_file=url_file,
     )
 
@@ -532,10 +605,24 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     )
 
     observer = _BusObserver(session_id=session_id, server=server)
-    # Attach the branch getter via the session view — pure ABI access, no
-    # ``core.runtime.*`` import.
-    observer.attach_branch_getter(api.session.get_branch)
     api.add_observer(observer)
+
+    def _on_entry_appended(event: EntryAppendedEvent) -> None:
+        try:
+            payload = to_jsonable(event.payload)
+        except Exception:
+            payload = {"_repr": repr(event.payload)}
+        server.broadcast(
+            {
+                "type": "entry",
+                "session_id": session_id,
+                "ts": _now(),
+                "entry_id": event.entry_id,
+                "entry_type": event.entry_type,
+                "parent_id": event.parent_id,
+                "payload": payload,
+            }
+        )
 
     def _on_child_start(event: ChildSessionStartEvent) -> None:
         server.broadcast(
@@ -544,9 +631,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "session_id": event.child_session_id,
                 "parent_session_id": event.parent_session_id,
                 "purpose": event.purpose,
-                # ``cwd`` is unknown from the parent's perspective; the
-                # child will broadcast its own session_started with cwd if
-                # the inspector atom is loaded inside it.
+                # cwd is unknown from the parent's perspective; the child's
+                # own session_started (broadcast by its inspector install)
+                # will carry the cwd.
                 "cwd": None,
                 "ts": _now(),
             }
@@ -569,43 +656,21 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "ts": _now(),
             }
         )
-        # Release our refcount. Server shuts down when the last holder
-        # releases — typically the root session at process exit.
         server.release()
 
+    api.on(EntryAppendedEvent.CHANNEL, _on_entry_appended)
     api.on(ChildSessionStartEvent.CHANNEL, _on_child_start)
     api.on(ChildSessionEndEvent.CHANNEL, _on_child_end)
     api.on(SessionShutdownEvent.CHANNEL, _on_shutdown)
 
-
-# --- Test helpers -----------------------------------------------------------
-# Exposed for unit tests in ``tests/test_live_inspector.py``. Not part of
-# the atom's runtime contract; do not import from other atoms.
-
-def _connect_and_read(host: str, port: int, n_messages: int, timeout: float = 2.0) -> list[dict[str, Any]]:
-    """Open a blocking TCP socket, read up to ``n_messages`` JSON lines.
-
-    Test-only helper; uses stdlib ``socket`` rather than asyncio to keep the
-    test harness simple.
-    """
-    sock = socket.create_connection((host, port), timeout=timeout)
-    sock.settimeout(timeout)
-    out: list[dict[str, Any]] = []
-    buf = b""
-    try:
-        while len(out) < n_messages:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                if not line.strip():
-                    continue
-                out.append(json.loads(line.decode("utf-8")))
-                if len(out) >= n_messages:
-                    break
-    finally:
-        with contextlib.suppress(Exception):
-            sock.close()
-    return out
+    # Wrap spawn_child_session so children auto-attach the inspector and
+    # share the SAME server (looked up by root_session_id in their own
+    # install()). Only wraps from the root install — children don't need
+    # to wrap further; transitive grandchildren walk back to the same root.
+    if role == "root":
+        _wrap_spawn_child_session(
+            api=api,
+            bind=bind,
+            actual_port=server.actual_port,
+            root_session_id=api.root_session_id,
+        )
