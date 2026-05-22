@@ -82,6 +82,7 @@ from .train_signals import (
     ToolEvent,
     auditor_process_reward,
     extractor_process_reward,
+    tool_events_from_phase_result,
 )
 
 __all__ = [
@@ -113,6 +114,7 @@ __all__ = [
     "replay_extractor_record",
     "run_offline_auditor_over_control",
     "strict_ab_replay_path",
+    "tool_events_from_phase_result",
     "write_record",
     "write_strict_ab_replay",
 ]
