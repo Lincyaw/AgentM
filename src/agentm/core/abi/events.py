@@ -33,11 +33,19 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Final, Literal, Protocol, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, Protocol, overload
 
 from .messages import AgentMessage, AssistantMessage
 from .stream import Model
 from .tool import Tool, ToolOutcome, ToolResult
+
+if TYPE_CHECKING:
+    # ``AgentSessionConfig`` is imported only for type hints —
+    # ``session_config`` itself imports from ``agentm.core.abi`` (this
+    # package's ``__init__``), so a runtime import would close the cycle.
+    # All annotations on this module already use ``from __future__ import
+    # annotations`` (PEP 563), so the type-only import is sufficient.
+    from .session_config import AgentSessionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -544,6 +552,39 @@ class ChildSessionStartEvent(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class ChildSessionExtendingEvent(Event):
+    """Fires synchronously on the parent bus BEFORE the substrate spawns a
+    child session, so extensions can contribute additional atoms to the
+    child's load order.
+
+    Handlers should return either ``None`` (no opinion) or a list of
+    ``(module_path, config)`` tuples that the substrate will append to
+    the child's ``AgentSessionConfig.extensions`` before the factory
+    runs. Multiple handlers' contributions are concatenated in
+    registration order. The substrate dedupes by ``module_path``: if an
+    entry is already present in ``child_config.extensions`` (operator
+    override) OR contributed by an earlier handler, later contributions
+    of the same module are dropped — handlers don't need to dedupe
+    themselves.
+
+    The ``child_config`` is exposed read-only on the event; handlers
+    MUST NOT mutate it. The substrate clones the extensions list before
+    appending, so even if a misbehaving handler mutates the field in
+    place the live config the factory sees is the substrate-controlled
+    one.
+
+    Emitted via ``bus.emit_sync`` because the spawn path needs the
+    contributions to be settled before ``session_cls.create`` runs;
+    async handlers are skipped (matching the rest of the ``emit_sync``
+    contract).
+    """
+
+    CHANNEL: ClassVar[Literal["child_session_extending"]] = "child_session_extending"
+    parent_session_id: str
+    child_config: "AgentSessionConfig"
+
+
+@dataclass(frozen=True, slots=True)
 class ChildSessionEndEvent(Event):
     """Fires on the parent bus when a child AgentSession terminates."""
 
@@ -583,6 +624,39 @@ class PlanSubmittedEvent(Event):
     CHANNEL: ClassVar[Literal["plan_submitted"]] = "plan_submitted"
     plan_id: str
     plan_text: str
+
+
+@dataclass(frozen=True, slots=True)
+class EntryAppendedEvent(Event):
+    """Fires after :meth:`ReadonlySession.append_entry` persists an entry.
+
+    Lets extensions observe every write to the session entry tree —
+    assistant messages, ``llmharness.audit_event`` / ``llmharness.verdict`` /
+    ``llmharness.audit_graph_op`` entries, plan submissions, etc. — without
+    polling ``get_branch()`` or tailing the on-disk JSONL.
+
+    Emitted via :meth:`EventBus.emit_sync` from inside the sync
+    ``append_entry`` codepath. Handlers must therefore be sync (an async
+    handler is skipped with a diagnostic, matching the rest of the
+    ``emit_sync`` contract). The event fires AFTER the entry has been
+    durably written so handler crashes cannot corrupt session state.
+
+    ``payload`` is the raw object passed to ``append_entry`` — observers
+    that need a JSON-serialisable view should run it through
+    :func:`agentm.core.lib.to_jsonable` themselves; we don't pre-serialise
+    on the hot path since most subscribers (e.g. ``live_inspector``) need
+    a custom shape anyway.
+    """
+
+    CHANNEL: ClassVar[Literal["entry_appended"]] = "entry_appended"
+    session_id: str
+    """The persisted session-manager header id (``ReadonlySession.get_session_id``),
+    not the OTel span id. Distinct from the bus-owning session's
+    ``api.session_id`` for embedded callers."""
+    entry_type: str
+    entry_id: str
+    parent_id: str | None
+    payload: Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -1249,12 +1323,14 @@ __all__ = [
     "BudgetExhausted",
     "BusPriority",
     "ChildSessionEndEvent",
+    "ChildSessionExtendingEvent",
     "ChildSessionStartEvent",
     "CommandDispatchedEvent",
     "ContextEvent",
     "CostBudgetExceededEvent",
     "DecideTurnActionEvent",
     "DiagnosticEvent",
+    "EntryAppendedEvent",
     "Event",
     "EventBus",
     "EventBusObserver",

@@ -24,6 +24,7 @@ from agentm.core.runtime.atom_reloader import AtomReloader
 from agentm.core.runtime.atom_sandbox import apply_atom_source_overrides
 from agentm.core.runtime.command_dispatcher import HarnessCommandDispatcher
 from agentm.core.abi.events import (
+    ChildSessionExtendingEvent,
     ChildSessionStartEvent,
     ExtensionInstallEvent,
     SessionReadyEvent,
@@ -56,6 +57,50 @@ from agentm.core.runtime.session_manager import InMemorySessionManager, SessionM
 from agentm.core.runtime.session_runtime import SessionRuntime
 
 logger = logging.getLogger(__name__)
+
+
+def apply_child_session_contributions(
+    base_extensions: list[tuple[str, dict[str, Any]]],
+    handler_returns: list[Any],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Concatenate handler-contributed extension entries onto a child's load
+    order, dedupe by ``module_path``.
+
+    See :class:`agentm.core.abi.events.ChildSessionExtendingEvent`. Each
+    element of ``handler_returns`` is either ``None`` (no opinion) or an
+    iterable of ``(module_path, config)`` tuples. Order is preserved:
+    the operator-supplied entries on ``base_extensions`` come first,
+    then handler returns in registration order. The first occurrence of
+    each module wins; later duplicates are dropped silently so handlers
+    don't have to dedupe themselves.
+
+    Exposed at module top-level (not nested inside the factory) so the
+    fail-stop test in ``tests/unit/core/test_child_session_extending_event.py``
+    can drive the dedupe logic directly without standing up a real
+    session.
+    """
+    result: list[tuple[str, dict[str, Any]]] = list(base_extensions)
+    seen: set[str] = {entry[0] for entry in result if isinstance(entry, tuple) and entry}
+    for ret in handler_returns:
+        if ret is None:
+            continue
+        # Permissive: accept any iterable of (module, config) — handlers
+        # may return list, tuple, or generator.
+        try:
+            iterator = list(ret)
+        except TypeError:
+            continue
+        for entry in iterator:
+            if not (isinstance(entry, tuple) and len(entry) == 2):
+                continue
+            module, cfg = entry
+            if not isinstance(module, str) or module in seen:
+                continue
+            if not isinstance(cfg, dict):
+                continue
+            result.append((module, cfg))
+            seen.add(module)
+    return result
 
 
 async def create_agent_session(
@@ -120,6 +165,7 @@ async def create_agent_session(
     session_view: ReadonlySession = SessionView(
         session_manager,
         loop_config_getter=lambda: configured_loop_config,
+        bus=bus,
     )
     from agentm.core.runtime.resource_writer import DEFAULT_PROTECTED_BRANCHES
 
@@ -187,6 +233,28 @@ async def create_agent_session(
                     "the parent session has no active provider to inherit."
                 )
             spec.provider = child_provider_factory(parent_provider)
+
+        # Give extensions on the parent bus a chance to contribute atoms
+        # to the child's load order. ``emit_sync`` because we need the
+        # contributions resolved BEFORE ``session_cls.create`` runs; the
+        # event is delivered on the parent bus only — child sessions don't
+        # observe their own extending pass.
+        #
+        # We clone the extensions list before emit so a misbehaving
+        # handler mutating ``ev.child_config.extensions`` in place cannot
+        # affect what the factory sees: only the substrate-controlled
+        # ``spec.extensions`` is honoured below.
+        returns = bus.emit_sync(
+            ChildSessionExtendingEvent.CHANNEL,
+            ChildSessionExtendingEvent(
+                parent_session_id=session_id,
+                child_config=spec,
+            ),
+        )
+        spec.extensions = apply_child_session_contributions(
+            list(spec.extensions), returns
+        )
+
         return await session_cls.create(spec)
 
     scope = build_extension_api_scope(
