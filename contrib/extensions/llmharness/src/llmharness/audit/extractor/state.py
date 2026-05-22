@@ -36,6 +36,14 @@ from typing import Any
 
 from ...schema import Edge, EdgeKind, Event, EventKind, ExternalRef
 from .._enum_schema import EDGE_KIND_VALUES, EVENT_KIND_VALUES
+from ..graph_fold import Graph, fold_graph
+from ..graph_ops import (
+    EdgeDelete,
+    EdgeUpsert,
+    GraphOp,
+    NodeDelete,
+    NodeUpsert,
+)
 from .witness import witness_data, witness_ref
 
 
@@ -96,6 +104,53 @@ class ExtractionState:
     _edges_pending: list[Edge] = field(default_factory=list)
     _external_refs_pending: dict[int, list[ExternalRef]] = field(default_factory=dict)
     _dropped_pending: list[dict[str, Any]] = field(default_factory=list)
+
+    # ------------------------------------------------------------------
+    # Event-sourcing op log (2026-05-22 refactor).
+    #
+    # ``pending_ops`` is the authoritative record of every edit this
+    # firing applied to the persistent graph; finalize hands the list
+    # to the adapter, which persists each entry as an ``AUDIT_GRAPH_OP``
+    # session entry. ``pending_graph`` caches the fold of
+    # (recent_graph + recent_edges) + pending_ops so each ``apply_*``
+    # call can validate against the *current* view (the LLM may edit
+    # nodes that were emitted by prior firings, not just this firing's
+    # work).
+    #
+    # ``recent_graph_dict`` / ``recent_edges_dict`` carry the prior-
+    # firings view; the adapter populates them in branch order from the
+    # scanned op log. Defaults are empty for first-firing tests and the
+    # legacy ``commit`` / ``commit_batch`` callers that never had a
+    # cumulative graph to start from.
+    recent_graph_dict: dict[int, Event] = field(default_factory=dict)
+    recent_edges_dict: dict[tuple[int, int, str], Edge] = field(
+        default_factory=dict
+    )
+    pending_ops: list[GraphOp] = field(default_factory=list)
+    pending_graph: Graph = field(default_factory=Graph)
+
+    def __post_init__(self) -> None:
+        # Seed ``recent_graph_dict`` from the legacy ``recent_graph``
+        # tuple when callers passed only the tuple (every existing test
+        # does this; the adapter populates the dict directly). Keeps
+        # the two views consistent so the new ``apply_*`` surface sees
+        # the same nodes the legacy ``commit`` path does.
+        if self.recent_graph and not self.recent_graph_dict:
+            self.recent_graph_dict = {ev.id: ev for ev in self.recent_graph}
+        # First fold: the only ops at this point are the recent prefix,
+        # so the result equals the recent graph view.
+        if (
+            self.recent_graph_dict
+            or self.recent_edges_dict
+            or self.pending_ops
+        ):
+            self._refold()
+        # ``next_event_id`` intentionally NOT auto-derived from
+        # ``recent_graph_dict``: legacy callers and tests rely on the
+        # default of 1 even when ``recent_graph`` is non-empty (the
+        # legacy validation rule didn't reject id collisions with
+        # recent). The adapter sets next_event_id explicitly for live
+        # sessions; tests can override per case.
 
     # ------------------------------------------------------------------
     # Public mutators
@@ -215,9 +270,17 @@ class ExtractionState:
         self._edges_pending = []
         self._external_refs_pending = {}
         self._dropped_pending = []
+        self.pending_ops = []
+        self._refold()
 
     def upsert_node(self, raw: dict[str, Any]) -> dict[str, Any] | str:
-        """Insert or replace one pending event node by id."""
+        """Insert or replace one pending event node by id.
+
+        Legacy in-firing-only contract: ids must occupy a fresh slice
+        starting at ``next_event_id`` — no cross-firing edits. Use
+        :meth:`apply_node_upsert` for the event-sourcing surface that
+        accepts edits targeting prior-firing nodes.
+        """
         if self.committed:
             return "upsert_node: firing already finalized"
         err, ev = _validate_event_shape(len(self._events_pending), raw)
@@ -234,8 +297,19 @@ class ExtractionState:
             if ev.id < min_id:
                 return f"upsert_node: node id {ev.id} must be >= {min_id}"
             self._events_pending.append(ev)
-            return self._edit_digest("upsert_node")
-        self._events_pending[idx] = ev
+        else:
+            self._events_pending[idx] = ev
+        # Mirror into the op log so commit() can emit AUDIT_GRAPH_OP
+        # entries for the firing.
+        self.pending_ops.append(
+            NodeUpsert(
+                id=ev.id,
+                kind=ev.kind.value,
+                summary=ev.summary,
+                source_turns=tuple(ev.source_turns),
+            )
+        )
+        self._refold()
         return self._edit_digest("upsert_node")
 
     def delete_node(self, node_id: int) -> dict[str, Any] | str:
@@ -250,6 +324,8 @@ class ExtractionState:
             e for e in self._edges_pending if e.src != node_id and e.dst != node_id
         ]
         self._external_refs_pending.pop(node_id, None)
+        self.pending_ops.append(NodeDelete(id=node_id))
+        self._refold()
         return self._edit_digest("delete_node")
 
     def upsert_edge(self, raw: dict[str, Any]) -> dict[str, Any] | str:
@@ -266,17 +342,317 @@ class ExtractionState:
             self._edges_pending.append(edge)
         else:
             self._edges_pending[idx] = edge
+        self.pending_ops.append(
+            EdgeUpsert(
+                src=edge.src,
+                dst=edge.dst,
+                kind=edge.kind.value,
+                reason=edge.reason,
+                cited_entities=edge.cited_entities,
+                cited_quote=edge.cited_quote,
+                src_turns=edge.src_turns,
+                dst_turns=edge.dst_turns,
+            )
+        )
+        self._refold()
         return self._edit_digest("upsert_edge")
 
     def delete_edge(self, selector: dict[str, Any]) -> dict[str, Any] | str:
-        """Delete one pending edge selected by src/dst and optional kind."""
+        """Delete one pending edge selected by src/dst and optional kind.
+
+        Op-log policy: the persisted ``EdgeDelete`` carries the full
+        ``(src, dst, kind)`` triple even when the caller omitted ``kind``,
+        so the replayable log remains unambiguous. When the selector
+        omits ``kind`` and several edges match, this matches the first
+        in pending order — preserving the legacy (pre-event-sourcing)
+        behaviour while still emitting a well-formed op.
+        """
         if self.committed:
             return "delete_edge: firing already finalized"
         idx = self._pending_edge_index(selector)
         if idx is None:
             return "delete_edge: edge not found"
+        edge = self._edges_pending[idx]
         del self._edges_pending[idx]
+        self.pending_ops.append(
+            EdgeDelete(src=edge.src, dst=edge.dst, kind=edge.kind.value)
+        )
+        self._refold()
         return self._edit_digest("delete_edge")
+
+    # ------------------------------------------------------------------
+    # Event-sourcing apply_* surface (2026-05-22 refactor).
+    #
+    # Each ``apply_*`` validates against the folded view
+    # ``recent (union pending_graph)``, appends a :class:`GraphOp` to
+    # ``pending_ops``, refolds ``pending_graph``, and returns a digest
+    # dict on success or a string error on rejection. Unlike the legacy
+    # ``upsert_node`` / ``delete_node`` / ``upsert_edge`` / ``delete_edge``
+    # methods, these accept edits that target nodes from prior firings
+    # (anything in ``recent_graph_dict``) — that is the whole point of
+    # the event-sourcing refactor: the graph maintainer can revise
+    # stale nodes and merge duplicates across firings.
+
+    def _refold(self) -> None:
+        """Recompute ``pending_graph`` from recent + pending_ops.
+
+        Recent state is materialised as a synthetic op prefix so the
+        same :func:`fold_graph` semantics apply uniformly (insertion
+        order, NodeDelete cascade, etc.). Building the prefix is O(R+E)
+        where R is recent_graph_dict size and E is recent_edges_dict
+        size; ``pending_ops`` is typically small per firing so the
+        refold cost is dominated by recent.
+        """
+        prefix: list[GraphOp] = []
+        for nid, ev in self.recent_graph_dict.items():
+            prefix.append(
+                NodeUpsert(
+                    id=nid,
+                    kind=ev.kind.value,
+                    summary=ev.summary,
+                    source_turns=tuple(ev.source_turns),
+                )
+            )
+        for (src, dst, kind), ed in self.recent_edges_dict.items():
+            prefix.append(
+                EdgeUpsert(
+                    src=src,
+                    dst=dst,
+                    kind=kind,
+                    reason=ed.reason,
+                    cited_entities=ed.cited_entities,
+                    cited_quote=ed.cited_quote,
+                    src_turns=ed.src_turns,
+                    dst_turns=ed.dst_turns,
+                )
+            )
+        self.pending_graph = fold_graph(prefix + self.pending_ops)
+
+    def _ops_digest(self, op: str) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "op": op,
+            "pending_ops": len(self.pending_ops),
+            "graph_nodes": len(self.pending_graph.nodes),
+            "graph_edges": len(self.pending_graph.edges),
+        }
+
+    def _folded_view(self) -> tuple[dict[int, Event], dict[tuple[int, int, str], Edge]]:
+        """Convenience: return ``(nodes, edges)`` of the current folded graph.
+
+        Always reflects ``recent union pending_ops`` because ``pending_graph``
+        is kept in sync via :meth:`_refold` after every accepted op.
+        """
+        return self.pending_graph.nodes, self.pending_graph.edges
+
+    def _witness_in_turn_texts(
+        self, quote: str, turn_indices: tuple[int, ...] | list[int]
+    ) -> bool:
+        """Substring-check ``quote`` against concatenated ``turn_texts``.
+
+        Uses the same case+whitespace normalisation as :mod:`witness` so
+        the gate here is identical to the one applied to in-firing refs
+        in :meth:`_validate_and_append`. Missing turn texts contribute
+        the empty string — the check then naturally fails.
+        """
+        from .witness import normalize as _normalize
+
+        concat = " ".join(self.turn_texts.get(t, "") for t in turn_indices)
+        return _normalize(quote) in _normalize(concat)
+
+    def apply_node_upsert(self, raw: dict[str, Any]) -> dict[str, Any] | str:
+        """Validate + apply one ``NodeUpsert`` against the folded view.
+
+        Accepts ids that are (a) already present in the folded graph
+        (edit), (b) the next free id ``= max(folded_ids) + 1`` (append),
+        or (c) any id previously removed in this firing via
+        ``apply_node_delete`` — re-use after delete is allowed because
+        the op log preserves the deletion order. The constraint is
+        enforced against ``(folded union deleted-in-this-firing)``.
+        """
+        if self.committed:
+            return "apply_node_upsert: firing already finalized"
+        err, ev = _validate_event_shape(0, raw)
+        if err is not None:
+            return err.replace("submit_events", "apply_node_upsert", 1)
+        assert ev is not None
+
+        nodes, _edges = self._folded_view()
+        deleted_in_firing = {
+            op.id for op in self.pending_ops if isinstance(op, NodeDelete)
+        }
+        # Largest seen id includes recent_graph_dict (which seeded
+        # pending_graph via _refold), pending NodeUpsert ids, and the
+        # explicitly-deleted ids — so the LLM cannot "skip" over a
+        # deleted slot to make the validator forget about it.
+        max_seen = max(
+            [0]
+            + list(nodes.keys())
+            + [op.id for op in self.pending_ops if isinstance(op, NodeUpsert)]
+            + list(deleted_in_firing)
+            + [self.next_event_id - 1]
+        )
+        allowed_ids = set(nodes.keys()) | deleted_in_firing | {max_seen + 1}
+        if ev.id not in allowed_ids:
+            return (
+                f"apply_node_upsert: id={ev.id} is neither an existing node "
+                f"in the folded graph (recent + pending), a node deleted in "
+                f"this firing, nor the next available id ({max_seen + 1}). "
+                "Pick one: edit an existing id, re-use a just-deleted id, or "
+                "append at the next free slot."
+            )
+
+        op = NodeUpsert(
+            id=ev.id,
+            kind=ev.kind.value,
+            summary=ev.summary,
+            source_turns=tuple(ev.source_turns),
+        )
+        self.pending_ops.append(op)
+        self._refold()
+        return self._ops_digest("node_upsert")
+
+    def apply_node_delete(self, node_id: int) -> dict[str, Any] | str:
+        """Validate + apply one ``NodeDelete`` against the folded view.
+
+        The node must exist in the current folded graph (recent +
+        pending); deleting a node not present is a programmer error
+        from the LLM's perspective. Edge cascade happens at fold time.
+        """
+        if self.committed:
+            return "apply_node_delete: firing already finalized"
+        nodes, _edges = self._folded_view()
+        if node_id not in nodes:
+            return (
+                f"apply_node_delete: unknown node_id {node_id}. "
+                f"Existing ids in the folded graph: {sorted(nodes.keys())}"
+            )
+        self.pending_ops.append(NodeDelete(id=node_id))
+        self._refold()
+        return self._ops_digest("node_delete")
+
+    def apply_edge_upsert(self, raw: dict[str, Any]) -> dict[str, Any] | str:
+        """Validate + apply one ``EdgeUpsert`` against the folded view.
+
+        Endpoint nodes are looked up in the folded view (recent +
+        pending). Kind-specific witness rules:
+
+        - ``kind='data'``: ``cited_entities`` is non-empty (validator
+          rejects empty list; the witness pipeline at edge-construction
+          time has historically been lax for this case because the
+          downstream auditor still has the entities to work with).
+        - ``kind='ref'``: ``cited_quote`` must appear (case+ws
+          normalised) as a substring of the src node's source_turns
+          text. This was missing from the original ``upsert_edge``
+          path — the LLM could fabricate quotes; the v18 batch path
+          enforced the same rule but the atomic edit path did not.
+        """
+        if self.committed:
+            return "apply_edge_upsert: firing already finalized"
+
+        src = _coerce_int(raw.get("src"))
+        dst = _coerce_int(raw.get("dst"))
+        kind_raw = raw.get("kind")
+        if src is None or dst is None:
+            return "apply_edge_upsert: 'src' and 'dst' must be integers"
+        try:
+            kind = EdgeKind(kind_raw)
+        except ValueError:
+            return f"apply_edge_upsert: kind {kind_raw!r} not in {EDGE_KIND_VALUES}"
+
+        nodes, _edges = self._folded_view()
+        if src not in nodes or dst not in nodes:
+            return (
+                f"apply_edge_upsert: src={src} and dst={dst} must both exist "
+                f"in the folded graph. Existing ids: {sorted(nodes.keys())}"
+            )
+        src_event = nodes[src]
+        dst_event = nodes[dst]
+
+        cited_entities_raw = raw.get("cited_entities", [])
+        cited_quote = str(raw.get("cited_quote", "") or "")
+        if kind is EdgeKind.DATA:
+            if not isinstance(cited_entities_raw, list) or not cited_entities_raw:
+                return (
+                    "apply_edge_upsert: kind='data' requires non-empty "
+                    "cited_entities"
+                )
+            if any(not isinstance(e, str) or not e for e in cited_entities_raw):
+                return (
+                    "apply_edge_upsert: cited_entities must be non-empty strings"
+                )
+            cited_entities = tuple(str(e) for e in cited_entities_raw)
+        else:
+            if not cited_quote:
+                return (
+                    "apply_edge_upsert: kind='ref' requires non-empty cited_quote"
+                )
+            # Witness validation for ref: the verbatim quote must appear in
+            # the src node's source_turns text. This was missing from the
+            # original atomic upsert_edge — a gap the event-sourcing
+            # refactor closes.
+            if not self._witness_in_turn_texts(
+                cited_quote, tuple(src_event.source_turns)
+            ):
+                return (
+                    "apply_edge_upsert: cited_quote not found in src node's "
+                    "source_turns text. Quote tokens must literally appear "
+                    "(after case+whitespace normalization) in the source "
+                    "event's turn text — paraphrasing is rejected."
+                )
+            cited_entities = tuple(
+                str(e) for e in (cited_entities_raw or [])
+            )
+
+        reason = raw.get("reason", "")
+        if not isinstance(reason, str):
+            return "apply_edge_upsert: reason must be a string"
+
+        op = EdgeUpsert(
+            src=src,
+            dst=dst,
+            kind=kind.value,
+            reason=reason,
+            cited_entities=cited_entities,
+            cited_quote=cited_quote,
+            src_turns=tuple(src_event.source_turns),
+            dst_turns=tuple(dst_event.source_turns),
+        )
+        self.pending_ops.append(op)
+        self._refold()
+        return self._ops_digest("edge_upsert")
+
+    def apply_edge_delete(self, selector: dict[str, Any]) -> dict[str, Any] | str:
+        """Validate + apply one ``EdgeDelete`` against the folded view.
+
+        Selector MUST carry src, dst, and kind — the op-log contract
+        requires the full key because ``(src, dst)`` alone is ambiguous
+        across ``kind=data`` / ``kind=ref``.
+        """
+        if self.committed:
+            return "apply_edge_delete: firing already finalized"
+
+        src = _coerce_int(selector.get("src"))
+        dst = _coerce_int(selector.get("dst"))
+        kind_raw = selector.get("kind")
+        if src is None or dst is None:
+            return "apply_edge_delete: 'src' and 'dst' must be integers"
+        if not isinstance(kind_raw, str) or not kind_raw:
+            return "apply_edge_delete: 'kind' is required and must be a string"
+        try:
+            EdgeKind(kind_raw)
+        except ValueError:
+            return f"apply_edge_delete: kind {kind_raw!r} not in {EDGE_KIND_VALUES}"
+
+        _nodes, edges = self._folded_view()
+        if (src, dst, kind_raw) not in edges:
+            return (
+                f"apply_edge_delete: edge ({src}, {dst}, {kind_raw}) not "
+                "found in the folded graph"
+            )
+        self.pending_ops.append(EdgeDelete(src=src, dst=dst, kind=kind_raw))
+        self._refold()
+        return self._ops_digest("edge_delete")
 
     # ------------------------------------------------------------------
     # Legacy single-shot API (kept for v17 tests and direct callers).
@@ -520,6 +896,32 @@ class ExtractionState:
         for eid, refs in accepted_external.items():
             self._external_refs_pending.setdefault(eid, []).extend(refs)
         self._dropped_pending.extend(dropped)
+        # Mirror the batch into the op log so commit() can persist
+        # AUDIT_GRAPH_OP entries even when the LLM used the legacy
+        # ``submit_events_batch`` flow.
+        for ev in working:
+            self.pending_ops.append(
+                NodeUpsert(
+                    id=ev.id,
+                    kind=ev.kind.value,
+                    summary=ev.summary,
+                    source_turns=tuple(ev.source_turns),
+                )
+            )
+        for ed in accepted_edges:
+            self.pending_ops.append(
+                EdgeUpsert(
+                    src=ed.src,
+                    dst=ed.dst,
+                    kind=ed.kind.value,
+                    reason=ed.reason,
+                    cited_entities=ed.cited_entities,
+                    cited_quote=ed.cited_quote,
+                    src_turns=ed.src_turns,
+                    dst_turns=ed.dst_turns,
+                )
+            )
+        self._refold()
         return None
 
     def _concat_turn_texts(self, turn_indices: list[int] | tuple[int, ...]) -> str:

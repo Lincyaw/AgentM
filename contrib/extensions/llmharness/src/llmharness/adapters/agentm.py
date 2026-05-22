@@ -102,6 +102,13 @@ from ..audit.extractor import (
     compose_extractor_extensions,
 )
 from ..audit.extractor.prompt import load_extractor_prompt
+from ..audit.graph_fold import fold_graph
+from ..audit.graph_ops import (
+    EdgeUpsert,
+    GraphOp,
+    NodeUpsert,
+    parse_op,
+)
 from ..audit.phase import merge_to_phases
 from ..audit.registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
 from ..audit.registry import AuditCheckRegistry, CheckContext
@@ -289,6 +296,7 @@ _REMINDER_PREAMBLE = _SHARED_REMINDER_PREAMBLE
 # Entry-type bindings (every literal must come from entry_types.py).
 _AUDIT_EVENT_ENTRY_TYPE = _et.AUDIT_EVENT
 _AUDIT_EDGE_ENTRY_TYPE = _et.AUDIT_EDGE
+_AUDIT_GRAPH_OP_ENTRY_TYPE = _et.AUDIT_GRAPH_OP
 _AUDIT_PHASE_ENTRY_TYPE = _et.AUDIT_PHASE
 _VERDICT_ENTRY_TYPE = _et.VERDICT
 _EXTRACTOR_CURSOR_ENTRY_TYPE = _et.EXTRACTOR_CURSOR
@@ -329,10 +337,25 @@ class _BranchState:
 
 
 def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _BranchState:
-    """Single-pass extraction of cursor + graph + edges + phases + verdicts."""
+    """Single-pass extraction of cursor + graph + edges + phases + verdicts.
+
+    Event-sourcing refactor (2026-05-22): the live graph is the **fold**
+    of an ordered op log. This scanner accumulates ops from three
+    sources in branch order:
+
+    * :data:`AUDIT_GRAPH_OP` entries — first-class ops produced by the
+      event-sourcing extractor; parsed via :func:`parse_op`.
+    * Legacy :data:`AUDIT_EVENT` entries — translated to
+      :class:`NodeUpsert`. Used by sessions written before the refactor;
+      mixed sessions Just Work because ops are folded in branch order.
+    * Legacy :data:`AUDIT_EDGE` entries — translated to
+      :class:`EdgeUpsert`.
+
+    Phases keep their own list — they're auditor-side metadata, not part
+    of the graph op log.
+    """
     cursor_last_turn_index = -1
-    graph: list[Event] = []
-    edges: list[Edge] = []
+    ops: list[GraphOp] = []
     phases: list[Phase] = []
     verdicts: list[dict[str, Any]] = []
 
@@ -340,16 +363,41 @@ def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _Bran
         payload = entry.payload
         if not isinstance(payload, dict):
             continue
-        if entry.type == _AUDIT_EVENT_ENTRY_TYPE:
+        if entry.type == _AUDIT_GRAPH_OP_ENTRY_TYPE:
             try:
-                graph.append(Event.from_dict(payload))
+                ops.append(parse_op(payload))
             except (KeyError, ValueError, TypeError):
                 continue
+        elif entry.type == _AUDIT_EVENT_ENTRY_TYPE:
+            try:
+                ev = Event.from_dict(payload)
+            except (KeyError, ValueError, TypeError):
+                continue
+            ops.append(
+                NodeUpsert(
+                    id=ev.id,
+                    kind=ev.kind.value,
+                    summary=ev.summary,
+                    source_turns=tuple(ev.source_turns),
+                )
+            )
         elif entry.type == _AUDIT_EDGE_ENTRY_TYPE:
             try:
-                edges.append(Edge.from_dict(payload))
+                ed = Edge.from_dict(payload)
             except (KeyError, ValueError, TypeError):
                 continue
+            ops.append(
+                EdgeUpsert(
+                    src=ed.src,
+                    dst=ed.dst,
+                    kind=ed.kind.value,
+                    reason=ed.reason,
+                    cited_entities=ed.cited_entities,
+                    cited_quote=ed.cited_quote,
+                    src_turns=ed.src_turns,
+                    dst_turns=ed.dst_turns,
+                )
+            )
         elif entry.type == _AUDIT_PHASE_ENTRY_TYPE:
             try:
                 phases.append(Phase.from_dict(payload))
@@ -361,6 +409,10 @@ def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _Bran
             raw = payload.get("last_turn_index")
             if isinstance(raw, int) and not isinstance(raw, bool):
                 cursor_last_turn_index = raw
+
+    folded = fold_graph(ops)
+    graph: list[Event] = folded.nodes_list()
+    edges: list[Edge] = folded.edges_list()
 
     last_continuation_notes: list[str] = []
     if verdicts:
@@ -842,6 +894,15 @@ async def _drain_extractor(
         if 0 <= t < len(messages):
             state.turn_texts[t] = _render_message_text(messages[t])
     state.recent_graph = recent_graph_events
+    # Event-sourcing seed: the apply_* surface needs the folded
+    # prior-firings view to validate cross-firing edits. Populate from
+    # the same branch scan that produced ``recent_graph_events``.
+    state.recent_graph_dict = {e.id: e for e in recent_graph_events}
+    state.recent_edges_dict = {
+        (ed.src, ed.dst, ed.kind.value): ed for ed in branch_state.edges
+    }
+    # Refold so the apply_* surface sees the prior graph from op zero.
+    state._refold()
 
     # Globally-unique event ids: this firing's events must continue the
     # global sequence rather than restart at 1. Pick the smallest id
@@ -979,6 +1040,29 @@ async def _drain_extractor(
         )
         return True
 
+    # Event-sourcing: persist the firing's op log as one
+    # ``AUDIT_GRAPH_OP`` entry per op so any future scan can replay the
+    # exact state changes this firing made. ``firing_id`` is the index
+    # of this firing in the session (derived from the existing op log
+    # size on the branch so we don't have to track it across firings);
+    # ``op_index`` is the position within the firing.
+    firing_id = sum(
+        1
+        for e in branch
+        if isinstance(e.payload, dict) and e.type == _AUDIT_GRAPH_OP_ENTRY_TYPE
+        and e.payload.get("op_index") == 0
+    )
+    for op_index, op in enumerate(state.pending_ops):
+        payload = op.to_dict()
+        payload["firing_id"] = firing_id
+        payload["op_index"] = op_index
+        payload["caused_by_turn_window"] = list(turn_window)
+        api.session.append_entry(_AUDIT_GRAPH_OP_ENTRY_TYPE, payload)
+
+    # Legacy emit: keep writing AUDIT_EVENT / AUDIT_EDGE entries so the
+    # auditor, aggregate, replay, and web-viewer paths continue to work
+    # without modification while the event-sourcing migration is rolled
+    # out. The scanner translates both stripes into the same fold view.
     for ev in output.events:
         api.session.append_entry(_AUDIT_EVENT_ENTRY_TYPE, ev.to_dict())
     for ed in output.edges:

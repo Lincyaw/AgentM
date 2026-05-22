@@ -17,6 +17,7 @@ the submission is accepted.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
@@ -361,8 +362,18 @@ _EDGE_SELECTOR_SCHEMA: dict[str, Any] = {
     "properties": {
         "src": {"type": "integer"},
         "dst": {"type": "integer"},
-        "kind": {"type": "string", "enum": list(EDGE_KIND_VALUES)},
+        "kind": {
+            "type": "string",
+            "enum": list(EDGE_KIND_VALUES),
+            "description": (
+                "Required: the edge kind to delete. Without this the "
+                "selector is ambiguous — the same (src, dst) pair may "
+                "carry both a 'data' and a 'ref' edge in the persistent "
+                "op log."
+            ),
+        },
     },
+    "required": ["src", "dst", "kind"],
     "additionalProperties": False,
 }
 
@@ -456,6 +467,7 @@ def build_extractor_tools(
         done = bool(args.get("done", False))
 
         prev_dropped = len(state._dropped_pending)
+        prev_ops_len = len(state.pending_ops)
         err = state.commit_batch(events_payload)
         if err is not None:
             return _err(err)
@@ -481,6 +493,10 @@ def build_extractor_tools(
                 if eid in accepted_ids:
                     state._external_refs_pending.pop(eid, None)
             state._dropped_pending = state._dropped_pending[:prev_dropped]
+            # Truncate the op log to match — the just-appended NodeUpsert
+            # / EdgeUpsert ops for this batch get rolled off.
+            state.pending_ops = state.pending_ops[:prev_ops_len]
+            state._refold()
             attempts_used += 1
             return _err(_format_witness_feedback(list(new_drops)))
 
@@ -513,38 +529,30 @@ def build_extractor_tools(
         )
 
     async def _upsert_node(args: dict[str, Any]) -> ToolResult:
-        result = state.upsert_node(args)
+        result = state.apply_node_upsert(args)
         if isinstance(result, str):
             return _err(result)
-        import json
-
         return _ok(json.dumps(result, ensure_ascii=False))
 
     async def _delete_node(args: dict[str, Any]) -> ToolResult:
         node_id = args.get("id")
         if isinstance(node_id, bool) or not isinstance(node_id, int):
             return _err("delete_node: 'id' must be an integer")
-        result = state.delete_node(node_id)
+        result = state.apply_node_delete(node_id)
         if isinstance(result, str):
             return _err(result)
-        import json
-
         return _ok(json.dumps(result, ensure_ascii=False))
 
     async def _upsert_edge(args: dict[str, Any]) -> ToolResult:
-        result = state.upsert_edge(args)
+        result = state.apply_edge_upsert(args)
         if isinstance(result, str):
             return _err(result)
-        import json
-
         return _ok(json.dumps(result, ensure_ascii=False))
 
     async def _delete_edge(args: dict[str, Any]) -> ToolResult:
-        result = state.delete_edge(args)
+        result = state.apply_edge_delete(args)
         if isinstance(result, str):
             return _err(result)
-        import json
-
         return _ok(json.dumps(result, ensure_ascii=False))
 
     async def _reset_extraction(args: dict[str, Any]) -> ToolResult:
