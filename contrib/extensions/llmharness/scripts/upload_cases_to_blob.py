@@ -136,7 +136,10 @@ def _upload_one(
                 "entity_kind": "llmharness-case",
             },
         )
-        ps = presign_resp.get("presigned") or {}
+        # Aegis wraps responses in {code, message, data, timestamp}; older
+        # builds returned the inner object directly. Accept both.
+        envelope = presign_resp.get("data") if isinstance(presign_resp.get("data"), dict) else presign_resp
+        ps = envelope.get("presigned") or {}
         put_url = ps.get("url")
         put_method = (ps.get("method") or "PUT").upper()
         extra_headers = ps.get("headers") or {}
