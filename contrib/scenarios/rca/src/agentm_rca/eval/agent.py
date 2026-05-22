@@ -70,6 +70,26 @@ _BASELINE_FORK_ALIASES = {
     "fork-audit",
 }
 
+# Registered harness variants → control scenario for strict A/B fork mode.
+# The control scenario is identical to the variant minus the auditor /
+# reminder legs, so the offline auditor side-channel can be replayed
+# against an immutable extractor-only trajectory. Override per-call via
+# ``--ak control_scenario=...`` or ``AGENTM_FORK_CONTROL_SCENARIO``.
+_HARNESS_VARIANT_TO_CONTROL: dict[str, str] = {
+    "rca:harness.sync": "rca:harness.sync.extractor5",
+    "rca:harness.sync.opinions": "rca:harness.sync.extractor5",
+    "rca:harness.sync.opinions10": "rca:harness.sync.extractor5",
+}
+
+# Module path of the llmharness cognitive-audit adapter. A scenario that
+# mounts this module is treated as a "harness scenario" by the eval
+# driver — it auto-wires the distill-binding atom so the offline
+# distillation pipeline can join replay records to ground truth.
+# Detection is by manifest composition (see :func:`_scenario_mounts_harness`),
+# not by scenario name — string-sniffing the scenario id silently breaks
+# when new variants are added.
+_HARNESS_ADAPTER_MODULE = "llmharness.adapters.agentm"
+
 
 def _provider_name_from_base_url(base_url: str) -> str:
     """Derive a stable provider registry slug from a base URL.
@@ -467,8 +487,10 @@ class AgentMAgent(BaseAgent):
         # distinct id and an env-var fallback would race under ``-n>1``.
         # Mount conditionally — binding is dead weight without the harness
         # adapter that produces the replay sidecar in the first place.
+        # Detection: introspect the resolved scenario manifest, not the
+        # scenario name string. See :func:`_scenario_mounts_harness`.
         extra_extensions: list[tuple[str, dict[str, Any]]] = []
-        if "harness" in scenario:
+        if _scenario_mounts_harness(scenario):
             sample_id = os.path.basename(data_dir.rstrip("/")) or "unknown"
             extra_extensions.append(
                 (
@@ -574,13 +596,26 @@ class AgentMAgent(BaseAgent):
 
 def _default_control_scenario(scenario: str) -> str:
     """Pick a no-auditor control scenario for strict A/B fork mode."""
-    if scenario in {
-        "rca:harness.sync",
-        "rca:harness.sync.opinions",
-        "rca:harness.sync.opinions10",
-    }:
-        return "rca:harness.sync.extractor5"
-    return scenario
+    return _HARNESS_VARIANT_TO_CONTROL.get(scenario, scenario)
+
+
+def _scenario_mounts_harness(scenario: str) -> bool:
+    """True iff ``scenario`` mounts the llmharness cognitive-audit adapter.
+
+    Detected by loading the resolved scenario manifest and looking for
+    ``llmharness.adapters.agentm`` in its extensions list. Replaces the
+    historical ``"harness" in scenario_name`` string-sniff so new harness
+    variants (or renames) don't silently miss the distill-binding wire-up.
+    """
+    try:
+        from agentm.extensions.loader import ScenarioLoadError, load_scenario
+    except ImportError:
+        return False
+    try:
+        extensions = load_scenario(scenario)
+    except (ScenarioLoadError, FileNotFoundError, OSError):
+        return False
+    return any(module == _HARNESS_ADAPTER_MODULE for module, _ in extensions)
 
 
 def _coerce_schema_list(cls: Any, items: Any) -> list[Any]:
