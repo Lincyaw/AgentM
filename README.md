@@ -7,183 +7,120 @@ See `.claude/designs/pluggable-architecture.md` for the boundary contract.
 
 ---
 
-## Architecture at a glance
+## Architecture
 
-Three layers, dependency arrows point downward only.
+Three layers, dependency arrows downward only.
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  agentm.cli  /  embedded SDK  /  (future: HTTP, RPC)                     │  presenters
-│  thin: load scenario → prompt → print                                    │
-├──────────────────────────────────────────────────────────────────────────┤
-│  agentm.extensions.builtin / contrib/extensions                          │  atoms
-│    one-file atoms — including default policies (operations_local,        │
-│    llm_<provider>, resource_writer_git, skills, prompt assembly, …)      │
-├──────────────────────────────────────────────────────────────────────────┤
-│  agentm.core   (constitution — unreplaceable substrate)                  │
-│    abi/      AgentLoop · Tool · Message · StreamFn · events ·            │  pure SDK
-│              ExtensionAPI / ExtensionManifest · AgentSessionConfig ·     │
-│              ResourceWriter / WriteResult · Catalog Protocols            │
-│              → atoms speak in these types                                │
-│    lib/      edit_diff · frontmatter · path_utils · text_truncate ·      │
-│              stream accumulator                                          │
-│              → atoms import as stdlib                                    │
-│    runtime/  AgentSession · EventBus impl · SessionManager · catalog/ ·  │
-│              extension loader · GitBackedResourceWriter                  │
-│              → atoms reach via ExtensionAPI / `api.*` hooks only         │
-│    _internal/  reload-time helpers; atoms never touch                    │
-└──────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    P["Presenters<br/>agentm.cli &middot; embedded SDK &middot; (future RPC)"]
+    A["Atoms (policy)<br/>src/agentm/extensions/builtin/ &middot; contrib/extensions/"]
+    subgraph CORE["agentm.core (constitution &mdash; write-protected)"]
+        ABI["abi/<br/>Protocols + dataclasses<br/>(StreamFn, Tool, Operations, ExtensionAPI, ...)"]
+        LIB["lib/<br/>pure helpers<br/>(edit_diff, frontmatter, path_utils, ...)"]
+        RT["runtime/<br/>AgentSession &middot; EventBus &middot; SessionManager &middot; loader<br/>(stateful; atoms reach via ExtensionAPI only)"]
+        INT["_internal/<br/>reload-time helpers (atoms never touch)"]
+    end
+    P --> A
+    A --> ABI
+    A --> LIB
+    A -. via api.* .-> RT
+    RT --> ABI
+    RT --> LIB
+    RT --> INT
 ```
 
-`agentm.core` must be importable in a Jupyter notebook with no CLI and no
-filesystem touched. The ABI knows nothing about sessions, files, or scenarios;
-the runtime substrate knows nothing about concrete scenarios or UI.
-
-The split inside `core/` is a **visibility** boundary, not a modifiability
-boundary — none of `core/` is agent-modifiable. `abi/` is the typed contract
-atoms speak in; `lib/` is a stdlib-style shelf of pure functions; `runtime/`
-holds the stateful substrate (sessions, catalog, writers) that atoms reach
-exclusively through ExtensionAPI services (`api.get_operations()`,
-`api.skills`, `api.prompt_templates`, `api.catalog`, `api.compaction`). The
-validator rejects any atom that imports `core.runtime.*` or `core._internal.*`
-directly.
+`agentm.core` imports with zero side effects: `abi/` and `lib/` are pure;
+`runtime/` *contains* stateful classes but performs no I/O at module import.
+The split inside `core/` is a **visibility** boundary; none of `core/` is
+agent-modifiable. The validator rejects any atom that imports `core.runtime.*`
+or `core._internal.*` directly.
 
 ---
 
 ## Five pluggability axes
 
-Every axis is a `typing.Protocol` in `agentm.core`. The harness ships a default;
-extensions or users can substitute without forking. The Tool environment axis is
-constitution-only in v0: the operations bundle is selected by the harness at
-session construction and exposed to atoms via `api.get_operations()`, but atoms
-do not register a replacement operations bundle at runtime.
+Each axis is a `typing.Protocol` in `core.abi`. The default scenario manifest
+enumerates the working set; atoms register replacements via the corresponding
+`api.register_*` hook.
 
-| # | Axis                | Protocol / Port          | Default impl                       |
-|---|---------------------|--------------------------|------------------------------------|
-| 1 | LLM stream          | `StreamFn`               | `agentm.extensions.builtin.llm_anthropic` |
-| 2 | Tool environment    | `Tool` + `*Operations`   | `LocalFileOperations`, `LocalBashOperations` (atoms obtain via `api.get_operations()`) |
-| 3 | Session state       | `SessionManager`         | `InMemorySessionManager`           |
-| 4 | Project context     | `ResourceLoader`         | `DefaultResourceLoader`            |
-| 5 | Policy / cross-cut  | `EventBus` + `ExtensionAPI` | bus + per-extension install hook |
+| # | Axis                | Protocol / Port             | Default impl                                          |
+|---|---------------------|-----------------------------|-------------------------------------------------------|
+| 1 | LLM stream          | `StreamFn`                  | `extensions.builtin.llm_anthropic` (also `llm_openai`)|
+| 2 | Tool environment    | `Tool` + `*Operations`      | `LocalFileOperations`, `LocalBashOperations` (via `api.get_operations()`) |
+| 3 | Session state       | `SessionManager`            | `InMemorySessionManager`                              |
+| 4 | Project context     | `ResourceLoader`            | `DefaultResourceLoader`                               |
+| 5 | Policy / cross-cut  | `EventBus` + `ExtensionAPI` | bus + per-extension install hook                      |
+
+Every signal &mdash; install, LLM request, tool call, mutation, turn summary
+&mdash; flows through the same `EventBus`. The `observability` builtin
+subscribes and writes OTel-flavored JSONL to
+`<cwd>/.agentm/observability/<trace_id>.jsonl`.
 
 ---
 
-## Extension-as-Scenario
+## Atom = one file
 
-A *scenario* is a **composition of atomic extensions**, expressed as data (YAML),
-not code. There is no privileged path between built-in and third-party scenarios.
-
-```
-                         ┌──────────────────────────────┐
-   scenarios/*.yaml ───▶ │ extensions.loader            │ ──▶ list[(module, config)]
-   (recipe of atoms)     │ load_scenario(name)          │
-                         └──────────────────────────────┘
-                                      │
-                                      ▼
-                         ┌──────────────────────────────┐
-                         │ AgentSession.create()        │
-                         │ for each (module, cfg):      │
-                         │   load_extension → install() │
-                         │ register handlers on bus     │
-                         └──────────────────────────────┘
-```
-
-Each atom is **one Python file** under `extensions/builtin/<name>.py` exporting:
+Each atom is one Python file exporting a manifest and an install hook:
 
 ```python
-MANIFEST: ExtensionManifest
-def install(api: ExtensionAPI, config: dict) -> None: ...
+from agentm.core.abi.extension import ExtensionAPI, ExtensionManifest
+
+MANIFEST = ExtensionManifest(name="my_atom", version="0.1.0", ...)
+
+def install(api: ExtensionAPI, config: dict) -> None:
+    api.bus.subscribe(SomeEvent, handler)
 ```
 
-A mechanical validator (`extensions.validate`) enforces the §11 single-file
-contract: no atom-to-atom imports, no `harness.session` import, no
-`core._internal` import. The allowlist is `core.abi` + `core.lib` +
-`harness.{extension,events,session_manager,resource_loader}` + `extensions`
-(public surface). Anything stateful is reached through ExtensionAPI services.
-This keeps the surface tiny enough that future agent self-edits remain
-verifiable.
-
-### Built-in atoms (`src/agentm/extensions/builtin/`)
-
-| Group        | Atoms |
-|--------------|-------|
-| Tools        | `tool_read`, `tool_write`, `tool_edit`, `tool_bash`, `tool_grep`, `tool_find`, `tool_ls`, `tool_hypothesis_store`, `tool_submit_plan`, `tool_trajectory_loader` |
-| Prompt/skill | `system_prompt`, `prompt_templates`, `skill_loader` |
-| Compaction   | `micro_compact`, `llm_compaction`, `tool_result_budget` |
-| Policy       | `permission`, `tool_filter`, `cost_budget`, `dedup`, `turn_reminder` |
-| Observability| `observability`, `trajectory` |
-| Misc         | `sub_agent`, `file_mutation_queue` |
-
-### Contrib atoms (`contrib/extensions/`)
-
-Flat-file `*.py` atoms at the top level (e.g. `turn_reminder`) are
-auto-discovered alongside builtins under the synthetic module prefix
-`_agentm_contrib__<name>`. Nested packages (e.g. `tool_catalog/`, `cc/`)
-are opt-in and are mounted explicitly by scenario manifests or
-`agentm --extension <dotted.module.path>`.
-
-- `contrib.extensions.cc` (package under `contrib/extensions/cc/`)
-  — Claude Code compatibility atoms (`agents`, `commands`, `plugins`)
-  (read `~/.claude/{agents,commands,plugins}` and surface them through
-  the generic `resources_discover` event).
-
-### Built-in scenarios (`src/agentm/extensions/scenarios/`)
-
-- `general_purpose.yaml` — read/bash/edit/write coding agent
-- `plan_mode.yaml` — read-only planning before execution
-- `trajectory_analysis.yaml` — analyze completed trajectories
+The `extensions.validate` checker enforces the §11 contract: no atom-to-atom
+imports, no `core.runtime.*` import, no `core._internal` import. Allowlist is
+`core.abi` + `core.lib` + the public `extensions` surface. Stateful subsystems
+are reached through ExtensionAPI services (`api.get_operations()`,
+`api.skills`, `api.prompt_templates`, `api.catalog`, `api.compaction`).
 
 ---
 
-## Session lifecycle
+## Scenario = YAML recipe
 
-```
-AgentSession.create(config)
-    │
-    ├─ build EventBus, SessionManager, ResourceLoader, ExtensionAPI
-    ├─ load_extension(...)  for each (module, cfg)  → emit ExtensionInstallEvent
-    ├─ load provider extension last (last registration wins)
-    └─ append initial_messages
+A scenario is a composition of atoms expressed as data, not code. There is no
+privileged path between built-in and third-party scenarios.
 
-session.prompt(text)
-    │
-    ├─ append UserMessage
-    ├─ assemble system prompt (context files + skills index)
-    ├─ emit before_agent_start  ── handlers may rewrite system prompt
-    ├─ AgentLoop.run            ── kernel: stream LLM → dispatch tools → repeat
-    │     emits LlmRequestStart/End, ToolCall events on the bus
-    ├─ append assistant + tool_result entries
-    └─ return updated message list
-
-session.shutdown()
-    └─ emit SessionShutdownEvent
+```mermaid
+flowchart LR
+    Y["contrib/scenarios/&lt;name&gt;/manifest.yaml"] --> L["extensions.loader<br/>load_scenario(name)"]
+    L --> M["list[(module, config)]"]
+    M --> S["AgentSession.create()"]
+    S --> I["for each atom:<br/>load_extension &rarr; install(api, cfg)"]
+    I --> B["handlers registered on EventBus"]
 ```
 
-Every signal — install, LLM request, tool call, mutation, turn summary — flows
-through the **same** `EventBus`. The `observability` builtin is a pure subscriber
-that writes OTel-flavored JSONL to `<cwd>/.agentm/observability/<trace_id>.jsonl`.
+Loader resolves `<cwd>/contrib/scenarios/<name>/manifest.yaml`. Builtin atoms
+and flat-file contrib atoms (`contrib/extensions/<name>.py`) auto-discover;
+nested contrib packages mount explicitly via the manifest or
+`--extension <dotted.path>`. Shipped scenarios: `general_purpose` (default),
+`agent_env`, `format_fix`, `mcp_demo`, `rca`, `rca_hfsm`.
 
 ---
 
 ## Quick start
 
 ```bash
-uv sync                               # install
-export ANTHROPIC_API_KEY="..."        # or use api_registry
-uv run agentm "list files in src/"    # full mode — loads general_purpose scenario
+uv sync
+export ANTHROPIC_API_KEY="..."
+uv run agentm "list files in src/"                  # default = general_purpose
+uv run agentm --scenario rca "diagnose this trace"  # opt-in scenario
 ```
 
-Programmatic use (full mode):
+Programmatic use:
 
 ```python
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
 from agentm.extensions.loader import load_scenario
 
-extensions = load_scenario("general_purpose")
 session = await AgentSession.create(AgentSessionConfig(
     cwd=".",
-    extensions=extensions,
+    extensions=load_scenario("general_purpose"),
     provider=("agentm.extensions.builtin.llm_anthropic", {"model": "claude-sonnet-4-6"}),
 ))
 final_messages = await session.prompt("explain core/abi/loop.py")
@@ -192,24 +129,29 @@ await session.shutdown()
 
 ### Recovery floor
 
-When the autonomy layer is broken (a corrupted atom, a regressing
-scenario, a harness bug), use `--no-extensions` to drive the kernel
-without any atoms loaded — the agent still launches with provider +
-loop and can be steered toward diagnosis:
+When the autonomy layer is broken (corrupted atom, regressing scenario,
+substrate bug), `--no-extensions` drives the kernel with no atoms loaded:
 
 ```bash
 uv run agentm --no-extensions "explain core/abi/loop.py"
 ```
 
-The dependency cone in this mode is `core/abi` + `core/lib` + `llm` +
-harness. No tool environment, no skills, no observability — exactly the
-"core alone yields a usable agent" floor described in
+Dependency cone is `core/abi` + `core/lib` + `core/runtime` + provider &mdash;
+the irreducible base described in
 `.claude/designs/self-modifiable-architecture.md`.
 
-Every full-mode feature (skills, prompt templates, compaction, observability,
-permission gates, ...) is opt-in through a scenario recipe or extension config —
-nothing is inlined into core. Minimal mode is the irreducible base; everything
-else is a layer you choose.
+---
+
+## Showcase
+
+- **`contrib/scenarios/rca/`** &mdash; root-cause-analysis scenario over
+  observability traces, with optional `llmharness` audit overlay. Multiple
+  manifest variants (`manifest.harness.*.yaml`) compose the same atoms with
+  different audit topologies. See its [README](contrib/scenarios/rca/README.md).
+- **`contrib/extensions/llmharness/`** &mdash; cognitive-audit pipeline that
+  subscribes to `DecideTurnActionEvent` on the EventBus and event-sources a
+  cross-firing audit graph for offline evaluation. See its
+  [README](contrib/extensions/llmharness/README.md).
 
 ---
 
@@ -218,14 +160,12 @@ else is a layer you choose.
 ```bash
 uv sync
 uv run agentm "..."
-uv run pytest
+uv run pytest                  # excludes nested workspaces, ui
 uv run ruff check src/
 uv run mypy src/
 ```
 
-- Python 3.12+, build backend `uv_build`.
-- Source layout: `src/agentm/`.
-- Entry point: `agentm:main`.
+Python 3.12+, build backend `uv_build`. Entry point `agentm:main`.
 
 ---
 
@@ -233,30 +173,20 @@ uv run mypy src/
 
 ```
 src/agentm/
-├── cli.py                    # thin presenter
-├── core/                     # constitution — write-protected
-│   ├── abi/                  # ABI surface (atom-facing Protocols + data types)
-│   │   ├── loop.py · tool.py · messages.py · stream.py · events.py
-│   │   ├── operations.py     # FileOperations / BashOperations Protocols + Operations bundle
-│   │   ├── extension.py · session_config.py · resource.py · catalog.py
-│   │   ├── skill.py · prompt_template.py · compaction.py
-│   ├── lib/                  # pure-function utility shelf (atom imports as stdlib)
-│   │   └── edit_diff.py · frontmatter.py · path_utils.py · text_truncate.py · stream.py
-│   ├── runtime/              # stateful substrate — atoms reach via ExtensionAPI only
-│   │   ├── session.py · session_manager.py · session_factory.py · session_bootstrap.py
-│   │   ├── extension.py · atom_reloader.py · resource_writer.py · catalog/
-│   └── _internal/            # reload-time helpers (atoms never touch)
-├── ai/                       # provider/api registry, OAuth, env keys
-└── extensions/
-    ├── loader.py · discover.py · validate.py
-    ├── builtin/<atom>.py     # one file per atom (§11 contract; includes llm_<provider>)
-    └── scenarios/<name>.yaml # composition recipes
+├── cli.py · modes/                  # thin presenters
+├── core/{abi,lib,runtime,_internal} # constitution — write-protected
+├── ai/                              # provider / api registry, OAuth, env keys
+└── extensions/{loader,discover,validate}.py
+    └── builtin/<atom>.py            # one file per atom (§11 contract)
 
-.claude/
-├── designs/                  # active design docs (continuously maintained)
-├── plans/   · tasks/         # append-only history
-└── index.yaml                # concept relationship graph
+contrib/
+├── extensions/                      # third-party atoms
+│   ├── cc/ · changespec_validators/ · live_inspector/ · llmharness/
+│   ├── mcp_bridge/ · rcabench_contract/ · tool_catalog/
+│   └── operations_agent_env.py · turn_reminder.py     # flat-file atoms
+└── scenarios/<name>/manifest.yaml   # composition recipes (loader entry point)
+
+.claude/{designs,plans,tasks}/  ·  .claude/index.yaml
 ```
 
-See `CLAUDE.md` for design-doc workflow and the architect / planner / tdd /
-implementer / reviewer agent pipeline.
+See `CLAUDE.md` for design-doc workflow and project conventions.
