@@ -232,6 +232,38 @@ class ExtractionState:
         """
         if self.committed:
             return "finalize: firing already finalized"
+
+        # v19 path. The new tool surface (apply_node_upsert /
+        # apply_edge_upsert) only writes to the op log; ``_events_pending``
+        # / ``_edges_pending`` stay empty. Read this firing's emitted
+        # nodes + edges back out of the folded view, scoped to ops the
+        # firing actually appended (so prior-firing nodes that arrived
+        # via ``recent_graph_dict`` don't get re-emitted as fresh audit
+        # entries).
+        if not self._events_pending and self.pending_ops:
+            firing_node_ids = {
+                op.id for op in self.pending_ops if isinstance(op, NodeUpsert)
+            }
+            firing_node_ids -= {
+                op.id for op in self.pending_ops if isinstance(op, NodeDelete)
+            }
+            nodes, edges_view = self._folded_view()
+            firing_events = [
+                nodes[nid] for nid in sorted(firing_node_ids) if nid in nodes
+            ]
+            firing_edges = [
+                ed for (src, dst, _kind), ed in edges_view.items()
+                if src in firing_node_ids or dst in firing_node_ids
+            ]
+            degree_err = _validate_event_degrees(firing_events, firing_edges)
+            if degree_err is not None:
+                return degree_err
+            self.events = tuple(firing_events)
+            self.edges = tuple(firing_edges)
+            self.dropped_edges = ()
+            self.committed = True
+            return None
+
         if not self._events_pending:
             self.events = ()
             self.edges = ()

@@ -6,10 +6,11 @@ strict-A/B test suite, smoke tests) OR an out-of-tree trainer
 (rca-autorl) imports it through the top-level package. Everything else
 stays reachable via its submodule path and gets promoted on demand.
 
-Phase contract surface (auditor side) — exposed for external trainers
-that RL-train the auditor child agent. The extractor-side contract face
-is coming in a follow-up pass; for now its tools remain reachable only
-via :mod:`llmharness.audit.extractor.tools`.
+Phase contract surface — exposed for external trainers that RL-train
+either child agent. Both extractor and auditor phase faces are now
+mounted here. The extractor's tool surface lives at
+:mod:`llmharness.audit.extractor.atom`; the auditor's lives at
+:mod:`llmharness.audit.auditor.atom`.
 
 Currently exported:
 
@@ -45,6 +46,11 @@ from .audit.auditor import (
     AUDITOR_TOOLS,
     load_auditor_prompt,
 )
+from .audit.extractor import (
+    EXTRACTOR_TERMINATION_REASON,
+    EXTRACTOR_TOOL_NAMES,
+    load_extractor_prompt,
+)
 from .replay.record import ReplayRecord, iter_records, write_record
 from .replay.strict_ab import (
     OfflineAuditRun,
@@ -68,6 +74,8 @@ __all__ = [
     "AUDITOR_TERMINATION_REASON",
     "AUDITOR_TOOLS",
     "AUDITOR_TOOL_NAMES",
+    "EXTRACTOR_TERMINATION_REASON",
+    "EXTRACTOR_TOOL_NAMES",
     "Edge",
     "EdgeKind",
     "Event",
@@ -81,6 +89,7 @@ __all__ = [
     "Verdict",
     "iter_records",
     "load_auditor_prompt",
+    "load_extractor_prompt",
     "run_offline_auditor_over_control",
     "strict_ab_replay_path",
     "write_record",
