@@ -129,6 +129,34 @@ def test_replay_record_back_compat_with_old_sidecar(tmp_path: Path) -> None:
     assert rec.raw_assistant_messages == []
 
 
+def test_to_dict_from_dict_round_trip() -> None:
+    """``to_dict`` and ``from_dict`` are an exact pair.
+
+    The rl-prompts CLI emits a stripped ``to_dict`` view and the trainer
+    re-hydrates it via ``from_dict``; if these two ever drift, the public
+    contract with rca-autorl breaks silently.
+    """
+    original = ReplayRecord(
+        phase="extractor",
+        turn_index=3,
+        root_session_id="sess-roundtrip",
+        ts_ns=987,
+        compose_kwargs={"base_prompt": "x", "summary_threshold": 30},
+        payload={"new_turns": [{"id": "t1"}], "next_event_id": 11},
+        provider=["mod.fake", {"k": "v"}],
+        output={"events": []},
+        status="ok",
+        error=None,
+        latency_ms=15,
+        extras={"turn_texts": {"1": "hi"}},
+        raw_assistant_messages=[
+            {"type": "tool_call", "id": "c-1", "name": "finalize_extraction", "arguments": {}}
+        ],
+    )
+    back = ReplayRecord.from_dict(original.to_dict())
+    assert back == original
+
+
 def test_malformed_lines_ignored(tmp_path: Path) -> None:
     path = tmp_path / "replay.jsonl"
     write_record(path, _make_record("extractor", turn=0))

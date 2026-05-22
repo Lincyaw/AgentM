@@ -1,101 +1,93 @@
-"""Emit the online-RL prompt pool from replay records.
+"""Emit the online-RL training pool from replay records.
 
-One JSONL row per phase firing — prompt-only, no targets. The downstream
-trainer (rca-autorl GRPO/PPO) samples from this pool, runs the policy
-to produce a rollout, scores it with :mod:`llmharness.train_signals`,
-and never sees a teacher trajectory. Locking the row schema here is what
-lets the trainer be implemented independently.
+One JSONL row per phase firing — stripped :class:`ReplayRecord` shape, no
+teacher targets. The downstream trainer (rca-autorl GRPO/PPO) samples a
+row, re-hydrates it via :meth:`ReplayRecord.from_dict`, feeds it straight
+into :func:`replay_extractor_record` / :func:`replay_auditor_record` to
+produce a fresh rollout, and scores the rollout with
+:mod:`llmharness.train_signals`. The trainer never sees the teacher's
+output trajectory.
 
-Row schema::
+Stripped fields (would leak teacher behavior into the policy's input)::
 
-    {
-      "phase": "extractor" | "auditor",
-      "sample_id": "<case>:<firing>:<phase>",
-      "source_case_id": "<replay-derived; root_session_id or meta sample_id>",
-      "firing_index": <turn_index>,
-      "input": {"system": "...", "user": "..."},
-      "meta": {"root_session_id": ..., "turn_index": ..., "ts_ns": ...}
-    }
+    output                    - the teacher's final submit_* args
+    status                    - teacher rollout terminal status
+    error                     - teacher rollout error string
+    latency_ms                - teacher wall-clock
+    raw_assistant_messages    - teacher's content blocks
+
+Every other ReplayRecord field is preserved: ``phase``, ``turn_index``,
+``root_session_id``, ``ts_ns``, ``compose_kwargs``, ``payload``,
+``provider``, ``extras``. The result is ready for
+``ReplayRecord.from_dict(row)`` and is the **public contract** consumed by
+rca-autorl from this commit forward.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
 from typing import Any, Literal
 
-from .export import child_prompt_for_record
+from ..replay.record import ReplayRecord
 
 Phase = Literal["extractor", "auditor"]
 
-__all__ = ["RlPromptRow", "rl_prompts_from_replay"]
+__all__ = ["STRIPPED_FIELDS", "rl_rows_from_replay"]
+
+#: Field names removed from each ReplayRecord before emission. Locked as
+#: part of the public contract — changing this set is a breaking schema
+#: change for downstream consumers.
+STRIPPED_FIELDS: frozenset[str] = frozenset(
+    {
+        "output",
+        "status",
+        "error",
+        "latency_ms",
+        "raw_assistant_messages",
+    }
+)
 
 
-@dataclass(frozen=True)
-class RlPromptRow:
-    """One prompt-only row for the RL sampling pool."""
-
-    phase: Phase
-    sample_id: str
-    source_case_id: str
-    firing_index: int
-    input_system: str
-    input_user: str
-    meta: dict[str, Any]
-
-    def to_jsonl(self) -> str:
-        return json.dumps(
-            {
-                "phase": self.phase,
-                "sample_id": self.sample_id,
-                "source_case_id": self.source_case_id,
-                "firing_index": self.firing_index,
-                "input": {"system": self.input_system, "user": self.input_user},
-                "meta": self.meta,
-            },
-            ensure_ascii=False,
-            default=str,
-        )
+def _strip(record_dict: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in record_dict.items() if k not in STRIPPED_FIELDS}
 
 
-def rl_prompts_from_replay(
+def rl_rows_from_replay(
     replay_records: Iterable[dict[str, Any]],
     *,
-    source_case_id: str,
     phases: tuple[Phase, ...] = ("extractor", "auditor"),
-) -> Iterator[RlPromptRow]:
-    """Yield one :class:`RlPromptRow` per matching replay record.
+) -> Iterator[dict[str, Any]]:
+    """Yield stripped-ReplayRecord dicts for every matching record.
 
-    Skips records whose phase isn't in ``phases`` and records whose
-    prompt can't be reconstructed (unknown phase / no payload). No
-    target / output fields are emitted — this is the prompt pool only.
+    Skips records whose phase isn't in ``phases``. The yielded dict is
+    JSON-serializable and round-trips via ``ReplayRecord.from_dict``.
     """
     wanted = set(phases)
     for rec in replay_records:
         phase = rec.get("phase")
         if phase not in wanted:
             continue
-        prompt = child_prompt_for_record(rec)
-        if prompt is None:
-            continue
-        input_system, input_user = prompt
-        firing_index = int(rec.get("turn_index") or 0)
-        root_session_id = str(rec.get("root_session_id") or "")
-        # phase is narrowed by ``wanted ⊆ {"extractor", "auditor"}`` —
-        # cast for the typed dataclass.
-        assert phase in ("extractor", "auditor")
-        sample_id = f"{source_case_id}:firing-{firing_index}:{phase}"
-        yield RlPromptRow(
-            phase=phase,
-            sample_id=sample_id,
-            source_case_id=source_case_id,
-            firing_index=firing_index,
-            input_system=input_system,
-            input_user=input_user,
-            meta={
-                "root_session_id": root_session_id,
-                "turn_index": firing_index,
-                "ts_ns": rec.get("ts_ns"),
-            },
-        )
+        yield _strip(rec)
+
+
+def serialize_row(row: dict[str, Any]) -> str:
+    """JSON-encode one rl row (the on-disk JSONL representation)."""
+    return json.dumps(row, ensure_ascii=False, default=str)
+
+
+def hydrate_row(row: dict[str, Any]) -> ReplayRecord:
+    """Re-hydrate an rl-prompts row into a ``ReplayRecord``.
+
+    Fills stripped fields with neutral defaults (``status='ok'``, empty
+    output/error/messages) so the result is a structurally-valid record
+    that can be passed straight into ``replay_extractor_record`` /
+    ``replay_auditor_record`` for a fresh policy rollout.
+    """
+    filled = dict(row)
+    filled.setdefault("output", None)
+    filled.setdefault("status", "ok")
+    filled.setdefault("error", None)
+    filled.setdefault("latency_ms", 0)
+    filled.setdefault("raw_assistant_messages", [])
+    return ReplayRecord.from_dict(filled)

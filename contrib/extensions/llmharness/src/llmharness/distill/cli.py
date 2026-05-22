@@ -50,7 +50,7 @@ from .export import (
 from .gt import GroundTruth, load_dataset
 from .oracle import label_auditor_record
 from .rl_prompts import Phase as RlPhase
-from .rl_prompts import RlPromptRow, rl_prompts_from_replay
+from .rl_prompts import rl_rows_from_replay, serialize_row
 
 _logger = logging.getLogger(__name__)
 
@@ -270,12 +270,12 @@ def _cmd_export(args: argparse.Namespace) -> int:
 # ----- rl-prompts -----------------------------------------------------------
 
 
-def _write_rl_prompts(path: Path, rows: Iterable[RlPromptRow]) -> int:
+def _write_rl_rows(path: Path, rows: Iterable[dict[str, Any]]) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     n = 0
     with path.open("w", encoding="utf-8") as fh:
         for row in rows:
-            fh.write(row.to_jsonl())
+            fh.write(serialize_row(row))
             fh.write("\n")
             n += 1
     return n
@@ -302,20 +302,14 @@ def _cmd_rl_prompts(args: argparse.Namespace) -> int:
         print(f"no replay logs in {replay_dir}", file=sys.stderr)
         return 2
 
-    def _iter() -> Iterable[RlPromptRow]:
+    def _iter() -> Iterable[dict[str, Any]]:
         for replay_file in sessions:
-            # source_case_id prefers the meta sidecar's sample_id (rcabench
-            # case id); falls back to root_session_id (replay file stem)
-            # when no sidecar is present.
-            meta = read_sample_meta(replay_file.with_suffix(".meta.json"))
-            source_case_id = meta.sample_id if meta is not None else replay_file.stem
-            yield from rl_prompts_from_replay(
+            yield from rl_rows_from_replay(
                 _replay_record_dicts(replay_file),
-                source_case_id=source_case_id,
                 phases=phases,
             )
 
-    n = _write_rl_prompts(out_path, _iter())
+    n = _write_rl_rows(out_path, _iter())
     print(f"rl-prompts={n} out={out_path}")
     return 0
 

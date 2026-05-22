@@ -55,6 +55,31 @@ class ReplayRecord:
     ``output``.
     """
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict that round-trips via :meth:`from_dict`.
+
+        All fields are emitted unconditionally (including ``extras`` and
+        ``raw_assistant_messages``, even when empty) so callers stripping a
+        subset for downstream consumers see a stable shape regardless of
+        live-capture content. ``to_jsonl`` is the on-disk format and still
+        omits empty optional fields to keep sidecars compact.
+        """
+        return {
+            "phase": self.phase,
+            "turn_index": self.turn_index,
+            "root_session_id": self.root_session_id,
+            "ts_ns": self.ts_ns,
+            "compose_kwargs": self.compose_kwargs,
+            "payload": self.payload,
+            "provider": self.provider,
+            "output": self.output,
+            "status": self.status,
+            "error": self.error,
+            "latency_ms": self.latency_ms,
+            "extras": self.extras,
+            "raw_assistant_messages": self.raw_assistant_messages,
+        }
+
     def to_jsonl(self) -> str:
         d: dict[str, Any] = {
             "phase": self.phase,
