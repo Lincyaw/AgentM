@@ -87,8 +87,8 @@ def test_replay_record_thinking_roundtrip(tmp_path: Path) -> None:
         {
             "type": "tool_call",
             "id": "call-1",
-            "name": "submit_events",
-            "arguments": {"events": [{"id": 1, "kind": "task"}]},
+            "name": "finalize_extraction",
+            "arguments": {},
         },
     ]
     rec = ReplayRecord(

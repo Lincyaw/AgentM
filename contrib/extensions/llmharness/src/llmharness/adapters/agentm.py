@@ -96,7 +96,7 @@ from ..audit.auditor import (
 from ..audit.auditor.profiles import resolve_tools as _resolve_auditor_tools
 from ..audit.auditor.prompt import load_auditor_prompt
 from ..audit.extractor import (
-    SUBMIT_EVENTS_TOOL_NAME,
+    FINALIZE_EXTRACTION_TOOL_NAME,
     ExtractionState,
     RawExtractorOutput,
     compose_extractor_extensions,
@@ -1028,7 +1028,7 @@ async def _drain_extractor(
             api,
             _EXTRACTOR_NO_CALL_ENTRY,
             {
-                "reason": (f"child returned without calling {SUBMIT_EVENTS_TOOL_NAME}"),
+                "reason": (f"child returned without calling {FINALIZE_EXTRACTION_TOOL_NAME}"),
                 "turn_window": turn_window,
             },
         )
@@ -1237,23 +1237,26 @@ async def _spawn_extractor_child(
             "(1) Call submit_plan ONCE with the block_plan partitioning "
             "the new-turn window. The plan is CoT scaffolding; structural "
             "enforcement happens on the events you emit, not on the plan.\n"
-            "(2) Call submit_events_batch one or more times to append "
-            "events. Each batch is validated standalone — a hard reject "
-            "only invalidates THAT batch, previously accepted batches "
-            "stay. Set done=true on the final batch to terminate. "
-            "Internal events must be true branch points (in-degree>=2 "
-            "or out-degree>=2); passthrough (in=1, out=1) events are "
-            "rejected on done=true.\n"
-            f"(3) Start event ids at {next_id} and increment strictly — "
+            "(2) Build the graph incrementally with upsert_node / "
+            "upsert_edge (and delete_node / delete_edge as needed). Every "
+            "edit is validated immediately; errors come back as a "
+            "three-section actionable message naming concrete next "
+            "options. Internal events must be true branch points "
+            "(in-degree>=2 or out-degree>=2); passthrough (in=1, out=1) "
+            "events are rejected at finalize.\n"
+            "(3) Call finalize_extraction (no payload) when you are done. "
+            "On a clean degree check the firing terminates; on rejection "
+            "the firing stays alive so you can promote passthrough nodes "
+            "with further upserts and re-call.\n"
+            f"(4) Start event ids at {next_id} and increment strictly — "
             "do NOT restart at 1 and do NOT reuse any id from recent_graph.\n"
-            f"(4) external_refs pass: recent_graph has {recent_n} entries "
-            "with source_turn_texts; for each event you emit, scan those "
-            "texts for any literal token that also appears in this event's "
-            "source_turns text. When you find one and the connection is "
-            "causally meaningful, emit an external_refs entry whose "
-            "to_recent_event_id copies that recent_graph entry's .id field. "
-            "In a typical multi-turn investigation most evid events in this "
-            "firing answer a hyp/act from earlier firings.\n\n"
+            f"(5) Cross-firing references: recent_graph has {recent_n} "
+            "entries. To link this firing's events to prior firings, emit "
+            "upsert_edge with src/dst spanning the boundary — the folded "
+            "view already contains prior-firing nodes by id. Most evid "
+            "events in this firing answer a hyp/act from earlier firings; "
+            "linking them is what turns a single firing into a connected "
+            "investigation.\n\n"
             + payload_json
         )
         messages = await child.prompt(directive)
@@ -1263,7 +1266,7 @@ async def _spawn_extractor_child(
 
     await safe_shutdown(child)
     return (
-        _has_tool_call(messages, SUBMIT_EVENTS_TOOL_NAME),
+        _has_tool_call(messages, FINALIZE_EXTRACTION_TOOL_NAME),
         _flatten_assistant_blocks(messages),
     )
 

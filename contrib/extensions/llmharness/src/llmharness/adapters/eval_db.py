@@ -34,7 +34,7 @@ import typer
 
 from ..audit._session_helpers import bind_extractor_state
 from ..audit.extractor import (
-    SUBMIT_EVENTS_TOOL_NAME,
+    FINALIZE_EXTRACTION_TOOL_NAME,
     ExtractionState,
     RawExtractorOutput,
     compose_extractor_extensions,
@@ -255,7 +255,6 @@ async def extract_trajectory(
     root_session_id: str,
     sink_path: Path,
     compose_kwargs_for_record: dict[str, Any],
-    witness_retry_budget: int = 1,
     graph_accumulator: list[dict[str, Any]] | None = None,
 ) -> list[ReplayRecord]:
     """Run extractor over a folded trajectory; emit one ReplayRecord per firing.
@@ -267,10 +266,7 @@ async def extract_trajectory(
     if not turns:
         return []
 
-    base_extensions = compose_extractor_extensions(
-        base_prompt=base_prompt,
-        witness_retry_budget=witness_retry_budget,
-    )
+    base_extensions = compose_extractor_extensions(base_prompt=base_prompt)
     records: list[ReplayRecord] = []
     recent_graph_events: list[SchemaEvent] = []
 
@@ -314,7 +310,7 @@ async def extract_trajectory(
                 extensions=extensions,
                 provider=provider,
                 payload=payload,
-                terminal_tool=SUBMIT_EVENTS_TOOL_NAME,
+                terminal_tool=FINALIZE_EXTRACTION_TOOL_NAME,
                 purpose="eval_db_extractor",
             )
             status = phase_result.status
@@ -580,9 +576,10 @@ def extract(
         typer.Option(
             "--witness-retry",
             help=(
-                "How many times to bounce a submission back to the LLM when "
-                "individual edges fail witness; 0 disables (V3.1 single-shot). "
-                "Each retry costs one extra LLM call per affected firing."
+                "Legacy v18 knob, ignored under v19 — the new tool surface "
+                "gets per-edit validation feedback so there is no batch to "
+                "bounce back. Retained as a CLI flag for backwards script "
+                "compatibility; the value is only echoed into the metadata."
             ),
         ),
     ] = 1,
@@ -704,7 +701,6 @@ def extract(
                 root_session_id=_root_session_id_for(row),
                 sink_path=records_path,
                 compose_kwargs_for_record=compose_kwargs_for_record,
-                witness_retry_budget=witness_retry,
                 graph_accumulator=graph_firings,
             )
             elapsed_ms = int((time.monotonic() - t0) * 1000)
