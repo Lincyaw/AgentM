@@ -24,7 +24,7 @@ flowchart TD
     P --> A
     A --> ABI
     A --> LIB
-    A -. via api.* .-> RT
+    A -. "via api.*" .-> RT
     RT --> ABI
     RT --> LIB
     RT --> INT
