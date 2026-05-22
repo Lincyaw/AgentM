@@ -6,8 +6,9 @@ description: |
   ``rca:baseline`` (no drift on the investigator side), with
   ``llmharness.adapters.agentm`` mounted on top to provide:
 
-    * Phase 1 — per-turn extractor that converts each TurnEndEvent into
-      structured ``Event`` entries on the session bus.
+    * Phase 1 — cadence-controlled extractor that converts recent
+      TurnEndEvent windows into structured ``Event`` entries on the
+      session bus.
     * Phase 2 — every-k-turns graph auditor that emits ``Verdict`` /
       ``Reminder`` entries; ``drift=true`` reminders are delivered to the
       main agent as synthetic user messages on the next
@@ -53,12 +54,10 @@ extensions:
   # --- cognitive-audit adapter (the only addition over baseline) ---
   # Mounted as a flat-file extension; the package is installed via
   # ``pip install -e contrib/extensions/llmharness`` (see its CLAUDE.md).
-  # Defaults: audit_interval_turns=3, recent_verdicts=5. Override here
-  # if you want a tighter / looser audit cadence per eval campaign.
+  # Extractor and auditor fire every 5 main-agent turns; extractor runs
+  # first, then auditor judges the freshly updated graph.
   - module: llmharness.adapters.agentm
     config:
-      # DEBUG: sync mode — each turn_end blocks the main agent until the
-      # extractor (and any due auditor) child session completes. Slower
-      # per-turn but no shutdown drain backlog. Useful for measuring the
-      # v3.1 single-tool extractor's per-firing cost.
       mode: sync
+      extractor_interval_turns: 5
+      audit_interval_turns: 5

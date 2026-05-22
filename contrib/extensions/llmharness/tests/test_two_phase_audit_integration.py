@@ -56,7 +56,9 @@ from llmharness.audit.entry_types import (
     EXTRACTOR_EMPTY,
     EXTRACTOR_NO_CALL,
     EXTRACTOR_PARTIAL,
+    VERDICT,
 )
+from llmharness.audit.auditor import SUBMIT_VERDICT_TOOL_NAME
 from llmharness.audit.extractor import SUBMIT_EVENTS_TOOL_NAME
 
 # --- shared constants -------------------------------------------------------
@@ -195,16 +197,7 @@ class _V31StubProvider:
         raise AssertionError(f"unknown stub mode {self.mode!r}")
 
     async def _auditor_iter(self) -> AsyncIterator[AssistantStreamEvent]:
-        # Auditor should never fire in these tests. If it does (e.g. k
-        # accidentally lowered), terminate cleanly so the session shuts
-        # down without hanging.
-        msg = AssistantMessage(
-            role="assistant",
-            content=[TextContent(type="text", text="(auditor stub — not exercised)")],
-            timestamp=999.0,
-            stop_reason="end_turn",
-        )
-        yield MessageEnd(message=msg)
+        yield MessageEnd(message=_submit_verdict_call())
 
 
 def _submit_events_call(*, events: list[dict[str, Any]]) -> AssistantMessage:
@@ -222,6 +215,30 @@ def _submit_events_call(*, events: list[dict[str, Any]]) -> AssistantMessage:
             )
         ],
         timestamp=600.0,
+        stop_reason="tool_use",
+    )
+
+
+def _submit_verdict_call() -> AssistantMessage:
+    return AssistantMessage(
+        role="assistant",
+        content=[
+            ToolCallBlock(
+                type="tool_call",
+                id="verdict-1",
+                name=SUBMIT_VERDICT_TOOL_NAME,
+                arguments={
+                    "verdict": {
+                        "surface_reminder": False,
+                        "reminder_text": "",
+                        "continuation_notes": ["stub auditor saw the graph"],
+                        "matched_event_ids": [],
+                        "cited_cards": [],
+                    }
+                },
+            )
+        ],
+        timestamp=999.0,
         stop_reason="tool_use",
     )
 
@@ -279,8 +296,58 @@ def _build_session_config(*, cwd: str, provider_module: str) -> AgentSessionConf
     )
 
 
+def _build_interval_session_config(
+    *,
+    cwd: str,
+    provider_module: str,
+    interval_turns: int,
+) -> AgentSessionConfig:
+    config = _build_session_config(cwd=cwd, provider_module=provider_module)
+    extensions = list(config.extensions)
+    extensions[-1] = (
+        "llmharness.adapters.agentm",
+        {
+            "mode": "sync",
+            "extractor_interval_turns": interval_turns,
+            "audit_interval_turns": interval_turns,
+            "cards_tools_config": None,
+            "observability_config": None,
+        },
+    )
+    config.extensions = extensions
+    return config
+
+
 def _entries(session: AgentSession, entry_type: str) -> list[Any]:
     return [e for e in session.session_manager.get_active_branch() if e.type == entry_type]
+
+
+@pytest.mark.asyncio
+async def test_extractor_and_auditor_fire_together_on_configured_interval(
+    tmp_path: Path,
+) -> None:
+    provider = _V31StubProvider(mode="happy")
+    provider_module = _install_provider_module(
+        "tests._fake_v31_interval_provider", provider
+    )
+
+    session = await AgentSession.create(
+        _build_interval_session_config(
+            cwd=str(tmp_path),
+            provider_module=provider_module,
+            interval_turns=3,
+        )
+    )
+    await session.prompt("user turn 1")
+    await session.prompt("user turn 2")
+    await session.prompt("user turn 3")
+    await session.shutdown()
+
+    assert provider.parent_calls == 3
+    assert provider.extractor_calls == 1
+    assert provider.auditor_calls == 1
+    assert len(_entries(session, AUDIT_EVENT)) == 2
+    assert len(_entries(session, VERDICT)) == 1
 
 
 # --- Scenario 1: happy path ------------------------------------------------
