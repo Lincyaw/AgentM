@@ -1369,6 +1369,7 @@ name = "llmharness"
 version = "0.3.0"
 source = { editable = "contrib/extensions/llmharness" }
 dependencies = [
+    { name = "pydantic" },
     { name = "pyyaml" },
     { name = "typer" },
 ]
@@ -1383,6 +1384,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
+    { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
