@@ -34,7 +34,7 @@ from agentm.core.abi.messages import AssistantMessage
 from agentm.core.abi.session import ENTRY_TYPE_MESSAGE, SessionEntry
 from agentm.core.runtime.session_manager import SessionManager
 
-from .record import ReplayRecord, iter_records
+from ..replay.record import ReplayRecord, iter_records
 
 
 class PrefixReplayError(RuntimeError):

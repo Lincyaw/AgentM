@@ -633,7 +633,7 @@ requirements:
         enforced by sourcing the message format from the shared
         ``audit/_reminder_format.py`` helper.
 
-      - ``llmharness.replay.prefix_replay`` — orchestration helpers.
+      - ``llmharness.tools.prefix_replay`` — orchestration helpers.
         Picks the auditor record at ``turn=t`` whose
         ``output.surface_reminder`` is set, locates the source session
         file under ``<session-dir>/*_<root_session_id>.jsonl``, finds
@@ -667,7 +667,7 @@ requirements:
     status: tested
     code:
       - src/llmharness/replay/reminder_seed.py
-      - src/llmharness/replay/prefix_replay.py
+      - src/llmharness/tools/prefix_replay.py
       - src/llmharness/replay/cli.py
       - src/llmharness/audit/_reminder_format.py
     tests:

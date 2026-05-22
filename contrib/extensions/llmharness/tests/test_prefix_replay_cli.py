@@ -239,7 +239,7 @@ def test_user_message_only_branch_smoke(tmp_path: Path) -> None:
     mgr.append(message_entry(UserMessage(role="user", content=[TextContent(type="text", text="q1")], timestamp=time.time()), mgr.get_leaf_id()))
     mgr.append(message_entry(_make_assistant_message("a1"), mgr.get_leaf_id()))
 
-    from llmharness.replay.prefix_replay import find_leaf_entry_for_turn
+    from llmharness.tools.prefix_replay import find_leaf_entry_for_turn
 
     leaf = find_leaf_entry_for_turn(mgr, turn=2)
     # turn=2 → 3rd message (0-indexed) which is the second user message.
