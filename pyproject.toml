@@ -71,15 +71,6 @@ members = [
     "contrib/channels-clients/worker",
 ]
 
-[tool.uv.sources]
-# Source override for the rcabench-platform dependency declared in
-# contrib/scenarios/rca: resolves against the local aegis monorepo
-# checkout (editable install) so changes to its judge-client surface or
-# ``AgentResult.trace_id`` forwarding are picked up without having to
-# wait for a fresh PyPI release. Drop this override and re-pin the
-# version constraint once rcabench-platform 0.4.44+ is published.
-rcabench-platform = { path = "../aegis/rcabench-platform", editable = true }
-
 [tool.pytest.ini_options]
 # UI tests exercise the Textual TUI; they pass but don't map to any
 # fail-stop core position (per CLAUDE.md "Testing Philosophy" §1). Run
