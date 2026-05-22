@@ -136,6 +136,11 @@ class GitBackedResourceWriter:
         auto_commit: bool = True,
         protected_branches: frozenset[str] = DEFAULT_PROTECTED_BRANCHES,
     ) -> None:
+        # Lazy-init contract: __init__ is a pure data-copy. No subprocess
+        # spawns, no stat calls, no mkdir. All disk probing and shadow-repo
+        # creation is deferred to `_lazy_setup()`, which fires on the first
+        # mutating operation (write/replace/delete/batch/restore). Scenarios
+        # that only read or classify pay zero filesystem cost.
         self._cwd = Path(cwd).resolve()
         self._session_id = session_id
         self._bus = bus
@@ -146,6 +151,20 @@ class GitBackedResourceWriter:
         self._advisory_mode = False
         self._warned_advisory = False
         self._initial_snapshot_needed = False
+        self._setup_done = False
+
+    def _lazy_setup(self) -> None:
+        """Perform the disk-touching init work on first mutation.
+
+        Idempotent: subsequent calls no-op via ``_setup_done``. Notes on
+        deferred semantics vs. eager init: the ``auto_commit=False`` /
+        ``git missing`` advisory-mode warnings now fire on the first write
+        attempt rather than at construction time. Same once-per-session
+        guarantee (``_warned_advisory``) still holds.
+        """
+        if self._setup_done:
+            return
+        self._setup_done = True
 
         git_bin = shutil.which("git")
         if git_bin is None:
@@ -155,7 +174,7 @@ class GitBackedResourceWriter:
         # auto_commit=False short-circuits everything below: we treat the
         # working tree as read-write-through and never call `git commit`.
         # Managed paths fall into the existing advisory-mode write-through.
-        if not auto_commit:
+        if not self._auto_commit:
             self._enter_advisory_mode("auto_commit disabled")
             return
 
@@ -207,6 +226,7 @@ class GitBackedResourceWriter:
         rationale: str,
         author: WriterAuthor = "agent",
     ) -> WriteResult:
+        await asyncio.to_thread(self._lazy_setup)
         path_class = self.classify(path)
         resolved = self._resolve_path(path)
         if path_class == "constitution":
@@ -254,6 +274,7 @@ class GitBackedResourceWriter:
         rationale: str,
         author: WriterAuthor = "agent",
     ) -> WriteResult:
+        await asyncio.to_thread(self._lazy_setup)
         path_class = self.classify(path)
         resolved = self._resolve_path(path)
         if path_class == "constitution":
@@ -319,6 +340,7 @@ class GitBackedResourceWriter:
         rationale: str,
         author: WriterAuthor = "agent",
     ) -> WriteResult:
+        await asyncio.to_thread(self._lazy_setup)
         path_class = self.classify(path)
         resolved = self._resolve_path(path)
         if path_class == "constitution":
@@ -391,6 +413,12 @@ class GitBackedResourceWriter:
         return _manager()
 
     def current_version_for_path(self, path: str) -> str | None:
+        # Read-only by contract: must never trigger _lazy_setup() or touch
+        # disk. With no writes yet, there is no commit and therefore no
+        # version to report — return None. Observability calls this on
+        # every session entry; touching disk here would defeat lazy-init.
+        if not self._setup_done:
+            return None
         path_class = self.classify(path)
         if path_class != "managed" or self._advisory_mode:
             return None
@@ -413,6 +441,7 @@ class GitBackedResourceWriter:
         return sha or None
 
     def restore(self, path: Path, version: str) -> None:
+        self._lazy_setup()
         if self._advisory_mode or self.classify(str(path)) != "managed":
             raise NotImplementedError("git rollback requires a versioned ResourceWriter")
 
@@ -432,6 +461,8 @@ class GitBackedResourceWriter:
     ) -> None:
         if not pending:
             return
+
+        await asyncio.to_thread(self._lazy_setup)
 
         managed_ops: list[tuple[_PendingBatchOp, Path, str]] = []
         unmanaged_ops: list[tuple[_PendingBatchOp, Path]] = []
