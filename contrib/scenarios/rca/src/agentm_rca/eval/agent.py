@@ -612,18 +612,19 @@ async def _run_offline_auditor_over_control(
     """
     from pathlib import Path
 
-    from llmharness.adapters.agentm import (
+    from llmharness import (
+        AuditorOutputError,
+        Edge,
+        Event,
+        RawVerdictOutput,
+        ReplayRecord,
         flatten_assistant_blocks,
+        iter_records,
+        merge_to_phases,
+        now_ns,
+        replay_auditor_record,
         serialize_full_trajectory,
     )
-    from llmharness.audit.auditor.output import (
-        AuditorOutputError,
-        RawVerdictOutput,
-    )
-    from llmharness.audit.phase import merge_to_phases
-    from llmharness.replay.record import ReplayRecord, iter_records, now_ns
-    from llmharness.replay.runner import replay_auditor_record
-    from llmharness.schema import Edge, Event
 
     replay_path = Path(control.audit_replay_path)
     if not replay_path.exists():
@@ -756,7 +757,7 @@ def _clone_replay_record(
     root_session_id: str,
     ts_ns: int | None = None,
 ) -> Any:
-    from llmharness.replay.record import ReplayRecord
+    from llmharness import ReplayRecord
 
     provider = record.provider
     if isinstance(provider, list):
@@ -797,7 +798,7 @@ def _write_strict_ab_replay(
     """
     from pathlib import Path
 
-    from llmharness.replay.record import iter_records, write_record
+    from llmharness import iter_records, write_record
 
     out_path = (
         Path(cwd)
