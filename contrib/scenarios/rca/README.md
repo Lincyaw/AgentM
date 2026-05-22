@@ -46,6 +46,39 @@ caller does not override it. Other variants:
   recorded but reminders **not** injected (clean trajectory for SFT).
 * `rca:harness.sync.extractor5` — extractor-only control; the control
   scenario consumed by strict-A/B fork mode.
+* `rca:harness.live` — `harness.sync` + `contrib.extensions.live_inspector`
+  WebSocket server. Use for live-watching a single case from the
+  aegis-ui `Live Inspect` sub-app. **Don't** use this for dataset-
+  collection runs (the inspector buffers a per-session backlog).
+
+### Live inspection (single case, watch in browser)
+
+Minimum command — run from the AgentM repo root, no sandbox needed
+(`GitBackedResourceWriter` is lazy and never touches disk for RCA since
+no write tools are mounted):
+
+```bash
+source .env   # provider creds + OPENAI_BASE_URL etc.
+
+AGENTM_RCA_DATA_DIR=/home/ddq/AoyangSpace/dataset/rca/<case-id> \
+AGENTM_LIVE_INSPECT_URL_FILE=/tmp/ws.url \
+uv run agentm --scenario rca:harness.live "<your RCA prompt>"
+```
+
+The inspector prints `LIVE INSPECT: ws://127.0.0.1:<port>/inspect?root=<id>`
+on stderr at startup; with `AGENTM_LIVE_INSPECT_URL_FILE` the same URL is
+also written to that sidecar. Paste it into the aegis-ui *Live Inspect*
+Connection page to watch the main agent + every spawned extractor /
+auditor child in real time.
+
+The inspector binds to `127.0.0.1` by default — the browser must be on
+the same machine. For remote viewing, override in the manifest config
+(`bind: 0.0.0.0`) and add your own auth at the network layer, or open an
+SSH tunnel:
+
+```bash
+ssh -L <port>:127.0.0.1:<port> <agentm-host>
+```
 
 Detection is by manifest composition, not by name — the eval driver's
 `_scenario_mounts_harness()` loads the resolved manifest and checks for
