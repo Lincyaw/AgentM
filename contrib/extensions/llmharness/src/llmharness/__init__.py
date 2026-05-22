@@ -2,9 +2,14 @@
 
 Public surface — kept deliberately small. Re-export rule: a symbol
 appears here only if at least one in-tree consumer (rca eval, the
-strict-A/B test suite, smoke tests) imports it through the top-level
-package. Everything else stays reachable via its submodule path and
-gets promoted on demand.
+strict-A/B test suite, smoke tests) OR an out-of-tree trainer
+(rca-autorl) imports it through the top-level package. Everything else
+stays reachable via its submodule path and gets promoted on demand.
+
+Phase contract surface (auditor side) — exposed for external trainers
+that RL-train the auditor child agent. The extractor-side contract face
+is coming in a follow-up pass; for now its tools remain reachable only
+via :mod:`llmharness.audit.extractor.tools`.
 
 Currently exported:
 
@@ -34,6 +39,12 @@ The runtime entry point is the AgentM extension at
 V2 breaking change (issue #134, 2026-05-10): ``DriftType`` is removed.
 """
 
+from .audit.auditor import (
+    AUDITOR_TERMINATION_REASON,
+    AUDITOR_TOOL_NAMES,
+    AUDITOR_TOOLS,
+    load_auditor_prompt,
+)
 from .replay.record import ReplayRecord, iter_records, write_record
 from .replay.strict_ab import (
     OfflineAuditRun,
@@ -54,6 +65,9 @@ from .schema import (
 )
 
 __all__ = [
+    "AUDITOR_TERMINATION_REASON",
+    "AUDITOR_TOOLS",
+    "AUDITOR_TOOL_NAMES",
     "Edge",
     "EdgeKind",
     "Event",
@@ -66,6 +80,7 @@ __all__ = [
     "ReplayRecord",
     "Verdict",
     "iter_records",
+    "load_auditor_prompt",
     "run_offline_auditor_over_control",
     "strict_ab_replay_path",
     "write_record",
