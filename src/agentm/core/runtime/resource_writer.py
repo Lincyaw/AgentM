@@ -413,7 +413,12 @@ class GitBackedResourceWriter:
         return _manager()
 
     def current_version_for_path(self, path: str) -> str | None:
-        self._lazy_setup()
+        # Read-only by contract: must never trigger _lazy_setup() or touch
+        # disk. With no writes yet, there is no commit and therefore no
+        # version to report — return None. Observability calls this on
+        # every session entry; touching disk here would defeat lazy-init.
+        if not self._setup_done:
+            return None
         path_class = self.classify(path)
         if path_class != "managed" or self._advisory_mode:
             return None
