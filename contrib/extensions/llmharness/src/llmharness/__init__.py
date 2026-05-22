@@ -27,11 +27,18 @@ Currently exported:
   :func:`write_strict_ab_replay`, :func:`strict_ab_replay_path`. The
   primary entry points the rca eval driver calls.
 
+* Replay drivers — :func:`replay_extractor_record`,
+  :func:`replay_auditor_record`, plus the shared :class:`PhaseResult` /
+  :class:`Status` types. These are the entry points for "drive one
+  child session standalone given a recorded firing"; online-RL
+  trainers (e.g. rca-autorl GRPO/PPO) call them per sampled
+  ``ReplayRecord`` to score a fresh rollout.
+
 Other helpers (``AuditorOutputError``, ``RawVerdictOutput``,
 ``merge_to_phases``, ``flatten_assistant_blocks``,
-``serialize_full_trajectory``, ``now_ns``, ``replay_auditor_record``)
-remain available via their submodules. Promote them here when an
-in-tree caller actually needs them through the top-level surface.
+``serialize_full_trajectory``, ``now_ns``) remain available via their
+submodules. Promote them here when an in-tree caller actually needs
+them through the top-level surface.
 
 The runtime entry point is the AgentM extension at
 ``llmharness.adapters.agentm``, loaded via
@@ -51,7 +58,8 @@ from .audit.extractor import (
     EXTRACTOR_TOOL_NAMES,
     load_extractor_prompt,
 )
-from .replay.record import ReplayRecord, iter_records, write_record
+from .replay.record import ReplayRecord, Status, iter_records, write_record
+from .replay.runner import replay_auditor_record, replay_extractor_record
 from .replay.strict_ab import (
     OfflineAuditRun,
     ReminderCandidate,
@@ -69,6 +77,7 @@ from .schema import (
     Reminder,
     Verdict,
 )
+from .tools.engine import PhaseResult
 from .train_signals import (
     ToolEvent,
     auditor_process_reward,
@@ -88,9 +97,11 @@ __all__ = [
     "Finding",
     "OfflineAuditRun",
     "Phase",
+    "PhaseResult",
     "Reminder",
     "ReminderCandidate",
     "ReplayRecord",
+    "Status",
     "ToolEvent",
     "Verdict",
     "auditor_process_reward",
@@ -98,6 +109,8 @@ __all__ = [
     "iter_records",
     "load_auditor_prompt",
     "load_extractor_prompt",
+    "replay_auditor_record",
+    "replay_extractor_record",
     "run_offline_auditor_over_control",
     "strict_ab_replay_path",
     "write_record",
