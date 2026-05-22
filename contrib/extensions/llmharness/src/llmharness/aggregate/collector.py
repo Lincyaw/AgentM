@@ -5,6 +5,7 @@ Pure function. No I/O writes; reads only the two sidecar files.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -25,10 +26,16 @@ def _firing_input_payload(rec: ReplayRecord) -> dict[str, Any]:
         "summary_threshold": ck.get("summary_threshold"),
     }
     if rec.phase == "auditor":
+        tools = ck.get("tools") or []
+        trajectory_snapshot = ck.get("trajectory_snapshot")
         out["findings"] = ck.get("findings") or []
         out["check_errors"] = ck.get("check_errors") or {}
         out["continuation_notes"] = ck.get("continuation_notes") or []
-        out["tools"] = ck.get("tools") or []
+        out["tools"] = tools
+        out["tools_profile"] = "minimal" if tools == ["submit_verdict"] else "custom"
+        out["trajectory_snapshot_len"] = (
+            len(trajectory_snapshot) if isinstance(trajectory_snapshot, list) else 0
+        )
     return out
 
 
@@ -58,6 +65,34 @@ def _to_firing(rec: ReplayRecord, sequence: int) -> FiringRecord:
         latency_ms=int(rec.latency_ms or 0),
         raw_assistant_messages=list(rec.raw_assistant_messages),
     )
+
+
+def _attach_auditor_graph_refs(
+    *,
+    auditor_firings: list[FiringRecord],
+    extractor_firings: list[FiringRecord],
+) -> list[FiringRecord]:
+    """Annotate auditor inputs with the graph snapshot they reviewed.
+
+    The web case viewer expects every auditor firing to point at the most
+    recent extractor snapshot. Older aggregate output omitted this because
+    the replay record stores extractor/auditor firings independently.
+    """
+    out: list[FiringRecord] = []
+    for auditor in auditor_firings:
+        prior = [
+            ext
+            for ext in extractor_firings
+            if ext.status == "ok"
+            and ext.output is not None
+            and ext.ts_ns <= auditor.ts_ns
+            and ext.turn_index <= auditor.turn_index
+        ]
+        graph_ref = prior[-1].sequence if prior else 0
+        input_payload = dict(auditor.input_payload)
+        input_payload["graph_snapshot_ref"] = graph_ref
+        out.append(replace(auditor, input_payload=input_payload))
+    return out
 
 
 def _accumulate_graph(
@@ -248,6 +283,10 @@ def collect_case(
     auditor_firings = [
         _to_firing(r, seq) for seq, r in enumerate(auditor_records, start=1)
     ]
+    auditor_firings = _attach_auditor_graph_refs(
+        auditor_firings=auditor_firings,
+        extractor_firings=extractor_firings,
+    )
 
     meta_obj = read_sample_meta(meta_path) if meta_path is not None else None
     sample_id = (

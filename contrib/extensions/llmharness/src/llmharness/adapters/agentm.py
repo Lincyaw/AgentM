@@ -2,7 +2,7 @@
 
 See `.claude/designs/llmharness-cognitive-audit.md` for the full design.
 
-Phase 1 (extractor) on every TurnEndEvent:
+Phase 1 (extractor) on the configured TurnEndEvent cadence:
 * Slice the trajectory window since the last cursor.
 * Build a per-firing :class:`ExtractionState`, populate ``turn_texts``
   with rendered turn content (used by the witness pipeline).
@@ -139,6 +139,7 @@ MANIFEST = ExtensionManifest(
         "type": "object",
         "properties": {
             "mode": {"type": "string", "enum": ["async", "sync"]},
+            "extractor_interval_turns": {"type": "integer", "minimum": 1},
             "audit_interval_turns": {"type": "integer", "minimum": 1},
             "audit_summary_threshold": {"type": "integer", "minimum": 0},
             "prompt_override_extractor": {"type": "string"},
@@ -269,6 +270,7 @@ MANIFEST = ExtensionManifest(
 
 
 _DEFAULT_AUDIT_INTERVAL_TURNS = 3
+_DEFAULT_EXTRACTOR_INTERVAL_TURNS = 1
 _DEFAULT_RECENT_VERDICTS = _et.RECENT_VERDICTS_FOR_AUDITOR
 # 600s (10min) accommodates slow / proxied LLM endpoints (e.g. Warpgate-
 # fronted OpenAI-compatible servers at ~14s/call); a low default drops
@@ -462,6 +464,11 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     k = int(config.get("audit_interval_turns", _DEFAULT_AUDIT_INTERVAL_TURNS))
     if k < 1:
         k = _DEFAULT_AUDIT_INTERVAL_TURNS
+    extractor_k = int(
+        config.get("extractor_interval_turns", _DEFAULT_EXTRACTOR_INTERVAL_TURNS)
+    )
+    if extractor_k < 1:
+        extractor_k = _DEFAULT_EXTRACTOR_INTERVAL_TURNS
 
     summary_threshold_raw = config.get("audit_summary_threshold", _DEFAULT_AUDIT_SUMMARY_THRESHOLD)
     try:
@@ -573,13 +580,17 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             nonlocal turn_count
             turn_count += 1
             messages_snapshot = tuple(event.messages)
-            extractor_ok = await _drain_extractor(
-                api=api,
-                job=_ExtractorJob(messages=messages_snapshot),
-                extractor_extensions=extractor_extensions,
-                extractor_provider=extractor_provider,
-            )
-            if enable_auditor and extractor_ok and (turn_count % k) == 0:
+            auditor_due = enable_auditor and (turn_count % k) == 0
+            extractor_due = (turn_count % extractor_k) == 0 or auditor_due
+            extractor_ok = True
+            if extractor_due:
+                extractor_ok = await _drain_extractor(
+                    api=api,
+                    job=_ExtractorJob(messages=messages_snapshot),
+                    extractor_extensions=extractor_extensions,
+                    extractor_provider=extractor_provider,
+                )
+            if auditor_due and extractor_ok:
                 await _drain_auditor(
                     api=api,
                     auditor_settings=auditor_settings,
@@ -619,10 +630,15 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     def _on_turn_end(event: TurnEndEvent) -> None:
         nonlocal turn_count
         turn_count += 1
-        _ensure_worker()
         messages_snapshot = tuple(event.messages)
-        queue.put_nowait(_ExtractorJob(messages=messages_snapshot))
-        if enable_auditor and (turn_count % k) == 0:
+        auditor_due = enable_auditor and (turn_count % k) == 0
+        extractor_due = (turn_count % extractor_k) == 0 or auditor_due
+        if not extractor_due and not auditor_due:
+            return
+        _ensure_worker()
+        if extractor_due:
+            queue.put_nowait(_ExtractorJob(messages=messages_snapshot))
+        if auditor_due:
             queue.put_nowait(_AuditorJob(messages=messages_snapshot))
 
     async def _on_session_shutdown(_event: SessionShutdownEvent) -> None:
@@ -1501,7 +1517,15 @@ async def _run_auditor(
         return None, raw_blocks
 
 
+# Public aliases for downstream eval orchestrators that need to reconstruct
+# extractor/auditor inputs offline (e.g. agentm_rca baseline-fork mode).
+flatten_assistant_blocks = _flatten_assistant_blocks
+serialize_full_trajectory = _serialize_full_trajectory
+
+
 __all__ = [
     "MANIFEST",
+    "flatten_assistant_blocks",
     "install",
+    "serialize_full_trajectory",
 ]

@@ -1,0 +1,23 @@
+name: rca:harness.sync.extractor5
+description: rca:harness.sync with extractor firing every 5 main-agent turns and auditor disabled.
+task_class: rca_baseline
+
+extensions:
+  - module: agentm.extensions.builtin.operations_local
+  - module: agentm_rca.tools.thinkdepth_sql
+  - module: agentm_rca.tools.finalize
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.otel_tracing
+  - module: contrib.extensions.rcabench_contract
+  - module: agentm_rca.prompt_loader
+    config:
+      prompt: investigator.md
+      personas: false
+  - module: agentm_rca.runtime_context
+  - module: llmharness.adapters.agentm
+    config:
+      mode: sync
+      extractor_interval_turns: 5
+      audit_interval_turns: 5
+      enable_auditor: false
+      enable_reminders: false
