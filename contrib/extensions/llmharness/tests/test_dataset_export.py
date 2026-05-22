@@ -17,9 +17,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from llmharness.audit.extractor import SUBMIT_EVENTS_TOOL_NAME
 from llmharness.cli import main as cli_main
-from llmharness.distill.export import extractor_records_from_replay
+from llmharness.distill.export import (
+    extractor_records_from_replay,
+    legacy_batch_replay_count,
+)
 
 
 def _write_session(path: Path, records: list[dict]) -> None:
@@ -217,35 +219,51 @@ def _ok_extractor_replay_record(
     return rec
 
 
-def test_dataset_export_thinking_in_extractor_target() -> None:
-    """``<think>`` wrapping is the load-bearing contract between
-    raw_assistant_messages and the Qwen / GLM SFT target.
+def test_dataset_export_emits_multi_turn_extractor_trajectory() -> None:
+    """Under v19 the SFT target is a multi-turn assistant trajectory.
 
-    Disaster guarded: if the thinking blocks are dropped from the
-    assistant content, the trained model never sees the teacher's
-    reasoning and degrades to a tool-call mimic.
+    Each recorded tool_call becomes its own assistant message and the
+    preceding thinking block(s) get attached as ``<think>`` content. A
+    student trained on this learns to drive an incremental graph build,
+    not to dump one batch.
+
+    Disaster guarded: a regression that collapses back to one terminal
+    tool_call (the v18 shape) would silently retrain the student on a
+    deleted tool surface.
     """
     rec = _ok_extractor_replay_record(
         raw_assistant_messages=[
-            {"type": "thinking", "text": "step 1"},
-            {"type": "tool_call", "name": "submit_events", "arguments": {}},
-            {"type": "thinking", "text": " step 2"},
+            {"type": "thinking", "text": "plan: one linear block"},
+            {
+                "type": "tool_call",
+                "name": "submit_plan",
+                "arguments": {"block_plan": []},
+            },
+            {"type": "thinking", "text": "emit the act"},
+            {
+                "type": "tool_call",
+                "name": "upsert_node",
+                "arguments": {"id": 1, "kind": "act"},
+            },
+            {
+                "type": "tool_call",
+                "name": "finalize_extraction",
+                "arguments": {},
+            },
         ]
     )
     [sft] = list(extractor_records_from_replay([rec], sample_id="s-1"))
     out = json.loads(sft.to_jsonl())
     messages = out["target"]["messages"]
-    assert len(messages) == 1
-    msg = messages[0]
-    assert msg["role"] == "assistant"
-    assert msg["content"] == "<think>step 1 step 2</think>\n\n"
-    [tc] = msg["tool_calls"]
-    assert tc["type"] == "function"
-    assert tc["function"]["name"] == SUBMIT_EVENTS_TOOL_NAME
-    # arguments is a JSON string per the OpenAI tool-call convention —
-    # parse it to assert the events round-trip without escaping issues.
-    args = json.loads(tc["function"]["arguments"])
-    assert [ev["id"] for ev in args["events"]] == [1]
+    assert [m["tool_calls"][0]["function"]["name"] for m in messages] == [
+        "submit_plan",
+        "upsert_node",
+        "finalize_extraction",
+    ]
+    assert messages[0]["content"] == "<think>plan: one linear block</think>\n\n"
+    assert messages[1]["content"] == "<think>emit the act</think>\n\n"
+    # finalize had no preceding thinking — empty content (not stray tags).
+    assert messages[2]["content"] == ""
 
 
 def test_distill_cli_export_preserves_thinking_through_sidecar(tmp_path: Path) -> None:
@@ -288,8 +306,8 @@ def test_distill_cli_export_preserves_thinking_through_sidecar(tmp_path: Path) -
             {
                 "type": "tool_call",
                 "id": "call-1",
-                "name": "submit_events",
-                "arguments": {"events": []},
+                "name": "finalize_extraction",
+                "arguments": {},
             },
         ],
     }
@@ -327,26 +345,36 @@ def test_distill_cli_export_preserves_thinking_through_sidecar(tmp_path: Path) -
     assert content == "<think>reason about the turn</think>\n\n"
 
 
-def test_dataset_export_extractor_no_thinking_fallback() -> None:
-    """Older sidecars + spawn_error firings carry no thinking blocks.
+def test_dataset_export_skips_legacy_batch_replays() -> None:
+    """Legacy v18 replays use ``submit_events_batch``; v19 cannot train on them.
 
-    Disaster guarded: an empty raw_assistant_messages list (or the
-    field missing entirely from older sidecars) must still produce a
-    valid SFT row — content collapses to empty string so the chat
-    template doesn't emit stray ``<think></think>`` tags.
+    Disaster guarded: training on the old terminal-batch shape under
+    the new tool surface would teach the student a deleted contract.
+    The export must skip the record AND a separate counter must report
+    how many such records were skipped so the operator notices.
     """
-    # Field present but empty.
-    rec_empty = _ok_extractor_replay_record(raw_assistant_messages=[])
-    [sft_empty] = list(extractor_records_from_replay([rec_empty], sample_id="s-1"))
-    msg_empty = json.loads(sft_empty.to_jsonl())["target"]["messages"][0]
-    assert msg_empty["content"] == ""
-    assert msg_empty["tool_calls"][0]["function"]["name"] == SUBMIT_EVENTS_TOOL_NAME
-
-    # Field missing (back-compat with pre-thinking sidecars).
-    rec_missing = _ok_extractor_replay_record()
-    [sft_missing] = list(
-        extractor_records_from_replay([rec_missing], sample_id="s-1")
+    legacy_rec = _ok_extractor_replay_record(
+        raw_assistant_messages=[
+            {"type": "thinking", "text": "v18 single shot"},
+            {
+                "type": "tool_call",
+                "name": "submit_events_batch",
+                "arguments": {"events": [], "done": True},
+            },
+        ]
     )
-    msg_missing = json.loads(sft_missing.to_jsonl())["target"]["messages"][0]
-    assert msg_missing["content"] == ""
-    assert msg_missing["tool_calls"][0]["function"]["name"] == SUBMIT_EVENTS_TOOL_NAME
+    assert list(extractor_records_from_replay([legacy_rec], sample_id="s-1")) == []
+    assert legacy_batch_replay_count([legacy_rec]) == 1
+
+
+def test_dataset_export_skips_record_with_no_recorded_tool_calls() -> None:
+    """Empty raw_assistant_messages (spawn_error / older sidecars).
+
+    Disaster guarded: there is nothing for the student to learn from
+    a target trajectory with zero tool calls; emitting a row with an
+    empty messages list would silently degrade training.
+    """
+    rec_empty = _ok_extractor_replay_record(raw_assistant_messages=[])
+    assert list(extractor_records_from_replay([rec_empty], sample_id="s-1")) == []
+    rec_missing = _ok_extractor_replay_record()
+    assert list(extractor_records_from_replay([rec_missing], sample_id="s-1")) == []
