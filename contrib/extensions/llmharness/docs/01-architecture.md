@@ -181,7 +181,7 @@ service lookups (not static imports).
 
   distill/  (offline, no live-adapter import)
   ────────
-  cli.py ──▶ oracle.py ──▶ replay/engine.run_phase_standalone
+  cli.py ──▶ oracle.py ──▶ tools/engine.run_phase_standalone
               │   ├──▶ causal.py
               │   ├──▶ gt.py            (loads rca-shaped dataset)
               │   ├──▶ _submit_oracle.py   (§11 atom)
@@ -204,3 +204,22 @@ Key invariants:
 * The check registry is resolved through `api.get_service` at
   install time, not imported. That keeps reference checks single-
   file §11-compliant (no atom-to-atom imports).
+
+---
+
+## 5. `tools/` vs the rest — host-side drivers are not atoms
+
+| Subpackage | Role | May import `agentm.core.runtime.*`? |
+|---|---|---|
+| `audit/`, `adapters/`, `replay/` (atoms + sidecar I/O), `extensions/check_*`, `distill/_submit_*` | §11 atoms or modules consumed by atoms — single-file contract, no `core.runtime.*` import, no atom-to-atom imports | No |
+| `tools/` (`tools/engine.py`, `tools/prefix_replay.py`) | **Host-side drivers** that construct standalone AgentM sessions for offline replay / fork-and-replay | Yes — that is what `tools/` exists for |
+| `replay/strict_ab.py` | Orchestration helper that combines `tools/engine` runs with `replay/` sidecar I/O; called by host code (e.g. rca eval), not by atoms | No direct `core.runtime.*` import — it composes through the `tools/` helpers |
+| `distill/` (the labeler / exporter) | Offline CLIs; not loaded into a live session | Yes (drives standalone children via `tools/engine`) |
+
+Structural rule: nothing under `llmharness/audit/`, `llmharness/adapters/`,
+`llmharness/atoms/`, or `llmharness/extensions/` may import from
+`llmharness.tools.*`. The boundary test
+`tests/test_replay_engine_boundary.py` enforces this — `tools/` is the
+explicit "host driver, not atom surface" marker. When a future workflow
+needs to spawn standalone sessions offline, add the module under
+`tools/`, not under `audit/` or `replay/`.

@@ -14,7 +14,7 @@ If you only want a quick mental model: read §1 and skim §5.
 
 | Piece | Composer | Where it runs | Inputs | Outputs |
 |---|---|---|---|---|
-| Extractor | `audit/extractor/extensions.py: compose_extractor_extensions` | child session (live: `spawn_child_session`; offline: `replay.engine.run_phase_standalone`) | trajectory window `{new_turns, recent_graph}` | `events[] + edges[]` written into the parent session entry tree + replay sidecar |
+| Extractor | `audit/extractor/extensions.py: compose_extractor_extensions` | child session (live: `spawn_child_session`; offline: `tools/engine.py: run_phase_standalone`) | trajectory window `{new_turns, recent_graph}` | `events[] + edges[]` written into the parent session entry tree + replay sidecar |
 | Auditor | `audit/auditor/extensions.py: compose_auditor_extensions` | child session, same two execution paths | `{events, edges, phases, findings, continuation_notes}` — **graph only**, trajectory used only by the optional `get_turn` drill-down tool | `Verdict` (incl. `surface_reminder?`) into entry tree + sidecar |
 | Reminder injection | `adapters/agentm.py:_make_reminder_injector` (live) and `replay/reminder_seed.py` (offline / prefix-replay) | on the **main** agent's bus via `DecideTurnActionEvent` → `Inject([reminder_msg])` | the `surface_reminder` text from a Verdict | one synthetic user message + `REMINDER_DELIVERED` entry |
 
