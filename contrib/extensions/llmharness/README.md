@@ -51,31 +51,31 @@ reminder makes it back to the main agent.
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Main as Main agent loop<br/>(AgentM session)
+    participant Main as Main agent loop
     participant Bus as EventBus
-    participant Adapter as adapters/agentm.py
-    participant Ext as Extractor child<br/>(audit/extractor)
-    participant Aud as Auditor child<br/>(audit/auditor)
-    participant Reg as AuditCheckRegistry<br/>(scenario findings)
-    participant Repl as Replay sidecar<br/>(replay/record.py)
+    participant Adapter as Adapter (adapters/agentm.py)
+    participant Ext as Extractor child
+    participant Aud as Auditor child
+    participant Reg as AuditCheckRegistry
+    participant Repl as Replay sidecar
     participant Entries as Session entry tree
 
     Main->>Bus: TurnEnd(messages, turn_count)
     Bus->>Adapter: _on_turn_end(event)
-    Note over Adapter: extractor_due = turn % extractor_k == 0<br/>auditor_due = turn % audit_k == 0<br/>auditor_due forces extractor
+    Note over Adapter: extractor_due = turn % extractor_k == 0; auditor_due = turn % audit_k == 0; auditor_due forces extractor
 
     alt extractor_due
         Adapter->>Adapter: scan branch, slice new-turn window
         Adapter->>Ext: spawn child, prompt(payload)
-        Ext-->>Adapter: submit_events(events,refs)
-        Adapter->>Entries: append audit_event / audit_edge /<br/>extractor_cursor
+        Ext-->>Adapter: submit_events(events, refs)
+        Adapter->>Entries: append audit_event / audit_edge / extractor_cursor
         Adapter->>Repl: write extractor record
     end
 
     opt auditor_due AND extractor_ok
-        Adapter->>Reg: run_all(CheckContext(events,edges))
+        Adapter->>Reg: run_all(CheckContext(events, edges))
         Reg-->>Adapter: findings, check_errors
-        Adapter->>Aud: spawn child with composed prompt<br/>(graph + findings + notes)
+        Adapter->>Aud: spawn child with composed prompt (graph + findings + notes)
         Aud-->>Adapter: submit_verdict(verdict)
         Adapter->>Entries: append verdict
         Adapter->>Repl: write auditor record
@@ -87,11 +87,11 @@ sequenceDiagram
     Main->>Bus: DecideTurnAction(default_action)
     Bus->>Adapter: _on_decide(event)
     alt pending_reminders AND default is Step or non-final Stop
-        Adapter-->>Main: Inject([reminder_msg])
-        Note right of Main: kernel extends messages<br/>and re-opens the loop
+        Adapter-->>Main: Inject(reminder_msg)
+        Note right of Main: kernel extends messages and re-opens the loop
         Adapter->>Entries: append reminder_delivered
     else final-cause Stop (MaxTurns / SignalAborted)
-        Note over Adapter: warn + leave reminder pending<br/>(no safe re-open)
+        Note over Adapter: warn + leave reminder pending (no safe re-open)
     end
 ```
 
@@ -120,17 +120,15 @@ sequenceDiagram
     autonumber
     participant User
     participant CLI as llmharness-replay
-    participant Sidecar as audit_replay/&lt;root&gt;.jsonl
+    participant Sidecar as Replay sidecar JSONL
     participant Runner as replay/runner.py
-    participant Engine as replay/engine.py<br/>run_phase_standalone
-    participant Child as Extractor / Auditor child
-    participant Out as PhaseResult<br/>(status, output, messages)
+    participant Engine as replay/engine.py
+    participant Child as Extractor or Auditor child
 
-    User->>CLI: replay extractor|auditor<br/>--record &lt;line&gt; [--provider X] [--prompt Y]
+    User->>CLI: replay extractor|auditor --record LINE [--provider X] [--prompt Y]
     CLI->>Sidecar: read one ReplayRecord
     CLI->>Runner: replay_*_record(record, overrides)
-    Runner->>Runner: rebuild compose_extensions(...)<br/>(same fn the live adapter used)
-    Runner->>Runner: extractor: mint fresh ExtractionState<br/>auditor: reuse compose_kwargs graph
+    Note over Runner: rebuild compose_extensions(...) — same fn the live adapter used; extractor mints fresh ExtractionState, auditor reuses compose_kwargs graph
     Runner->>Engine: run_phase_standalone(extensions, payload)
     Engine->>Child: top-level session.prompt(payload)
     Child-->>Engine: assistant messages + tool calls
@@ -158,20 +156,20 @@ sequenceDiagram
     autonumber
     participant User
     participant CLI as llmharness-aggregate
-    participant Sidecar as audit_replay/&lt;root&gt;.jsonl
-    participant Meta as &lt;root&gt;.meta.json<br/>(optional, distill.binding)
+    participant Sidecar as Replay sidecar JSONL
+    participant Meta as Meta sidecar (optional, distill.binding)
     participant Coll as aggregate/collector.py
     participant Writer as aggregate/writer.py
-    participant Case as cases/&lt;case_id&gt;/
+    participant Case as Case directory
 
-    User->>CLI: aggregate --replay &lt;path&gt;
+    User->>CLI: aggregate --replay PATH
     CLI->>Sidecar: iter_records(...)
-    CLI->>Meta: read_sample_meta(...) (if present)
+    CLI->>Meta: read_sample_meta(...) if present
     CLI->>Coll: collect_case(replay, meta, overrides)
-    Coll->>Coll: partition by phase
-    Coll->>Coll: _attach_auditor_graph_refs<br/>(pair each auditor with its graph snapshot)
-    Coll->>Coll: _accumulate_graph(extractor_firings)<br/>→ GraphSnapshot per firing
-    Coll->>Coll: stitch main_agent_messages<br/>(latest auditor snapshot + extractor tails)
+    Coll->>Coll: partition records by phase
+    Coll->>Coll: _attach_auditor_graph_refs — pair each auditor with its graph snapshot
+    Coll->>Coll: _accumulate_graph(extractor_firings) → GraphSnapshot per firing
+    Coll->>Coll: stitch main_agent_messages (latest auditor snapshot + extractor tails)
     Coll-->>CLI: CaseData(meta, firings, snapshots, verdicts)
     CLI->>Writer: write_case(case_data, out_dir)
     Writer->>Case: write meta.json, firings/, graph/, verdicts/, messages/
