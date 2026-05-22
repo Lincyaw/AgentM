@@ -27,12 +27,16 @@ they shift, that's a breaking change that bumps the package version.
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:  # avoid pulling agentm.core.abi at import time
+    from .tools.engine import PhaseResult
 
 __all__ = [
     "ToolEvent",
     "auditor_process_reward",
     "extractor_process_reward",
+    "tool_events_from_phase_result",
 ]
 
 
@@ -162,3 +166,89 @@ def auditor_process_reward(
         "verdict_submitted": verdict_submitted,
         "efficiency_penalty": efficiency_penalty,
     }
+
+
+def tool_events_from_phase_result(result: PhaseResult) -> list[ToolEvent]:
+    """Walk ``result.messages`` and pair tool_call with tool_result.
+
+    Returns the canonical :class:`ToolEvent` list that
+    :func:`extractor_process_reward` / :func:`auditor_process_reward`
+    consume. Pairing prefers ``ToolResultBlock.tool_call_id`` match;
+    when an id can't be matched (older providers / synthetic messages)
+    we fall back to per-tool-call FIFO ordering across the trajectory.
+
+    Skips system / user / assistant-text / thinking content. Defensive:
+    empty ``result.messages`` returns ``[]``. Tool calls without any
+    matching result are still emitted with ``is_error=False`` and
+    ``error_text=None`` so the rollout's step count stays honest.
+
+    The pairing strategy intentionally mirrors what the live audit loop
+    does — see :func:`find_terminal_tool_arguments` in
+    ``audit/_session_helpers.py``; here we keep every tool_call, not
+    just the terminal one.
+    """
+    # Local import: keeping ``agentm.core.abi`` out of module-load time
+    # so train_signals stays cheap to import in the trainer's hot path.
+    from agentm.core.abi.messages import (
+        AssistantMessage,
+        TextContent,
+        ToolCallBlock,
+        ToolResultBlock,
+        ToolResultMessage,
+    )
+
+    messages = result.messages
+    if not messages:
+        return []
+
+    # First pass: collect tool calls in order, indexed by their id.
+    calls: list[ToolCallBlock] = []
+    for msg in messages:
+        if not isinstance(msg, AssistantMessage):
+            continue
+        for block in msg.content:
+            if isinstance(block, ToolCallBlock):
+                calls.append(block)
+
+    if not calls:
+        return []
+
+    # Second pass: collect results, keyed by tool_call_id when possible.
+    # ``results_by_id`` maps id -> (is_error, error_text); we keep the last
+    # match if a provider somehow emits the same id twice.
+    results_by_id: dict[str, tuple[bool, str | None]] = {}
+    # Fallback queue of (is_error, error_text) when a result block has no
+    # matching id; consumed in FIFO order by leftover unpaired calls.
+    orphan_results: list[tuple[bool, str | None]] = []
+    seen_call_ids = {c.id for c in calls if c.id}
+    for msg in messages:
+        if not isinstance(msg, ToolResultMessage):
+            continue
+        for r_block in msg.content:
+            if not isinstance(r_block, ToolResultBlock):
+                continue
+            text_parts = [c.text for c in r_block.content if isinstance(c, TextContent)]
+            error_text = "\n".join(text_parts) if r_block.is_error and text_parts else None
+            entry = (bool(r_block.is_error), error_text)
+            if r_block.tool_call_id and r_block.tool_call_id in seen_call_ids:
+                results_by_id[r_block.tool_call_id] = entry
+            else:
+                orphan_results.append(entry)
+
+    out: list[ToolEvent] = []
+    for call in calls:
+        if call.id and call.id in results_by_id:
+            is_error, error_text = results_by_id[call.id]
+        elif orphan_results:
+            is_error, error_text = orphan_results.pop(0)
+        else:
+            is_error, error_text = False, None
+        out.append(
+            ToolEvent(
+                tool_name=call.name,
+                args=dict(call.arguments),
+                is_error=is_error,
+                error_text=error_text,
+            )
+        )
+    return out
