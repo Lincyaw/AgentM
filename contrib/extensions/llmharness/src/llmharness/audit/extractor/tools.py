@@ -25,7 +25,10 @@ from .._enum_schema import EDGE_KIND_VALUES, EVENT_KIND_VALUES
 from .state import ExtractionState
 
 SUBMIT_PLAN_TOOL_NAME = "submit_plan"
-GRAPH_EDIT_TOOL_NAME = "graph_edit"
+UPSERT_NODE_TOOL_NAME = "upsert_node"
+DELETE_NODE_TOOL_NAME = "delete_node"
+UPSERT_EDGE_TOOL_NAME = "upsert_edge"
+DELETE_EDGE_TOOL_NAME = "delete_edge"
 SUBMIT_EVENTS_BATCH_TOOL_NAME = "submit_events_batch"
 RESET_EXTRACTION_TOOL_NAME = "reset_extraction"
 SUBMIT_EVENTS_REASON = "llmharness:submit_events_batch_done"
@@ -37,7 +40,10 @@ SUBMIT_EVENTS_TOOL_NAME = SUBMIT_EVENTS_BATCH_TOOL_NAME
 
 EXTRACTOR_TOOL_NAMES: tuple[str, ...] = (
     SUBMIT_PLAN_TOOL_NAME,
-    GRAPH_EDIT_TOOL_NAME,
+    UPSERT_NODE_TOOL_NAME,
+    DELETE_NODE_TOOL_NAME,
+    UPSERT_EDGE_TOOL_NAME,
+    DELETE_EDGE_TOOL_NAME,
     SUBMIT_EVENTS_BATCH_TOOL_NAME,
     RESET_EXTRACTION_TOOL_NAME,
 )
@@ -376,39 +382,12 @@ _GRAPH_EDGE_SCHEMA: dict[str, Any] = {
 }
 
 
-_GRAPH_EDIT_PARAMETERS: dict[str, Any] = {
+_DELETE_NODE_PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "op": {
-            "type": "string",
-            "enum": [
-                "add_node",
-                "update_node",
-                "delete_node",
-                "add_edge",
-                "update_edge",
-                "delete_edge",
-            ],
-            "description": "One graph mutation to apply to the pending extractor graph.",
-        },
-        "node": {
-            "type": "object",
-            "description": (
-                "Full node for add_node, or patch for update_node. Node fields "
-                "match submit_events_batch events: id, kind, summary, source_turns."
-            ),
-        },
-        "node_id": {"type": "integer", "description": "Target node id for update/delete."},
-        "edge": {
-            "oneOf": [_GRAPH_EDGE_SCHEMA],
-            "description": "Full edge for add_edge, or patch for update_edge.",
-        },
-        "edge_selector": {
-            "oneOf": [_EDGE_SELECTOR_SCHEMA],
-            "description": "Select an existing pending edge for update/delete.",
-        },
+        "id": {"type": "integer", "description": "Pending event node id to delete."},
     },
-    "required": ["op"],
+    "required": ["id"],
     "additionalProperties": False,
 }
 
@@ -433,6 +412,9 @@ def build_extractor_tools(
       the v18 cross-graph degree check (see below). The plan still
       provides offline diagnostic value and gives the LLM a place to
       front-load CoT before emitting events.
+    * ``upsert_node`` / ``delete_node`` / ``upsert_edge`` /
+      ``delete_edge`` — direct edits to the same pending graph used by
+      ``submit_events_batch``.
     * ``submit_events_batch`` — called one OR more times. Each batch is
       validated standalone and either accepted in full (appended to
       pending) or rejected in full (LLM retries the batch). When called
@@ -530,9 +512,35 @@ def build_extractor_tools(
             reason=SUBMIT_EVENTS_REASON,
         )
 
-    async def _graph_edit(args: dict[str, Any]) -> ToolResult:
-        op = str(args.get("op") or "")
-        result = state.apply_graph_edit(op, args)
+    async def _upsert_node(args: dict[str, Any]) -> ToolResult:
+        result = state.upsert_node(args)
+        if isinstance(result, str):
+            return _err(result)
+        import json
+
+        return _ok(json.dumps(result, ensure_ascii=False))
+
+    async def _delete_node(args: dict[str, Any]) -> ToolResult:
+        node_id = args.get("id")
+        if isinstance(node_id, bool) or not isinstance(node_id, int):
+            return _err("delete_node: 'id' must be an integer")
+        result = state.delete_node(node_id)
+        if isinstance(result, str):
+            return _err(result)
+        import json
+
+        return _ok(json.dumps(result, ensure_ascii=False))
+
+    async def _upsert_edge(args: dict[str, Any]) -> ToolResult:
+        result = state.upsert_edge(args)
+        if isinstance(result, str):
+            return _err(result)
+        import json
+
+        return _ok(json.dumps(result, ensure_ascii=False))
+
+    async def _delete_edge(args: dict[str, Any]) -> ToolResult:
+        result = state.delete_edge(args)
         if isinstance(result, str):
             return _err(result)
         import json
@@ -567,16 +575,39 @@ def build_extractor_tools(
             fn=_submit_plan,
         ),
         FunctionTool(
-            name=GRAPH_EDIT_TOOL_NAME,
+            name=UPSERT_NODE_TOOL_NAME,
             description=(
-                "Apply one direct edit to the pending extractor graph. "
-                "Use this when you need to revise the graph incrementally: "
-                "add/update/delete event nodes or witness-bearing edges. "
-                "After graph_edit operations, call submit_events_batch with "
-                "events=[] and done=true to finalize the edited pending graph."
+                "Insert or replace one pending event node by id. Fields match "
+                "submit_events_batch events: id, kind, summary, source_turns."
             ),
-            parameters=_GRAPH_EDIT_PARAMETERS,
-            fn=_graph_edit,
+            parameters=_EVENT_SCHEMA,
+            fn=_upsert_node,
+        ),
+        FunctionTool(
+            name=DELETE_NODE_TOOL_NAME,
+            description=(
+                "Delete one pending event node by id. Any pending edge touching "
+                "that node is removed automatically."
+            ),
+            parameters=_DELETE_NODE_PARAMETERS,
+            fn=_delete_node,
+        ),
+        FunctionTool(
+            name=UPSERT_EDGE_TOOL_NAME,
+            description=(
+                "Insert or replace one pending witness-bearing edge, keyed by "
+                "(src, dst, kind). Both endpoint nodes must already be pending."
+            ),
+            parameters=_GRAPH_EDGE_SCHEMA,
+            fn=_upsert_edge,
+        ),
+        FunctionTool(
+            name=DELETE_EDGE_TOOL_NAME,
+            description=(
+                "Delete one pending edge selected by src/dst and optional kind."
+            ),
+            parameters=_EDGE_SELECTOR_SCHEMA,
+            fn=_delete_edge,
         ),
         FunctionTool(
             name=SUBMIT_EVENTS_BATCH_TOOL_NAME,
@@ -644,12 +675,15 @@ def _format_witness_feedback(dropped: list[dict[str, Any]]) -> str:
 
 
 __all__ = [
+    "DELETE_EDGE_TOOL_NAME",
+    "DELETE_NODE_TOOL_NAME",
     "EXTRACTOR_TOOL_NAMES",
-    "GRAPH_EDIT_TOOL_NAME",
     "RESET_EXTRACTION_TOOL_NAME",
     "SUBMIT_EVENTS_BATCH_TOOL_NAME",
     "SUBMIT_EVENTS_REASON",
     "SUBMIT_EVENTS_TOOL_NAME",
     "SUBMIT_PLAN_TOOL_NAME",
+    "UPSERT_EDGE_TOOL_NAME",
+    "UPSERT_NODE_TOOL_NAME",
     "build_extractor_tools",
 ]
