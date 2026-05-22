@@ -1517,7 +1517,15 @@ async def _run_auditor(
         return None, raw_blocks
 
 
+# Public aliases for downstream eval orchestrators that need to reconstruct
+# extractor/auditor inputs offline (e.g. agentm_rca baseline-fork mode).
+flatten_assistant_blocks = _flatten_assistant_blocks
+serialize_full_trajectory = _serialize_full_trajectory
+
+
 __all__ = [
     "MANIFEST",
+    "flatten_assistant_blocks",
     "install",
+    "serialize_full_trajectory",
 ]

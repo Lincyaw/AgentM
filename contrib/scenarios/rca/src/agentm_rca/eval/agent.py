@@ -613,8 +613,8 @@ async def _run_offline_auditor_over_control(
     from pathlib import Path
 
     from llmharness.adapters.agentm import (
-        _flatten_assistant_blocks,
-        _serialize_full_trajectory,
+        flatten_assistant_blocks,
+        serialize_full_trajectory,
     )
     from llmharness.audit.auditor.output import (
         AuditorOutputError,
@@ -652,7 +652,7 @@ async def _run_offline_auditor_over_control(
         phases.extend(merge_to_phases(new_events))
 
         cut = min(max(extractor_record.turn_index + 1, 0), len(control.final_messages))
-        trajectory_snapshot = _serialize_full_trajectory(control.final_messages[:cut])
+        trajectory_snapshot = serialize_full_trajectory(control.final_messages[:cut])
         compose_kwargs = {
             "base_prompt": None,
             "cards_tools_config": {},
@@ -708,7 +708,7 @@ async def _run_offline_auditor_over_control(
             status=phase_result.status if verdict_dict is not None else "no_call",
             error=phase_result.error,
             latency_ms=phase_result.latency_ms,
-            raw_assistant_messages=_flatten_assistant_blocks(phase_result.messages),
+            raw_assistant_messages=flatten_assistant_blocks(phase_result.messages),
         )
         auditor_records.append(auditor_record)
 
@@ -868,47 +868,6 @@ def _write_strict_ab_replay(
                 )
 
     return str(out_path)
-
-
-def _find_first_surface_reminder(audit_replay_path: str) -> _ReminderCandidate | None:
-    """Pick the first auditor verdict that would have affected the agent.
-
-    The baseline-fork experiment runs the baseline with reminders disabled,
-    so the replay sidecar is the only place where auditor decisions live.
-    """
-    if not os.path.exists(audit_replay_path):
-        return None
-
-    with open(audit_replay_path, encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if record.get("phase") != "auditor":
-                continue
-            if record.get("status") != "ok":
-                continue
-            output = record.get("output")
-            if not isinstance(output, dict):
-                continue
-            if not output.get("surface_reminder"):
-                continue
-            text = output.get("reminder_text")
-            if not isinstance(text, str) or not text.strip():
-                continue
-            try:
-                turn_index = int(record.get("turn_index"))
-            except (TypeError, ValueError):
-                continue
-            return _ReminderCandidate(
-                turn_index=turn_index,
-                text=text,
-                record=record,
-            )
-    return None
 
 
 def _fork_prefix_messages(final_messages: list[Any], *, turn_index: int) -> list[Any]:

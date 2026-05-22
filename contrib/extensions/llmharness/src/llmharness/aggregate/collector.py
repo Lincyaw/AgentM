@@ -85,7 +85,8 @@ def _attach_auditor_graph_refs(
             for ext in extractor_firings
             if ext.status == "ok"
             and ext.output is not None
-            and (ext.ts_ns <= auditor.ts_ns or ext.turn_index <= auditor.turn_index)
+            and ext.ts_ns <= auditor.ts_ns
+            and ext.turn_index <= auditor.turn_index
         ]
         graph_ref = prior[-1].sequence if prior else 0
         input_payload = dict(auditor.input_payload)
