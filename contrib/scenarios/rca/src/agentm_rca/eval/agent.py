@@ -226,6 +226,7 @@ class AgentMAgent(BaseAgent):
         )
         self._exp_id = exp_id
         self._max_turns = _coerce_max_turns(max_turns, _DEFAULT_MAX_TURNS)
+        self._intervention_mode: str | None
         if intervention_mode:
             mode = intervention_mode.strip()
             self._intervention_mode = (
