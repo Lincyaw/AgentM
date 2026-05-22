@@ -13,8 +13,8 @@ from typing import Any
 import pytest
 
 from llmharness.replay import chain as chain_module
-from llmharness.replay.engine import PhaseResult
 from llmharness.replay.record import ReplayRecord, write_record
+from llmharness.tools.engine import PhaseResult
 
 
 def _rec(phase: str, turn: int) -> ReplayRecord:

@@ -21,7 +21,7 @@ from ..audit.extractor.output import RawExtractorOutput
 from ..audit.extractor.state import ExtractionState
 from ..audit.extractor.tools import SUBMIT_EVENTS_TOOL_NAME
 from ..schema import Edge, Event, Finding, Phase
-from .engine import PhaseResult, run_phase_standalone
+from ..tools.engine import PhaseResult, run_phase_standalone
 from .record import ReplayRecord
 
 _T = TypeVar("_T")

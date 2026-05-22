@@ -633,7 +633,7 @@ requirements:
         enforced by sourcing the message format from the shared
         ``audit/_reminder_format.py`` helper.
 
-      - ``llmharness.replay.prefix_replay`` — orchestration helpers.
+      - ``llmharness.tools.prefix_replay`` — orchestration helpers.
         Picks the auditor record at ``turn=t`` whose
         ``output.surface_reminder`` is set, locates the source session
         file under ``<session-dir>/*_<root_session_id>.jsonl``, finds
@@ -667,13 +667,61 @@ requirements:
     status: tested
     code:
       - src/llmharness/replay/reminder_seed.py
-      - src/llmharness/replay/prefix_replay.py
+      - src/llmharness/tools/prefix_replay.py
       - src/llmharness/replay/cli.py
       - src/llmharness/audit/_reminder_format.py
     tests:
       - tests/test_reminder_seed_atom.py
       - tests/test_prefix_replay_cli.py
     depends_on: [REQ-019, REQ-034]
+
+  - id: REQ-036
+    title: Strict-A/B replay orchestration
+    description: |
+      Own the host-side stitching of strict-A/B fork experiments inside
+      llmharness so downstream eval drivers (rca, others) become thin
+      callers that supply only their scenario-naming policy.
+
+      A strict-A/B fork pairs:
+
+      - a *control* trajectory recorded under an extractor-only
+        scenario (no auditor reminders, so the prefix is immutable
+        across runs), and
+      - a *branch* trajectory that re-runs from the same prefix after
+        the surfaced reminder has been seeded.
+
+      Two entry points:
+
+      - :func:`llmharness.run_offline_auditor_over_control` — walks the
+        control's extractor records in ``(ts_ns, turn_index)`` order,
+        folds the cumulative event/edge/phase graph, recomposes the
+        auditor compose-kwargs at each turn, and replays the auditor
+        via :func:`replay_auditor_record`. Returns the first
+        surfaced-reminder candidate plus every silent auditor record
+        collected along the way (so branch-side replays can persist a
+        complete sidecar even when ``stop_on_first_surface`` is on).
+
+      - :func:`llmharness.write_strict_ab_replay` +
+        :func:`strict_ab_replay_path` — stitch ``control[<=t]`` +
+        ``branch[>t]`` extractor/auditor pairs into a single
+        ``<branch_session_log_id>.strict_ab.jsonl`` file, rewriting
+        every record's ``root_session_id`` to the branch's id so the
+        case viewer joins records to the right trajectory. Falls back
+        to writing the branch sidecar verbatim if the branch produced
+        no post-reminder extractor records.
+
+      Fail-stop position: misjoining the prefix and tail (wrong
+      session_id, wrong cut point, dropped branch tail) silently
+      corrupts every distillation pair derived from forked-eval runs.
+      Tests assert the cut point, the session-id rebind, and the empty-tail
+      fallback.
+    priority: P1
+    status: tested
+    code:
+      - src/llmharness/replay/strict_ab.py
+    tests:
+      - tests/test_strict_ab_replay.py
+    depends_on: [REQ-019, REQ-034, REQ-035]
 
   # ---------------------------------------------------------------------------
   # Removed in the 2026-05-08 SDK-native cleanup. Kept here for traceability;
