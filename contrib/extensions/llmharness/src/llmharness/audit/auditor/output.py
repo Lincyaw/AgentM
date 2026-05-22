@@ -3,7 +3,8 @@
 The auditor terminates by calling ``submit_verdict(verdict=...)``. The
 kernel records that call as a :class:`ToolCallBlock` whose ``arguments``
 is a ``dict[str, Any]`` validated against
-:data:`llmharness.audit.auditor.submit_tool.SUBMIT_VERDICT_PARAMETERS`.
+:class:`llmharness.audit.auditor.submit_verdict.SubmitVerdictArgs` (the
+pydantic model that backs the tool's JSON schema).
 This module gives the adapter a typed view over that dict — coercing it
 to a :class:`llmharness.schema.Verdict` so downstream code never sees
 ``Any``.
