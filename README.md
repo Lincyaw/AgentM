@@ -206,17 +206,3 @@ Setting `extensions=[...]` is a **hard override** — scenario, auto-discovery,
 and `--extension` are all suppressed. Use it for tests; use scenarios in
 production.
 
----
-
-## Build & development
-
-```bash
-uv sync
-uv run agentm "..."
-uv run pytest                  # excludes nested workspaces, ui
-uv run ruff check src/
-uv run mypy src/
-```
-
-Python 3.12+, build backend `uv_build`. Entry point `agentm:main`. See
-`CLAUDE.md` for design-doc workflow and project conventions.
