@@ -681,7 +681,7 @@ started.
 
 ## The contract
 
-Four tools:
+Core tools plus four atomic graph-edit tools:
 
 1. `submit_plan(block_plan=[...])` — call ONCE. Partitions the
    new-turn window into basic blocks (see "The block plan" above).
@@ -690,14 +690,24 @@ Four tools:
    dropped — the real check moved to the emitted events). Use the
    plan to commit to a structure before token-generating events.
 
-2. `graph_edit(op=..., ...)` — optional but preferred when revising
-   the pending graph incrementally. Use it to `add_node`,
-   `update_node`, `delete_node`, `add_edge`, `update_edge`, or
-   `delete_edge`. This is for real graph mutation, not prose. After
-   graph edits, finalize by calling
-   `submit_events_batch(events=[], done=true)`.
+2. `upsert_node(id=..., kind=..., summary=..., source_turns=[...])`
+   — insert or replace one pending event node. Use the same event
+   fields described below. If the id is new it adds a node; if the id
+   already exists it updates that node.
 
-3. `submit_events_batch(events=[...], done=bool)` — call ONE OR
+3. `delete_node(id=...)` — delete one pending event node. Pending
+   edges touching that node are removed automatically.
+
+4. `upsert_edge(src=..., dst=..., kind=..., reason=..., ...)` —
+   insert or replace one pending edge keyed by `(src, dst, kind)`.
+   The edge must include the correct witness: `cited_entities` for
+   `data`, `cited_quote` for `ref`.
+
+5. `delete_edge(src=..., dst=..., kind=...)` — delete one pending
+   edge. `kind` is optional when `src` and `dst` identify a single
+   pending edge.
+
+6. `submit_events_batch(events=[...], done=bool)` — call ONE OR
    MORE times. Each batch appends to the firing's pending graph;
    accepted batches accumulate across calls. A hard reject (event
    shape, id sequence, ref shape) fails ONLY the offending batch —
@@ -716,7 +726,7 @@ Four tools:
    passthrough events (e.g. add a later event whose `refs`
    include the passthrough id, boosting its out-degree to 2).
 
-4. `reset_extraction()` — clears the pending event list so you
+7. `reset_extraction()` — clears the pending event list so you
    can start over. Only use this when the accumulated graph is
    genuinely unrecoverable.
 
@@ -787,10 +797,11 @@ are linear blocks; the marks themselves are branch blocks. Call
 `submit_plan(block_plan=[...])` to commit your partition.
 
 **Pass 2 — build the graph.** Walk the plan in order. You may use
-`graph_edit` for incremental construction/revision, or
-`submit_events_batch` for append-only batches. Prefer `graph_edit`
-when you need to change or delete a node/edge after seeing a better
-structure. For each block:
+the atomic graph-edit tools (`upsert_node`, `delete_node`,
+`upsert_edge`, `delete_edge`) for incremental construction/revision,
+or `submit_events_batch` for append-only batches. Prefer the graph
+edit tools when you need to change or delete a node/edge after seeing
+a better structure. For each block:
 
 1. **Emit per block kind.** Linear → one act + one evid covering
    the block's turns. Branch → one atomic hyp / dec / concl on
@@ -823,7 +834,7 @@ Two checks before setting `done=true`:
   concl must cite it directly via refs or external_refs.
 
 Then call `submit_events_batch(events=[...], done=true)` to
-finalize; if you already built the graph with `graph_edit`, use
+finalize; if you already built the graph with atomic edit tools, use
 `submit_events_batch(events=[], done=true)`. If the degree check rejects, the firing stays alive —
 either submit additional batches that promote passthroughs (add
 a later event whose refs target the passthrough id), or call
