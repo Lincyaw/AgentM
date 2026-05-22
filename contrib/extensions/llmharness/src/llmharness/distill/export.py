@@ -4,14 +4,19 @@ Two outputs:
 
 * ``extractor.jsonl`` — straight from replay records, no oracle needed.
   Input is the extractor system prompt + the recorded payload; target
-  is a single Qwen / GLM style assistant message — ``content`` carries
-  the teacher's ``<think>...</think>`` reasoning trace recovered from
-  the replay sidecar's ``raw_assistant_messages``, and ``tool_calls``
-  carries a single ``submit_events`` call whose ``arguments`` are
-  rebuilt from the witness-filtered ``output.events`` /
-  ``output.edges``. The student learns to emit thinking + the same
-  validated event graph the live teacher committed; raw, witness-failed
-  tool-call args are not surfaced.
+  is a **multi-turn** assistant trajectory replayed from the recorded
+  tool-call sequence (``submit_plan`` -> ``upsert_node`` /
+  ``upsert_edge`` / ``delete_*`` -> ``finalize_extraction``). Each
+  assistant message carries ``<think>`` wrapping reconstructed from the
+  matching block of ``raw_assistant_messages``. The student learns to
+  drive an incremental graph build, not to dump one batch — that was
+  the v18 single-shot ``submit_events_batch`` shape, which produced bad
+  SFT signal because witness retries dominated the trajectory.
+
+  Replays from the legacy v18 ``submit_events_batch`` toolset are
+  skipped (a counter is reported on completion) — under the v19 tool
+  surface those tool names are invalid and rebuilding them would
+  miscondition the student.
 
 * ``auditor.jsonl`` — from :class:`~llmharness.distill.oracle.LabeledSample`
   rows that were not dropped. Input is the student-visible payload
@@ -38,26 +43,37 @@ from ..audit.auditor.prompt import (
 )
 from ..audit.auditor.prompt import load_auditor_prompt
 from ..audit.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
+from ..audit.extractor.atom import EXTRACTOR_TOOL_NAMES
 from ..audit.extractor.prompt import (
     DEFAULT_PROMPT_NAME as _EXTRACTOR_DEFAULT_PROMPT_NAME,
 )
 from ..audit.extractor.prompt import load_extractor_prompt
-from ..audit.extractor.tools import SUBMIT_EVENTS_TOOL_NAME
 
 Phase = Literal["extractor", "auditor"]
+
+
+# v18 legacy tool names — if a replay record carries any of these, the
+# tool sequence is invalid under v19 and the record gets skipped (not
+# rebuilt) so we never train the student on a deleted tool surface.
+_LEGACY_BATCH_TOOL_NAMES = frozenset(
+    {"submit_events", "submit_events_batch"}
+)
 
 
 @dataclass(frozen=True)
 class SftRecord:
     """One SFT training row in Qwen / GLM chat-template shape.
 
-    ``target_messages`` is a list of assistant messages (today always
-    length 1) whose ``content`` holds the teacher's reasoning trace as
-    ``<think>...</think>`` and whose ``tool_calls`` holds the
-    validated terminal call. Trainers that consume Qwen / GLM tokens
-    can pass this list straight to the chat template; the ``<think>``
-    block is preserved verbatim and ``arguments`` is a JSON string per
-    the OpenAI-compatible tool-call convention.
+    ``target_messages`` is a list of assistant messages. After the v19
+    extractor refactor an extractor row is a **multi-turn trajectory**:
+    one assistant message per recorded tool call, each with its own
+    ``<think>`` block reconstructed from ``raw_assistant_messages``
+    (thinking blocks that sit immediately before the matching
+    tool_call). Auditor rows stay single-turn for now.
+
+    Each ``tool_calls[*].function.arguments`` is a JSON string per the
+    OpenAI-compatible tool-call convention so off-the-shelf trainers
+    work without a custom adapter.
     """
 
     phase: Phase
@@ -85,58 +101,78 @@ class SftRecord:
         )
 
 
-def _thinking_text_from_raw(raw_assistant_messages: Any) -> str:
-    """Concatenate thinking-block text in chronological order.
-
-    Source rows can be the missing field (older sidecars), a non-list
-    (corrupt payload), or a list of dicts. Anything that isn't a
-    ``{"type": "thinking", "text": str}`` block is ignored — we don't
-    want to surface tool_call args or text blocks here, only reasoning.
-    """
-    if not isinstance(raw_assistant_messages, list):
-        return ""
-    parts: list[str] = []
-    for blk in raw_assistant_messages:
-        if not isinstance(blk, dict):
-            continue
-        if blk.get("type") != "thinking":
-            continue
-        text = blk.get("text")
-        if isinstance(text, str) and text:
-            parts.append(text)
-    return "".join(parts)
-
-
-def _build_target_messages(
-    tool_name: str, arguments: dict[str, Any], *, thinking_text: str
-) -> list[dict[str, Any]]:
+def _assistant_message(
+    *, thinking_text: str, tool_name: str, arguments: dict[str, Any]
+) -> dict[str, Any]:
     """Assemble one Qwen / GLM-style assistant message.
 
     ``content`` carries the thinking block wrapped in ``<think>`` tags;
-    when no thinking was captured it collapses to an empty string so
-    the chat template doesn't emit a stray pair of empty tags.
-    ``tool_calls`` follows the OpenAI-compatible shape (``arguments``
-    serialized to a JSON string) so off-the-shelf trainers work without
-    a custom adapter.
+    when no thinking was captured it collapses to an empty string so the
+    chat template doesn't emit a stray pair of empty tags. ``tool_calls``
+    follows the OpenAI-compatible shape (``arguments`` serialized to a
+    JSON string).
     """
-    content = (
-        f"<think>{thinking_text}</think>\n\n" if thinking_text else ""
-    )
-    return [
-        {
-            "role": "assistant",
-            "content": content,
-            "tool_calls": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "arguments": json.dumps(arguments, ensure_ascii=False),
-                    },
-                }
-            ],
-        }
-    ]
+    content = f"<think>{thinking_text}</think>\n\n" if thinking_text else ""
+    return {
+        "role": "assistant",
+        "content": content,
+        "tool_calls": [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": json.dumps(arguments, ensure_ascii=False),
+                },
+            }
+        ],
+    }
+
+
+def _split_into_steps(
+    raw_blocks: list[Any],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Walk the flattened block list, yielding ``(thinking, tool_call)``.
+
+    The replay sidecar's ``raw_assistant_messages`` is the chronological
+    flattening of every assistant message's content blocks (see
+    ``_flatten_assistant_blocks`` in the adapter): thinking blocks,
+    tool_call blocks, and free-text blocks interleaved. For multi-turn
+    SFT we slice it into one step per tool_call, attributing the
+    immediately preceding thinking block(s) to that step.
+
+    Returns a list of ``(thinking_concat, tool_call_dict)`` tuples.
+    ``tool_call_dict`` carries ``name`` and ``arguments`` (already
+    parsed). Blocks of unknown type are ignored — they don't affect
+    the SFT shape.
+    """
+    steps: list[tuple[str, dict[str, Any]]] = []
+    pending_thinking: list[str] = []
+    for blk in raw_blocks:
+        if not isinstance(blk, dict):
+            continue
+        btype = blk.get("type")
+        if btype == "thinking":
+            text = blk.get("text")
+            if isinstance(text, str) and text:
+                pending_thinking.append(text)
+        elif btype == "tool_call":
+            name = blk.get("name")
+            args = blk.get("arguments")
+            if not isinstance(name, str):
+                # Malformed block — drop the thinking with it so we
+                # don't attribute it to the next tool call by mistake.
+                pending_thinking = []
+                continue
+            steps.append(
+                (
+                    "".join(pending_thinking),
+                    {"name": name, "arguments": args if isinstance(args, dict) else {}},
+                )
+            )
+            pending_thinking = []
+        # text / other blocks: ignore (the prompt input is the carrier;
+        # final SFT content is reconstructed from thinking only).
+    return steps
 
 
 # ----- extractor side -------------------------------------------------------
@@ -149,57 +185,52 @@ def extractor_records_from_replay(
 ) -> Iterator[SftRecord]:
     """Yield one SFT record per ok extractor replay record.
 
-    The extractor's replay ``output`` carries the witness-filtered
-    events + edges the teacher actually committed; we re-package them
-    as a single ``submit_events`` tool call (the v3.1 shape: events
-    with embedded ``refs[]`` derived from edges). The teacher's
-    ``<think>...</think>`` reasoning trace is recovered from
-    ``raw_assistant_messages`` so the student learns reasoning →
-    validated graph, not reasoning → raw (possibly invalid) emit.
-    Older sidecars without ``raw_assistant_messages`` yield an empty
-    thinking string and an empty ``content`` field — the row is still
-    a valid SFT target.
+    Drops three kinds of records:
+
+    * non-extractor / non-ok records (status != "ok"),
+    * legacy records whose tool sequence contains any v18 batch tool
+      name (``submit_events`` / ``submit_events_batch``) — those rebuild
+      a deleted tool surface and would miscondition the student. Use
+      :func:`legacy_batch_replay_count` to count them ahead of an
+      export run.
+    * records with no recorded tool calls at all (e.g. spawn_error /
+      empty firings) — the student has nothing to learn from an empty
+      target trajectory.
+
+    The recorded tool sequence becomes a multi-turn assistant
+    trajectory: each tool_call is its own assistant message carrying
+    the matching thinking block(s) wrapped in ``<think>``.
     """
     for rec in replay_records:
         if rec.get("phase") != "extractor":
             continue
         if rec.get("status") != "ok":
             continue
-        out = rec.get("output") or {}
-        events = out.get("events") or []
-        edges = out.get("edges") or []
-        if not events and not edges:
-            # Trivial-window extraction; skip — student doesn't need to
-            # learn "submit empty".
+        raw_blocks = rec.get("raw_assistant_messages")
+        if not isinstance(raw_blocks, list) or not raw_blocks:
             continue
-        # Re-attach edges as refs[] on events so the SFT target matches
-        # the v3.1 ``submit_events`` payload shape (one terminal call).
-        refs_by_src: dict[int, list[dict[str, Any]]] = {}
-        for ed in edges:
-            src = ed.get("src")
-            if not isinstance(src, int):
-                continue
-            refs_by_src.setdefault(src, []).append(
-                {
-                    "dst": ed.get("dst"),
-                    "kind": ed.get("kind"),
-                    "reason": ed.get("reason"),
-                    "src_turns": ed.get("src_turns"),
-                    "dst_turns": ed.get("dst_turns"),
-                    "cited_entities": ed.get("cited_entities"),
-                    "cited_quote": ed.get("cited_quote"),
-                }
+        steps = _split_into_steps(raw_blocks)
+        if not steps:
+            continue
+        # Legacy filter — any v18 batch tool name invalidates the
+        # whole trajectory under v19.
+        if any(call["name"] in _LEGACY_BATCH_TOOL_NAMES for _think, call in steps):
+            continue
+        # Optional sanity: ignore steps that call unknown tool names so
+        # a malformed sidecar can't slip through.
+        valid_steps = [
+            s for s in steps if s[1]["name"] in EXTRACTOR_TOOL_NAMES
+        ]
+        if not valid_steps:
+            continue
+        target_messages = [
+            _assistant_message(
+                thinking_text=thinking,
+                tool_name=call["name"],
+                arguments=call["arguments"],
             )
-        events_with_refs = []
-        for ev in events:
-            ev_copy = dict(ev)
-            ev_id = ev_copy.get("id")
-            ev_copy["refs"] = (
-                refs_by_src.get(ev_id, []) if isinstance(ev_id, int) else []
-            )
-            events_with_refs.append(ev_copy)
-
-        thinking_text = _thinking_text_from_raw(rec.get("raw_assistant_messages"))
+            for thinking, call in valid_steps
+        ]
         yield SftRecord(
             phase="extractor",
             sample_id=sample_id,
@@ -207,13 +238,36 @@ def extractor_records_from_replay(
             turn_index=int(rec.get("turn_index") or 0),
             input_system=load_extractor_prompt(_EXTRACTOR_DEFAULT_PROMPT_NAME),
             input_user=json.dumps(rec.get("payload") or {}, ensure_ascii=False),
-            target_messages=_build_target_messages(
-                SUBMIT_EVENTS_TOOL_NAME,
-                {"events": events_with_refs},
-                thinking_text=thinking_text,
-            ),
+            target_messages=target_messages,
             meta={"replay_ts_ns": rec.get("ts_ns")},
         )
+
+
+def legacy_batch_replay_count(
+    replay_records: Iterable[dict[str, Any]],
+) -> int:
+    """Count replay records that would be skipped as legacy-batch.
+
+    Callers exposing a CLI can print this so the operator notices when
+    their corpus is dominated by pre-v19 replays — those need a
+    re-collection under the new tool surface before SFT is useful.
+    """
+    count = 0
+    for rec in replay_records:
+        if rec.get("phase") != "extractor":
+            continue
+        raw_blocks = rec.get("raw_assistant_messages")
+        if not isinstance(raw_blocks, list):
+            continue
+        for blk in raw_blocks:
+            if not isinstance(blk, dict):
+                continue
+            if blk.get("type") != "tool_call":
+                continue
+            if blk.get("name") in _LEGACY_BATCH_TOOL_NAMES:
+                count += 1
+                break
+    return count
 
 
 # ----- auditor side ---------------------------------------------------------
@@ -244,11 +298,13 @@ def auditor_records_from_labels(
             input_user=json.dumps(
                 row.get("input_payload") or {}, ensure_ascii=False
             ),
-            target_messages=_build_target_messages(
-                SUBMIT_VERDICT_TOOL_NAME,
-                {"verdict": target},
-                thinking_text="",
-            ),
+            target_messages=[
+                _assistant_message(
+                    thinking_text="",
+                    tool_name=SUBMIT_VERDICT_TOOL_NAME,
+                    arguments={"verdict": target},
+                )
+            ],
             meta=dict(row.get("gt_meta") or {}),
         )
 
@@ -293,5 +349,6 @@ __all__ = [
     "auditor_records_from_labels",
     "dropped_records_from_labels",
     "extractor_records_from_replay",
+    "legacy_batch_replay_count",
     "write_jsonl",
 ]
