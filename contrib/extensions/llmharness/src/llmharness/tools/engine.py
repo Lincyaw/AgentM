@@ -87,19 +87,16 @@ async def run_phase_standalone(
 
     try:
         payload_json = json.dumps(payload, ensure_ascii=False, default=str)
-        if terminal_tool == "submit_events":
+        if terminal_tool == "finalize_extraction":
             recent_n = len(payload.get("recent_graph") or [])
             payload_json = (
-                "Below is the firing input. Before calling submit_events, do "
-                f"the external_refs pass: recent_graph has {recent_n} entries "
-                "with source_turn_texts; for each event you emit, scan those "
-                "texts for any literal token that also appears in this "
-                "event's source_turns text. When you find one and the "
-                "connection is causally meaningful, emit an external_refs "
-                "entry pointing to that recent_graph entry by 1-based index. "
-                "Do not skip this pass; in a typical multi-turn investigation "
-                "most evid events in this firing answer a hyp/act from "
-                "earlier firings.\n\n" + payload_json
+                "Below is the firing input. Build the graph incrementally "
+                "with submit_plan -> upsert_node / upsert_edge (and "
+                "delete_node / delete_edge as needed), then call "
+                "finalize_extraction with no payload to terminate. recent_graph "
+                f"carries {recent_n} prior-firing entries you can ref-link by "
+                "id via upsert_edge (the folded view already contains them).\n\n"
+                + payload_json
             )
         messages = await session.prompt(payload_json)
     except Exception as exc:

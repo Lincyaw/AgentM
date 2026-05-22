@@ -22,7 +22,7 @@ from typing import Final
 EXTRACTOR_STATE_SERVICE_KEY: Final[str] = "llmharness.extractor_state"
 
 # llmharness atom dotted module names referenced by the composers.
-EXTRACTOR_TOOLS_MODULE: Final[str] = "llmharness.audit.extractor.extensions"
+EXTRACTOR_TOOLS_MODULE: Final[str] = "llmharness.audit.extractor.atom"
 
 # SDK builtin atom dotted module names that the audit composers wire in.
 # A host-side rename of any of these surfaces here first.

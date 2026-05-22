@@ -17,9 +17,9 @@ from ..audit._session_helpers import bind_extractor_state
 from ..audit.auditor.extensions import compose_auditor_extensions
 from ..audit.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
 from ..audit.extractor.extensions import compose_extractor_extensions
+from ..audit.extractor.finalize_extraction import FINALIZE_EXTRACTION_TOOL_NAME
 from ..audit.extractor.output import RawExtractorOutput
 from ..audit.extractor.state import ExtractionState
-from ..audit.extractor.tools import SUBMIT_EVENTS_TOOL_NAME
 from ..schema import Edge, Event, Finding, Phase
 from ..tools.engine import PhaseResult, run_phase_standalone
 from .record import ReplayRecord
@@ -60,7 +60,6 @@ async def replay_extractor_record(
     cwd: str,
     provider_override: tuple[str, dict[str, Any]] | None = None,
     prompt_override: str | None = None,
-    witness_retry_budget: int | None = None,
 ) -> PhaseResult:
     """Run extractor on a recorded payload.
 
@@ -68,11 +67,12 @@ async def replay_extractor_record(
     system prompt while keeping the input payload + tool surface identical
     — the A/B knobs that motivate this whole module.
 
-    ``witness_retry_budget`` forwards into the extractor_tools atom so
-    the LLM can re-cite refs that failed witness validation. Default
-    ``None`` keeps the atom's own default (0, single-shot); replay
-    callers typically pass 3 to recover causally-correct edges where
-    the LLM picked a witness that only exists on one side of the edge.
+    The v18 ``witness_retry_budget`` knob is gone in v19: each upsert
+    gets per-edit validation feedback so there is no batch to bounce
+    back. Replay sidecars from v18 that carried the knob in
+    ``compose_kwargs`` are ignored — the new tool surface handles
+    witness fixes via the three-section error template inside the
+    handler.
     """
     if record.phase != "extractor":
         raise ValueError(f"expected extractor record, got phase={record.phase!r}")
@@ -91,7 +91,6 @@ async def replay_extractor_record(
         base_prompt=effective_prompt,
         cards_tools_config=ck.get("cards_tools_config"),
         observability_config=ck.get("observability_config"),
-        witness_retry_budget=witness_retry_budget,
     )
 
     state = ExtractionState()
@@ -148,7 +147,7 @@ async def replay_extractor_record(
         extensions=extensions,
         provider=provider,
         payload=payload,
-        terminal_tool=SUBMIT_EVENTS_TOOL_NAME,
+        terminal_tool=FINALIZE_EXTRACTION_TOOL_NAME,
         purpose="cognitive_audit_extractor_replay",
     )
     # ``run_phase_standalone`` returns the raw submit_events tool args

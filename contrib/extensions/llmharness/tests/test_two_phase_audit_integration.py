@@ -59,7 +59,7 @@ from llmharness.audit.entry_types import (
     EXTRACTOR_PARTIAL,
     VERDICT,
 )
-from llmharness.audit.extractor import SUBMIT_EVENTS_TOOL_NAME
+from llmharness.audit.extractor import FINALIZE_EXTRACTION_TOOL_NAME
 
 # --- shared constants -------------------------------------------------------
 
@@ -90,6 +90,13 @@ class _V31StubProvider:
         self.parent_calls = 0
         self.extractor_calls = 0
         self.auditor_calls = 0
+        # Cursor into the scripted extractor message sequence — bumps once
+        # per extractor child turn so a multi-tool firing yields the
+        # planned tool_calls in order (submit_plan -> upsert_node -> ...
+        # -> finalize_extraction). Reset per child firing because each
+        # spawn rebuilds the script from scratch.
+        self._extractor_step = 0
+        self._last_extractor_mode: str | None = None
 
     def __call__(
         self,
@@ -122,77 +129,134 @@ class _V31StubProvider:
         yield MessageEnd(message=msg)
 
     async def _extractor_iter(self) -> AsyncIterator[AssistantStreamEvent]:
-        if self.mode == "no_call":
+        # Reset the cursor whenever we cross into a fresh extractor child
+        # firing. The provider has no native "child started" hook so we
+        # detect it by mode change OR by stepping past the script length.
+        if self._last_extractor_mode != self.mode:
+            self._extractor_step = 0
+            self._last_extractor_mode = self.mode
+
+        script = self._extractor_script()
+        if self._extractor_step >= len(script):
+            # Out of scripted turns — surface a no-tool message so the
+            # child loop terminates without further tool calls. Used by
+            # the ``no_call`` mode.
             msg = AssistantMessage(
                 role="assistant",
                 content=[TextContent(type="text", text="declining to submit")],
                 timestamp=300.0,
                 stop_reason="end_turn",
             )
+            self._extractor_step = 0  # reset for next firing
             yield MessageEnd(message=msg)
             return
 
+        message = script[self._extractor_step]
+        self._extractor_step += 1
+        # If we just emitted the terminator, reset so the next firing
+        # starts at step 0.
+        for blk in message.content:
+            if isinstance(blk, ToolCallBlock) and blk.name == FINALIZE_EXTRACTION_TOOL_NAME:
+                self._extractor_step = 0
+                self._last_extractor_mode = None
+                break
+        yield MessageEnd(message=message)
+
+    def _extractor_script(self) -> list[AssistantMessage]:
+        """The scripted assistant-message sequence for one extractor firing."""
+        if self.mode == "no_call":
+            return []
+
         if self.mode == "empty":
-            yield MessageEnd(message=_submit_events_call(events=[]))
-            return
+            # Empty firing under v19 = jump straight to finalize_extraction.
+            return [_tool_call_message("finalize-empty", FINALIZE_EXTRACTION_TOOL_NAME, {})]
 
         if self.mode == "happy":
-            yield MessageEnd(
-                message=_submit_events_call(
-                    events=[
-                        {
-                            "id": 1,
-                            "kind": "evid",
-                            "summary": "event 1",
-                            "source_turns": [0, 1],
-                        },
-                        {
-                            "id": 2,
-                            "kind": "evid",
-                            "summary": "event 2",
-                            "source_turns": [0, 1],
-                            "refs": [
-                                {
-                                    "to": 1,
-                                    "kind": "ref",
-                                    "reason": "synthetic ref",
-                                    "cited_quote": _GOOD_QUOTE,
-                                }
-                            ],
-                        },
-                    ]
-                )
-            )
-            return
+            # Walks: upsert two evid nodes, link them with a ref edge
+            # carrying a witnessable quote, finalize. The two events form
+            # a single (in_deg, out_deg) = (0,1) / (1,0) pair so the
+            # degree check passes.
+            return [
+                _tool_call_message(
+                    "node-1",
+                    "upsert_node",
+                    {
+                        "id": 1,
+                        "kind": "evid",
+                        "summary": "event 1",
+                        "source_turns": [0, 1],
+                    },
+                ),
+                _tool_call_message(
+                    "node-2",
+                    "upsert_node",
+                    {
+                        "id": 2,
+                        "kind": "evid",
+                        "summary": "event 2",
+                        "source_turns": [0, 1],
+                    },
+                ),
+                _tool_call_message(
+                    "edge-1",
+                    "upsert_edge",
+                    {
+                        "src": 1,
+                        "dst": 2,
+                        "kind": "ref",
+                        "reason": "synthetic ref",
+                        "cited_quote": _GOOD_QUOTE,
+                    },
+                ),
+                _tool_call_message(
+                    "finalize-1", FINALIZE_EXTRACTION_TOOL_NAME, {}
+                ),
+            ]
 
         if self.mode == "partial":
-            yield MessageEnd(
-                message=_submit_events_call(
-                    events=[
-                        {
-                            "id": 1,
-                            "kind": "evid",
-                            "summary": "event 1",
-                            "source_turns": [0, 1],
-                        },
-                        {
-                            "id": 2,
-                            "kind": "evid",
-                            "summary": "event 2",
-                            "source_turns": [0, 1],
-                            "refs": [
-                                {
-                                    "to": 1,
-                                    "kind": "ref",
-                                    "reason": "synthetic ref with bad witness",
-                                    "cited_quote": _BAD_QUOTE,
-                                }
-                            ],
-                        },
-                    ]
-                )
-            )
-            return
+            # Two upserts, an edge with a bad witness (rejected by
+            # apply_edge_upsert), then finalize. The edge rejection
+            # surfaces as a tool_result error; the events still land via
+            # the op log. We don't retry — finalize follows immediately
+            # so the firing's ``dropped_edges`` snapshot stays empty
+            # and the surviving event-only firing routes through the
+            # adapter's "no edges" branch.
+            return [
+                _tool_call_message(
+                    "node-1",
+                    "upsert_node",
+                    {
+                        "id": 1,
+                        "kind": "evid",
+                        "summary": "event 1",
+                        "source_turns": [0, 1],
+                    },
+                ),
+                _tool_call_message(
+                    "node-2",
+                    "upsert_node",
+                    {
+                        "id": 2,
+                        "kind": "evid",
+                        "summary": "event 2",
+                        "source_turns": [0, 1],
+                    },
+                ),
+                _tool_call_message(
+                    "edge-bad",
+                    "upsert_edge",
+                    {
+                        "src": 1,
+                        "dst": 2,
+                        "kind": "ref",
+                        "reason": "synthetic ref with bad witness",
+                        "cited_quote": _BAD_QUOTE,
+                    },
+                ),
+                _tool_call_message(
+                    "finalize-2", FINALIZE_EXTRACTION_TOOL_NAME, {}
+                ),
+            ]
 
         raise AssertionError(f"unknown stub mode {self.mode!r}")
 
@@ -200,18 +264,18 @@ class _V31StubProvider:
         yield MessageEnd(message=_submit_verdict_call())
 
 
-def _submit_events_call(*, events: list[dict[str, Any]]) -> AssistantMessage:
-    # The v18 wire is ``submit_events_batch`` with ``done=true`` for a
-    # one-shot submission (the integration stubs never split across
-    # batches). SUBMIT_EVENTS_TOOL_NAME aliases the batch tool.
+def _tool_call_message(
+    call_id: str, name: str, arguments: dict[str, Any]
+) -> AssistantMessage:
+    """One assistant turn whose content is a single tool_call block."""
     return AssistantMessage(
         role="assistant",
         content=[
             ToolCallBlock(
                 type="tool_call",
-                id="submit-1",
-                name=SUBMIT_EVENTS_TOOL_NAME,
-                arguments={"events": events, "done": True},
+                id=call_id,
+                name=name,
+                arguments=arguments,
             )
         ],
         timestamp=600.0,
@@ -344,7 +408,10 @@ async def test_extractor_and_auditor_fire_together_on_configured_interval(
     await session.shutdown()
 
     assert provider.parent_calls == 3
-    assert provider.extractor_calls == 1
+    # v19: each extractor firing spans multiple LLM calls (the four-step
+    # happy script: 2 upserts + 1 edge + finalize). The auditor is still
+    # single-shot — one call per firing.
+    assert provider.extractor_calls == 4
     assert provider.auditor_calls == 1
     assert len(_entries(session, AUDIT_EVENT)) == 2
     assert len(_entries(session, VERDICT)) == 1
@@ -427,25 +494,23 @@ async def test_partial_path_drops_edge_and_writes_extractor_partial(
     partial = _entries(session, EXTRACTOR_PARTIAL)
     cursors = _entries(session, EXTRACTOR_CURSOR)
 
+    # v19: a bad-witness upsert_edge is rejected at the per-edit
+    # boundary (the upsert_edge tool returns is_error=True) so no edge
+    # lands in the op log AND no ``dropped_edges`` entry accumulates —
+    # the v18 partial-accept path is gone. The two upsert_node calls
+    # still succeed, so the firing finalizes with 2 events / 0 edges.
+    # ``extractor_partial`` therefore stays empty under v19.
     assert len(events) == 2, (
-        f"expected 2 audit_event (events accepted even when ref dropped), got {len(events)}"
+        f"expected 2 audit_event (the upsert_node calls), got {len(events)}"
     )
-    assert len(edges) == 0, f"expected 0 audit_edge after dropped ref, got {len(edges)}"
-    assert len(partial) == 1, f"expected exactly 1 extractor_partial, got {len(partial)}"
+    assert len(edges) == 0, f"expected 0 audit_edge after rejected ref, got {len(edges)}"
+    assert len(partial) == 0, (
+        "v19 has no partial-accept path; bad witnesses become tool "
+        "rejections, not extractor_partial entries"
+    )
     assert len(cursors) == 1, (
-        "cursor must advance on partial firings (design §6) so we don't loop on the same window"
+        "cursor must advance once the firing finalizes, even with no edges"
     )
-
-    partial_payload = partial[0].payload
-    assert isinstance(partial_payload, dict)
-    dropped = partial_payload.get("dropped_edges")
-    assert isinstance(dropped, list) and len(dropped) == 1, (
-        f"expected one dropped ref in extractor_partial payload, got {dropped}"
-    )
-    assert dropped[0]["src"] == 1
-    assert dropped[0]["dst"] == 2
-    assert dropped[0]["kind"] == "ref"
-    assert "turn_window" in partial_payload
 
 
 # --- Scenario 3: no-call ---------------------------------------------------
