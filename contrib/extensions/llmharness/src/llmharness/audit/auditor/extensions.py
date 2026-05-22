@@ -26,6 +26,7 @@ from .profiles import (
     PROFILES,
     TOOL_GET_EVENT_DETAIL,
     TOOL_GET_TURN,
+    TOOL_SUBMIT_VERDICT,
     resolve_tools,
 )
 from .prompt import (
@@ -34,9 +35,7 @@ from .prompt import (
     load_auditor_prompt,
 )
 
-_SUBMIT_TOOL_MODULE = "llmharness.audit.auditor.submit_tool"
-_GET_TURN_TOOL_MODULE = "llmharness.audit.auditor.get_turn_tool"
-_GET_EVENT_DETAIL_TOOL_MODULE = "llmharness.audit.auditor.get_event_detail_tool"
+_AUDITOR_TOOLS_MODULE = "llmharness.audit.auditor.atom"
 
 
 def compose_auditor_extensions(
@@ -67,14 +66,8 @@ def compose_auditor_extensions(
     tools are appended here only when their name is in ``tools`` AND
     the relevant inputs are available.
     """
-    tools_tuple = (
-        tools if tools is not None else PROFILES[DEFAULT_PROFILE]
-    )
-    framing = (
-        base_prompt
-        if base_prompt is not None
-        else load_auditor_prompt(DEFAULT_PROMPT_NAME)
-    )
+    tools_tuple = tools if tools is not None else PROFILES[DEFAULT_PROFILE]
+    framing = base_prompt if base_prompt is not None else load_auditor_prompt(DEFAULT_PROMPT_NAME)
 
     if events is not None or edges is not None:
         prompt_text = build_auditor_system_prompt(
@@ -90,29 +83,36 @@ def compose_auditor_extensions(
     else:
         prompt_text = framing
 
+    # Build the auditor_tools config: which tools to mount + any state the
+    # drill-down tools need. Names absent from ``tools_tuple`` are omitted
+    # so the merged atom only registers what the profile asks for. Drill-
+    # down state is only attached when the relevant inputs are available;
+    # otherwise the atom would still mount the tool but over an empty
+    # backing snapshot/graph, which is a worse failure mode than simply
+    # not exposing the tool.
+    selected: list[str] = []
+    if TOOL_SUBMIT_VERDICT in tools_tuple:
+        selected.append(TOOL_SUBMIT_VERDICT)
+    if TOOL_GET_TURN in tools_tuple and trajectory_snapshot is not None:
+        selected.append(TOOL_GET_TURN)
+    if TOOL_GET_EVENT_DETAIL in tools_tuple and (events is not None or edges is not None):
+        selected.append(TOOL_GET_EVENT_DETAIL)
+
+    auditor_tools_cfg: dict[str, Any] = {"tools": selected}
+    if TOOL_GET_TURN in selected:
+        auditor_tools_cfg["trajectory_snapshot"] = trajectory_snapshot
+    if TOOL_GET_EVENT_DETAIL in selected:
+        auditor_tools_cfg["events"] = list(events or ())
+        auditor_tools_cfg["edges"] = list(edges or ())
+
     extensions = compose_audit_extensions(
-        submit_tool_module=_SUBMIT_TOOL_MODULE,
+        submit_tool_module=_AUDITOR_TOOLS_MODULE,
         default_prompt=prompt_text,
         prompt_override=None,
         cards_tools_config=cards_tools_config,
         observability_config=observability_config,
+        submit_tool_config=auditor_tools_cfg,
     )
-    if TOOL_GET_TURN in tools_tuple and trajectory_snapshot is not None:
-        extensions.append(
-            (_GET_TURN_TOOL_MODULE, {"trajectory_snapshot": trajectory_snapshot})
-        )
-    if TOOL_GET_EVENT_DETAIL in tools_tuple and (
-        events is not None or edges is not None
-    ):
-        extensions.append(
-            (
-                _GET_EVENT_DETAIL_TOOL_MODULE,
-                {
-                    "events": list(events or ()),
-                    "edges": list(edges or ()),
-                },
-            )
-        )
     return extensions
 
 
