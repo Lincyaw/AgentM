@@ -175,6 +175,32 @@ def _split_into_steps(
     return steps
 
 
+# ----- shared prompt-extraction helpers -------------------------------------
+
+
+def child_prompt_for_record(rec: dict[str, Any]) -> tuple[str, str] | None:
+    """Reconstruct the (system, user) pair the child saw at firing time.
+
+    Returns ``None`` when the record's phase isn't recognized. The system
+    prompt is the canonical phase prompt — same string that the live
+    extractor / auditor child sees (so SFT and RL prompt pools agree).
+    The user prompt is the JSON-serialized ``payload`` field of the
+    replay record.
+
+    Shared by both SFT export (:func:`extractor_records_from_replay`)
+    and the RL-prompt-pool exporter so the two never drift apart.
+    """
+    phase = rec.get("phase")
+    if phase == "extractor":
+        system = load_extractor_prompt(_EXTRACTOR_DEFAULT_PROMPT_NAME)
+    elif phase == "auditor":
+        system = load_auditor_prompt(_AUDITOR_DEFAULT_PROMPT_NAME)
+    else:
+        return None
+    user = json.dumps(rec.get("payload") or {}, ensure_ascii=False)
+    return system, user
+
+
 # ----- extractor side -------------------------------------------------------
 
 
@@ -231,13 +257,17 @@ def extractor_records_from_replay(
             )
             for thinking, call in valid_steps
         ]
+        prompt = child_prompt_for_record(rec)
+        if prompt is None:
+            continue
+        input_system, input_user = prompt
         yield SftRecord(
             phase="extractor",
             sample_id=sample_id,
             root_session_id=str(rec.get("root_session_id") or ""),
             turn_index=int(rec.get("turn_index") or 0),
-            input_system=load_extractor_prompt(_EXTRACTOR_DEFAULT_PROMPT_NAME),
-            input_user=json.dumps(rec.get("payload") or {}, ensure_ascii=False),
+            input_system=input_system,
+            input_user=input_user,
             target_messages=target_messages,
             meta={"replay_ts_ns": rec.get("ts_ns")},
         )
@@ -347,6 +377,7 @@ def write_jsonl(path: Path, records: Iterable[SftRecord | dict[str, Any]]) -> in
 __all__ = [
     "SftRecord",
     "auditor_records_from_labels",
+    "child_prompt_for_record",
     "dropped_records_from_labels",
     "extractor_records_from_replay",
     "legacy_batch_replay_count",

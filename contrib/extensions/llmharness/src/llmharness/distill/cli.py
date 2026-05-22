@@ -49,6 +49,8 @@ from .export import (
 )
 from .gt import GroundTruth, load_dataset
 from .oracle import label_auditor_record
+from .rl_prompts import Phase as RlPhase
+from .rl_prompts import RlPromptRow, rl_prompts_from_replay
 
 _logger = logging.getLogger(__name__)
 
@@ -265,6 +267,230 @@ def _cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+# ----- rl-prompts -----------------------------------------------------------
+
+
+def _write_rl_prompts(path: Path, rows: Iterable[RlPromptRow]) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    n = 0
+    with path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(row.to_jsonl())
+            fh.write("\n")
+            n += 1
+    return n
+
+
+def _cmd_rl_prompts(args: argparse.Namespace) -> int:
+    replay_dir = Path(args.replay_dir)
+    out_path = Path(args.out)
+    phase = args.phase
+    phases: tuple[RlPhase, ...]
+    if phase == "extractor":
+        phases = ("extractor",)
+    elif phase == "auditor":
+        phases = ("auditor",)
+    else:
+        phases = ("extractor", "auditor")
+
+    if not replay_dir.is_dir():
+        print(f"replay-dir not found: {replay_dir}", file=sys.stderr)
+        return 2
+
+    sessions = sorted(replay_dir.glob("*.jsonl"))
+    if not sessions:
+        print(f"no replay logs in {replay_dir}", file=sys.stderr)
+        return 2
+
+    def _iter() -> Iterable[RlPromptRow]:
+        for replay_file in sessions:
+            # source_case_id prefers the meta sidecar's sample_id (rcabench
+            # case id); falls back to root_session_id (replay file stem)
+            # when no sidecar is present.
+            meta = read_sample_meta(replay_file.with_suffix(".meta.json"))
+            source_case_id = meta.sample_id if meta is not None else replay_file.stem
+            yield from rl_prompts_from_replay(
+                _replay_record_dicts(replay_file),
+                source_case_id=source_case_id,
+                phases=phases,
+            )
+
+    n = _write_rl_prompts(out_path, _iter())
+    print(f"rl-prompts={n} out={out_path}")
+    return 0
+
+
+# ----- annotate-case-outcome ------------------------------------------------
+
+
+def _last_submit_final_report(main_jsonl: Path) -> dict[str, Any] | None:
+    """Scan a bundle's main.jsonl for the last submit_final_report args.
+
+    Recognizes two on-disk shapes:
+
+    * AgentM observability rows: ``kind == "event.dispatch"`` with
+      ``name == "emit:tool_call"`` and ``attributes.event.tool_name ==
+      "submit_final_report"`` — args under ``attributes.event.args``.
+    * Bare session-log rows: ``type == "tool_call"`` with
+      ``payload.tool_name == "submit_final_report"`` — args under
+      ``payload.args``.
+
+    Returns the last matching args dict, or ``None`` if none seen.
+    """
+    last_args: dict[str, Any] | None = None
+    try:
+        with main_jsonl.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                # Observability shape.
+                if (
+                    rec.get("kind") == "event.dispatch"
+                    and rec.get("name") == "emit:tool_call"
+                ):
+                    attrs = rec.get("attributes") or {}
+                    if not isinstance(attrs, dict):
+                        continue
+                    event = attrs.get("event") or {}
+                    if (
+                        isinstance(event, dict)
+                        and event.get("tool_name") == "submit_final_report"
+                    ):
+                        args = event.get("args")
+                        if isinstance(args, dict):
+                            last_args = args
+                            continue
+                # Session-log shape.
+                if rec.get("type") == "tool_call":
+                    payload = rec.get("payload") or {}
+                    if (
+                        isinstance(payload, dict)
+                        and payload.get("tool_name") == "submit_final_report"
+                    ):
+                        args = payload.get("args")
+                        if isinstance(args, dict):
+                            last_args = args
+    except OSError:
+        return None
+    return last_args
+
+
+def _grade_submission(
+    args: dict[str, Any],
+    *,
+    ground_truth: list[str],
+    fault_type: str,
+) -> tuple[float, float, float]:
+    """Compute (service_hit, fault_kind_hit, composite).
+
+    Mirrors the substring rule used by
+    ``contrib/scenarios/rca/eval/baseline/grader.py`` — keep them in
+    sync. We replicate (don't import) because the canonical grader is
+    coupled to the on-disk observability trace path, whereas here we
+    have the submission args already in hand.
+    """
+    raw = json.dumps(args, ensure_ascii=False).lower()
+    service_hit = 1.0 if any(
+        isinstance(s, str) and s.lower() in raw for s in ground_truth
+    ) else 0.0
+    ft = (fault_type or "").strip().lower()
+    fault_kind_hit = 1.0 if ft and ft in raw else 0.0
+    composite = 0.7 * service_hit + 0.3 * fault_kind_hit
+    return service_hit, fault_kind_hit, composite
+
+
+def _annotate_one_bundle(
+    bundle_dir: Path,
+    *,
+    case_metadata_override: Path | None = None,
+) -> dict[str, Any] | None:
+    meta_path = case_metadata_override or (bundle_dir / "case_metadata.json")
+    if not meta_path.is_file():
+        print(f"missing case_metadata.json for {bundle_dir}", file=sys.stderr)
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"failed to read {meta_path}: {exc}", file=sys.stderr)
+        return None
+    if not isinstance(meta, dict):
+        print(f"case_metadata.json must be an object: {meta_path}", file=sys.stderr)
+        return None
+
+    case_id = str(meta.get("case_id") or "")
+    datapack_name = str(meta.get("datapack_name") or "")
+    gt_raw = meta.get("ground_truth") or []
+    ground_truth = [s for s in gt_raw if isinstance(s, str)]
+    fault_type = str(meta.get("fault_type") or "")
+
+    main_jsonl = bundle_dir / "main.jsonl"
+    submission = (
+        _last_submit_final_report(main_jsonl) if main_jsonl.is_file() else None
+    )
+    submission_seen = submission is not None
+
+    if submission_seen:
+        assert submission is not None  # narrowing for mypy
+        service_hit, fault_kind_hit, composite = _grade_submission(
+            submission, ground_truth=ground_truth, fault_type=fault_type
+        )
+    else:
+        service_hit = fault_kind_hit = composite = 0.0
+
+    outcome: dict[str, Any] = {
+        "case_id": case_id,
+        "datapack_name": datapack_name,
+        "service_hit": service_hit,
+        "fault_kind_hit": fault_kind_hit,
+        "composite_score": composite,
+        "ground_truth": ground_truth,
+        "fault_type": fault_type,
+        "submission_seen": submission_seen,
+    }
+    out_path = bundle_dir / "case_outcome.json"
+    out_path.write_text(
+        json.dumps(outcome, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return outcome
+
+
+def _cmd_annotate_case_outcome(args: argparse.Namespace) -> int:
+    bundles = [Path(b) for b in args.bundle]
+    override = Path(args.case_metadata) if args.case_metadata else None
+    if override is not None and len(bundles) != 1:
+        print(
+            "--case-metadata may only be combined with a single --bundle",
+            file=sys.stderr,
+        )
+        return 2
+    n_ok = 0
+    n_skip = 0
+    for bundle in bundles:
+        if not bundle.is_dir():
+            print(f"bundle not a directory: {bundle}", file=sys.stderr)
+            n_skip += 1
+            continue
+        outcome = _annotate_one_bundle(bundle, case_metadata_override=override)
+        if outcome is None:
+            n_skip += 1
+            continue
+        n_ok += 1
+        print(
+            f"{bundle}: case_id={outcome['case_id']} "
+            f"composite={outcome['composite_score']:.3f} "
+            f"submission_seen={outcome['submission_seen']}"
+        )
+    print(f"annotated={n_ok} skipped={n_skip}")
+    return 0 if n_skip == 0 else 1
+
+
 # ----- top-level ------------------------------------------------------------
 
 
@@ -297,6 +523,29 @@ def _build_parser() -> argparse.ArgumentParser:
         "--phase", choices=("extractor", "auditor", "both"), default="both"
     )
     p_export.set_defaults(func=_cmd_export)
+
+    p_rl = sub.add_parser(
+        "rl-prompts",
+        help="Emit prompt-only rows for online-RL sampling.",
+    )
+    p_rl.add_argument("--replay-dir", required=True)
+    p_rl.add_argument("--out", required=True)
+    p_rl.add_argument(
+        "--phase", choices=("extractor", "auditor", "both"), default="both"
+    )
+    p_rl.set_defaults(func=_cmd_rl_prompts)
+
+    p_oc = sub.add_parser(
+        "annotate-case-outcome",
+        help="Write case_outcome.json into one or more bundle dirs.",
+    )
+    p_oc.add_argument("--bundle", action="append", required=True)
+    p_oc.add_argument(
+        "--case-metadata",
+        default=None,
+        help="override path; only valid with a single --bundle",
+    )
+    p_oc.set_defaults(func=_cmd_annotate_case_outcome)
 
     return parser
 
