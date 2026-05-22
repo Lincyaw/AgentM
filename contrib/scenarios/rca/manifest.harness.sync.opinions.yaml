@@ -26,9 +26,12 @@ extensions:
       personas: false
   - module: agentm_rca.runtime_context
 
-  # Sync audit, opinions-only: enable_reminders=false keeps the audit
-  # output observable while preventing main-agent intervention.
+  # Sync audit, opinions-only: every 5 main-agent turns, run extractor
+  # first and then auditor; enable_reminders=false keeps the audit output
+  # observable while preventing main-agent intervention.
   - module: llmharness.adapters.agentm
     config:
       mode: sync
+      extractor_interval_turns: 5
+      audit_interval_turns: 5
       enable_reminders: false
