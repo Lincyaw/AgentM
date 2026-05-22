@@ -18,6 +18,76 @@ The root `agentm` package stays free of RCA, observability, and DuckDB concerns.
 - DuckDB or observability dependencies added to the SDK
 - Tight coupling from the SDK back into RCA
 
+## Opting into llmharness
+
+The default `manifest.yaml` and `manifest.baseline.yaml` do **not** mount
+the llmharness cognitive-audit adapter. To run rca with the
+extractor + auditor pipeline supervising the main agent, pick one of the
+`manifest.harness*.yaml` variants. The variant matrix (mode, cadence,
+auditor / reminder on or off, intended use) lives in
+[`_VARIANTS.md`](_VARIANTS.md) — read that first.
+
+One concrete invocation against a sandbox:
+
+```bash
+uv run agentm \
+  --cwd <sandbox> \
+  --scenario rca:harness.sync \
+  "<your RCA prompt>"
+```
+
+Adapter behaviour (cadence, sync vs async, reminders on or off) is set
+**inside** the manifest's `llmharness.adapters.agentm` config block; the
+caller does not override it. Other variants:
+
+* `rca:harness` — async, production cadence.
+* `rca:harness.sync` — sync, default for dataset collection.
+* `rca:harness.sync.opinions` / `.opinions10` — sync, auditor verdicts
+  recorded but reminders **not** injected (clean trajectory for SFT).
+* `rca:harness.sync.extractor5` — extractor-only control; the control
+  scenario consumed by strict-A/B fork mode.
+
+Detection is by manifest composition, not by name — the eval driver's
+`_scenario_mounts_harness()` loads the resolved manifest and checks for
+`llmharness.adapters.agentm` in the extension list. Renaming a variant
+or adding a new one does **not** require any string-pattern update.
+
+### Strict-A/B fork mode (`baseline_fork`)
+
+When running the eval driver with `intervention_mode=baseline_fork` (via
+`rca llm-eval ... --ak intervention_mode=baseline_fork`), the driver:
+
+1. Spawns a **control** session against `control_scenario` (extractor-
+   only — no auditor side channel — so the prefix is immutable).
+2. Replays the offline auditor over each cumulative graph snapshot to
+   find the first turn that surfaces a reminder
+   (`run_offline_auditor_over_control` from `llmharness`).
+3. Forks a **branch** session from that prefix with
+   `llmharness.replay.reminder_seed` mounted to deliver the recorded
+   reminder.
+4. Writes a unified replay sidecar via `write_strict_ab_replay` so the
+   case viewer sees a single A/B comparison.
+
+The control scenario is resolved from `_HARNESS_VARIANT_TO_CONTROL` (top
+of `src/agentm_rca/eval/agent.py`). The current mapping is:
+
+| Harness variant | Control scenario |
+|---|---|
+| `rca:harness.sync` | `rca:harness.sync.extractor5` |
+| `rca:harness.sync.opinions` | `rca:harness.sync.extractor5` |
+| `rca:harness.sync.opinions10` | `rca:harness.sync.extractor5` |
+
+If the variant is not in the table and no `control_scenario=...` is
+passed explicitly (via `--ak control_scenario=...` or
+`AGENTM_FORK_CONTROL_SCENARIO`), the driver fail-stops with a
+`ValueError`. Add new entries to `_HARNESS_VARIANT_TO_CONTROL` (and
+update [`_VARIANTS.md`](_VARIANTS.md)) when introducing a harness
+variant that should be eligible for fork mode.
+
+For the llmharness side of this story (public API, replay sidecar
+schema, profile / prompt knobs, prefix-replay flow), see
+`contrib/extensions/llmharness/README.md` and the docs it links to.
+
 ## Eval-config environment variables
 
 The YAML configs under `contrib/scenarios/rca/eval/` and

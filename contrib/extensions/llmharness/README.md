@@ -37,6 +37,85 @@ training a small (~4B) model into the same harness role.
                              --out  ./sft
    ```
 
+## Mounting on a scenario (consumer's view)
+
+### Manifest entries
+
+A scenario opts into llmharness by adding the adapter (and optionally the
+sample-id binding) to its manifest. There is **no** name-based detection —
+nothing keys off the scenario name containing "harness"; the wiring is
+purely manifest-driven.
+
+```yaml
+# contrib/scenarios/<your-scenario>/manifest.<variant>.yaml
+extensions:
+  # ... your scenario's atoms ...
+
+  - module: llmharness.adapters.agentm
+    config:
+      mode: sync                       # or "async"
+      extractor_interval_turns: 5
+      audit_interval_turns: 5
+      enable_auditor: true             # default true
+      enable_reminders: true           # default true; false = opinions-only
+
+  # Optional: write the distill-binding sidecar so offline labeler can join
+  # replay records back to a sample id (driven by LLMHARNESS_DISTILL_* env).
+  - module: llmharness.distill.binding
+
+  # Optional: enable the prefix-replay flow (mounted only on resumed
+  # sessions emitted by `llmharness-replay agent-from-reminder`).
+  - module: llmharness.replay.reminder_seed
+```
+
+Adapter knobs are documented in
+[docs/08-running-modes.md §1](docs/08-running-modes.md#1-decoupling-matrix).
+For a concrete reference, see the rca scenario's
+`contrib/scenarios/rca/manifest.harness*.yaml` family +
+`contrib/scenarios/rca/_VARIANTS.md` for the variant matrix.
+
+### Public API
+
+Importable from the top-level package only — everything else is internal.
+Promote a symbol to the top level on demand when an in-tree caller needs
+it (see `src/llmharness/__init__.py` for the contract).
+
+| Symbol | Purpose |
+|---|---|
+| `Event`, `EventKind`, `Edge`, `EdgeKind`, `Finding`, `Phase`, `Verdict`, `Reminder` | Wire-type dataclasses (see [docs/02-schemas.md](docs/02-schemas.md)). |
+| `ReplayRecord`, `iter_records`, `write_record` | Replay sidecar format and I/O. |
+| `ReminderCandidate`, `OfflineAuditRun`, `run_offline_auditor_over_control`, `write_strict_ab_replay`, `strict_ab_replay_path` | Strict-A/B fork orchestration. Used by the rca eval driver. |
+
+Atom authors who write new audit checks (rare) additionally import
+`SERVICE_KEY`, `AuditCheckRegistry`, and `CheckContext` from
+`llmharness.audit.registry` — the one documented submodule import,
+covered in [docs/04-extending.md §1](docs/04-extending.md).
+
+### Events the adapter subscribes to
+
+The adapter binds three handlers on the main agent's `EventBus`:
+
+| Event | Handler | What it does |
+|---|---|---|
+| `TurnEndEvent` | `_on_turn_end` | Computes extractor / auditor due. Spawns extractor child (always when due); spawns auditor child (every k turns, only after a successful extractor firing). Persists results to the session entry tree and replay sidecar. |
+| `DecideTurnActionEvent` | `_on_decide` | If a verdict surfaced a reminder, returns an `Inject([reminder_msg])` action so the kernel re-opens the loop. |
+| `SessionShutdownEvent` | `_on_shutdown` | Drains pending audit work (async mode only) and closes the sidecar. |
+
+No tools are exposed to the main agent — model-visible surface is
+unchanged. The only main-agent side effect is the optional reminder
+injection, gated on `enable_reminders=true`.
+
+### What the auditor injects
+
+When `Verdict.surface_reminder=true`, the auditor's `reminder_text` is
+wrapped by `audit/_reminder_format.py:build_reminder_message` and
+injected as a synthetic user message before the next agent turn. Format
+is single-sourced so live and offline (prefix-replay) paths stay
+byte-identical. Verdicts always persist to the entry tree and sidecar;
+`enable_reminders=false` only suppresses delivery.
+
+---
+
 ## Sequence diagrams
 
 Three views of how the moving parts fit together. Read these before
@@ -123,7 +202,7 @@ sequenceDiagram
     participant CLI as llmharness-replay
     participant Sidecar as Replay sidecar JSONL
     participant Runner as replay/runner.py
-    participant Engine as replay/engine.py
+    participant Engine as tools/engine.py
     participant Child as Extractor or Auditor child
 
     User->>CLI: replay extractor or auditor with overrides
