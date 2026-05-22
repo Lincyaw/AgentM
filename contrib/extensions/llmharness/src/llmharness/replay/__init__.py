@@ -14,13 +14,17 @@ or chain them end-to-end on a recorded main-agent trajectory. Use cases:
 Submodule layout
 ----------------
 * :mod:`llmharness.replay.record` — sidecar I/O. No agentm dependency.
-* :mod:`llmharness.replay.engine` — runs a phase as a top-level session.
 * :mod:`llmharness.replay.runner` — rebuild extensions from a record + run.
 * :mod:`llmharness.replay.cli`    — ``llmharness-replay`` entry point.
 
-``engine`` / ``runner`` / ``cli`` import :mod:`agentm`, so they are
-*not* re-exported from this ``__init__`` — downstream consumers that only
-need the record types (e.g. ``rca-autorl`` reading sidecar files) can
+The host-side phase driver and prefix-replay helpers live in
+:mod:`llmharness.tools` (``tools.engine`` / ``tools.prefix_replay``)
+because they reach into ``agentm.core.runtime.*`` to spawn standalone
+sessions — that placement signals "not an atom, not API surface".
+
+``runner`` / ``cli`` import :mod:`agentm`, so they are *not* re-exported
+from this ``__init__`` — downstream consumers that only need the record
+types (e.g. ``rca-autorl`` reading sidecar files) can
 ``from llmharness.replay.record import …`` without pulling AgentM in.
 """
 
