@@ -55,11 +55,10 @@ caller does not override it. Other variants:
 
 Minimum command — run from the AgentM repo root, no sandbox needed
 (`GitBackedResourceWriter` is lazy and never touches disk for RCA since
-no write tools are mounted):
+no write tools are mounted). `.env` autoloads from `<cwd>/.env` and the
+workspace root, so provider creds don't need a manual `source`:
 
 ```bash
-source .env   # provider creds + OPENAI_BASE_URL etc.
-
 AGENTM_RCA_DATA_DIR=/home/ddq/AoyangSpace/dataset/rca/<case-id> \
 AGENTM_LIVE_INSPECT_URL_FILE=/tmp/ws.url \
 uv run agentm --scenario rca:harness.live "<your RCA prompt>"
