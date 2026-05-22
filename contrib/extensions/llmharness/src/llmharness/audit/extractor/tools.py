@@ -17,6 +17,7 @@ the submission is accepted.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
@@ -352,6 +353,71 @@ _SUBMIT_EVENTS_BATCH_PARAMETERS: dict[str, Any] = {
 _RESET_EXTRACTION_PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {},
+    "required": [],
+    "additionalProperties": False,
+}
+
+
+# Dedicated parameters schema for the atomic ``upsert_node`` tool.
+#
+# Sharing ``_EVENT_SCHEMA`` (the v18 ``submit_events_batch.events[]``
+# item shape) misleads the LLM in two ways: its ``id`` description
+# talks about ``events[0]`` / ``events[1]`` (no plural here — one node
+# per call), and it lists ``refs`` as required, which is undefined for
+# single-node upserts and outright wrong for editing a prior-firing
+# node. The persistent-graph contract is: id resolves against the
+# *current folded graph* (this firing or any prior firing); refs are
+# only carried by ``submit_events_batch`` events, never as a field on
+# the node itself.
+_UPSERT_NODE_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "id": {
+            "type": "integer",
+            "description": (
+                "Node id. If this id already exists in the current graph "
+                "(this firing or any prior firing), the node is updated "
+                "in place. Otherwise the id must equal the next available "
+                "id (max existing id + 1) or a node id you deleted earlier "
+                "in this firing (re-use after delete is the merge-duplicate "
+                "path). Gaps over still-live ids are rejected."
+            ),
+        },
+        "kind": {
+            "type": "string",
+            "enum": list(EVENT_KIND_VALUES),
+            "description": (
+                "Closed-set event kind classified by ACTION SIGNATURE, "
+                "not by what the agent says it is doing."
+            ),
+        },
+        "summary": {
+            "type": "string",
+            "description": (
+                "Natural-language paragraph describing this event, with "
+                "LENGTH PROPORTIONAL TO source_turns COUNT. A "
+                "single-turn branch event (task / hyp / dec / concl) is "
+                "one focused sentence with the concrete claim. A linear "
+                "act or evid that COALESCES N consecutive turns must be "
+                "a paragraph that walks through what happened across "
+                "those N turns: roughly one short sentence per covered "
+                "turn. Name every distinct tool_call's concrete "
+                "parameters verbatim (services, time windows, query "
+                "filters, file paths, error codes, span/log/metric "
+                "names) and quote the key numbers each result returned."
+            ),
+        },
+        "source_turns": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": (
+                "Trajectory indices this event was extracted from. "
+                "Non-empty and contiguous ([first, first+1, ..., last] "
+                "with no gaps)."
+            ),
+        },
+    },
+    "required": ["id", "kind", "summary", "source_turns"],
     "additionalProperties": False,
 }
 
@@ -361,8 +427,18 @@ _EDGE_SELECTOR_SCHEMA: dict[str, Any] = {
     "properties": {
         "src": {"type": "integer"},
         "dst": {"type": "integer"},
-        "kind": {"type": "string", "enum": list(EDGE_KIND_VALUES)},
+        "kind": {
+            "type": "string",
+            "enum": list(EDGE_KIND_VALUES),
+            "description": (
+                "Required: the edge kind to delete. Without this the "
+                "selector is ambiguous — the same (src, dst) pair may "
+                "carry both a 'data' and a 'ref' edge in the persistent "
+                "op log."
+            ),
+        },
     },
+    "required": ["src", "dst", "kind"],
     "additionalProperties": False,
 }
 
@@ -370,12 +446,53 @@ _EDGE_SELECTOR_SCHEMA: dict[str, Any] = {
 _GRAPH_EDGE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "src": {"type": "integer"},
-        "dst": {"type": "integer"},
-        "kind": {"type": "string", "enum": list(EDGE_KIND_VALUES)},
-        "reason": {"type": "string"},
-        "cited_entities": {"type": "array", "items": {"type": "string"}},
-        "cited_quote": {"type": "string"},
+        "src": {
+            "type": "integer",
+            "description": (
+                "Source node id — must exist in the current graph (this "
+                "firing or any prior firing)."
+            ),
+        },
+        "dst": {
+            "type": "integer",
+            "description": (
+                "Destination node id — must exist in the current graph "
+                "(this firing or any prior firing)."
+            ),
+        },
+        "kind": {
+            "type": "string",
+            "enum": list(EDGE_KIND_VALUES),
+            "description": (
+                "Edge kind. 'ref' for textual-witness edges (cited_quote); "
+                "'data' for entity-witness edges (cited_entities)."
+            ),
+        },
+        "reason": {
+            "type": "string",
+            "description": "One short sentence explaining the causal connection.",
+        },
+        "cited_entities": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Concrete identifiers (service names, span ids, file "
+                "paths, error codes, etc.) shared by src and dst. "
+                "Required non-empty when kind='data'; each entity must "
+                "appear (case+whitespace normalized substring) in at "
+                "least one of the src or dst node's source_turns text."
+            ),
+        },
+        "cited_quote": {
+            "type": "string",
+            "description": (
+                "Verbatim substring of BOTH the src node's source_turns "
+                "text AND the dst node's source_turns text "
+                "(case+whitespace normalized). Required when kind='ref'. "
+                "Paraphrasing or reformatting is rejected at op-build "
+                "time."
+            ),
+        },
     },
     "required": ["src", "dst", "kind", "reason"],
     "additionalProperties": False,
@@ -385,7 +502,14 @@ _GRAPH_EDGE_SCHEMA: dict[str, Any] = {
 _DELETE_NODE_PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "id": {"type": "integer", "description": "Pending event node id to delete."},
+        "id": {
+            "type": "integer",
+            "description": (
+                "Event node id to delete. May reference a node from this "
+                "firing or from any prior firing — the resulting "
+                "NodeDelete cascades to all incident edges at fold time."
+            ),
+        },
     },
     "required": ["id"],
     "additionalProperties": False,
@@ -456,6 +580,7 @@ def build_extractor_tools(
         done = bool(args.get("done", False))
 
         prev_dropped = len(state._dropped_pending)
+        prev_ops_len = len(state.pending_ops)
         err = state.commit_batch(events_payload)
         if err is not None:
             return _err(err)
@@ -481,6 +606,10 @@ def build_extractor_tools(
                 if eid in accepted_ids:
                     state._external_refs_pending.pop(eid, None)
             state._dropped_pending = state._dropped_pending[:prev_dropped]
+            # Truncate the op log to match — the just-appended NodeUpsert
+            # / EdgeUpsert ops for this batch get rolled off.
+            state.pending_ops = state.pending_ops[:prev_ops_len]
+            state._refold()
             attempts_used += 1
             return _err(_format_witness_feedback(list(new_drops)))
 
@@ -513,38 +642,30 @@ def build_extractor_tools(
         )
 
     async def _upsert_node(args: dict[str, Any]) -> ToolResult:
-        result = state.upsert_node(args)
+        result = state.apply_node_upsert(args)
         if isinstance(result, str):
             return _err(result)
-        import json
-
         return _ok(json.dumps(result, ensure_ascii=False))
 
     async def _delete_node(args: dict[str, Any]) -> ToolResult:
         node_id = args.get("id")
         if isinstance(node_id, bool) or not isinstance(node_id, int):
             return _err("delete_node: 'id' must be an integer")
-        result = state.delete_node(node_id)
+        result = state.apply_node_delete(node_id)
         if isinstance(result, str):
             return _err(result)
-        import json
-
         return _ok(json.dumps(result, ensure_ascii=False))
 
     async def _upsert_edge(args: dict[str, Any]) -> ToolResult:
-        result = state.upsert_edge(args)
+        result = state.apply_edge_upsert(args)
         if isinstance(result, str):
             return _err(result)
-        import json
-
         return _ok(json.dumps(result, ensure_ascii=False))
 
     async def _delete_edge(args: dict[str, Any]) -> ToolResult:
-        result = state.delete_edge(args)
+        result = state.apply_edge_delete(args)
         if isinstance(result, str):
             return _err(result)
-        import json
-
         return _ok(json.dumps(result, ensure_ascii=False))
 
     async def _reset_extraction(args: dict[str, Any]) -> ToolResult:
@@ -577,17 +698,20 @@ def build_extractor_tools(
         FunctionTool(
             name=UPSERT_NODE_TOOL_NAME,
             description=(
-                "Insert or replace one pending event node by id. Fields match "
-                "submit_events_batch events: id, kind, summary, source_turns."
+                "Insert or replace one event node in the current graph. "
+                "Editing a prior-firing node is supported — the id "
+                "resolves against the folded view (this firing + every "
+                "prior firing). Recorded as a NodeUpsert op."
             ),
-            parameters=_EVENT_SCHEMA,
+            parameters=_UPSERT_NODE_PARAMETERS,
             fn=_upsert_node,
         ),
         FunctionTool(
             name=DELETE_NODE_TOOL_NAME,
             description=(
-                "Delete one pending event node by id. Any pending edge touching "
-                "that node is removed automatically."
+                "Delete one event node from the current graph (this firing "
+                "or any prior firing). Every edge incident to that node "
+                "is removed automatically at fold time."
             ),
             parameters=_DELETE_NODE_PARAMETERS,
             fn=_delete_node,
@@ -595,8 +719,10 @@ def build_extractor_tools(
         FunctionTool(
             name=UPSERT_EDGE_TOOL_NAME,
             description=(
-                "Insert or replace one pending witness-bearing edge, keyed by "
-                "(src, dst, kind). Both endpoint nodes must already be pending."
+                "Insert or replace one witness-bearing edge keyed by "
+                "(src, dst, kind). Both endpoint nodes must already exist "
+                "in the current graph (this firing or any prior firing). "
+                "Recorded as an EdgeUpsert op."
             ),
             parameters=_GRAPH_EDGE_SCHEMA,
             fn=_upsert_edge,
@@ -604,7 +730,9 @@ def build_extractor_tools(
         FunctionTool(
             name=DELETE_EDGE_TOOL_NAME,
             description=(
-                "Delete one pending edge selected by src/dst and optional kind."
+                "Delete one edge identified by (src, dst, kind). 'kind' "
+                "is mandatory because the same (src, dst) pair may carry "
+                "both a 'data' and a 'ref' edge."
             ),
             parameters=_EDGE_SELECTOR_SCHEMA,
             fn=_delete_edge,

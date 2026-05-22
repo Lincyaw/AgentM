@@ -103,7 +103,11 @@ def test_atomic_edit_tools_upsert_and_delete_nodes_and_edges() -> None:
     assert not isinstance(updated_edge, str)
     assert state._edges_pending[0].reason == "updated reason"
 
-    deleted_edge = state.delete_edge({"src": 1, "dst": 2})
+    # ``kind`` is mandatory on the legacy delete path too — the op
+    # log selector needs the full (src, dst, kind) triple.
+    rejected = state.delete_edge({"src": 1, "dst": 2})
+    assert isinstance(rejected, str) and "kind" in rejected
+    deleted_edge = state.delete_edge({"src": 1, "dst": 2, "kind": "data"})
     assert not isinstance(deleted_edge, str)
     assert state._edges_pending == []
 
@@ -549,6 +553,155 @@ def test_external_ref_unknown_id_rejected() -> None:
     )
     assert err is not None
     assert "not found in recent_graph" in err
+
+
+# --- event-sourcing apply_* surface (cross-firing edits) ----------------------
+
+
+def test_apply_node_delete_targets_prior_firing_node() -> None:
+    """Cross-firing edit: the apply_* surface accepts deleting a node
+    that came from a PRIOR firing (i.e. lives in ``recent_graph_dict``
+    only, not in this firing's pending ops). The legacy ``delete_node``
+    rejects this because it only sees the in-firing pending set.
+    """
+    from llmharness.audit.graph_ops import NodeDelete
+    from llmharness.schema import Event, EventKind
+
+    prior_a = Event(id=1, kind=EventKind("task"), summary="prior a", source_turns=[1])
+    prior_b = Event(id=2, kind=EventKind("evid"), summary="prior b", source_turns=[2])
+    state = ExtractionState(
+        turn_texts={1: "alpha", 2: "bravo"},
+        recent_graph_dict={1: prior_a, 2: prior_b},
+        next_event_id=3,
+    )
+
+    result = state.apply_node_delete(1)
+    assert not isinstance(result, str), result
+    assert len(state.pending_ops) == 1
+    op = state.pending_ops[0]
+    assert isinstance(op, NodeDelete) and op.id == 1
+    # Folded view drops node 1; node 2 remains visible to subsequent
+    # apply_* calls in this firing.
+    assert set(state.pending_graph.nodes.keys()) == {2}
+
+
+def test_apply_edge_upsert_requires_existing_endpoints_in_folded_view() -> None:
+    """The apply_* surface validates endpoint nodes against the folded
+    graph (recent union pending), not just pending. Adding a node first
+    and then an edge to it must work — this proves the test described
+    in the brief: build on a prior node, then attach a new edge.
+    """
+    from llmharness.schema import Event, EventKind
+
+    prior = Event(id=2, kind=EventKind("hyp"), summary="prior hyp", source_turns=[2])
+    state = ExtractionState(
+        turn_texts={2: "bravo alpha", 3: "charlie alpha"},
+        recent_graph_dict={2: prior},
+        next_event_id=3,
+    )
+
+    # Initial: try to point at a yet-unborn dst — must reject.
+    err = state.apply_edge_upsert(
+        {
+            "src": 2,
+            "dst": 99,
+            "kind": "data",
+            "reason": "r",
+            "cited_entities": ["alpha"],
+        }
+    )
+    assert isinstance(err, str) and "99" in err
+
+    # Now create the dst, then attach the edge. Both succeed.
+    res = state.apply_node_upsert(
+        {"id": 3, "kind": "evid", "summary": "new", "source_turns": [3]}
+    )
+    assert not isinstance(res, str), res
+
+    res = state.apply_edge_upsert(
+        {
+            "src": 2,
+            "dst": 3,
+            "kind": "data",
+            "reason": "supports",
+            "cited_entities": ["alpha"],
+        }
+    )
+    assert not isinstance(res, str), res
+    assert (2, 3, "data") in state.pending_graph.edges
+
+
+def test_apply_edge_upsert_rejects_fabricated_ref_quote() -> None:
+    """Witness validation for kind='ref' edges: the cited_quote must
+    literally appear (after case+ws normalization) in the src node's
+    source_turns text. This gate was missing from the original atomic
+    upsert_edge — fabricated quotes slipped through.
+    """
+    state = ExtractionState(
+        turn_texts={
+            10: "the abnormal_traces table has rows",
+            11: "we follow up on abnormal_traces",
+        }
+    )
+    # Build two nodes in this firing first.
+    state.apply_node_upsert(
+        {"id": 1, "kind": "evid", "summary": "src", "source_turns": [10]}
+    )
+    state.apply_node_upsert(
+        {"id": 2, "kind": "act", "summary": "dst", "source_turns": [11]}
+    )
+
+    # cited_quote not present in src node's turn text -> rejected.
+    err = state.apply_edge_upsert(
+        {
+            "src": 1,
+            "dst": 2,
+            "kind": "ref",
+            "reason": "r",
+            "cited_quote": "never said xyzzy",
+        }
+    )
+    assert isinstance(err, str)
+    assert "cited_quote" in err
+
+    # A real quote from turn 10 -> accepted.
+    ok = state.apply_edge_upsert(
+        {
+            "src": 1,
+            "dst": 2,
+            "kind": "ref",
+            "reason": "r",
+            "cited_quote": "abnormal_traces",
+        }
+    )
+    assert not isinstance(ok, str), ok
+    assert (1, 2, "ref") in state.pending_graph.edges
+
+
+def test_apply_node_delete_unknown_id_is_rejected() -> None:
+    state = ExtractionState(turn_texts={1: "alpha"})
+    err = state.apply_node_delete(42)
+    assert isinstance(err, str) and "42" in err
+    assert state.pending_ops == []
+
+
+def test_apply_edge_delete_requires_kind() -> None:
+    state = ExtractionState(
+        turn_texts={1: "alpha", 2: "bravo alpha"}
+    )
+    state.apply_node_upsert({"id": 1, "kind": "evid", "summary": "s", "source_turns": [1]})
+    state.apply_node_upsert({"id": 2, "kind": "act", "summary": "d", "source_turns": [2]})
+    state.apply_edge_upsert(
+        {"src": 1, "dst": 2, "kind": "data", "reason": "r", "cited_entities": ["alpha"]}
+    )
+    # No kind in selector -> rejected; the op-log selector contract
+    # requires the full triple.
+    err = state.apply_edge_delete({"src": 1, "dst": 2})
+    assert isinstance(err, str) and "kind" in err
+    # With kind -> accepted; folded graph drops the edge.
+    ok = state.apply_edge_delete({"src": 1, "dst": 2, "kind": "data"})
+    assert not isinstance(ok, str), ok
+    assert (1, 2, "data") not in state.pending_graph.edges
 
 
 def test_external_ref_witness_failure_drops_into_dropped_edges() -> None:
