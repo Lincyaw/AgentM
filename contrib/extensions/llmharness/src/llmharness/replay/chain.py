@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from .engine import PhaseResult
+from ..tools.engine import PhaseResult
 from .record import Phase, ReplayRecord, iter_records
 from .runner import replay_auditor_record, replay_extractor_record
 

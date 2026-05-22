@@ -59,9 +59,9 @@ if str(_REPO_SRC) not in sys.path:
 
 from llmharness.audit.auditor.extensions import compose_auditor_extensions  # noqa: E402
 from llmharness.audit.auditor.submit_tool import SUBMIT_VERDICT_TOOL_NAME  # noqa: E402
-from llmharness.replay.engine import run_phase_standalone  # noqa: E402
 from llmharness.replay.record import iter_records  # noqa: E402
 from llmharness.schema import Edge, Event  # noqa: E402
+from llmharness.tools.engine import run_phase_standalone  # noqa: E402
 
 
 def _read_pinned_rows(path: Path) -> list[int]:

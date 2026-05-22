@@ -5,14 +5,14 @@ stream ``{trajectory_file, events: [...]}``. We fold those events into
 the extractor-friendly ``new_turns`` shape (matches
 ``_serialize_message_for_extractor`` in ``adapters/agentm.py``) and run
 the v3.1 extractor as a top-level session via
-:func:`llmharness.replay.engine.run_phase_standalone`.
+:func:`llmharness.tools.engine.run_phase_standalone`.
 
 Output is a JSONL of :class:`llmharness.replay.record.ReplayRecord` —
 one record per firing per row — so the result can later be re-run via
 ``llmharness-replay extractor`` for A/B prompt/model bisection.
 
 Boundary: this is a host-side driver (not a §11 atom). It is allowed to
-``import agentm.core.runtime`` indirectly via ``replay.engine``.
+``import agentm.core.runtime`` indirectly via ``tools.engine``.
 """
 
 from __future__ import annotations
@@ -40,9 +40,9 @@ from ..audit.extractor import (
     compose_extractor_extensions,
 )
 from ..audit.extractor.prompt import load_extractor_prompt
-from ..replay.engine import run_phase_standalone
 from ..replay.record import ReplayRecord, now_ns, write_record
 from ..schema import Event as SchemaEvent
+from ..tools.engine import run_phase_standalone
 
 logger = logging.getLogger(__name__)
 

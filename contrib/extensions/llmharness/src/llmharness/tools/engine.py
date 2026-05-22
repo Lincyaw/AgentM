@@ -33,7 +33,7 @@ from agentm.core.runtime.session import AgentSession
 from agentm.core.runtime.session_factory import create_agent_session
 
 from ..audit._session_helpers import find_terminal_tool_arguments, safe_shutdown
-from .record import Status
+from ..replay.record import Status
 
 
 @dataclass
