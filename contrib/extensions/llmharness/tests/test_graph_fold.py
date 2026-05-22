@@ -25,7 +25,7 @@ from llmharness.audit.graph_ops import (
     NodeUpsert,
     parse_op,
 )
-from llmharness.schema import EdgeKind, EventKind
+from llmharness.schema import EdgeKind, EventKind, ExternalRef
 
 
 def _nu(eid: int, *, kind: str = "evid", summary: str = "x", turns: tuple[int, ...] = (1,)) -> NodeUpsert:
@@ -185,6 +185,25 @@ def test_nodes_and_edges_iterate_in_insertion_order() -> None:
     "op",
     [
         NodeUpsert(id=7, kind="hyp", summary="bet", source_turns=(3, 4, 5)),
+        # Round-trip for the external_refs payload — this is the B2
+        # fix: NodeUpsert must carry the cross-firing edge tuple
+        # through to_dict / from_dict so legacy AUDIT_EVENT translation
+        # and live op-log writes preserve cumulative connectivity.
+        NodeUpsert(
+            id=8,
+            kind="evid",
+            summary="evidence",
+            source_turns=(10,),
+            external_refs=(
+                ExternalRef(
+                    to_recent_event_id=3,
+                    kind=EdgeKind.DATA,
+                    reason="follows from prior table",
+                    cited_entities=("abnormal_traces",),
+                    cited_quote="",
+                ),
+            ),
+        ),
         NodeDelete(id=12),
         EdgeUpsert(
             src=1,
@@ -226,6 +245,35 @@ def test_parse_op_rejects_unknown_discriminator() -> None:
 def test_parse_op_rejects_missing_discriminator() -> None:
     with pytest.raises(ValueError):
         parse_op({"id": 1, "kind": "evid"})
+
+
+def test_node_upsert_carries_external_refs_through_fold() -> None:
+    """The fold must materialise ``Event.external_refs`` from the op,
+    not synthesize ``()`` defaults. Regression for B2: prior code
+    used ``Event(...)`` without the field, so legacy AUDIT_EVENT
+    translation silently dropped cross-firing connectivity that the
+    auditor + next firing's ``recent_graph`` payload both depend on.
+    """
+    ext = ExternalRef(
+        to_recent_event_id=5,
+        kind=EdgeKind.REF,
+        reason="cites earlier turn",
+        cited_entities=(),
+        cited_quote="latency spike",
+    )
+    g = fold_graph(
+        [
+            NodeUpsert(
+                id=8,
+                kind="concl",
+                summary="root cause",
+                source_turns=(20,),
+                external_refs=(ext,),
+            ),
+        ]
+    )
+    ev = g.nodes[8]
+    assert ev.external_refs == (ext,)
 
 
 def test_edge_kind_round_trip_against_schema_enum() -> None:

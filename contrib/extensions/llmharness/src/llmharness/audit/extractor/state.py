@@ -329,13 +329,26 @@ class ExtractionState:
         return self._edit_digest("delete_node")
 
     def upsert_edge(self, raw: dict[str, Any]) -> dict[str, Any] | str:
-        """Insert or replace one pending edge by (src, dst, kind)."""
+        """Insert or replace one pending edge by (src, dst, kind).
+
+        Witness rule: kind='ref' requires ``cited_quote`` to appear in
+        BOTH endpoints' source_turns text — same gate as the batch
+        path and :meth:`apply_edge_upsert`. The legacy path used to
+        skip this check, letting fabricated quotes through; closed
+        here so all three surfaces share one contract.
+        """
         if self.committed:
             return "upsert_edge: firing already finalized"
         err, edge = self._build_pending_edge(raw)
         if err is not None:
             return err
         assert edge is not None
+        if edge.kind is EdgeKind.REF:
+            src_text = self._concat_turn_texts(edge.src_turns)
+            dst_text = self._concat_turn_texts(edge.dst_turns)
+            werr = witness_ref(edge.cited_quote, src_text, dst_text)
+            if werr is not None:
+                return f"upsert_edge: {werr}"
         selector = {"src": edge.src, "dst": edge.dst, "kind": edge.kind.value}
         idx = self._pending_edge_index(selector)
         if idx is None:
@@ -358,17 +371,25 @@ class ExtractionState:
         return self._edit_digest("upsert_edge")
 
     def delete_edge(self, selector: dict[str, Any]) -> dict[str, Any] | str:
-        """Delete one pending edge selected by src/dst and optional kind.
+        """Delete one pending edge selected by ``(src, dst, kind)``.
 
-        Op-log policy: the persisted ``EdgeDelete`` carries the full
-        ``(src, dst, kind)`` triple even when the caller omitted ``kind``,
-        so the replayable log remains unambiguous. When the selector
-        omits ``kind`` and several edges match, this matches the first
-        in pending order — preserving the legacy (pre-event-sourcing)
-        behaviour while still emitting a well-formed op.
+        ``kind`` is **mandatory** — the op-log contract requires the
+        full triple because the same ``(src, dst)`` pair may carry
+        both a ``data`` and a ``ref`` edge. The original kind-less
+        behaviour (first-match-in-pending-order) lost replay
+        determinism: which edge got the EdgeDelete depended on
+        insertion order, not on the selector.
         """
         if self.committed:
             return "delete_edge: firing already finalized"
+        kind_raw = selector.get("kind")
+        if not isinstance(kind_raw, str) or not kind_raw:
+            return (
+                "delete_edge: 'kind' is required. The op-log selector "
+                "needs the full (src, dst, kind) triple — (src, dst) "
+                "alone is ambiguous when both 'data' and 'ref' edges "
+                "exist between the same pair."
+            )
         idx = self._pending_edge_index(selector)
         if idx is None:
             return "delete_edge: edge not found"
@@ -411,6 +432,7 @@ class ExtractionState:
                     kind=ev.kind.value,
                     summary=ev.summary,
                     source_turns=tuple(ev.source_turns),
+                    external_refs=ev.external_refs,
                 )
             )
         for (src, dst, kind), ed in self.recent_edges_dict.items():
@@ -542,10 +564,12 @@ class ExtractionState:
           time has historically been lax for this case because the
           downstream auditor still has the entities to work with).
         - ``kind='ref'``: ``cited_quote`` must appear (case+ws
-          normalised) as a substring of the src node's source_turns
-          text. This was missing from the original ``upsert_edge``
-          path — the LLM could fabricate quotes; the v18 batch path
-          enforced the same rule but the atomic edit path did not.
+          normalised) as a substring of BOTH the src node's source-
+          turns text AND the dst node's source-turns text — same rule
+          as the batch path (:func:`witness_ref`). The atomic path
+          originally checked src only, letting a quote that exists
+          only in src text slip through; that divergence was a hole
+          the batch contract closed and we close here too.
         """
         if self.committed:
             return "apply_edge_upsert: firing already finalized"
@@ -587,19 +611,16 @@ class ExtractionState:
                 return (
                     "apply_edge_upsert: kind='ref' requires non-empty cited_quote"
                 )
-            # Witness validation for ref: the verbatim quote must appear in
-            # the src node's source_turns text. This was missing from the
-            # original atomic upsert_edge — a gap the event-sourcing
-            # refactor closes.
-            if not self._witness_in_turn_texts(
-                cited_quote, tuple(src_event.source_turns)
-            ):
-                return (
-                    "apply_edge_upsert: cited_quote not found in src node's "
-                    "source_turns text. Quote tokens must literally appear "
-                    "(after case+whitespace normalization) in the source "
-                    "event's turn text — paraphrasing is rejected."
-                )
+            # Witness validation for ref: the verbatim quote must appear
+            # in BOTH the src and dst nodes' source_turns text (same
+            # rule as :func:`witness_ref` in the batch path). Routing
+            # through that helper keeps the two contracts byte-identical
+            # so a quote accepted by one path is accepted by the other.
+            src_text = self._concat_turn_texts(src_event.source_turns)
+            dst_text = self._concat_turn_texts(dst_event.source_turns)
+            werr = witness_ref(cited_quote, src_text, dst_text)
+            if werr is not None:
+                return f"apply_edge_upsert: {werr}"
             cited_entities = tuple(
                 str(e) for e in (cited_entities_raw or [])
             )
@@ -898,7 +919,11 @@ class ExtractionState:
         self._dropped_pending.extend(dropped)
         # Mirror the batch into the op log so commit() can persist
         # AUDIT_GRAPH_OP entries even when the LLM used the legacy
-        # ``submit_events_batch`` flow.
+        # ``submit_events_batch`` flow. external_refs are folded onto
+        # each event's NodeUpsert so the op-log round-trip preserves
+        # cross-firing connectivity — matches the eventual
+        # ``finalize()`` Event(...) construction (line ~273 in this
+        # file) that attaches them as event-level fields.
         for ev in working:
             self.pending_ops.append(
                 NodeUpsert(
@@ -906,6 +931,7 @@ class ExtractionState:
                     kind=ev.kind.value,
                     summary=ev.summary,
                     source_turns=tuple(ev.source_turns),
+                    external_refs=tuple(accepted_external.get(ev.id, [])),
                 )
             )
         for ed in accepted_edges:

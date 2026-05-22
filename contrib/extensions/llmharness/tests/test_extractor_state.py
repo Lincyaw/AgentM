@@ -103,7 +103,11 @@ def test_atomic_edit_tools_upsert_and_delete_nodes_and_edges() -> None:
     assert not isinstance(updated_edge, str)
     assert state._edges_pending[0].reason == "updated reason"
 
-    deleted_edge = state.delete_edge({"src": 1, "dst": 2})
+    # ``kind`` is mandatory on the legacy delete path too — the op
+    # log selector needs the full (src, dst, kind) triple.
+    rejected = state.delete_edge({"src": 1, "dst": 2})
+    assert isinstance(rejected, str) and "kind" in rejected
+    deleted_edge = state.delete_edge({"src": 1, "dst": 2, "kind": "data"})
     assert not isinstance(deleted_edge, str)
     assert state._edges_pending == []
 

@@ -65,6 +65,7 @@ def fold_graph(ops: Iterable[GraphOp]) -> Graph:
                 kind=EventKind(op.kind),
                 summary=op.summary,
                 source_turns=list(op.source_turns),
+                external_refs=op.external_refs,
             )
         elif isinstance(op, NodeDelete):
             nodes.pop(op.id, None)

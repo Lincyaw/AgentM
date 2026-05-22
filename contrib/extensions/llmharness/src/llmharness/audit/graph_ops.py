@@ -23,10 +23,10 @@ can dispatch without ambiguity. The discriminator values are:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from ..schema import EdgeKind, EventKind
+from ..schema import EdgeKind, EventKind, ExternalRef
 
 
 @dataclass(frozen=True)
@@ -36,12 +36,21 @@ class NodeUpsert:
     ``kind`` is the :class:`~llmharness.schema.EventKind` value (str);
     validated by the caller before constructing the op. ``source_turns``
     is a tuple of absolute trajectory turn indices.
+
+    ``external_refs`` carries cross-firing references from this event
+    back into the cumulative graph (see :class:`ExternalRef`). It must
+    survive the op-log/fold round-trip so the legacy
+    ``AUDIT_EVENT``-to-op translation in ``_scan_branch`` does not
+    drop them when reading prior-firing entries; the auditor and the
+    next firing's ``recent_graph`` payload both depend on them being
+    present on the folded :class:`Event`.
     """
 
     id: int
     kind: str
     summary: str
     source_turns: tuple[int, ...]
+    external_refs: tuple[ExternalRef, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -50,6 +59,7 @@ class NodeUpsert:
             "kind": self.kind,
             "summary": self.summary,
             "source_turns": list(self.source_turns),
+            "external_refs": [r.to_dict() for r in self.external_refs],
         }
 
     @classmethod
@@ -59,6 +69,9 @@ class NodeUpsert:
             kind=str(data["kind"]),
             summary=str(data.get("summary", "")),
             source_turns=tuple(int(t) for t in (data.get("source_turns") or [])),
+            external_refs=tuple(
+                ExternalRef.from_dict(r) for r in (data.get("external_refs") or [])
+            ),
         )
 
 

@@ -373,12 +373,18 @@ def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _Bran
                 ev = Event.from_dict(payload)
             except (KeyError, ValueError, TypeError):
                 continue
+            # external_refs MUST round-trip through the synthesized op
+            # so the auditor and the next firing's recent_graph see the
+            # cross-firing edges the prior firing recorded. Dropping
+            # them silently makes the cumulative graph regress to
+            # per-firing islands.
             ops.append(
                 NodeUpsert(
                     id=ev.id,
                     kind=ev.kind.value,
                     summary=ev.summary,
                     source_turns=tuple(ev.source_turns),
+                    external_refs=ev.external_refs,
                 )
             )
         elif entry.type == _AUDIT_EDGE_ENTRY_TYPE:
@@ -625,6 +631,11 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     pending_reminders: list[Reminder] = []
     turn_count = 0
+    # Session-scoped firing counter — a 1-element box so ``_drain_extractor``
+    # can mutate it through the closure. Incremented only when a firing
+    # actually persists ops; failed / empty firings don't burn an id. See
+    # the M4 invariant test in ``test_firing_id_invariant``.
+    firing_counter: list[int] = [0]
 
     if mode == "sync":
 
@@ -641,6 +652,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     job=_ExtractorJob(messages=messages_snapshot),
                     extractor_extensions=extractor_extensions,
                     extractor_provider=extractor_provider,
+                    firing_counter=firing_counter,
                 )
             if auditor_due and extractor_ok:
                 await _drain_auditor(
@@ -675,6 +687,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     auditor_settings=auditor_settings,
                     extractor_provider=extractor_provider,
                     auditor_provider=auditor_provider,
+                    firing_counter=firing_counter,
                 ),
                 name="llmharness-audit-worker",
             )
@@ -801,6 +814,7 @@ async def _drain_queue(
     auditor_settings: _AuditorSettings,
     extractor_provider: tuple[str, dict[str, Any]] | None,
     auditor_provider: tuple[str, dict[str, Any]] | None,
+    firing_counter: list[int],
 ) -> None:
     """Serial worker. Owns all session-mutating audit writes."""
     _last_extractor_held_cursor: bool = False
@@ -819,6 +833,7 @@ async def _drain_queue(
                     job=job,
                     extractor_extensions=extractor_extensions,
                     extractor_provider=extractor_provider,
+                    firing_counter=firing_counter,
                 )
                 _last_extractor_held_cursor = not extractor_ok
             elif isinstance(job, _AuditorJob):
@@ -852,11 +867,19 @@ async def _drain_extractor(
     job: _ExtractorJob,
     extractor_extensions: list[tuple[str, dict[str, Any]]],
     extractor_provider: tuple[str, dict[str, Any]] | None,
+    firing_counter: list[int],
 ) -> bool:
     """Run one v3 extractor firing.
 
     Returns ``True`` on success or partial-success (cursor advanced).
     Returns ``False`` on no_call / empty / error paths (cursor held).
+
+    ``firing_counter`` is a 1-element mutable box (closure pattern)
+    owned by ``install``: it's the stable session-scoped count of
+    ops-bearing firings, used as the persisted ``firing_id``. We
+    increment ONLY after a successful op persistence so failed /
+    empty firings don't burn an id and the per-session sequence stays
+    contiguous.
     """
     branch = api.session.get_branch()
     branch_state = _scan_branch(branch, recent_verdicts_n=_DEFAULT_RECENT_VERDICTS)
@@ -1023,9 +1046,21 @@ async def _drain_extractor(
         },
     )
 
-    # Empty submission on a non-trivial window is a typed failure; on a
-    # trivial (user-only) window an empty output is normal.
-    if not output.events and not output.edges and not output.dropped_edges:
+    # Empty firing classification.
+    #
+    # The maintainer model means a firing can produce ops that ONLY
+    # edit prior-firing nodes (e.g. a single ``NodeDelete`` merging a
+    # duplicate). Such a firing has empty ``output.events`` / ``edges``
+    # / ``dropped_edges`` (those snapshot the legacy
+    # ``_events_pending`` / ``_edges_pending`` lists, which are only
+    # populated by ``commit_batch``/``finalize``), but a non-empty
+    # ``state.pending_ops``. Gating "empty" on the legacy snapshot
+    # would silently drop the maintainer's op log on the floor.
+    has_legacy_output = bool(
+        output.events or output.edges or output.dropped_edges
+    )
+    has_ops = bool(state.pending_ops)
+    if not has_legacy_output and not has_ops:
         if _window_is_non_trivial(window_messages):
             _record_failure(api, _EXTRACTOR_EMPTY_ENTRY, {"turn_window": turn_window})
             return False
@@ -1042,27 +1077,29 @@ async def _drain_extractor(
 
     # Event-sourcing: persist the firing's op log as one
     # ``AUDIT_GRAPH_OP`` entry per op so any future scan can replay the
-    # exact state changes this firing made. ``firing_id`` is the index
-    # of this firing in the session (derived from the existing op log
-    # size on the branch so we don't have to track it across firings);
-    # ``op_index`` is the position within the firing.
-    firing_id = sum(
-        1
-        for e in branch
-        if isinstance(e.payload, dict) and e.type == _AUDIT_GRAPH_OP_ENTRY_TYPE
-        and e.payload.get("op_index") == 0
-    )
+    # exact state changes this firing made. ``firing_id`` is supplied
+    # by the install-level closure (M4): it is a stable session-scoped
+    # counter incremented once per ops-bearing firing, NOT recomputed
+    # from the branch (the prior heuristic — counting ``op_index==0``
+    # entries — collapses if any future change emits a firing whose
+    # first op has a non-zero index, e.g. partial recovery / retry).
+    firing_id = firing_counter[0]
     for op_index, op in enumerate(state.pending_ops):
         payload = op.to_dict()
         payload["firing_id"] = firing_id
         payload["op_index"] = op_index
         payload["caused_by_turn_window"] = list(turn_window)
         api.session.append_entry(_AUDIT_GRAPH_OP_ENTRY_TYPE, payload)
+    if has_ops:
+        firing_counter[0] += 1
 
     # Legacy emit: keep writing AUDIT_EVENT / AUDIT_EDGE entries so the
     # auditor, aggregate, replay, and web-viewer paths continue to work
     # without modification while the event-sourcing migration is rolled
     # out. The scanner translates both stripes into the same fold view.
+    # Skipped when this firing only produced ops that edit prior-firing
+    # nodes (e.g. pure NodeDelete) — there's nothing legacy-shaped to
+    # persist, and the scanner reads the ops back via AUDIT_GRAPH_OP.
     for ev in output.events:
         api.session.append_entry(_AUDIT_EVENT_ENTRY_TYPE, ev.to_dict())
     for ed in output.edges:

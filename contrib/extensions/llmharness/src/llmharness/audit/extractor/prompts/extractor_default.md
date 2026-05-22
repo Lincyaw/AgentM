@@ -793,8 +793,14 @@ Core tools plus four atomic graph-edit tools:
 Each event has:
 
 - `id` — global integer. Start from `next_event_id` (in the
-  payload) and increment strictly. Never restart at 1. Never reuse
-  an id already in `recent_graph`.
+  payload) and increment strictly for any *new* node. Never restart
+  at 1. Do not reuse an id that is **still present in the current
+  graph** — i.e. any id you can see in `recent_graph` or that you
+  have just emitted in this firing. Ids that have been deleted in
+  this firing via `delete_node` ARE eligible for re-use: that is
+  the merge-duplicate path (delete the old, then re-issue with the
+  canonical id). To *edit* an existing live node, pass its id to
+  `upsert_node` — that is an in-place revision, not a re-use.
 - `kind` — one of: `task`, `hyp`, `act`, `evid`, `dec`, `concl`.
 - `summary` — natural prose; see above.
 - `source_turns` — trajectory indices this event derives from;
