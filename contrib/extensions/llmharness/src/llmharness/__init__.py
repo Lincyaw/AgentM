@@ -16,6 +16,11 @@ or a fork-and-replay over recorded trajectories:
 * :class:`ReplayRecord`, :func:`iter_records`, :func:`write_record`,
   :func:`now_ns` — replay-sidecar record format and IO helpers.
 * :func:`replay_auditor_record` — re-run a recorded auditor firing.
+* :class:`ReminderCandidate` / :class:`OfflineAuditRun` /
+  :func:`run_offline_auditor_over_control` /
+  :func:`write_strict_ab_replay` / :func:`strict_ab_replay_path` —
+  strict-A/B fork orchestration (replay auditor against a fixed
+  control trajectory, then stitch a unified replay sidecar).
 
 The runtime entry point is the AgentM extension at
 ``llmharness.adapters.agentm``, loaded via
@@ -29,6 +34,13 @@ from .audit.auditor.output import AuditorOutputError, RawVerdictOutput
 from .audit.phase import merge_to_phases
 from .replay.record import ReplayRecord, iter_records, now_ns, write_record
 from .replay.runner import replay_auditor_record
+from .replay.strict_ab import (
+    OfflineAuditRun,
+    ReminderCandidate,
+    run_offline_auditor_over_control,
+    strict_ab_replay_path,
+    write_strict_ab_replay,
+)
 from .schema import (
     Edge,
     EdgeKind,
@@ -47,9 +59,11 @@ __all__ = [
     "Event",
     "EventKind",
     "Finding",
+    "OfflineAuditRun",
     "Phase",
     "RawVerdictOutput",
     "Reminder",
+    "ReminderCandidate",
     "ReplayRecord",
     "Verdict",
     "flatten_assistant_blocks",
@@ -57,6 +71,9 @@ __all__ = [
     "merge_to_phases",
     "now_ns",
     "replay_auditor_record",
+    "run_offline_auditor_over_control",
     "serialize_full_trajectory",
+    "strict_ab_replay_path",
     "write_record",
+    "write_strict_ab_replay",
 ]
