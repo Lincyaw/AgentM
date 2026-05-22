@@ -1,18 +1,73 @@
 """LLM-as-harness: cognitive-audit AgentM extension.
 
-Public surface is the typed payloads (``Event``, ``Verdict``, ``Reminder``,
-``EventKind``) and the AFC card loader. The runtime entry point is the AgentM
-extension at ``llmharness.adapters.agentm``, loaded via
+Public surface — kept deliberately small. Re-export rule: a symbol
+appears here only if at least one in-tree consumer (rca eval, the
+strict-A/B test suite, smoke tests) imports it through the top-level
+package. Everything else stays reachable via its submodule path and
+gets promoted on demand.
+
+Currently exported:
+
+* Wire-type dataclasses from :mod:`llmharness.schema` —
+  ``Event`` / ``EventKind`` / ``Edge`` / ``EdgeKind`` / ``Finding`` /
+  ``Phase`` / ``Reminder`` / ``Verdict``. These define the
+  replay-record / audit-graph data model and are the typed view every
+  consumer needs.
+* :class:`ReplayRecord` + :func:`iter_records` / :func:`write_record`
+  — replay sidecar record format and I/O. Used directly by both the
+  strict-A/B helpers and downstream consumers that read sidecars.
+* Strict-A/B fork orchestration — :class:`ReminderCandidate`,
+  :class:`OfflineAuditRun`, :func:`run_offline_auditor_over_control`,
+  :func:`write_strict_ab_replay`, :func:`strict_ab_replay_path`. The
+  primary entry points the rca eval driver calls.
+
+Other helpers (``AuditorOutputError``, ``RawVerdictOutput``,
+``merge_to_phases``, ``flatten_assistant_blocks``,
+``serialize_full_trajectory``, ``now_ns``, ``replay_auditor_record``)
+remain available via their submodules. Promote them here when an
+in-tree caller actually needs them through the top-level surface.
+
+The runtime entry point is the AgentM extension at
+``llmharness.adapters.agentm``, loaded via
 ``AgentSessionConfig(extensions=[("llmharness.adapters.agentm", {})])``.
 
 V2 breaking change (issue #134, 2026-05-10): ``DriftType`` is removed.
 """
 
-from .schema import Event, EventKind, Reminder, Verdict
+from .replay.record import ReplayRecord, iter_records, write_record
+from .replay.strict_ab import (
+    OfflineAuditRun,
+    ReminderCandidate,
+    run_offline_auditor_over_control,
+    strict_ab_replay_path,
+    write_strict_ab_replay,
+)
+from .schema import (
+    Edge,
+    EdgeKind,
+    Event,
+    EventKind,
+    Finding,
+    Phase,
+    Reminder,
+    Verdict,
+)
 
 __all__ = [
+    "Edge",
+    "EdgeKind",
     "Event",
     "EventKind",
+    "Finding",
+    "OfflineAuditRun",
+    "Phase",
     "Reminder",
+    "ReminderCandidate",
+    "ReplayRecord",
     "Verdict",
+    "iter_records",
+    "run_offline_auditor_over_control",
+    "strict_ab_replay_path",
+    "write_record",
+    "write_strict_ab_replay",
 ]

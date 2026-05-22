@@ -6,7 +6,7 @@ graph-only justifiability and emits the final `reminder_text`. If
 the rewriter rejects the selection, the sample is dropped.
 
 Both children run as **top-level** AgentM sessions via
-:func:`llmharness.replay.engine.run_phase_standalone` with a minimal
+:func:`llmharness.tools.engine.run_phase_standalone` with a minimal
 five-atom extension list (observability + otel_tracing +
 operations_local + submit_tool + system_prompt). No cards, no skills.
 """
@@ -25,8 +25,8 @@ from ..audit._atom_constants import (
     OTEL_TRACING_MODULE,
     SYSTEM_PROMPT_MODULE,
 )
-from ..replay.engine import run_phase_standalone
 from ..schema import Edge, Event, Finding
+from ..tools.engine import run_phase_standalone
 from ._submit_oracle import SUBMIT_ORACLE_TOOL_NAME
 from ._submit_rewriter import SUBMIT_REWRITE_TOOL_NAME
 from .causal import CausalSnapshot, causal_mask

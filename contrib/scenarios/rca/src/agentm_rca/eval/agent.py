@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 import os
 from typing import Any
 
@@ -47,6 +48,8 @@ from rcabench_platform.v3.sdk.llm_eval.trajectory.schema import (
     Trajectory,
     Turn,
 )
+
+_logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 # RCA investigations dispatch workers, poll, and run many SQL queries; the
@@ -69,6 +72,26 @@ _BASELINE_FORK_ALIASES = {
     "fork_audit",
     "fork-audit",
 }
+
+# Registered harness variants → control scenario for strict A/B fork mode.
+# The control scenario is identical to the variant minus the auditor /
+# reminder legs, so the offline auditor side-channel can be replayed
+# against an immutable extractor-only trajectory. Override per-call via
+# ``--ak control_scenario=...`` or ``AGENTM_FORK_CONTROL_SCENARIO``.
+_HARNESS_VARIANT_TO_CONTROL: dict[str, str] = {
+    "rca:harness.sync": "rca:harness.sync.extractor5",
+    "rca:harness.sync.opinions": "rca:harness.sync.extractor5",
+    "rca:harness.sync.opinions10": "rca:harness.sync.extractor5",
+}
+
+# Module path of the llmharness cognitive-audit adapter. A scenario that
+# mounts this module is treated as a "harness scenario" by the eval
+# driver — it auto-wires the distill-binding atom so the offline
+# distillation pipeline can join replay records to ground truth.
+# Detection is by manifest composition (see :func:`_scenario_mounts_harness`),
+# not by scenario name — string-sniffing the scenario id silently breaks
+# when new variants are added.
+_HARNESS_ADAPTER_MODULE = "llmharness.adapters.agentm"
 
 
 def _provider_name_from_base_url(base_url: str) -> str:
@@ -159,19 +182,6 @@ def _coerce_bool(value: Any, *, default: bool = False) -> bool:
 
 
 @dataclass(frozen=True)
-class _ReminderCandidate:
-    turn_index: int
-    text: str
-    record: Any
-
-
-@dataclass(frozen=True)
-class _OfflineAuditRun:
-    reminder: _ReminderCandidate | None
-    records: list[Any]
-
-
-@dataclass(frozen=True)
 class _SessionRun:
     result: AgentResult
     final_messages: list[Any]
@@ -228,11 +238,28 @@ class AgentMAgent(BaseAgent):
         else:
             self._intervention_mode = None
         self._fork_policy = fork_policy
-        self._control_scenario = (
-            control_scenario
-            or os.environ.get("AGENTM_FORK_CONTROL_SCENARIO")
-            or _default_control_scenario(scenario)
+        explicit_control = (
+            control_scenario or os.environ.get("AGENTM_FORK_CONTROL_SCENARIO")
         )
+        if explicit_control:
+            self._control_scenario = explicit_control
+        else:
+            mapped_control = _HARNESS_VARIANT_TO_CONTROL.get(scenario)
+            if (
+                self._intervention_mode == _INTERVENTION_BASELINE_FORK
+                and mapped_control is None
+            ):
+                raise ValueError(
+                    f"strict-A/B fork requested for scenario={scenario!r}, "
+                    "but no control scenario is registered for that variant. "
+                    "Either pick a variant in _HARNESS_VARIANT_TO_CONTROL (see "
+                    "contrib/scenarios/rca/_VARIANTS.md), or pass "
+                    "control_scenario=... explicitly "
+                    "(--ak control_scenario=... / AGENTM_FORK_CONTROL_SCENARIO)."
+                )
+            # Non-fork rollouts: control scenario is just the requested
+            # scenario itself — it is unused by ``run``.
+            self._control_scenario = mapped_control or scenario
         self._branch_scenario = (
             branch_scenario
             or os.environ.get("AGENTM_FORK_BRANCH_SCENARIO")
@@ -309,14 +336,24 @@ class AgentMAgent(BaseAgent):
                 "baseline_fork currently supports only fork_policy='first_surface'"
             )
 
+        from pathlib import Path
+
+        from llmharness import (
+            run_offline_auditor_over_control,
+            strict_ab_replay_path,
+            write_strict_ab_replay,
+        )
+
         control = await self._execute_session(
             incident=incident,
             data_dir=data_dir,
             scenario=self._control_scenario,
             **kwargs,
         )
-        offline_audit = await _run_offline_auditor_over_control(
-            control=control,
+        offline_audit = await run_offline_auditor_over_control(
+            control_replay_path=Path(control.audit_replay_path),
+            control_session_log_id=control.session_log_id,
+            control_messages=control.final_messages,
             cwd=os.getcwd(),
             provider=_build_provider(self._provider, self._model),
         )
@@ -348,19 +385,26 @@ class AgentMAgent(BaseAgent):
             seed_reminder_text=reminder.text,
             **kwargs,
         )
-        branch_audit = await _run_offline_auditor_over_control(
-            control=branch,
+        branch_audit = await run_offline_auditor_over_control(
+            control_replay_path=Path(branch.audit_replay_path),
+            control_session_log_id=branch.session_log_id,
+            control_messages=branch.final_messages,
             cwd=os.getcwd(),
             provider=_build_provider(self._provider, self._model),
             stop_on_first_surface=False,
         )
-        strict_replay_path = _write_strict_ab_replay(
-            control=control,
-            branch=branch,
-            offline_auditor_records=offline_audit.records,
-            branch_auditor_records=branch_audit.records,
-            reminder=reminder,
-            cwd=os.getcwd(),
+        strict_replay_path = str(
+            write_strict_ab_replay(
+                control_replay_path=Path(control.audit_replay_path),
+                branch_replay_path=Path(branch.audit_replay_path),
+                branch_session_log_id=branch.session_log_id,
+                offline_auditor_records=offline_audit.records,
+                branch_auditor_records=branch_audit.records,
+                reminder=reminder,
+                out_path=strict_ab_replay_path(
+                    os.getcwd(), branch.session_log_id
+                ),
+            )
         )
         metadata = dict(branch.result.metadata or {})
         metadata["intervention_mode"] = _INTERVENTION_BASELINE_FORK
@@ -467,8 +511,10 @@ class AgentMAgent(BaseAgent):
         # distinct id and an env-var fallback would race under ``-n>1``.
         # Mount conditionally — binding is dead weight without the harness
         # adapter that produces the replay sidecar in the first place.
+        # Detection: introspect the resolved scenario manifest, not the
+        # scenario name string. See :func:`_scenario_mounts_harness`.
         extra_extensions: list[tuple[str, dict[str, Any]]] = []
-        if "harness" in scenario:
+        if _scenario_mounts_harness(scenario):
             sample_id = os.path.basename(data_dir.rstrip("/")) or "unknown"
             extra_extensions.append(
                 (
@@ -572,302 +618,42 @@ class AgentMAgent(BaseAgent):
         )
 
 
-def _default_control_scenario(scenario: str) -> str:
-    """Pick a no-auditor control scenario for strict A/B fork mode."""
-    if scenario in {
-        "rca:harness.sync",
-        "rca:harness.sync.opinions",
-        "rca:harness.sync.opinions10",
-    }:
-        return "rca:harness.sync.extractor5"
-    return scenario
+def _scenario_mounts_harness(scenario: str) -> bool:
+    """True iff ``scenario`` mounts the llmharness cognitive-audit adapter.
 
+    Detected by loading the resolved scenario manifest and looking for
+    ``llmharness.adapters.agentm`` in its extensions list. Replaces the
+    historical ``"harness" in scenario_name`` string-sniff so new harness
+    variants (or renames) don't silently miss the distill-binding wire-up.
 
-def _coerce_schema_list(cls: Any, items: Any) -> list[Any]:
-    out: list[Any] = []
-    if not isinstance(items, list):
-        return out
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        try:
-            out.append(cls.from_dict(item))
-        except (KeyError, TypeError, ValueError):
-            continue
-    return out
-
-
-async def _run_offline_auditor_over_control(
-    *,
-    control: _SessionRun,
-    cwd: str,
-    provider: tuple[str, dict[str, Any]] | None,
-    stop_on_first_surface: bool = True,
-) -> _OfflineAuditRun:
-    """Run auditor side-channel over the fixed control trajectory.
-
-    Strict A/B means the control session must not mount the auditor. This
-    helper reconstructs each auditor firing from the extractor-only replay
-    sidecar, so the judgment is made against an immutable control prefix.
+    Error policy: a malformed scenario manifest is a hard error — we let
+    ``ScenarioLoadError`` propagate so the rollout fails loudly rather
+    than silently producing an unjoinable replay sidecar. The only
+    swallowed case is "manifest legitimately not found on disk": the
+    loader wraps the underlying ``FileNotFoundError`` as
+    ``ScenarioLoadError(..., cause=FileNotFoundError(...))``. We
+    recognise this shape via the ``.cause`` attribute (the loader does
+    not chain with ``from exc``, so ``__cause__`` is None — inspect the
+    explicit attribute instead). The not-found case is logged at
+    WARNING so the wire-up failure is observable in stderr.
     """
-    from pathlib import Path
+    from agentm.extensions.loader import ScenarioLoadError, load_scenario
 
-    from llmharness.adapters.agentm import (
-        flatten_assistant_blocks,
-        serialize_full_trajectory,
-    )
-    from llmharness.audit.auditor.output import (
-        AuditorOutputError,
-        RawVerdictOutput,
-    )
-    from llmharness.audit.phase import merge_to_phases
-    from llmharness.replay.record import ReplayRecord, iter_records, now_ns
-    from llmharness.replay.runner import replay_auditor_record
-    from llmharness.schema import Edge, Event
-
-    replay_path = Path(control.audit_replay_path)
-    if not replay_path.exists():
-        return _OfflineAuditRun(reminder=None, records=[])
-
-    events: list[Any] = []
-    edges: list[Any] = []
-    phases: list[Any] = []
-    recent_verdicts: list[dict[str, Any]] = []
-    continuation_notes: list[str] = []
-    auditor_records: list[Any] = []
-
-    extractor_records = [
-        rec
-        for rec in iter_records(replay_path)
-        if rec.phase == "extractor" and rec.status == "ok" and rec.output
-    ]
-    extractor_records.sort(key=lambda rec: (rec.ts_ns, rec.turn_index))
-
-    for extractor_record in extractor_records:
-        output = extractor_record.output or {}
-        new_events = _coerce_schema_list(Event, output.get("events") or [])
-        new_edges = _coerce_schema_list(Edge, output.get("edges") or [])
-        events.extend(new_events)
-        edges.extend(new_edges)
-        phases.extend(merge_to_phases(new_events))
-
-        cut = min(max(extractor_record.turn_index + 1, 0), len(control.final_messages))
-        trajectory_snapshot = serialize_full_trajectory(control.final_messages[:cut])
-        compose_kwargs = {
-            "base_prompt": None,
-            "cards_tools_config": {},
-            "observability_config": {},
-            "trajectory_snapshot": trajectory_snapshot,
-            "events": [ev.to_dict() for ev in events],
-            "edges": [ed.to_dict() for ed in edges],
-            "phases": [ph.to_dict() for ph in phases],
-            "findings": [],
-            "check_errors": {},
-            "continuation_notes": list(continuation_notes),
-            "summary_threshold": 30,
-            "tools": ["submit_verdict"],
-        }
-        payload = {
-            "graph": [ev.to_dict() for ev in events],
-            "recent_verdicts": list(recent_verdicts),
-            "continuation_notes_from_prior_firing": list(continuation_notes),
-        }
-        replay_record = ReplayRecord(
-            phase="auditor",
-            turn_index=extractor_record.turn_index,
-            root_session_id=control.session_log_id,
-            ts_ns=(extractor_record.ts_ns or now_ns()) + 1,
-            compose_kwargs=compose_kwargs,
-            payload=payload,
-            provider=None,
-            output=None,
-            status="ok",
-        )
-        phase_result = await replay_auditor_record(
-            replay_record,
-            cwd=cwd,
-            provider_override=provider,
-        )
-        verdict_dict: dict[str, Any] | None = None
-        if phase_result.status == "ok" and isinstance(phase_result.output, dict):
-            try:
-                verdict_dict = RawVerdictOutput.from_dict(
-                    phase_result.output
-                ).to_verdict().to_dict()
-            except AuditorOutputError:
-                verdict_dict = None
-        auditor_record = ReplayRecord(
-            phase="auditor",
-            turn_index=extractor_record.turn_index,
-            root_session_id=control.session_log_id,
-            ts_ns=replay_record.ts_ns,
-            compose_kwargs=compose_kwargs,
-            payload=payload,
-            provider=[provider[0], provider[1]] if provider else None,
-            output=verdict_dict,
-            status=phase_result.status if verdict_dict is not None else "no_call",
-            error=phase_result.error,
-            latency_ms=phase_result.latency_ms,
-            raw_assistant_messages=flatten_assistant_blocks(phase_result.messages),
-        )
-        auditor_records.append(auditor_record)
-
-        verdict = verdict_dict
-        if verdict is not None:
-            recent_verdicts.append(verdict)
-            raw_notes = verdict.get("continuation_notes")
-            continuation_notes = [
-                str(n) for n in raw_notes if isinstance(n, str)
-            ] if isinstance(raw_notes, list) else []
-
-        if not verdict or not verdict.get("surface_reminder"):
-            continue
-        text = verdict.get("reminder_text")
-        if not isinstance(text, str) or not text.strip():
-            continue
-        reminder = _ReminderCandidate(
-            turn_index=extractor_record.turn_index,
-            text=text,
-            record=auditor_record,
-        )
-        if stop_on_first_surface:
-            return _OfflineAuditRun(reminder=reminder, records=auditor_records)
-
-    first_reminder = next(
-        (
-            _ReminderCandidate(
-                turn_index=int(record.turn_index),
-                text=str((record.output or {}).get("reminder_text", "")),
-                record=record,
+    try:
+        extensions = load_scenario(scenario)
+    except ScenarioLoadError as exc:
+        if isinstance(exc.cause, FileNotFoundError):
+            _logger.warning(
+                "rca eval: scenario %r not found; treating as non-harness "
+                "(distill binding will not be mounted). Check "
+                "AGENTM_PROJECT_ROOT and contrib/scenarios/ layout. (%s)",
+                scenario,
+                exc,
             )
-            for record in auditor_records
-            if isinstance(record.output, dict)
-            and record.output.get("surface_reminder")
-            and str(record.output.get("reminder_text", "")).strip()
-        ),
-        None,
-    )
-    return _OfflineAuditRun(reminder=first_reminder, records=auditor_records)
+            return False
+        raise
+    return any(module == _HARNESS_ADAPTER_MODULE for module, _ in extensions)
 
-
-def _clone_replay_record(
-    record: Any,
-    *,
-    root_session_id: str,
-    ts_ns: int | None = None,
-) -> Any:
-    from llmharness.replay.record import ReplayRecord
-
-    provider = record.provider
-    if isinstance(provider, list):
-        provider = list(provider)
-    return ReplayRecord(
-        phase=record.phase,
-        turn_index=int(record.turn_index),
-        root_session_id=root_session_id,
-        ts_ns=int(ts_ns if ts_ns is not None else record.ts_ns),
-        compose_kwargs=dict(record.compose_kwargs or {}),
-        payload=dict(record.payload or {}),
-        provider=provider,
-        output=dict(record.output) if isinstance(record.output, dict) else record.output,
-        status=record.status,
-        error=record.error,
-        latency_ms=int(record.latency_ms or 0),
-        extras=dict(record.extras or {}),
-        raw_assistant_messages=list(record.raw_assistant_messages or []),
-    )
-
-
-def _write_strict_ab_replay(
-    *,
-    control: _SessionRun,
-    branch: _SessionRun,
-    offline_auditor_records: list[Any],
-    branch_auditor_records: list[Any] | None = None,
-    reminder: _ReminderCandidate,
-    cwd: str,
-) -> str:
-    """Materialize the website sidecar for the with-auditor branch.
-
-    The sidecar is intentionally composed as:
-    control extractor/auditor prefix -> branch extractor/auditor tail. Silent
-    auditor verdicts are persisted too, so the case viewer shows one auditor
-    firing for every extractor firing while only the surfaced reminder changes
-    the main-agent trajectory.
-    """
-    from pathlib import Path
-
-    from llmharness.replay.record import iter_records, write_record
-
-    out_path = (
-        Path(cwd)
-        / ".agentm"
-        / "audit_replay"
-        / f"{branch.session_log_id}.strict_ab.jsonl"
-    )
-    if out_path.exists():
-        out_path.unlink()
-
-    control_records = list(iter_records(Path(control.audit_replay_path)))
-    branch_records = list(iter_records(Path(branch.audit_replay_path)))
-    root_session_id = branch.session_log_id
-    control_auditors_by_turn = {
-        int(record.turn_index): record for record in offline_auditor_records
-    }
-    branch_auditors_by_turn = {
-        int(record.turn_index): record for record in (branch_auditor_records or [])
-    }
-
-    for record in control_records:
-        if record.phase != "extractor":
-            continue
-        if int(record.turn_index) > reminder.turn_index:
-            continue
-        write_record(
-            out_path,
-            _clone_replay_record(record, root_session_id=root_session_id),
-        )
-        auditor = control_auditors_by_turn.get(int(record.turn_index))
-        if auditor is not None:
-            write_record(
-                out_path,
-                _clone_replay_record(auditor, root_session_id=root_session_id),
-            )
-
-    branch_tail_written = False
-    for record in branch_records:
-        if record.phase != "extractor":
-            continue
-        if int(record.turn_index) <= reminder.turn_index:
-            continue
-        branch_tail_written = True
-        write_record(
-            out_path,
-            _clone_replay_record(record, root_session_id=root_session_id),
-        )
-        auditor = branch_auditors_by_turn.get(int(record.turn_index))
-        if auditor is not None:
-            write_record(
-                out_path,
-                _clone_replay_record(auditor, root_session_id=root_session_id),
-            )
-
-    if not branch_tail_written:
-        for record in branch_records:
-            if record.phase != "extractor":
-                continue
-            write_record(
-                out_path,
-                _clone_replay_record(record, root_session_id=root_session_id),
-            )
-            auditor = branch_auditors_by_turn.get(int(record.turn_index))
-            if auditor is not None:
-                write_record(
-                    out_path,
-                    _clone_replay_record(auditor, root_session_id=root_session_id),
-                )
-
-    return str(out_path)
 
 
 def _fork_prefix_messages(final_messages: list[Any], *, turn_index: int) -> list[Any]:
