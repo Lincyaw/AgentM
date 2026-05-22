@@ -69,6 +69,70 @@ def test_commit_happy_path_accepts_events_and_witnessed_ref() -> None:
     assert state.committed is True
 
 
+def test_graph_edit_add_update_delete_nodes_and_edges() -> None:
+    state = _state()
+    assert state.apply_graph_edit(
+        "add_node",
+        {"node": _evid(1, turns=[10], summary="src")},
+    )["pending_nodes"] == 1
+    assert state.apply_graph_edit(
+        "add_node",
+        {"node": _evid(2, turns=[11], summary="dst")},
+    )["pending_nodes"] == 2
+    updated = state.apply_graph_edit(
+        "update_node",
+        {"node_id": 2, "node": {"summary": "updated dst"}},
+    )
+    assert not isinstance(updated, str)
+    assert state._events_pending[1].summary == "updated dst"
+
+    added_edge = state.apply_graph_edit(
+        "add_edge",
+        {
+            "edge": {
+                "src": 1,
+                "dst": 2,
+                "kind": "data",
+                "reason": "connects",
+                "cited_entities": ["abnormal_traces"],
+            }
+        },
+    )
+    assert not isinstance(added_edge, str)
+    assert len(state._edges_pending) == 1
+
+    updated_edge = state.apply_graph_edit(
+        "update_edge",
+        {
+            "edge_selector": {"src": 1, "dst": 2},
+            "edge": {"reason": "updated reason"},
+        },
+    )
+    assert not isinstance(updated_edge, str)
+    assert state._edges_pending[0].reason == "updated reason"
+
+    deleted_edge = state.apply_graph_edit(
+        "delete_edge",
+        {"edge_selector": {"src": 1, "dst": 2}},
+    )
+    assert not isinstance(deleted_edge, str)
+    assert state._edges_pending == []
+
+    deleted_node = state.apply_graph_edit("delete_node", {"node_id": 2})
+    assert not isinstance(deleted_node, str)
+    assert [ev.id for ev in state._events_pending] == [1]
+
+
+def test_graph_edit_rejects_unknown_node_update() -> None:
+    state = _state()
+    err = state.apply_graph_edit(
+        "update_node",
+        {"node_id": 999, "node": {"summary": "missing"}},
+    )
+    assert isinstance(err, str)
+    assert "unknown node_id" in err
+
+
 def test_commit_with_empty_events_is_accepted() -> None:
     state = _state()
     err = state.commit([])
