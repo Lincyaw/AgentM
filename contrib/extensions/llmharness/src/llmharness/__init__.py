@@ -69,6 +69,11 @@ from .schema import (
     Reminder,
     Verdict,
 )
+from .train_signals import (
+    ToolEvent,
+    auditor_process_reward,
+    extractor_process_reward,
+)
 
 __all__ = [
     "AUDITOR_TERMINATION_REASON",
@@ -86,7 +91,10 @@ __all__ = [
     "Reminder",
     "ReminderCandidate",
     "ReplayRecord",
+    "ToolEvent",
     "Verdict",
+    "auditor_process_reward",
+    "extractor_process_reward",
     "iter_records",
     "load_auditor_prompt",
     "load_extractor_prompt",
