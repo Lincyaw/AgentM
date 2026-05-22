@@ -731,26 +731,25 @@ Core tools plus four atomic graph-edit tools:
    edge. `kind` is optional when `src` and `dst` identify a single
    pending edge.
 
-5. `submit_events_batch(events=[...], done=bool)` — call ONE OR
-   MORE times. Each batch appends to the firing's pending graph;
-   accepted batches accumulate across calls. A hard reject (event
-   shape, id sequence, ref shape) fails ONLY the offending batch —
-   previous batches stay accepted, so you only retry what failed.
-   Set `done=true` on the FINAL batch to trigger the cross-graph
-   degree check and terminate the firing.
+5. `finalize_extraction()` — call ONCE as the FINAL tool call to
+   commit the pending event graph and end the firing. No arguments.
+   Runs the cross-graph degree check (passthrough rejection) and the
+   id-monotonicity check at commit time. If the check rejects, the
+   firing stays alive — fix the offending events via upsert/delete
+   and re-call `finalize_extraction`.
 
-   The degree check is the v18 structural invariant: every
-   internal event must be a true branch point (in-degree ≥ 2 OR
+   The degree check is the structural invariant: every internal
+   event must be a true branch point (in-degree ≥ 2 OR
    out-degree ≥ 2). A passthrough event — `(in=1, out=1)` — is
    a chain link with no branching role and is rejected. The fix
    is to MERGE the passthrough with its neighbour (basic-block
    coalescence) — one act + one evid per linear stretch — not to
-   add a fake ref. If the check rejects, the firing stays alive
-   and you may submit additional batches that promote the
-   passthrough events (e.g. add a later event whose `refs`
-   include the passthrough id, boosting its out-degree to 2).
+   add a fake ref. If the check rejects, promote the passthrough
+   events (e.g. add a later event whose `refs` include the
+   passthrough id, boosting its out-degree to 2) via additional
+   upsert/delete calls, then re-call `finalize_extraction`.
 
-7. `reset_extraction()` — clears the pending event list so you
+6. `reset_extraction()` — clears the pending event list so you
    can start over. Only use this when the accumulated graph is
    genuinely unrecoverable.
 
@@ -825,9 +824,9 @@ tools — there is no plan-submission step.
 
 Use the atomic graph-edit tools (`upsert_node`, `delete_node`,
 `upsert_edge`, `delete_edge`) for incremental construction;
-prefer them over `submit_events_batch` whenever you may need to
-revise a node/edge after seeing a better structure. Walk the
-basic blocks in turn order. For each block:
+upserts and deletes accumulate in the pending graph, and you commit
+them all at once with `finalize_extraction`. Walk the basic blocks
+in turn order. For each block:
 
 1. **Emit per block kind.** Linear → one act + one evid covering
    the block's turns. Branch → one atomic hyp / dec / concl on
@@ -845,7 +844,7 @@ basic blocks in turn order. For each block:
    source_turns text, preferring tokens from tool args / tool
    results (Principle 4).
 
-Two checks before setting `done=true`:
+Two checks before calling `finalize_extraction`:
 
 - **No passthroughs.** Every internal event you emitted must
   have in-degree ≥ 2 OR out-degree ≥ 2. If you see an event with
@@ -859,9 +858,9 @@ Two checks before setting `done=true`:
   retesting? If a `concl` in this firing restates that hyp, the
   concl must cite it directly via refs or external_refs.
 
-Then call `submit_events_batch(events=[...], done=true)` to
-finalize; if you already built the graph with atomic edit tools, use
-`submit_events_batch(events=[], done=true)`. If the degree check rejects, the firing stays alive —
-either submit additional batches that promote passthroughs (add
-a later event whose refs target the passthrough id), or call
+Then call `finalize_extraction()` (no arguments) to commit the
+pending graph and end the firing. If the degree check rejects, the
+firing stays alive — either promote passthroughs via additional
+upsert/delete calls (add a later event whose refs target the
+passthrough id) and re-call `finalize_extraction`, or call
 `reset_extraction()` and re-emit with the events properly merged.
