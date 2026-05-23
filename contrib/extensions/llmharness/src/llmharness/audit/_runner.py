@@ -706,8 +706,11 @@ class HarnessRunner:
         # (``fire_extractor_from_record`` / ``fire_auditor_from_record``)
         # which spawn standalone sessions directly. Live + trajectory-
         # driven paths route through the ``child`` :class:`ChildRunner`
-        # and never read this field.
-        cwd: str = "",
+        # and never read this field — pass ``None`` for those callers.
+        # Passing an explicit ``""`` was a footgun: empty-string ``cwd``
+        # flows into ``AgentSessionConfig(cwd="")`` and silently writes
+        # to the process CWD.
+        cwd: str | None = None,
     ) -> None:
         self.cumulative = cumulative
         self._child = child
@@ -1166,6 +1169,11 @@ class HarnessRunner:
             raise ValueError(
                 f"expected extractor record, got phase={record.phase!r}"
             )
+        if self._cwd is None:
+            raise ValueError(
+                "HarnessRunner.fire_extractor_from_record requires cwd to be "
+                "set at construction"
+            )
 
         extras = record.extras or {}
         state = ExtractionState()
@@ -1254,6 +1262,11 @@ class HarnessRunner:
         if record.phase != "auditor":
             raise ValueError(
                 f"expected auditor record, got phase={record.phase!r}"
+            )
+        if self._cwd is None:
+            raise ValueError(
+                "HarnessRunner.fire_auditor_from_record requires cwd to be "
+                "set at construction"
             )
 
         ck = record.compose_kwargs or {}
