@@ -503,6 +503,13 @@ class StepResult:
     fired_extractor: bool
     fired_auditor: bool
     surfaced_reminder: Reminder | None
+    auditor_record: ReplayRecord | None = None
+    """Synthetic auditor :class:`ReplayRecord` for the firing, when one
+    occurred. Populated even when the sidecar writer is ``None`` so
+    offline drivers (notably
+    :func:`llmharness.replay.run_offline_auditor_over_control`) can
+    capture per-firing records without a disk round-trip. ``None`` when
+    no auditor firing happened or the firing produced no verdict (no-call)."""
 
 
 # --- helpers ----------------------------------------------------------------
@@ -639,6 +646,7 @@ class _AuditorFiringResult:
     """Internal — returned from :meth:`HarnessRunner.fire_auditor_once`."""
 
     verdict: Verdict | None
+    record: ReplayRecord | None = None
 
 
 class HarnessRunner:
@@ -719,6 +727,7 @@ class HarnessRunner:
         fired_extractor = False
         fired_auditor = False
         surfaced: Reminder | None = None
+        auditor_record: ReplayRecord | None = None
 
         if extractor_due:
             result = await self.fire_extractor_once(messages)
@@ -734,12 +743,14 @@ class HarnessRunner:
             else:
                 audit_result = await self.fire_auditor_once(messages)
                 fired_auditor = True
+                auditor_record = audit_result.record
                 if audit_result.verdict is not None and audit_result.verdict.surface_reminder:
                     text = audit_result.verdict.reminder_text
                     if text:
                         surfaced = Reminder(text=text)
 
         return StepResult(
+            auditor_record=auditor_record,
             fired_extractor=fired_extractor,
             fired_auditor=fired_auditor,
             surfaced_reminder=surfaced,
@@ -993,28 +1004,31 @@ class HarnessRunner:
             tools=self._auditor_settings.tools,
         )
 
-        replay_compose_kwargs: dict[str, Any] | None = None
-        replay_payload: dict[str, Any] | None = None
-        if self._sidecar is not None and self._sidecar.path is not None:
-            replay_compose_kwargs = {
-                "base_prompt": self._auditor_settings.base_prompt,
-                "cards_tools_config": self._auditor_settings.cards_tools_config,
-                "observability_config": self._auditor_settings.observability_config,
-                "trajectory_snapshot": trajectory_snapshot,
-                "events": [e.to_dict() for e in events_tuple],
-                "edges": [ed.to_dict() for ed in edges_tuple],
-                "phases": [ph.to_dict() for ph in phases_tuple],
-                "findings": [f.to_dict() for f in findings],
-                "check_errors": dict(check_errors),
-                "continuation_notes": continuation_notes,
-                "summary_threshold": self._auditor_settings.summary_threshold,
-                "tools": list(self._auditor_settings.tools),
-            }
-            replay_payload = {
-                "graph": [e.to_dict() for e in events_tuple],
-                "recent_verdicts": recent_verdicts,
-                "continuation_notes_from_prior_firing": continuation_notes,
-            }
+        # Always compute the replay record metadata (independent of
+        # sidecar emission) so the runner can return a synthetic
+        # auditor :class:`ReplayRecord` per firing via
+        # :class:`StepResult.auditor_record`. Offline drivers depend
+        # on this for in-memory record capture without a disk
+        # round-trip.
+        replay_compose_kwargs: dict[str, Any] = {
+            "base_prompt": self._auditor_settings.base_prompt,
+            "cards_tools_config": self._auditor_settings.cards_tools_config,
+            "observability_config": self._auditor_settings.observability_config,
+            "trajectory_snapshot": trajectory_snapshot,
+            "events": [e.to_dict() for e in events_tuple],
+            "edges": [ed.to_dict() for ed in edges_tuple],
+            "phases": [ph.to_dict() for ph in phases_tuple],
+            "findings": [f.to_dict() for f in findings],
+            "check_errors": dict(check_errors),
+            "continuation_notes": continuation_notes,
+            "summary_threshold": self._auditor_settings.summary_threshold,
+            "tools": list(self._auditor_settings.tools),
+        }
+        replay_payload: dict[str, Any] = {
+            "graph": [e.to_dict() for e in events_tuple],
+            "recent_verdicts": recent_verdicts,
+            "continuation_notes_from_prior_firing": continuation_notes,
+        }
 
         verdict, raw_blocks = await self._child.run_auditor(
             extensions=firing_extensions,
@@ -1038,7 +1052,23 @@ class HarnessRunner:
                     status="no_call",
                     raw_assistant_messages=raw_blocks,
                 )
-            return _AuditorFiringResult(verdict=None)
+            no_call_record = ReplayRecord(
+                phase="auditor",
+                turn_index=turn_index,
+                root_session_id=self._root_session_id,
+                ts_ns=now_ns(),
+                compose_kwargs=replay_compose_kwargs,
+                payload=replay_payload,
+                provider=(
+                    [self._provider_auditor[0], self._provider_auditor[1]]
+                    if self._provider_auditor
+                    else None
+                ),
+                output=None,
+                status="no_call",
+                raw_assistant_messages=list(raw_blocks),
+            )
+            return _AuditorFiringResult(verdict=None, record=no_call_record)
 
         verdict_dict = verdict.to_dict()
         self._sink.append_verdict(verdict_dict)
@@ -1057,7 +1087,23 @@ class HarnessRunner:
                 status="ok",
                 raw_assistant_messages=raw_blocks,
             )
-        return _AuditorFiringResult(verdict=verdict)
+        ok_record = ReplayRecord(
+            phase="auditor",
+            turn_index=turn_index,
+            root_session_id=self._root_session_id,
+            ts_ns=now_ns(),
+            compose_kwargs=replay_compose_kwargs,
+            payload=replay_payload,
+            provider=(
+                [self._provider_auditor[0], self._provider_auditor[1]]
+                if self._provider_auditor
+                else None
+            ),
+            output=verdict_dict,
+            status="ok",
+            raw_assistant_messages=list(raw_blocks),
+        )
+        return _AuditorFiringResult(verdict=verdict, record=ok_record)
 
     # ----------------------------------------------------------------------
     # Single-firing replay (degenerate case of the runner — invariant #2)
