@@ -56,7 +56,7 @@ async def run_phase_standalone(
     cwd: str,
     extensions: list[tuple[str, dict[str, Any]]],
     provider: tuple[str, dict[str, Any]] | None,
-    payload: dict[str, Any],
+    payload: dict[str, Any] | str,
     terminal_tool: str,
     purpose: str = "cognitive_audit_replay",
 ) -> PhaseResult:
@@ -66,6 +66,11 @@ async def run_phase_standalone(
     The live path's ``api.spawn_child_session`` produces a bus-parented
     child; this produces an isolated root session — same tool surface
     and prompt, no parent linkage.
+
+    ``payload`` is either a dict (JSON-serialised and sent as the user
+    message) or a string (sent verbatim). Callers that need a per-phase
+    directive prefix construct the combined string themselves and pass
+    it in — this engine no longer special-cases any terminal tool.
     """
     config = AgentSessionConfig(
         cwd=cwd,
@@ -86,19 +91,11 @@ async def run_phase_standalone(
         )
 
     try:
-        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
-        if terminal_tool == "finalize_extraction":
-            recent_n = len(payload.get("recent_graph") or [])
-            payload_json = (
-                "Below is the firing input. Build the graph incrementally "
-                "with upsert_node / upsert_edge (and "
-                "delete_node / delete_edge as needed), then call "
-                "finalize_extraction with no payload to terminate. recent_graph "
-                f"carries {recent_n} prior-firing entries you can ref-link by "
-                "id via upsert_edge (the folded view already contains them).\n\n"
-                + payload_json
-            )
-        messages = await session.prompt(payload_json)
+        if isinstance(payload, str):
+            user_message = payload
+        else:
+            user_message = json.dumps(payload, ensure_ascii=False, default=str)
+        messages = await session.prompt(user_message)
     except Exception as exc:
         await safe_shutdown(session)
         return PhaseResult(

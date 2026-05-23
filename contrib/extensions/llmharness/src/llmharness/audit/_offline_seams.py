@@ -19,11 +19,13 @@ live ExtensionAPI.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
 from ..schema import Edge, Event, Phase, Verdict
 from ..tools.engine import run_phase_standalone
+from ._extractor_directive import build_extractor_directive
 from ._runner import (
     ExtractorSpawnError,
     _flatten_assistant_blocks,
@@ -65,23 +67,26 @@ class StandaloneChildRunner:
     ) -> tuple[bool, list[dict[str, Any]]]:
         """Run one extractor firing as a top-level session.
 
-        The four-step directive preamble the live ``LiveChildRunner``
-        prepends to the payload lives, for the standalone path, inside
-        :func:`run_phase_standalone` (it special-cases
-        ``terminal_tool == "finalize_extraction"`` and prepends a
-        recent-graph-aware preamble). Reuse that so the prompt-side
-        contract stays in one place.
+        The four-step directive preamble is built here via
+        :func:`build_extractor_directive` and prepended to the JSON
+        payload before being passed to :func:`run_phase_standalone` as
+        a verbatim string. :func:`run_phase_standalone` no longer
+        builds any preamble — both the live and offline extractor
+        children now see the same byte-identical user message, which
+        is what the design's invariant #1 (live === offline) requires.
 
         Returns ``(terminator_called, raw_assistant_blocks)``. Spawn /
         prompt failures raise :class:`ExtractorSpawnError`; everything
         else (including ``no_call``) is signalled via ``terminator_called=False``.
         """
         del turn_window  # surfaced by the runner via append_failure context
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+        directive = build_extractor_directive(payload)
         result = await run_phase_standalone(
             cwd=self._cwd,
             extensions=extensions,
             provider=provider,
-            payload=payload,
+            payload=directive + payload_json,
             terminal_tool=FINALIZE_EXTRACTION_TOOL_NAME,
             purpose="cognitive_audit_extractor_offline",
         )

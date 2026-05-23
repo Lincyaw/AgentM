@@ -23,6 +23,7 @@ from agentm.core.abi.session_config import AgentSessionConfig
 
 from ..schema import Edge, Event, Phase, Verdict
 from . import entry_types as _et
+from ._extractor_directive import build_extractor_directive
 from ._runner import (
     ExtractorSpawnError,
     _flatten_assistant_blocks,
@@ -78,33 +79,8 @@ class LiveChildRunner:
 
         try:
             payload_json = json.dumps(payload, ensure_ascii=False, default=str)
-            recent_n = len(payload.get("recent_graph") or [])
-            next_id = payload.get("next_event_id")
-            directive = (
-                "Below is the firing input. Workflow:\n"
-                "(1) Build the graph incrementally with upsert_node / "
-                "upsert_edge (and delete_node / delete_edge as needed). Every "
-                "edit is validated immediately; errors come back as a "
-                "three-section actionable message naming concrete next "
-                "options. Internal events must be true branch points "
-                "(in-degree>=2 or out-degree>=2); passthrough (in=1, out=1) "
-                "events are rejected at finalize.\n"
-                "(2) Call finalize_extraction (no payload) when you are done. "
-                "On a clean degree check the firing terminates; on rejection "
-                "the firing stays alive so you can promote passthrough nodes "
-                "with further upserts and re-call.\n"
-                f"(3) Start event ids at {next_id} and increment strictly — "
-                "do NOT restart at 1 and do NOT reuse any id from recent_graph.\n"
-                f"(4) Cross-firing references: recent_graph has {recent_n} "
-                "entries. To link this firing's events to prior firings, emit "
-                "upsert_edge with src/dst spanning the boundary — the folded "
-                "view already contains prior-firing nodes by id. Most evid "
-                "events in this firing answer a hyp/act from earlier firings; "
-                "linking them is what turns a single firing into a connected "
-                "investigation.\n\n"
-                + payload_json
-            )
-            messages = await child.prompt(directive)
+            directive = build_extractor_directive(payload)
+            messages = await child.prompt(directive + payload_json)
         except Exception as exc:
             await safe_shutdown(child)
             raise ExtractorSpawnError(str(exc)) from exc
