@@ -132,11 +132,12 @@ class _StubChildRunner:
         graph_events: list[Any],
         recent_verdicts: list[dict[str, Any]],
         continuation_notes_from_prior_firing: list[str],
-    ) -> tuple[Any, list[dict[str, Any]]]:
+    ) -> Any:
         del extensions, provider, recent_verdicts, continuation_notes_from_prior_firing
         self.auditor_calls += 1
         self.auditor_graphs.append(list(graph_events))
 
+        from llmharness.audit._runner import AuditorChildResult
         from llmharness.schema import Verdict
 
         verdict = Verdict(
@@ -152,7 +153,7 @@ class _StubChildRunner:
             "name": "submit_verdict",
             "arguments": {"verdict": verdict.to_dict()},
         }
-        return verdict, [raw_block]
+        return AuditorChildResult(verdict=verdict, raw_blocks=[raw_block])
 
 
 @pytest.mark.asyncio
@@ -271,11 +272,12 @@ class _SurfacingStubChildRunner(_StubChildRunner):
         graph_events: list[Any],
         recent_verdicts: list[dict[str, Any]],
         continuation_notes_from_prior_firing: list[str],
-    ) -> tuple[Any, list[dict[str, Any]]]:
+    ) -> Any:
         del extensions, provider, recent_verdicts, continuation_notes_from_prior_firing
         self.auditor_calls += 1
         self.auditor_graphs.append(list(graph_events))
 
+        from llmharness.audit._runner import AuditorChildResult
         from llmharness.schema import Verdict
 
         verdict = Verdict(
@@ -291,7 +293,7 @@ class _SurfacingStubChildRunner(_StubChildRunner):
             "name": "submit_verdict",
             "arguments": {"verdict": verdict.to_dict()},
         }
-        return verdict, [raw_block]
+        return AuditorChildResult(verdict=verdict, raw_blocks=[raw_block])
 
 
 @pytest.mark.asyncio
