@@ -37,12 +37,9 @@ from typing import Any
 
 from agentm.core.abi.messages import AgentMessage
 
-from ..adapters.agentm import flatten_assistant_blocks, serialize_full_trajectory
-from ..audit.auditor.output import AuditorOutputError, RawVerdictOutput
-from ..audit.phase import merge_to_phases
-from ..schema import Edge, Event
-from .record import ReplayRecord, iter_records, now_ns, write_record
-from .runner import replay_auditor_record
+from ..audit._runner import AuditorSettings, ExtractorSettings
+from .offline_driver import replay_pipeline_over_trajectory
+from .record import ReplayRecord, iter_records, write_record
 
 _logger = logging.getLogger(__name__)
 
@@ -89,25 +86,62 @@ def strict_ab_replay_path(cwd: str | Path, branch_session_log_id: str) -> Path:
     return Path(cwd) / ".agentm" / "audit_replay" / f"{branch_session_log_id}.strict_ab.jsonl"
 
 
-def _coerce_schema_list(cls: Any, items: Any) -> list[Any]:
-    """Best-effort dict-to-dataclass coercion for events / edges.
+def _infer_interval(turn_indices: list[int], default: int = 5) -> int:
+    """Derive the runner cadence from a list of recorded turn indices.
 
-    Replay records carry serialized dicts; the auditor composer wants
-    ``Event`` / ``Edge`` dataclasses. Skip anything that fails to
-    deserialize rather than crashing the whole walk over one bad row.
+    The control sidecar's ``phase=='extractor'`` records were emitted
+    every ``k`` turns by the live runner; the deltas between turn
+    indices are therefore the cadence. Inspecting up to three records
+    is sufficient — if the first three deltas don't agree the records
+    are stitched from a non-uniform run, and we fall back to ``default``
+    rather than picking one arbitrarily.
     """
+    if len(turn_indices) < 2:
+        return default
+    deltas: list[int] = []
+    for i in range(1, min(len(turn_indices), 4)):
+        d = turn_indices[i] - turn_indices[i - 1]
+        if d > 0:
+            deltas.append(d)
+    if not deltas:
+        return default
+    first = deltas[0]
+    return first if all(d == first for d in deltas) else default
 
-    out: list[Any] = []
-    if not isinstance(items, list):
-        return out
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        try:
-            out.append(cls.from_dict(item))
-        except (KeyError, TypeError, ValueError):
-            continue
-    return out
+
+def _settings_from_sidecar(
+    control_replay_path: Path,
+) -> tuple[ExtractorSettings, AuditorSettings, int, int]:
+    """Extract per-firing compose state + cadence from the control sidecar.
+
+    Returns ``(extractor_settings, auditor_settings, extractor_interval,
+    audit_interval)``. The first record of each phase carries the
+    compose_kwargs the live adapter would have used; subsequent
+    records reuse the same compose state modulo cadence so reading
+    the head record is sufficient. Missing records → module defaults
+    (empty base prompt, default cadence 5).
+    """
+    extractor_records: list[ReplayRecord] = []
+    auditor_records: list[ReplayRecord] = []
+    for rec in iter_records(control_replay_path):
+        if rec.phase == "extractor":
+            extractor_records.append(rec)
+        elif rec.phase == "auditor":
+            auditor_records.append(rec)
+
+    ext_settings = (
+        ExtractorSettings.from_compose_kwargs(extractor_records[0].compose_kwargs)
+        if extractor_records
+        else ExtractorSettings.from_compose_kwargs({})
+    )
+    aud_settings = (
+        AuditorSettings.from_compose_kwargs(auditor_records[0].compose_kwargs)
+        if auditor_records
+        else AuditorSettings.empty()
+    )
+    ext_interval = _infer_interval([r.turn_index for r in extractor_records])
+    aud_interval = _infer_interval([r.turn_index for r in auditor_records])
+    return ext_settings, aud_settings, ext_interval, aud_interval
 
 
 async def run_offline_auditor_over_control(
@@ -121,155 +155,58 @@ async def run_offline_auditor_over_control(
 ) -> OfflineAuditRun:
     """Replay the auditor side-channel against a fixed control trajectory.
 
-    Walks every ``ok`` extractor record on the control's replay
-    sidecar in (ts_ns, turn_index) order. For each one we (1) fold the
-    extracted events / edges into a cumulative graph, (2) compose the
-    same auditor payload the live adapter would build at that turn,
-    (3) re-run the auditor via :func:`replay_auditor_record`, and
-    (4) collect the resulting auditor record. If a verdict's
-    ``surface_reminder`` is set and ``reminder_text`` is non-empty,
-    that turn becomes the candidate.
-
-    When ``stop_on_first_surface`` is true (default) we return as soon
-    as a candidate appears. When false, the walk continues to the end
-    and ``OfflineAuditRun.records`` contains every silent verdict too
-    — useful for branch-side audit replays where the case viewer
-    wants every firing, not just the first.
-
-    Missing control sidecar → empty :class:`OfflineAuditRun`. Schema
-    coercion failures on individual records are skipped (see
-    :func:`_coerce_schema_list`).
+    Thin caller of :func:`replay_pipeline_over_trajectory` (P3 of
+    ``.claude/designs/harness-runner.md``). Pulls extractor / auditor
+    settings + cadence from the control sidecar's first record of each
+    phase, drives the runner across the control trajectory, and
+    collects synthetic auditor :class:`ReplayRecord` s from each
+    fired :class:`StepResult`. Missing control sidecar → empty
+    :class:`OfflineAuditRun`.
     """
-
     if not control_replay_path.exists():
         return OfflineAuditRun(reminder=None, records=[])
 
-    events: list[Event] = []
-    edges: list[Edge] = []
-    phases: list[Any] = []
-    recent_verdicts: list[dict[str, Any]] = []
-    continuation_notes: list[str] = []
-    auditor_records: list[ReplayRecord] = []
+    ext_settings, aud_settings, ext_interval, aud_interval = _settings_from_sidecar(
+        control_replay_path
+    )
 
-    extractor_records = [
-        rec
-        for rec in iter_records(control_replay_path)
-        if rec.phase == "extractor" and rec.status == "ok" and rec.output
+    run = await replay_pipeline_over_trajectory(
+        messages=list(control_messages),
+        cwd=cwd,
+        root_session_id=control_session_log_id,
+        provider=provider,
+        extractor_settings=ext_settings,
+        auditor_settings=aud_settings,
+        extractor_interval=ext_interval,
+        audit_interval=aud_interval,
+        enable_auditor=True,
+        stop_on_first_surface=stop_on_first_surface,
+        sidecar_path=None,
+    )
+
+    auditor_records: list[ReplayRecord] = [
+        step.auditor_record
+        for step in run.all_step_results
+        if step.auditor_record is not None
     ]
-    extractor_records.sort(key=lambda rec: (rec.ts_ns, rec.turn_index))
 
-    for extractor_record in extractor_records:
-        output = extractor_record.output or {}
-        new_events = _coerce_schema_list(Event, output.get("events") or [])
-        new_edges = _coerce_schema_list(Edge, output.get("edges") or [])
-        events.extend(new_events)
-        edges.extend(new_edges)
-        phases.extend(merge_to_phases(new_events))
-
-        cut = min(
-            max(extractor_record.turn_index + 1, 0), len(control_messages)
-        )
-        trajectory_snapshot = serialize_full_trajectory(
-            list(control_messages[:cut])
-        )
-        compose_kwargs: dict[str, Any] = {
-            "base_prompt": None,
-            "cards_tools_config": {},
-            "observability_config": {},
-            "trajectory_snapshot": trajectory_snapshot,
-            "events": [ev.to_dict() for ev in events],
-            "edges": [ed.to_dict() for ed in edges],
-            "phases": [ph.to_dict() for ph in phases],
-            "findings": [],
-            "check_errors": {},
-            "continuation_notes": list(continuation_notes),
-            "summary_threshold": 30,
-            "tools": ["submit_verdict"],
-        }
-        payload: dict[str, Any] = {
-            "graph": [ev.to_dict() for ev in events],
-            "recent_verdicts": list(recent_verdicts),
-            "continuation_notes_from_prior_firing": list(continuation_notes),
-        }
-        replay_input = ReplayRecord(
-            phase="auditor",
-            turn_index=extractor_record.turn_index,
-            root_session_id=control_session_log_id,
-            ts_ns=(extractor_record.ts_ns or now_ns()) + 1,
-            compose_kwargs=compose_kwargs,
-            payload=payload,
-            provider=None,
-            output=None,
-            status="ok",
-        )
-        phase_result = await replay_auditor_record(
-            replay_input,
-            cwd=cwd,
-            provider_override=provider,
-        )
-        verdict_dict: dict[str, Any] | None = None
-        if phase_result.status == "ok" and isinstance(phase_result.output, dict):
-            try:
-                verdict_dict = (
-                    RawVerdictOutput.from_dict(phase_result.output)
-                    .to_verdict()
-                    .to_dict()
-                )
-            except AuditorOutputError:
-                verdict_dict = None
-        auditor_record = ReplayRecord(
-            phase="auditor",
-            turn_index=extractor_record.turn_index,
-            root_session_id=control_session_log_id,
-            ts_ns=replay_input.ts_ns,
-            compose_kwargs=compose_kwargs,
-            payload=payload,
-            provider=[provider[0], provider[1]] if provider else None,
-            output=verdict_dict,
-            status=phase_result.status if verdict_dict is not None else "no_call",
-            error=phase_result.error,
-            latency_ms=phase_result.latency_ms,
-            raw_assistant_messages=flatten_assistant_blocks(phase_result.messages),
-        )
-        auditor_records.append(auditor_record)
-
-        if verdict_dict is not None:
-            recent_verdicts.append(verdict_dict)
-            raw_notes = verdict_dict.get("continuation_notes")
-            continuation_notes = (
-                [str(n) for n in raw_notes if isinstance(n, str)]
-                if isinstance(raw_notes, list)
-                else []
-            )
-
-        if not verdict_dict or not verdict_dict.get("surface_reminder"):
+    reminder: ReminderCandidate | None = None
+    for record in auditor_records:
+        if not isinstance(record.output, dict):
             continue
-        text = verdict_dict.get("reminder_text")
+        if not record.output.get("surface_reminder"):
+            continue
+        text = record.output.get("reminder_text")
         if not isinstance(text, str) or not text.strip():
             continue
         reminder = ReminderCandidate(
-            turn_index=extractor_record.turn_index,
+            turn_index=int(record.turn_index),
             text=text,
-            record=auditor_record,
+            record=record,
         )
-        if stop_on_first_surface:
-            return OfflineAuditRun(reminder=reminder, records=auditor_records)
+        break
 
-    first_reminder = next(
-        (
-            ReminderCandidate(
-                turn_index=int(record.turn_index),
-                text=str((record.output or {}).get("reminder_text", "")),
-                record=record,
-            )
-            for record in auditor_records
-            if isinstance(record.output, dict)
-            and record.output.get("surface_reminder")
-            and str(record.output.get("reminder_text", "")).strip()
-        ),
-        None,
-    )
-    return OfflineAuditRun(reminder=first_reminder, records=auditor_records)
+    return OfflineAuditRun(reminder=reminder, records=auditor_records)
 
 
 def _rebind_record(record: ReplayRecord, *, root_session_id: str) -> ReplayRecord:
