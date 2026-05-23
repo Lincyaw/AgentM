@@ -47,6 +47,7 @@ The runtime entry point is the AgentM extension at
 V2 breaking change (issue #134, 2026-05-10): ``DriftType`` is removed.
 """
 
+from .audit._runner import AuditorSettings, ExtractorSettings
 from .audit.auditor import (
     AUDITOR_TERMINATION_REASON,
     AUDITOR_TOOL_NAMES,
@@ -64,6 +65,7 @@ from .replay.strict_ab import (
     OfflineAuditRun,
     ReminderCandidate,
     run_offline_auditor_over_control,
+    run_offline_auditor_over_trajectory,
     strict_ab_replay_path,
     write_strict_ab_replay,
 )
@@ -91,10 +93,12 @@ __all__ = [
     "AUDITOR_TOOL_NAMES",
     "EXTRACTOR_TERMINATION_REASON",
     "EXTRACTOR_TOOL_NAMES",
+    "AuditorSettings",
     "Edge",
     "EdgeKind",
     "Event",
     "EventKind",
+    "ExtractorSettings",
     "Finding",
     "OfflineAuditRun",
     "Phase",
@@ -113,6 +117,7 @@ __all__ = [
     "replay_auditor_record",
     "replay_extractor_record",
     "run_offline_auditor_over_control",
+    "run_offline_auditor_over_trajectory",
     "strict_ab_replay_path",
     "tool_events_from_phase_result",
     "write_record",
