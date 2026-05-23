@@ -73,26 +73,50 @@ def _thread_extractor_record(
 def _thread_auditor_record(
     record: ReplayRecord, cumulative: CumulativeAuditState
 ) -> ReplayRecord:
-    """Return a copy of ``record`` whose payload reflects ``cumulative``.
+    """Return a copy of ``record`` whose payload AND compose_kwargs reflect ``cumulative``.
 
-    Overrides ``graph`` / ``recent_verdicts`` /
-    ``continuation_notes_from_prior_firing`` so the auditor firing
-    sees the threaded state. ``compose_kwargs`` is untouched —
-    :func:`replay_auditor_record` rebuilds the extension list from
-    ``compose_kwargs`` (events/edges/phases/findings etc.), so for a
-    faithful threading we would also need to override those.  This
-    helper takes the more conservative line: thread the user-facing
-    ``payload`` (what the LLM sees) but leave the compose-side
-    framing as captured, matching what the caller bisected on.
+    :func:`replay_auditor_record` rebuilds the auditor's installed
+    extensions from ``compose_kwargs`` (events / edges / phases /
+    continuation_notes / findings). If we threaded only the payload,
+    the LLM would see the threaded graph in the user message but the
+    installed extension context (cards, continuation notes, findings)
+    would still be whatever was captured at record time — half state
+    is worse than no state.
+
+    So override both layers: ``payload.graph`` /
+    ``payload.recent_verdicts`` /
+    ``payload.continuation_notes_from_prior_firing`` AND
+    ``compose_kwargs.events`` / ``compose_kwargs.edges`` /
+    ``compose_kwargs.phases`` / ``compose_kwargs.continuation_notes``.
+
+    Limitation: chain replay does NOT re-run audit-check registries,
+    so ``compose_kwargs.findings`` and ``compose_kwargs.check_errors``
+    are cleared to empty — they are produced live by ``_drain_auditor``
+    against a scenario-installed registry that is not available in
+    chain replay. The replayed auditor therefore sees the same graph
+    the live auditor would have seen at this firing point, modulo
+    audit-check findings.
     """
     new_payload = dict(record.payload)
-    events, _edges, _phases = cumulative.graph_view()
+    events, edges, phases = cumulative.graph_view()
     new_payload["graph"] = [e.to_dict() for e in events]
     new_payload["recent_verdicts"] = list(cumulative.recent_verdicts)
     new_payload["continuation_notes_from_prior_firing"] = list(
         cumulative.last_continuation_notes
     )
-    return replace(record, payload=new_payload)
+
+    new_compose = dict(record.compose_kwargs)
+    new_compose["events"] = [e.to_dict() for e in events]
+    new_compose["edges"] = [ed.to_dict() for ed in edges]
+    new_compose["phases"] = [ph.to_dict() for ph in phases]
+    new_compose["continuation_notes"] = list(cumulative.last_continuation_notes)
+    # Audit-check registry is scenario-installed and chain replay does
+    # not re-execute it; leave findings / check_errors empty rather
+    # than carry stale captured values.
+    new_compose["findings"] = []
+    new_compose["check_errors"] = {}
+
+    return replace(record, payload=new_payload, compose_kwargs=new_compose)
 
 
 def _absorb_extractor_output(
