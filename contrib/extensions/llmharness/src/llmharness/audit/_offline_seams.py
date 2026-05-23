@@ -206,4 +206,46 @@ class InMemorySink:
         self.legacy_phases.append(ph)
 
 
-__all__ = ["InMemorySink", "StandaloneChildRunner"]
+class NoopSink:
+    """:class:`OpSink` impl that drops every persisted entry.
+
+    Used by single-firing replay (:func:`replay_extractor_record` /
+    :func:`replay_auditor_record`) where the runner is constructed
+    purely to host one fire-from-record call. No session log, no
+    in-memory inspection — the caller cares only about the returned
+    :class:`PhaseResult`.
+    """
+
+    def append_op(
+        self,
+        op: GraphOp,
+        *,
+        firing_id: int,
+        op_index: int,
+        turn_window: list[int],
+    ) -> None:
+        return
+
+    def append_cursor(self, *, last_turn_index: int) -> None:
+        return
+
+    def append_verdict(self, verdict: dict[str, Any]) -> None:
+        return
+
+    def append_failure(self, entry_type: str, payload: dict[str, Any]) -> None:
+        return
+
+    def append_partial(self, payload: dict[str, Any]) -> None:
+        return
+
+    def append_legacy_event(self, ev: Event) -> None:
+        return
+
+    def append_legacy_edge(self, ed: Edge) -> None:
+        return
+
+    def append_legacy_phase(self, ph: Phase) -> None:
+        return
+
+
+__all__ = ["InMemorySink", "NoopSink", "StandaloneChildRunner"]

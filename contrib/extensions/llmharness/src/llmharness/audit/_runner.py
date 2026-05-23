@@ -38,6 +38,7 @@ from agentm.core.abi.session import SessionEntry
 
 from ..replay.record import ReplayRecord, now_ns, write_record
 from ..schema import Edge, Event, Phase, Reminder, Verdict
+from ..tools.engine import PhaseResult, run_phase_standalone
 from . import entry_types as _et
 from ._session_helpers import bind_extractor_state
 from .auditor import (
@@ -72,6 +73,35 @@ class ExtractorSettings:
     extensions: list[tuple[str, dict[str, Any]]]
     compose_kwargs: dict[str, Any]
 
+    @classmethod
+    def from_compose_kwargs(
+        cls,
+        compose_kwargs: dict[str, Any],
+        *,
+        prompt_override: str | None = None,
+    ) -> ExtractorSettings:
+        """Build an ``ExtractorSettings`` from a record's ``compose_kwargs``.
+
+        Used by single-firing replay (:func:`replay_extractor_record`) and
+        the strict-A/B offline driver — both extract the per-firing
+        compose state from a recorded :class:`ReplayRecord`. Honours the
+        legacy ``prompt_override`` key from pre-profile replay sidecars.
+        """
+        from .extractor import compose_extractor_extensions
+
+        ck = dict(compose_kwargs or {})
+        effective_prompt = (
+            prompt_override
+            if prompt_override is not None
+            else ck.get("base_prompt") or ck.get("prompt_override")
+        )
+        extensions = compose_extractor_extensions(
+            base_prompt=effective_prompt,
+            cards_tools_config=ck.get("cards_tools_config"),
+            observability_config=ck.get("observability_config"),
+        )
+        return cls(extensions=extensions, compose_kwargs=ck)
+
 
 @dataclass(frozen=True)
 class AuditorSettings:
@@ -86,6 +116,51 @@ class AuditorSettings:
     observability_config: dict[str, Any] | None
     summary_threshold: int
     tools: tuple[str, ...]
+
+    @classmethod
+    def from_compose_kwargs(
+        cls,
+        compose_kwargs: dict[str, Any],
+        *,
+        prompt_override: str | None = None,
+    ) -> AuditorSettings:
+        """Build an ``AuditorSettings`` from a record's ``compose_kwargs``."""
+        ck = dict(compose_kwargs or {})
+        effective_prompt = (
+            prompt_override
+            if prompt_override is not None
+            else ck.get("base_prompt") or ck.get("prompt_override")
+        )
+        tools_raw = ck.get("tools")
+        tools_tuple: tuple[str, ...] = (
+            tuple(str(t) for t in tools_raw)
+            if isinstance(tools_raw, list)
+            else (SUBMIT_VERDICT_TOOL_NAME,)
+        )
+        return cls(
+            base_prompt=effective_prompt or "",
+            cards_tools_config=ck.get("cards_tools_config"),
+            observability_config=ck.get("observability_config"),
+            summary_threshold=int(ck.get("summary_threshold", 30)),
+            tools=tools_tuple,
+        )
+
+    @classmethod
+    def empty(cls) -> AuditorSettings:
+        """Sentinel settings for paths that don't fire the auditor.
+
+        Used by :func:`replay_extractor_record`, which constructs a
+        :class:`HarnessRunner` purely for its extractor seam — the
+        auditor settings are never consulted but the runner's
+        constructor demands a value.
+        """
+        return cls(
+            base_prompt="",
+            cards_tools_config=None,
+            observability_config=None,
+            summary_threshold=30,
+            tools=(SUBMIT_VERDICT_TOOL_NAME,),
+        )
 
 
 # --- cumulative state -------------------------------------------------------
@@ -193,6 +268,7 @@ class CumulativeAuditState:
     def fresh(cls) -> CumulativeAuditState:
         """Offline-mode seed: empty state."""
         return cls()
+
 
     @classmethod
     def hydrate_from_session_log(cls, branch: list[SessionEntry]) -> CumulativeAuditState:
@@ -594,6 +670,12 @@ class HarnessRunner:
         # ExtensionAPI so the (P2) offline driver can supply a synthetic
         # registry or ``None``.
         audit_registry: AuditCheckRegistry | None = None,
+        # ``cwd`` is only consulted by the single-firing replay seams
+        # (``fire_extractor_from_record`` / ``fire_auditor_from_record``)
+        # which spawn standalone sessions directly. Live + trajectory-
+        # driven paths route through the ``child`` :class:`ChildRunner`
+        # and never read this field.
+        cwd: str = "",
     ) -> None:
         self.cumulative = cumulative
         self._child = child
@@ -608,6 +690,7 @@ class HarnessRunner:
         self._provider_extractor = provider_extractor
         self._provider_auditor = provider_auditor
         self._audit_registry = audit_registry
+        self._cwd = cwd
         # Track whether the most recent extractor firing held the cursor;
         # mirrors ``_drain_queue``'s ``_last_extractor_held_cursor`` so
         # the auditor doesn't fire on top of stale state.
@@ -975,6 +1058,163 @@ class HarnessRunner:
                 raw_assistant_messages=raw_blocks,
             )
         return _AuditorFiringResult(verdict=verdict)
+
+    # ----------------------------------------------------------------------
+    # Single-firing replay (degenerate case of the runner — invariant #2)
+    # ----------------------------------------------------------------------
+
+    async def fire_extractor_from_record(
+        self, record: ReplayRecord
+    ) -> PhaseResult:
+        """Replay one recorded extractor firing without windowing.
+
+        Bypasses the ``messages → turn_window → payload`` construction
+        in :meth:`fire_extractor_once`; the record already carries a
+        finished ``payload`` (``recent_graph`` + ``next_event_id`` +
+        ``new_turns``). We rebuild an :class:`ExtractionState` from
+        ``payload`` + ``extras.turn_texts`` exactly as legacy
+        ``replay_extractor_record`` did, then call
+        :func:`run_phase_standalone` and snapshot
+        :class:`RawExtractorOutput` from the bound state. The returned
+        :class:`PhaseResult` schema (with ``events`` / ``edges`` /
+        ``dropped_edges`` on success) is byte-identical to the legacy
+        wrapper output — many tests pin this.
+        """
+        from .extractor.state import ExtractionState
+
+        if record.phase != "extractor":
+            raise ValueError(
+                f"expected extractor record, got phase={record.phase!r}"
+            )
+
+        extras = record.extras or {}
+        state = ExtractionState()
+        # next_event_id: record payload carries the firing's id cursor.
+        nxt = (record.payload or {}).get("next_event_id")
+        if isinstance(nxt, int) and nxt >= 1:
+            state.next_event_id = nxt
+
+        # JSON-loaded turn_texts has string keys; ExtractionState
+        # expects ints.
+        for k, v in (extras.get("turn_texts") or {}).items():
+            with contextlib.suppress(TypeError, ValueError):
+                state.turn_texts[int(k)] = str(v)
+        # Union in any prior-firing turn texts the caller supplied
+        # (the CLI computes this from earlier records in the sidecar so
+        # external_refs can be witnessed during replay — the live
+        # adapter does the same enrichment at firing time).
+        for k, v in (extras.get("prior_turn_texts") or {}).items():
+            with contextlib.suppress(TypeError, ValueError):
+                state.turn_texts.setdefault(int(k), str(v))
+
+        # Enrich recent_graph entries with source_turn_texts and
+        # populate state.recent_graph so external_refs can be
+        # witnessed against trajectory text.
+        payload = dict(record.payload or {})
+        recent_graph_raw = payload.get("recent_graph") or []
+        enriched_recent: list[dict[str, Any]] = []
+        recent_events: list[Event] = []
+        for entry in recent_graph_raw:
+            if not isinstance(entry, dict):
+                continue
+            copy = dict(entry)
+            copy["source_turn_texts"] = [
+                state.turn_texts.get(int(t), "")
+                for t in (entry.get("source_turns") or [])
+                if isinstance(t, int)
+            ]
+            enriched_recent.append(copy)
+            try:
+                recent_events.append(Event.from_dict(entry))
+            except (KeyError, ValueError, TypeError):
+                continue
+        payload["recent_graph"] = enriched_recent
+        state.recent_graph = tuple(recent_events)
+
+        extensions = bind_extractor_state(
+            self._extractor_settings.extensions, state=state
+        )
+
+        result = await run_phase_standalone(
+            cwd=self._cwd,
+            extensions=extensions,
+            provider=self._provider_extractor,
+            payload=payload,
+            terminal_tool=FINALIZE_EXTRACTION_TOOL_NAME,
+            purpose="cognitive_audit_extractor_replay",
+        )
+        if result.status == "ok":
+            snapshot = RawExtractorOutput.from_state(state)
+            result = PhaseResult(
+                output={
+                    "events": [e.to_dict() for e in snapshot.events],
+                    "edges": [ed.to_dict() for ed in snapshot.edges],
+                    "dropped_edges": list(snapshot.dropped_edges),
+                },
+                status=result.status,
+                error=result.error,
+                latency_ms=result.latency_ms,
+                messages=result.messages,
+            )
+        return result
+
+    async def fire_auditor_from_record(
+        self, record: ReplayRecord
+    ) -> PhaseResult:
+        """Replay one recorded auditor firing.
+
+        Mirrors legacy ``replay_auditor_record``: composes auditor
+        extensions from ``record.compose_kwargs`` (events / edges /
+        phases / findings / continuation_notes / tools) and calls
+        :func:`run_phase_standalone` with ``record.payload`` as the
+        user message verbatim.
+        """
+        from ..schema import Finding
+
+        if record.phase != "auditor":
+            raise ValueError(
+                f"expected auditor record, got phase={record.phase!r}"
+            )
+
+        ck = record.compose_kwargs or {}
+        s = self._auditor_settings
+        extensions = compose_auditor_extensions(
+            base_prompt=s.base_prompt or None,
+            cards_tools_config=s.cards_tools_config,
+            observability_config=s.observability_config,
+            trajectory_snapshot=ck.get("trajectory_snapshot"),
+            events=tuple(_coerce_schema_list(Event, ck.get("events") or [])),
+            edges=tuple(_coerce_schema_list(Edge, ck.get("edges") or [])),
+            phases=tuple(_coerce_schema_list(Phase, ck.get("phases") or [])),
+            findings=_coerce_schema_list(Finding, ck.get("findings") or []),
+            check_errors=dict(ck.get("check_errors") or {}),
+            continuation_notes=list(ck.get("continuation_notes") or []),
+            summary_threshold=s.summary_threshold,
+            tools=s.tools or None,
+        )
+        return await run_phase_standalone(
+            cwd=self._cwd,
+            extensions=extensions,
+            provider=self._provider_auditor,
+            payload=record.payload or {},
+            terminal_tool=SUBMIT_VERDICT_TOOL_NAME,
+            purpose="cognitive_audit_auditor_replay",
+        )
+
+
+def _coerce_schema_list(cls: Any, items: Any) -> list[Any]:
+    """Best-effort dict-to-dataclass coercion for replay-record schema fields."""
+    out: list[Any] = []
+    if not isinstance(items, list):
+        return out
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            out.append(cls.from_dict(item))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
 
 
 # Re-exported helpers — the adapter imports these so they stay in one place.
