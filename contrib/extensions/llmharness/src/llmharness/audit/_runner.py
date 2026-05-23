@@ -52,7 +52,7 @@ from .extractor import (
     RawExtractorOutput,
 )
 from .graph_fold import fold_graph
-from .graph_ops import EdgeUpsert, GraphOp, NodeUpsert, parse_op
+from .graph_ops import GraphOp, op_from_edge, op_from_event, parse_op
 from .phase import merge_to_phases
 from .registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
 from .registry import AuditCheckRegistry, CheckContext
@@ -229,32 +229,13 @@ class CumulativeAuditState:
                     ev = Event.from_dict(payload)
                 except (KeyError, ValueError, TypeError):
                     continue
-                ops.append(
-                    NodeUpsert(
-                        id=ev.id,
-                        kind=ev.kind.value,
-                        summary=ev.summary,
-                        source_turns=tuple(ev.source_turns),
-                        external_refs=ev.external_refs,
-                    )
-                )
+                ops.append(op_from_event(ev))
             elif entry.type == _et.AUDIT_EDGE:
                 try:
                     ed = Edge.from_dict(payload)
                 except (KeyError, ValueError, TypeError):
                     continue
-                ops.append(
-                    EdgeUpsert(
-                        src=ed.src,
-                        dst=ed.dst,
-                        kind=ed.kind.value,
-                        reason=ed.reason,
-                        cited_entities=ed.cited_entities,
-                        cited_quote=ed.cited_quote,
-                        src_turns=ed.src_turns,
-                        dst_turns=ed.dst_turns,
-                    )
-                )
+                ops.append(op_from_edge(ed))
             elif entry.type == _et.AUDIT_PHASE:
                 try:
                     phases.append(Phase.from_dict(payload))
