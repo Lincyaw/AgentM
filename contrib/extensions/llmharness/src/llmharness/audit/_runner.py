@@ -140,6 +140,10 @@ class CumulativeAuditState:
         events, _edges, _phases = self.graph_view()
         return max((e.id for e in events), default=0) + 1
 
+    def _invalidate_cache(self) -> None:
+        self._cached_view = None
+        self._cached_len = -1
+
     def absorb_extractor_firing(
         self,
         *,
@@ -157,8 +161,24 @@ class CumulativeAuditState:
         # ``firing_id_counter`` directly).
         if firing_id >= self.firing_id_counter:
             self.firing_id_counter = firing_id + 1
-        self._cached_view = None
-        self._cached_len = -1
+        self._invalidate_cache()
+
+    def absorb_legacy_only(
+        self,
+        *,
+        firing_cursor: int,
+        firing_phases: Sequence[Phase],
+    ) -> None:
+        """Absorb a firing that produced legacy-only output (no maintainer ops).
+
+        The cumulative ``ops`` log doesn't grow, but ``_phases`` does — so
+        the fold cache (keyed on ``len(ops)``) would happily return a
+        stale phases tuple on the next ``graph_view()``. Invalidate it
+        explicitly.
+        """
+        self.cursor_last_turn_index = firing_cursor
+        self._phases.extend(firing_phases)
+        self._invalidate_cache()
 
     def absorb_auditor_verdict(
         self, verdict: dict[str, Any], *, is_silent: bool
@@ -850,8 +870,10 @@ class HarnessRunner:
         else:
             # Legacy-only output (no maintainer ops). Still advance the
             # cursor + accumulate phases so subsequent firings see them.
-            self.cumulative.cursor_last_turn_index = window_hi_inclusive
-            self.cumulative._phases.extend(firing_phases)
+            self.cumulative.absorb_legacy_only(
+                firing_cursor=window_hi_inclusive,
+                firing_phases=firing_phases,
+            )
 
         return _ExtractorFiringResult(ok=True, cursor_advanced=True)
 
