@@ -41,7 +41,7 @@ from typing import Any
 from agentm.core.abi.messages import AgentMessage
 
 from ..audit._runner import AuditorSettings, ExtractorSettings
-from .offline_driver import replay_pipeline_over_trajectory
+from .offline_driver import OfflineRunResult, replay_pipeline_over_trajectory
 from .record import ReplayRecord, iter_records, write_record
 
 _logger = logging.getLogger(__name__)
@@ -221,13 +221,23 @@ async def run_offline_auditor_over_control(
         stop_on_first_surface=stop_on_first_surface,
         sidecar_path=None,
     )
+    return _offline_run_to_audit(run)
 
+
+def _offline_run_to_audit(offline_run: OfflineRunResult) -> OfflineAuditRun:
+    """Convert a fresh OfflineRunResult into the OfflineAuditRun shape.
+
+    Recovers a ReminderCandidate from the synthesised auditor records by
+    inspecting each record's output for ``surface_reminder`` /
+    ``reminder_text`` — the same mining logic
+    :func:`run_offline_auditor_over_control` uses on a sidecar-driven
+    walk.
+    """
     auditor_records: list[ReplayRecord] = [
         step.auditor_record
-        for step in run.all_step_results
+        for step in offline_run.all_step_results
         if step.auditor_record is not None
     ]
-
     reminder: ReminderCandidate | None = None
     for record in auditor_records:
         if not isinstance(record.output, dict):
@@ -243,8 +253,47 @@ async def run_offline_auditor_over_control(
             record=record,
         )
         break
-
     return OfflineAuditRun(reminder=reminder, records=auditor_records)
+
+
+async def run_offline_auditor_over_trajectory(
+    *,
+    messages: Sequence[AgentMessage],
+    cwd: str,
+    root_session_id: str,
+    provider: tuple[str, dict[str, Any]] | None,
+    extractor_settings: ExtractorSettings,
+    auditor_settings: AuditorSettings,
+    extractor_interval: int = 5,
+    audit_interval: int = 5,
+    stop_on_first_surface: bool = True,
+    sidecar_path: Path | None = None,
+) -> OfflineAuditRun:
+    """Drive the offline pipeline over a raw trajectory and surface the
+    first reminder candidate, returning the same OfflineAuditRun shape
+    that run_offline_auditor_over_control yields for sidecar-driven
+    input.
+
+    Use when the control rollout has no in-line extractor (e.g. pure
+    ``rca:baseline`` runs). The runner synthesises extractor + auditor
+    records on the fly, writes them to ``sidecar_path`` if provided,
+    and the returned ``records`` are pulled from each step's
+    ``auditor_record``.
+    """
+    offline_run = await replay_pipeline_over_trajectory(
+        messages=list(messages),
+        cwd=cwd,
+        root_session_id=root_session_id,
+        provider=provider,
+        extractor_settings=extractor_settings,
+        auditor_settings=auditor_settings,
+        extractor_interval=extractor_interval,
+        audit_interval=audit_interval,
+        enable_auditor=True,
+        stop_on_first_surface=stop_on_first_surface,
+        sidecar_path=sidecar_path,
+    )
+    return _offline_run_to_audit(offline_run)
 
 
 def _rebind_record(record: ReplayRecord, *, root_session_id: str) -> ReplayRecord:
@@ -351,6 +400,7 @@ __all__ = [
     "OfflineAuditRun",
     "ReminderCandidate",
     "run_offline_auditor_over_control",
+    "run_offline_auditor_over_trajectory",
     "strict_ab_replay_path",
     "write_strict_ab_replay",
 ]
