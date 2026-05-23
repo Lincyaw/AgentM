@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..audit._runner import CumulativeAuditState
-from ..audit.graph_ops import EdgeUpsert, NodeUpsert
+from ..audit.graph_ops import op_from_edge, op_from_event
 from ..schema import Edge, Event, Verdict
 from ..tools.engine import PhaseResult
 from .record import Phase, ReplayRecord, iter_records
@@ -143,15 +143,7 @@ def _absorb_extractor_output(
             ev = Event.from_dict(raw)
         except (KeyError, TypeError, ValueError):
             continue
-        ops.append(
-            NodeUpsert(
-                id=ev.id,
-                kind=ev.kind.value,
-                summary=ev.summary,
-                source_turns=tuple(ev.source_turns),
-                external_refs=ev.external_refs,
-            )
-        )
+        ops.append(op_from_event(ev))
     for raw in result.output.get("edges") or []:
         if not isinstance(raw, dict):
             continue
@@ -159,18 +151,7 @@ def _absorb_extractor_output(
             ed = Edge.from_dict(raw)
         except (KeyError, TypeError, ValueError):
             continue
-        ops.append(
-            EdgeUpsert(
-                src=ed.src,
-                dst=ed.dst,
-                kind=ed.kind.value,
-                reason=ed.reason,
-                cited_entities=ed.cited_entities,
-                cited_quote=ed.cited_quote,
-                src_turns=ed.src_turns,
-                dst_turns=ed.dst_turns,
-            )
-        )
+        ops.append(op_from_edge(ed))
     if not ops:
         return
     firing_id = cumulative.firing_id_counter
