@@ -46,19 +46,29 @@ Reminder delivery (unified path):
 * Final-cause stops (``MaxTurnsExhausted`` / ``SignalAborted`` / etc.)
   ignore overrides; the handler logs a warning and leaves the reminder
   pending — there is no safe way to re-open the loop in that case.
+
+P1 refactor (2026-05-23). All of cadence / windowing / cumulative-state
+threading / payload composition / sidecar emission has moved to
+:class:`llmharness.audit._runner.HarnessRunner`. The adapter constructs
+exactly one runner per install (seeded by
+:meth:`CumulativeAuditState.hydrate_from_session_log`) and routes
+``TurnEndEvent`` through ``runner.on_trajectory_progress``. The async
+worker now drains :class:`_RunnerStepJob` jobs; the body of the legacy
+``_drain_extractor`` / ``_drain_auditor`` / ``_spawn_extractor_child`` /
+``_run_auditor`` lives inside the runner and
+:mod:`llmharness.audit._live_seams` (:class:`LiveChildRunner` +
+:class:`LiveOpSink`).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Literal, TypeVar
+from typing import Any, Final
 
 from agentm.core.abi import (
     DecideTurnActionEvent,
@@ -67,40 +77,28 @@ from agentm.core.abi import (
     Stop,
     TurnEndEvent,
 )
-from agentm.core.abi.events import DiagnosticEvent, SessionShutdownEvent
+from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.messages import (
-    AgentMessage,
-    AssistantMessage,
-    ToolCallBlock,
-    ToolResultMessage,
-)
+from agentm.core.abi.messages import AgentMessage
 from agentm.core.abi.session import SessionEntry
-from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.extensions import ExtensionManifest
 
 from ..audit import entry_types as _et
+from ..audit._live_seams import LiveChildRunner, LiveOpSink
 from ..audit._reminder_format import REMINDER_PREAMBLE as _SHARED_REMINDER_PREAMBLE
 from ..audit._reminder_format import build_reminder_message
-from ..audit._session_helpers import (
-    bind_extractor_state,
-    find_terminal_tool_arguments,
-    safe_shutdown,
-)
-from ..audit.auditor import (
-    SUBMIT_VERDICT_TOOL_NAME,
-    AuditorOutputError,
-    RawVerdictOutput,
-    compose_auditor_extensions,
+from ..audit._runner import (
+    AuditorSettings,
+    CumulativeAuditState,
+    ExtractorSettings,
+    HarnessRunner,
+    SidecarWriter,
+    _flatten_assistant_blocks,
+    _serialize_full_trajectory,
 )
 from ..audit.auditor.profiles import resolve_tools as _resolve_auditor_tools
 from ..audit.auditor.prompt import load_auditor_prompt
-from ..audit.extractor import (
-    FINALIZE_EXTRACTION_TOOL_NAME,
-    ExtractionState,
-    RawExtractorOutput,
-    compose_extractor_extensions,
-)
+from ..audit.extractor import compose_extractor_extensions
 from ..audit.extractor.prompt import load_extractor_prompt
 from ..audit.graph_fold import fold_graph
 from ..audit.graph_ops import (
@@ -109,16 +107,10 @@ from ..audit.graph_ops import (
     NodeUpsert,
     parse_op,
 )
-from ..audit.phase import merge_to_phases
 from ..audit.registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
-from ..audit.registry import AuditCheckRegistry, CheckContext
-from ..replay.record import (
-    ReplayRecord,
-    now_ns,
-    replay_log_path,
-    write_record,
-)
-from ..schema import Edge, Event, Phase, Reminder, Verdict
+from ..audit.registry import AuditCheckRegistry
+from ..replay.record import replay_log_path
+from ..schema import Edge, Event, Phase, Reminder
 
 _logger = logging.getLogger(__name__)
 
@@ -312,21 +304,25 @@ _AUDIT_ERROR_ENTRY = _et.AUDIT_ERROR
 # Adapter-internal ExtensionAPI service keys. The audit-check registry has
 # its own public key in ``audit/registry.py`` because external atoms need to
 # resolve it; these two are read only by helpers inside this module, so they
-# stay private to the adapter. Routing through ``api.set_service`` /
-# ``api.get_service`` keeps the per-install state off the public
-# ``ExtensionAPI`` attribute surface (§11.4.D2).
+# stay private to the adapter.
 _EXTRACTOR_COMPOSE_KWARGS_SERVICE_KEY: Final[str] = (
     "llmharness._extractor_compose_kwargs"
 )
 _REPLAY_LOG_PATH_SERVICE_KEY: Final[str] = "llmharness._replay_log_path"
 
 
-# --- branch state -----------------------------------------------------------
+# --- branch state (legacy; kept for the scan-branch regression tests) -------
 
 
 @dataclass(frozen=True)
 class _BranchState:
-    """Snapshot of audit-relevant entries pulled from a single branch walk."""
+    """Snapshot of audit-relevant entries pulled from a single branch walk.
+
+    The runner now drives audit via :class:`CumulativeAuditState`; this
+    type is retained because ``test_scan_branch_regressions`` exercises
+    :func:`_scan_branch` directly to lock down the fold semantics over
+    legacy ``AUDIT_EVENT`` / ``AUDIT_EDGE`` entries and pure-delete ops.
+    """
 
     cursor_last_turn_index: int
     graph: list[Event]
@@ -339,20 +335,10 @@ class _BranchState:
 def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _BranchState:
     """Single-pass extraction of cursor + graph + edges + phases + verdicts.
 
-    Event-sourcing refactor (2026-05-22): the live graph is the **fold**
-    of an ordered op log. This scanner accumulates ops from three
-    sources in branch order:
-
-    * :data:`AUDIT_GRAPH_OP` entries — first-class ops produced by the
-      event-sourcing extractor; parsed via :func:`parse_op`.
-    * Legacy :data:`AUDIT_EVENT` entries — translated to
-      :class:`NodeUpsert`. Used by sessions written before the refactor;
-      mixed sessions Just Work because ops are folded in branch order.
-    * Legacy :data:`AUDIT_EDGE` entries — translated to
-      :class:`EdgeUpsert`.
-
-    Phases keep their own list — they're auditor-side metadata, not part
-    of the graph op log.
+    Mirror of the pre-P1 implementation; retained because
+    ``test_scan_branch_regressions`` imports it. The live install path
+    no longer calls this — see
+    :meth:`CumulativeAuditState.hydrate_from_session_log`.
     """
     cursor_last_turn_index = -1
     ops: list[GraphOp] = []
@@ -373,11 +359,6 @@ def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _Bran
                 ev = Event.from_dict(payload)
             except (KeyError, ValueError, TypeError):
                 continue
-            # external_refs MUST round-trip through the synthesized op
-            # so the auditor and the next firing's recent_graph see the
-            # cross-firing edges the prior firing recorded. Dropping
-            # them silently makes the cumulative graph regress to
-            # per-firing islands.
             ops.append(
                 NodeUpsert(
                     id=ev.id,
@@ -436,72 +417,15 @@ def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _Bran
     )
 
 
-# --- failure recording ------------------------------------------------------
-
-
-_FAILURE_DIAGNOSTIC_LEVEL: Literal["warning"] = "warning"
-
-
-def _record_failure(api: ExtensionAPI, entry_type: str, payload: dict[str, Any]) -> None:
-    """Single chokepoint for typed failure entries.
-
-    Append-only on the session branch (consumed by ``_scan_branch`` and
-    downstream eval), AND simultaneously emit a ``DiagnosticEvent`` so
-    that the failure shows up in the OTel jsonl. Without the diagnostic
-    leg an audit-child crash leaves zero evidence on disk — burning the
-    extractor / auditor LLM quota and producing nothing — exactly the
-    silent-no-op mode that masked the post-harness-collapse Operations
-    fail-stop until a 50-case run was already spent. Never raises.
-    """
-    api.session.append_entry(entry_type, payload)
-    reason_raw = payload.get("reason") if isinstance(payload, dict) else None
-    reason = str(reason_raw) if reason_raw is not None else ""
-    message = f"{entry_type}: {reason}" if reason else entry_type
-    try:
-        api.events.emit_sync(
-            DiagnosticEvent.CHANNEL,
-            DiagnosticEvent(
-                level=_FAILURE_DIAGNOSTIC_LEVEL,
-                source="llmharness.audit",
-                message=message,
-            ),
-        )
-    except Exception:
-        # Diagnostics must never break the audit loop. Fall through.
-        _logger.exception("llmharness audit diagnostic emit failed; suppressing.")
-
-
-def _window_is_non_trivial(messages_slice: list[AgentMessage]) -> bool:
-    """True iff the slice contains any AssistantMessage or ToolResultMessage."""
-    return any(isinstance(msg, (AssistantMessage, ToolResultMessage)) for msg in messages_slice)
-
-
 # --- jobs -------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
-class _ExtractorJob:
-    """Snapshot taken synchronously at TurnEndEvent; consumed by worker."""
+class _RunnerStepJob:
+    """Per-TurnEndEvent snapshot. Worker hands it to ``runner.on_trajectory_progress``."""
 
     messages: tuple[AgentMessage, ...]
-
-
-@dataclass(frozen=True)
-class _AuditorJob:
-    """Trajectory snapshot taken at TurnEndEvent time; consumed by the worker."""
-
-    messages: tuple[AgentMessage, ...]
-
-
-@dataclass(frozen=True)
-class _AuditorSettings:
-    """Per-install knobs for assembling a per-firing auditor extension list."""
-
-    base_prompt: str
-    cards_tools_config: dict[str, Any] | None
-    observability_config: dict[str, Any] | None
-    summary_threshold: int
-    tools: tuple[str, ...]
+    turn_count: int
 
 
 @dataclass(frozen=True)
@@ -509,7 +433,7 @@ class _ShutdownJob:
     """Worker-stop sentinel; consumed only by ``_drain_queue``."""
 
 
-_Job = _ExtractorJob | _AuditorJob | _ShutdownJob
+_Job = _RunnerStepJob | _ShutdownJob
 
 
 # --- install ----------------------------------------------------------------
@@ -528,7 +452,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     if extractor_k < 1:
         extractor_k = _DEFAULT_EXTRACTOR_INTERVAL_TURNS
 
-    summary_threshold_raw = config.get("audit_summary_threshold", _DEFAULT_AUDIT_SUMMARY_THRESHOLD)
+    summary_threshold_raw = config.get(
+        "audit_summary_threshold", _DEFAULT_AUDIT_SUMMARY_THRESHOLD
+    )
     try:
         summary_threshold = int(summary_threshold_raw)
     except (TypeError, ValueError):
@@ -536,7 +462,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     if summary_threshold < 0:
         summary_threshold = _DEFAULT_AUDIT_SUMMARY_THRESHOLD
 
-    shutdown_timeout = float(config.get("shutdown_timeout_s", _DEFAULT_SHUTDOWN_TIMEOUT_S))
+    shutdown_timeout = float(
+        config.get("shutdown_timeout_s", _DEFAULT_SHUTDOWN_TIMEOUT_S)
+    )
     if shutdown_timeout < 0:
         shutdown_timeout = _DEFAULT_SHUTDOWN_TIMEOUT_S
 
@@ -580,9 +508,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     auditor_profile_raw = config.get("auditor_profile")
     auditor_tools_raw = config.get("auditor_tools")
     auditor_tools = _resolve_auditor_tools(
-        profile=auditor_profile_raw
-        if isinstance(auditor_profile_raw, str)
-        else None,
+        profile=auditor_profile_raw if isinstance(auditor_profile_raw, str) else None,
         tools=auditor_tools_raw if isinstance(auditor_tools_raw, list) else None,
     )
 
@@ -591,17 +517,20 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         cards_tools_config=cards_cfg,
         observability_config=obs_cfg,
     )
+    extractor_compose_kwargs = {
+        "base_prompt": extractor_base_prompt,
+        "cards_tools_config": cards_cfg,
+        "observability_config": obs_cfg,
+    }
     api.set_service(
         _EXTRACTOR_COMPOSE_KWARGS_SERVICE_KEY,
-        {
-            "base_prompt": extractor_base_prompt,
-            "cards_tools_config": cards_cfg,
-            "observability_config": obs_cfg,
-        },
+        extractor_compose_kwargs,
     )
-    # Auditor extensions are rebuilt per firing in _drain_auditor because
-    # the prompt is templated over the live event/edge graph + findings.
-    auditor_settings = _AuditorSettings(
+    extractor_settings = ExtractorSettings(
+        extensions=extractor_extensions,
+        compose_kwargs=extractor_compose_kwargs,
+    )
+    auditor_settings = AuditorSettings(
         base_prompt=auditor_base_prompt,
         cards_tools_config=cards_cfg,
         observability_config=obs_cfg,
@@ -616,10 +545,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     enable_reminders = bool(config.get("enable_reminders", True))
     enable_replay_log = bool(config.get("enable_replay_log", True))
 
-    api.set_service(
-        _REPLAY_LOG_PATH_SERVICE_KEY,
-        replay_log_path(api.cwd, _audit_session_id(api)) if enable_replay_log else None,
+    sidecar_path = (
+        replay_log_path(api.cwd, _audit_session_id(api)) if enable_replay_log else None
     )
+    api.set_service(_REPLAY_LOG_PATH_SERVICE_KEY, sidecar_path)
 
     # Publish the audit-check registry on the parent session. Atoms in
     # later commits (reference checks etc.) call
@@ -629,39 +558,50 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     with contextlib.suppress(KeyError):
         api.set_service(AUDIT_REGISTRY_SERVICE_KEY, AuditCheckRegistry())
 
+    # Construct the single runner for this install. Hydrate the
+    # cumulative state once from the existing session log so process
+    # restarts pick up where they left off; thereafter the in-memory
+    # state is authoritative (no per-firing re-reads).
+    cumulative = CumulativeAuditState.hydrate_from_session_log(
+        api.session.get_branch()
+    )
+    runner = HarnessRunner(
+        cumulative=cumulative,
+        child=LiveChildRunner(api),
+        sink=LiveOpSink(api),
+        sidecar=SidecarWriter(sidecar_path) if sidecar_path is not None else None,
+        extractor_settings=extractor_settings,
+        auditor_settings=auditor_settings,
+        extractor_interval=extractor_k,
+        audit_interval=k,
+        enable_auditor=enable_auditor,
+        root_session_id=_audit_session_id(api),
+        provider_extractor=extractor_provider,
+        provider_auditor=auditor_provider,
+        audit_registry=_resolve_registry(api),
+    )
+
     pending_reminders: list[Reminder] = []
     turn_count = 0
-    # Session-scoped firing counter — a 1-element box so ``_drain_extractor``
-    # can mutate it through the closure. Incremented only when a firing
-    # actually persists ops; failed / empty firings don't burn an id. See
-    # the M4 invariant test in ``test_firing_id_invariant``.
-    firing_counter: list[int] = [0]
+
+    def _drain_step_result(reminder: Reminder | None) -> None:
+        if reminder is not None:
+            pending_reminders.append(reminder)
 
     if mode == "sync":
 
         async def _on_turn_end_sync(event: TurnEndEvent) -> None:
             nonlocal turn_count
             turn_count += 1
-            messages_snapshot = tuple(event.messages)
-            auditor_due = enable_auditor and (turn_count % k) == 0
-            extractor_due = (turn_count % extractor_k) == 0 or auditor_due
-            extractor_ok = True
-            if extractor_due:
-                extractor_ok = await _drain_extractor(
-                    api=api,
-                    job=_ExtractorJob(messages=messages_snapshot),
-                    extractor_extensions=extractor_extensions,
-                    extractor_provider=extractor_provider,
-                    firing_counter=firing_counter,
-                )
-            if auditor_due and extractor_ok:
-                await _drain_auditor(
-                    api=api,
-                    auditor_settings=auditor_settings,
-                    auditor_provider=auditor_provider,
-                    pending_reminders=pending_reminders,
-                    messages=list(messages_snapshot),
-                )
+            # Re-resolve the registry per firing — atoms in the adapter
+            # chain may install themselves after this adapter's install
+            # but before the first turn, so a None at install time
+            # doesn't mean "no checks ever".
+            runner._audit_registry = _resolve_registry(api)
+            step = await runner.on_trajectory_progress(
+                list(event.messages), turn_count=turn_count
+            )
+            _drain_step_result(step.surfaced_reminder)
 
         api.on(TurnEndEvent.CHANNEL, _on_turn_end_sync)
         if enable_reminders:
@@ -682,12 +622,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 _drain_queue(
                     api=api,
                     queue=queue,
+                    runner=runner,
                     pending_reminders=pending_reminders,
-                    extractor_extensions=extractor_extensions,
-                    auditor_settings=auditor_settings,
-                    extractor_provider=extractor_provider,
-                    auditor_provider=auditor_provider,
-                    firing_counter=firing_counter,
                 ),
                 name="llmharness-audit-worker",
             )
@@ -695,16 +631,22 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     def _on_turn_end(event: TurnEndEvent) -> None:
         nonlocal turn_count
         turn_count += 1
-        messages_snapshot = tuple(event.messages)
+        # Cadence is decided inside ``runner.on_trajectory_progress``.
+        # We still gate enqueueing so that a no-op turn (no extractor /
+        # auditor due) doesn't even wake the worker — matches the
+        # legacy behaviour where TurnEndEvent below the cadence dropped
+        # the job on the floor.
         auditor_due = enable_auditor and (turn_count % k) == 0
         extractor_due = (turn_count % extractor_k) == 0 or auditor_due
         if not extractor_due and not auditor_due:
             return
         _ensure_worker()
-        if extractor_due:
-            queue.put_nowait(_ExtractorJob(messages=messages_snapshot))
-        if auditor_due:
-            queue.put_nowait(_AuditorJob(messages=messages_snapshot))
+        queue.put_nowait(
+            _RunnerStepJob(
+                messages=tuple(event.messages),
+                turn_count=turn_count,
+            )
+        )
 
     async def _on_session_shutdown(_event: SessionShutdownEvent) -> None:
         if worker_task is None or worker_task.done():
@@ -732,6 +674,15 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             _make_reminder_injector(api, pending_reminders),
         )
     api.on(SessionShutdownEvent.CHANNEL, _on_session_shutdown)
+
+
+def _resolve_registry(api: ExtensionAPI) -> AuditCheckRegistry | None:
+    """Return the live audit-check registry, or ``None`` if absent."""
+    try:
+        registry = api.get_service(AUDIT_REGISTRY_SERVICE_KEY)
+    except Exception:  # pragma: no cover - defensive
+        return None
+    return registry if isinstance(registry, AuditCheckRegistry) else None
 
 
 def _parse_provider_spec(
@@ -788,10 +739,6 @@ def _make_reminder_injector(
         injected: list[AgentMessage] = []
         while pending_reminders:
             reminder = pending_reminders.pop(0)
-            # Route through the shared builder so the seed atom in
-            # ``llmharness.replay.reminder_seed`` and this live path stay
-            # byte-identical — train/inference parity is the fail-stop
-            # for the prefix-replay iteration loop.
             injected.append(build_reminder_message(reminder.text))
             try:
                 api.session.append_entry(
@@ -809,16 +756,10 @@ async def _drain_queue(
     *,
     api: ExtensionAPI,
     queue: asyncio.Queue[_Job],
+    runner: HarnessRunner,
     pending_reminders: list[Reminder],
-    extractor_extensions: list[tuple[str, dict[str, Any]]],
-    auditor_settings: _AuditorSettings,
-    extractor_provider: tuple[str, dict[str, Any]] | None,
-    auditor_provider: tuple[str, dict[str, Any]] | None,
-    firing_counter: list[int],
 ) -> None:
-    """Serial worker. Owns all session-mutating audit writes."""
-    _last_extractor_held_cursor: bool = False
-
+    """Serial worker. Owns all session-mutating audit writes via the runner."""
     while True:
         try:
             job = await queue.get()
@@ -827,29 +768,15 @@ async def _drain_queue(
         try:
             if isinstance(job, _ShutdownJob):
                 return
-            if isinstance(job, _ExtractorJob):
-                extractor_ok = await _drain_extractor(
-                    api=api,
-                    job=job,
-                    extractor_extensions=extractor_extensions,
-                    extractor_provider=extractor_provider,
-                    firing_counter=firing_counter,
+            if isinstance(job, _RunnerStepJob):
+                # Re-resolve the registry each step — see comment in
+                # the sync handler.
+                runner._audit_registry = _resolve_registry(api)
+                step = await runner.on_trajectory_progress(
+                    list(job.messages), turn_count=job.turn_count
                 )
-                _last_extractor_held_cursor = not extractor_ok
-            elif isinstance(job, _AuditorJob):
-                if _last_extractor_held_cursor:
-                    _logger.debug(
-                        "llmharness audit worker: skipping auditor — "
-                        "preceding extractor firing held the cursor"
-                    )
-                else:
-                    await _drain_auditor(
-                        api=api,
-                        auditor_settings=auditor_settings,
-                        auditor_provider=auditor_provider,
-                        pending_reminders=pending_reminders,
-                        messages=list(job.messages),
-                    )
+                if step.surfaced_reminder is not None:
+                    pending_reminders.append(step.surfaced_reminder)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -858,274 +785,7 @@ async def _drain_queue(
             queue.task_done()
 
 
-# --- extractor (Phase 1, v3) ------------------------------------------------
-
-
-async def _drain_extractor(
-    *,
-    api: ExtensionAPI,
-    job: _ExtractorJob,
-    extractor_extensions: list[tuple[str, dict[str, Any]]],
-    extractor_provider: tuple[str, dict[str, Any]] | None,
-    firing_counter: list[int],
-) -> bool:
-    """Run one v3 extractor firing.
-
-    Returns ``True`` on success or partial-success (cursor advanced).
-    Returns ``False`` on no_call / empty / error paths (cursor held).
-
-    ``firing_counter`` is a 1-element mutable box (closure pattern)
-    owned by ``install``: it's the stable session-scoped count of
-    ops-bearing firings, used as the persisted ``firing_id``. We
-    increment ONLY after a successful op persistence so failed /
-    empty firings don't burn an id and the per-session sequence stays
-    contiguous.
-    """
-    branch = api.session.get_branch()
-    branch_state = _scan_branch(branch, recent_verdicts_n=_DEFAULT_RECENT_VERDICTS)
-    messages = list(job.messages)
-
-    window_lo = max(branch_state.cursor_last_turn_index + 1, 0)
-    window_hi_inclusive = len(messages) - 1
-    window_messages = messages[window_lo:]
-    if not window_messages:
-        # Nothing new to extract; do nothing (don't advance cursor).
-        return True
-
-    turn_window = [window_lo, window_hi_inclusive]
-
-    # Build the per-firing ExtractionState. ``turn_texts`` keys are
-    # absolute trajectory indices so the witness pipeline can resolve
-    # ``src_turns`` / ``dst_turns`` against the rendered text.
-    state = ExtractionState()
-    for i, msg in enumerate(window_messages, start=window_lo):
-        state.turn_texts[i] = _render_message_text(msg)
-
-    # Extend turn_texts with the source turns of every recent_graph
-    # event so external_refs can be witnessed (their source side lives
-    # in prior firings' windows). recent_graph carries the full prior
-    # graph — letting the LLM cite any earlier event, not just a tail
-    # window — so conclusions can attach back to the original evidence
-    # rather than whichever events happened to be in the last slice.
-    recent_graph_events = tuple(branch_state.graph)
-    referenced_turns: set[int] = {
-        t for e in recent_graph_events for t in e.source_turns
-    }
-    for t in referenced_turns:
-        if t in state.turn_texts:
-            continue
-        if 0 <= t < len(messages):
-            state.turn_texts[t] = _render_message_text(messages[t])
-    state.recent_graph = recent_graph_events
-    # Event-sourcing seed: the apply_* surface needs the folded
-    # prior-firings view to validate cross-firing edits. Populate from
-    # the same branch scan that produced ``recent_graph_events``.
-    state.recent_graph_dict = {e.id: e for e in recent_graph_events}
-    state.recent_edges_dict = {
-        (ed.src, ed.dst, ed.kind.value): ed for ed in branch_state.edges
-    }
-    # Refold so the apply_* surface sees the prior graph from op zero.
-    state._refold()
-
-    # Globally-unique event ids: this firing's events must continue the
-    # global sequence rather than restart at 1. Pick the smallest id
-    # not yet present in the running graph (treat ids as a contiguous
-    # claim — a hole is fine, but reusing a live id is not).
-    state.next_event_id = (
-        max((g.id for g in branch_state.graph), default=0) + 1
-    )
-
-    # Build the new-turn JSON window for the prompt + payload.
-    new_turn_window = [
-        s
-        for s in (
-            _serialize_message_for_extractor(msg, index=i)
-            for i, msg in enumerate(window_messages, start=window_lo)
-        )
-        if s is not None
-    ]
-
-    # Enrich each recent_graph entry with the literal text of its
-    # source_turns so the extractor can pick external_refs witnesses
-    # without guessing. Without this the model only sees summaries and
-    # cannot tell which tokens are actually present in the prior turn
-    # texts the witness validator will check against.
-    recent_graph_payload: list[dict[str, Any]] = []
-    for e in recent_graph_events:
-        entry = e.to_dict()
-        entry["source_turn_texts"] = [
-            state.turn_texts.get(t, "") for t in e.source_turns
-        ]
-        recent_graph_payload.append(entry)
-
-    payload = {
-        "next_event_id": state.next_event_id,
-        "new_turns": new_turn_window,
-        "recent_graph": recent_graph_payload,
-    }
-
-    # Inject state into the per-firing extensions list. The base list
-    # returned by ``compose_extractor_extensions`` is shared across
-    # firings; we never mutate it. The new-turn window is shipped as
-    # the child's user message (see ``payload`` above), not embedded
-    # into the system prompt.
-    firing_extensions = bind_extractor_state(
-        extractor_extensions,
-        state=state,
-    )
-
-    # Only materialize the replay snapshot if the sidecar is enabled.
-    # turn_texts can be large in long sessions; skip the copy otherwise.
-    replay_path = _replay_log_path_for(api)
-    if replay_path is not None:
-        replay_compose_kwargs: dict[str, Any] | None = dict(
-            api.get_service(_EXTRACTOR_COMPOSE_KWARGS_SERVICE_KEY) or {}
-        )
-        replay_extras: dict[str, Any] | None = {
-            "turn_texts": {str(k): v for k, v in state.turn_texts.items()},
-        }
-    else:
-        replay_compose_kwargs = None
-        replay_extras = None
-
-    raw_assistant_messages: list[dict[str, Any]] = []
-
-    def _record(status: str, output: dict[str, Any] | None, error: str | None = None) -> None:
-        _record_replay_at(
-            replay_path,
-            phase="extractor",
-            turn_index=window_hi_inclusive,
-            root_session_id=_audit_session_id(api),
-            compose_kwargs=replay_compose_kwargs,
-            payload=payload,
-            provider=extractor_provider,
-            output=output,
-            status=status,
-            error=error,
-            extras=replay_extras,
-            raw_assistant_messages=raw_assistant_messages,
-        )
-
-    try:
-        terminator_called, raw_assistant_messages = await _spawn_extractor_child(
-            api=api,
-            extensions=firing_extensions,
-            provider=extractor_provider,
-            payload=payload,
-            turn_window=turn_window,
-        )
-    except _ExtractorSpawnError as exc:
-        _record_failure(
-            api,
-            _EXTRACTOR_ERROR_ENTRY,
-            {"reason": str(exc), "turn_window": turn_window},
-        )
-        _record("spawn_error", output=None, error=str(exc))
-        return False
-
-    if not terminator_called:
-        _record_failure(
-            api,
-            _EXTRACTOR_NO_CALL_ENTRY,
-            {
-                "reason": (f"child returned without calling {FINALIZE_EXTRACTION_TOOL_NAME}"),
-                "turn_window": turn_window,
-            },
-        )
-        _record("no_call", output=None)
-        return False
-
-    output = RawExtractorOutput.from_state(state)
-    _record(
-        "ok",
-        output={
-            "events": [e.to_dict() for e in output.events],
-            "edges": [ed.to_dict() for ed in output.edges],
-            "dropped_edges": list(output.dropped_edges),
-        },
-    )
-
-    # Empty firing classification.
-    #
-    # The maintainer model means a firing can produce ops that ONLY
-    # edit prior-firing nodes (e.g. a single ``NodeDelete`` merging a
-    # duplicate). Such a firing has empty ``output.events`` / ``edges``
-    # / ``dropped_edges`` (those snapshot the legacy
-    # ``_events_pending`` / ``_edges_pending`` lists, which are only
-    # populated by ``commit_batch``/``finalize``), but a non-empty
-    # ``state.pending_ops``. Gating "empty" on the legacy snapshot
-    # would silently drop the maintainer's op log on the floor.
-    has_legacy_output = bool(
-        output.events or output.edges or output.dropped_edges
-    )
-    has_ops = bool(state.pending_ops)
-    if not has_legacy_output and not has_ops:
-        if _window_is_non_trivial(window_messages):
-            _record_failure(api, _EXTRACTOR_EMPTY_ENTRY, {"turn_window": turn_window})
-            return False
-        # Truly trivial window: still advance the cursor so we don't
-        # re-extract the same prefix forever.
-        api.session.append_entry(
-            _EXTRACTOR_CURSOR_ENTRY_TYPE,
-            {
-                "last_turn_index": window_hi_inclusive,
-                "extraction_run_id": uuid.uuid4().hex,
-            },
-        )
-        return True
-
-    # Event-sourcing: persist the firing's op log as one
-    # ``AUDIT_GRAPH_OP`` entry per op so any future scan can replay the
-    # exact state changes this firing made. ``firing_id`` is supplied
-    # by the install-level closure (M4): it is a stable session-scoped
-    # counter incremented once per ops-bearing firing, NOT recomputed
-    # from the branch (the prior heuristic — counting ``op_index==0``
-    # entries — collapses if any future change emits a firing whose
-    # first op has a non-zero index, e.g. partial recovery / retry).
-    firing_id = firing_counter[0]
-    for op_index, op in enumerate(state.pending_ops):
-        payload = op.to_dict()
-        payload["firing_id"] = firing_id
-        payload["op_index"] = op_index
-        payload["caused_by_turn_window"] = list(turn_window)
-        api.session.append_entry(_AUDIT_GRAPH_OP_ENTRY_TYPE, payload)
-    if has_ops:
-        firing_counter[0] += 1
-
-    # Legacy emit: keep writing AUDIT_EVENT / AUDIT_EDGE entries so the
-    # auditor, aggregate, replay, and web-viewer paths continue to work
-    # without modification while the event-sourcing migration is rolled
-    # out. The scanner translates both stripes into the same fold view.
-    # Skipped when this firing only produced ops that edit prior-firing
-    # nodes (e.g. pure NodeDelete) — there's nothing legacy-shaped to
-    # persist, and the scanner reads the ops back via AUDIT_GRAPH_OP.
-    for ev in output.events:
-        api.session.append_entry(_AUDIT_EVENT_ENTRY_TYPE, ev.to_dict())
-    for ed in output.edges:
-        api.session.append_entry(_AUDIT_EDGE_ENTRY_TYPE, ed.to_dict())
-    # Mechanical phase merge over the just-extracted events. Phases
-    # collapse consecutive ``act`` / ``evid`` runs into one block so the
-    # auditor reads a "basic block" view; raw events stay on disk for
-    # drill-down via ``get_event_detail``.
-    for ph in merge_to_phases(output.events):
-        api.session.append_entry(_AUDIT_PHASE_ENTRY_TYPE, ph.to_dict())
-    if output.dropped_edges:
-        api.session.append_entry(
-            _EXTRACTOR_PARTIAL_ENTRY,
-            {
-                "dropped_edges": list(output.dropped_edges),
-                "turn_window": turn_window,
-            },
-        )
-
-    api.session.append_entry(
-        _EXTRACTOR_CURSOR_ENTRY_TYPE,
-        {
-            "last_turn_index": window_hi_inclusive,
-            "extraction_run_id": uuid.uuid4().hex,
-        },
-    )
-    return True
+# --- session id / replay path helpers ---------------------------------------
 
 
 def _replay_log_path_for(api: ExtensionAPI) -> Path | None:
@@ -1148,493 +808,10 @@ def _audit_session_id(api: ExtensionAPI) -> str:
     try:
         sid = api.session.get_session_id()
     except AttributeError:
-        # Older ReadonlySession impl without get_session_id (third-party
-        # SDK consumer). Fall back to the trace id.
         sid = ""
     if sid:
         return sid
     return api.root_session_id
-
-
-def _record_replay_at(
-    path: Path | None,
-    *,
-    phase: str,
-    turn_index: int,
-    root_session_id: str,
-    compose_kwargs: dict[str, Any] | None,
-    payload: dict[str, Any] | None,
-    provider: tuple[str, dict[str, Any]] | None,
-    output: dict[str, Any] | None,
-    status: str,
-    error: str | None = None,
-    extras: dict[str, Any] | None = None,
-    raw_assistant_messages: list[dict[str, Any]] | None = None,
-) -> None:
-    """Append one record; ``path is None`` short-circuits.
-
-    ``write_record`` swallows OSError internally; programmer errors
-    (malformed kwargs) should surface, not be silently dropped.
-    """
-    if path is None:
-        return
-    rec = ReplayRecord(
-        phase=phase,  # type: ignore[arg-type]
-        turn_index=turn_index,
-        root_session_id=root_session_id,
-        ts_ns=now_ns(),
-        compose_kwargs=compose_kwargs or {},
-        payload=payload or {},
-        provider=[provider[0], provider[1]] if provider else None,
-        output=output,
-        status=status,  # type: ignore[arg-type]
-        error=error,
-        extras=extras or {},
-        raw_assistant_messages=list(raw_assistant_messages or []),
-    )
-    write_record(path, rec)
-
-
-class _ExtractorSpawnError(RuntimeError):
-    """Wraps spawn / prompt failures so the caller can record them."""
-
-
-async def _spawn_extractor_child(
-    *,
-    api: ExtensionAPI,
-    extensions: list[tuple[str, dict[str, Any]]],
-    provider: tuple[str, dict[str, Any]] | None,
-    payload: dict[str, Any],
-    turn_window: list[int],
-) -> tuple[bool, list[dict[str, Any]]]:
-    """Run the extractor child. Returns ``(submit_events_called, raw_blocks)``.
-
-    ``raw_blocks`` is the chronological flattened list of serialized
-    assistant content blocks (thinking + tool_call + text) captured from
-    the child's message stream. It is empty when spawn / prompt fail —
-    those paths raise :class:`_ExtractorSpawnError` so the caller can
-    route them to the typed failure entry.
-    """
-    del turn_window  # surfaced by caller via _record_failure context
-    child_config = AgentSessionConfig(
-        cwd=api.cwd,
-        provider=provider,
-        extensions=extensions,
-        purpose="cognitive_audit_extractor",
-    )
-    try:
-        child = await api.spawn_child_session(child_config)
-    except Exception as exc:
-        raise _ExtractorSpawnError(str(exc)) from exc
-
-    try:
-        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
-        recent_n = len(payload.get("recent_graph") or [])
-        next_id = payload.get("next_event_id")
-        directive = (
-            "Below is the firing input. Workflow:\n"
-            "(1) Build the graph incrementally with upsert_node / "
-            "upsert_edge (and delete_node / delete_edge as needed). Every "
-            "edit is validated immediately; errors come back as a "
-            "three-section actionable message naming concrete next "
-            "options. Internal events must be true branch points "
-            "(in-degree>=2 or out-degree>=2); passthrough (in=1, out=1) "
-            "events are rejected at finalize.\n"
-            "(2) Call finalize_extraction (no payload) when you are done. "
-            "On a clean degree check the firing terminates; on rejection "
-            "the firing stays alive so you can promote passthrough nodes "
-            "with further upserts and re-call.\n"
-            f"(3) Start event ids at {next_id} and increment strictly — "
-            "do NOT restart at 1 and do NOT reuse any id from recent_graph.\n"
-            f"(4) Cross-firing references: recent_graph has {recent_n} "
-            "entries. To link this firing's events to prior firings, emit "
-            "upsert_edge with src/dst spanning the boundary — the folded "
-            "view already contains prior-firing nodes by id. Most evid "
-            "events in this firing answer a hyp/act from earlier firings; "
-            "linking them is what turns a single firing into a connected "
-            "investigation.\n\n"
-            + payload_json
-        )
-        messages = await child.prompt(directive)
-    except Exception as exc:
-        await safe_shutdown(child)
-        raise _ExtractorSpawnError(str(exc)) from exc
-
-    await safe_shutdown(child)
-    return (
-        _has_tool_call(messages, FINALIZE_EXTRACTION_TOOL_NAME),
-        _flatten_assistant_blocks(messages),
-    )
-
-
-def _flatten_assistant_blocks(messages: list[AgentMessage]) -> list[dict[str, Any]]:
-    """Flatten every AssistantMessage's content into a chronological block list.
-
-    Used by ReplayRecord.raw_assistant_messages to persist child thinking
-    + tool_call traces for downstream SFT. User / tool_result messages
-    are skipped — the payload + output fields already carry them.
-    """
-    blocks: list[dict[str, Any]] = []
-    for msg in messages:
-        if not isinstance(msg, AssistantMessage):
-            continue
-        content = getattr(msg, "content", None)
-        if not isinstance(content, list):
-            continue
-        for blk in content:
-            serialized = _serialize_block(blk)
-            if serialized is not None:
-                blocks.append(serialized)
-    return blocks
-
-
-def _has_tool_call(messages: list[AgentMessage], tool_name: str) -> bool:
-    for msg in messages:
-        if not isinstance(msg, AssistantMessage):
-            continue
-        for block in msg.content:
-            if isinstance(block, ToolCallBlock) and block.name == tool_name:
-                return True
-    return False
-
-
-
-
-def _render_message_text(msg: AgentMessage) -> str:
-    """Render the text content of a message for witness substring checks.
-
-    Concatenates every text-bearing block (assistant text, thinking,
-    tool-result text, user text) into a single string. The witness
-    layer normalises whitespace and case before substring matching so
-    block boundaries don't matter.
-    """
-    parts: list[str] = []
-    content = getattr(msg, "content", None)
-    if isinstance(content, list):
-        for block in content:
-            text = getattr(block, "text", None)
-            if isinstance(text, str) and text:
-                parts.append(text)
-                continue
-            inner = getattr(block, "content", None)
-            if isinstance(inner, list):
-                for sub in inner:
-                    sub_text = getattr(sub, "text", None)
-                    if isinstance(sub_text, str) and sub_text:
-                        parts.append(sub_text)
-            args = getattr(block, "arguments", None)
-            if isinstance(args, dict):
-                with contextlib.suppress(TypeError, ValueError):
-                    parts.append(json.dumps(args, ensure_ascii=False, default=str))
-    return " ".join(parts)
-
-
-# --- auditor (Phase 2, unchanged from v2) -----------------------------------
-
-
-async def _drain_auditor(
-    *,
-    api: ExtensionAPI,
-    auditor_settings: _AuditorSettings,
-    auditor_provider: tuple[str, dict[str, Any]] | None,
-    pending_reminders: list[Reminder],
-    messages: list[AgentMessage],
-) -> None:
-    branch = api.session.get_branch()
-    branch_state = _scan_branch(branch, recent_verdicts_n=_DEFAULT_RECENT_VERDICTS)
-
-    events_tuple: tuple[Event, ...] = tuple(branch_state.graph)
-    edges_tuple: tuple[Edge, ...] = tuple(branch_state.edges)
-    phases_tuple: tuple[Phase, ...] = tuple(branch_state.phases)
-
-    # Run scenario-registered checks. Empty registry / unset service →
-    # empty findings, no error (design §4.c).
-    findings: list[Any] = []
-    check_errors: dict[str, str] = {}
-    try:
-        registry = api.get_service(AUDIT_REGISTRY_SERVICE_KEY)
-    except Exception:  # pragma: no cover - defensive, no service registry path
-        registry = None
-    if isinstance(registry, AuditCheckRegistry):
-        try:
-            ctx = CheckContext(events=events_tuple, edges=edges_tuple)
-            findings, check_errors = registry.run_all(ctx)
-        except Exception:
-            _logger.exception("audit-check registry run_all failed; using empty findings")
-            findings, check_errors = [], {}
-
-    trajectory_snapshot = _serialize_full_trajectory(messages)
-    firing_extensions = compose_auditor_extensions(
-        base_prompt=auditor_settings.base_prompt,
-        cards_tools_config=auditor_settings.cards_tools_config,
-        observability_config=auditor_settings.observability_config,
-        trajectory_snapshot=trajectory_snapshot,
-        events=events_tuple,
-        edges=edges_tuple,
-        phases=phases_tuple,
-        findings=list(findings),
-        check_errors=dict(check_errors),
-        continuation_notes=list(branch_state.last_continuation_notes),
-        summary_threshold=auditor_settings.summary_threshold,
-        tools=auditor_settings.tools,
-    )
-
-    # Build the replay snapshot only when the sidecar is enabled — the
-    # to_dict() comprehensions over events/edges/phases/findings dominate
-    # per-firing CPU on large graphs.
-    replay_path = _replay_log_path_for(api)
-    replay_compose_kwargs: dict[str, Any] | None = None
-    replay_payload: dict[str, Any] | None = None
-    if replay_path is not None:
-        replay_compose_kwargs = {
-            "base_prompt": auditor_settings.base_prompt,
-            "cards_tools_config": auditor_settings.cards_tools_config,
-            "observability_config": auditor_settings.observability_config,
-            "trajectory_snapshot": trajectory_snapshot,
-            "events": [e.to_dict() for e in events_tuple],
-            "edges": [ed.to_dict() for ed in edges_tuple],
-            "phases": [ph.to_dict() for ph in phases_tuple],
-            "findings": [f.to_dict() for f in findings],
-            "check_errors": dict(check_errors),
-            "continuation_notes": list(branch_state.last_continuation_notes),
-            "summary_threshold": auditor_settings.summary_threshold,
-            "tools": list(auditor_settings.tools),
-        }
-        replay_payload = {
-            "graph": [e.to_dict() for e in branch_state.graph],
-            "recent_verdicts": list(branch_state.recent_verdicts),
-            "continuation_notes_from_prior_firing": list(
-                branch_state.last_continuation_notes
-            ),
-        }
-
-    verdict, raw_blocks = await _run_auditor(
-        api=api,
-        auditor_extensions=firing_extensions,
-        provider=auditor_provider,
-        graph_events=branch_state.graph,
-        recent_verdicts=branch_state.recent_verdicts,
-        continuation_notes_from_prior_firing=branch_state.last_continuation_notes,
-    )
-    turn_index = len(messages) - 1 if messages else -1
-    if verdict is None:
-        _record_replay_at(
-            replay_path,
-            phase="auditor",
-            turn_index=turn_index,
-            root_session_id=_audit_session_id(api),
-            compose_kwargs=replay_compose_kwargs,
-            payload=replay_payload,
-            provider=auditor_provider,
-            output=None,
-            status="no_call",
-            raw_assistant_messages=raw_blocks,
-        )
-        return
-
-    api.session.append_entry(_VERDICT_ENTRY_TYPE, verdict.to_dict())
-    _record_replay_at(
-        replay_path,
-        phase="auditor",
-        turn_index=turn_index,
-        root_session_id=_audit_session_id(api),
-        compose_kwargs=replay_compose_kwargs,
-        payload=replay_payload,
-        provider=auditor_provider,
-        output=verdict.to_dict(),
-        status="ok",
-        raw_assistant_messages=raw_blocks,
-    )
-    if verdict.surface_reminder and verdict.reminder_text:
-        pending_reminders.append(Reminder(text=verdict.reminder_text))
-
-
-# --- trajectory slicing -----------------------------------------------------
-
-
-def _serialize_message_for_extractor(msg: AgentMessage, *, index: int) -> dict[str, Any] | None:
-    """Best-effort dict view of one message."""
-    content = getattr(msg, "content", None)
-    if not isinstance(content, list):
-        return None
-
-    blocks = [b for b in (_serialize_block(blk) for blk in content) if b is not None]
-    if not blocks:
-        return None
-    return {
-        "index": index,
-        "role": getattr(msg, "role", "unknown"),
-        "content": blocks,
-    }
-
-
-def _serialize_block(block: Any) -> dict[str, Any] | None:
-    """Serialize one content block; preserves thinking + tool-result structure."""
-    text = getattr(block, "text", None)
-    if isinstance(text, str) and text:
-        block_type = getattr(block, "type", None)
-        return {
-            "type": block_type if isinstance(block_type, str) and block_type else "text",
-            "text": text,
-        }
-
-    name = getattr(block, "name", None)
-    arguments = getattr(block, "arguments", None)
-    if isinstance(name, str) and isinstance(arguments, dict):
-        return {
-            "type": "tool_call",
-            "id": getattr(block, "id", None),
-            "name": name,
-            "arguments": dict(arguments),
-        }
-
-    tool_call_id = getattr(block, "tool_call_id", None)
-    inner_content = getattr(block, "content", None)
-    if isinstance(tool_call_id, str) and isinstance(inner_content, list):
-        inner_blocks: list[dict[str, Any]] = []
-        for inner in inner_content:
-            inner_text = getattr(inner, "text", None)
-            if isinstance(inner_text, str):
-                inner_blocks.append({"type": "text", "text": inner_text})
-            else:
-                inner_blocks.append(
-                    {
-                        "type": getattr(inner, "type", inner.__class__.__name__),
-                        "repr": repr(inner),
-                    }
-                )
-        return {
-            "type": "tool_result",
-            "tool_call_id": tool_call_id,
-            "content": inner_blocks,
-            "is_error": bool(getattr(block, "is_error", False)),
-        }
-
-    return {"type": getattr(block, "type", block.__class__.__name__), "repr": repr(block)}
-
-
-def _serialize_full_trajectory(messages: list[AgentMessage]) -> list[dict[str, Any]]:
-    """Serialize the entire trajectory for the auditor's get_turn tool."""
-    out: list[dict[str, Any]] = []
-    for i, msg in enumerate(messages):
-        serialized = _serialize_message_for_extractor(msg, index=i)
-        if serialized is not None:
-            out.append(serialized)
-    return out
-
-
-# --- phase runner -----------------------------------------------------------
-
-
-_T = TypeVar("_T")
-
-
-async def _run_phase(
-    *,
-    api: ExtensionAPI,
-    extensions: list[tuple[str, dict[str, Any]]],
-    provider: tuple[str, dict[str, Any]] | None,
-    purpose: str,
-    payload: dict[str, Any],
-    terminal_tool: str,
-    coerce: Callable[[dict[str, Any]], _T],
-    coerce_error: type[Exception],
-    on_spawn_or_prompt_error: Callable[[str], None],
-    on_no_call: Callable[[], None],
-    on_malformed: Callable[[str], None],
-) -> tuple[_T | None, list[dict[str, Any]]]:
-    """Spawn child, drive to terminal_tool, coerce, return ``(result, raw_blocks)``.
-
-    ``raw_blocks`` is the chronological flattened assistant content
-    block list captured from the child's reply (thinking + tool_calls +
-    text). Empty list when the child never produced an assistant
-    message (spawn / prompt failure paths).
-    """
-    child_config = AgentSessionConfig(
-        cwd=api.cwd,
-        provider=provider,
-        extensions=extensions,
-        purpose=purpose,
-    )
-    try:
-        child = await api.spawn_child_session(child_config)
-    except Exception as exc:
-        on_spawn_or_prompt_error(str(exc))
-        return None, []
-
-    try:
-        messages = await child.prompt(json.dumps(payload, ensure_ascii=False, default=str))
-    except Exception as exc:
-        on_spawn_or_prompt_error(str(exc))
-        await safe_shutdown(child)
-        return None, []
-
-    await safe_shutdown(child)
-
-    raw_blocks = _flatten_assistant_blocks(messages)
-
-    arguments = find_terminal_tool_arguments(messages, terminal_tool)
-    if arguments is None:
-        on_no_call()
-        return None, raw_blocks
-
-    try:
-        return coerce(arguments), raw_blocks
-    except coerce_error as exc:
-        on_malformed(str(exc))
-        return None, raw_blocks
-
-
-async def _run_auditor(
-    *,
-    api: ExtensionAPI,
-    auditor_extensions: list[tuple[str, dict[str, Any]]],
-    provider: tuple[str, dict[str, Any]] | None,
-    graph_events: list[Event],
-    recent_verdicts: list[dict[str, Any]],
-    continuation_notes_from_prior_firing: list[str],
-) -> tuple[Verdict | None, list[dict[str, Any]]]:
-    """Run one auditor firing; return ``(verdict, raw_assistant_blocks)``.
-
-    ``raw_assistant_blocks`` is forwarded for replay-sidecar persistence
-    so downstream SFT exporters can recover the auditor's thinking
-    trace. The verdict-coercion branch keeps it intact even on
-    malformed-output / no-call paths so the sidecar still captures what
-    the LLM produced.
-    """
-    payload = {
-        "graph": [e.to_dict() for e in graph_events],
-        "recent_verdicts": list(recent_verdicts),
-        "continuation_notes_from_prior_firing": list(continuation_notes_from_prior_firing),
-    }
-    raw, raw_blocks = await _run_phase(
-        api=api,
-        extensions=auditor_extensions,
-        provider=provider,
-        purpose="cognitive_audit_auditor",
-        payload=payload,
-        terminal_tool=SUBMIT_VERDICT_TOOL_NAME,
-        coerce=RawVerdictOutput.from_dict,
-        coerce_error=AuditorOutputError,
-        on_spawn_or_prompt_error=lambda reason: _record_failure(
-            api, _AUDIT_ERROR_ENTRY, {"reason": reason}
-        ),
-        on_no_call=lambda: _record_failure(
-            api,
-            _AUDIT_NO_CALL_ENTRY,
-            {"reason": f"child returned without calling {SUBMIT_VERDICT_TOOL_NAME}"},
-        ),
-        on_malformed=lambda reason: _record_failure(
-            api, _AUDIT_ERROR_ENTRY, {"reason": f"malformed: {reason}"}
-        ),
-    )
-    if raw is None:
-        return None, raw_blocks
-    try:
-        return raw.to_verdict(), raw_blocks
-    except AuditorOutputError as exc:
-        _record_failure(api, _AUDIT_ERROR_ENTRY, {"reason": f"malformed: {exc}"})
-        return None, raw_blocks
 
 
 # Public aliases for downstream eval orchestrators that need to reconstruct
