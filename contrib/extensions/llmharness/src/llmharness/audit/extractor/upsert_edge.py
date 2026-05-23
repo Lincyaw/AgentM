@@ -55,23 +55,22 @@ class UpsertEdgeArgs(BaseModel):
         description="One short sentence explaining the causal connection.",
     )
     cited_entities: list[str] = Field(
-        default_factory=list,
         description=(
             "Concrete identifiers (service names, span ids, file "
             "paths, error codes, etc.) shared by src and dst. "
             "Required non-empty when kind='data'; each entity must "
             "appear (case+whitespace normalized substring) in at "
-            "least one of the src or dst node's source_turns text."
+            "least one of the src or dst node's source_turns text. "
+            "Pass [] when kind='ref'."
         ),
     )
     cited_quote: str = Field(
-        default="",
         description=(
             "Verbatim substring of BOTH the src node's source_turns "
             "text AND the dst node's source_turns text "
             "(case+whitespace normalized). Required when kind='ref'. "
             "Paraphrasing or reformatting is rejected at op-build "
-            "time."
+            "time. Pass \"\" when kind='data'."
         ),
     )
 
