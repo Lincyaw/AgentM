@@ -214,7 +214,6 @@ class CumulativeAuditState:
         phases: list[Phase] = []
         verdicts_all: list[dict[str, Any]] = []
         cursor_last_turn_index = -1
-        max_firing_id = -1
 
         for entry in branch:
             payload = entry.payload
@@ -225,10 +224,6 @@ class CumulativeAuditState:
                     ops.append(parse_op(payload))
                 except (KeyError, ValueError, TypeError):
                     continue
-                fid_raw = payload.get("firing_id")
-                fid = _bool_safe_int(fid_raw)
-                if fid is not None and fid > max_firing_id:
-                    max_firing_id = fid
             elif entry.type == _et.AUDIT_EVENT:
                 try:
                     ev = Event.from_dict(payload)
@@ -284,12 +279,17 @@ class CumulativeAuditState:
         for v in verdicts_all[-_DEFAULT_RECENT_VERDICTS:]:
             recent.append(v)
 
+        # TODO(harness-runner-p2): legacy adapter installed
+        # ``firing_counter = [0]`` unconditionally, so on session restart a
+        # colliding firing_id was possible. P1 is a pure refactor — keep
+        # that exact (broken) behaviour here; the collision-on-restart fix
+        # belongs in a separate P2 change.
         state = cls(
             ops=ops,
             cursor_last_turn_index=cursor_last_turn_index,
             recent_verdicts=recent,
             last_continuation_notes=last_notes,
-            firing_id_counter=max_firing_id + 1 if max_firing_id >= 0 else 0,
+            firing_id_counter=0,
         )
         state._phases = phases
         return state
