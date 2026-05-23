@@ -1,105 +1,50 @@
 name: verifier
 description: >
-  Verify whether a known fault injection actually materialized in the
-  rcabench parquet data, and trace its forward propagation through the
-  observability graph. Reuses the rca scenario's data layout and tools
-  (DuckDB over parquet) but answers a different question: given the
-  injection spec, what is the evidence-backed impact graph?
+  Default fault-injection verifier. Single agent, 7 atoms. Tools:
+  get_injection_spec, list_tables, query_sql,
+  submit_propagation_report. Output is the service-level
+  fault-propagation graph (edges only) with SQL evidence per hop.
+  Reuses the rca scenario's DuckDB+parquet data layout via
+  AGENTM_RCA_DATA_DIR. For the skills-augmented variant (methodology
+  + per-fault-kind diagnostic signatures), use ``verifier:skills``.
 
 extensions:
-  # --- environment / data ports ---------------------------------------
   - module: agentm.extensions.builtin.operations_local
-
-  # Provider-call retry. Without this, llm_openai falls back to
-  # ``_IdentityRetryPolicy`` and the Doubao XGrammar JIT-compile flake
-  # (transient 400 ``Invalid decoding guidance syntax``) kills the
-  # whole rollout — even though _is_openai_retryable recognises it.
   - module: agentm.extensions.builtin.retry_policy
-
-  # The rca duckdb_sql atom is a thin wrapper around DuckDB over the
-  # parquet files in AGENTM_RCA_DATA_DIR. We reuse it directly. The
-  # exclude list hides the platform's own conclusion file so the
-  # verifier cannot shortcut by reading it.
   - module: agentm_rca.tools.duckdb_sql
     config:
       exclude:
         - conclusion.parquet
-
-  # Hypothesis lifecycle (add/update/remove) — reused. The verifier's
-  # hypotheses are about propagation edges rather than root cause, but
-  # the lifecycle mechanics are the same.
-  - module: agentm_rca.tools.hypothesis_tools
-
-  # Runtime-context block (appends the case data dir + bare-filename
-  # resolution rule to the system prompt). Reused as-is.
-  - module: agentm_rca.runtime_context
-
-  # --- scenario-specific atoms ----------------------------------------
-
-  # Surfaces the known injection spec via get_injection_spec(). The
-  # verifier's starting point.
   - module: contrib.extensions.verifier_fault_context
-
-  # Termination protocol: submit_propagation_report with the verifier
-  # contract schema.
   - module: contrib.extensions.verifier_finalize
-
-  # Verifier-bundled skills (methodology + per-fault-kind signatures).
-  # ``verifier_skills`` publishes the skills/ directory via
-  # ``ResourcesDiscoverEvent``; ``skill_loader`` (builtin) reads the
-  # hook and splices the SKILL.md bodies into the system prompt.
-  - module: contrib.extensions.verifier_skills
-  - module: agentm.extensions.builtin.skill_loader
-    config:
-      include_defaults: false
-      inherit_claude: false
-
-  # Loads prompts/verifier.md into the system prompt, plus the critic
-  # persona from agents/critic.md.
-  - module: contrib.extensions.verifier_prompt_loader
-    config:
-      prompt: verifier.md
-      personas: true
-
+  - module: agentm.extensions.builtin.observability
   - module: agentm.extensions.builtin.system_prompt
     config:
-      prompt: ""
+      prompt: |
+        You verify a known fault injection against the rcabench parquet
+        data. Tools: get_injection_spec, list_tables, query_sql,
+        submit_propagation_report.
 
-  # --- observability + artifacts --------------------------------------
-  - module: agentm.extensions.builtin.artifact_store
-  - module: agentm.extensions.builtin.observability
-  - module: agentm.extensions.builtin.otel_tracing
+        Workflow:
+        1. Call get_injection_spec — returns the target service,
+           fault_kind, and normal/abnormal time windows.
+        2. Call list_tables once for the parquet schema.
+        3. Run 3-6 query_sql calls comparing the abnormal window vs the
+           normal window to confirm the injection materialised.
+        4. Run more query_sql calls to find downstream SERVICES whose
+           behaviour changed in the abnormal window because of the
+           injection. Build the service-to-service propagation graph.
+        5. Call submit_propagation_report.
 
-  # --- critic subagent ------------------------------------------------
-  - module: agentm.extensions.builtin.sub_agent
-    config:
-      max_workers: 1
-      inherit_extensions:
-        - operations_local
-        - duckdb_sql
-        - artifact_store
-        - observability
-        - otel_tracing
-        - verifier_fault_context
-        - verifier_skills
-        - skill_loader
-        - worker_finalize
-      available_inherited_extensions:
-        operations_local:
-          module: agentm.extensions.builtin.operations_local
-        duckdb_sql:
-          module: agentm_rca.tools.duckdb_sql
-        artifact_store:
-          module: agentm.extensions.builtin.artifact_store
-        observability:
-          module: agentm.extensions.builtin.observability
-        otel_tracing:
-          module: agentm.extensions.builtin.otel_tracing
-        verifier_fault_context:
-          module: contrib.extensions.verifier_fault_context
-        verifier_skills:
-          module: contrib.extensions.verifier_skills
-        skill_loader:
-          module: agentm.extensions.builtin.skill_loader
-        worker_finalize:
-          module: agentm_rca.tools.worker_finalize
+        Output is **service-level only**. Each propagation_edges entry
+        is one directed hop {from_service, to_service, evidence[]}
+        where evidence is at least one SQL + one-sentence claim
+        proving to_service's anomaly during the abnormal window is
+        downstream of from_service. Edge direction is fault impact
+        (failing service → affected service), NOT request direction.
+
+        Service names must match the parquet `service_name` column
+        exactly. Do not invent or canonicalise names.
+
+        Always emit one tool_call per turn. The only way to terminate
+        is submit_propagation_report.
