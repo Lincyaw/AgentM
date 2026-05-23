@@ -130,7 +130,24 @@ def _is_openai_retryable(exc: BaseException) -> bool:
         for name in ("RateLimitError", "APIConnectionError", "APITimeoutError")
         if isinstance((err_type := getattr(openai, name, None)), type)
     )
-    return bool(retryable_types) and isinstance(exc, retryable_types)
+    if retryable_types and isinstance(exc, retryable_types):
+        return True
+    # Doubao / LiteLLM XGrammar JIT compiles the tool schema for
+    # constrained decoding. The compile is non-deterministic: identical
+    # payloads succeed most of the time and fail ~10-30% with a 400
+    # carrying ``Invalid decoding guidance syntax`` (the error string
+    # also contains ``json_schema_converter``). Retrying the same
+    # request typically succeeds. This is a backend issue we can't fix
+    # client-side, but we can stop it from killing whole rollouts.
+    bad_request = getattr(openai, "BadRequestError", None)
+    if isinstance(bad_request, type) and isinstance(exc, bad_request):
+        message = str(exc)
+        if (
+            "Invalid decoding guidance syntax" in message
+            or "json_schema_converter" in message
+        ):
+            return True
+    return False
 
 
 def _default_httpx_client(*, verify: bool) -> Any:

@@ -1,0 +1,105 @@
+name: verifier
+description: >
+  Verify whether a known fault injection actually materialized in the
+  rcabench parquet data, and trace its forward propagation through the
+  observability graph. Reuses the rca scenario's data layout and tools
+  (DuckDB over parquet) but answers a different question: given the
+  injection spec, what is the evidence-backed impact graph?
+
+extensions:
+  # --- environment / data ports ---------------------------------------
+  - module: agentm.extensions.builtin.operations_local
+
+  # Provider-call retry. Without this, llm_openai falls back to
+  # ``_IdentityRetryPolicy`` and the Doubao XGrammar JIT-compile flake
+  # (transient 400 ``Invalid decoding guidance syntax``) kills the
+  # whole rollout — even though _is_openai_retryable recognises it.
+  - module: agentm.extensions.builtin.retry_policy
+
+  # The rca duckdb_sql atom is a thin wrapper around DuckDB over the
+  # parquet files in AGENTM_RCA_DATA_DIR. We reuse it directly. The
+  # exclude list hides the platform's own conclusion file so the
+  # verifier cannot shortcut by reading it.
+  - module: agentm_rca.tools.duckdb_sql
+    config:
+      exclude:
+        - conclusion.parquet
+
+  # Hypothesis lifecycle (add/update/remove) — reused. The verifier's
+  # hypotheses are about propagation edges rather than root cause, but
+  # the lifecycle mechanics are the same.
+  - module: agentm_rca.tools.hypothesis_tools
+
+  # Runtime-context block (appends the case data dir + bare-filename
+  # resolution rule to the system prompt). Reused as-is.
+  - module: agentm_rca.runtime_context
+
+  # --- scenario-specific atoms ----------------------------------------
+
+  # Surfaces the known injection spec via get_injection_spec(). The
+  # verifier's starting point.
+  - module: contrib.extensions.verifier_fault_context
+
+  # Termination protocol: submit_propagation_report with the verifier
+  # contract schema.
+  - module: contrib.extensions.verifier_finalize
+
+  # Verifier-bundled skills (methodology + per-fault-kind signatures).
+  # ``verifier_skills`` publishes the skills/ directory via
+  # ``ResourcesDiscoverEvent``; ``skill_loader`` (builtin) reads the
+  # hook and splices the SKILL.md bodies into the system prompt.
+  - module: contrib.extensions.verifier_skills
+  - module: agentm.extensions.builtin.skill_loader
+    config:
+      include_defaults: false
+      inherit_claude: false
+
+  # Loads prompts/verifier.md into the system prompt, plus the critic
+  # persona from agents/critic.md.
+  - module: contrib.extensions.verifier_prompt_loader
+    config:
+      prompt: verifier.md
+      personas: true
+
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: ""
+
+  # --- observability + artifacts --------------------------------------
+  - module: agentm.extensions.builtin.artifact_store
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.otel_tracing
+
+  # --- critic subagent ------------------------------------------------
+  - module: agentm.extensions.builtin.sub_agent
+    config:
+      max_workers: 1
+      inherit_extensions:
+        - operations_local
+        - duckdb_sql
+        - artifact_store
+        - observability
+        - otel_tracing
+        - verifier_fault_context
+        - verifier_skills
+        - skill_loader
+        - worker_finalize
+      available_inherited_extensions:
+        operations_local:
+          module: agentm.extensions.builtin.operations_local
+        duckdb_sql:
+          module: agentm_rca.tools.duckdb_sql
+        artifact_store:
+          module: agentm.extensions.builtin.artifact_store
+        observability:
+          module: agentm.extensions.builtin.observability
+        otel_tracing:
+          module: agentm.extensions.builtin.otel_tracing
+        verifier_fault_context:
+          module: contrib.extensions.verifier_fault_context
+        verifier_skills:
+          module: contrib.extensions.verifier_skills
+        skill_loader:
+          module: agentm.extensions.builtin.skill_loader
+        worker_finalize:
+          module: agentm_rca.tools.worker_finalize
