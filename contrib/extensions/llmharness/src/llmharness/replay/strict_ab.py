@@ -41,7 +41,8 @@ from typing import Any
 from agentm.core.abi.messages import AgentMessage
 
 from ..audit._runner import AuditorSettings, ExtractorSettings
-from .offline_driver import OfflineRunResult, replay_pipeline_over_trajectory
+from . import offline_driver as _offline_driver
+from .offline_driver import OfflineRunResult
 from .record import ReplayRecord, iter_records, write_record
 
 _logger = logging.getLogger(__name__)
@@ -208,7 +209,7 @@ async def run_offline_auditor_over_control(
         control_replay_path
     )
 
-    run = await replay_pipeline_over_trajectory(
+    run = await _offline_driver.replay_pipeline_over_trajectory(
         messages=list(control_messages),
         cwd=cwd,
         root_session_id=control_session_log_id,
@@ -280,7 +281,7 @@ async def run_offline_auditor_over_trajectory(
     and the returned ``records`` are pulled from each step's
     ``auditor_record``.
     """
-    offline_run = await replay_pipeline_over_trajectory(
+    offline_run = await _offline_driver.replay_pipeline_over_trajectory(
         messages=list(messages),
         cwd=cwd,
         root_session_id=root_session_id,
