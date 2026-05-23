@@ -253,3 +253,98 @@ async def test_cadence_and_cumulative_threading(tmp_path: Path) -> None:
         # All 13 keys present on the dataclass form.
         as_dict = r.to_dict()
         assert set(as_dict.keys()) == _REPLAY_RECORD_KEYS
+
+
+class _SurfacingStubChildRunner(_StubChildRunner):
+    """:class:`_StubChildRunner` variant whose auditor surfaces on the
+    first firing.
+
+    Extractor behaviour is inherited verbatim; only the auditor differs.
+    Used to exercise ``stop_on_first_surface=True``'s early-break path.
+    """
+
+    async def run_auditor(
+        self,
+        *,
+        extensions: list[tuple[str, dict[str, Any]]],
+        provider: tuple[str, dict[str, Any]] | None,
+        graph_events: list[Any],
+        recent_verdicts: list[dict[str, Any]],
+        continuation_notes_from_prior_firing: list[str],
+    ) -> tuple[Any, list[dict[str, Any]]]:
+        del extensions, provider, recent_verdicts, continuation_notes_from_prior_firing
+        self.auditor_calls += 1
+        self.auditor_graphs.append(list(graph_events))
+
+        from llmharness.schema import Verdict
+
+        verdict = Verdict(
+            surface_reminder=True,
+            reminder_text="halt",
+            continuation_notes=[],
+            matched_event_ids=[],
+            cited_cards=[],
+        )
+        raw_block = {
+            "type": "tool_call",
+            "id": f"verdict-{self.auditor_calls}",
+            "name": "submit_verdict",
+            "arguments": {"verdict": verdict.to_dict()},
+        }
+        return verdict, [raw_block]
+
+
+@pytest.mark.asyncio
+async def test_replay_pipeline_breaks_on_first_surface(tmp_path: Path) -> None:
+    """``stop_on_first_surface=True`` must short-circuit on the first
+    surfaced reminder.
+
+    With ``extractor_interval=5`` and ``audit_interval=5``, the auditor
+    fires first at turn 5. The surfacing stub returns
+    ``surface_reminder=True`` on that first firing, so the run must
+    halt at turn 5 — well before the 30-message trajectory ends.
+    """
+    messages = _make_trajectory(30)
+    sink = InMemorySink()
+    stub = _SurfacingStubChildRunner()
+
+    extractor_settings = ExtractorSettings(
+        extensions=[(EXTRACTOR_TOOLS_MODULE, {})],
+        compose_kwargs={"base_prompt": "stub-extractor-prompt"},
+    )
+    auditor_settings = AuditorSettings(
+        base_prompt="stub-auditor-prompt",
+        cards_tools_config=None,
+        observability_config=None,
+        summary_threshold=30,
+        tools=(),
+    )
+
+    result = await replay_pipeline_over_trajectory(
+        messages=messages,
+        cwd=str(tmp_path),
+        root_session_id="test-session",
+        provider=None,
+        extractor_settings=extractor_settings,
+        auditor_settings=auditor_settings,
+        extractor_interval=5,
+        audit_interval=5,
+        enable_auditor=True,
+        stop_on_first_surface=True,
+        sidecar_path=None,
+        sink=sink,
+        child=stub,
+    )
+
+    assert result.reminder is not None
+    assert result.reminder.text == "halt"
+    # First auditor firing happens at turn 5 (cadence), so the loop
+    # records steps for turns 1..5 inclusive and then breaks.
+    assert len(result.all_step_results) == 5
+    # The trajectory was 30 messages long — confirm we did break early.
+    assert len(result.all_step_results) < len(messages)
+    # Only one auditor firing happened before the break.
+    assert stub.auditor_calls == 1
+    # The surfacing step is the last one recorded.
+    assert result.all_step_results[-1].surfaced_reminder is not None
+    assert result.all_step_results[-1].surfaced_reminder.text == "halt"
