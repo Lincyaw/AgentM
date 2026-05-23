@@ -34,7 +34,12 @@ from dataclasses import dataclass
 import json
 import logging
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from llmharness import OfflineAuditRun
 
 from rcabench_platform.v3.sdk.llm_eval.agents.base_agent import (
     AgentResult,
@@ -82,6 +87,13 @@ _HARNESS_VARIANT_TO_CONTROL: dict[str, str] = {
     "rca:harness.sync": "rca:harness.sync.extractor5",
     "rca:harness.sync.opinions": "rca:harness.sync.extractor5",
     "rca:harness.sync.opinions10": "rca:harness.sync.extractor5",
+    # Pure baseline as its own control. The control session mounts no
+    # llmharness adapter and produces no audit-replay sidecar; instead
+    # ``_run_baseline_fork`` calls ``replay_pipeline_over_trajectory`` to
+    # synthesise extractor + auditor records retroactively from the
+    # captured ``final_messages``. See `.claude/designs/harness-runner.md`
+    # §3 (P4) for the end-to-end pipeline.
+    "rca:baseline": "rca:baseline",
 }
 
 # Module path of the llmharness cognitive-audit adapter. A scenario that
@@ -351,13 +363,24 @@ class AgentMAgent(BaseAgent):
             scenario=self._control_scenario,
             **kwargs,
         )
-        offline_audit = await run_offline_auditor_over_control(
-            control_replay_path=Path(control.audit_replay_path),
-            control_session_log_id=control.session_log_id,
-            control_messages=control.final_messages,
-            cwd=os.getcwd(),
-            provider=_build_provider(self._provider, self._model),
-        )
+        if self._control_scenario == "rca:baseline":
+            # Pure-baseline control mounts no llmharness adapter, so no
+            # audit_replay sidecar exists on disk. Drive the offline
+            # runner over the captured trajectory to synthesise extractor
+            # + auditor records, then adapt to the `OfflineAuditRun`
+            # shape the rest of this method already consumes.
+            offline_audit = await _baseline_offline_audit(
+                control=control,
+                provider=_build_provider(self._provider, self._model),
+            )
+        else:
+            offline_audit = await run_offline_auditor_over_control(
+                control_replay_path=Path(control.audit_replay_path),
+                control_session_log_id=control.session_log_id,
+                control_messages=control.final_messages,
+                cwd=os.getcwd(),
+                provider=_build_provider(self._provider, self._model),
+            )
         reminder = offline_audit.reminder
         if reminder is None:
             metadata = dict(control.result.metadata or {})
@@ -394,9 +417,15 @@ class AgentMAgent(BaseAgent):
             provider=_build_provider(self._provider, self._model),
             stop_on_first_surface=False,
         )
+        if self._control_scenario == "rca:baseline":
+            control_replay_for_stitch = _baseline_offline_sidecar_path(
+                os.getcwd(), control.session_log_id
+            )
+        else:
+            control_replay_for_stitch = Path(control.audit_replay_path)
         strict_replay_path = str(
             write_strict_ab_replay(
-                control_replay_path=Path(control.audit_replay_path),
+                control_replay_path=control_replay_for_stitch,
                 branch_replay_path=Path(branch.audit_replay_path),
                 branch_session_log_id=branch.session_log_id,
                 offline_auditor_records=offline_audit.records,
@@ -694,6 +723,73 @@ def _fork_prefix_messages(final_messages: list[Any], *, turn_index: int) -> list
         if assistant_tool_call_ids & result_tool_call_ids:
             cut += 1
     return list(final_messages[:cut])
+
+
+def _baseline_offline_sidecar_path(cwd: str, session_log_id: str) -> "Path":
+    """Canonical path for a baseline-control offline audit-replay sidecar.
+
+    Mirrors :func:`llmharness.replay.record.replay_log_path` but with a
+    ``.baseline_offline.jsonl`` suffix so the synthesised sidecar is
+    clearly distinguishable from a real live-recorded one.
+    """
+    from pathlib import Path
+
+    return Path(cwd) / ".agentm" / "audit_replay" / f"{session_log_id}.baseline_offline.jsonl"
+
+
+async def _baseline_offline_audit(
+    *,
+    control: _SessionRun,
+    provider: tuple[str, dict[str, Any]],
+) -> "OfflineAuditRun":
+    """Drive the offline runner over a baseline trajectory and adapt the
+    result into the :class:`OfflineAuditRun` shape `_run_baseline_fork`
+    expects.
+
+    Used only when ``control_scenario == 'rca:baseline'`` — the control
+    session mounts no llmharness adapter, so we synthesise extractor +
+    auditor records here. See `.claude/designs/harness-runner.md` §3.
+    """
+    from llmharness import OfflineAuditRun, ReminderCandidate
+    from llmharness.audit._runner import AuditorSettings, ExtractorSettings
+    from llmharness.replay.offline_driver import replay_pipeline_over_trajectory
+
+    sidecar_path = _baseline_offline_sidecar_path(os.getcwd(), control.session_log_id)
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    offline_run = await replay_pipeline_over_trajectory(
+        messages=list(control.final_messages),
+        cwd=os.getcwd(),
+        root_session_id=control.session_log_id,
+        provider=provider,
+        extractor_settings=ExtractorSettings.default(),
+        auditor_settings=AuditorSettings.default(),
+        extractor_interval=5,
+        audit_interval=5,
+        enable_auditor=True,
+        stop_on_first_surface=True,
+        sidecar_path=sidecar_path,
+    )
+    records = [
+        step.auditor_record
+        for step in offline_run.all_step_results
+        if step.auditor_record is not None
+    ]
+    reminder: ReminderCandidate | None = None
+    for record in records:
+        if not isinstance(record.output, dict):
+            continue
+        if not record.output.get("surface_reminder"):
+            continue
+        text = record.output.get("reminder_text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        reminder = ReminderCandidate(
+            turn_index=int(record.turn_index),
+            text=text,
+            record=record,
+        )
+        break
+    return OfflineAuditRun(reminder=reminder, records=records)
 
 
 def _run_metadata(run: _SessionRun) -> dict[str, Any]:
