@@ -86,14 +86,21 @@ class PropagationEdge(BaseModel):
     they appear in the parquet ``service_name`` column. The edge
     direction is fault-impact (upstream-failing → downstream-affected),
     NOT request-call direction.
+
+    Synthetic traffic generators (``loadgenerator``, ``locust``,
+    ``wrk2``, ``dsb-wrk2``, ``k6``) are not real services and must NOT
+    appear in either ``from_service`` or ``to_service``.
     """
 
     model_config = _STRICT
     from_service: str = Field(
-        description="Service whose degradation causes the downstream change."
+        description="Service whose degradation causes the downstream change. "
+        "Do NOT use synthetic load generators (loadgenerator, locust, wrk2, "
+        "dsb-wrk2, k6) — those are not services."
     )
     to_service: str = Field(
-        description="Service that degraded because of ``from_service``."
+        description="Service that degraded because of ``from_service``. "
+        "Do NOT use synthetic load generators."
     )
     evidence: list[SqlEvidence] = Field(
         description="At least one SQL+claim showing to_service's "
