@@ -26,3 +26,18 @@ When adding a new variant, update this table **and** add the
 ``_HARNESS_VARIANT_TO_CONTROL`` at the top of
 ``src/agentm_rca/eval/agent.py`` if it should be eligible for strict
 A/B fork mode.
+
+## `rca:baseline` as a strict-A/B control (2026-05-23)
+
+With the HarnessRunner refactor (`.claude/designs/harness-runner.md` P4),
+``baseline_fork`` now also accepts ``rca:baseline`` as control —
+``_HARNESS_VARIANT_TO_CONTROL`` maps ``rca:baseline`` → ``rca:baseline``.
+The control session mounts no llmharness adapter and therefore produces
+no audit-replay sidecar on its own; instead the offline runner
+(``llmharness.replay.offline_driver.replay_pipeline_over_trajectory``)
+synthesises extractor + auditor records retroactively from the
+captured ``final_messages`` and persists them to
+``<sid>.baseline_offline.jsonl`` for the strict-A/B stitch. Use this
+variant when you want a strict A/B that excludes the cost of in-line
+extractor during the control rollout — the control is then the cheapest
+possible baseline trajectory.

@@ -102,6 +102,31 @@ class ExtractorSettings:
         )
         return cls(extensions=extensions, compose_kwargs=ck)
 
+    @classmethod
+    def default(cls) -> ExtractorSettings:
+        """Built-in extractor defaults — same prompt + empty configs the live
+        ``rca:harness.sync`` variant uses when no overrides are supplied.
+
+        Used by callers (notably ``agentm_rca`` ``baseline_fork`` with a
+        ``rca:baseline`` control) that need to drive the offline runner
+        without a recorded sidecar to crib settings from.
+        """
+        from .extractor import compose_extractor_extensions
+        from .extractor.prompt import load_extractor_prompt
+
+        base_prompt = load_extractor_prompt("default")
+        compose_kwargs: dict[str, Any] = {
+            "base_prompt": base_prompt,
+            "cards_tools_config": None,
+            "observability_config": None,
+        }
+        extensions = compose_extractor_extensions(
+            base_prompt=base_prompt,
+            cards_tools_config=None,
+            observability_config=None,
+        )
+        return cls(extensions=extensions, compose_kwargs=compose_kwargs)
+
 
 @dataclass(frozen=True)
 class AuditorSettings:
@@ -156,6 +181,27 @@ class AuditorSettings:
         """
         return cls(
             base_prompt="",
+            cards_tools_config=None,
+            observability_config=None,
+            summary_threshold=30,
+            tools=(SUBMIT_VERDICT_TOOL_NAME,),
+        )
+
+    @classmethod
+    def default(cls) -> AuditorSettings:
+        """Built-in auditor defaults — same prompt + minimal-profile tools
+        the live ``rca:harness.sync`` variant uses when no overrides are
+        supplied.
+
+        Distinct from :meth:`empty`: ``empty`` is a sentinel for paths
+        that never fire the auditor (``base_prompt=""``); ``default``
+        loads the canonical framing so the offline runner can actually
+        execute auditor firings.
+        """
+        from .auditor.prompt import load_auditor_prompt
+
+        return cls(
+            base_prompt=load_auditor_prompt("minimal"),
             cards_tools_config=None,
             observability_config=None,
             summary_threshold=30,
