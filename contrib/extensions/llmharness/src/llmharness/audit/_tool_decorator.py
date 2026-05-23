@@ -5,14 +5,23 @@ validation that followed them (the auditor's V2 ``submit_verdict`` schema
 duplicated every field description across the constant and the
 ``RawVerdictOutput`` coercer). Pydantic v2's ``model_json_schema()`` is the
 single source of truth for both — the decorator pipes the model's JSON schema
-into ``FunctionTool.parameters`` after inlining ``$defs`` and stripping
-``title`` keys (the two cosmetic differences vs. the hand-written shape).
+into ``FunctionTool.parameters`` after normalising it to OpenAI strict-mode
+shape (inline ``$defs``, strip ``title``, force ``additionalProperties: false``
+and full ``required``).
+
+Schema normalisation is delegated to
+:func:`agentm.core.lib.pydantic_to_openai_tool_schema`. Earlier revisions of
+this module carried a private ``_inline_schema`` helper that only performed
+the inline-and-strip-title pass; the core helper additionally enforces
+OpenAI strict-mode constraints (``additionalProperties: false`` on every
+object, every property listed in ``required``). For the audit Args models
+that constraint is satisfied trivially because they declare
+``model_config = ConfigDict(extra="forbid")`` and avoid field defaults.
 
 Two-axis contract preserved:
 
-* schema equality — ``_inline_schema(Model.model_json_schema())`` must equal
-  the hand-written constant key-for-key (verified during the auditor-atoms
-  merge transition).
+* schema parity — the parameters dict emitted here is OpenAI strict-mode
+  ready, drift-free against the runtime ``model_validate`` coercer.
 * termination sentinel — terminal tools (the auditor's ``submit_verdict``)
   carry ``metadata={"terminates": True}`` on the returned :class:`FunctionTool`.
   The merged ``atom.py`` reads this to compute the termination-reason mapping
@@ -32,46 +41,11 @@ from typing import Any, TypeVar
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.tool import ToolOutcome
+from agentm.core.lib import pydantic_to_openai_tool_schema
 from pydantic import BaseModel, ValidationError
 
 ArgsT = TypeVar("ArgsT", bound=BaseModel)
 _HandlerFn = Callable[[ArgsT, Any], Awaitable[ToolResult | ToolOutcome]]
-
-
-def _inline_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """Inline ``$defs`` references and strip every ``title`` key.
-
-    Pydantic emits ``$ref: "#/$defs/Name"`` for nested ``BaseModel`` fields and
-    auto-generates a ``title`` for every property/object. Neither survives the
-    round-trip to the hand-written JSON schema constants the auditor was
-    shipping before this decorator existed — so we normalise on the
-    hand-written shape: no ``$defs``, no titles, refs resolved in-place.
-    """
-    defs = schema.get("$defs", {})
-
-    def _resolve(node: Any) -> Any:
-        if isinstance(node, dict):
-            ref = node.get("$ref")
-            if isinstance(ref, str) and ref.startswith("#/$defs/"):
-                name = ref[len("#/$defs/") :]
-                target = defs.get(name)
-                if isinstance(target, dict):
-                    # Resolve the target (which may itself contain refs), then
-                    # merge in any sibling keys from the ref node so callers
-                    # can override description / default alongside $ref.
-                    resolved = _resolve(target)
-                    sibling = {k: v for k, v in node.items() if k != "$ref"}
-                    if sibling:
-                        return {**resolved, **_resolve(sibling)}
-                    return resolved
-            return {k: _resolve(v) for k, v in node.items() if k != "title"}
-        if isinstance(node, list):
-            return [_resolve(x) for x in node]
-        return node
-
-    out = _resolve({k: v for k, v in schema.items() if k != "$defs"})
-    assert isinstance(out, dict)
-    return out
 
 
 def harness_tool(
@@ -85,8 +59,9 @@ def harness_tool(
     The decorated function must have the signature
     ``async def fn(args: SomeArgsModel, ctx) -> ToolResult | ToolTerminate``
     where ``SomeArgsModel`` is a :class:`pydantic.BaseModel` with
-    ``model_config = {"extra": "forbid"}`` (so ``additionalProperties: false``
-    survives into the JSON schema).
+    ``model_config = ConfigDict(extra="forbid")`` (matches the schema-level
+    ``additionalProperties: false`` that
+    :func:`agentm.core.lib.pydantic_to_openai_tool_schema` forces).
 
     **Docstring-first description.** Following the Pydantic-AI / LangChain
     ``@tool`` convention, the tool description comes from the handler's
@@ -142,7 +117,7 @@ def harness_tool(
                 "argument with a pydantic.BaseModel subclass"
             )
 
-        parameters = _inline_schema(model_cls.model_json_schema())
+        parameters = pydantic_to_openai_tool_schema(model_cls)
 
         async def _wrapped(args: dict[str, Any]) -> ToolResult | ToolOutcome:
             try:
@@ -172,4 +147,4 @@ def harness_tool(
     return _decorate
 
 
-__all__ = ["_inline_schema", "harness_tool"]
+__all__ = ["harness_tool"]

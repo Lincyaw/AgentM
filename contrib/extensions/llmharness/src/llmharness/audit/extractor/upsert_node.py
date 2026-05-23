@@ -26,8 +26,8 @@ from .state import ExtractionState
 UPSERT_NODE_TOOL_NAME = "upsert_node"
 
 # Use a Literal so the generated JSON schema carries the closed-set
-# enum verbatim — _inline_schema strips title keys for parity with the
-# legacy hand-written ``enum: [...]`` constants.
+# enum verbatim — pydantic_to_openai_tool_schema strips title keys for
+# parity with the legacy hand-written ``enum: [...]`` constants.
 _EventKindLiteral = Literal["task", "hyp", "evid", "act", "dec", "concl"]
 
 
