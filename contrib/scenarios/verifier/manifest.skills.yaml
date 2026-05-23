@@ -1,0 +1,52 @@
+name: verifier:skills
+description: >
+  verifier:minimal + bundled skills (methodology + per-fault-kind
+  signatures). Same 4-tool surface as minimal, no critic, no
+  sub_agent, no Inject keepalive — just the SKILL.md bodies spliced
+  into the system prompt for fault-specific diagnostic guidance.
+
+extensions:
+  - module: agentm.extensions.builtin.operations_local
+  - module: agentm.extensions.builtin.retry_policy
+  - module: agentm_rca.tools.duckdb_sql
+    config:
+      exclude:
+        - conclusion.parquet
+  - module: contrib.extensions.verifier_fault_context
+  - module: contrib.extensions.verifier_finalize
+  - module: agentm.extensions.builtin.observability
+
+  # Skill bundle: methodology + fault-signatures. ``verifier_skills``
+  # publishes the skills/ directory via ResourcesDiscoverEvent;
+  # ``skill_loader`` reads the hook and splices SKILL.md bodies into
+  # the system prompt.
+  - module: contrib.extensions.verifier_skills
+  - module: agentm.extensions.builtin.skill_loader
+    config:
+      include_defaults: false
+      inherit_claude: false
+
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You verify a known fault injection against the rcabench parquet
+        data. Tools: get_injection_spec, list_tables, query_sql,
+        submit_propagation_report.
+
+        Follow the verifier-methodology skill loaded above for the
+        4-stage framework. For each case, consult the fault-signatures
+        section matching the `fault_kind` returned by get_injection_spec
+        to pick the right SQL.
+
+        Output is **service-level only**. Each propagation_edges entry
+        is one directed hop {from_service, to_service, evidence[]}
+        where evidence is at least one SQL + one-sentence claim
+        proving to_service's anomaly during the abnormal window is
+        downstream of from_service. Edge direction is fault impact
+        (failing service → affected service), NOT request direction.
+
+        Service names must match the parquet `service_name` column
+        exactly. Do not invent or canonicalise names.
+
+        Always emit one tool_call per turn. The only way to terminate
+        is submit_propagation_report.

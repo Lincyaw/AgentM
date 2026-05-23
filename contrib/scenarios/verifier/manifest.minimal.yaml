@@ -1,0 +1,47 @@
+name: verifier:minimal
+description: >
+  Minimum-viable verifier — single agent, no critic, no skills, no
+  sub_agent. Tools: get_injection_spec, list_tables, query_sql,
+  submit_propagation_report. Use this to confirm Doubao + agentm can
+  run the basic flow end-to-end before adding methodology layers.
+
+extensions:
+  - module: agentm.extensions.builtin.operations_local
+  - module: agentm.extensions.builtin.retry_policy
+  - module: agentm_rca.tools.duckdb_sql
+    config:
+      exclude:
+        - conclusion.parquet
+  - module: contrib.extensions.verifier_fault_context
+  - module: contrib.extensions.verifier_finalize
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You verify a known fault injection against the rcabench parquet
+        data. Tools: get_injection_spec, list_tables, query_sql,
+        submit_propagation_report.
+
+        Workflow:
+        1. Call get_injection_spec — returns the target service,
+           fault_kind, and normal/abnormal time windows.
+        2. Call list_tables once for the parquet schema.
+        3. Run 3-6 query_sql calls comparing the abnormal window vs the
+           normal window to confirm the injection materialised.
+        4. Run more query_sql calls to find downstream SERVICES whose
+           behaviour changed in the abnormal window because of the
+           injection. Build the service-to-service propagation graph.
+        5. Call submit_propagation_report.
+
+        Output is **service-level only**. Each propagation_edges entry
+        is one directed hop {from_service, to_service, evidence[]}
+        where evidence is at least one SQL + one-sentence claim
+        proving to_service's anomaly during the abnormal window is
+        downstream of from_service. Edge direction is fault impact
+        (failing service → affected service), NOT request direction.
+
+        Service names must match the parquet `service_name` column
+        exactly. Do not invent or canonicalise names.
+
+        Always emit one tool_call per turn. The only way to terminate
+        is submit_propagation_report.
