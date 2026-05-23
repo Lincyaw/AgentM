@@ -247,6 +247,11 @@ class LiveOpSink:
     def append_failure(self, entry_type: str, payload: dict[str, Any]) -> None:
         _record_failure(self._api, entry_type, payload)
 
+    def append_partial(self, payload: dict[str, Any]) -> None:
+        # Legacy ``_drain_extractor`` wrote EXTRACTOR_PARTIAL with a plain
+        # ``append_entry`` — no DiagnosticEvent. Keep that exact shape.
+        self._api.session.append_entry(_et.EXTRACTOR_PARTIAL, payload)
+
     def append_legacy_event(self, ev: Event) -> None:
         self._api.session.append_entry(_et.AUDIT_EVENT, ev.to_dict())
 
