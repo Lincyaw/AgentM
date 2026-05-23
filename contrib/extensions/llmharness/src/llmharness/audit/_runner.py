@@ -337,6 +337,19 @@ class OpSink(Protocol):
 
     def append_failure(self, entry_type: str, payload: dict[str, Any]) -> None: ...
 
+    def append_partial(self, payload: dict[str, Any]) -> None:
+        """Persist an ``EXTRACTOR_PARTIAL`` entry without emitting a diagnostic.
+
+        Distinct from :meth:`append_failure` because the legacy
+        ``_drain_extractor`` wrote ``EXTRACTOR_PARTIAL`` via a plain
+        ``api.session.append_entry`` — no ``DiagnosticEvent``. The other
+        failure entries (``EXTRACTOR_NO_CALL`` / ``EXTRACTOR_ERROR`` /
+        ``EXTRACTOR_EMPTY`` / ``AUDIT_NO_CALL`` / ``AUDIT_ERROR``) all
+        kept their diagnostic emission in legacy, so they stay on
+        :meth:`append_failure`.
+        """
+        ...
+
     # Legacy compatibility writes — preserved for P1 so the auditor /
     # viewer / aggregate pipelines that still read AUDIT_EVENT /
     # AUDIT_EDGE / AUDIT_PHASE keep working. Offline sinks no-op these.
@@ -815,8 +828,7 @@ class HarnessRunner:
             self._sink.append_legacy_phase(ph)
 
         if output.dropped_edges:
-            self._sink.append_failure(
-                _et.EXTRACTOR_PARTIAL,
+            self._sink.append_partial(
                 {
                     "dropped_edges": list(output.dropped_edges),
                     "turn_window": turn_window,
