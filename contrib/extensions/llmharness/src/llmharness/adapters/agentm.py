@@ -597,7 +597,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             # chain may install themselves after this adapter's install
             # but before the first turn, so a None at install time
             # doesn't mean "no checks ever".
-            runner._audit_registry = _resolve_registry(api)
+            runner.set_audit_registry(_resolve_registry(api))
             step = await runner.on_trajectory_progress(
                 list(event.messages), turn_count=turn_count
             )
@@ -771,7 +771,7 @@ async def _drain_queue(
             if isinstance(job, _RunnerStepJob):
                 # Re-resolve the registry each step — see comment in
                 # the sync handler.
-                runner._audit_registry = _resolve_registry(api)
+                runner.set_audit_registry(_resolve_registry(api))
                 step = await runner.on_trajectory_progress(
                     list(job.messages), turn_count=job.turn_count
                 )

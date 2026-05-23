@@ -632,6 +632,16 @@ class HarnessRunner:
         # the auditor doesn't fire on top of stale state.
         self._last_extractor_held_cursor: bool = False
 
+    def set_audit_registry(self, registry: AuditCheckRegistry | None) -> None:
+        """Public seam for the live adapter to refresh the registry.
+
+        Audit-check atoms may install themselves *after* the harness
+        atom (the adapter chain composes them in any order), so a
+        ``None`` at construction time doesn't mean "no checks ever".
+        The live adapter re-resolves and calls this method each firing.
+        """
+        self._audit_registry = registry
+
     async def on_trajectory_progress(
         self,
         messages: list[AgentMessage],
