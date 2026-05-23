@@ -30,8 +30,11 @@ branch session's log id with a ``.strict_ab.jsonl`` suffix.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from functools import reduce
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -86,48 +89,77 @@ def strict_ab_replay_path(cwd: str | Path, branch_session_log_id: str) -> Path:
     return Path(cwd) / ".agentm" / "audit_replay" / f"{branch_session_log_id}.strict_ab.jsonl"
 
 
-def _infer_interval(turn_indices: list[int], default: int = 5) -> int:
-    """Derive the runner cadence from a list of recorded turn indices.
+_EXTRACTOR_FIRING_STATUSES = frozenset(
+    {"ok", "no_call", "spawn_error", "prompt_error"}
+)
 
-    The control sidecar's ``phase=='extractor'`` records were emitted
-    every ``k`` turns by the live runner; the deltas between turn
-    indices are therefore the cadence. Inspecting up to three records
-    is sufficient — if the first three deltas don't agree the records
-    are stitched from a non-uniform run, and we fall back to ``default``
-    rather than picking one arbitrarily.
+
+def _infer_extractor_interval(
+    records: list[ReplayRecord], *, default: int = 5
+) -> int:
+    """Derive the extractor cadence from recorded extractor firings.
+
+    The live runner enforces ``extractor_due = (turn_count %
+    extractor_k) == 0 or auditor_due`` AND ``auditor_due = (turn_count
+    % k) == 0`` on every ``_on_turn_end``, so the extractor fires on
+    every cadence boundary unconditionally — auditor firings are a
+    strict subset of extractor firings. Auditor records, on the other
+    hand, can have non-uniform turn-index deltas because the runner
+    skips an auditor firing when the preceding extractor held the
+    cursor (see ``_runner.HarnessRunner._last_extractor_held_cursor``).
+    Inferring cadence from auditor records is therefore unsafe; the
+    fix is to derive it from extractor records only.
+
+    Filters ``records`` to ``phase=='extractor'`` and statuses where a
+    firing attempt actually occurred (``ok``, ``no_call``,
+    ``spawn_error``, ``prompt_error``). Returns ``gcd(*deltas)`` of
+    consecutive turn-index deltas — for uniform cadence this is the
+    cadence itself; for sidecars stitched across non-uniform runs
+    ``gcd`` is the largest interval that divides every observed
+    delta. Falls back to ``default`` only when fewer than two firings
+    are available.
     """
-    if len(turn_indices) < 2:
+    extractor_firings = [
+        r
+        for r in records
+        if r.phase == "extractor" and r.status in _EXTRACTOR_FIRING_STATUSES
+    ]
+    if len(extractor_firings) < 2:
         return default
+    extractor_firings.sort(key=lambda r: r.turn_index)
     deltas: list[int] = []
-    for i in range(1, min(len(turn_indices), 4)):
-        d = turn_indices[i] - turn_indices[i - 1]
+    for prev, cur in pairwise(extractor_firings):
+        d = cur.turn_index - prev.turn_index
         if d > 0:
             deltas.append(d)
     if not deltas:
         return default
-    first = deltas[0]
-    return first if all(d == first for d in deltas) else default
+    inferred = reduce(math.gcd, deltas)
+    return inferred if inferred > 0 else default
 
 
 def _settings_from_sidecar(
     control_replay_path: Path,
-) -> tuple[ExtractorSettings, AuditorSettings, int, int]:
+) -> tuple[ExtractorSettings, AuditorSettings, int]:
     """Extract per-firing compose state + cadence from the control sidecar.
 
-    Returns ``(extractor_settings, auditor_settings, extractor_interval,
-    audit_interval)``. The first record of each phase carries the
-    compose_kwargs the live adapter would have used; subsequent
-    records reuse the same compose state modulo cadence so reading
-    the head record is sufficient. Missing records → module defaults
-    (empty base prompt, default cadence 5).
+    Returns ``(extractor_settings, auditor_settings, extractor_interval)``.
+    The first record of each phase carries the compose_kwargs the live
+    adapter would have used; subsequent records reuse the same compose
+    state modulo cadence so reading the head record is sufficient.
+    Missing records → module defaults (empty base prompt, default
+    cadence 5).
+
+    In ``rca:harness.sync*`` variants the extractor and auditor share
+    the same cadence (auditor firings are a strict subset of extractor
+    firings on the same boundary — see
+    :func:`_infer_extractor_interval`). The single inferred cadence is
+    therefore the right value to pass for both ``extractor_interval``
+    and ``audit_interval`` in :func:`replay_pipeline_over_trajectory`.
     """
-    extractor_records: list[ReplayRecord] = []
-    auditor_records: list[ReplayRecord] = []
-    for rec in iter_records(control_replay_path):
-        if rec.phase == "extractor":
-            extractor_records.append(rec)
-        elif rec.phase == "auditor":
-            auditor_records.append(rec)
+    records = list(iter_records(control_replay_path))
+    extractor_records = [r for r in records if r.phase == "extractor"]
+    auditor_records = [r for r in records if r.phase == "auditor"]
 
     ext_settings = (
         ExtractorSettings.from_compose_kwargs(extractor_records[0].compose_kwargs)
@@ -139,9 +171,15 @@ def _settings_from_sidecar(
         if auditor_records
         else AuditorSettings.empty()
     )
-    ext_interval = _infer_interval([r.turn_index for r in extractor_records])
-    aud_interval = _infer_interval([r.turn_index for r in auditor_records])
-    return ext_settings, aud_settings, ext_interval, aud_interval
+    interval = _infer_extractor_interval(records)
+    _logger.info(
+        "strict_ab: inferred cadence interval=%d from %d extractor record(s) "
+        "in %s",
+        interval,
+        len(extractor_records),
+        control_replay_path,
+    )
+    return ext_settings, aud_settings, interval
 
 
 async def run_offline_auditor_over_control(
@@ -166,7 +204,7 @@ async def run_offline_auditor_over_control(
     if not control_replay_path.exists():
         return OfflineAuditRun(reminder=None, records=[])
 
-    ext_settings, aud_settings, ext_interval, aud_interval = _settings_from_sidecar(
+    ext_settings, aud_settings, interval = _settings_from_sidecar(
         control_replay_path
     )
 
@@ -177,8 +215,8 @@ async def run_offline_auditor_over_control(
         provider=provider,
         extractor_settings=ext_settings,
         auditor_settings=aud_settings,
-        extractor_interval=ext_interval,
-        audit_interval=aud_interval,
+        extractor_interval=interval,
+        audit_interval=interval,
         enable_auditor=True,
         stop_on_first_surface=stop_on_first_surface,
         sidecar_path=None,
