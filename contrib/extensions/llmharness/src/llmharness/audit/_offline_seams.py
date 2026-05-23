@@ -23,10 +23,11 @@ import json
 import logging
 from typing import Any
 
-from ..schema import Edge, Event, Phase, Verdict
+from ..schema import Edge, Event, Phase
 from ..tools.engine import run_phase_standalone
 from ._extractor_directive import build_extractor_directive
 from ._runner import (
+    AuditorChildResult,
     ExtractorSpawnError,
     _flatten_assistant_blocks,
 )
@@ -103,18 +104,19 @@ class StandaloneChildRunner:
         graph_events: list[Event],
         recent_verdicts: list[dict[str, Any]],
         continuation_notes_from_prior_firing: list[str],
-    ) -> tuple[Verdict | None, list[dict[str, Any]]]:
+    ) -> AuditorChildResult:
         """Run one auditor firing as a top-level session.
 
         Mirrors :meth:`LiveChildRunner.run_auditor` — composes the
         ``{graph, recent_verdicts, continuation_notes_from_prior_firing}``
         payload and parses the terminal tool's args via
-        :class:`RawVerdictOutput`. Returns ``(verdict | None, raw_blocks)``.
-
-        Failure modes (spawn / prompt / no-call / malformed) all return
-        ``(None, raw_blocks)`` — failure persistence is not this seam's
-        responsibility (offline drivers route through ``InMemorySink``
-        which has no diagnostic channel to emit on).
+        :class:`RawVerdictOutput`. Returns an :class:`AuditorChildResult`
+        with ``verdict=None`` for every failure mode (spawn / prompt /
+        no-call / malformed); ``error`` / ``latency_ms`` are taken
+        verbatim from :func:`run_phase_standalone`'s
+        :class:`PhaseResult`. Failure persistence is not this seam's
+        responsibility — offline drivers route through ``InMemorySink``
+        which has no diagnostic channel to emit on.
         """
         payload: dict[str, Any] = {
             "graph": [e.to_dict() for e in graph_events],
@@ -132,16 +134,33 @@ class StandaloneChildRunner:
             purpose="cognitive_audit_auditor_offline",
         )
         raw_blocks = _flatten_assistant_blocks(result.messages)
+        latency_ms = result.latency_ms
 
         if result.status != "ok" or result.output is None:
-            return None, raw_blocks
+            return AuditorChildResult(
+                verdict=None,
+                raw_blocks=raw_blocks,
+                error=result.error,
+                latency_ms=latency_ms,
+            )
 
         try:
             raw = RawVerdictOutput.from_dict(result.output)
-            return raw.to_verdict(), raw_blocks
+            return AuditorChildResult(
+                verdict=raw.to_verdict(),
+                raw_blocks=raw_blocks,
+                error=None,
+                latency_ms=latency_ms,
+            )
         except AuditorOutputError as exc:
+            err = f"malformed: {exc}"
             _logger.debug("offline auditor returned malformed verdict: %s", exc)
-            return None, raw_blocks
+            return AuditorChildResult(
+                verdict=None,
+                raw_blocks=raw_blocks,
+                error=err,
+                latency_ms=latency_ms,
+            )
 
 
 # --- op sink ----------------------------------------------------------------

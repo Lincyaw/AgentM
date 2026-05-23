@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from typing import Any, Final, Literal
 
@@ -21,10 +22,11 @@ from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolCallBlock
 from agentm.core.abi.session_config import AgentSessionConfig
 
-from ..schema import Edge, Event, Phase, Verdict
+from ..schema import Edge, Event, Phase
 from . import entry_types as _et
 from ._extractor_directive import build_extractor_directive
 from ._runner import (
+    AuditorChildResult,
     ExtractorSpawnError,
     _flatten_assistant_blocks,
 )
@@ -99,13 +101,15 @@ class LiveChildRunner:
         graph_events: list[Event],
         recent_verdicts: list[dict[str, Any]],
         continuation_notes_from_prior_firing: list[str],
-    ) -> tuple[Verdict | None, list[dict[str, Any]]]:
+    ) -> AuditorChildResult:
         """Run one auditor firing; mirror of the legacy ``_run_auditor``.
 
-        ``None`` return covers spawn / prompt / no-call / malformed paths.
-        Failures are recorded via ``api.session.append_entry`` + a
+        Returns an :class:`AuditorChildResult` with ``verdict=None`` for
+        spawn / prompt / no-call / malformed paths. Failures are
+        recorded via ``api.session.append_entry`` + a
         :class:`DiagnosticEvent`, matching the legacy ``_record_failure``
-        chokepoint.
+        chokepoint. ``latency_ms`` / ``error`` are propagated so the
+        runner can surface them on the synthetic auditor record.
         """
         payload = {
             "graph": [e.to_dict() for e in graph_events],
@@ -120,53 +124,78 @@ class LiveChildRunner:
             extensions=extensions,
             purpose="cognitive_audit_auditor",
         )
+        t0 = time.monotonic()
+
+        def _elapsed_ms() -> int:
+            return int((time.monotonic() - t0) * 1000)
+
         try:
             child = await self._api.spawn_child_session(child_config)
         except Exception as exc:
-            _record_failure(self._api, _et.AUDIT_ERROR, {"reason": str(exc)})
-            return None, []
+            err = str(exc)
+            _record_failure(self._api, _et.AUDIT_ERROR, {"reason": err})
+            return AuditorChildResult(
+                verdict=None, raw_blocks=[], error=err, latency_ms=_elapsed_ms()
+            )
 
         try:
             messages = await child.prompt(
                 json.dumps(payload, ensure_ascii=False, default=str)
             )
         except Exception as exc:
-            _record_failure(self._api, _et.AUDIT_ERROR, {"reason": str(exc)})
+            err = str(exc)
+            _record_failure(self._api, _et.AUDIT_ERROR, {"reason": err})
             await safe_shutdown(child)
-            return None, []
+            return AuditorChildResult(
+                verdict=None, raw_blocks=[], error=err, latency_ms=_elapsed_ms()
+            )
 
         await safe_shutdown(child)
 
         raw_blocks = _flatten_assistant_blocks(messages)
+        latency_ms = _elapsed_ms()
 
         arguments = find_terminal_tool_arguments(messages, SUBMIT_VERDICT_TOOL_NAME)
         if arguments is None:
-            _record_failure(
-                self._api,
-                _et.AUDIT_NO_CALL,
-                {
-                    "reason": (
-                        f"child returned without calling {SUBMIT_VERDICT_TOOL_NAME}"
-                    )
-                },
+            reason = (
+                f"child returned without calling {SUBMIT_VERDICT_TOOL_NAME}"
             )
-            return None, raw_blocks
+            _record_failure(self._api, _et.AUDIT_NO_CALL, {"reason": reason})
+            return AuditorChildResult(
+                verdict=None,
+                raw_blocks=raw_blocks,
+                error=reason,
+                latency_ms=latency_ms,
+            )
 
         try:
             raw = RawVerdictOutput.from_dict(arguments)
         except AuditorOutputError as exc:
-            _record_failure(
-                self._api, _et.AUDIT_ERROR, {"reason": f"malformed: {exc}"}
+            err = f"malformed: {exc}"
+            _record_failure(self._api, _et.AUDIT_ERROR, {"reason": err})
+            return AuditorChildResult(
+                verdict=None,
+                raw_blocks=raw_blocks,
+                error=err,
+                latency_ms=latency_ms,
             )
-            return None, raw_blocks
 
         try:
-            return raw.to_verdict(), raw_blocks
-        except AuditorOutputError as exc:
-            _record_failure(
-                self._api, _et.AUDIT_ERROR, {"reason": f"malformed: {exc}"}
+            return AuditorChildResult(
+                verdict=raw.to_verdict(),
+                raw_blocks=raw_blocks,
+                error=None,
+                latency_ms=latency_ms,
             )
-            return None, raw_blocks
+        except AuditorOutputError as exc:
+            err = f"malformed: {exc}"
+            _record_failure(self._api, _et.AUDIT_ERROR, {"reason": err})
+            return AuditorChildResult(
+                verdict=None,
+                raw_blocks=raw_blocks,
+                error=err,
+                latency_ms=latency_ms,
+            )
 
 
 def _has_tool_call(messages: list[AgentMessage], tool_name: str) -> bool:

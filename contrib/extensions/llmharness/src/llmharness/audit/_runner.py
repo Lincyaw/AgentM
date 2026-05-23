@@ -355,6 +355,25 @@ class CumulativeAuditState:
 # --- protocols --------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class AuditorChildResult:
+    """Outcome of one :meth:`ChildRunner.run_auditor` call.
+
+    Carries the parsed verdict (``None`` for spawn / prompt / no-call /
+    malformed) plus diagnostics so the synthetic auditor
+    :class:`ReplayRecord` constructed by
+    :meth:`HarnessRunner.fire_auditor_once` can surface the same
+    ``error`` / ``latency_ms`` the sidecar would carry. Without these
+    fields the synthetic record drops them silently — CLI tools that
+    read ``latency_ms`` then report 0 for every firing.
+    """
+
+    verdict: Verdict | None
+    raw_blocks: list[dict[str, Any]]
+    error: str | None = None
+    latency_ms: int = 0
+
+
 class ChildRunner(Protocol):
     """How a single child phase is invoked."""
 
@@ -382,12 +401,15 @@ class ChildRunner(Protocol):
         graph_events: list[Event],
         recent_verdicts: list[dict[str, Any]],
         continuation_notes_from_prior_firing: list[str],
-    ) -> tuple[Verdict | None, list[dict[str, Any]]]:
-        """Run the auditor child; return ``(verdict | None, raw_blocks)``.
+    ) -> AuditorChildResult:
+        """Run the auditor child.
 
-        ``None`` covers spawn / prompt / no-call / malformed paths; the
+        Returns an :class:`AuditorChildResult` with ``verdict`` set to
+        ``None`` for spawn / prompt / no-call / malformed paths. The
         implementation is responsible for recording failures via the
         runner's sink (the live impl uses ``api.session.append_entry``).
+        ``error`` / ``latency_ms`` are surfaced on the synthetic
+        :class:`ReplayRecord` produced by the runner.
         """
         ...
 
@@ -471,6 +493,7 @@ class SidecarWriter:
         output: dict[str, Any] | None,
         status: str,
         error: str | None = None,
+        latency_ms: int = 0,
         extras: dict[str, Any] | None = None,
         raw_assistant_messages: list[dict[str, Any]] | None = None,
     ) -> None:
@@ -487,6 +510,7 @@ class SidecarWriter:
             output=output,
             status=status,  # type: ignore[arg-type]
             error=error,
+            latency_ms=latency_ms,
             extras=extras or {},
             raw_assistant_messages=list(raw_assistant_messages or []),
         )
@@ -1030,13 +1054,17 @@ class HarnessRunner:
             "continuation_notes_from_prior_firing": continuation_notes,
         }
 
-        verdict, raw_blocks = await self._child.run_auditor(
+        child_result = await self._child.run_auditor(
             extensions=firing_extensions,
             provider=self._provider_auditor,
             graph_events=list(events_tuple),
             recent_verdicts=recent_verdicts,
             continuation_notes_from_prior_firing=continuation_notes,
         )
+        verdict = child_result.verdict
+        raw_blocks = child_result.raw_blocks
+        latency_ms = child_result.latency_ms
+        child_error = child_result.error
         turn_index = len(messages) - 1 if messages else -1
 
         if verdict is None:
@@ -1050,6 +1078,8 @@ class HarnessRunner:
                     provider=self._provider_auditor,
                     output=None,
                     status="no_call",
+                    error=child_error,
+                    latency_ms=latency_ms,
                     raw_assistant_messages=raw_blocks,
                 )
             no_call_record = ReplayRecord(
@@ -1066,6 +1096,8 @@ class HarnessRunner:
                 ),
                 output=None,
                 status="no_call",
+                error=child_error,
+                latency_ms=latency_ms,
                 raw_assistant_messages=list(raw_blocks),
             )
             return _AuditorFiringResult(verdict=None, record=no_call_record)
@@ -1085,6 +1117,7 @@ class HarnessRunner:
                 provider=self._provider_auditor,
                 output=verdict_dict,
                 status="ok",
+                latency_ms=latency_ms,
                 raw_assistant_messages=raw_blocks,
             )
         ok_record = ReplayRecord(
@@ -1101,6 +1134,7 @@ class HarnessRunner:
             ),
             output=verdict_dict,
             status="ok",
+            latency_ms=latency_ms,
             raw_assistant_messages=list(raw_blocks),
         )
         return _AuditorFiringResult(verdict=verdict, record=ok_record)
@@ -1268,6 +1302,7 @@ __all__ = [
     "AUDIT_REGISTRY_SERVICE_KEY",
     "FINALIZE_EXTRACTION_TOOL_NAME",
     "SUBMIT_VERDICT_TOOL_NAME",
+    "AuditorChildResult",
     "AuditorOutputError",
     "AuditorSettings",
     "ChildRunner",
