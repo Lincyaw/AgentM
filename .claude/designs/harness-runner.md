@@ -120,6 +120,10 @@ class CumulativeAuditState:
 
         Used by the live adapter on (re)start to recover state across
         process restarts; thereafter the in-memory state is authoritative.
+        Legacy ``AUDIT_EVENT`` / ``AUDIT_EDGE`` entries are converted
+        through the `op_from_event` / `op_from_edge` helpers in
+        :mod:`llmharness.audit.graph_ops` so a mixed pre-/post-
+        event-sourcing session folds correctly.
         """
 
     @classmethod
@@ -183,10 +187,13 @@ class HarnessRunner:
         extractor_interval: int,
         audit_interval: int,
         enable_auditor: bool,
-        cwd: str,
         root_session_id: str,
         provider_extractor: tuple[str, dict[str, Any]] | None,
         provider_auditor: tuple[str, dict[str, Any]] | None,
+        audit_registry: AuditCheckRegistry | None = None,
+        # Only consulted by the single-firing replay seams below;
+        # trajectory-driven and live paths leave this at None.
+        cwd: str | None = None,
     ): ...
 
     # Single public entry point — both live and offline call this.
@@ -197,24 +204,48 @@ class HarnessRunner:
         turn_count: int,
     ) -> StepResult: ...
 
-    # Lower-level entry points kept public for single-firing reuse.
+    # Lower-level trajectory entry points kept public for tests.
     async def fire_extractor_once(
         self,
         messages: list[AgentMessage],
-        *,
-        turn_window_upper: int,
-    ) -> ExtractorFiringResult: ...
+    ) -> _ExtractorFiringResult: ...
 
     async def fire_auditor_once(
         self,
         messages: list[AgentMessage],
-    ) -> AuditorFiringResult: ...
+    ) -> _AuditorFiringResult: ...
+
+    # Single-firing replay seams (invariant #2 — degenerate case).
+    # Both raise ValueError if cwd was not set at construction.
+    async def fire_extractor_from_record(
+        self, record: ReplayRecord
+    ) -> PhaseResult: ...
+
+    async def fire_auditor_from_record(
+        self, record: ReplayRecord
+    ) -> PhaseResult: ...
 ```
 
 `StepResult` carries `{fired_extractor: bool, fired_auditor: bool,
-surfaced_reminder: ReminderCandidate | None}` so the offline driver can
-break out of its trajectory walk on first surfaced reminder, matching
-live `baseline_fork` semantics.
+surfaced_reminder: Reminder | None, auditor_record: ReplayRecord |
+None}`. The `auditor_record` field is populated on every auditor
+firing (even when `sidecar=None`) so offline drivers — notably
+`llmharness.replay.strict_ab.run_offline_auditor_over_control` —
+can capture per-firing records without a disk round-trip.
+
+`fire_extractor_from_record` / `fire_auditor_from_record` reconstruct
+the per-firing `ExtractionState` inline from `record.payload` +
+`record.extras.turn_texts` (in lieu of the earlier sketch's
+`CumulativeAuditState.hydrate_from_replay_record` helper — that
+helper was never landed; the inline reconstruction in the runner
+serves the same role and stays scoped to the seam that needs it).
+
+`ExtractorSettings.from_compose_kwargs(compose_kwargs, *,
+prompt_override=None)`, `AuditorSettings.from_compose_kwargs(...)`,
+and `AuditorSettings.empty()` are the public constructors callers use
+to rebuild per-firing settings from a recorded `ReplayRecord` (the
+single-firing replay wrappers in `replay/runner.py` and the strict-A/B
+driver both consume them).
 
 ### 2.1 Three concrete pluggings
 
@@ -222,7 +253,7 @@ live `baseline_fork` semantics.
 |---|---|---|---|
 | **live adapter** | `hydrate_from_session_log(api.session.get_branch())` on `install`; mutated in-place per firing | `LiveChildRunner(api)` → `api.spawn_child_session` | `LiveOpSink(api)` → `api.session.append_entry(AUDIT_GRAPH_OP, ...)` (legacy AUDIT_EVENT / AUDIT_EDGE / AUDIT_PHASE writes stay, for the auditor + viewer) |
 | **offline-from-trajectory** | `fresh()` | `StandaloneChildRunner(cwd)` → `run_phase_standalone` | `InMemorySink` (no AgentM session log; the sidecar is the artefact) |
-| **offline-from-sidecar single firing** | `fresh()` + `hydrate_from_replay_record(record)` (back-compat helper) | `StandaloneChildRunner(cwd)` | `NoopSink` |
+| **offline-from-sidecar single firing** | `fresh()` — `fire_extractor_from_record` / `fire_auditor_from_record` reconstruct `ExtractionState` inline from `record.payload` + `record.extras.turn_texts`; cumulative state is not consulted by these seams | `StandaloneChildRunner(cwd)` | `NoopSink` (defined in `audit/_offline_seams.py`) |
 
 ### 2.2 Live adapter shrinkage
 
@@ -383,28 +414,36 @@ A correct refactor satisfies three diff-testable invariants:
    under LLM nondeterminism). This is the only test that proves
    windowing + payload composition exists in exactly one place.
 
-2. **Single-firing replay is a degenerate case.**
-   `replay_extractor_record(record)` is implementable as
+2. **Single-firing replay is a degenerate case.** As shipped in P3,
+   `replay_extractor_record` / `replay_auditor_record` are thin
+   wrappers in `replay/runner.py`:
 
    ```python
    async def replay_extractor_record(record, *, cwd, provider_override, prompt_override):
-       state = CumulativeAuditState.fresh()
-       state.hydrate_from_replay_record(record)
        runner = HarnessRunner(
-           cumulative=state,
+           cumulative=CumulativeAuditState.fresh(),
            child=StandaloneChildRunner(cwd),
            sink=NoopSink(),
            sidecar=None,
-           ...settings from record.compose_kwargs...,
+           extractor_settings=ExtractorSettings.from_compose_kwargs(
+               record.compose_kwargs, prompt_override=prompt_override,
+           ),
+           auditor_settings=AuditorSettings.empty(),
+           extractor_interval=1, audit_interval=1, enable_auditor=False,
+           root_session_id=record.root_session_id,
+           provider_extractor=provider_override or _coerce_provider(record),
+           provider_auditor=None,
+           cwd=cwd,
        )
-       # turn_window_upper is recorded in record.turn_index
-       return await runner.fire_extractor_once(
-           messages=[],  # legacy single-firing path
-           turn_window_upper=record.turn_index,
-       )
+       return await runner.fire_extractor_from_record(record)
    ```
 
-   No separate code path for "single firing"; the wrapper is sugar.
+   The seam is `fire_extractor_from_record` (resp.
+   `fire_auditor_from_record`) on the runner itself; it reconstructs
+   per-firing state inline from `record.payload` + `record.extras`
+   rather than going through a `CumulativeAuditState`
+   hydrate-helper. No separate code path for "single firing"; the
+   wrapper is sugar.
 
 3. **Sidecar is an artefact, not a seed.** A `HarnessRunner`'s only
    non-message input is `CumulativeAuditState` (which the runner can
@@ -421,7 +460,7 @@ Phased, no shims, hard-cut per phase:
 |---|---|---|
 | P1 | Land `CumulativeAuditState` + `ChildRunner` / `OpSink` Protocols + `HarnessRunner` (live path only) | live adapter routed through runner; live `_drain_extractor` / `_drain_auditor` shrink to wrappers; existing tests (live sidecar shape) still pass byte-identical |
 | P2 | Land `StandaloneChildRunner` + `InMemorySink` + `replay_pipeline_over_trajectory` | invariant #1 (live ≡ offline) verifiable; `chain_replay` reimplemented over runner with cumulative threading enabled |
-| P3 | Collapse `run_offline_auditor_over_control` + rewrite `replay_extractor_record` / `replay_auditor_record` as thin wrappers | invariant #2 holds; `strict_ab.py` shrinks to `write_strict_ab_replay` + thin caller of `replay_pipeline_over_trajectory(..., enable_auditor=True, stop_on_first_surface=True)` |
+| P3 | Collapse `run_offline_auditor_over_control` + rewrite `replay_extractor_record` / `replay_auditor_record` as thin wrappers | **Shipped:** `HarnessRunner.fire_extractor_from_record` / `fire_auditor_from_record` are the new seams; `replay/runner.py` wrappers route through them. `NoopSink` (in `audit/_offline_seams.py`) is the sink for single-firing replay. `strict_ab.py::run_offline_auditor_over_control` is now a thin caller of `replay_pipeline_over_trajectory(..., enable_auditor=True, stop_on_first_surface=True)`, collecting per-firing auditor records via `StepResult.auditor_record`. Invariant #2 holds. |
 | P4 | Wire `agentm_rca` `baseline_fork` to support `rca:baseline → rca:baseline` via the offline runner | adds entry `rca:baseline → rca:baseline` to `_HARNESS_VARIANT_TO_CONTROL`; `_run_baseline_fork` calls `replay_pipeline_over_trajectory` when `control_scenario == "rca:baseline"`; existing `extractor5`-control variant unchanged |
 
 Each phase is independently revert-able: P1's wrapper preserves the
