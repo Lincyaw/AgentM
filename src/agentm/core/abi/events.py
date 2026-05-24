@@ -48,6 +48,13 @@ if TYPE_CHECKING:
     # annotations`` (PEP 563), so the type-only import is sufficient.
     from .session_config import AgentSessionConfig
 
+    # ``SessionTelemetry`` is the per-session OTel handle (tracer + logger
+    # + lifecycle-pairing tracker). Type-only import: every
+    # :meth:`Event.to_otel` call site uses duck-typed attribute access on
+    # the runtime object, so the kernel does not import the runtime module
+    # at module-load time.
+    from agentm.core.runtime.otel_export import SessionTelemetry
+
 logger = logging.getLogger(__name__)
 
 
@@ -95,6 +102,29 @@ class Event:
     dispatch_id: str = field(
         default_factory=lambda: uuid.uuid4().hex, kw_only=True
     )
+
+    def to_otel(self, telemetry: "SessionTelemetry") -> None:
+        """Translate this event into OTel spans / log records.
+
+        **Declarative mapping.** Each concrete event subclass overrides this
+        method to emit whatever spans or log records the wire format
+        requires. The observability atom is reduced to a thin dispatcher:
+        it subscribes to every channel and calls ``event.to_otel(telemetry)``
+        — the per-event class owns its own translation. This eliminates the
+        big switch-on-channel that observability.py used to carry and makes
+        "every Event has an OTel meaning" enforceable: new Event subclasses
+        either declare a mapping or inherit this no-op default.
+
+        Start/End span pairs use :meth:`SessionTelemetry.open_span` and
+        :meth:`SessionTelemetry.pop_span` for lifecycle pairing — see those
+        methods' docstrings for the contract.
+
+        The base implementation is a no-op: events that have no OTel
+        meaning (or whose translation is owned by the bus-observer layer,
+        like ``agentm.event.dispatch`` / ``agentm.handler.invoke``) simply
+        do not override it.
+        """
+        del telemetry
 
 
 # --- Termination causes -----------------------------------------------------
@@ -1381,6 +1411,483 @@ class EventBus:
         """Remove every subscription on every channel."""
 
         self._handlers.clear()
+
+
+# ---------------------------------------------------------------------------
+# Declarative ``Event → OTel`` mapping (PR-F).
+#
+# Each concrete subclass below installs its own :meth:`to_otel` translator so
+# the observability atom can stay a thin dispatcher (one handler per channel,
+# uniformly delegating to ``event.to_otel(telemetry)``). Keeping the methods
+# in one block at module-bottom — rather than threaded through 30+ dataclass
+# definitions — makes the wire-format contract reviewable in one read, and
+# localises the OTel-specific imports so the dataclass declarations stay
+# transport-agnostic.
+#
+# The mapping mirrors the table in ``.claude/designs/single-event-log.md``.
+# Adding a new Event subclass without a :meth:`to_otel` override means the
+# event has no OTel wire-format meaning, which is sometimes correct (e.g.
+# ``AgentStartEvent``, kernel-internal lifecycle that the bus observer
+# already covers via ``agentm.event.dispatch``). The matching test —
+# ``tests/unit/core/test_event_to_otel.py::test_every_event_class_has_to_otel``
+# — enforces that every subclass either defines its own or inherits the
+# base no-op deliberately.
+
+# Local-import the OTel SDK shapes; keeps the event-payload dataclass region
+# at the top of the file free of transport concerns. ``opentelemetry`` is a
+# substrate dependency (PR-A landed it) so the import is free at module load.
+from opentelemetry._logs import SeverityNumber  # noqa: E402
+from opentelemetry.trace import SpanKind, Status, StatusCode  # noqa: E402
+
+from .messages import ToolCallBlock  # noqa: E402
+
+# Span-kind keys for ``SessionTelemetry.span_tracker``. Strings rather than
+# enums because the tracker keys are tuple-with-string and the discrimination
+# is purely an internal namespace; the OTel SpanKind enum already lives on
+# the span itself.
+_SPAN_INVOKE_AGENT = "invoke_agent"
+_SPAN_CHAT = "chat"
+_SPAN_EXECUTE_TOOL = "execute_tool"
+
+
+def _before_agent_start_to_otel(
+    self: "BeforeAgentStartEvent", telemetry: "SessionTelemetry"
+) -> None:
+    """Open the ``invoke_agent <scenario>`` INTERNAL span for this session.
+
+    Preempts any previous still-open span under the same session id (matches
+    the legacy writer's behaviour for retries that didn't get a clean
+    ``AgentEndEvent``); the preempted span is closed with status UNSET.
+    """
+    session_id = telemetry.session_id
+    preempted = telemetry.pop_span(_SPAN_INVOKE_AGENT, session_id)
+    if preempted is not None:
+        preempted.set_status(Status(StatusCode.UNSET, "preempted by new run"))
+        preempted.end()
+    scenario_label = telemetry.obs_scenario or telemetry.obs_purpose or "agent"
+    span = telemetry.tracer.start_span(
+        f"invoke_agent {scenario_label}",
+        kind=SpanKind.INTERNAL,
+        attributes={
+            "gen_ai.operation.name": "invoke_agent",
+            "gen_ai.agent.name": scenario_label,
+            "gen_ai.conversation.id": session_id,
+            "agentm.session.id": session_id,
+            "agentm.session.purpose": telemetry.obs_purpose,
+            "agentm.session.scenario": telemetry.obs_scenario,
+        },
+    )
+    telemetry.open_span(_SPAN_INVOKE_AGENT, session_id, span)
+
+
+BeforeAgentStartEvent.to_otel = _before_agent_start_to_otel  # type: ignore[assignment]
+
+
+def _agent_end_to_otel(
+    self: "AgentEndEvent", telemetry: "SessionTelemetry"
+) -> None:
+    """Close the matching ``invoke_agent`` span and emit ``agentm.agent.end``."""
+    from .messages import AgentMessage  # local: avoid moving import into header
+
+    del AgentMessage  # used only via duck-typed iteration
+    session_id = telemetry.session_id
+    span = telemetry.pop_span(_SPAN_INVOKE_AGENT, session_id)
+    cause = self.cause
+    cause_attrs: dict[str, Any] = {
+        "agentm.agent.message_count": len(self.messages),
+        "agentm.agent.cause_kind": type(cause).__name__,
+        "agentm.agent.cause_final": type(cause).final,
+    }
+    from agentm.core.lib import to_jsonable
+
+    cause_payload = to_jsonable(cause)
+    if isinstance(cause_payload, dict):
+        for key, value in cause_payload.items():
+            cause_attrs[f"agentm.agent.cause.{key}"] = telemetry.to_otel_attr(value)
+    if span is not None:
+        for key, value in cause_attrs.items():
+            span.set_attribute(key, value)
+        span.set_status(Status(StatusCode.OK))
+        span.end()
+    telemetry.emit_log(
+        "agentm.agent.end",
+        body={"cause": cause_payload, "message_count": len(self.messages)},
+        attributes={"agentm.session.id": session_id, **cause_attrs},
+    )
+
+
+AgentEndEvent.to_otel = _agent_end_to_otel  # type: ignore[assignment]
+
+
+def _llm_request_start_to_otel(
+    self: "LlmRequestStartEvent", telemetry: "SessionTelemetry"
+) -> None:
+    """Open the ``chat <model>`` CLIENT span for one LLM call."""
+    model_id = self.model_id or "unknown"
+    span = telemetry.tracer.start_span(
+        f"chat {model_id}",
+        kind=SpanKind.CLIENT,
+        attributes={
+            "gen_ai.operation.name": "chat",
+            "gen_ai.request.model": model_id,
+            "gen_ai.conversation.id": telemetry.session_id,
+            "agentm.session.id": telemetry.session_id,
+            "agentm.turn.index": self.turn_index,
+            "agentm.turn.id": self.turn_id,
+            "agentm.llm.message_count": self.message_count,
+            "agentm.llm.tool_count": self.tool_count,
+            "agentm.llm.system_chars": self.system_chars,
+        },
+    )
+    if telemetry.obs_provider_name:
+        span.set_attribute("gen_ai.provider.name", telemetry.obs_provider_name)
+    telemetry.open_span(_SPAN_CHAT, str(self.turn_id), span)
+
+
+LlmRequestStartEvent.to_otel = _llm_request_start_to_otel  # type: ignore[assignment]
+
+
+def _llm_request_end_to_otel(
+    self: "LlmRequestEndEvent", telemetry: "SessionTelemetry"
+) -> None:
+    """Close the ``chat`` span; stamp duration / error on the way out."""
+    span = telemetry.pop_span(_SPAN_CHAT, str(self.turn_id))
+    if span is None:
+        return
+    span.set_attribute("agentm.llm.chunk_count", self.chunk_count)
+    span.set_attribute("agentm.llm.duration_ns", self.duration_ns)
+    if self.error is not None:
+        span.set_attribute("agentm.llm.error", self.error)
+        span.set_status(Status(StatusCode.ERROR, self.error))
+    else:
+        span.set_status(Status(StatusCode.OK))
+    span.end()
+
+
+LlmRequestEndEvent.to_otel = _llm_request_end_to_otel  # type: ignore[assignment]
+
+
+def _tool_call_to_otel(
+    self: "ToolCallEvent", telemetry: "SessionTelemetry"
+) -> None:
+    """Open the ``execute_tool <name>`` span and stamp the call arguments."""
+    args = dict(self.args)
+    span = telemetry.tracer.start_span(
+        f"execute_tool {self.tool_name}",
+        kind=SpanKind.INTERNAL,
+        attributes={
+            "gen_ai.operation.name": "execute_tool",
+            "gen_ai.tool.name": self.tool_name,
+            "gen_ai.tool.call.id": self.tool_call_id,
+            "gen_ai.conversation.id": telemetry.session_id,
+            "agentm.session.id": telemetry.session_id,
+            "gen_ai.tool.call.arguments": telemetry.to_otel_attr(args),
+        },
+    )
+    telemetry.open_span(_SPAN_EXECUTE_TOOL, self.tool_call_id, span)
+
+
+ToolCallEvent.to_otel = _tool_call_to_otel  # type: ignore[assignment]
+
+
+def _tool_result_to_otel(
+    self: "ToolResultEvent", telemetry: "SessionTelemetry"
+) -> None:
+    """Close the matching ``execute_tool`` span, stamp the result.
+
+    Also bumps the per-turn aggregator's ``current_tool_errors`` counter so
+    the ``agentm.turn.summary`` record emitted by :meth:`TurnEndEvent.to_otel`
+    sees an accurate count without a separate handler.
+    """
+    from agentm.core.lib import to_jsonable
+
+    if getattr(self.result, "is_error", False):
+        telemetry.turn_state["current_tool_errors"] += 1
+    span = telemetry.pop_span(_SPAN_EXECUTE_TOOL, self.tool_call_id)
+    if span is None:
+        return
+    result_payload = to_jsonable(self.result)
+    span.set_attribute(
+        "gen_ai.tool.call.result", telemetry.to_otel_attr(result_payload)
+    )
+    is_error = bool(getattr(self.result, "is_error", False))
+    if is_error:
+        span.set_attribute("agentm.tool.is_error", True)
+        span.set_status(Status(StatusCode.ERROR, "tool result is_error=True"))
+    else:
+        span.set_status(Status(StatusCode.OK))
+    span.end()
+
+
+ToolResultEvent.to_otel = _tool_result_to_otel  # type: ignore[assignment]
+
+
+def _turn_start_to_otel(
+    self: "TurnStartEvent", telemetry: "SessionTelemetry"
+) -> None:
+    """Rotate the per-turn aggregator state ahead of :class:`TurnEndEvent`."""
+    del self
+    telemetry.turn_state["turn_start_ns"] = time.time_ns()
+    telemetry.turn_state["previous_tool_errors"] = telemetry.turn_state[
+        "current_tool_errors"
+    ]
+    telemetry.turn_state["current_tool_errors"] = 0
+
+
+TurnStartEvent.to_otel = _turn_start_to_otel  # type: ignore[assignment]
+
+
+def _turn_end_to_otel(
+    self: "TurnEndEvent", telemetry: "SessionTelemetry"
+) -> None:
+    """Emit one ``agentm.turn.summary`` log record per completed turn."""
+    end_ns = time.time_ns()
+    tool_calls = [
+        block.name
+        for block in self.message.content
+        if isinstance(block, ToolCallBlock)
+    ]
+    usage = getattr(self.message, "usage", None)
+    duration_ns = end_ns - telemetry.turn_state["turn_start_ns"]
+    body: dict[str, Any] = {
+        "turn_index": self.turn_index,
+        "turn_id": self.turn_id,
+        "duration_ns": duration_ns,
+        "tool_calls": tool_calls,
+        "tool_call_count": len(tool_calls),
+        "tool_error_count": telemetry.turn_state["previous_tool_errors"],
+        "stop_reason": self.message.stop_reason,
+        "content_block_types": [
+            getattr(c, "type", type(c).__name__) for c in self.message.content
+        ],
+    }
+    attrs: dict[str, Any] = {
+        "agentm.session.id": telemetry.session_id,
+        "agentm.turn.index": self.turn_index,
+        "agentm.turn.id": self.turn_id,
+        "agentm.turn.duration_ns": duration_ns,
+        "agentm.turn.tool_call_count": len(tool_calls),
+        "agentm.turn.tool_error_count": telemetry.turn_state[
+            "previous_tool_errors"
+        ],
+        "agentm.turn.stop_reason": self.message.stop_reason or "",
+    }
+    if usage is not None:
+        body["input_tokens"] = usage.input_tokens
+        body["output_tokens"] = usage.output_tokens
+        body["cache_read"] = usage.cache_read
+        body["cache_write"] = usage.cache_write
+        attrs["gen_ai.usage.input_tokens"] = usage.input_tokens
+        attrs["gen_ai.usage.output_tokens"] = usage.output_tokens
+        attrs["gen_ai.usage.cache_read_tokens"] = usage.cache_read
+        attrs["gen_ai.usage.cache_write_tokens"] = usage.cache_write
+    telemetry.emit_log("agentm.turn.summary", body=body, attributes=attrs)
+    telemetry.turn_state["previous_tool_errors"] = 0
+
+
+TurnEndEvent.to_otel = _turn_end_to_otel  # type: ignore[assignment]
+
+
+def _session_header_to_otel(
+    self: "SessionHeaderEmittedEvent", telemetry: "SessionTelemetry"
+) -> None:
+    """Emit ``agentm.session.header`` — body is the SessionHeader dict verbatim."""
+    telemetry.emit_log(
+        "agentm.session.header",
+        body=self.record,
+        attributes={
+            "agentm.session.id": telemetry.session_id,
+            "agentm.session.header.id": str(self.record.get("id", "")),
+        },
+    )
+
+
+SessionHeaderEmittedEvent.to_otel = _session_header_to_otel  # type: ignore[assignment]
+
+
+def _message_appended_to_otel(
+    self: "MessageAppendedEvent", telemetry: "SessionTelemetry"
+) -> None:
+    """Emit ``agentm.message.appended`` — SessionEntry dict verbatim in body."""
+    telemetry.emit_log(
+        "agentm.message.appended",
+        body=self.record,
+        attributes={
+            "agentm.session.id": telemetry.session_id,
+            "agentm.message.id": str(self.record.get("id", "")),
+            "agentm.message.parent_id": str(self.record.get("parent_id", "") or ""),
+            "agentm.message.type": str(self.record.get("type", "")),
+        },
+    )
+
+
+MessageAppendedEvent.to_otel = _message_appended_to_otel  # type: ignore[assignment]
+
+
+def _api_register_to_otel(
+    self: "ApiRegisterEvent", telemetry: "SessionTelemetry"
+) -> None:
+    from agentm.core.lib import to_jsonable
+
+    telemetry.emit_log(
+        "agentm.api.register",
+        body={"payload": to_jsonable(self.payload)},
+        attributes={
+            "agentm.session.id": telemetry.session_id,
+            "agentm.api.kind": self.kind,
+            "agentm.api.name": self.name,
+            "agentm.api.extension": self.extension,
+        },
+    )
+
+
+ApiRegisterEvent.to_otel = _api_register_to_otel  # type: ignore[assignment]
+
+
+def _api_send_user_message_to_otel(
+    self: "ApiSendUserMessageEvent", telemetry: "SessionTelemetry"
+) -> None:
+    """Emit ``agentm.api.send_user_message`` with optional prompt redaction.
+
+    Redaction is governed by :attr:`SessionTelemetry.obs_redact_prompts`,
+    which the observability atom stamps from its ``redact_prompts`` config
+    at install time. ``True`` (default) substitutes a
+    ``{role, chars, sha256_prefix}`` stub for prompt content; ``False``
+    captures raw content (operator-explicit opt-in for debugging).
+    """
+    from agentm.core.lib import redact_messages, to_jsonable
+
+    raw_content: Any = to_jsonable(self.content)
+    content_chars = len(self.content) if isinstance(self.content, str) else None
+    if telemetry.obs_redact_prompts:
+        stub_payload = redact_messages({"content": raw_content})
+        attributes_content: Any = stub_payload["content"]
+    else:
+        attributes_content = raw_content
+    telemetry.emit_log(
+        "agentm.api.send_user_message",
+        body={"content": attributes_content},
+        attributes={
+            "agentm.session.id": telemetry.session_id,
+            "agentm.api.extension": self.extension,
+            "agentm.api.content_chars": (
+                content_chars if content_chars is not None else -1
+            ),
+        },
+    )
+
+
+ApiSendUserMessageEvent.to_otel = _api_send_user_message_to_otel  # type: ignore[assignment]
+
+
+def _diagnostic_to_otel(
+    self: "DiagnosticEvent", telemetry: "SessionTelemetry"
+) -> None:
+    sev = {
+        "info": SeverityNumber.INFO,
+        "warning": SeverityNumber.WARN,
+        "error": SeverityNumber.ERROR,
+    }.get(self.level, SeverityNumber.INFO)
+    telemetry.emit_log(
+        "agentm.diagnostic",
+        body={"message": self.message, "level": self.level},
+        attributes={
+            "agentm.session.id": telemetry.session_id,
+            "agentm.diagnostic.level": self.level,
+            "agentm.diagnostic.source": self.source,
+        },
+        severity=sev,
+    )
+
+
+DiagnosticEvent.to_otel = _diagnostic_to_otel  # type: ignore[assignment]
+
+
+def _extension_unload_to_otel(
+    self: "ExtensionUnloadEvent", telemetry: "SessionTelemetry"
+) -> None:
+    telemetry.emit_log(
+        "agentm.extension.unload",
+        body={"trigger": self.trigger, "tier": self.tier},
+        attributes={
+            "agentm.session.id": telemetry.session_id,
+            "agentm.extension.name": self.name,
+            "agentm.extension.module_path": self.module_path,
+            "agentm.extension.trigger": self.trigger,
+            "agentm.extension.error": self.error or "",
+        },
+        severity=(SeverityNumber.ERROR if self.error else SeverityNumber.INFO),
+    )
+
+
+ExtensionUnloadEvent.to_otel = _extension_unload_to_otel  # type: ignore[assignment]
+
+
+def _session_ready_to_otel(
+    self: "SessionReadyEvent", telemetry: "SessionTelemetry"
+) -> None:
+    """Emit ``agentm.session.ready`` with the final tool / command / extension lists.
+
+    The companion ``agentm.session.fingerprint`` log record (which depends
+    on the catalog hash machinery and the loaded-builtin set, not exposed
+    through :class:`SessionTelemetry`) is still emitted by the
+    observability atom — it owns the atom-hash state.
+    """
+    from agentm.core.lib import to_jsonable
+
+    telemetry.emit_log(
+        "agentm.session.ready",
+        body={
+            "session_id": self.session_id,
+            "cwd": self.cwd,
+            "tool_names": list(self.tool_names),
+            "command_names": list(self.command_names),
+            "extension_module_paths": list(self.extension_module_paths),
+            "model": to_jsonable(self.model),
+        },
+        attributes={
+            "agentm.session.id": self.session_id,
+            "agentm.session.scenario": telemetry.obs_scenario,
+            "agentm.session.tool_count": len(self.tool_names),
+            "agentm.session.command_count": len(self.command_names),
+            "agentm.session.extension_count": len(self.extension_module_paths),
+        },
+    )
+
+
+SessionReadyEvent.to_otel = _session_ready_to_otel  # type: ignore[assignment]
+
+
+def _session_shutdown_to_otel(
+    self: "SessionShutdownEvent", telemetry: "SessionTelemetry"
+) -> None:
+    """Drain every still-open tracked span; emit ``agentm.session.end``."""
+    del self
+    end_ns = time.time_ns()
+    telemetry.close_open_spans(status_description="session shutdown")
+    duration_ns = (
+        end_ns - telemetry.obs_session_start_ns
+        if telemetry.obs_session_start_ns
+        else 0
+    )
+    telemetry.emit_log(
+        "agentm.session.end",
+        body={
+            "session_id": telemetry.session_id,
+            "root_session_id": telemetry.obs_root_session_id,
+            "parent_session_id": telemetry.obs_parent_session_id or None,
+            "purpose": telemetry.obs_purpose,
+            "scenario": telemetry.obs_scenario or None,
+            "duration_ns": duration_ns,
+        },
+        attributes={
+            "agentm.session.id": telemetry.session_id,
+            "agentm.session.duration_ns": duration_ns,
+        },
+    )
+
+
+SessionShutdownEvent.to_otel = _session_shutdown_to_otel  # type: ignore[assignment]
 
 
 __all__ = [
