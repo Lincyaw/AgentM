@@ -166,6 +166,10 @@ def test_cli_run_writes_final_output_to_injected_stream(
 
     text = output.getvalue()
     assert rc == 0
-    assert "AGENT FINAL OUTPUT" in text
-    assert "streamed answer" in text
+    # Body now streams live via the MessagePersistedEvent presenter, which
+    # this fake session bypasses (it returns a message directly without
+    # going through the loop / bus). The final-block summary and the
+    # session-id resume hint still route to the injected stream — that is
+    # what this test guards.
+    assert "messages=" in text
     assert "session_id=" in text
