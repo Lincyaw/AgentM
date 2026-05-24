@@ -47,3 +47,6 @@ datasets/
 # Ephemeral planning/task artifacts (kept locally, not shipped)
 .claude/tasks/
 .claude/plans/
+
+# llmharness local experiment outputs (audit dumps, eval DBs, per-iter runs)
+contrib/extensions/llmharness/runs/
