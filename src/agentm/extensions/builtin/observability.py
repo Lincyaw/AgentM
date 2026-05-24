@@ -276,6 +276,11 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     telemetry: SessionTelemetry = api.get_session_telemetry()
     tracer = telemetry.tracer
     log = telemetry.logger
+    # PR-H: every log record we emit must carry ``agentm.session.id`` as an
+    # attribute (it's no longer on the OTel resource), so the process-level
+    # TracerProvider / LoggerProvider can fan many sessions into disjoint
+    # per-session files based on this attribute alone.
+    session_id_attr = api.session_id
 
     include_handlers = bool(config.get("include_handler_records", True))
     include_diff = bool(config.get("include_mutation_diff", True))
@@ -354,6 +359,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             owner = getattr(handler, _HANDLER_OWNER_ATTR, None)
             dispatch_id = getattr(event, "dispatch_id", "") or ""
             attrs: dict[str, Any] = {
+                "agentm.session.id": api.session_id,
                 "agentm.event.channel": channel,
                 "agentm.event.dispatch_id": dispatch_id,
                 "agentm.handler.name": _handler_label(handler),
@@ -382,6 +388,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 return
             dispatch_id = getattr(event, "dispatch_id", "") or ""
             attrs: dict[str, Any] = {
+                "agentm.session.id": api.session_id,
                 "agentm.event.channel": channel,
                 "agentm.event.dispatch_id": dispatch_id,
                 "agentm.handler.count": len(results),
@@ -438,6 +445,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "agentm.handler.mutated",
                 body=None,
                 attributes={
+                    "agentm.session.id": api.session_id,
                     "agentm.event.channel": channel,
                     "agentm.event.dispatch_id": getattr(event, "dispatch_id", "")
                     or "",
@@ -560,6 +568,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "agentm.extension.install",
             body={"config": to_jsonable(event.config)},
             attributes={
+                "agentm.session.id": session_id_attr,
                 "agentm.extension.module_path": event.module_path,
                 "agentm.extension.phase": event.phase,
                 "agentm.extension.duration_ns": event.duration_ns,
@@ -595,6 +604,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "fingerprint_after": fingerprint_after,
             },
             attributes={
+                "agentm.session.id": session_id_attr,
                 "agentm.atom.name": event.name,
                 "agentm.atom.new_hash": event.new_hash,
                 "agentm.atom.old_hash": event.old_hash or "",
@@ -611,6 +621,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "agentm.extension.unload",
             body={"trigger": event.trigger, "tier": event.tier},
             attributes={
+                "agentm.session.id": session_id_attr,
                 "agentm.extension.name": event.name,
                 "agentm.extension.module_path": event.module_path,
                 "agentm.extension.trigger": event.trigger,
@@ -625,6 +636,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "agentm.api.register",
             body={"payload": to_jsonable(event.payload)},
             attributes={
+                "agentm.session.id": session_id_attr,
                 "agentm.api.kind": event.kind,
                 "agentm.api.name": event.name,
                 "agentm.api.extension": event.extension,
@@ -646,6 +658,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "agentm.api.send_user_message",
             body={"content": attributes_content},
             attributes={
+                "agentm.session.id": session_id_attr,
                 "agentm.api.extension": event.extension,
                 "agentm.api.content_chars": (
                     content_chars if content_chars is not None else -1
@@ -664,6 +677,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "agentm.diagnostic",
             body={"message": event.message, "level": event.level},
             attributes={
+                "agentm.session.id": session_id_attr,
                 "agentm.diagnostic.level": event.level,
                 "agentm.diagnostic.source": event.source,
             },
@@ -714,7 +728,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             log,
             "agentm.agent.end",
             body={"cause": cause_payload, "message_count": len(event.messages)},
-            attributes=cause_attrs,
+            attributes={"agentm.session.id": session_id_attr, **cause_attrs},
         )
 
     def _on_llm_start(event: LlmRequestStartEvent) -> None:
