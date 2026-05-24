@@ -21,6 +21,9 @@ branch:
   `tests/unit/extensions/test_observability_semconv.py` locks down the
   on-disk semconv contract.
 - **Commit 3** (this commit) — design doc + index.yaml sync.
+- **PR-H** (2026-05-24) — process-level `TracerProvider` / `LoggerProvider`;
+  `agentm.session.id` moves from OTel resource attribute to per-span /
+  per-log attribute. See "Process-level providers" below.
 
 ## Motivation
 
@@ -105,20 +108,54 @@ share one file and interleave in arrival order; the OTLP top-level shape
 (`scopeSpans` vs `scopeLogs`) disambiguates them on read. Collector pipelines
 (e.g. `filelog` receiver + `otlpjson` decoder) consume the file directly.
 
-Each line carries a `resource` block duplicating the session-scoped
+Each line carries a `resource` block duplicating the **process-scoped**
 attributes:
 
 | Attribute | Source |
 |---|---|
 | `service.name` | constant `"agentm"` |
 | `service.version` | `importlib.metadata.version("agentm")` |
-| `agentm.session.id` | the session id |
-| `agentm.scenario.name` | scenario name, when known |
 
-The ~150 bytes/line of resource duplication is accepted; sessions are a few
-MB. Lines do **not** include the outer `{"resourceSpans": [...]}` /
+The resource carries only what is genuinely process-global: the OTel
+ecosystem assumes one `service.name` per process, and AgentM honours that
+(PR-H). Session-scoped metadata lives on **per-span / per-log attributes**,
+not on the resource:
+
+| Attribute | Lives on | Stamped by |
+|---|---|---|
+| `agentm.session.id` | every span and every log record | observability atom (and `SessionManager` for the direct-write path) |
+| `agentm.session.scenario` | spans/records where it carries information | observability atom |
+| `agentm.session.purpose`, `agentm.session.root_id`, ... | spans/records where it carries information | observability atom |
+
+Lines do **not** include the outer `{"resourceSpans": [...]}` /
 `{"resourceLogs": [...]}` envelope — that wrap is the exporter request, not
 the on-disk shape.
+
+### Process-level providers
+
+A single Python process can host many AgentSessions (gateway daemon, RCA
+runner, eval driver). They all share **one** `TracerProvider` and one
+`LoggerProvider`. Each session attaches its own
+`BlockingBatchSpanProcessor` + `BlockingBatchLogRecordProcessor` to those
+shared providers; each processor forwards exclusively to its own per-session
+file exporter and **filters by `agentm.session.id`** (records lacking the
+matching attribute are dropped at the processor before they enter the batch
+queue). This keeps three things consistent simultaneously:
+
+- OTel ecosystem compatibility — one `service.name` per process is what
+  collectors, samplers, and the GenAI semconv assume.
+- File partitioning — a session's file holds only that session's records,
+  so consumers walking one file never see cross-session noise.
+- Lazy startup — `setup_process_telemetry()` is invoked exactly once per
+  process (on the first `setup_session_telemetry` call); subsequent
+  sessions are cheap (one processor pair + one file handle each).
+
+Session shutdown is a **partial** teardown: the per-session processors are
+flushed and removed from the global providers (rebuilding the multi-processor
+tuple under its internal lock), the file handles close, but the providers
+themselves stay alive for the next session. Process shutdown drains the
+providers once via an `atexit` hook registered inside
+`setup_process_telemetry`.
 
 **Shape source.** Canonical OTLP/JSON is produced by feeding `ReadableSpan` /
 `ReadableLogRecord` through the standard `opentelemetry-exporter-otlp`
@@ -368,9 +405,20 @@ Recorded here so they don't get lost; PR briefs to follow when dispatched.
   Phase 2 runner) now depends on it. See the "TraceReader API" section
   above for the surface; `tests/unit/core/test_trace_reader.py` locks
   it down.
-- **PR-H** — Process-level `TracerProvider` with `session_id` moved from
-  resource attribute to span attribute, aligning with OTel ecosystem
-  assumptions about one provider per process.
+- **PR-H** — Landed. One process-level `TracerProvider` +
+  `LoggerProvider`; resource carries only `service.name=agentm` +
+  `service.version`. Per-session isolation via per-session
+  `BlockingBatchSpanProcessor` / `BlockingBatchLogRecordProcessor`
+  attached to the shared providers, each filtering on
+  `agentm.session.id` so cross-session traffic does not bleed into the
+  wrong file. `agentm.session.id` is stamped as a span/log attribute by
+  the observability atom and the `SessionManager` direct-write path.
+  Session shutdown drains and removes the per-session processors; the
+  providers themselves are torn down once at process exit via an
+  `atexit` hook. See the "Process-level providers" subsection above
+  for the multi-session model; locked down by
+  `tests/unit/core/test_otel_export.py::test_two_sessions_share_one_tracer_provider`
+  and `test_session_shutdown_does_not_affect_other_session`.
 
 ## Related concepts
 

@@ -37,7 +37,6 @@ from agentm.core.runtime.session_manager import SessionManager
 _RESOURCE_AGENTM = {
     "attributes": [
         {"key": "service.name", "value": {"stringValue": "agentm"}},
-        {"key": "agentm.session.id", "value": {"stringValue": "sess-fixture"}},
     ]
 }
 

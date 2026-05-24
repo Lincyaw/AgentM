@@ -242,19 +242,34 @@ class TraceReader:
         self,
         name: str | None = None,
         attribute_filters: dict[str, Any] | None = None,
+        session_id: str | None = None,
     ) -> Iterator[Span]:
         """Yield every span matching ``name`` and ``attribute_filters``.
 
         ``name`` matches exactly. ``attribute_filters`` is a dict of
         ``{attribute_key: expected_value}`` — every key must match. Pass
         ``None`` to disable a filter.
+
+        ``session_id`` is a convenience filter that matches the
+        ``agentm.session.id`` span attribute (PR-H: this lives on the
+        span, not the OTel resource, so a single process can host many
+        sessions sharing one ``TracerProvider``). Per-file scope is the
+        default — every reader is already pointed at one session file —
+        so an explicit ``session_id`` is only useful for merged or
+        cross-session files.
         """
+        merged_filters: dict[str, Any] | None
+        if session_id is not None:
+            merged_filters = dict(attribute_filters or {})
+            merged_filters["agentm.session.id"] = session_id
+        else:
+            merged_filters = attribute_filters
         for line in self._iter_lines():
             for raw in _iter_spans_on_line(line):
                 if name is not None and raw.get("name") != name:
                     continue
                 span = _span_from_raw(raw)
-                if not _matches_filter(span.attributes, attribute_filters):
+                if not _matches_filter(span.attributes, merged_filters):
                     continue
                 yield span
 
@@ -263,6 +278,7 @@ class TraceReader:
         name: str | None = None,
         attribute_filters: dict[str, Any] | None = None,
         parent_span_id: str | None = None,
+        session_id: str | None = None,
     ) -> Iterator[LogRecord]:
         """Yield every log record matching the supplied filters.
 
@@ -270,13 +286,22 @@ class TraceReader:
         convenience filter that matches the record's ``spanId`` (log
         records do not carry a separate parent reference; their ``spanId``
         is the parent span by OTLP convention).
+
+        ``session_id`` matches the ``agentm.session.id`` log-record
+        attribute (PR-H — see :meth:`iter_spans` for the rationale).
         """
+        merged_filters: dict[str, Any] | None
+        if session_id is not None:
+            merged_filters = dict(attribute_filters or {})
+            merged_filters["agentm.session.id"] = session_id
+        else:
+            merged_filters = attribute_filters
         for line in self._iter_lines():
             for raw in _iter_log_records_on_line(line):
                 if name is not None and raw.get("eventName") != name:
                     continue
                 record = _log_record_from_raw(raw)
-                if not _matches_filter(record.attributes, attribute_filters):
+                if not _matches_filter(record.attributes, merged_filters):
                     continue
                 if parent_span_id is not None and record.span_id != parent_span_id:
                     continue
