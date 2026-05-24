@@ -576,10 +576,18 @@ class StepResult:
     auditor_record: ReplayRecord | None = None
     """Synthetic auditor :class:`ReplayRecord` for the firing, when one
     occurred. Populated even when the sidecar writer is ``None`` so
-    offline drivers (notably
-    :func:`llmharness.replay.run_offline_auditor_over_control`) can
-    capture per-firing records without a disk round-trip. ``None`` when
-    no auditor firing happened or the firing produced no verdict (no-call)."""
+    offline drivers can capture per-firing records without a disk
+    round-trip. ``None`` when no auditor firing happened or the firing
+    produced no verdict (no-call)."""
+    extractor_record: ReplayRecord | None = None
+    """Synthetic extractor :class:`ReplayRecord` for the firing, when
+    one occurred. Mirrors :attr:`auditor_record`: populated even when
+    the sidecar writer is ``None`` so multi-segment offline drivers
+    (notably :func:`llmharness.replay.run_chained_fork_experiment`) can
+    assemble a chained replay sidecar without re-invoking the runner or
+    routing through a per-segment temp file. ``None`` when the firing
+    short-circuited before producing a record (e.g. an empty
+    window)."""
 
 
 # --- helpers ----------------------------------------------------------------
@@ -709,6 +717,7 @@ class _ExtractorFiringResult:
 
     ok: bool
     cursor_advanced: bool
+    record: ReplayRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -801,11 +810,13 @@ class HarnessRunner:
         fired_auditor = False
         surfaced: Reminder | None = None
         auditor_record: ReplayRecord | None = None
+        extractor_record: ReplayRecord | None = None
 
         if extractor_due:
             result = await self.fire_extractor_once(messages)
             fired_extractor = True
             self._last_extractor_held_cursor = not result.ok
+            extractor_record = result.record
 
         if auditor_due:
             if self._last_extractor_held_cursor:
@@ -824,6 +835,7 @@ class HarnessRunner:
 
         return StepResult(
             auditor_record=auditor_record,
+            extractor_record=extractor_record,
             fired_extractor=fired_extractor,
             fired_auditor=fired_auditor,
             surfaced_reminder=surfaced,
@@ -902,22 +914,45 @@ class HarnessRunner:
             state=state,
         )
 
-        replay_compose_kwargs: dict[str, Any] | None
-        replay_extras: dict[str, Any] | None
-        if self._sidecar is not None and self._sidecar.path is not None:
-            replay_compose_kwargs = dict(self._extractor_settings.compose_kwargs)
-            replay_extras = {
-                "turn_texts": {str(k): v for k, v in state.turn_texts.items()},
-            }
-        else:
-            replay_compose_kwargs = None
-            replay_extras = None
+        # Always materialise the per-firing replay-record metadata so a
+        # synthetic :class:`ReplayRecord` can be attached to the
+        # returned :class:`StepResult` regardless of whether the sidecar
+        # writer is mounted. Offline chained-fork drivers depend on this
+        # to assemble a multi-segment replay file without re-invoking
+        # the runner.
+        replay_compose_kwargs: dict[str, Any] = dict(
+            self._extractor_settings.compose_kwargs
+        )
+        replay_extras: dict[str, Any] = {
+            "turn_texts": {str(k): v for k, v in state.turn_texts.items()},
+        }
 
         raw_assistant_messages: list[dict[str, Any]] = []
+        synth_record: ReplayRecord | None = None
 
         def _record(
             status: str, output: dict[str, Any] | None, error: str | None = None
         ) -> None:
+            nonlocal synth_record
+            synth_record = ReplayRecord(
+                phase="extractor",
+                turn_index=window_hi_inclusive,
+                root_session_id=self._root_session_id,
+                ts_ns=now_ns(),
+                compose_kwargs=dict(replay_compose_kwargs),
+                payload=dict(payload),
+                provider=(
+                    [self._provider_extractor[0], self._provider_extractor[1]]
+                    if self._provider_extractor
+                    else None
+                ),
+                output=output,
+                status=status,  # type: ignore[arg-type]
+                error=error,
+                latency_ms=0,
+                extras=dict(replay_extras),
+                raw_assistant_messages=list(raw_assistant_messages),
+            )
             if self._sidecar is None:
                 return
             self._sidecar.record(
@@ -947,7 +982,9 @@ class HarnessRunner:
                 {"reason": str(exc), "turn_window": turn_window},
             )
             _record("spawn_error", output=None, error=str(exc))
-            return _ExtractorFiringResult(ok=False, cursor_advanced=False)
+            return _ExtractorFiringResult(
+                ok=False, cursor_advanced=False, record=synth_record
+            )
 
         if not terminator_called:
             self._sink.append_failure(
@@ -960,7 +997,9 @@ class HarnessRunner:
                 },
             )
             _record("no_call", output=None)
-            return _ExtractorFiringResult(ok=False, cursor_advanced=False)
+            return _ExtractorFiringResult(
+                ok=False, cursor_advanced=False, record=synth_record
+            )
 
         output = RawExtractorOutput.from_state(state)
         _record(
@@ -980,12 +1019,16 @@ class HarnessRunner:
                 self._sink.append_failure(
                     _et.EXTRACTOR_EMPTY, {"turn_window": turn_window}
                 )
-                return _ExtractorFiringResult(ok=False, cursor_advanced=False)
+                return _ExtractorFiringResult(
+                    ok=False, cursor_advanced=False, record=synth_record
+                )
             # Truly trivial window: still advance the cursor so we don't
             # re-extract the same prefix forever.
             self._sink.append_cursor(last_turn_index=window_hi_inclusive)
             self.cumulative.cursor_last_turn_index = window_hi_inclusive
-            return _ExtractorFiringResult(ok=True, cursor_advanced=True)
+            return _ExtractorFiringResult(
+                ok=True, cursor_advanced=True, record=synth_record
+            )
 
         firing_id = self.cumulative.firing_id_counter
         for op_index, op in enumerate(state.pending_ops):
@@ -1033,7 +1076,9 @@ class HarnessRunner:
                 firing_phases=firing_phases,
             )
 
-        return _ExtractorFiringResult(ok=True, cursor_advanced=True)
+        return _ExtractorFiringResult(
+            ok=True, cursor_advanced=True, record=synth_record
+        )
 
     # ----------------------------------------------------------------------
     # Phase 2 — auditor
