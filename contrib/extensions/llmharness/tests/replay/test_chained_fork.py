@@ -452,24 +452,30 @@ async def test_chained_fork_three_reminders_then_silent(
 
     # Fail-stop: the cumulative state of segment k must be the SAME
     # object passed as ``seed_cumulative`` to segment k+1's call, and
-    # the next ``start_turn`` must equal segment k's surfacing turn + 1.
-    # Without this invariant the chain silently re-runs each segment
-    # from a blank state — the experiment compares apples to oranges.
+    # the next ``start_turn`` must equal segment k's surfacing turn
+    # plus one full ``audit_interval`` (NOT +1). Without the cadence
+    # shift the first iteration of the branch replay would fire on an
+    # empty extractor window (cursor still at surfacing turn from the
+    # seeded cumulative state) and the auditor would re-surface a
+    # phantom reminder at the same turn the parent surfaced at,
+    # creating a fork-at-same-turn loop. Validated empirically against
+    # a live RCA case before the shift landed.
     # Control segment (idx 0) is called with seed_cumulative=None,
     # start_turn=1 — verify that explicitly too.
     assert scripted.calls_seen[0]["seed_cumulative"] is None
     assert scripted.calls_seen[0]["start_turn"] == 1
+    audit_interval = 5  # matches the fixture's cadence
     for k in range(len(scripted.calls_seen) - 1):
         assert (
             scripted.calls_seen[k + 1]["seed_cumulative"]
             is scripted.return_values[k].state
         ), f"segment {k + 1} did not receive segment {k}'s cumulative state"
+        expected = scripted.surface_turns[k] + audit_interval
         assert (
-            scripted.calls_seen[k + 1]["start_turn"]
-            == scripted.surface_turns[k] + 1
+            scripted.calls_seen[k + 1]["start_turn"] == expected
         ), (
             f"segment {k + 1} start_turn={scripted.calls_seen[k + 1]['start_turn']}, "
-            f"expected surface_turn+1={scripted.surface_turns[k] + 1}"
+            f"expected surface_turn+audit_interval={expected}"
         )
 
 

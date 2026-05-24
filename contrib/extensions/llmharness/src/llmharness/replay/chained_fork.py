@@ -241,6 +241,11 @@ async def run_chained_fork_experiment(
     control_payload = await session_factory(
         initial_messages=None, seed_reminder_text=None
     )
+    _logger.info(
+        "chained_fork: control session=%s msgs=%d max_interventions=%d",
+        control_payload.session_log_id, len(control_payload.final_messages),
+        max_interventions,
+    )
     control_run = await replay_pipeline_over_trajectory(
         messages=control_payload.final_messages,
         cwd=cwd,
@@ -262,6 +267,11 @@ async def run_chained_fork_experiment(
         _last_audited_turn(control_run.all_step_results)
         if control_run.reminder is not None
         else None
+    )
+    _logger.info(
+        "chained_fork: control replay done; reminder=%s surface_turn=%s steps=%d",
+        "None" if control_run.reminder is None else "set",
+        control_surface_turn, len(control_run.all_step_results),
     )
     segments: list[ChainSegment] = [
         ChainSegment(
@@ -311,12 +321,44 @@ async def run_chained_fork_experiment(
             sink=sink,
             child=child,
             seed_cumulative=cumulative,
-            start_turn=next_fork_turn + 1,
+            # Skip past the parent's surfacing cadence boundary entirely.
+            # If we resumed at next_fork_turn + 1, the very first iteration
+            # would land on a cadence boundary with an empty extractor
+            # window (cursor still pinned at next_fork_turn by the seeded
+            # cumulative state) — the auditor would fire on stale state
+            # and surface a phantom reminder at turn_index = next_fork_turn,
+            # creating an infinite fork-at-same-turn loop. Resuming one
+            # cadence interval later gives the branch a full window of
+            # genuinely new turns before the auditor's first firing.
+            start_turn=next_fork_turn + audit_interval,
         )
         branch_surface_turn = (
             _last_audited_turn(branch_run.all_step_results)
             if branch_run.reminder is not None
             else None
+        )
+        # Defence-in-depth guard: even with the start_turn shift above,
+        # an auditor that re-surfaces immediately on minimal new content
+        # could still report a turn <= the parent's fork point. Treat
+        # such non-progressing surfaces as silent so the chain
+        # terminates rather than spinning.
+        if (
+            branch_surface_turn is not None
+            and branch_surface_turn <= next_fork_turn
+        ):
+            _logger.warning(
+                "chained_fork: iter %d surfaced at turn=%d <= fork_turn=%d; "
+                "treating as silent (auditor did not observe forward progress)",
+                i, branch_surface_turn, next_fork_turn,
+            )
+            branch_surface_turn = None
+            branch_run = replace(branch_run, reminder=None)
+        _logger.info(
+            "chained_fork: iter %d branch=%s steps=%d reminder=%s surface_turn=%s",
+            i, branch_payload.session_log_id,
+            len(branch_run.all_step_results),
+            "None" if branch_run.reminder is None else "set",
+            branch_surface_turn,
         )
         segments.append(
             ChainSegment(
