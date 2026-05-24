@@ -15,14 +15,26 @@ and converting the resulting protobuf message via ``MessageToDict``. This is
 the same path the collector exporters use, so the field names
 (``traceId``, ``startTimeUnixNano``, ...) match the OTLP/JSON spec exactly.
 
-This module is PR-A of the single-event-log migration: the exporters and a
-``setup_session_telemetry`` helper that wires both into per-session
-Tracer/Logger providers. Nothing in the runtime calls into this module yet —
-observability rewiring lands in PR-B.
+**Process-level providers (PR-H).** The OTel ecosystem assumes one process =
+one ``service.name``, so there is exactly **one** ``TracerProvider`` and one
+``LoggerProvider`` per Python process. The resource attached to those
+providers carries only ``service.name=agentm`` and ``service.version=<pkg>``.
+Per-session isolation is achieved by attaching a **per-session
+SpanProcessor + LogRecordProcessor** to the shared globals; each processor
+forwards exclusively to its own per-session file exporter, so writes never
+cross sessions. ``agentm.session.id`` lives as a span/log **attribute**
+stamped by the observability atom on every record it emits — never on the
+resource block.
+
+``setup_session_telemetry`` returns a :class:`SessionTelemetry` handle whose
+``shutdown()`` drains and removes that session's processors from the global
+providers, leaving the providers themselves intact for other concurrent
+sessions. Global teardown is deferred to ``atexit``.
 """
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import threading
@@ -60,7 +72,9 @@ __all__ = [
     "iter_log_records",
     "iter_spans",
     "otlp_unwrap",
+    "setup_process_telemetry",
     "setup_session_telemetry",
+    "shutdown_process_telemetry",
     "span_attr",
 ]
 
@@ -170,17 +184,55 @@ def _wait_for_queue_space(batch_processor: object) -> None:
 
 
 class BlockingBatchSpanProcessor(BatchSpanProcessor):
-    """:class:`BatchSpanProcessor` that blocks the producer on overflow."""
+    """:class:`BatchSpanProcessor` that blocks the producer on overflow.
+
+    When ``session_id_filter`` is set, the processor drops spans whose
+    ``agentm.session.id`` attribute does not match — this is how
+    per-session file partitioning survives a shared process-level
+    ``TracerProvider``. Spans without the attribute also drop (the
+    observability atom is required to stamp it; bare SDK calls in
+    tests can opt in by passing ``agentm.session.id`` in span attributes).
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        session_id_filter: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._session_id_filter = session_id_filter
 
     def on_end(self, span: ReadableSpan) -> None:  # type: ignore[override]
+        if self._session_id_filter is not None:
+            attrs = span.attributes or {}
+            if attrs.get("agentm.session.id") != self._session_id_filter:
+                return
         _wait_for_queue_space(self)
         super().on_end(span)
 
 
 class BlockingBatchLogRecordProcessor(BatchLogRecordProcessor):
-    """:class:`BatchLogRecordProcessor` that blocks the producer on overflow."""
+    """:class:`BatchLogRecordProcessor` that blocks the producer on overflow.
+
+    Symmetric ``session_id_filter`` behaviour — see
+    :class:`BlockingBatchSpanProcessor`.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        session_id_filter: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._session_id_filter = session_id_filter
 
     def on_emit(self, log_record):  # type: ignore[override, no-untyped-def]
+        if self._session_id_filter is not None:
+            attrs = getattr(log_record, "log_record", log_record).attributes or {}
+            if attrs.get("agentm.session.id") != self._session_id_filter:
+                return
         _wait_for_queue_space(self)
         super().on_emit(log_record)
 
@@ -327,17 +379,155 @@ class FileLogExporter(LogRecordExporter):
                 self._closed = True
 
 
+# --- Process-level providers ------------------------------------------------
+#
+# The OTel ecosystem assumes one ``service.name`` per process. We honour that
+# by holding exactly one ``TracerProvider`` + one ``LoggerProvider`` for the
+# whole Python process; per-session isolation happens at the processor layer.
+# These globals are protected by ``_global_lock``; first call to
+# :func:`setup_process_telemetry` (typically via
+# :func:`setup_session_telemetry`) constructs them and registers an
+# ``atexit`` hook for final teardown.
+
+_global_lock = threading.Lock()
+_global_tracer_provider: TracerProvider | None = None
+_global_logger_provider: LoggerProvider | None = None
+_global_atexit_registered = False
+
+
+def setup_process_telemetry() -> tuple[TracerProvider, LoggerProvider]:
+    """Lazily construct the process-level OTel providers.
+
+    Idempotent — subsequent calls return the same provider instances. The
+    resource attached to each provider carries only ``service.name`` and
+    ``service.version``; per-session metadata (``agentm.session.id``,
+    ``agentm.scenario.name``) is emitted as **per-span / per-log
+    attributes** by the observability atom, not as resource attributes.
+
+    Returns ``(tracer_provider, logger_provider)``.
+    """
+    global _global_tracer_provider, _global_logger_provider
+    global _global_atexit_registered
+    with _global_lock:
+        if (
+            _global_tracer_provider is not None
+            and _global_logger_provider is not None
+        ):
+            return _global_tracer_provider, _global_logger_provider
+        resource = Resource.create(
+            {
+                "service.name": "agentm",
+                "service.version": _agentm_version(),
+            }
+        )
+        _global_tracer_provider = TracerProvider(resource=resource)
+        _global_logger_provider = LoggerProvider(resource=resource)
+        if not _global_atexit_registered:
+            atexit.register(shutdown_process_telemetry)
+            _global_atexit_registered = True
+        return _global_tracer_provider, _global_logger_provider
+
+
+def shutdown_process_telemetry() -> None:
+    """Tear down the process-level providers (idempotent).
+
+    Registered as an ``atexit`` hook on first :func:`setup_process_telemetry`
+    call. Safe to invoke explicitly from tests that want a clean slate.
+    """
+    global _global_tracer_provider, _global_logger_provider
+    with _global_lock:
+        tp = _global_tracer_provider
+        lp = _global_logger_provider
+        _global_tracer_provider = None
+        _global_logger_provider = None
+    if tp is not None:
+        try:
+            tp.shutdown()
+        except Exception:  # pragma: no cover
+            pass
+    if lp is not None:
+        try:
+            lp.shutdown()
+        except Exception:  # pragma: no cover
+            pass
+
+
+def _remove_span_processor(
+    provider: TracerProvider, processor: BlockingBatchSpanProcessor
+) -> None:
+    """Remove a span processor from a provider's internal multi-processor.
+
+    The ``SynchronousMultiSpanProcessor`` stores its children in a tuple;
+    there is no public ``remove`` method. We rebuild the tuple under its
+    lock. Best-effort — if the SDK rearranges this private attribute in a
+    future release the processor stays attached but its underlying exporter
+    is shut down, so it would only log to a closed handle.
+    """
+    multi = getattr(provider, "_active_span_processor", None)
+    if multi is None:
+        return
+    lock = getattr(multi, "_lock", None)
+    span_processors_attr = "_span_processors"
+    if lock is None or not hasattr(multi, span_processors_attr):
+        return
+    with lock:
+        current = getattr(multi, span_processors_attr)
+        if processor in current:
+            setattr(
+                multi,
+                span_processors_attr,
+                tuple(p for p in current if p is not processor),
+            )
+
+
+def _remove_log_processor(
+    provider: LoggerProvider, processor: BlockingBatchLogRecordProcessor
+) -> None:
+    """Symmetric helper for :class:`LoggerProvider`'s multi-processor."""
+    multi = getattr(provider, "_multi_log_record_processor", None)
+    if multi is None:
+        return
+    lock = getattr(multi, "_lock", None)
+    attr_name = "_log_record_processors"
+    if lock is None or not hasattr(multi, attr_name):
+        return
+    with lock:
+        current = getattr(multi, attr_name)
+        if isinstance(current, tuple):
+            if processor in current:
+                setattr(
+                    multi,
+                    attr_name,
+                    tuple(p for p in current if p is not processor),
+                )
+        elif isinstance(current, list):
+            try:
+                current.remove(processor)
+            except ValueError:
+                pass
+
+
 @dataclass(slots=True)
 class SessionTelemetry:
     """Handle bundling per-session telemetry plumbing.
 
-    A session owns its own :class:`TracerProvider` and :class:`LoggerProvider`
-    so that resource attributes (notably ``agentm.session.id``) are scoped to
-    the session, not process-global. Both providers write into the same
-    ndjson file; lines from spans and logs interleave in arrival order.
+    Each session has its own :class:`BlockingBatchSpanProcessor` +
+    :class:`BlockingBatchLogRecordProcessor` attached to the **shared**
+    process-level providers. ``tracer`` and ``logger`` are scoped instrument
+    objects (scope name ``agentm.session.<id>``) acquired from the global
+    providers; spans/logs emitted through them flow through every attached
+    processor, but our per-session processor is the only one that forwards
+    to this session's file exporter, so files stay cleanly partitioned.
 
-    :meth:`shutdown` flushes both batch processors and closes both exporters.
-    Idempotent — safe to call from ``atexit`` and explicit teardown.
+    ``agentm.session.id`` is **not** on the OTel resource. Atoms emitting
+    spans / log records stamp it as an attribute on every record (see
+    :mod:`agentm.extensions.builtin.observability`).
+
+    :meth:`shutdown` flushes this session's processors, removes them from
+    the global providers, and closes the file exporters. Idempotent — safe
+    to call from explicit teardown + the ``SessionShutdownEvent`` handler.
+    The global providers themselves outlive every session and are torn
+    down once at process exit by an ``atexit`` hook.
     """
 
     session_id: str
@@ -346,6 +536,8 @@ class SessionTelemetry:
     logger: Logger
     tracer_provider: TracerProvider
     logger_provider: LoggerProvider
+    span_processor: BlockingBatchSpanProcessor
+    log_processor: BlockingBatchLogRecordProcessor
     span_exporter: FileSpanExporter
     log_exporter: FileLogExporter
     _shutdown: bool = False
@@ -354,19 +546,21 @@ class SessionTelemetry:
         if self._shutdown:
             return
         self._shutdown = True
-        # Order matters: drain processors before closing the exporters they
-        # write through. ``shutdown`` on the providers force-flushes and
-        # tears down the batch processors.
+        # Drain + remove the per-session processors so other sessions still
+        # running in the same process keep emitting. Provider lives on.
         try:
-            self.tracer_provider.shutdown()
-        except Exception:  # pragma: no cover — provider rarely fails
-            pass
-        try:
-            self.logger_provider.shutdown()
+            self.span_processor.shutdown()
         except Exception:  # pragma: no cover
             pass
-        # BatchSpanProcessor.shutdown calls exporter.shutdown; calling again
-        # is fine because the exporters guard with ``self._closed``.
+        try:
+            self.log_processor.shutdown()
+        except Exception:  # pragma: no cover
+            pass
+        _remove_span_processor(self.tracer_provider, self.span_processor)
+        _remove_log_processor(self.logger_provider, self.log_processor)
+        # ``BatchSpanProcessor.shutdown`` already calls exporter.shutdown;
+        # the exporters guard with ``self._closed`` so a second call is a
+        # no-op.
         self.span_exporter.shutdown()
         self.log_exporter.shutdown()
 
@@ -384,11 +578,21 @@ def setup_session_telemetry(
 ) -> SessionTelemetry:
     """Build a per-session telemetry handle.
 
+    Constructs (lazily, once) the process-level ``TracerProvider`` +
+    ``LoggerProvider`` and attaches a fresh per-session
+    ``BlockingBatchSpanProcessor`` + ``BlockingBatchLogRecordProcessor`` to
+    them. The processors forward exclusively to this session's file
+    exporter, so concurrent sessions never cross-contaminate.
+
     The output path defaults to ``<cwd>/.agentm/observability/<session_id>.jsonl``.
-    Callers that already know the absolute path (e.g.
-    :class:`SessionManager` direct-write callers that custom-place the
-    file) may override via ``file_path``; the ``cwd`` argument is then
-    only used as a hint for resource attribute defaults.
+    Callers that already know the absolute path (e.g. :class:`SessionManager`
+    direct-write callers) may override via ``file_path``; the ``cwd``
+    argument is then only used as a hint for resolving the default.
+
+    ``scenario_name`` is accepted for API compatibility but is **not**
+    stamped onto the resource — atoms that want to record it should
+    emit it as a span / log attribute (the observability atom does
+    via ``agentm.session.scenario``).
 
     The same file holds both spans and logs interleaved — the OTLP shape
     per line is what disambiguates them on read.
@@ -398,14 +602,9 @@ def setup_session_telemetry(
     ``max_queue_size`` is hit is to drop; we set queue size large enough
     that overflow is rare, and tests assert no drops at this size).
     """
-    resource_attrs: dict[str, str] = {
-        "service.name": "agentm",
-        "service.version": _agentm_version(),
-        "agentm.session.id": session_id,
-    }
-    if scenario_name is not None:
-        resource_attrs["agentm.scenario.name"] = scenario_name
-    resource = Resource.create(resource_attrs)
+    del scenario_name  # No longer on the resource; observability atom emits as attribute.
+
+    tracer_provider, logger_provider = setup_process_telemetry()
 
     if file_path is None:
         file_path = Path(cwd) / ".agentm" / "observability" / f"{session_id}.jsonl"
@@ -421,30 +620,31 @@ def setup_session_telemetry(
         else min(512, max_queue_size)
     )
 
-    tracer_provider = TracerProvider(resource=resource)
-    tracer_provider.add_span_processor(
-        BlockingBatchSpanProcessor(
-            span_exporter,
-            max_queue_size=max_queue_size,
-            schedule_delay_millis=schedule_delay_millis,
-            export_timeout_millis=export_timeout_millis,
-            max_export_batch_size=effective_batch_size,
-        )
+    span_processor = BlockingBatchSpanProcessor(
+        span_exporter,
+        max_queue_size=max_queue_size,
+        schedule_delay_millis=schedule_delay_millis,
+        export_timeout_millis=export_timeout_millis,
+        max_export_batch_size=effective_batch_size,
+        session_id_filter=session_id,
     )
+    tracer_provider.add_span_processor(span_processor)
 
-    logger_provider = LoggerProvider(resource=resource)
-    logger_provider.add_log_record_processor(
-        BlockingBatchLogRecordProcessor(
-            log_exporter,
-            max_queue_size=max_queue_size,
-            schedule_delay_millis=schedule_delay_millis,
-            export_timeout_millis=export_timeout_millis,
-            max_export_batch_size=effective_batch_size,
-        )
+    log_processor = BlockingBatchLogRecordProcessor(
+        log_exporter,
+        max_queue_size=max_queue_size,
+        schedule_delay_millis=schedule_delay_millis,
+        export_timeout_millis=export_timeout_millis,
+        max_export_batch_size=effective_batch_size,
+        session_id_filter=session_id,
     )
+    logger_provider.add_log_record_processor(log_processor)
 
-    tracer = tracer_provider.get_tracer(_SCOPE_NAME, _agentm_version())
-    logger = logger_provider.get_logger(_SCOPE_NAME, _agentm_version())
+    # Per-session instrument scope: gives consumers a join point in addition
+    # to the ``agentm.session.id`` attribute stamped by atoms.
+    scope_name = f"{_SCOPE_NAME}.session.{session_id}"
+    tracer = tracer_provider.get_tracer(scope_name, _agentm_version())
+    logger = logger_provider.get_logger(scope_name, _agentm_version())
 
     return SessionTelemetry(
         session_id=session_id,
@@ -453,6 +653,8 @@ def setup_session_telemetry(
         logger=logger,
         tracer_provider=tracer_provider,
         logger_provider=logger_provider,
+        span_processor=span_processor,
+        log_processor=log_processor,
         span_exporter=span_exporter,
         log_exporter=log_exporter,
     )

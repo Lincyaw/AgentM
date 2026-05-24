@@ -186,18 +186,21 @@ class _SessionTelemetryHolder:
 
     Telemetry is a **default-pluggable** axis like :class:`_ResourceWriterHolder`:
     the substrate has a working default (``setup_session_telemetry`` from
-    :mod:`agentm.core.runtime.otel_export`, which wires up the per-session
-    OTLP/JSON ndjson exporters), so the slot pre-populates with a *factory*
-    rather than a live handle — construction is deferred to the first
+    :mod:`agentm.core.runtime.otel_export`, which attaches a per-session
+    SpanProcessor + LogRecordProcessor to the **process-level** OTel
+    providers — PR-H), so the slot pre-populates with a *factory* rather
+    than a live handle — construction is deferred to the first
     :meth:`_ExtensionAPIImpl.get_session_telemetry` call so tests / sessions
     that never read telemetry pay no cost.
 
     On first construction the holder also installs a ``SessionShutdownEvent``
     handler on the session bus that calls :meth:`SessionTelemetry.shutdown`,
-    so the batch-processor threads + file handles drain cleanly when the
-    session ends. ``SessionTelemetry.shutdown`` is itself idempotent
-    (PR-A), so an explicit shutdown by the atom + the bus-driven teardown
-    is safe.
+    so the per-session batch processors drain and are removed from the
+    global providers when the session ends. The providers themselves
+    outlive the session and are torn down once at process exit by an
+    ``atexit`` hook registered inside ``setup_process_telemetry``.
+    ``SessionTelemetry.shutdown`` is itself idempotent so an explicit
+    shutdown by the atom + the bus-driven teardown is safe.
 
     Sharing one holder across every :class:`_ExtensionAPIImpl` instance for
     a session means later atoms see the same telemetry handle as the first
