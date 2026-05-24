@@ -36,14 +36,29 @@ extensions:
           graph**: every directed edge `from_service → to_service`
           that the data supports during the abnormal window, where
           `from` is the service whose anomaly causes `to`'s anomaly.
-          This is the fault-impact direction, not necessarily the
-          request-call direction. The graph radiates from the
-          injection target outwards through multiple hops — direct
-          callers, their callers, and so on — until the impact dies
-          out. A report containing only the first hop is incomplete.
-          Each edge carries one or more `{sql, claim}` evidence pairs
-          that re-execute against the parquets and justify the edge
-          in one sentence.
+          This is the fault-impact direction, not the request-call
+          direction. The graph radiates from the injection target
+          outwards through multiple hops — direct callers, their
+          callers, and so on — until the impact dies out. A report
+          containing only the first hop is incomplete. Each edge
+          carries one or more `{sql, claim}` evidence pairs that
+          re-execute against the parquets and justify the edge in
+          one sentence.
+
+          **Edge semantics by fault category.** For faults that live
+          inside a single service's pod / process (pod_failure,
+          pod_unavailable, cpu_stress, mem_stress, jvm_*, dns_*,
+          clock_skew), `from` is that service — the target — and
+          edges fan out to its callers. For faults that live on the
+          link between two services (network_delay / loss /
+          partition / corrupt / duplicate / bandwidth_limit and the
+          http_* family), the rule physically sits on ONE side of
+          the link — usually the service named as
+          `injection_point.source_service` (or `app_name` for the
+          http_* variants). That side is the `from`; the peer at
+          the other end of the link is the `to`. Propagation then
+          continues from the rule-bearing side outward through its
+          callers.
 
         Service names must match the parquet `service_name` column
         exactly. Always emit one tool_call per turn; the only way to
