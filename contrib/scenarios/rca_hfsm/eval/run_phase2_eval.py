@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from agentm.core.abi import TraceReader
 from dotenv import load_dotenv
 
 # Repo paths -----------------------------------------------------------------
@@ -117,60 +118,33 @@ def _local_grade(
     raw_payload = ""
     found_report = False
     if jsonl_path is not None and jsonl_path.is_file():
-        try:
-            with jsonl_path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(rec, dict):
-                        continue
-                    # OTLP/JSON shape: walk spans for
-                    # ``execute_tool submit_final_report`` and decode
-                    # the JSON-encoded ``gen_ai.tool.call.arguments``
-                    # attribute.
-                    for scope_spans in rec.get("scopeSpans", []) or []:
-                        for span in scope_spans.get("spans", []) or []:
-                            if span.get("name") != "execute_tool submit_final_report":
-                                continue
-                            args = None
-                            for attr in span.get("attributes", []) or []:
-                                if attr.get("key") != "gen_ai.tool.call.arguments":
-                                    continue
-                                v = attr.get("value") or {}
-                                raw = (
-                                    v.get("stringValue")
-                                    if isinstance(v, dict)
-                                    else None
-                                )
-                                if isinstance(raw, str) and raw:
-                                    try:
-                                        args = json.loads(raw)
-                                    except (TypeError, ValueError):
-                                        args = None
-                            if not isinstance(args, dict):
-                                continue
-                            found_report = True
-                            raw_payload = json.dumps(args)
-                            # rca_hfsm's submit_final_report schema is a
-                            # single ``root_cause`` string +
-                            # ``supporting_observations`` list, NOT the
-                            # rca scenario's ``root_causes[]`` of
-                            # {service, fault_kind} structs. So we scan
-                            # the whole args blob lowercased for the
-                            # expected tokens.
-                            for rc in args.get("root_causes") or []:
-                                if isinstance(rc, dict):
-                                    if isinstance(rc.get("service"), str):
-                                        services.append(rc["service"])
-                                    if isinstance(rc.get("fault_kind"), str):
-                                        fault_kinds.append(rc["fault_kind"])
-        except OSError:
-            pass
+        # OTLP/JSON shape: walk spans for ``execute_tool
+        # submit_final_report`` via :class:`TraceReader` and decode the
+        # JSON-encoded ``gen_ai.tool.call.arguments`` attribute. rca_hfsm's
+        # submit_final_report schema is a single ``root_cause`` string +
+        # ``supporting_observations`` list, NOT the rca scenario's
+        # ``root_causes[]`` of {service, fault_kind} structs. We scan the
+        # whole args blob lowercased for the expected tokens.
+        for span in TraceReader(jsonl_path).iter_spans(
+            name="execute_tool submit_final_report"
+        ):
+            raw = span.attributes.get("gen_ai.tool.call.arguments")
+            if not isinstance(raw, str) or not raw:
+                continue
+            try:
+                args = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(args, dict):
+                continue
+            found_report = True
+            raw_payload = json.dumps(args)
+            for rc in args.get("root_causes") or []:
+                if isinstance(rc, dict):
+                    if isinstance(rc.get("service"), str):
+                        services.append(rc["service"])
+                    if isinstance(rc.get("fault_kind"), str):
+                        fault_kinds.append(rc["fault_kind"])
 
     raw_blob = (
         raw_payload

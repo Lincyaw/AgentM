@@ -36,7 +36,7 @@ from typing import Any, Final, TypedDict
 
 import yaml
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.abi import FunctionTool, TextContent, ToolResult, TraceReader
 from agentm.core.abi.messages import AssistantMessage
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
@@ -656,65 +656,11 @@ def _read_trace_cost_usd(cwd: Path, session_id: str) -> float:
     if not trace_path.is_file():
         return 0.0
     total = 0.0
-    try:
-        with trace_path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    line_dict = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(line_dict, dict):
-                    continue
-                for scope_logs in line_dict.get("scopeLogs", []) or []:
-                    for record in scope_logs.get("logRecords", []) or []:
-                        if record.get("eventName") != "agentm.turn.summary":
-                            continue
-                        body = _unwrap_otlp(record.get("body"))
-                        if not isinstance(body, dict):
-                            continue
-                        cost = body.get("cost_usd")
-                        if isinstance(cost, (int, float)):
-                            total += float(cost)
-    except OSError:
-        return 0.0
+    for body in TraceReader(trace_path).load_turn_summaries():
+        cost = body.get("cost_usd")
+        if isinstance(cost, (int, float)):
+            total += float(cost)
     return total
-
-
-def _unwrap_otlp(value: Any) -> Any:
-    """Tiny OTLP proto-JSON tagged-union unwrapper (kvlistValue +
-    primitives). Kept local to this atom so the §11 import allow-list
-    stays satisfied — atoms can't reach into ``core.runtime.otel_export``.
-    """
-    if not isinstance(value, dict):
-        return value
-    if "stringValue" in value:
-        return value["stringValue"]
-    if "boolValue" in value:
-        return value["boolValue"]
-    if "intValue" in value:
-        try:
-            return int(value["intValue"])
-        except (TypeError, ValueError):
-            return value["intValue"]
-    if "doubleValue" in value:
-        try:
-            return float(value["doubleValue"])
-        except (TypeError, ValueError):
-            return value["doubleValue"]
-    if "kvlistValue" in value:
-        out: dict[str, Any] = {}
-        for item in value["kvlistValue"].get("values", []) or []:
-            key = item.get("key")
-            if not isinstance(key, str):
-                continue
-            out[key] = _unwrap_otlp(item.get("value"))
-        return out
-    if "arrayValue" in value:
-        return [_unwrap_otlp(v) for v in value["arrayValue"].get("values", []) or []]
-    return value
 
 
 def _normalize_grade(value: Any) -> GradeResult:

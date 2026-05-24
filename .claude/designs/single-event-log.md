@@ -276,27 +276,53 @@ with `gen_ai.operation.name=chat`, one `agentm.session.ready` log record,
 one `agentm.turn.summary` per turn, and one `agentm.session.end` at
 shutdown — all with the expected gen_ai semconv attributes.
 
-## Known follow-up: extract a TraceReader API
+## TraceReader API
 
-The OTLP-unwrap helper (a small recursive function that walks the proto-JSON
-tagged-union shape into plain Python) is currently duplicated across
-`tool_query_traces`, `tool_eval_run`, `tool_guard_watch`, the llmharness
-CLIs, and both rca graders. The duplication is intentional under §11 (atoms
-can't import from `core.runtime.*`), but it's a maintenance hazard: a bug
-in one copy stays hidden until that specific reader hits the affected
-shape, and any future shape extension (e.g. encoding bytes attributes)
-needs N edits.
+**Status:** Landed (PR-G, see "Followups identified during landing" below).
+Previously every reader (`tool_query_traces`, `tool_eval_run`,
+`tool_guard_watch`, the llmharness CLIs, both rca graders, plus the core
+substrate's `SessionManager` and the catalog indexer) carried its own
+copy of the proto-JSON tagged-union unwrapper and its own `scopeSpans` /
+`scopeLogs` walk. PR-G extracted that into
+`src/agentm/core/runtime/trace_reader.py` and re-exported the read-only
+surface (`TraceReader`, `Span`, `LogRecord`, `attr`) through
+`agentm.core.abi`, so atoms stay §11-clean while sharing the parser.
 
-**PR-G in the followup queue** will lift this into a published `TraceReader`
-API — likely a small read-only surface in a new published package or under
-`core.lib` — so atoms can depend on the unwrap layer the same way they
-already depend on `agentm.core.lib.to_jsonable`. The §11 boundary stays
-satisfied because the new surface is pure-function read-only over OTLP/JSON,
-not a window into runtime state.
+The surface is intentionally small and lazy — every iterator is a
+generator over the file, so callers never materialise a whole trace into
+memory unless they explicitly ask via a `load_*` accessor.
 
-Tracking note: when PR-G lands, every `_unwrap_otlp` copy in this
-repository should be deleted in the same commit. Grep for `_unwrap_otlp`
-to find them.
+Public surface:
+
+```python
+from agentm.core.abi import TraceReader, Span, LogRecord, attr
+
+reader = TraceReader(path)
+
+# Generic walks (filter by name + attribute equality, lazy):
+reader.iter_spans(name=None, attribute_filters=None)
+reader.iter_log_records(name=None, attribute_filters=None, parent_span_id=None)
+reader.iter_all()  # interleaves spans + logs in file order
+
+# Convenience accessors (eager, list-returning where order matters):
+reader.load_session_header()       # -> dict | None
+reader.load_session_fingerprint()  # -> dict | None
+reader.load_messages()             # -> list[dict]
+reader.load_turn_summaries()       # -> list[dict]
+reader.chat_calls()                # -> Iterator[Span]
+reader.tool_calls()                # -> Iterator[(Span, LogRecord?, LogRecord?)]
+
+attr(obj, key, default=None)       # terse attribute lookup
+```
+
+`Span` and `LogRecord` are frozen dataclasses with attributes already
+unwrapped from OTLP tagged-union form: a `kvlistValue` becomes a `dict`,
+an `intValue` becomes an `int`, etc. The raw element is preserved in
+`.raw` for callers that need to peek at fields the dataclass does not
+surface.
+
+The reader skips malformed lines silently — the writer is append-only,
+so a partial last line during a crash should not crash readers.
 
 ## Followups identified during landing
 
@@ -308,8 +334,13 @@ Recorded here so they don't get lost; PR briefs to follow when dispatched.
 - **PR-F** — Declarative `Event → OTel` mapping via per-class `to_otel()`
   method (or registered translator), eliminating the giant translator
   switch in `observability.install`.
-- **PR-G** — `TraceReader` API in core, closing the OTLP-unwrap duplication
-  flagged above.
+- **PR-G** — Landed. `TraceReader` API extracted into
+  `core.runtime.trace_reader` and re-exported via `agentm.core.abi`;
+  every reader (`SessionManager`, the catalog indexer, the three
+  `tool_*` atoms, the llmharness CLIs, both rca graders, the rca_hfsm
+  Phase 2 runner) now depends on it. See the "TraceReader API" section
+  above for the surface; `tests/unit/core/test_trace_reader.py` locks
+  it down.
 - **PR-H** — Process-level `TracerProvider` with `session_id` moved from
   resource attribute to span attribute, aligning with OTel ecosystem
   assumptions about one provider per process.
