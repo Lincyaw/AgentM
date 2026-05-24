@@ -1523,6 +1523,23 @@ def _agent_end_to_otel(
 
     del AgentMessage  # used only via duck-typed iteration
     session_id = telemetry.session_id
+    # Close the trailing turn span first — turn spans are late-closed (see
+    # _turn_start_to_otel), so the last turn's span is still open at this
+    # point. Without this its parent invoke_agent span would end first and
+    # the orphan would only get cleaned up by the SessionShutdown fallback
+    # at UNSET status.
+    trailing_turn_span = telemetry.current_turn_span
+    if trailing_turn_span is not None:
+        trailing_turn_span.set_status(Status(StatusCode.OK))
+        trailing_turn_span.end()
+        stale_tracker_keys = [
+            tracker_key
+            for tracker_key, tracked in telemetry.span_tracker.items()
+            if tracked is trailing_turn_span
+        ]
+        for tracker_key in stale_tracker_keys:
+            telemetry.span_tracker.pop(tracker_key, None)
+        telemetry.current_turn_span = None
     span = telemetry.pop_span(_SPAN_INVOKE_AGENT, session_id)
     cause = self.cause
     cause_attrs: dict[str, Any] = {
@@ -1694,12 +1711,39 @@ def _turn_start_to_otel(
     flattening directly under ``invoke_agent``. The span name is
     intentionally AgentM-private (``agentm.turn``) — GenAI semconv has no
     "turn" concept.
+
+    **Late-close pairing.** The previous turn's span is closed *here*, not
+    in :func:`_turn_end_to_otel`. ``TurnEndEvent`` fires the moment the LLM
+    response is decoded — before this turn's resulting ``ToolCallEvent`` /
+    ``ToolResultEvent`` pair, which are owned by the same logical turn.
+    Ending the span at TurnEnd time would orphan those tool spans
+    (no parent — agent loop already moved past the LLM response by then).
+    So we keep the turn span open through the tool-execution gap and only
+    close it when the next TurnStart fires (or when the agent ends, see
+    :func:`_agent_end_to_otel`).
     """
     telemetry.turn_state["turn_start_ns"] = time.time_ns()
     telemetry.turn_state["previous_tool_errors"] = telemetry.turn_state[
         "current_tool_errors"
     ]
     telemetry.turn_state["current_tool_errors"] = 0
+    # Close the previous turn's still-open span, if any. The attributes
+    # (usage / tool_call_count / stop_reason) were already stamped by
+    # _turn_end_to_otel; we only need to set status + end here.
+    prev_turn_span = telemetry.current_turn_span
+    if prev_turn_span is not None:
+        prev_turn_span.set_status(Status(StatusCode.OK))
+        prev_turn_span.end()
+        # Drop the tracker entry the previous TurnStart added — we look up
+        # by turn_id and don't know it cheaply here, so scan once. Tracker
+        # size stays at most ``turn_count`` so the cost is bounded.
+        stale_keys = [
+            key
+            for key, span in telemetry.span_tracker.items()
+            if span is prev_turn_span
+        ]
+        for key in stale_keys:
+            telemetry.span_tracker.pop(key, None)
     parent_span = telemetry.span_tracker.get(
         (_SPAN_INVOKE_AGENT, telemetry.session_id)
     )
@@ -1765,10 +1809,11 @@ def _turn_end_to_otel(
         attrs["gen_ai.usage.output_tokens"] = usage.output_tokens
         attrs["gen_ai.usage.cache_read_tokens"] = usage.cache_read
         attrs["gen_ai.usage.cache_write_tokens"] = usage.cache_write
-    # Close the matching ``agentm.turn`` span; stamp usage / stop_reason /
-    # cache attributes (a strict superset of the log-record attributes so
-    # span-only consumers can still surface per-turn cost).
-    turn_span = telemetry.pop_span(_SPAN_TURN, str(self.turn_id))
+    # Stamp turn-summary attributes on the open span but do NOT close it
+    # yet — see _turn_start_to_otel for the late-close rationale. The
+    # span stays in span_tracker / current_turn_span so ToolCall and
+    # ToolResult events that follow can still find it as their parent.
+    turn_span = telemetry.span_tracker.get((_SPAN_TURN, str(self.turn_id)))
     if turn_span is not None:
         turn_span.set_attribute("agentm.turn.duration_ns", duration_ns)
         turn_span.set_attribute("agentm.turn.tool_call_count", len(tool_calls))
@@ -1792,10 +1837,6 @@ def _turn_end_to_otel(
             turn_span.set_attribute(
                 "gen_ai.usage.cache_write_tokens", usage.cache_write
             )
-        turn_span.set_status(Status(StatusCode.OK))
-        turn_span.end()
-    if telemetry.current_turn_span is turn_span:
-        telemetry.current_turn_span = None
     telemetry.emit_log("agentm.turn.summary", body=body, attributes=attrs)
     telemetry.turn_state["previous_tool_errors"] = 0
 
