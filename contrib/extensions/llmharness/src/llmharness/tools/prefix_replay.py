@@ -104,14 +104,20 @@ def locate_source_session_file(
 ) -> Path:
     """Find the session JSONL whose id matches ``root_session_id``.
 
-    Matches the ``JsonlSessionStore.open`` convention: the on-disk file
-    is named ``<timestamp>_<id>.jsonl``. Raises :class:`PrefixReplayError`
-    if no match.
+    Matches the ``JsonlSessionStore.open`` convention. Post single-event-
+    log merge (.claude/designs/single-event-log.md) files are named
+    ``<session_id>.jsonl``; the trailing glob still resolves legacy
+    ``<timestamp>_<id>.jsonl`` artefacts for sessions written before the
+    rename. Raises :class:`PrefixReplayError` if no match.
     """
+
+    direct = session_dir / f"{root_session_id}.jsonl"
+    if direct.is_file():
+        return direct
     matches = sorted(session_dir.glob(f"*_{root_session_id}.jsonl"))
     if not matches:
         raise PrefixReplayError(
-            f"no session file matching *_{root_session_id}.jsonl under {session_dir}"
+            f"no session file matching {root_session_id} under {session_dir}"
         )
     return matches[0]
 

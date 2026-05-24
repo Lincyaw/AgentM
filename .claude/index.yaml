@@ -57,7 +57,14 @@ concepts:
   observability:
     description: "Per-session OTel-flavored JSONL diagnostic stream complementary to trajectory. Single principle: every signal goes through the bus. EventBus exposes EventBusObserver + emit_sync (sync handlers only, async skipped). New bus events: ApiRegisterEvent / ApiSendUserMessageEvent (harness, emit_sync from ExtensionAPI), LlmRequestStartEvent / LlmRequestEndEvent (kernel, around stream_fn drain in AgentLoop with try/except for error path), ExtensionInstallEvent (harness, around load_extension). observability builtin is a pure subscriber + Observer installed via ExtensionAPI.add_observer; no EventBus or ExtensionAPI monkey-patching. Records: session.start/ready/end, extension.install, api.register, api.send_user_message, llm.request.start/end, event.dispatch, handler.invoke, turn.summary. Writes to <cwd>/.agentm/observability/<trace_id>.jsonl, flushed per record. evolution_substrate extends session.start with active-set fingerprint binding the trace to exact (core, scenario, atom_versions) tuple."
     design: "designs/observability.md"
-    related_concepts: [pluggable_architecture, extension_as_scenario, evolution_substrate, self_modifiable_architecture, textual_tui, per_task_evolution_loop]
+    related_concepts: [pluggable_architecture, extension_as_scenario, evolution_substrate, self_modifiable_architecture, textual_tui, per_task_evolution_loop, single_event_log]
+    plans: []
+    tasks: []
+
+  single_event_log:
+    description: "Collapses the two parallel JSONL streams (SessionManager trajectory file under ~/.agentm/sessions/ and observability event file under <cwd>/.agentm/observability/) into one per-session event log under the observability path. SessionManager._append_record no longer writes its own file; instead it dispatches a MessageAppendedEvent through the EventBus, and the observability writer picks it up like any other event. continue_recent reads the same single file and filters kind==message.appended to rebuild the in-memory trajectory. All writes go through one bounded async queue with batched flush (N entries or T ms); backpressure blocks the producer rather than drops, because once merged the queue is authoritative for conversation state. before_send_to_llm stops carrying the full messages payload — consumers reconstruct from prior message.appended events. Drops the chars+sha256_prefix redaction layer (the O(N²) duplication it was working around disappears with the merge). Acceptance: ≤5% wall-clock regression on a 30-turn verifier session, no event loss under 10k-event bursts, atexit + signal hook drain on shutdown."
+    design: "designs/single-event-log.md"
+    related_concepts: [observability, pluggable_architecture, agent_loop, evolution_substrate]
     plans: []
     tasks: []
 
