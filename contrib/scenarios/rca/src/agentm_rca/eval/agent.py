@@ -225,6 +225,20 @@ class AgentMAgent(BaseAgent):
         self._chained_fork = _coerce_bool(chained_fork, default=False)
         self._max_interventions = _coerce_max_interventions(max_interventions, 10)
 
+        # Stay lenient on unknown kwargs (stale eval YAMLs survive), but
+        # surface them at WARNING so a hand-edited config still pointing
+        # at pre-refactor flag names (intervention_mode / fork_audit /
+        # fork_policy / control_scenario / branch_scenario) doesn't
+        # silently degrade to a vanilla control session.
+        if _extra:
+            _logger.warning(
+                "AgentMAgent: ignoring unknown kwargs %s. "
+                "Pre-refactor names like intervention_mode / fork_policy / "
+                "fork_audit / control_scenario / branch_scenario are removed; "
+                "use chained_fork=true and max_interventions=N instead.",
+                sorted(_extra.keys()),
+            )
+
     @staticmethod
     def name() -> str:
         return "agentm"
