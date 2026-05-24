@@ -1,12 +1,12 @@
 name: verifier
 description: >
-  Default fault-injection verifier. Single agent, 7 atoms. Tools:
-  get_injection_spec, list_tables, query_sql,
-  submit_propagation_report. Output is the service-level
-  fault-propagation graph (edges only) with SQL evidence per hop.
-  Reuses the rca scenario's DuckDB+parquet data layout via
-  AGENTM_RCA_DATA_DIR. For the skills-augmented variant (methodology
-  + per-fault-kind diagnostic signatures), use ``verifier:skills``.
+  Fault-injection verifier. Single agent. Tools: get_injection_spec,
+  list_tables, query_sql, submit_propagation_report. Output is the
+  service-level fault-propagation graph (edges only) with SQL
+  evidence per hop. Bundled skills (methodology + per-fault-kind
+  signatures) are loaded into the system prompt for diagnostic
+  guidance. Reuses the rca scenario's DuckDB+parquet data layout via
+  AGENTM_RCA_DATA_DIR.
 
 extensions:
   - module: agentm.extensions.builtin.operations_local
@@ -18,6 +18,17 @@ extensions:
   - module: contrib.extensions.verifier_fault_context
   - module: contrib.extensions.verifier_finalize
   - module: agentm.extensions.builtin.observability
+
+  # Skill bundle: methodology + fault-signatures. ``verifier_skills``
+  # publishes the skills/ directory via ResourcesDiscoverEvent;
+  # ``skill_loader`` reads the hook and splices SKILL.md bodies into
+  # the system prompt.
+  - module: contrib.extensions.verifier_skills
+  - module: agentm.extensions.builtin.skill_loader
+    config:
+      include_defaults: false
+      inherit_claude: false
+
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: |
@@ -25,7 +36,8 @@ extensions:
         data. `get_injection_spec` returns what was injected and the
         normal / abnormal time windows; `list_tables` and `query_sql`
         let you read the parquets; `submit_propagation_report` ends
-        the session.
+        the session. Consult the verifier-methodology and
+        fault-signatures skills loaded above for guidance.
 
         Output is **service-level only**. The report has two parts:
 
