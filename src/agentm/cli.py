@@ -549,19 +549,20 @@ def run_cmd(
 ) -> None:
     """Send a single prompt and print the agent's final text."""
 
-    # Resolve provider/model/cwd at invocation time so ``--cwd /b`` actually
-    # selects ``/b/.env`` (rather than whichever directory the process was
-    # launched from), and so ``--provider openai`` picks OpenAI's default
-    # model instead of inheriting another provider's default that happened
-    # to be frozen into the typer signature at import.
+    # ``.env`` must load BEFORE provider/model resolution: if the user
+    # only set AGENTM_PROVIDER / AGENTM_MODEL in ``.env`` (not in the
+    # shell), ``_resolve_provider_model_cwd`` would otherwise read an
+    # unset env and fall through to the registry default (anthropic),
+    # silently picking the wrong backend. Compute cwd inline using the
+    # same precedence ``_resolve_provider_model_cwd`` will apply, so
+    # ``--cwd /b`` still consults ``/b/.env`` not the process cwd.
+    pre_cwd = cwd or os.environ.get("AGENTM_CWD") or os.getcwd()
+    autoload_dotenv(Path(pre_cwd))
     provider, model, cwd = _resolve_provider_model_cwd(
         provider_flag=provider,
         model_flag=model,
         cwd_flag=cwd,
     )
-    # Run dotenv autoload AFTER --cwd is known: ``cd /a && agentm --cwd /b``
-    # must consult ``/b/.env``, not ``/a/.env``. Honours AGENTM_SKIP_DOTENV.
-    autoload_dotenv(Path(cwd))
 
     extra_extensions = _parse_extensions(extension)
     # No --scenario? Resolve via AGENTM_SCENARIO, falling back to the
