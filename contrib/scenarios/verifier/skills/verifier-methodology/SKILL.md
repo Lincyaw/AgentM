@@ -52,6 +52,27 @@ different causal readings depending on whether the injection is on
 X, Y, the network between them, or a shared dependency — the
 mechanism field disambiguates.
 
+## Edges around link-type faults
+
+Some faults — the `network_*` family and the `http_*` family —
+are not inside a single service's process but on a *link* between
+two services. The chaos rule (tc netem, iptables, or an HTTP
+proxy) is installed at exactly one of the two endpoints; that
+endpoint is the rule-bearing side, and the peer at the other end
+of the link is observed to be unreachable / slow / malformed from
+its perspective. The injection spec records the rule-bearing side
+under `injection_point.source_service` (or `app_name` for the
+http_* variants); the peer is `target_service` (or
+`server_address`).
+
+For these faults, write the link-spanning edge as `rule-bearing
+side → peer`. The rule-bearing side is the originator of the
+fault, the peer is the part of the world that side fails to
+communicate with. The cascade then continues from the
+rule-bearing side outward through its callers — same as for
+in-pod faults, with the link edge sitting at the head of the
+chain.
+
 ## What good evidence looks like
 
 `sql` is DuckDB SQL that runs against the case parquets and returns
