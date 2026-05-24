@@ -83,10 +83,8 @@ extensions:
       exclude:
         - conclusion.parquet
 
-  # --- observability sinks (JSONL + OTLP). otel_tracing is a no-op
-  # without ``uv sync --extra otel``.
+  # --- observability sink (JSONL OTLP via the Event.to_otel pipeline). ---
   - module: agentm.extensions.builtin.observability
-  - module: agentm.extensions.builtin.otel_tracing
 
   # --- L3 worker dispatch. The investigator persona uses dispatch_agent
   # to fan out verification briefs (built by rca_brief_builder) onto
@@ -111,7 +109,6 @@ extensions:
         - rca_evidence_tools
         - duckdb_sql
         - observability
-        - otel_tracing
         - worker_finalize
       available_inherited_extensions:
         operations_local:
@@ -136,8 +133,6 @@ extensions:
           module: agentm_rca.tools.duckdb_sql
         observability:
           module: agentm.extensions.builtin.observability
-        otel_tracing:
-          module: agentm.extensions.builtin.otel_tracing
         worker_finalize:
           module: agentm_rca.tools.worker_finalize
 

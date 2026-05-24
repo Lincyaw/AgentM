@@ -7,8 +7,8 @@ the rewriter rejects the selection, the sample is dropped.
 
 Both children run as **top-level** AgentM sessions via
 :func:`llmharness.tools.engine.run_phase_standalone` with a minimal
-five-atom extension list (observability + otel_tracing +
-operations_local + submit_tool + system_prompt). No cards, no skills.
+four-atom extension list (observability + operations_local +
+submit_tool + system_prompt). No cards, no skills.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from typing import Any
 from ..audit._atom_constants import (
     OBSERVABILITY_MODULE,
     OPERATIONS_MODULE,
-    OTEL_TRACING_MODULE,
     SYSTEM_PROMPT_MODULE,
 )
 from ..schema import Edge, Event, Finding
@@ -47,13 +46,13 @@ def _read_prompt(name: str) -> str:
 def _minimal_extensions(
     *, submit_module: str, system_prompt: str
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Five-atom audit-child surface — same shape as the live audit children
-    but stripped of cards / skills. observability + otel + operations
-    (substrate freeze) + submit + system_prompt.
+    """Four-atom audit-child surface — same shape as the live audit children
+    but stripped of cards / skills. observability (now also the sole OTLP
+    span/log source via Event.to_otel) + operations (substrate freeze) +
+    submit + system_prompt.
     """
     return [
         (OBSERVABILITY_MODULE, {}),
-        (OTEL_TRACING_MODULE, {}),
         (OPERATIONS_MODULE, {}),
         (submit_module, {}),
         (SYSTEM_PROMPT_MODULE, {"prompt": system_prompt}),
