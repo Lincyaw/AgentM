@@ -24,7 +24,7 @@ of "drive the audit pipeline over a trajectory":
 |---|---|---|---|---|
 | 1 | `adapters/agentm.py::_drain_extractor` + `_drain_auditor` | `api.session.get_branch()` (live session log) | `api.spawn_child_session` | `api.session.append_entry` |
 | 2 | `replay/runner.py::replay_extractor_record` / `replay_auditor_record` | a single recorded `ReplayRecord` | `tools.engine.run_phase_standalone` (top-level session) | nothing |
-| 3 | `replay/strict_ab.py::run_offline_auditor_over_control` | sidecar's `phase=='extractor'` records, folded ad-hoc | `replay_auditor_record` | nothing |
+| 3 | `replay/chained_fork.py::run_chained_fork_experiment` (was `replay/strict_ab.py::run_offline_auditor_over_control` pre-2026-05-24) | re-runs the offline pipeline over each segment's trajectory | `StandaloneChildRunner` (via `replay_pipeline_over_trajectory`) | `InMemorySink` |
 
 The duplication has three concrete costs:
 
@@ -52,12 +52,15 @@ The duplication has three concrete costs:
    "circular" failure mode of "to offline-replay you need a sidecar; to
    produce a sidecar you need a live run" falls out directly.
 
-Downstream pain: the `baseline_fork` intervention in
-`agentm_rca/eval/agent.py` is forced to use
+Downstream pain: the (now-removed) `baseline_fork` intervention in
+`agentm_rca/eval/agent.py` was forced to use
 `rca:harness.sync.extractor5` (extractor online, auditor off) as its
-control variant — there is no way to start from a pure `rca:baseline`
+control variant — there was no way to start from a pure `rca:baseline`
 trajectory and add extractor + auditor retroactively, because no code
-path turns bare messages into extractor firings.
+path turned bare messages into extractor firings. The current
+`chained_fork` intervention solves this directly: it runs every
+segment under the same scenario and synthesises extractor + auditor
+records offline against each segment's captured `final_messages`.
 
 ## 2. Decision
 
@@ -81,7 +84,9 @@ class CumulativeAuditState:
 
     Single source of truth for the cumulative view; replaces both the
     live `_scan_branch` re-read-each-firing pattern and the offline
-    fold inside `run_offline_auditor_over_control`.
+    fold inside the (deleted) `run_offline_auditor_over_control`. The
+    `chained_fork` driver threads the same struct across segment
+    boundaries via `seed_cumulative=`.
     """
     ops: list[GraphOp]
     cursor_last_turn_index: int
@@ -227,11 +232,12 @@ class HarnessRunner:
 ```
 
 `StepResult` carries `{fired_extractor: bool, fired_auditor: bool,
-surfaced_reminder: Reminder | None, auditor_record: ReplayRecord |
-None}`. The `auditor_record` field is populated on every auditor
-firing (even when `sidecar=None`) so offline drivers — notably
-`llmharness.replay.strict_ab.run_offline_auditor_over_control` —
-can capture per-firing records without a disk round-trip.
+surfaced_reminder: Reminder | None, extractor_record: ReplayRecord |
+None, auditor_record: ReplayRecord | None}`. Both record fields are
+populated on every firing (even when `sidecar=None`) so offline
+drivers — notably `llmharness.replay.chained_fork.write_chained_replay`
+— can assemble multi-segment replay sidecars without a disk round-trip
+between segments.
 
 `fire_extractor_from_record` / `fire_auditor_from_record` reconstruct
 the per-firing `ExtractionState` inline from `record.payload` +
@@ -244,8 +250,8 @@ serves the same role and stays scoped to the seam that needs it).
 prompt_override=None)`, `AuditorSettings.from_compose_kwargs(...)`,
 and `AuditorSettings.empty()` are the public constructors callers use
 to rebuild per-firing settings from a recorded `ReplayRecord` (the
-single-firing replay wrappers in `replay/runner.py` and the strict-A/B
-driver both consume them).
+single-firing replay wrappers in `replay/runner.py` and the
+`chained_fork` driver both consume them).
 
 ### 2.1 Three concrete pluggings
 
@@ -335,69 +341,67 @@ async def replay_pipeline_over_trajectory(
                             sidecar_path=sidecar_path)
 ```
 
-`run_offline_auditor_over_control` and the no-cumulative-threading
-behaviour of `chain_replay` both collapse into this single function.
+The (deleted) `run_offline_auditor_over_control` and the
+no-cumulative-threading behaviour of `chain_replay` both collapse into
+this single function; the `chained_fork` driver builds N-segment
+experiments on top by calling it once per segment with the prior
+segment's `state` threaded back in via `seed_cumulative`.
 
 ## 3. End-to-end pipeline (the user-facing goal)
 
 The motivation for the refactor is being able to run, for each case, a
-single pipeline of the form **baseline run → offline extract+audit →
-opinion-driven fork**:
+chained-fork pipeline of the form **control segment → offline
+extract+audit → seed reminder, fork → offline extract+audit → ...** for
+N segments, all under the same scenario:
 
 ```
-┌── one-shot per-case E2E ──────────────────────────────────────────────┐
+┌── one-shot per-case chained-fork ─────────────────────────────────────┐
 │                                                                       │
-│ STEP 1. Baseline phase                                                │
-│   child   = live (api.spawn_child_session)                            │
-│   sink    = NoopSink   (no extractor at all)                          │
-│   scenario = rca:baseline                                             │
-│   → control.final_messages, control.session_log_id                    │
+│ SEGMENT 0 (control)                                                   │
+│   session_factory(initial_messages=None, seed_reminder_text=None)     │
+│     → control.final_messages, control.session_log_id                  │
 │                                                                       │
-│ STEP 2. Offline extract+audit phase                                   │
-│   runner = HarnessRunner(                                             │
+│   offline_run = await replay_pipeline_over_trajectory(                │
+│       messages = control.final_messages,                              │
 │       cumulative = CumulativeAuditState.fresh(),                      │
-│       child      = StandaloneChildRunner(cwd),                        │
-│       sink       = InMemorySink,                                      │
-│       sidecar    = SidecarWriter(<branch_sid>.audit_replay.jsonl),    │
-│       extractor_interval=k, audit_interval=k, enable_auditor=True,    │
+│       stop_on_first_surface = True,                                   │
 │   )                                                                   │
+│   # offline_run carries: reminder, state, all_step_results            │
+│   # (per-firing extractor_record + auditor_record captured even with  │
+│   # sidecar_path=None, so write_chained_replay can stitch later)      │
 │                                                                       │
-│   for turn_count in 1..len(control.messages):                         │
-│       step = await runner.on_trajectory_progress(                     │
-│           control.messages[:turn_count], turn_count=turn_count,       │
-│       )                                                               │
-│       # Inside: cadence decides whether to fire_extractor_once /      │
-│       # fire_auditor_once; cumulative absorbs ops; next firing sees   │
-│       # the updated recent_graph view automatically.                  │
-│       if step.surfaced_reminder is not None:                          │
-│           break                                                       │
+│ for k in 1..max_interventions while a reminder surfaces:              │
+│   SEGMENT k (branch)                                                  │
+│     prefix = _fork_prefix(parent.final_messages, surface_turn_{k-1})  │
+│     # ^ inclusive cut + paired-tool_result bump                       │
+│     branch = await session_factory(                                   │
+│         initial_messages = prefix,                                    │
+│         seed_reminder_text = reminder_{k-1}.text,                     │
+│     )                                                                 │
+│     offline_run = await replay_pipeline_over_trajectory(              │
+│         messages = branch.final_messages,                             │
+│         seed_cumulative = previous.state,                             │
+│         start_turn      = surface_turn_{k-1} + 1,                     │
+│         stop_on_first_surface = True,                                 │
+│     )                                                                 │
 │                                                                       │
-│ STEP 3. Branch phase (only when reminder surfaced)                    │
-│   prefix = _fork_prefix_messages(                                     │
-│       control.messages, turn=step.surfaced_reminder.turn_index,       │
+│ FINALISE                                                              │
+│   write_chained_replay(                                               │
+│       segments, out_path = <final_sid>.chained.jsonl                  │
 │   )                                                                   │
-│   branch = await _execute_session(                                    │
-│       scenario=branch_scenario,                                       │
-│       initial_messages=prefix,                                        │
-│       seed_reminder_text=step.surfaced_reminder.text,                 │
-│   )                                                                   │
-│                                                                       │
-│ STEP 4. Strict-A/B sidecar stitch                                     │
-│   write_strict_ab_replay(                                             │
-│       control_replay_path = offline_sidecar,                          │
-│       branch_replay_path  = branch.audit_replay_path,                 │
-│       ...                                                             │
-│   )                                                                   │
+│   # Each segment k contributes records in [turn_lo_k, turn_hi_k];     │
+│   # all entries rebound to segments[-1].payload.session_log_id.       │
 │                                                                       │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
 A 100-case batch is the same pipeline in a per-case loop, parallelisable
-within provider rate limits. The `baseline_fork` intervention in
-`agentm_rca/eval/agent.py` adopts this pipeline and the
-`_HARNESS_VARIANT_TO_CONTROL` map gains an entry
-`rca:baseline → rca:baseline` — the baseline now is a legitimate control
-because the offline runner supplies what the in-line extractor used to.
+within provider rate limits. The `chained_fork` intervention in
+`agentm_rca/eval/agent.py` is a thin caller: it supplies the
+`SessionFactory` closure that turns `(initial_messages,
+seed_reminder_text)` into an `_SessionRun`; everything else (cadence,
+windowing, cumulative-state threading, sidecar emission) lives inside
+`replay_pipeline_over_trajectory` + `run_chained_fork_experiment`.
 
 ## 4. Acceptance invariants
 
@@ -460,8 +464,9 @@ Phased, no shims, hard-cut per phase:
 |---|---|---|
 | P1 | Land `CumulativeAuditState` + `ChildRunner` / `OpSink` Protocols + `HarnessRunner` (live path only) | live adapter routed through runner; live `_drain_extractor` / `_drain_auditor` shrink to wrappers; existing tests (live sidecar shape) still pass byte-identical |
 | P2 | Land `StandaloneChildRunner` + `InMemorySink` + `replay_pipeline_over_trajectory` | invariant #1 (live ≡ offline) verifiable; `chain_replay` reimplemented over runner with cumulative threading enabled |
-| P3 | Collapse `run_offline_auditor_over_control` + rewrite `replay_extractor_record` / `replay_auditor_record` as thin wrappers | **Shipped:** `HarnessRunner.fire_extractor_from_record` / `fire_auditor_from_record` are the new seams; `replay/runner.py` wrappers route through them. `NoopSink` (in `audit/_offline_seams.py`) is the sink for single-firing replay. `strict_ab.py::run_offline_auditor_over_control` is now a thin caller of `replay_pipeline_over_trajectory(..., enable_auditor=True, stop_on_first_surface=True)`, collecting per-firing auditor records via `StepResult.auditor_record`. Invariant #2 holds. |
-| P4 | Wire `agentm_rca` `baseline_fork` to support `rca:baseline → rca:baseline` via the offline runner | adds entry `rca:baseline → rca:baseline` to `_HARNESS_VARIANT_TO_CONTROL`; `_run_baseline_fork` calls `replay_pipeline_over_trajectory` when `control_scenario == "rca:baseline"`; existing `extractor5`-control variant unchanged |
+| P3 | Collapse `run_offline_auditor_over_control` + rewrite `replay_extractor_record` / `replay_auditor_record` as thin wrappers | **Shipped:** `HarnessRunner.fire_extractor_from_record` / `fire_auditor_from_record` are the new seams; `replay/runner.py` wrappers route through them. `NoopSink` (in `audit/_offline_seams.py`) is the sink for single-firing replay. Invariant #2 holds. |
+| P4 | Wire `agentm_rca` `baseline_fork` to support `rca:baseline → rca:baseline` via the offline runner | **Superseded by P5.** Initially shipped as `_HARNESS_VARIANT_TO_CONTROL[rca:baseline] = rca:baseline` + a baseline-branch inside `_run_baseline_fork`; replaced 2026-05-24 (see P5). |
+| P5 | Replace strict-A/B `baseline_fork` with N-segment `chained_fork` | **Shipped 2026-05-24:** `replay_pipeline_over_trajectory` gains `seed_cumulative` + `start_turn` so segment k+1's auditor sees segment k's verdicts; `StepResult` gains `extractor_record` (mirroring `auditor_record`) so multi-segment sidecars assemble in-process. New driver `llmharness.replay.chained_fork.run_chained_fork_experiment` runs the loop; `write_chained_replay` materialises a single `<final_sid>.chained.jsonl`. `strict_ab.py` deleted; `_HARNESS_VARIANT_TO_CONTROL` deleted (every segment uses the same scenario); `agentm_rca` constructor narrowed to `chained_fork: bool` + `max_interventions: int`. Previously: strict_ab — see git history (commit `7b259e2..c966e24`). |
 
 Each phase is independently revert-able: P1's wrapper preserves the
 existing live behaviour; P2-P4 add capability without changing P1.
