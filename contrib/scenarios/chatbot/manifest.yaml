@@ -1,0 +1,91 @@
+name: chatbot
+description: |
+  Conversational-assistant scenario for chat channels (Feishu, terminal,
+  …) driven through ``agentm-gateway --scenario chatbot``.
+
+  It is ``general_purpose`` (the minimal coding default) plus an identity
+  layer: the ``persona`` contrib atom reads file-driven character from the
+  workspace (SOUL.md / IDENTITY.md / USER.md) and the base prompt frames
+  the agent as a chat assistant rather than a one-shot CLI coder. Nothing
+  here is new mechanism — it is a different *composition* of atoms, which
+  is exactly how scenarios are meant to differ.
+
+  Curate character by editing the markdown files in the workspace; the
+  ``memory`` atom keeps evolving facts (user/project/feedback) across
+  sessions. Both land in the cache-stable system-prompt prefix.
+
+  Floor atoms (``compaction_prompts``, ``slash_commands``) are auto-mounted
+  by the session factory. User atoms under ``<cwd>/.agentm/atoms/`` merge
+  on top so ``api.install_atom`` calls persist across restarts.
+
+extensions:
+  # --- environment ports: local-FS / asyncio-bash Operations bundle.
+  # Listed first so tool atoms calling ``api.get_operations()`` at install
+  # see a registered bundle. ---
+  - module: agentm.extensions.builtin.operations_local
+
+  # --- file I/O + shell: same minimal tool floor as general_purpose. ---
+  - module: agentm.extensions.builtin.tool_read
+  - module: agentm.extensions.builtin.tool_edit
+  - module: agentm.extensions.builtin.tool_write
+  - module: agentm.extensions.builtin.tool_bash
+
+  # --- observability: every turn lands in the JSONL trace store. ---
+  - module: agentm.extensions.builtin.observability
+
+  # --- prompt assembly: a conversational base frame. Persona files and
+  # memory layer on top of this at BeforeAgentStartEvent. ---
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You are a conversational assistant reachable over a chat channel.
+        Replies are read in a chat client, so be concise and direct; lead
+        with the answer, expand only when asked. You hold a continuous
+        relationship with the user across turns and sessions — rely on the
+        persona and memory context below for who you are and who they are,
+        and use the memory tools to remember durable facts they tell you.
+        You have real file and shell tools in the workspace; use them when
+        a request needs action rather than narrating what you would do.
+
+        Your character is file-driven: SOUL.md (voice), IDENTITY.md (who
+        you are), and USER.md (who you are talking to) live in your
+        workspace. You may edit these files with your own tools to refine
+        yourself or to record durable facts about the user — your edits are
+        reloaded into this prompt automatically on your next reply, so no
+        restart is needed. To wipe the conversation and start fresh, the
+        user can send /new.
+  - module: agentm.extensions.builtin.runtime_context
+
+  # --- identity: file-driven persona (SOUL.md / IDENTITY.md / USER.md)
+  # from the workspace. ``defaults`` seed preset starter content into a
+  # fresh workspace on first run (absent files only — never clobbers the
+  # agent's own edits). Edit the files to change character; the next turn
+  # re-reads them. Flat-file contrib atom, auto-discovered. ---
+  - module: _agentm_contrib__persona
+    config:
+      defaults:
+        SOUL.md: |
+          # Soul
+
+          - Warm but terse. Lead with the answer; skip the throat-clearing.
+          - Never sycophantic — no "great question". If you don't know, say so.
+          - Reply in the user's language.
+        IDENTITY.md: |
+          # Identity
+
+          You are a conversational assistant reachable over a chat channel,
+          with real file and shell tools in this workspace. No fixed name
+          yet — adopt one when the user gives you one.
+        USER.md: |
+          # User
+
+          Nothing learned yet. Record durable facts about the user here as
+          you go (name, preferences, ongoing projects).
+
+  # --- skill / template auto-discovery. ---
+  - module: agentm.extensions.builtin.skill_loader
+  - module: agentm.extensions.builtin.prompt_templates
+
+  # --- project-local persistent memory: MEMORY.md index + typed
+  # frontmatter files, the evolving-facts companion to persona. ---
+  - module: agentm.extensions.builtin.memory

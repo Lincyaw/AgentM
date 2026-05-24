@@ -29,19 +29,22 @@ class PeerSession:
     # below high_water / 2.
     backpressure: bool = False
     capabilities: dict[str, object] = field(default_factory=dict)
-    # Authoritative principal bound to the peer at connect time. Used
-    # by the wire bridge to refuse chat clients that try to spoof
-    # someone else's ``sender_id`` in inbound bodies. ``None`` means
-    # "derive from peer_id" — the current default for every transport
-    # (unix/peercred/ws/token) because none of them yet carry a
-    # distinct user identity. When a future authenticator does (e.g.
-    # OIDC subject claim), it should set this field directly so the
-    # bridge picks it up without code changes.
+    # Connection identity bound to the peer at connect time. The wire
+    # bridge uses it as the **fallback author** for inbound bodies that
+    # omit ``sender_id`` (single-user transports carry no per-message
+    # identity). It is NOT compared against a client's reported
+    # ``sender_id`` — a chat client relays many humans, so the
+    # per-message author is the client's to assert; peer impersonation
+    # is prevented by channel binding, not by author equality. ``None``
+    # means "derive from peer_id" — the current default for every
+    # transport (unix/peercred/ws/token). A future authenticator that
+    # learns a distinct identity (e.g. an OIDC subject claim) may set
+    # this directly so the fallback picks it up without code changes.
     principal: str | None = None
 
     @property
     def bound_principal(self) -> str:
-        """The identity the bridge will accept as ``sender_id``.
+        """The fallback author for inbounds that omit ``sender_id``.
 
         Defaults to :attr:`peer_id` when no transport-level principal
         was set. Centralised so callers don't reimplement the fallback.

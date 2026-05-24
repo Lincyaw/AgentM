@@ -44,8 +44,8 @@ caller does not override it. Other variants:
 * `rca:harness.sync` — sync, default for dataset collection.
 * `rca:harness.sync.opinions` / `.opinions10` — sync, auditor verdicts
   recorded but reminders **not** injected (clean trajectory for SFT).
-* `rca:harness.sync.extractor5` — extractor-only control; the control
-  scenario consumed by strict-A/B fork mode.
+* `rca:harness.sync.extractor5` — extractor-only variant (no auditor
+  side channel). Kept around as a cheap pipeline-equivalent baseline.
 * `rca:harness.live` — `harness.sync` + `contrib.extensions.live_inspector`
   WebSocket server. Use for live-watching a single case from the
   aegis-ui `Live Inspect` sub-app. **Don't** use this for dataset-
@@ -84,37 +84,37 @@ Detection is by manifest composition, not by name — the eval driver's
 `llmharness.adapters.agentm` in the extension list. Renaming a variant
 or adding a new one does **not** require any string-pattern update.
 
-### Strict-A/B fork mode (`baseline_fork`)
+### Chained-fork intervention (`chained_fork`)
 
-When running the eval driver with `intervention_mode=baseline_fork` (via
-`rca llm-eval ... --ak intervention_mode=baseline_fork`), the driver:
+When running the eval driver with `--ak chained_fork=true` (optionally
+`--ak max_interventions=N`, defaults to 10), the driver:
 
-1. Spawns a **control** session against `control_scenario` (extractor-
-   only — no auditor side channel — so the prefix is immutable).
-2. Replays the offline auditor over each cumulative graph snapshot to
-   find the first turn that surfaces a reminder
-   (`run_offline_auditor_over_control` from `llmharness`).
-3. Forks a **branch** session from that prefix with
-   `llmharness.replay.reminder_seed` mounted to deliver the recorded
-   reminder.
-4. Writes a unified replay sidecar via `write_strict_ab_replay` so the
-   case viewer sees a single A/B comparison.
+1. Runs a **control** segment against the configured `scenario` —
+   no seeded reminder, no initial messages.
+2. Replays the cognitive-audit pipeline offline over the control
+   trajectory with `stop_on_first_surface=True` to find the first
+   auditor firing that surfaces a reminder.
+3. If a reminder surfaced, forks a **branch** segment from the parent
+   trajectory at that turn with the reminder text seeded into the
+   child session via `llmharness.replay.reminder_seed`. The branch
+   replays under the same scenario.
+4. Repeats step 2-3 for each subsequent branch, threading the prior
+   segment's `CumulativeAuditState` into the next via the offline
+   driver's `seed_cumulative` / `start_turn` knobs. Stops on the first
+   silent auditor or after `max_interventions` branches.
+5. Writes a unified replay sidecar
+   (`<final_branch_session_log_id>.chained.jsonl`) via
+   `write_chained_replay` so the case viewer sees the full N-segment
+   chain.
 
-The control scenario is resolved from `_HARNESS_VARIANT_TO_CONTROL` (top
-of `src/agentm_rca/eval/agent.py`). The current mapping is:
+There is no separate "control scenario" anymore — every segment runs
+the same scenario; only the seeded prefix + reminder text differ.
 
-| Harness variant | Control scenario |
-|---|---|
-| `rca:harness.sync` | `rca:harness.sync.extractor5` |
-| `rca:harness.sync.opinions` | `rca:harness.sync.extractor5` |
-| `rca:harness.sync.opinions10` | `rca:harness.sync.extractor5` |
-
-If the variant is not in the table and no `control_scenario=...` is
-passed explicitly (via `--ak control_scenario=...` or
-`AGENTM_FORK_CONTROL_SCENARIO`), the driver fail-stops with a
-`ValueError`. Add new entries to `_HARNESS_VARIANT_TO_CONTROL` (and
-update [`_VARIANTS.md`](_VARIANTS.md)) when introducing a harness
-variant that should be eligible for fork mode.
+The returned `AgentResult.metadata` carries an `intervention_mode:
+"chained_fork"` entry plus a `chained_fork.segments` list describing
+each segment (`segment_index`, `session_log_id`, `is_control`,
+`fork_turn_index`, `reminder_text`, `surfaced_reminder_turn`, and the
+segment's full `_SessionRun` metadata).
 
 For the llmharness side of this story (public API, replay sidecar
 schema, profile / prompt knobs, prefix-replay flow), see

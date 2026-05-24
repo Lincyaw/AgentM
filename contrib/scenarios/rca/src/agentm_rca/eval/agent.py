@@ -34,7 +34,6 @@ from dataclasses import dataclass
 import json
 import logging
 import os
-from pathlib import Path
 from typing import Any
 
 from rcabench_platform.v3.sdk.llm_eval.agents.base_agent import (
@@ -64,32 +63,6 @@ _DEFAULT_MAX_TURNS = 128
 _EMPTY_AGENT_RCA_OUTPUT: dict[str, list[Any]] = {
     "root_causes": [],
     "propagation": [],
-}
-
-_INTERVENTION_BASELINE_FORK = "baseline_fork"
-_BASELINE_FORK_ALIASES = {
-    "baseline_fork",
-    "baseline-fork",
-    "fork_audit",
-    "fork-audit",
-}
-
-# Registered harness variants → control scenario for strict A/B fork mode.
-# The control scenario is identical to the variant minus the auditor /
-# reminder legs, so the offline auditor side-channel can be replayed
-# against an immutable extractor-only trajectory. Override per-call via
-# ``--ak control_scenario=...`` or ``AGENTM_FORK_CONTROL_SCENARIO``.
-_HARNESS_VARIANT_TO_CONTROL: dict[str, str] = {
-    "rca:harness.sync": "rca:harness.sync.extractor5",
-    "rca:harness.sync.opinions": "rca:harness.sync.extractor5",
-    "rca:harness.sync.opinions10": "rca:harness.sync.extractor5",
-    # Pure baseline as its own control. The control session mounts no
-    # llmharness adapter and produces no audit-replay sidecar; instead
-    # ``_run_baseline_fork`` calls ``replay_pipeline_over_trajectory`` to
-    # synthesise extractor + auditor records retroactively from the
-    # captured ``final_messages``. See `.claude/designs/harness-runner.md`
-    # §3 (P4) for the end-to-end pipeline.
-    "rca:baseline": "rca:baseline",
 }
 
 # Module path of the llmharness cognitive-audit adapter. A scenario that
@@ -176,6 +149,24 @@ def _coerce_max_turns(value: Any, fallback: int) -> int:
     return result if result > 0 else fallback
 
 
+def _coerce_max_interventions(value: Any, fallback: int) -> int:
+    """Coerce ``--ak max_interventions=...`` to a non-negative int.
+
+    Distinct from :func:`_coerce_max_turns` (which floors at 1) because
+    ``max_interventions=0`` is a legitimate setting — it disables every
+    branch and runs only the control segment, which is useful for
+    A/B-baseline experiments that want chained-fork metadata without
+    paying for branch rollouts.
+    """
+    if value is None:
+        return fallback
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return result if result >= 0 else fallback
+
+
 def _coerce_bool(value: Any, *, default: bool = False) -> bool:
     if value is None:
         return default
@@ -214,11 +205,8 @@ class AgentMAgent(BaseAgent):
         provider: str | None = None,
         exp_id: str | None = None,
         max_turns: Any = None,
-        intervention_mode: str | None = None,
-        control_scenario: str | None = None,
-        branch_scenario: str | None = None,
-        fork_audit: Any = None,
-        fork_policy: str = "first_surface",
+        chained_fork: Any = None,
+        max_interventions: Any = None,
         **_extra: Any,
     ) -> None:
         # ``rcabench-platform`` passes ``exp_id`` plus any ``--ak key=value``
@@ -234,46 +222,22 @@ class AgentMAgent(BaseAgent):
         )
         self._exp_id = exp_id
         self._max_turns = _coerce_max_turns(max_turns, _DEFAULT_MAX_TURNS)
-        self._intervention_mode: str | None
-        if intervention_mode:
-            mode = intervention_mode.strip()
-            self._intervention_mode = (
-                _INTERVENTION_BASELINE_FORK
-                if mode in _BASELINE_FORK_ALIASES
-                else mode
+        self._chained_fork = _coerce_bool(chained_fork, default=False)
+        self._max_interventions = _coerce_max_interventions(max_interventions, 10)
+
+        # Stay lenient on unknown kwargs (stale eval YAMLs survive), but
+        # surface them at WARNING so a hand-edited config still pointing
+        # at pre-refactor flag names (intervention_mode / fork_audit /
+        # fork_policy / control_scenario / branch_scenario) doesn't
+        # silently degrade to a vanilla control session.
+        if _extra:
+            _logger.warning(
+                "AgentMAgent: ignoring unknown kwargs %s. "
+                "Pre-refactor names like intervention_mode / fork_policy / "
+                "fork_audit / control_scenario / branch_scenario are removed; "
+                "use chained_fork=true and max_interventions=N instead.",
+                sorted(_extra.keys()),
             )
-        elif _coerce_bool(fork_audit):
-            self._intervention_mode = _INTERVENTION_BASELINE_FORK
-        else:
-            self._intervention_mode = None
-        self._fork_policy = fork_policy
-        explicit_control = (
-            control_scenario or os.environ.get("AGENTM_FORK_CONTROL_SCENARIO")
-        )
-        if explicit_control:
-            self._control_scenario = explicit_control
-        else:
-            mapped_control = _HARNESS_VARIANT_TO_CONTROL.get(scenario)
-            if (
-                self._intervention_mode == _INTERVENTION_BASELINE_FORK
-                and mapped_control is None
-            ):
-                raise ValueError(
-                    f"strict-A/B fork requested for scenario={scenario!r}, "
-                    "but no control scenario is registered for that variant. "
-                    "Either pick a variant in _HARNESS_VARIANT_TO_CONTROL (see "
-                    "contrib/scenarios/rca/_VARIANTS.md), or pass "
-                    "control_scenario=... explicitly "
-                    "(--ak control_scenario=... / AGENTM_FORK_CONTROL_SCENARIO)."
-                )
-            # Non-fork rollouts: control scenario is just the requested
-            # scenario itself — it is unused by ``run``.
-            self._control_scenario = mapped_control or scenario
-        self._branch_scenario = (
-            branch_scenario
-            or os.environ.get("AGENTM_FORK_BRANCH_SCENARIO")
-            or self._control_scenario
-        )
 
     @staticmethod
     def name() -> str:
@@ -288,14 +252,12 @@ class AgentMAgent(BaseAgent):
         data_dir: str,
         **kwargs: Any,
     ) -> AgentResult:
-        if self._intervention_mode == _INTERVENTION_BASELINE_FORK:
-            return await self._run_baseline_fork(
+        if self._chained_fork:
+            return await self._run_chained_fork(
                 incident=incident,
                 data_dir=data_dir,
                 **kwargs,
             )
-        if self._intervention_mode:
-            raise ValueError(f"unknown intervention_mode={self._intervention_mode!r}")
         return await self._run_single_session(
             incident=incident,
             data_dir=data_dir,
@@ -333,132 +295,82 @@ class AgentMAgent(BaseAgent):
             metadata=metadata,
         )
 
-    async def _run_baseline_fork(
+    async def _run_chained_fork(
         self,
         *,
         incident: str,
         data_dir: str,
         **kwargs: Any,
     ) -> AgentResult:
-        if self._fork_policy != "first_surface":
-            raise ValueError(
-                "baseline_fork currently supports only fork_policy='first_surface'"
-            )
-
         from llmharness import (
             AuditorSettings,
+            ChainSegmentPayload,
             ExtractorSettings,
-            run_offline_auditor_over_control,
-            run_offline_auditor_over_trajectory,
-            strict_ab_replay_path,
-            write_strict_ab_replay,
+            run_chained_fork_experiment,
         )
 
-        control = await self._execute_session(
-            incident=incident,
-            data_dir=data_dir,
-            scenario=self._control_scenario,
-            **kwargs,
-        )
-        if self._control_scenario == "rca:baseline":
-            # Pure-baseline control mounts no llmharness adapter, so no
-            # audit_replay sidecar exists on disk. Drive the offline
-            # runner over the captured trajectory to synthesise extractor
-            # + auditor records on the fly.
-            offline_sidecar = _baseline_offline_sidecar_path(
-                os.getcwd(), control.session_log_id
-            )
-            offline_sidecar.parent.mkdir(parents=True, exist_ok=True)
-            offline_audit = await run_offline_auditor_over_trajectory(
-                messages=control.final_messages,
-                cwd=os.getcwd(),
-                root_session_id=control.session_log_id,
-                provider=_build_provider(self._provider, self._model),
-                extractor_settings=ExtractorSettings.default(),
-                auditor_settings=AuditorSettings.default(),
-                sidecar_path=offline_sidecar,
-            )
-        else:
-            offline_audit = await run_offline_auditor_over_control(
-                control_replay_path=Path(control.audit_replay_path),
-                control_session_log_id=control.session_log_id,
-                control_messages=control.final_messages,
-                cwd=os.getcwd(),
-                provider=_build_provider(self._provider, self._model),
-            )
-        reminder = offline_audit.reminder
-        if reminder is None:
-            metadata = dict(control.result.metadata or {})
-            metadata["intervention_mode"] = _INTERVENTION_BASELINE_FORK
-            metadata["intervention_status"] = "no_surface_reminder"
-            metadata["control_scenario"] = self._control_scenario
-            metadata["branch_scenario"] = self._branch_scenario
-            metadata["control"] = _run_metadata(control)
-            metadata["offline_auditor_firings"] = len(offline_audit.records)
-            return AgentResult(
-                response=control.result.response,
-                trajectory=control.result.trajectory,
-                trace_id=control.result.trace_id,
-                metadata=metadata,
-            )
+        # Parallel side-table keyed by session_log_id so we can recover
+        # the full _SessionRun (and its AgentResult / metadata) for each
+        # segment after the experiment finishes. _SessionRun structurally
+        # matches ChainSegmentPayload (both have session_log_id +
+        # final_messages), so the factory returns it directly.
+        session_runs: dict[str, _SessionRun] = {}
 
-        prefix_messages = _fork_prefix_messages(
-            control.final_messages,
-            turn_index=reminder.turn_index,
-        )
-        branch = await self._execute_session(
-            incident=None,
-            data_dir=data_dir,
-            scenario=self._branch_scenario,
-            initial_messages=prefix_messages,
-            seed_reminder_text=reminder.text,
-            **kwargs,
-        )
-        branch_audit = await run_offline_auditor_over_control(
-            control_replay_path=Path(branch.audit_replay_path),
-            control_session_log_id=branch.session_log_id,
-            control_messages=branch.final_messages,
+        async def factory(
+            *,
+            initial_messages: list[Any] | None,
+            seed_reminder_text: str | None,
+        ) -> ChainSegmentPayload:
+            run = await self._execute_session(
+                incident=incident if initial_messages is None else None,
+                data_dir=data_dir,
+                scenario=self._scenario,
+                initial_messages=initial_messages,
+                seed_reminder_text=seed_reminder_text,
+                **kwargs,
+            )
+            session_runs[run.session_log_id] = run
+            return run  # type: ignore[return-value]  # structural match on Protocol
+
+        experiment = await run_chained_fork_experiment(
+            session_factory=factory,
             cwd=os.getcwd(),
             provider=_build_provider(self._provider, self._model),
-            stop_on_first_surface=False,
+            extractor_settings=ExtractorSettings.default(),
+            auditor_settings=AuditorSettings.default(),
+            extractor_interval=5,
+            audit_interval=5,
+            max_interventions=self._max_interventions,
         )
-        if self._control_scenario == "rca:baseline":
-            control_replay_for_stitch = _baseline_offline_sidecar_path(
-                os.getcwd(), control.session_log_id
-            )
-        else:
-            control_replay_for_stitch = Path(control.audit_replay_path)
-        strict_replay_path = str(
-            write_strict_ab_replay(
-                control_replay_path=control_replay_for_stitch,
-                branch_replay_path=Path(branch.audit_replay_path),
-                branch_session_log_id=branch.session_log_id,
-                offline_auditor_records=offline_audit.records,
-                branch_auditor_records=branch_audit.records,
-                reminder=reminder,
-                out_path=strict_ab_replay_path(
-                    os.getcwd(), branch.session_log_id
-                ),
-            )
+
+        final_run = session_runs[experiment.final.payload.session_log_id]
+        metadata = dict(final_run.result.metadata or {})
+        # Chain topology comes straight from the experiment header
+        # (matches the ``<sid>.chained.jsonl`` first-line bundle so
+        # rcabench-platform and downstream tools see the same shape).
+        # Augment with presentational fields the sidecar doesn't carry:
+        # ``base_scenario``, ``chained_replay_path`` (string path), and
+        # per-segment ``run`` summaries from the rca eval driver.
+        chain_meta: dict[str, Any] = dict(experiment.header)
+        chain_meta["base_scenario"] = self._scenario
+        chain_meta["chained_replay_path"] = (
+            str(experiment.chained_replay_path)
+            if experiment.chained_replay_path is not None
+            else None
         )
-        metadata = dict(branch.result.metadata or {})
-        metadata["intervention_mode"] = _INTERVENTION_BASELINE_FORK
-        metadata["intervention_status"] = "forked"
-        metadata["control_scenario"] = self._control_scenario
-        metadata["branch_scenario"] = self._branch_scenario
-        metadata["strict_ab_replay_path"] = strict_replay_path
-        metadata["fork"] = {
-            "policy": self._fork_policy,
-            "turn_index": reminder.turn_index,
-            "reminder_text": reminder.text,
-            "prefix_message_count": len(prefix_messages),
-        }
-        metadata["control"] = _run_metadata(control)
-        metadata["branch"] = _run_metadata(branch)
+        chain_meta["segments"] = [
+            {
+                **seg_header,
+                "run": _run_metadata(session_runs[seg_header["session_log_id"]]),
+            }
+            for seg_header in experiment.header["segments"]
+        ]
+        metadata["intervention_mode"] = "chained_fork"
+        metadata["chained_fork"] = chain_meta
         return AgentResult(
-            response=branch.result.response,
-            trajectory=branch.result.trajectory,
-            trace_id=branch.result.trace_id,
+            response=final_run.result.response,
+            trajectory=final_run.result.trajectory,
+            trace_id=final_run.result.trace_id,
             metadata=metadata,
         )
 
@@ -689,55 +601,6 @@ def _scenario_mounts_harness(scenario: str) -> bool:
         raise
     return any(module == _HARNESS_ADAPTER_MODULE for module, _ in extensions)
 
-
-
-def _fork_prefix_messages(final_messages: list[Any], *, turn_index: int) -> list[Any]:
-    """Return the main-agent prefix that matches live reminder delivery.
-
-    ``llmharness`` records the auditor turn at ``TurnEndEvent`` time, which
-    is after the assistant message but before tool execution. In the live
-    path the reminder is injected only after the turn's tool results have
-    been appended, so a prefix fork must include the paired ToolResultMessage
-    when the turn's assistant message made tool calls.
-    """
-    if turn_index < 0:
-        return []
-    cut = min(turn_index + 1, len(final_messages))
-    if cut >= len(final_messages):
-        return list(final_messages[:cut])
-
-    from agentm.core.abi.messages import (
-        AssistantMessage,
-        ToolCallBlock,
-        ToolResultMessage,
-    )
-
-    current = final_messages[turn_index] if turn_index < len(final_messages) else None
-    following = final_messages[cut]
-    if isinstance(current, AssistantMessage) and isinstance(
-        following, ToolResultMessage
-    ):
-        assistant_tool_call_ids = {
-            block.id for block in current.content if isinstance(block, ToolCallBlock)
-        }
-        result_tool_call_ids = {
-            block.tool_call_id
-            for block in following.content
-            if hasattr(block, "tool_call_id")
-        }
-        if assistant_tool_call_ids & result_tool_call_ids:
-            cut += 1
-    return list(final_messages[:cut])
-
-
-def _baseline_offline_sidecar_path(cwd: str, session_log_id: str) -> Path:
-    """Canonical path for a baseline-control offline audit-replay sidecar.
-
-    Mirrors :func:`llmharness.replay.record.replay_log_path` but with a
-    ``.baseline_offline.jsonl`` suffix so the synthesised sidecar is
-    clearly distinguishable from a real live-recorded one.
-    """
-    return Path(cwd) / ".agentm" / "audit_replay" / f"{session_log_id}.baseline_offline.jsonl"
 
 
 def _run_metadata(run: _SessionRun) -> dict[str, Any]:

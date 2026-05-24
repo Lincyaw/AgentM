@@ -17,27 +17,23 @@ full. Document drift first; collapse later if a loader feature lands.
 | `manifest.harness.yaml`                  | async | 5                  | 5              | (default true) | (default true)   | Production async harness — main agent runs at provider-floor latency.                 |
 | `manifest.harness.sync.yaml`             | sync  | 5                  | 5              | (default true) | (default true)   | Dataset collection — main agent stops every k turns waiting for extractor + auditor.  |
 | `manifest.harness.sync.opinions.yaml`    | sync  | 5                  | 5              | (default true) | false            | Opinions-only: auditor verdicts are persisted but reminders are NOT injected.          |
-| `manifest.harness.sync.opinions10.yaml`  | sync  | 10                 | 10             | true           | false            | Opinions-only at 10-turn cadence; baseline-fork intervention experiments.              |
-| `manifest.harness.sync.extractor5.yaml`  | sync  | 5                  | 5              | false          | false            | Extractor-only control for strict A/B fork mode (no auditor side channel).             |
+| `manifest.harness.sync.opinions10.yaml`  | sync  | 10                 | 10             | true           | false            | Opinions-only at 10-turn cadence; chained-fork intervention experiments.               |
+| `manifest.harness.sync.extractor5.yaml`  | sync  | 5                  | 5              | false          | false            | Extractor-only variant (no auditor side channel).                                      |
 | `manifest.harness.live.yaml`             | sync  | 5                  | 5              | (default true) | (default true)   | `harness.sync` + `live_inspector` WebSocket — single-case live viewing in aegis-ui.   |
 
-When adding a new variant, update this table **and** add the
-``rca:<new>`` → control mapping in
-``_HARNESS_VARIANT_TO_CONTROL`` at the top of
-``src/agentm_rca/eval/agent.py`` if it should be eligible for strict
-A/B fork mode.
+When adding a new variant, update this table. Chained-fork mode (the
+current intervention pipeline — see `README.md`'s
+"Chained-fork intervention" section) runs every segment under the same
+scenario, so no per-variant control mapping is needed anymore.
 
-## `rca:baseline` as a strict-A/B control (2026-05-23)
+## Chained-fork mode (2026-05-24)
 
-With the HarnessRunner refactor (`.claude/designs/harness-runner.md` P4),
-``baseline_fork`` now also accepts ``rca:baseline`` as control —
-``_HARNESS_VARIANT_TO_CONTROL`` maps ``rca:baseline`` → ``rca:baseline``.
-The control session mounts no llmharness adapter and therefore produces
-no audit-replay sidecar on its own; instead the offline runner
-(``llmharness.replay.offline_driver.replay_pipeline_over_trajectory``)
-synthesises extractor + auditor records retroactively from the
-captured ``final_messages`` and persists them to
-``<sid>.baseline_offline.jsonl`` for the strict-A/B stitch. Use this
-variant when you want a strict A/B that excludes the cost of in-line
-extractor during the control rollout — the control is then the cheapest
-possible baseline trajectory.
+Strict-A/B fork mode (the old `baseline_fork` intervention with a
+separate `control_scenario` / `branch_scenario` and a `.strict_ab.jsonl`
+sidecar) was replaced by chained-fork mode in the harness-runner
+refactor's P5. The chained driver
+(`llmharness.run_chained_fork_experiment`) repeatedly seeds the agent
+with each surfaced reminder under the same scenario and writes a single
+`<final_branch_sid>.chained.jsonl` sidecar covering every segment. See
+`README.md` for the operator-facing invocation
+(`--ak chained_fork=true --ak max_interventions=N`).

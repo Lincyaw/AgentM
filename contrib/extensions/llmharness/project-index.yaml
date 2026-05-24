@@ -676,51 +676,47 @@ requirements:
     depends_on: [REQ-019, REQ-034]
 
   - id: REQ-036
-    title: Strict-A/B replay orchestration
+    title: Chained-fork experiment orchestration
     description: |
-      Own the host-side stitching of strict-A/B fork experiments inside
+      Own the host-side stitching of chained-fork experiments inside
       llmharness so downstream eval drivers (rca, others) become thin
-      callers that supply only their scenario-naming policy.
+      callers that supply only their session-factory policy.
 
-      A strict-A/B fork pairs:
-
-      - a *control* trajectory recorded under an extractor-only
-        scenario (no auditor reminders, so the prefix is immutable
-        across runs), and
-      - a *branch* trajectory that re-runs from the same prefix after
-        the surfaced reminder has been seeded.
+      A chained-fork experiment repeatedly seeds the agent with each
+      surfaced reminder: segment 0 (the control) runs until the
+      auditor first surfaces a reminder, then each subsequent segment
+      forks from the prior segment's surfacing turn with the reminder
+      text seeded into the child session. The chain terminates on the
+      first segment whose auditor stays silent, or after
+      ``max_interventions`` branches.
 
       Two entry points:
 
-      - :func:`llmharness.run_offline_auditor_over_control` — walks the
-        control's extractor records in ``(ts_ns, turn_index)`` order,
-        folds the cumulative event/edge/phase graph, recomposes the
-        auditor compose-kwargs at each turn, and replays the auditor
-        via :func:`replay_auditor_record`. Returns the first
-        surfaced-reminder candidate plus every silent auditor record
-        collected along the way (so branch-side replays can persist a
-        complete sidecar even when ``stop_on_first_surface`` is on).
+      - :func:`llmharness.run_chained_fork_experiment` — drives the
+        whole chain. Calls a host-supplied :data:`SessionFactory` to
+        obtain each segment's trajectory, then replays the cognitive-
+        audit pipeline offline against it with the prior segment's
+        :class:`CumulativeAuditState` seeded in via the
+        ``seed_cumulative`` / ``start_turn`` knobs of
+        :func:`replay_pipeline_over_trajectory`.
 
-      - :func:`llmharness.write_strict_ab_replay` +
-        :func:`strict_ab_replay_path` — stitch ``control[<=t]`` +
-        ``branch[>t]`` extractor/auditor pairs into a single
-        ``<branch_session_log_id>.strict_ab.jsonl`` file, rewriting
-        every record's ``root_session_id`` to the branch's id so the
-        case viewer joins records to the right trajectory. Falls back
-        to writing the branch sidecar verbatim if the branch produced
-        no post-reminder extractor records.
+      - :func:`llmharness.write_chained_replay` +
+        :func:`chained_replay_path` — materialise a single
+        ``<final_branch_session_log_id>.chained.jsonl`` sidecar
+        covering every segment's [turn_lo, turn_hi] window, rewriting
+        every record's ``root_session_id`` to the final branch's id so
+        the case viewer joins records to the right trajectory.
 
-      Fail-stop position: misjoining the prefix and tail (wrong
-      session_id, wrong cut point, dropped branch tail) silently
-      corrupts every distillation pair derived from forked-eval runs.
-      Tests assert the cut point, the session-id rebind, and the empty-tail
-      fallback.
+      Fail-stop position: the cumulative-state threading across segment
+      boundaries. If ``seed_cumulative`` / ``start_turn`` are wrong, the
+      chained experiment compares apples to oranges (segment k+1's
+      auditor sees stale or missing prior verdicts).
     priority: P1
     status: tested
     code:
-      - src/llmharness/replay/strict_ab.py
+      - src/llmharness/replay/chained_fork.py
     tests:
-      - tests/test_strict_ab_replay.py
+      - tests/replay/test_chained_fork.py
     depends_on: [REQ-019, REQ-034, REQ-035]
 
   # ---------------------------------------------------------------------------

@@ -64,23 +64,38 @@ async def replay_pipeline_over_trajectory(
     sidecar_path: Path | None = None,
     sink: InMemorySink | None = None,
     child: StandaloneChildRunner | None = None,
+    seed_cumulative: CumulativeAuditState | None = None,
+    start_turn: int = 1,
 ) -> OfflineRunResult:
     """Replay the cognitive-audit pipeline over a captured trajectory.
 
     Drives :meth:`HarnessRunner.on_trajectory_progress` from
-    ``turn_count=1`` up through ``len(messages)`` so the runner's
-    cadence (``turn_count % extractor_interval == 0`` etc.) fires
-    identically to the live ``_on_turn_end`` path. Single source of
-    truth for the cadence decision — this function never duplicates it.
+    ``turn_count=start_turn`` up through ``len(messages)`` so the
+    runner's cadence (``turn_count % extractor_interval == 0`` etc.)
+    fires identically to the live ``_on_turn_end`` path. Single source
+    of truth for the cadence decision -- this function never duplicates
+    it.
 
-    ``stop_on_first_surface`` mirrors the ``baseline_fork`` semantics:
-    when the auditor surfaces a reminder, the offline run stops so the
-    caller can fork.
+    ``stop_on_first_surface`` halts the run on the first auditor firing
+    that surfaces a reminder so a chained-fork driver can re-seed.
+
+    ``seed_cumulative`` lets a chained-fork driver thread state from a
+    previous segment into the next so the auditor sees prior verdicts
+    and the cumulative graph instead of restarting blank. When ``None``
+    (the default), a fresh :class:`CumulativeAuditState` is used.
+
+    ``start_turn`` shifts the inclusive lower bound of the cadence
+    walk. Used by chained-fork replays where segment ``k+1`` begins
+    one turn past segment ``k``'s surfaced-reminder boundary; previous
+    turns have already been replayed under the parent segment's
+    sidecar.
 
     ``sink`` / ``child`` are exposed for tests that want to inject
     stubs while still exercising the real :class:`HarnessRunner`.
     """
-    cumulative = CumulativeAuditState.fresh()
+    cumulative = (
+        seed_cumulative if seed_cumulative is not None else CumulativeAuditState.fresh()
+    )
     sink_used = sink if sink is not None else InMemorySink()
     child_used = child if child is not None else StandaloneChildRunner(cwd)
     sidecar = SidecarWriter(sidecar_path) if sidecar_path is not None else None
@@ -103,7 +118,7 @@ async def replay_pipeline_over_trajectory(
 
     all_steps: list[StepResult] = []
     reminder: Reminder | None = None
-    for turn_count in range(1, len(messages) + 1):
+    for turn_count in range(max(1, start_turn), len(messages) + 1):
         step = await runner.on_trajectory_progress(
             messages[:turn_count], turn_count=turn_count
         )
