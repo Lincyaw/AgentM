@@ -39,7 +39,7 @@ import json
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import IO, Any, Sequence
@@ -48,6 +48,7 @@ from google.protobuf.json_format import MessageToDict
 from opentelemetry.exporter.otlp.proto.common._log_encoder import encode_logs
 from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 from opentelemetry._logs import Logger
+from opentelemetry._logs import SeverityNumber
 from opentelemetry.sdk._logs import LoggerProvider, ReadableLogRecord
 from opentelemetry.sdk._logs.export import (
     BatchLogRecordProcessor,
@@ -61,7 +62,9 @@ from opentelemetry.sdk.trace.export import (
     SpanExporter,
     SpanExportResult,
 )
-from opentelemetry.trace import Tracer
+from opentelemetry.trace import Span, Tracer
+
+from agentm.core.lib import to_jsonable
 
 __all__ = [
     "BlockingBatchLogRecordProcessor",
@@ -528,6 +531,15 @@ class SessionTelemetry:
     to call from explicit teardown + the ``SessionShutdownEvent`` handler.
     The global providers themselves outlive every session and are torn
     down once at process exit by an ``atexit`` hook.
+
+    **Observability fields** (``obs_*`` and the tracker dicts) are populated
+    by the observability atom during :func:`install` and consumed by the
+    per-event :meth:`Event.to_otel` translators. They are part of the
+    telemetry handle so the declarative-mapping pattern can stay §11-clean:
+    events reach the substrate exclusively through this ABI-exposed object.
+    Atoms that do not install observability simply leave the fields at
+    their construction defaults — :meth:`Event.to_otel` no-ops on the
+    base class, so no records are emitted in that case.
     """
 
     session_id: str
@@ -540,7 +552,139 @@ class SessionTelemetry:
     log_processor: BlockingBatchLogRecordProcessor
     span_exporter: FileSpanExporter
     log_exporter: FileLogExporter
+    # --- Observability-atom-populated context ------------------------------
+    # The observability atom stamps these in its install() so each
+    # ``Event.to_otel(telemetry)`` translator has session-scoped metadata
+    # without re-reaching for ``ExtensionAPI``. Empty defaults keep the
+    # substrate's construction path side-effect-free.
+    obs_root_session_id: str = ""
+    obs_parent_session_id: str = ""
+    obs_purpose: str = ""
+    obs_scenario: str = ""
+    obs_provider_name: str = ""
+    obs_cwd: str = ""
+    obs_redact_prompts: bool = True
+    obs_session_start_ns: int = 0
+    # Lifecycle-pairing tracker for paired Start/End events. See
+    # :meth:`open_span` / :meth:`close_span` for the contract.
+    span_tracker: dict[tuple[str, str], Span] = field(default_factory=dict)
+    # Per-turn aggregator state for the ``agentm.turn.summary`` log record.
+    # Mutated by :meth:`TurnStartEvent.to_otel` (records turn_start_ns,
+    # rotates error counter) and :meth:`ToolResultEvent.to_otel` (increments
+    # current_tool_errors on tool-result is_error).
+    turn_state: dict[str, int] = field(
+        default_factory=lambda: {
+            "turn_start_ns": 0,
+            "previous_tool_errors": 0,
+            "current_tool_errors": 0,
+        }
+    )
     _shutdown: bool = False
+
+    # --- Lifecycle-pairing helper -----------------------------------------
+
+    def open_span(self, kind: str, key: str, span: Span) -> None:
+        """Register an open span for later closure by a paired End event.
+
+        Many event families come in Start/End pairs whose lifetime maps to
+        a single OTel span: ``BeforeAgentStartEvent``→``AgentEndEvent``,
+        ``LlmRequestStartEvent``→``LlmRequestEndEvent``,
+        ``ToolCallEvent``→``ToolResultEvent``. The Start event's
+        :meth:`Event.to_otel` calls ``tracer.start_span(...)`` and stashes
+        the resulting :class:`Span` here under a ``(kind, key)`` tuple; the
+        End event's :meth:`Event.to_otel` looks it up with
+        :meth:`close_span`, sets terminal attributes, and ``.end()`` s it.
+
+        ``kind`` is a short discriminator string (``"invoke_agent"``,
+        ``"chat"``, ``"execute_tool"``) so the same correlator (e.g. a
+        session id) can serve multiple span families without collision.
+        ``key`` is the correlator the End event will recover —
+        ``session_id`` for ``invoke_agent``, ``turn_id`` for ``chat``,
+        ``tool_call_id`` for ``execute_tool``. Re-using an unclosed key
+        replaces the previous span; callers that need preempt semantics
+        should :meth:`pop_span` and ``.end()`` first.
+        """
+        self.span_tracker[(kind, key)] = span
+
+    def pop_span(self, kind: str, key: str) -> Span | None:
+        """Look up and remove the open span for ``(kind, key)``.
+
+        Returns ``None`` when no span was opened under that key — End
+        events should treat that as a benign "no pair, nothing to close"
+        (some test paths and degraded sessions emit End-without-Start),
+        not as an error.
+        """
+        return self.span_tracker.pop((kind, key), None)
+
+    def close_open_spans(self, *, status_description: str) -> None:
+        """End every still-open tracked span with an UNSET status.
+
+        Used by the ``SessionShutdownEvent`` translator to guarantee no
+        span leaks past session teardown — paired End events handle the
+        happy path; this catches abnormal exits (crash, signal, forced
+        shutdown) where the End event never fired.
+        """
+        # Local import keeps the dataclass body trace-import-light; the
+        # SDK is already imported at module scope so this is free.
+        from opentelemetry.trace import Status, StatusCode
+
+        for span in list(self.span_tracker.values()):
+            span.set_status(Status(StatusCode.UNSET, status_description))
+            span.end()
+        self.span_tracker.clear()
+
+    # --- Attribute-coercion / log-emission helpers ------------------------
+
+    @staticmethod
+    def to_otel_attr(value: Any) -> Any:
+        """Coerce a Python value to something OTel attributes accept.
+
+        OTel attribute values are restricted to str / bool / int / float /
+        and homogeneous sequences thereof. We round-trip anything richer
+        through JSON so the on-disk shape stays inspectable. Shared with
+        every :meth:`Event.to_otel` so the on-disk coercion is consistent.
+        """
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (str, int, float)):
+            return value
+        return json.dumps(to_jsonable(value), default=str, ensure_ascii=False)
+
+    def emit_log(
+        self,
+        event_name: str,
+        *,
+        body: Any = None,
+        attributes: dict[str, Any] | None = None,
+        severity: SeverityNumber = SeverityNumber.INFO,
+    ) -> None:
+        """Emit one log record through this session's OTel ``Logger``.
+
+        The PR-A ``FileLogExporter`` writes one OTLP ``ResourceLogs``
+        element per line. The ``event_name`` plays the role of the OTel
+        "event name" — consumers (session_manager, indexer,
+        tool_query_traces, llmharness CLI) filter on it instead of on a
+        legacy ``kind`` field.
+
+        Attribute values are coerced through :meth:`to_otel_attr` so atoms
+        can pass Python objects directly without repeating the JSON dance.
+        """
+        coerced: dict[str, Any] | None
+        if attributes is not None:
+            coerced = {
+                key: self.to_otel_attr(value) for key, value in attributes.items()
+            }
+        else:
+            coerced = None
+        self.logger.emit(
+            body=to_jsonable(body) if body is not None else None,
+            severity_number=severity,
+            severity_text=severity.name,
+            event_name=event_name,
+            attributes=coerced,
+        )
 
     def shutdown(self) -> None:
         if self._shutdown:

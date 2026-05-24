@@ -24,6 +24,10 @@ branch:
 - **PR-H** (2026-05-24) — process-level `TracerProvider` / `LoggerProvider`;
   `agentm.session.id` moves from OTel resource attribute to per-span /
   per-log attribute. See "Process-level providers" below.
+- **PR-F** (2026-05-24) — declarative `Event.to_otel` mapping; the
+  observability atom collapses to a thin dispatcher. See "Followups
+  identified during landing" → PR-F for the full record, and the
+  "Event → OTel mapping" section for the new pattern.
 
 ## Motivation
 
@@ -175,10 +179,31 @@ Sample (one span line, one log line):
 
 ## Event → OTel mapping
 
-The observability atom translates AgentM bus events into OTel spans (timed
-work) and log records (events with bodies). The mapping is intentionally
-sparse — only the events whose record is structurally meaningful land on
-disk; high-frequency channels like `stream_delta` are excluded from
+Each concrete `Event` subclass declares its own translation via a
+`to_otel(telemetry: SessionTelemetry) -> None` method (PR-F). The
+observability atom is a thin dispatcher: it subscribes one uniform
+handler per typed channel that calls `event.to_otel(telemetry)`, and
+new `Event` classes reach the wire by adding their channel to
+`_TO_OTEL_CHANNELS` — no central switch to edit. The base method on
+`Event` is a documented no-op for events that have no OTel meaning
+(kernel-internal lifecycle, mutation channels covered by the bus
+observer, `stream_delta` excluded as bloat).
+
+**Lifecycle pairing.** Start/End event pairs (`BeforeAgentStart` /
+`AgentEnd`, `LlmRequestStart` / `LlmRequestEnd`, `ToolCall` /
+`ToolResult`) share a single OTel span through the
+`SessionTelemetry.span_tracker` dict, keyed by `(span_kind, correlator)`:
+the Start event's `to_otel` calls `tracer.start_span(...)` and stashes
+the span via `telemetry.open_span(kind, key, span)`; the End event
+recovers it with `telemetry.pop_span(kind, key)`, stamps terminal
+attributes, and `.end()` s it. `SessionShutdownEvent.to_otel` calls
+`telemetry.close_open_spans(...)` so abnormal exits (crash, signal)
+never leak open spans.
+
+The wire-format table below is reference for consumers; the source of
+truth is the per-class `to_otel` body. The mapping is intentionally
+sparse — only the events whose record is structurally meaningful land
+on disk; high-frequency channels like `stream_delta` are excluded from
 `event.dispatch` recording.
 
 **Spans** (paired start/end, written through
@@ -320,6 +345,11 @@ Locked down by the test suite:
   attribute presence on `chat` / `execute_tool` / `invoke_agent` spans,
   log record shape for header / message.appended / turn.summary /
   fingerprint, dispatch_id join.
+- `tests/unit/core/test_event_to_otel.py` — PR-F declarative-mapping
+  contract: every concrete `Event` subclass either overrides
+  `to_otel` or is in the intentional no-op set; lifecycle pairing via
+  the `span_tracker` round-trips cleanly for the three real span
+  families.
 - `tests/unit/core/test_single_event_log.py` — `SessionManager._load`
   walks interleaved OTLP/JSON lines and rebuilds the trajectory
   identically to a clean in-memory build.
@@ -395,9 +425,29 @@ Recorded here so they don't get lost; PR briefs to follow when dispatched.
   kw_only=True)`; the `EventBus` reassigns the field on every emit. The
   `_dispatch_stack` + `current_dispatch_id()` workaround is gone. See
   "Bus correlation" above for the new mechanism.
-- **PR-F** — Declarative `Event → OTel` mapping via per-class `to_otel()`
-  method (or registered translator), eliminating the giant translator
-  switch in `observability.install`.
+- **PR-F** — Landed (2026-05-24). Declarative `Event → OTel` mapping
+  via a per-class `to_otel(telemetry)` method on every concrete `Event`
+  subclass. The `observability.py` atom is reduced to a thin dispatcher:
+  it stamps session-scoped metadata onto :class:`SessionTelemetry`,
+  subscribes one uniform handler per typed channel that delegates to
+  `event.to_otel(telemetry)`, and still owns the bus-observer side
+  (`agentm.event.dispatch` / `agentm.handler.invoke` /
+  `agentm.handler.mutated`) plus the atom-hash bookkeeping needed for
+  `agentm.session.fingerprint` and `agentm.atom.reload`. Lifecycle
+  pairing for Start/End span families uses a new
+  :meth:`SessionTelemetry.open_span` / :meth:`pop_span` /
+  :meth:`close_open_spans` helper keyed by `(span_kind, correlator)`;
+  the `_Observer` class no longer reaches for the chat/tool/invoke
+  span dicts that the old translator held in install-scope closures.
+  Coverage is enforced by
+  `tests/unit/core/test_event_to_otel.py::test_every_event_class_has_to_otel`:
+  every concrete `Event` subclass either overrides `to_otel` or appears
+  in the explicit intentional no-op set (kernel-internal lifecycle
+  events whose semantics are covered by the bus-observer records).
+  Adding a new `Event` without considering wire format trips the test.
+  On-disk wire format is unchanged — semconv tests in
+  `tests/unit/extensions/test_observability_semconv.py` continue to
+  lock down the byte-shape contract.
 - **PR-G** — Landed. `TraceReader` API extracted into
   `core.runtime.trace_reader` and re-exported via `agentm.core.abi`;
   every reader (`SessionManager`, the catalog indexer, the three
