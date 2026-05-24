@@ -44,13 +44,15 @@ not emit. Evidence is what separates verification from speculation.
 
 ## What "downstream" means concretely
 
-`get_injection_spec.mechanism.what_happens` tells you the physical
-effect of the fault on the target. Re-derive who is downstream
-*from that*, not from generic heuristics. The same observable
+After `get_injection_spec` returns the `fault_kind`, call
+`get_fault_kind_doc(fault_kind)` to read the per-kind reference:
+how the injection physically works, what signals it produces, and
+how it tends to propagate. Re-derive who is downstream *from that
+mechanism*, not from generic heuristics. The same observable
 ("service X reports errors when calling service Y") admits
 different causal readings depending on whether the injection is on
 X, Y, the network between them, or a shared dependency — the
-mechanism field disambiguates.
+mechanism doc disambiguates.
 
 ## Edges around link-type faults
 
