@@ -37,8 +37,8 @@ Three concrete failure modes followed from this in the rca scenario:
 
 2. **Polling burns the parent's turn budget.** Even when the model does poll, every
    `check_tasks` call costs one parent LLM round-trip. With workers doing ten or twenty
-   tool calls of real investigation, the parent exhausts `LoopConfig.max_turns` (32)
-   waiting on no-op status snapshots. Second rca trial: 33 parent tool calls, 30 of them
+   tool calls of real investigation, the parent exhausts its `LoopConfig.max_turns`
+   budget waiting on no-op status snapshots. Second rca trial: 33 parent tool calls, 30 of them
    `check_tasks` returning `running`, no progress on the actual hypothesis.
 
 3. **Findings are not retrievable.** Even after fixing the two above with a blocking

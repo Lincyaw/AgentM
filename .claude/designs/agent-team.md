@@ -246,8 +246,9 @@ under-spend on complex ones. The literature's recommendation (Anthropic):
 comparisons need 2–4 subagents with 10–15 calls each; complex research
 might use over 10 subagents."
 
-Today, every dispatched worker inherits the same `LoopConfig.max_turns =
-32` regardless of task complexity.
+Today, every dispatched worker inherits the parent's `LoopConfig.max_turns`
+— now `None` (uncapped) by default unless a `loop_budget` atom or
+`--max-turns` sets it — regardless of task complexity.
 
 ### Mechanism
 
