@@ -1463,7 +1463,7 @@ class EventBus:
 # at the top of the file free of transport concerns. ``opentelemetry`` is a
 # substrate dependency (PR-A landed it) so the import is free at module load.
 from opentelemetry._logs import SeverityNumber  # noqa: E402
-from opentelemetry.trace import SpanKind, Status, StatusCode  # noqa: E402
+from opentelemetry.trace import SpanKind, Status, StatusCode, set_span_in_context  # noqa: E402
 
 from .messages import ToolCallBlock  # noqa: E402
 
@@ -1472,6 +1472,7 @@ from .messages import ToolCallBlock  # noqa: E402
 # is purely an internal namespace; the OTel SpanKind enum already lives on
 # the span itself.
 _SPAN_INVOKE_AGENT = "invoke_agent"
+_SPAN_TURN = "turn"
 _SPAN_CHAT = "chat"
 _SPAN_EXECUTE_TOOL = "execute_tool"
 
@@ -1499,6 +1500,11 @@ def _before_agent_start_to_otel(
             "gen_ai.agent.name": scenario_label,
             "gen_ai.conversation.id": session_id,
             "agentm.session.id": session_id,
+            # Session-tree linkage attributes (stamped here on the span so
+            # ClickHouse-backed UIs can group sessions by root/parent without
+            # joining the ``agentm.session.start`` log record).
+            "agentm.session.root_id": telemetry.obs_root_session_id,
+            "agentm.session.parent_id": telemetry.obs_parent_session_id,
             "agentm.session.purpose": telemetry.obs_purpose,
             "agentm.session.scenario": telemetry.obs_scenario,
         },
@@ -1548,11 +1554,19 @@ AgentEndEvent.to_otel = _agent_end_to_otel  # type: ignore[assignment]
 def _llm_request_start_to_otel(
     self: "LlmRequestStartEvent", telemetry: "SessionTelemetry"
 ) -> None:
-    """Open the ``chat <model>`` CLIENT span for one LLM call."""
+    """Open the ``chat <model>`` CLIENT span for one LLM call.
+
+    Parented under the open ``agentm.turn`` span (when present) so chat
+    spans group per turn rather than flattening as ``invoke_agent``
+    siblings.
+    """
     model_id = self.model_id or "unknown"
+    turn_span = telemetry.current_turn_span
+    parent_ctx = set_span_in_context(turn_span) if turn_span is not None else None
     span = telemetry.tracer.start_span(
         f"chat {model_id}",
         kind=SpanKind.CLIENT,
+        context=parent_ctx,
         attributes={
             "gen_ai.operation.name": "chat",
             "gen_ai.request.model": model_id,
@@ -1611,11 +1625,18 @@ LlmRequestEndEvent.to_otel = _llm_request_end_to_otel  # type: ignore[assignment
 def _tool_call_to_otel(
     self: "ToolCallEvent", telemetry: "SessionTelemetry"
 ) -> None:
-    """Open the ``execute_tool <name>`` span and stamp the call arguments."""
+    """Open the ``execute_tool <name>`` span and stamp the call arguments.
+
+    Parented under the open ``agentm.turn`` span (when present) so
+    execute_tool spans group per turn under their owning ``chat`` sibling.
+    """
     args = dict(self.args)
+    turn_span = telemetry.current_turn_span
+    parent_ctx = set_span_in_context(turn_span) if turn_span is not None else None
     span = telemetry.tracer.start_span(
         f"execute_tool {self.tool_name}",
         kind=SpanKind.INTERNAL,
+        context=parent_ctx,
         attributes={
             "gen_ai.operation.name": "execute_tool",
             "gen_ai.tool.name": self.tool_name,
@@ -1666,13 +1687,35 @@ ToolResultEvent.to_otel = _tool_result_to_otel  # type: ignore[assignment]
 def _turn_start_to_otel(
     self: "TurnStartEvent", telemetry: "SessionTelemetry"
 ) -> None:
-    """Rotate the per-turn aggregator state ahead of :class:`TurnEndEvent`."""
-    del self
+    """Open the ``agentm.turn`` INTERNAL span and rotate per-turn state.
+
+    The span is parented under the open ``invoke_agent`` span (if any) so
+    sibling ``chat`` / ``execute_tool`` spans group per turn rather than
+    flattening directly under ``invoke_agent``. The span name is
+    intentionally AgentM-private (``agentm.turn``) — GenAI semconv has no
+    "turn" concept.
+    """
     telemetry.turn_state["turn_start_ns"] = time.time_ns()
     telemetry.turn_state["previous_tool_errors"] = telemetry.turn_state[
         "current_tool_errors"
     ]
     telemetry.turn_state["current_tool_errors"] = 0
+    parent_span = telemetry.span_tracker.get(
+        (_SPAN_INVOKE_AGENT, telemetry.session_id)
+    )
+    parent_ctx = set_span_in_context(parent_span) if parent_span is not None else None
+    span = telemetry.tracer.start_span(
+        "agentm.turn",
+        kind=SpanKind.INTERNAL,
+        context=parent_ctx,
+        attributes={
+            "agentm.session.id": telemetry.session_id,
+            "agentm.turn.index": self.turn_index,
+            "agentm.turn.id": self.turn_id,
+        },
+    )
+    telemetry.open_span(_SPAN_TURN, str(self.turn_id), span)
+    telemetry.current_turn_span = span
 
 
 TurnStartEvent.to_otel = _turn_start_to_otel  # type: ignore[assignment]
@@ -1722,6 +1765,37 @@ def _turn_end_to_otel(
         attrs["gen_ai.usage.output_tokens"] = usage.output_tokens
         attrs["gen_ai.usage.cache_read_tokens"] = usage.cache_read
         attrs["gen_ai.usage.cache_write_tokens"] = usage.cache_write
+    # Close the matching ``agentm.turn`` span; stamp usage / stop_reason /
+    # cache attributes (a strict superset of the log-record attributes so
+    # span-only consumers can still surface per-turn cost).
+    turn_span = telemetry.pop_span(_SPAN_TURN, str(self.turn_id))
+    if turn_span is not None:
+        turn_span.set_attribute("agentm.turn.duration_ns", duration_ns)
+        turn_span.set_attribute("agentm.turn.tool_call_count", len(tool_calls))
+        turn_span.set_attribute(
+            "agentm.turn.tool_error_count",
+            telemetry.turn_state["previous_tool_errors"],
+        )
+        turn_span.set_attribute(
+            "agentm.turn.stop_reason", self.message.stop_reason or ""
+        )
+        if usage is not None:
+            turn_span.set_attribute(
+                "gen_ai.usage.input_tokens", usage.input_tokens
+            )
+            turn_span.set_attribute(
+                "gen_ai.usage.output_tokens", usage.output_tokens
+            )
+            turn_span.set_attribute(
+                "gen_ai.usage.cache_read_tokens", usage.cache_read
+            )
+            turn_span.set_attribute(
+                "gen_ai.usage.cache_write_tokens", usage.cache_write
+            )
+        turn_span.set_status(Status(StatusCode.OK))
+        turn_span.end()
+    if telemetry.current_turn_span is turn_span:
+        telemetry.current_turn_span = None
     telemetry.emit_log("agentm.turn.summary", body=body, attributes=attrs)
     telemetry.turn_state["previous_tool_errors"] = 0
 

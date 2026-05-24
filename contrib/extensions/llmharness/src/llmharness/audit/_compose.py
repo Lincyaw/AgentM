@@ -14,7 +14,6 @@ from typing import Any
 from ._atom_constants import (
     OBSERVABILITY_MODULE,
     OPERATIONS_MODULE,
-    OTEL_TRACING_MODULE,
     SYSTEM_PROMPT_MODULE,
 )
 
@@ -32,7 +31,6 @@ def compose_audit_extensions(
     prompt_override: str | None,
     cards_tools_config: dict[str, Any] | None,
     observability_config: dict[str, Any] | None,
-    otel_tracing_config: dict[str, Any] | None = UNSET,
     submit_tool_config: dict[str, Any] | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     out: list[tuple[str, dict[str, Any]]] = []
@@ -41,13 +39,9 @@ def compose_audit_extensions(
     if obs_cfg is not None:
         out.append((OBSERVABILITY_MODULE, dict(obs_cfg)))
 
-    # OTLP span emission, parented to the main session's root span via the
-    # ``_session_root_contexts`` registry inside the otel_tracing atom.
-    # No-op if the ``otel`` extra isn't installed, so this is safe to
-    # always include.
-    otel_cfg = {} if otel_tracing_config is UNSET else otel_tracing_config
-    if otel_cfg is not None:
-        out.append((OTEL_TRACING_MODULE, dict(otel_cfg)))
+    # OTLP span emission is now driven by the declarative ``Event.to_otel``
+    # path inside the observability atom — no separate tracing atom needed.
+    # Audit children inherit the same emission contract as their parent.
 
     # Post harness-collapse (AgentM commit e062913) the session factory
     # fail-stops at freeze unless some atom registered an Operations

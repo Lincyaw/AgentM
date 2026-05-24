@@ -13,8 +13,6 @@ extensions:
   # bundle because the substrate asserts at freeze time. ---
   - module: agentm.extensions.builtin.operations_local
   - module: agentm.extensions.builtin.observability
-  # OTLP span export — no-op without ``uv sync --extra otel``.
-  - module: agentm.extensions.builtin.otel_tracing
   - local: tool_normalize_json
   - module: agentm.extensions.builtin.system_prompt
     config:

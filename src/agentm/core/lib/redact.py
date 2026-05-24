@@ -14,8 +14,9 @@ Both helpers operate on **already-JSON-serialized dicts** (post
 they're orthogonal to dataclass shapes and trivial to unit-test from a
 fabricated input.
 
-Lives in ``core.lib`` because both ``observability`` and ``otel_tracing``
-atoms need identical semantics, and atom-to-atom imports are forbidden by
+Lives in ``core.lib`` because the ``observability`` atom and the
+``Event.to_otel`` translators in ``core.abi.events`` both need identical
+semantics, and atom-to-atom / atom-to-runtime imports are forbidden by
 the §11 single-file contract. ``core.lib`` is the sanctioned shared
 "stdlib for atoms".
 """

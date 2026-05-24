@@ -260,7 +260,6 @@ MANIFEST = ExtensionManifest(
     # the right scope.
     requires=(
         "observability",
-        "otel_tracing",
         "operations_local",
     ),
     api_version=1,
