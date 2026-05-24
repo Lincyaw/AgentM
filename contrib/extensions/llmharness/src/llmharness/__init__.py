@@ -22,10 +22,11 @@ Currently exported:
 * :class:`ReplayRecord` + :func:`iter_records` / :func:`write_record`
   — replay sidecar record format and I/O. Used directly by both the
   strict-A/B helpers and downstream consumers that read sidecars.
-* Strict-A/B fork orchestration — :class:`ReminderCandidate`,
-  :class:`OfflineAuditRun`, :func:`run_offline_auditor_over_control`,
-  :func:`write_strict_ab_replay`, :func:`strict_ab_replay_path`. The
-  primary entry points the rca eval driver calls.
+* Chained-fork experiment orchestration —
+  :func:`run_chained_fork_experiment`, :class:`ChainSegment`,
+  :class:`ChainSegmentPayload`, :class:`ChainedForkExperiment`,
+  :func:`write_chained_replay`, :func:`chained_replay_path`. The primary
+  entry points the rca eval driver calls.
 
 * Replay drivers — :func:`replay_extractor_record`,
   :func:`replay_auditor_record`, plus the shared :class:`PhaseResult` /
@@ -59,16 +60,17 @@ from .audit.extractor import (
     EXTRACTOR_TOOL_NAMES,
     load_extractor_prompt,
 )
+from .replay.chained_fork import (
+    ChainedForkExperiment,
+    ChainSegment,
+    ChainSegmentPayload,
+    SessionFactory,
+    chained_replay_path,
+    run_chained_fork_experiment,
+    write_chained_replay,
+)
 from .replay.record import ReplayRecord, Status, iter_records, write_record
 from .replay.runner import replay_auditor_record, replay_extractor_record
-from .replay.strict_ab import (
-    OfflineAuditRun,
-    ReminderCandidate,
-    run_offline_auditor_over_control,
-    run_offline_auditor_over_trajectory,
-    strict_ab_replay_path,
-    write_strict_ab_replay,
-)
 from .schema import (
     Edge,
     EdgeKind,
@@ -94,32 +96,33 @@ __all__ = [
     "EXTRACTOR_TERMINATION_REASON",
     "EXTRACTOR_TOOL_NAMES",
     "AuditorSettings",
+    "ChainSegment",
+    "ChainSegmentPayload",
+    "ChainedForkExperiment",
     "Edge",
     "EdgeKind",
     "Event",
     "EventKind",
     "ExtractorSettings",
     "Finding",
-    "OfflineAuditRun",
     "Phase",
     "PhaseResult",
     "Reminder",
-    "ReminderCandidate",
     "ReplayRecord",
+    "SessionFactory",
     "Status",
     "ToolEvent",
     "Verdict",
     "auditor_process_reward",
+    "chained_replay_path",
     "extractor_process_reward",
     "iter_records",
     "load_auditor_prompt",
     "load_extractor_prompt",
     "replay_auditor_record",
     "replay_extractor_record",
-    "run_offline_auditor_over_control",
-    "run_offline_auditor_over_trajectory",
-    "strict_ab_replay_path",
+    "run_chained_fork_experiment",
     "tool_events_from_phase_result",
+    "write_chained_replay",
     "write_record",
-    "write_strict_ab_replay",
 ]
