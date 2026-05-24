@@ -10,7 +10,7 @@
 
 services:
   collector:
-    image: otel/opentelemetry-collector-contrib:0.115.0
+    image: otel/opentelemetry-collector-contrib:0.152.1
     container_name: agentm-otel-collector
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
@@ -22,7 +22,7 @@ services:
       - jaeger
 
   jaeger:
-    image: jaegertracing/all-in-one:1.62
+    image: jaegertracing/all-in-one:1.76.0
     container_name: agentm-jaeger
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
