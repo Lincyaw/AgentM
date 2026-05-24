@@ -76,10 +76,19 @@ SLASH_COMMAND_DISPATCHER_SERVICE: Final = "slash_commands"
 slash commands programmatically look it up via
 ``api.get_service(SLASH_COMMAND_DISPATCHER_SERVICE)``."""
 
+LOOP_BUDGET_SERVICE: Final = "loop_budget"
+"""``service_registry`` key under which the ``loop_budget`` atom publishes a
+:class:`~agentm.core.abi.loop.LoopConfig`. The session factory reads it just
+before constructing the :class:`AgentLoop` to set the scenario's turn / tool
+budget. Absent ⇒ the substrate falls back to ``LoopConfig()`` (no cap). An
+explicit caller override (CLI ``--max-turns`` / SDK ``loop_config=``) takes
+precedence over whatever the atom registered."""
+
 
 __all__ = [
     "COMMAND_PARSER",
     "COMPACTION_PROMPTS",
+    "LOOP_BUDGET_SERVICE",
     "PARENT_PROVIDER_CONFIG_KEY",
     "PROMPT_REGISTRY",
     "PROVIDER_INHERITOR",

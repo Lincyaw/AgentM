@@ -59,7 +59,8 @@ class ProtectedBranchError(RuntimeError):
     def __init__(self, branch: str) -> None:
         super().__init__(
             f"refusing to auto-commit to protected branch {branch!r}; "
-            "pass --no-auto-commit or switch branches"
+            "switch branches or run a scenario that registers a "
+            "non-committing ResourceWriter"
         )
         self.branch = branch
 
