@@ -102,6 +102,15 @@ from .tool import Tool, ToolContinue, ToolOutcome, ToolResult, ToolTerminate
 # __init__ is allowed: this module is itself part of the constitution.
 from agentm.core._internal.tools import FunctionTool  # noqa: E402
 
+# ``SessionTelemetry`` is similarly a runtime-side service object (file
+# exporters + batch processors live in ``core.runtime.otel_export``), but
+# atoms need the *type* to annotate handler captures of
+# ``api.get_session_telemetry()``. Re-exporting through the ABI is the
+# established service-facade pattern (cf. ``FunctionTool`` above) and lets
+# the §11 validator stay strict about atoms importing
+# ``agentm.core.runtime.*`` directly.
+from agentm.core.runtime.otel_export import SessionTelemetry  # noqa: E402
+
 __all__ = [
     # loop
     "AgentLoop",
@@ -118,6 +127,9 @@ __all__ = [
     # session store
     "SessionState",
     "SessionStore",
+    # telemetry (re-exported from core.runtime.otel_export — see comment
+    # in __init__ body for the service-facade rationale).
+    "SessionTelemetry",
     # messages
     "AgentMessage",
     "AssistantContent",
