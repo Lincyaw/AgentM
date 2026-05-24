@@ -258,6 +258,10 @@ def _attach_streaming_presenter(bus: EventBus, output: TextIO) -> None:
             return ", ".join(parts)
         return _truncate(str(args), 160)
 
+    use_color = hasattr(output, "isatty") and output.isatty() and not os.environ.get("NO_COLOR")
+    DIM = "\x1b[2m" if use_color else ""
+    RESET = "\x1b[0m" if use_color else ""
+
     def _on_message(event: MessagePersistedEvent) -> None:
         content = getattr(event.message, "content", None) or []
         if event.source == "assistant":
@@ -267,6 +271,16 @@ def _attach_streaming_presenter(bus: EventBus, output: TextIO) -> None:
                     text = getattr(block, "text", "") or ""
                     if text.strip():
                         print(text, file=output, flush=True)
+                        print(file=output, flush=True)
+                elif btype == "thinking":
+                    # Render thinking dimmed (live only — not re-encoded into
+                    # next turn unless thinking_round_trip='system_note'; see
+                    # llm_openai.py INFO message). One `💭 ` per line so long
+                    # reasoning stays scannable.
+                    text = getattr(block, "text", "") or ""
+                    if text.strip():
+                        for line in text.splitlines():
+                            print(f"{DIM}💭 {line}{RESET}", file=output, flush=True)
                         print(file=output, flush=True)
                 elif btype == "tool_call":
                     name = getattr(block, "name", "?")
