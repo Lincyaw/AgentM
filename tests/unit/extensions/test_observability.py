@@ -177,11 +177,15 @@ def _build_before_send_event(text: str) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_observability_redacts_prompt_body_by_default(
+async def test_observability_strips_messages_from_before_send_to_llm(
     tmp_path: Path,
 ) -> None:
-    """A leaked secret in messages must NOT reach the JSONL file under
-    the default redact_prompts=True policy."""
+    """Single-event-log merge (.claude/designs/single-event-log.md): the
+    ``before_send_to_llm`` event no longer carries a ``messages`` snapshot
+    on disk — the full trajectory lives in ``message.appended`` rows of
+    the same merged log. Any leaked secret in the prompt body therefore
+    cannot reach the trace via this channel by construction (the field is
+    absent), making the old redaction layer redundant."""
 
     from agentm.core.abi.events import (
         BeforeSendToLlmEvent,
@@ -195,7 +199,7 @@ async def test_observability_redacts_prompt_body_by_default(
     await api.events.emit(_Shut.CHANNEL, _Shut(cwd=str(tmp_path)))
 
     raw = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
-    assert _LEAK_SECRET not in raw, "secret must not appear in default trace"
+    assert _LEAK_SECRET not in raw, "secret must not appear via before_send_to_llm"
 
     dispatch_records = [
         r
@@ -203,33 +207,11 @@ async def test_observability_redacts_prompt_body_by_default(
         if r["kind"] == "event.dispatch" and r["attributes"]["channel"] == "before_send_to_llm"
     ]
     assert len(dispatch_records) == 1
-    redacted = dispatch_records[0]["attributes"]["event"]
-    assert redacted["messages"][0]["role"] == "user"
-    assert redacted["messages"][0]["chars"] > 0
-    assert len(redacted["messages"][0]["sha256_prefix"]) == 16
-    # System prompt stubbed too.
-    assert redacted["system"] == {
-        "chars": len("sys"),
-        "sha256_prefix": __import__("hashlib").sha256(b"sys").hexdigest()[:16],
-    }
-
-
-@pytest.mark.asyncio
-async def test_observability_keeps_prompt_body_when_redaction_disabled(
-    tmp_path: Path,
-) -> None:
-    """Operator opt-in: ``redact_prompts=False`` restores raw content."""
-
-    from agentm.core.abi.events import (
-        BeforeSendToLlmEvent,
-        SessionShutdownEvent as _Shut,
+    event_payload = dispatch_records[0]["attributes"]["event"]
+    assert "messages" not in event_payload, (
+        "messages field must be stripped — trajectory lives in message.appended"
     )
-
-    api = _api(tmp_path)
-    observability.install(api, {"path": "trace.jsonl", "redact_prompts": False})
-    event = _build_before_send_event(f"leak: {_LEAK_SECRET}")
-    await api.events.emit(BeforeSendToLlmEvent.CHANNEL, event)
-    await api.events.emit(_Shut.CHANNEL, _Shut(cwd=str(tmp_path)))
-
-    raw = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
-    assert _LEAK_SECRET in raw, "raw content must reappear when opt-out is set"
+    # System prompt remains untouched on this channel (it is not a
+    # messages-array snapshot; the spec only drops the duplicated
+    # trajectory field).
+    assert event_payload["system"] == "sys"

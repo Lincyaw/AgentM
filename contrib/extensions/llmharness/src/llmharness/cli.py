@@ -1,13 +1,15 @@
 """``llmharness review`` — read-only inspector for the cognitive-audit graph.
 
-The graph and verdicts the adapter writes live as custom entries inside the
-main AgentM session JSONL (``~/.agentm/sessions/--<cwd-slug>--/*.jsonl``),
-intermixed with messages. This CLI extracts and pretty-prints them so you
+The graph and verdicts the adapter writes live as ``message.appended``
+records (audit entries are persisted as custom-type messages) inside the
+main AgentM merged event log
+(``<cwd>/.agentm/observability/<session_id>.jsonl``), intermixed with the
+trajectory and OTel spans. This CLI extracts and pretty-prints them so you
 can audit a run without writing ad-hoc ``jq`` queries.
 
 It is read-only — it never imports the AgentM harness or mutates the
 session file. The session file format is the contract; if AgentM changes
-it, this tool only needs to track ``type``/``payload`` shape.
+it, this tool only needs to track the merged-log envelope shape.
 """
 
 from __future__ import annotations
@@ -33,21 +35,15 @@ _RECENT_VERDICTS_FOR_AUDITOR = _et.RECENT_VERDICTS_FOR_AUDITOR
 
 # --- session-file resolution ------------------------------------------------
 #
-# These helpers reproduce the AgentM session-directory rule (currently
-# ``~/.agentm/sessions/<cwd-slug>/``) so this CLI stays a read-only tool
-# with no AgentM-runtime dependency. Keep in sync if the SDK ever moves
-# the session root. (The legacy ``harness.session_manager`` module was
-# removed in the 2026-05-11 harness collapse; the rule itself is now
-# inlined in core.runtime.session_factory.)
+# Single-event-log merge (.claude/designs/single-event-log.md): the merged
+# session JSONL now lives under ``<cwd>/.agentm/observability/``. Keep this
+# rule in sync with ``SessionManager.default_session_dir`` if the SDK ever
+# moves it; this CLI stays a read-only tool with no AgentM-runtime
+# dependency.
 
 
-def _default_sessions_root() -> Path:
-    return Path.home() / ".agentm" / "sessions"
-
-
-def _cwd_slug(cwd: Path) -> str:
-    s = str(cwd.resolve()).strip(os.sep).replace(os.sep, "-") or "root"
-    return f"--{s}--"
+def _default_sessions_root(cwd: Path) -> Path:
+    return cwd / ".agentm" / "observability"
 
 
 def _resolve_session_file(arg: str | None, cwd: Path) -> Path:
@@ -56,7 +52,7 @@ def _resolve_session_file(arg: str | None, cwd: Path) -> Path:
         if not p.is_file():
             raise FileNotFoundError(f"session file not found: {arg}")
         return p
-    directory = _default_sessions_root() / _cwd_slug(cwd)
+    directory = _default_sessions_root(cwd)
     if not directory.is_dir():
         raise FileNotFoundError(f"no session directory for cwd {cwd} (looked in {directory})")
     files = sorted(
@@ -73,15 +69,41 @@ def _resolve_session_file(arg: str | None, cwd: Path) -> Path:
 
 
 def _iter_records(path: Path) -> Iterable[dict[str, Any]]:
+    """Yield SessionEntry-shaped records from a merged session log.
+
+    Post single-event-log merge each trajectory row is wrapped in an OTel
+    envelope (``kind == "message.appended"``, payload under ``record``);
+    we unwrap to the inner ``SessionEntry`` shape so the rest of the CLI
+    keeps reading ``rec["type"]`` / ``rec["payload"]`` unchanged. Legacy
+    bare-entry lines (pre-merge sessions) pass through unchanged.
+    """
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                raw = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(raw, dict):
+                continue
+            kind = raw.get("kind")
+            if kind == "message.appended":
+                inner = raw.get("record")
+                if isinstance(inner, dict):
+                    yield inner
+                continue
+            if kind == "session.header":
+                # Header carries no payload of interest to the inspector;
+                # skip rather than yield the wrapped form that would fail
+                # the downstream ``isinstance(payload, dict)`` checks.
+                continue
+            if kind is not None:
+                # Other OTel spans (event.dispatch, turn.summary, etc.)
+                # — irrelevant for the audit-graph view; skip them.
+                continue
+            yield raw
 
 
 def _collect(path: Path) -> tuple[list[Event], list[Verdict], int]:

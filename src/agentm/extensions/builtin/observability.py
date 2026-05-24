@@ -41,6 +41,8 @@ from agentm.core.abi.events import (
     BeforeCompactEvent,
     ExtensionInstallEvent,
     ExtensionReloadEvent,
+    MessageAppendedEvent,
+    SessionHeaderEmittedEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
 )
@@ -137,13 +139,25 @@ _DEFAULT_EXCLUDE_CHANNELS: frozenset[str] = frozenset({StreamDeltaEvent.CHANNEL}
 # payload to a ``{role, chars, sha256_prefix}`` stub before it hits disk.
 _REDACTED_CHANNELS: frozenset[str] = frozenset(
     {
-        BeforeSendToLlmEvent.CHANNEL,
         LlmRequestStartEvent.CHANNEL,
         LlmRequestEndEvent.CHANNEL,
         # ApiSendUserMessageEvent.CHANNEL added below — string literal to
         # avoid a forward-ref cycle since the events module is already
         # imported above.
         "api_send_user_message",
+    }
+)
+
+
+# Channels whose event payload would otherwise carry a verbose ``messages``
+# snapshot — redundant now that the merged single-event-log captures every
+# trajectory message via ``message.appended``. We strip the field at write
+# time so the on-disk row carries metadata only. (`before_send_to_llm` is
+# the documented offender; if other channels ever start carrying a similar
+# snapshot, add them here.)
+_STRIP_MESSAGES_FIELD_CHANNELS: frozenset[str] = frozenset(
+    {
+        BeforeSendToLlmEvent.CHANNEL,
     }
 )
 
@@ -206,22 +220,31 @@ def _format_traceback(exc: BaseException | None) -> str | None:
 
 
 class _Sink:
-    """Async file sink: hot path is ``queue.put_nowait`` (O(1), no I/O).
+    """Async file sink: hot path is ``queue.put`` (blocks on full).
 
-    A daemon thread drains the queue and does the actual ``json.dumps`` +
-    ``write`` + ``flush``. Bounded queue (drops on full so a stuck disk
-    cannot OOM the agent). ``atexit`` flushes on process exit so we don't
-    silently lose the tail.
+    A daemon thread drains the queue in batches, doing ``json.dumps`` +
+    ``write`` per record but ``flush`` once per batch (configurable batch
+    size). Generous bounded queue (default 100k slots) — backpressure is
+    *blocking* rather than drop-on-full, because the merged single-event
+    log (.claude/designs/single-event-log.md) now carries authoritative
+    SessionManager state; silently dropping a ``message.appended`` row
+    would lose conversation history. ``atexit`` drains the queue before
+    process exit so we don't silently lose the tail.
     """
 
     _SENTINEL: Any = object()
 
-    def __init__(self, path: Path, max_queue: int = 10_000) -> None:
+    def __init__(
+        self,
+        path: Path,
+        max_queue: int = 100_000,
+        batch_size: int = 64,
+    ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._handle: IO[str] = path.open("a", encoding="utf-8")
         self._closed = False
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=max_queue)
-        self._dropped = 0
+        self._batch_size = max(1, batch_size)
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="agentm-obs-sink"
         )
@@ -231,50 +254,62 @@ class _Sink:
     def write(self, record: dict[str, Any]) -> None:
         if self._closed:
             return
-        try:
-            self._queue.put_nowait(record)
-        except queue.Full:
-            self._dropped += 1
+        # Blocking put — dropping is forbidden now that the merged log
+        # carries SessionManager-authoritative records. A bounded but
+        # generously-sized queue means this only blocks under genuine
+        # disk-stall pathology, which we want to surface as latency
+        # rather than hide as silent data loss.
+        self._queue.put(record)
 
     def _run(self) -> None:
+        sentinel = self._SENTINEL
         while True:
+            batch: list[Any] = []
             item = self._queue.get()
-            if item is self._SENTINEL:
+            if item is sentinel:
                 self._queue.task_done()
                 return
+            batch.append(item)
+            # Opportunistically drain up to ``batch_size`` items so we
+            # ``flush()`` once per batch instead of per record. The
+            # ``get_nowait`` loop never blocks — if the queue is already
+            # empty we just write the single item we got above.
+            stopped = False
+            while len(batch) < self._batch_size:
+                try:
+                    nxt = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if nxt is sentinel:
+                    stopped = True
+                    self._queue.task_done()
+                    break
+                batch.append(nxt)
             try:
-                line = json.dumps(item, default=str, ensure_ascii=False)
-                self._handle.write(line)
-                self._handle.write("\n")
+                for rec in batch:
+                    line = json.dumps(rec, default=str, ensure_ascii=False)
+                    self._handle.write(line)
+                    self._handle.write("\n")
                 self._handle.flush()
             except Exception:
                 logger.exception("agentm observability sink write failed")
             finally:
-                self._queue.task_done()
+                # ``task_done`` once per real item (the sentinel was
+                # accounted for at pickup).
+                for _ in batch:
+                    self._queue.task_done()
+            if stopped:
+                return
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        if self._dropped:
-            try:
-                # Best-effort tail note about drops.
-                self._queue.put_nowait(
-                    {
-                        "schema": "otel/span/v0",
-                        "kind": "sink.drop_summary",
-                        "name": "sink.drop_summary",
-                        "attributes": {"dropped_record_count": self._dropped},
-                        "status": {"code": "ERROR"},
-                    }
-                )
-            except queue.Full:
-                pass
-        try:
-            self._queue.put(self._SENTINEL, timeout=1.0)
-        except queue.Full:
-            pass
-        self._thread.join(timeout=5.0)
+        # Drain — block until the writer thread has consumed everything
+        # already in the queue, then send the sentinel and join. ``atexit``
+        # runs this at process exit; tests can call it directly.
+        self._queue.put(self._SENTINEL)
+        self._thread.join(timeout=10.0)
         try:
             self._handle.close()
         except OSError:
@@ -439,6 +474,11 @@ class _Observer(EventBusObserver):
                 parent_span_id = ancestor[1]
                 break
         event_payload = to_jsonable(event)
+        if ch in _STRIP_MESSAGES_FIELD_CHANNELS and isinstance(event_payload, dict):
+            # Single-event-log merge: full trajectory lives in
+            # ``message.appended`` rows; the duplicated snapshot here was
+            # only ever kept for backward-compat redaction.
+            event_payload.pop("messages", None)
         if self._redact_prompts and ch in _REDACTED_CHANNELS:
             event_payload = redact_messages(event_payload)
         self._sink.write(
@@ -590,7 +630,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     include_handlers = bool(config.get("include_handler_records", True))
     include_diff = bool(config.get("include_mutation_diff", True))
-    max_queue = int(config.get("max_queue", 10_000))
+    max_queue = int(config.get("max_queue", 100_000))
     user_excludes = config.get("exclude_channels")
     exclude_channels = frozenset(_DEFAULT_EXCLUDE_CHANNELS) | (
         frozenset(str(ch) for ch in user_excludes) if user_excludes else frozenset()
@@ -903,6 +943,36 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         )
         sink.close()
 
+    def _on_session_header(event: SessionHeaderEmittedEvent) -> None:
+        sink.write(
+            {
+                "schema": "session/header/v0",
+                "kind": "session.header",
+                "trace_id": trace_id,
+                "span_id": _new_id(),
+                "name": "session.header",
+                "start_time_unix_nano": _now_ns(),
+                "record": event.record,
+                "status": {"code": "OK"},
+            }
+        )
+
+    def _on_message_appended(event: MessageAppendedEvent) -> None:
+        sink.write(
+            {
+                "schema": "session/message/v0",
+                "kind": "message.appended",
+                "trace_id": trace_id,
+                "span_id": _new_id(),
+                "name": "message.appended",
+                "start_time_unix_nano": _now_ns(),
+                "record": event.record,
+                "status": {"code": "OK"},
+            }
+        )
+
+    api.on(SessionHeaderEmittedEvent.CHANNEL, _on_session_header)
+    api.on(MessageAppendedEvent.CHANNEL, _on_message_appended)
     api.on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
     api.on(ApiRegisterEvent.CHANNEL, _on_api_register)
     api.on(ApiSendUserMessageEvent.CHANNEL, _on_api_send)

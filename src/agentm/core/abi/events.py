@@ -627,6 +627,44 @@ class PlanSubmittedEvent(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class MessageAppendedEvent(Event):
+    """Fires after :meth:`SessionManager._append_record` mutates in-memory
+    state.
+
+    Routes session-trajectory persistence through the observability sink:
+    the observability atom subscribes and writes ``record`` straight into
+    the merged per-session JSONL. Replaces the older synchronous
+    ``open("a") + write + close`` per-message write path in SessionManager
+    (see ``.claude/designs/single-event-log.md``).
+
+    ``record`` is the JSON-ready dict shape SessionManager already used on
+    disk (``{"type", "id", "parent_id", "timestamp", "payload"}``) — keeping
+    it as a plain dict avoids dragging :class:`SessionEntry` into the
+    ABI-event surface and lets the writer dump it without further
+    massaging.
+    """
+
+    CHANNEL: ClassVar[Literal["message_appended"]] = "message_appended"
+    record: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class SessionHeaderEmittedEvent(Event):
+    """Fires when :meth:`SessionManager.new_session` mints a fresh session
+    header.
+
+    Header round-trips through the same merged log as
+    :class:`MessageAppendedEvent`. ``record`` carries the JSON-ready
+    SessionHeader dict; subsequent loads filter by ``kind=session.header``
+    and take the most recent (the "rewrite-style behavior in the merged
+    world becomes 'emit a new header'" reconciliation from the spec).
+    """
+
+    CHANNEL: ClassVar[Literal["session_header_emitted"]] = "session_header_emitted"
+    record: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class EntryAppendedEvent(Event):
     """Fires after :meth:`ReadonlySession.append_entry` persists an entry.
 
@@ -1343,6 +1381,7 @@ __all__ = [
     "LlmRequestStartEvent",
     "LoopAction",
     "MaxTurnsExhausted",
+    "MessageAppendedEvent",
     "ModelEndTurn",
     "NoPendingInput",
     "ObserverCallback",
@@ -1353,6 +1392,7 @@ __all__ = [
     "ResolveSubagentEvent",
     "ResourceWriteEvent",
     "ResourcesDiscoverEvent",
+    "SessionHeaderEmittedEvent",
     "SessionReadyEvent",
     "SessionShutdownEvent",
     "SignalAborted",
