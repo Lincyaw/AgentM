@@ -42,10 +42,11 @@ This atom is the writer side of ``.claude/designs/single-event-log.md``:
     log records. Consumers like ``build_trace_map`` and the baseline
     grader pick them out by event name.
   - ``agentm.event.dispatch`` (one per ``EventBus.emit`` end) +
-    ``agentm.handler.invoke`` (one per handler done) — both carry the
-    bus-owned ``agentm.event.dispatch_id`` so consumers can join the
-    fanout post-hoc. See ``.claude/designs/single-event-log.md`` "Bus
-    correlation".
+    ``agentm.handler.invoke`` (one per handler done) — both carry
+    ``agentm.event.dispatch_id`` sourced from the :class:`Event` field,
+    which the bus reassigns on every emit. Consumers join the fanout
+    post-hoc on that id. See ``.claude/designs/single-event-log.md``
+    "Bus correlation".
 
 The on-disk wire format is one OTLP ``ResourceSpans`` / ``ResourceLogs``
 element per line (PR-A). Atoms downstream of this writer never see the
@@ -275,7 +276,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     telemetry: SessionTelemetry = api.get_session_telemetry()
     tracer = telemetry.tracer
     log = telemetry.logger
-    bus = api.events
 
     include_handlers = bool(config.get("include_handler_records", True))
     include_diff = bool(config.get("include_mutation_diff", True))
@@ -342,16 +342,17 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             self,
             channel: str,
             handler: Handler,
+            event: Any,
             result: Any,
             error: BaseException | None,
             duration_ns: int,
         ) -> None:
             del result
-            self._record_mutation(channel, handler, error)
+            self._record_mutation(channel, handler, event, error)
             if not include_handlers or channel in exclude_channels:
                 return
             owner = getattr(handler, _HANDLER_OWNER_ATTR, None)
-            dispatch_id = bus.current_dispatch_id() or ""
+            dispatch_id = getattr(event, "dispatch_id", "") or ""
             attrs: dict[str, Any] = {
                 "agentm.event.channel": channel,
                 "agentm.event.dispatch_id": dispatch_id,
@@ -379,7 +380,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         def on_emit_end(self, channel: str, event: Any, results: list[Any]) -> None:
             if channel in exclude_channels:
                 return
-            dispatch_id = bus.current_dispatch_id() or ""
+            dispatch_id = getattr(event, "dispatch_id", "") or ""
             attrs: dict[str, Any] = {
                 "agentm.event.channel": channel,
                 "agentm.event.dispatch_id": dispatch_id,
@@ -407,25 +408,26 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             self,
             channel: str,
             handler: Handler,
+            event: Any,
             error: BaseException | None,
         ) -> None:
             if not include_diff or channel not in _MUTABLE_CHANNELS:
                 return
             before: Any | None = None
-            event: Any | None = None
+            snapshot_event: Any | None = None
             for index in range(len(pending_diff_snapshots) - 1, -1, -1):
                 snap_channel, snap_handler, snap_before, snap_event = (
                     pending_diff_snapshots[index]
                 )
                 if snap_channel == channel and snap_handler is handler:
                     before = snap_before
-                    event = snap_event
+                    snapshot_event = snap_event
                     del pending_diff_snapshots[index]
                     break
             if before is None:
                 return
             try:
-                after = to_jsonable(event)
+                after = to_jsonable(snapshot_event)
                 diff = _deep_diff(before, after)
             except Exception:
                 return
@@ -437,7 +439,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 body=None,
                 attributes={
                     "agentm.event.channel": channel,
-                    "agentm.event.dispatch_id": bus.current_dispatch_id() or "",
+                    "agentm.event.dispatch_id": getattr(event, "dispatch_id", "")
+                    or "",
                     "agentm.handler.name": _handler_label(handler),
                     "agentm.handler.mutations": _to_otel_attr(diff[:100]),
                     "agentm.handler.raised": error is not None,

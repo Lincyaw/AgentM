@@ -17,8 +17,9 @@ verbatim.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -41,6 +42,7 @@ from agentm.core.abi import (
 )
 from agentm.core.abi.events import (
     BeforeAgentStartEvent,
+    Event,
     MessageAppendedEvent,
     SessionHeaderEmittedEvent,
     SessionReadyEvent,
@@ -492,18 +494,28 @@ async def test_dispatch_id_links_dispatch_and_handler_records(tmp_path: Path) ->
         api, {"include_handler_records": True, "include_mutation_diff": False}
     )
 
-    seen: list[str | None] = []
+    # Use a real Event subclass on a bespoke channel so the bus-assigned
+    # dispatch_id lands on the field; observability reads it off the event
+    # in scope and stamps it onto both records.
+    @dataclass(slots=True)
+    class _ProbeEvent(Event):
+        CHANNEL: ClassVar[str] = "custom"
+        value: int = 0
 
-    def handler(_event: object) -> None:
-        seen.append(api.events.current_dispatch_id())
+    seen: list[str] = []
+
+    def handler(event: Any) -> None:
+        seen.append(event.dispatch_id)
 
     api.events.on("custom", handler)
-    await api.events.emit("custom", {"x": 1})
+    await api.events.emit("custom", _ProbeEvent(value=1))
+    # Drain telemetry by emitting the session-shutdown event; the
+    # substrate-installed POST handler flushes the OTel pipeline.
     await api.events.emit(
         SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=api.cwd)
     )
 
-    assert len(seen) == 1 and seen[0] is not None
+    assert len(seen) == 1 and seen[0]
     expected_id = seen[0]
 
     lines = _read_otlp_lines(_trace_path(api))

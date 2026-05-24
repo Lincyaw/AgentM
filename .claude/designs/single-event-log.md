@@ -8,7 +8,9 @@ branch:
 - **PR-A** (`be78860`) — file exporters in `core.runtime.otel_export` +
   `setup_session_telemetry`. Isolated; not wired into the runtime yet.
 - **Commit 1** (`9bae7dc`) — bus-owned `dispatch_id` on `EventBus` with
-  `current_dispatch_id()` accessor. No consumer reads it yet.
+  `current_dispatch_id()` accessor. Superseded by PR-E (`__PR_E_SHA__`):
+  the id moved onto the `Event` ABI as a real field, the bus stash and
+  accessor were removed.
 - **Commit 2a** (`ad6c5cb`) — `ExtensionAPI.get_session_telemetry()` service
   facade so atoms can reach the per-session OTel `Tracer` + `Logger`
   without violating §11. Lazy construction, substrate-owned teardown.
@@ -181,43 +183,64 @@ tokens). Anything AgentM-specific lives under `agentm.*`.
 
 ## Bus correlation
 
-The bus owns the `dispatch_id`, not the `Event` ABI. This is the Commit 1
-decision recorded here for posterity.
+The `dispatch_id` lives on the `Event` ABI as a real field; the
+`EventBus` reassigns it on every emit. This closes the bus-stash workaround
+that the original landing carried (PR-E, see "Followups identified during
+landing" below).
 
-**Mechanism.** `EventBus` carries a `_dispatch_stack: list[str]` — a stack
-of in-flight dispatch ids. `emit` and `emit_sync` push a fresh
-`uuid.uuid4().hex` on entry and pop on exit (in a `finally` clause, so a
-buggy handler can't leak the id). A public accessor
-`bus.current_dispatch_id() -> str | None` returns the top of the stack, or
-`None` when no emit is on the call stack.
+**Mechanism.** `Event` is `@dataclass(slots=True)` with a single field:
 
-**Why a stack, not a single field.** A handler that re-emits on the same
-bus needs its own nested id; once the inner emit returns, the outer id
-must resume. Single-field designs lose the outer id during the nested
-call and miscorrelate the surrounding `agentm.handler.invoke` records.
+```python
+dispatch_id: str = field(
+    default_factory=lambda: uuid.uuid4().hex, kw_only=True
+)
+```
 
-**Why not on the `Event` ABI.** During PR-B planning we surveyed adding
-`dispatch_id: str = field(default_factory=...)` to the `Event` base. Two
-problems:
+`kw_only=True` keeps the field out of subclass positional argument order
+so the ~30 concrete `Event` subclasses inherit cleanly without
+re-ordering. The `default_factory` exists so events that are constructed
+but never emitted — test fixtures, standalone payloads — still carry a
+sane id. On every `emit` / `emit_sync` entry, the bus reassigns
+`event.dispatch_id = uuid.uuid4().hex` when the payload is an `Event`
+instance, so re-emitting the same instance produces a fresh id (the
+field default is overwritten). Non-`Event` payloads (raw dicts on
+extension-invented channels) flow through untouched; observability
+reads via `getattr(event, "dispatch_id", "")` and stamps an empty
+string in that case.
 
-1. `Event` is a bare marker class; the ~50 subclasses are
-   `@dataclass(slots=True[, frozen=True])` with their own required fields.
-   Adding a default field to a non-dataclass base while keeping non-default
-   subclass fields would force converting `Event` to
-   `@dataclass(kw_only=True, slots=True)` — a sweeping change with ripple
-   through every event construction site.
-2. "Generated when the event is constructed" and "EventBus passes the
-   same id to all handlers" are different mechanisms. The first means
-   each `MyEvent(...)` call gets its own id (so re-emitting the same
-   instance produces stale ids); the second means one id per emit. The
-   bus owns the emit loop, so the bus is the natural owner of the id.
+**Why not a bus-owned stack.** The previous design carried
+`_dispatch_stack: list[str]` on `EventBus` plus a `current_dispatch_id()`
+accessor so observers could read the in-flight id. Two reasons that
+mechanism was a workaround, not the destination:
+
+1. The id is conceptually per-emission — it travels with the event
+   through every handler. Stashing it on the bus forced observers to
+   look it up out-of-band; the event was already in scope.
+2. Re-entrant emits needed a stack to distinguish nested ids from outer
+   ids. With the id on the event, each event carries its own; nested
+   emits of *different* events are naturally isolated, and the bus has
+   no per-dispatch state to leak across emits.
+
+**Why `Event` is no longer `frozen`.** Python's `dataclass` forbids
+mixing frozen and non-frozen across an inheritance chain. The bus needs
+to overwrite `dispatch_id` on every emit, so the base must be
+non-frozen; every concrete `Event` subclass therefore drops
+`frozen=True` as well. Nothing in the codebase relied on Event
+instances being hashable or immutable — `TerminationCause` and
+`LoopAction` payloads (which are still frozen) are passed *inside*
+events, not as events themselves.
+
+**Observer hook signature.** `EventBusObserver.on_handler_done` now
+takes `event` as a parameter so observers can read `event.dispatch_id`
+without an out-of-band accessor. `on_emit_end` already received `event`.
 
 **How consumers join.** The observability atom reads
-`api.events.current_dispatch_id()` from inside its `EventBusObserver`
-hooks (`on_emit_end` for the `agentm.event.dispatch` record, and
-`on_handler_done` for each `agentm.handler.invoke`). Both records stamp
-the same value into their `agentm.event.dispatch_id` attribute, so a
-downstream query
+`event.dispatch_id` from inside its `EventBusObserver` hooks
+(`on_emit_end` for the `agentm.event.dispatch` record,
+`on_handler_done` for each `agentm.handler.invoke`,
+`_record_mutation` for `agentm.handler.mutated`). All three records
+stamp the same value into their `agentm.event.dispatch_id` attribute,
+so a downstream query
 
 ```
 WHERE eventName = "agentm.handler.invoke"
@@ -227,10 +250,12 @@ WHERE eventName = "agentm.handler.invoke"
 recovers every handler that fanned out from one dispatch, and the matching
 `agentm.event.dispatch` record names which channel + how many handlers.
 
-**Tests.** `tests/unit/core/test_event_dispatch_id.py` locks down the three
-properties consumers depend on: stable within one dispatch, fresh across
-dispatches, nested-dispatch isolation, exception-safe pop, and the
-observer-side join is verified end-to-end by
+**Tests.** `tests/unit/core/test_event_dispatch_id.py` locks down the
+properties consumers depend on: stable within one dispatch, fresh
+across dispatches (including same-instance re-emit), construction
+default for never-emitted events, nested-emit isolation, exception
+safety, and non-Event payload pass-through. The observer-side join is
+verified end-to-end by
 `test_observability_semconv.py::test_dispatch_id_links_dispatch_and_handler_records`.
 
 ## What this is NOT
@@ -276,35 +301,63 @@ with `gen_ai.operation.name=chat`, one `agentm.session.ready` log record,
 one `agentm.turn.summary` per turn, and one `agentm.session.end` at
 shutdown — all with the expected gen_ai semconv attributes.
 
-## Known follow-up: extract a TraceReader API
+## TraceReader API
 
-The OTLP-unwrap helper (a small recursive function that walks the proto-JSON
-tagged-union shape into plain Python) is currently duplicated across
-`tool_query_traces`, `tool_eval_run`, `tool_guard_watch`, the llmharness
-CLIs, and both rca graders. The duplication is intentional under §11 (atoms
-can't import from `core.runtime.*`), but it's a maintenance hazard: a bug
-in one copy stays hidden until that specific reader hits the affected
-shape, and any future shape extension (e.g. encoding bytes attributes)
-needs N edits.
+**Status:** Landed (PR-G, see "Followups identified during landing" below).
+Previously every reader (`tool_query_traces`, `tool_eval_run`,
+`tool_guard_watch`, the llmharness CLIs, both rca graders, plus the core
+substrate's `SessionManager` and the catalog indexer) carried its own
+copy of the proto-JSON tagged-union unwrapper and its own `scopeSpans` /
+`scopeLogs` walk. PR-G extracted that into
+`src/agentm/core/runtime/trace_reader.py` and re-exported the read-only
+surface (`TraceReader`, `Span`, `LogRecord`, `attr`) through
+`agentm.core.abi`, so atoms stay §11-clean while sharing the parser.
 
-**PR-G in the followup queue** will lift this into a published `TraceReader`
-API — likely a small read-only surface in a new published package or under
-`core.lib` — so atoms can depend on the unwrap layer the same way they
-already depend on `agentm.core.lib.to_jsonable`. The §11 boundary stays
-satisfied because the new surface is pure-function read-only over OTLP/JSON,
-not a window into runtime state.
+The surface is intentionally small and lazy — every iterator is a
+generator over the file, so callers never materialise a whole trace into
+memory unless they explicitly ask via a `load_*` accessor.
 
-Tracking note: when PR-G lands, every `_unwrap_otlp` copy in this
-repository should be deleted in the same commit. Grep for `_unwrap_otlp`
-to find them.
+Public surface:
+
+```python
+from agentm.core.abi import TraceReader, Span, LogRecord, attr
+
+reader = TraceReader(path)
+
+# Generic walks (filter by name + attribute equality, lazy):
+reader.iter_spans(name=None, attribute_filters=None)
+reader.iter_log_records(name=None, attribute_filters=None, parent_span_id=None)
+reader.iter_all()  # interleaves spans + logs in file order
+
+# Convenience accessors (eager, list-returning where order matters):
+reader.load_session_header()       # -> dict | None
+reader.load_session_fingerprint()  # -> dict | None
+reader.load_messages()             # -> list[dict]
+reader.load_turn_summaries()       # -> list[dict]
+reader.chat_calls()                # -> Iterator[Span]
+reader.tool_calls()                # -> Iterator[(Span, LogRecord?, LogRecord?)]
+
+attr(obj, key, default=None)       # terse attribute lookup
+```
+
+`Span` and `LogRecord` are frozen dataclasses with attributes already
+unwrapped from OTLP tagged-union form: a `kvlistValue` becomes a `dict`,
+an `intValue` becomes an `int`, etc. The raw element is preserved in
+`.raw` for callers that need to peek at fields the dataclass does not
+surface.
+
+The reader skips malformed lines silently — the writer is append-only,
+so a partial last line during a crash should not crash readers.
 
 ## Followups identified during landing
 
 Recorded here so they don't get lost; PR briefs to follow when dispatched.
 
-- **PR-E** — `Event` ABI refactor: convert base to `@dataclass(kw_only=True,
-  slots=True)` and add a real `dispatch_id` field, closing the bus-stash
-  workaround documented in "Bus correlation" above.
+- **PR-E** — landed `__PR_E_SHA__`. `Event` is now `@dataclass(slots=True)`
+  with a `dispatch_id` field defaulted via `field(default_factory=...,
+  kw_only=True)`; the `EventBus` reassigns the field on every emit. The
+  `_dispatch_stack` + `current_dispatch_id()` workaround is gone. See
+  "Bus correlation" above for the new mechanism.
 - **PR-F** — Declarative `Event → OTel` mapping via per-class `to_otel()`
   method (or registered translator), eliminating the giant translator
   switch in `observability.install`.

@@ -408,11 +408,12 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 self,
                 channel: str,
                 handler: Any,
+                event: Any,
                 value: Any,
                 err: BaseException | None,
                 duration_ns: int,
             ) -> None:
-                del err, duration_ns
+                del event, err, duration_ns
                 if channel == ResourcesDiscoverEvent.CHANNEL and isinstance(value, dict):
                     response_owners[id(value)] = str(
                         getattr(handler, "_agentm_obs_owner", "<unknown>")
