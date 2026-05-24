@@ -30,84 +30,37 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
+from agentm.core.abi import TraceReader
+
 
 def _first_line_attrs(jsonl_path: Path) -> dict | None:
     """Walk the file for the first ``agentm.session.start`` log record.
 
-    OTLP/JSON ndjson: each line is a ``ResourceLogs`` or ``ResourceSpans``
-    element. The session.start identity is emitted as a log record with
-    ``eventName == "agentm.session.start"``; we walk until we find it.
-    Returns a dict shaped to keep the downstream call sites readable
+    The session.start identity is emitted as a log record with
+    ``eventName == "agentm.session.start"``; :class:`TraceReader` walks
+    OTLP/JSON ndjson lazily and yields unwrapped attribute dicts. Returns
+    a dict shaped to keep the downstream call sites readable
     (``trace_id`` + ``span_id`` + ``attributes`` keys, all derived from
     the OTLP body / attributes).
     """
-    try:
-        with jsonl_path.open() as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(row, dict):
-                    continue
-                for scope_logs in row.get("scopeLogs", []) or []:
-                    for record in scope_logs.get("logRecords", []) or []:
-                        if record.get("eventName") != "agentm.session.start":
-                            continue
-                        body = _unwrap_otlp(record.get("body"))
-                        attrs: dict = {}
-                        for attr in record.get("attributes", []) or []:
-                            v = attr.get("value") or {}
-                            if "stringValue" in v:
-                                attrs[attr["key"]] = v["stringValue"]
-                        body_dict = body if isinstance(body, dict) else {}
-                        return {
-                            "trace_id": (
-                                body_dict.get("root_session_id")
-                                or attrs.get("agentm.session.root_id")
-                            ),
-                            "span_id": (
-                                body_dict.get("session_id")
-                                or attrs.get("agentm.session.id")
-                            ),
-                            "attributes": body_dict,
-                        }
-    except OSError:
+    if not jsonl_path.is_file():
         return None
+    for record in TraceReader(jsonl_path).iter_log_records(
+        name="agentm.session.start"
+    ):
+        body_dict = record.body if isinstance(record.body, dict) else {}
+        return {
+            "trace_id": (
+                body_dict.get("root_session_id")
+                or record.attributes.get("agentm.session.root_id")
+            ),
+            "span_id": (
+                body_dict.get("session_id")
+                or record.attributes.get("agentm.session.id")
+            ),
+            "attributes": body_dict,
+        }
     return None
-
-
-def _unwrap_otlp(value):
-    if not isinstance(value, dict):
-        return value
-    if "stringValue" in value:
-        return value["stringValue"]
-    if "boolValue" in value:
-        return value["boolValue"]
-    if "intValue" in value:
-        try:
-            return int(value["intValue"])
-        except (TypeError, ValueError):
-            return value["intValue"]
-    if "doubleValue" in value:
-        try:
-            return float(value["doubleValue"])
-        except (TypeError, ValueError):
-            return value["doubleValue"]
-    if "kvlistValue" in value:
-        out = {}
-        for item in value["kvlistValue"].get("values", []) or []:
-            key = item.get("key")
-            if not isinstance(key, str):
-                continue
-            out[key] = _unwrap_otlp(item.get("value"))
-        return out
-    if "arrayValue" in value:
-        return [_unwrap_otlp(v) for v in value["arrayValue"].get("values", []) or []]
-    return value
 
 
 def main() -> int:

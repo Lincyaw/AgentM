@@ -22,6 +22,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from agentm.core.abi import TraceReader
+
 # tool_eval_run cd's into the tuner cwd; observability lives under
 # ``<cwd>/.agentm/observability/<trace>.jsonl``. The grader runs in the same
 # process, so plain Path().cwd() resolves to the tuner cwd.
@@ -205,97 +207,50 @@ def _parse_trace(path: Path, expected_task_id: str) -> dict[str, Any] | None:
     ``execute_tool submit_final_report`` span's
     ``gen_ai.tool.call.arguments`` attribute (JSON-encoded by the writer).
     """
+    if not path.is_file():
+        return None
+    reader = TraceReader(path)
+
+    # Identity match: look for an ``agentm.session.fingerprint`` whose
+    # ``task_meta.task_id`` is the one we're scoring.
+    matched = False
+    for record in reader.iter_log_records(name="agentm.session.fingerprint"):
+        body = record.body
+        if isinstance(body, dict):
+            task_meta = body.get("task_meta") or {}
+            if (
+                isinstance(task_meta, dict)
+                and str(task_meta.get("task_id") or "") == expected_task_id
+            ):
+                matched = True
+                break
+    if not matched:
+        return None
+
     services: list[str] = []
     fault_kinds: list[str] = []
     raw_payload: str = ""
-    matched = False
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(rec, dict):
-                    continue
-                for scope_logs in rec.get("scopeLogs", []) or []:
-                    for record in scope_logs.get("logRecords", []) or []:
-                        if record.get("eventName") != "agentm.session.fingerprint":
-                            continue
-                        body = _unwrap_otlp(record.get("body"))
-                        if isinstance(body, dict):
-                            task_meta = body.get("task_meta") or {}
-                            if (
-                                isinstance(task_meta, dict)
-                                and str(task_meta.get("task_id") or "")
-                                == expected_task_id
-                            ):
-                                matched = True
-                for scope_spans in rec.get("scopeSpans", []) or []:
-                    for span in scope_spans.get("spans", []) or []:
-                        if span.get("name") != "execute_tool submit_final_report":
-                            continue
-                        for attr in span.get("attributes", []) or []:
-                            if attr.get("key") != "gen_ai.tool.call.arguments":
-                                continue
-                            v = attr.get("value") or {}
-                            raw = v.get("stringValue") if isinstance(v, dict) else None
-                            if not isinstance(raw, str) or not raw:
-                                continue
-                            try:
-                                args = json.loads(raw)
-                            except (TypeError, ValueError):
-                                continue
-                            if not isinstance(args, dict):
-                                continue
-                            raw_payload = json.dumps(args)
-                            for rc in args.get("root_causes") or []:
-                                if not isinstance(rc, dict):
-                                    continue
-                                svc = rc.get("service")
-                                if isinstance(svc, str):
-                                    services.append(svc)
-                                fk = rc.get("fault_kind")
-                                if isinstance(fk, str):
-                                    fault_kinds.append(fk)
-    except OSError:
-        return None
-    if not matched:
-        return None
-    return {"services": services, "fault_kinds": fault_kinds, "raw": raw_payload}
-
-
-def _unwrap_otlp(value: Any) -> Any:
-    if not isinstance(value, dict):
-        return value
-    if "stringValue" in value:
-        return value["stringValue"]
-    if "boolValue" in value:
-        return value["boolValue"]
-    if "intValue" in value:
+    for span in reader.iter_spans(name="execute_tool submit_final_report"):
+        raw = span.attributes.get("gen_ai.tool.call.arguments")
+        if not isinstance(raw, str) or not raw:
+            continue
         try:
-            return int(value["intValue"])
+            args = json.loads(raw)
         except (TypeError, ValueError):
-            return value["intValue"]
-    if "doubleValue" in value:
-        try:
-            return float(value["doubleValue"])
-        except (TypeError, ValueError):
-            return value["doubleValue"]
-    if "kvlistValue" in value:
-        out: dict[str, Any] = {}
-        for item in value["kvlistValue"].get("values", []) or []:
-            key = item.get("key")
-            if not isinstance(key, str):
+            continue
+        if not isinstance(args, dict):
+            continue
+        raw_payload = json.dumps(args)
+        for rc in args.get("root_causes") or []:
+            if not isinstance(rc, dict):
                 continue
-            out[key] = _unwrap_otlp(item.get("value"))
-        return out
-    if "arrayValue" in value:
-        return [_unwrap_otlp(v) for v in value["arrayValue"].get("values", []) or []]
-    return value
+            svc = rc.get("service")
+            if isinstance(svc, str):
+                services.append(svc)
+            fk = rc.get("fault_kind")
+            if isinstance(fk, str):
+                fault_kinds.append(fk)
+    return {"services": services, "fault_kinds": fault_kinds, "raw": raw_payload}
 
 
 def _detect_sql_quoting_issue(task: dict[str, Any]) -> str | None:

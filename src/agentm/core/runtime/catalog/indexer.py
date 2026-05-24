@@ -18,10 +18,7 @@ from typing import Annotated, Any
 import typer
 
 from agentm.core.runtime.catalog import _layout
-from agentm.core.runtime.otel_export import (
-    iter_log_records,
-    otlp_unwrap,
-)
+from agentm.core.runtime.trace_reader import TraceReader
 
 logger = logging.getLogger(__name__)
 _LEGACY_FINGERPRINT_WARNED = False
@@ -238,54 +235,52 @@ def index_trace(trace_path: Path, *, root: Path | None = None) -> IndexerResult:
     trace_id = trace_path.stem
     state = _EpochState()
 
-    with trace_path.open("r", encoding="utf-8") as handle:
-        for lineno, raw_line in enumerate(handle, start=1):
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                line_dict = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"{trace_path}:{lineno}: invalid JSON: {exc}") from exc
-            if not isinstance(line_dict, dict):
-                continue
-            # OTLP/JSON ndjson: each line is one ResourceSpans or
-            # ResourceLogs element. The indexer reads only log records
-            # (identity events live there); spans carry timing/lineage
-            # but no aggregation signal we don't already get from the
-            # paired log records.
-            for record in iter_log_records(line_dict):
-                event_name = record.get("eventName")
-                body = otlp_unwrap(record.get("body"))
-                if event_name == "agentm.session.fingerprint":
-                    if isinstance(body, dict):
-                        parsed = _parse_atom_versions(body)
-                        if parsed is not None:
-                            state.fingerprint = parsed
-                            state.scenario = _parse_scenario(body)
-                elif event_name == "agentm.atom.reload":
-                    next_fingerprint = None
-                    next_scenario = state.scenario
-                    if isinstance(body, dict):
-                        next_fingerprint = _parse_atom_versions(
-                            body.get("fingerprint_after")
-                        )
-                        next_scenario = (
-                            _parse_scenario(body.get("fingerprint_after"))
-                            or next_scenario
-                        )
-                    state.reset_for_reload(
-                        next_fingerprint or state.fingerprint, next_scenario
-                    )
-                elif event_name == "agentm.agent.end":
-                    stop_reason = _extract_stop_reason_from_body(body)
-                    if stop_reason is not None:
-                        state.last_stop_reason = stop_reason
-                elif event_name == "agentm.turn.summary":
-                    token_count = _extract_usage_tokens(body)
-                    if token_count is not None:
-                        state.tokens_total = (state.tokens_total or 0) + token_count
-                        state.saw_tokens = True
+    # OTLP/JSON ndjson: each line is one ResourceSpans or ResourceLogs
+    # element. The indexer reads only log records (identity events live
+    # there); spans carry timing/lineage but no aggregation signal we
+    # don't already get from the paired log records.
+    #
+    # NB: the indexer's rebuild-from-raw idempotence (fail-stop test in
+    # ``tests/unit/core/catalog/test_indexer.py``) depends on this walk
+    # being deterministic over the on-disk byte order. TraceReader's
+    # ``iter_log_records`` is a plain file-order walk over scopeLogs
+    # entries, so order is preserved.
+    try:
+        log_records = list(TraceReader(trace_path).iter_log_records())
+    except json.JSONDecodeError as exc:  # pragma: no cover — TraceReader skips
+        raise ValueError(f"{trace_path}: invalid JSON: {exc}") from exc
+    for record in log_records:
+        event_name = record.event_name
+        body = record.body
+        if event_name == "agentm.session.fingerprint":
+            if isinstance(body, dict):
+                parsed = _parse_atom_versions(body)
+                if parsed is not None:
+                    state.fingerprint = parsed
+                    state.scenario = _parse_scenario(body)
+        elif event_name == "agentm.atom.reload":
+            next_fingerprint = None
+            next_scenario = state.scenario
+            if isinstance(body, dict):
+                next_fingerprint = _parse_atom_versions(
+                    body.get("fingerprint_after")
+                )
+                next_scenario = (
+                    _parse_scenario(body.get("fingerprint_after"))
+                    or next_scenario
+                )
+            state.reset_for_reload(
+                next_fingerprint or state.fingerprint, next_scenario
+            )
+        elif event_name == "agentm.agent.end":
+            stop_reason = _extract_stop_reason_from_body(body)
+            if stop_reason is not None:
+                state.last_stop_reason = stop_reason
+        elif event_name == "agentm.turn.summary":
+            token_count = _extract_usage_tokens(body)
+            if token_count is not None:
+                state.tokens_total = (state.tokens_total or 0) + token_count
+                state.saw_tokens = True
 
     if state.fingerprint is None:
         result.warnings.append(f"trace {trace_id!r} missing session.fingerprint record")
