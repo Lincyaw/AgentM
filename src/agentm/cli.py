@@ -19,6 +19,7 @@ import typer
 from dotenv import load_dotenv
 
 from agentm.ai import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
+from agentm.core.abi import LoopConfig
 from agentm.core.abi.events import DiagnosticEvent, EventBus
 from agentm.core.abi.session_store import SessionState, SessionStore
 from agentm.core.lib.render import final_summary
@@ -186,18 +187,6 @@ def _resolve_provider_model_cwd(
     return provider, model, cwd
 
 
-def _auto_commit_default() -> bool:
-    """Read `AGENTM_AUTO_COMMIT` env var; truthy → True, 0/false/no → False.
-
-    Default when the var is unset: True (preserves existing sandbox
-    workflows where agentm auto-commits during sessions).
-    """
-    raw = os.environ.get("AGENTM_AUTO_COMMIT")
-    if raw is None:
-        return True
-    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
-
-
 def _make_default_session_store(cwd: str) -> SessionStore:
     from agentm.core.runtime.session_bootstrap import make_default_session_store
 
@@ -274,7 +263,7 @@ def _build_session_config(
     continue_recent: bool = False,
     session_store: SessionStore | None = None,
     provider_registry: ProviderRegistry = DEFAULT_PROVIDER_REGISTRY,
-    auto_commit: bool = True,
+    loop_config: LoopConfig | None = None,
 ) -> tuple[Any, SessionState]:
     from agentm.core.abi.session_config import AgentSessionConfig
 
@@ -313,7 +302,7 @@ def _build_session_config(
             session_manager=cast(Any, session_state),
             resource_loader=resource_loader,
             bus=bus,
-            auto_commit=auto_commit,
+            loop_config=loop_config,
         ),
         session_state,
     )
@@ -338,13 +327,24 @@ async def run(
     quiet: bool,
     resume: str | None,
     continue_recent: bool,
-    auto_commit: bool = True,
+    max_turns: int | None = None,
+    max_tool_calls: int | None = None,
     output: TextIO = sys.stdout,
 ) -> int:
     from agentm.core.runtime.session import AgentSession
 
     bus = EventBus()
     diagnostic_state = _attach_default_diagnostics(bus)
+
+    # Build an explicit loop_config only when the user actually passed a cap;
+    # otherwise leave it None so the scenario's ``loop_budget`` atom (or the
+    # LoopConfig default — no cap) decides. An explicit flag wins over the
+    # atom-registered budget wholesale (see session_factory precedence).
+    loop_config = (
+        LoopConfig(max_turns=max_turns, max_tool_calls=max_tool_calls)
+        if (max_turns is not None or max_tool_calls is not None)
+        else None
+    )
 
     config, session_manager = _build_session_config(
         scenario=scenario,
@@ -359,7 +359,7 @@ async def run(
         bus=bus,
         resume=resume,
         continue_recent=continue_recent,
-        auto_commit=auto_commit,
+        loop_config=loop_config,
     )
     if not quiet and session_manager.session_file is not None:
         print(f"INFO: session log: {session_manager.session_file}", file=sys.stderr)
@@ -523,20 +523,29 @@ def run_cmd(
             ),
         ),
     ] = False,
-    auto_commit: Annotated[
-        bool,
+    max_turns: Annotated[
+        int | None,
         typer.Option(
-            "--auto-commit/--no-auto-commit",
+            "--max-turns",
+            min=1,
             help=(
-                "Whether the resource writer should auto-commit managed "
-                "writes to the working tree. When disabled the writer falls "
-                "back to advisory mode (bytes-on-disk, no `git commit`). "
-                "When enabled (default) the writer still refuses to commit "
-                "to protected branches ('main', 'master') in the user's real "
-                "repo. Reads `AGENTM_AUTO_COMMIT` when the flag is unset."
+                "Hard ceiling on agent-loop turns. Unset = no cap (the agent "
+                "runs until it stops on its own / hits --max-tool-calls / is "
+                "aborted). Overrides the scenario's `loop_budget` atom."
             ),
         ),
-    ] = _auto_commit_default(),
+    ] = None,
+    max_tool_calls: Annotated[
+        int | None,
+        typer.Option(
+            "--max-tool-calls",
+            min=1,
+            help=(
+                "Hard ceiling on total tool calls across the run. Unset = no "
+                "cap. Overrides the scenario's `loop_budget` atom."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Send a single prompt and print the agent's final text."""
 
@@ -601,7 +610,8 @@ def run_cmd(
             quiet=quiet,
             resume=resume,
             continue_recent=continue_recent,
-            auto_commit=auto_commit,
+            max_turns=max_turns,
+            max_tool_calls=max_tool_calls,
         )
     )
     raise typer.Exit(code=rc)
