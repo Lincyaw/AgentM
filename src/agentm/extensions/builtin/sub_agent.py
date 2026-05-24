@@ -427,7 +427,12 @@ def _resolve_child_loop_config(
         "max_tool_calls",
         persona_budget.get("max_tool_calls", parent.max_tool_calls),
     )
-    applied_budget = {"max_turns": max_turns}
+    # Only advertise caps that are actually enforced. An unbounded
+    # ``max_turns`` (None — inherited from an uncapped parent) must not leak
+    # into the worker's ``<budget>`` block as a fake "max_turns: None" limit.
+    applied_budget: dict[str, int] = {}
+    if max_turns is not None:
+        applied_budget["max_turns"] = max_turns
     if max_tool_calls is not None:
         applied_budget["max_tool_calls"] = max_tool_calls
     return (
