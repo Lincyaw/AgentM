@@ -64,7 +64,7 @@ def test_scan_branch_folds_pure_node_delete_op() -> None:
             AUDIT_EVENT,
             {
                 "id": 1,
-                "kind": "evid",
+                "kind": "act",
                 "summary": "stale",
                 "source_turns": [1],
                 "external_refs": [],
@@ -94,7 +94,7 @@ def test_state_pending_ops_is_truthy_for_pure_node_delete() -> None:
     firing as ``EXTRACTOR_EMPTY``. Verified at the state level — the
     adapter's gating logic reads ``state.pending_ops`` directly.
     """
-    prior = Event(id=1, kind=EventKind("evid"), summary="stale", source_turns=[1])
+    prior = Event(id=1, kind=EventKind("act"), summary="stale", source_turns=[1])
     state = ExtractionState(
         turn_texts={1: "alpha"},
         recent_graph_dict={1: prior},
@@ -273,7 +273,7 @@ def test_scan_branch_legacy_audit_edge_translation_preserves_witness_fields() ->
     branch = [
         _entry(
             AUDIT_EVENT,
-            {"id": 1, "kind": "evid", "summary": "s", "source_turns": [1], "external_refs": []},
+            {"id": 1, "kind": "act", "summary": "s", "source_turns": [1], "external_refs": []},
         ),
         _entry(
             AUDIT_EVENT,

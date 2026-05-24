@@ -8,6 +8,17 @@ between the audit prompt schemas, the phase parsers
 (``audit.extractor.RawExtractorOutput`` /
 ``audit.auditor.RawVerdictOutput``), and the adapter.
 
+V4 breaking changes (2026-05-24):
+- ``EventKind.EVID`` is dropped. The valid kinds are now
+  ``task``, ``hyp``, ``act``, ``dec``, ``concl`` (five). A linear
+  investigation block now collapses to ONE ``act`` node whose
+  ``summary`` records both the probes the agent issued AND the
+  results that came back, in time order.
+- The hard "no passthrough" finalize check
+  (``_validate_event_degrees``) is replaced by a soft warning emitted
+  alongside a successful finalize. See
+  :func:`llmharness.audit.extractor.state._compute_degree_warning`.
+
 V3 breaking changes (issue #134, 2026-05-10):
 - ``EventKind`` short-form values: ``task``, ``hyp``, ``evid``, ``act``,
   ``dec``, ``concl``. The earlier long forms (``hypothesis``,
@@ -44,7 +55,6 @@ class EventKind(str, Enum):
 
     TASK = "task"
     HYP = "hyp"
-    EVID = "evid"
     ACT = "act"
     DEC = "dec"
     CONCL = "concl"
@@ -267,7 +277,7 @@ class Phase:
     """A merged "basic block" over consecutive raw events.
 
     Raw events are extracted one-per-turn; phases group consecutive
-    ``act`` / ``evid`` events into a single block while keeping
+    ``act`` events into a single block while keeping
     ``task`` / ``hyp`` / ``dec`` / ``concl`` as singleton phases. The
     adapter persists phases as ``llmharness.audit_phase`` entries
     alongside raw events; the auditor reads the phase view for
@@ -278,9 +288,8 @@ class Phase:
     as raw event ids.
 
     ``kind`` is one of the :class:`EventKind` values for singleton
-    phases (``task`` / ``hyp`` / ``dec`` / ``concl`` / ``act`` / ``evid``
-    when only one such event is in the run), plus the merged-run
-    sentinel ``act_evid_run`` when two or more ``act`` / ``evid`` events
+    phases (``task`` / ``hyp`` / ``dec`` / ``concl`` / ``act``), plus
+    the merged-run sentinel ``act_run`` when two or more ``act`` events
     are coalesced. Free-text rather than enum so future merge rules can
     introduce new run types without a schema bump.
     """

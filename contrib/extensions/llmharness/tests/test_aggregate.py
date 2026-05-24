@@ -518,7 +518,7 @@ def test_external_ref_resolves_to_cross_firing_edge_in_snapshot(
                 "events": [
                     {
                         "id": 2,
-                        "kind": "evid",
+                        "kind": "act",
                         "summary": "follow-up",
                         "source_turns": [3],
                         "external_refs": [

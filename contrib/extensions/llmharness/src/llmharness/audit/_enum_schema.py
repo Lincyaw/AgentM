@@ -6,6 +6,11 @@ classes here keeps the schema in lockstep with ``schema.py`` and removes
 hand-listed copies that can silently drift. JSON-Schema ``enum``
 literals declared in ``audit/extractor/*`` import from this module.
 
+V4 (2026-05-24): ``EventKind.EVID`` is gone. ``EVENT_KIND_VALUES`` now
+holds ``task``, ``hyp``, ``act``, ``dec``, ``concl`` (five) — derived
+from :class:`~llmharness.schema.EventKind`. Linear blocks fold into a
+single ``act`` whose summary records both probes and results.
+
 V3 (issue #134, 2026-05-10):
 - ``EVENT_KIND_VALUES`` short-form values: ``task``, ``hyp``, ``evid``,
   ``act``, ``dec``, ``concl`` — derived from

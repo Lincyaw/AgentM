@@ -1,11 +1,14 @@
 """Small helpers that build the state-echo + option suggestions for the
-extractor's three-section error template.
+extractor's three-section error / advisory templates.
 
 Kept beside the tool files (not promoted to the shared ``audit/``
 namespace) because every shape here is extractor-specific:
-``ExtractionState`` internals, ``EdgeKind`` enum text, the passthrough
-recovery recipe. The auditor side reuses ``format_witness_error`` but
-not these specifics.
+``ExtractionState`` internals, ``EdgeKind`` enum text, the chain-link
+recovery recipe. V4 (2026-05-24): the chain-neighbours helper still
+ships because the soft degree warning surfaced via
+:meth:`ExtractionState.compute_degree_warning` may want to name the
+in/out neighbours of a flagged chain-link node. Used for ADVISORY
+rendering only — never to gate finalize.
 
 Not an atom — pure functions, no MANIFEST, no install hook.
 """
@@ -35,12 +38,12 @@ def state_echo(state: ExtractionState) -> str:
 
 
 def chain_neighbours(state: ExtractionState, event_id: int) -> tuple[int | None, int | None]:
-    """Return ``(in_neighbour_id, out_neighbour_id)`` for a passthrough.
+    """Return ``(in_neighbour_id, out_neighbour_id)`` for a chain-link node.
 
-    A passthrough event has exactly one predecessor and one successor in
-    the pending in-firing graph; this returns those ids so the error
-    message can name them in the options. Returns ``(None, None)`` when
-    the event is not in the pending graph or is not a passthrough.
+    A chain-link event has exactly one predecessor and one successor in
+    the pending in-firing graph; this returns those ids so the advisory
+    text can name them. Returns ``(None, None)`` when the event is not
+    in the pending graph or is not a chain link.
     """
     in_neighbour: int | None = None
     out_neighbour: int | None = None

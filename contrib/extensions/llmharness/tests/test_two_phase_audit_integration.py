@@ -182,7 +182,7 @@ class _V31StubProvider:
                     "upsert_node",
                     {
                         "id": 1,
-                        "kind": "evid",
+                        "kind": "act",
                         "summary": "event 1",
                         "source_turns": [0, 1],
                     },
@@ -192,7 +192,7 @@ class _V31StubProvider:
                     "upsert_node",
                     {
                         "id": 2,
-                        "kind": "evid",
+                        "kind": "act",
                         "summary": "event 2",
                         "source_turns": [0, 1],
                     },
@@ -228,7 +228,7 @@ class _V31StubProvider:
                     "upsert_node",
                     {
                         "id": 1,
-                        "kind": "evid",
+                        "kind": "act",
                         "summary": "event 1",
                         "source_turns": [0, 1],
                     },
@@ -238,7 +238,7 @@ class _V31StubProvider:
                     "upsert_node",
                     {
                         "id": 2,
-                        "kind": "evid",
+                        "kind": "act",
                         "summary": "event 2",
                         "source_turns": [0, 1],
                     },

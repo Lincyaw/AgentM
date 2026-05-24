@@ -39,17 +39,17 @@ def test_singleton_break_kinds_each_become_their_own_phase() -> None:
     assert [p.id for p in phases] == [1, 2, 3, 4]
 
 
-def test_consecutive_act_evid_run_collapses_into_one_phase() -> None:
+def test_consecutive_act_run_collapses_into_one_phase() -> None:
     events = [
         _ev(1, EventKind.ACT, "tool_call list_tables"),
-        _ev(2, EventKind.EVID, "list_tables result"),
+        _ev(2, EventKind.ACT, "list_tables result"),
         _ev(3, EventKind.ACT, "tool_call query_sql"),
-        _ev(4, EventKind.EVID, "query_sql result"),
+        _ev(4, EventKind.ACT, "query_sql result"),
     ]
     phases = merge_to_phases(events)
     assert len(phases) == 1
     p = phases[0]
-    assert p.kind == "act_evid_run"
+    assert p.kind == "act_run"
     assert p.member_event_ids == (1, 2, 3, 4)
     assert p.summary.count(" | ") == 3  # four pieces joined by separator
 
@@ -58,18 +58,18 @@ def test_break_kind_flushes_run_and_starts_singleton() -> None:
     events = [
         _ev(1, EventKind.TASK, "task"),
         _ev(2, EventKind.ACT, "act A"),
-        _ev(3, EventKind.EVID, "evid A"),
+        _ev(3, EventKind.ACT, "evid A"),
         _ev(4, EventKind.HYP, "hyp"),
         _ev(5, EventKind.ACT, "act B"),
-        _ev(6, EventKind.EVID, "evid B"),
+        _ev(6, EventKind.ACT, "evid B"),
         _ev(7, EventKind.CONCL, "concl"),
     ]
     phases = merge_to_phases(events)
     assert [p.kind for p in phases] == [
         "task",
-        "act_evid_run",
+        "act_run",
         "hyp",
-        "act_evid_run",
+        "act_run",
         "concl",
     ]
     assert [p.member_event_ids for p in phases] == [
@@ -83,23 +83,23 @@ def test_break_kind_flushes_run_and_starts_singleton() -> None:
 
 
 def test_single_act_or_evid_keeps_its_own_kind_not_run_label() -> None:
-    """A run of length 1 must NOT be relabelled ``act_evid_run`` — that
+    """A run of length 1 must NOT be relabelled ``act_run`` — that
     label means "two or more were merged" and downstream readers may
     branch on it."""
     events = [
         _ev(1, EventKind.HYP, "hyp"),
         _ev(2, EventKind.ACT, "lone act"),
         _ev(3, EventKind.HYP, "hyp 2"),
-        _ev(4, EventKind.EVID, "lone evid"),
+        _ev(4, EventKind.ACT, "lone evid"),
     ]
     phases = merge_to_phases(events)
-    assert [p.kind for p in phases] == ["hyp", "act", "hyp", "evid"]
+    assert [p.kind for p in phases] == ["hyp", "act", "hyp", "act"]
 
 
 def test_phase_source_turns_are_union_of_member_turns_sorted_unique() -> None:
     events = [
         _ev(1, EventKind.ACT, "a", turns=[3, 5]),
-        _ev(2, EventKind.EVID, "b", turns=[5, 4]),
+        _ev(2, EventKind.ACT, "b", turns=[5, 4]),
         _ev(3, EventKind.ACT, "c", turns=[4]),
     ]
     phases = merge_to_phases(events)
@@ -111,7 +111,7 @@ def test_run_summary_truncated_when_member_summaries_get_long() -> None:
     big = "x" * 800
     events = [
         _ev(1, EventKind.ACT, big),
-        _ev(2, EventKind.EVID, big),
+        _ev(2, EventKind.ACT, big),
     ]
     phases = merge_to_phases(events)
     assert len(phases) == 1
