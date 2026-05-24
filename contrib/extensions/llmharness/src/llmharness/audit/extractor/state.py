@@ -1238,10 +1238,4 @@ def _compute_degree_warning(
     )
 
 
-# Back-compat alias for tests / external callers that still import the
-# old name. Both names exist for the v3 → v4 transition; new code
-# should use ``_compute_degree_warning``.
-_validate_event_degrees = _compute_degree_warning
-
-
 __all__ = ["ExtractionState", "_compute_degree_warning"]

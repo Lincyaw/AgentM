@@ -13,7 +13,9 @@ V4 breaking changes (2026-05-24):
   ``task``, ``hyp``, ``act``, ``dec``, ``concl`` (five). A linear
   investigation block now collapses to ONE ``act`` node whose
   ``summary`` records both the probes the agent issued AND the
-  results that came back, in time order.
+  results that came back, in time order. V3 records containing
+  ``kind: "evid"`` will fail to deserialize with ``ValueError``;
+  use ``scripts/migrate_v3_to_v4_evid_fold.py`` to convert first.
 - The hard "no passthrough" finalize check
   (``_validate_event_degrees``) is replaced by a soft warning emitted
   alongside a successful finalize. See
