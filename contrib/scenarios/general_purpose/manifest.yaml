@@ -35,20 +35,6 @@ extensions:
   # mine production traces later. ---
   - module: agentm.extensions.builtin.observability
 
-  # --- OTel tracing: ships real OTLP spans for session / turns / LLM
-  # requests / tool calls / handler invocations / every event-bus
-  # dispatch (``stream_delta`` excluded by default — one span per LLM
-  # token is pure bloat). Requires ``uv sync --extra otel`` and an OTel
-  # collector reachable on ``OTEL_EXPORTER_OTLP_ENDPOINT`` (default
-  # 'http://localhost:4317'). If the SDK is not installed the atom
-  # logs a notice and no-ops, so the session still boots cleanly.
-  - module: agentm.extensions.builtin.otel_tracing
-    config:
-      service_name: agentm
-      # endpoint: http://localhost:4317
-      # protocol: grpc           # or http/protobuf
-      # headers: { authorization: "Bearer …" }
-
   # --- prompt assembly: runtime_context surfaces cwd/platform;
   # system_prompt provides the assembly hook. ---
   - module: agentm.extensions.builtin.system_prompt

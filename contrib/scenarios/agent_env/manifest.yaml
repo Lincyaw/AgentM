@@ -62,9 +62,6 @@ extensions:
   # same set as general_purpose so the agent behaves identically apart
   # from where its shell commands run. ---
   - module: agentm.extensions.builtin.observability
-  # OTLP span export — no-op without ``uv sync --extra otel``. See
-  # ``tools/otel/`` for a local collector + Jaeger compose file.
-  - module: agentm.extensions.builtin.otel_tracing
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: |

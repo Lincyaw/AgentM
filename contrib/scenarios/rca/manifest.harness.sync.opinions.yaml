@@ -18,7 +18,6 @@ extensions:
   - module: agentm_rca.tools.thinkdepth_sql
   - module: agentm_rca.tools.finalize
   - module: agentm.extensions.builtin.observability
-  - module: agentm.extensions.builtin.otel_tracing
   - module: contrib.extensions.rcabench_contract
   - module: agentm_rca.prompt_loader
     config:

@@ -340,13 +340,11 @@ def _build_session_config(*, cwd: str, provider_module: str) -> AgentSessionConf
         provider=(provider_module, {}),
         extensions=[
             # Satisfy the adapter's MANIFEST.requires (observability,
-            # otel_tracing, operations_local, system_prompt) so the
-            # session-factory's requires-ordering check passes. The
-            # audit child still mounts its own copies via
-            # ``compose_audit_extensions``; these are for the host
-            # session only.
+            # operations_local, system_prompt) so the session-factory's
+            # requires-ordering check passes. The audit child still
+            # mounts its own copies via ``compose_audit_extensions``;
+            # these are for the host session only.
             ("agentm.extensions.builtin.observability", {}),
-            ("agentm.extensions.builtin.otel_tracing", {}),
             ("agentm.extensions.builtin.operations_local", {}),
             ("agentm.extensions.builtin.system_prompt", {"prompt": ""}),
             (

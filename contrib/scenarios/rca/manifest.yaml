@@ -26,9 +26,6 @@ extensions:
   - module: agentm_rca.tools.finalize
   - module: agentm.extensions.builtin.artifact_store
   - module: agentm.extensions.builtin.observability
-  # OTLP span export — no-op without ``uv sync --extra otel``. See
-  # ``tools/otel/`` for a local collector + Jaeger compose file.
-  - module: agentm.extensions.builtin.otel_tracing
   - module: agentm_rca.worker_skills
   - module: agentm.extensions.builtin.skill_loader
     config:
@@ -65,7 +62,6 @@ extensions:
         - duckdb_sql
         - artifact_store
         - observability
-        - otel_tracing
         # Critic-only skills: ``worker_skills`` publishes the
         # ``contrib/scenarios/rca/skills/`` directory via
         # ``ResourcesDiscoverEvent``; ``skill_loader`` (builtin) reads
@@ -90,8 +86,6 @@ extensions:
           module: agentm.extensions.builtin.artifact_store
         observability:
           module: agentm.extensions.builtin.observability
-        otel_tracing:
-          module: agentm.extensions.builtin.otel_tracing
         worker_skills:
           module: agentm_rca.worker_skills
         skill_loader:
