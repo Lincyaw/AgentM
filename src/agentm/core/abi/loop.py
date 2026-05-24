@@ -10,7 +10,7 @@ message and tool outcomes, optionally overridden by extensions on the
 Loop sketch (one ``run`` invocation):
 
     emit "agent_start"
-    while turn_index < max_turns:
+    while max_turns is None or turn_index < max_turns:   # None ⇒ no cap
         if signal.is_set(): _terminate(SignalAborted())
         emit "turn_start"
         emit "context"  (handlers may rewrite the messages list)
@@ -36,6 +36,7 @@ causes the override returns are ignored.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -108,9 +109,18 @@ from .tool import (
 
 @dataclass(slots=True)
 class LoopConfig:
-    """Loop tuning knobs. Defaults are deliberately conservative."""
+    """Loop tuning knobs.
 
-    max_turns: int = 32
+    ``max_turns`` defaults to ``None`` — no turn cap. The agent then runs
+    until it terminates on its own (``ModelEndTurn``), a tool/budget cap
+    (``max_tool_calls``), an abort signal, or a provider error. A positive
+    int reinstates a hard ceiling that ends the run with
+    ``MaxTurnsExhausted`` once reached. Set a cap via the CLI
+    (``--max-turns``), a scenario manifest ``loop:`` block, or an explicit
+    ``LoopConfig`` in embedded use.
+    """
+
+    max_turns: int | None = None
     max_tool_calls: int | None = None
 
 
@@ -410,8 +420,14 @@ class AgentLoop:
         last_assistant: AssistantMessage | None = None
         last_turn_index = -1
 
+        # ``max_turns is None`` ⇒ no turn cap: iterate forever and rely on an
+        # in-loop ``return`` (ModelEndTurn / budget / signal / error) to end
+        # the run. A finite cap uses ``range`` so falling off the end below
+        # surfaces ``MaxTurnsExhausted``.
+        turn_iter = itertools.count() if max_turns is None else range(max_turns)
+
         try:
-            for turn_index in range(max_turns):
+            for turn_index in turn_iter:
                 last_turn_index = turn_index
                 turn_id = self._next_turn_id
                 self._next_turn_id += 1
