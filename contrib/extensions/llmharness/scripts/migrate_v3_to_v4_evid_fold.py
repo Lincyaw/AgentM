@@ -77,6 +77,10 @@ def _fold_evid_into_act(events: list[dict[str, Any]]) -> tuple[
             )
             cloned = dict(ev)
             cloned["kind"] = "act"
+            # Tag the downgrade in the summary so a post-migration audit
+            # can grep these out — they are not real probe+result acts.
+            orig_summary = cloned.get("summary", "")
+            cloned["summary"] = f"[v4-migrated orphan evid] {orig_summary}".rstrip()
             folded.append(cloned)
             last_act_index = len(folded) - 1
             continue
