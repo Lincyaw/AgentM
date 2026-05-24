@@ -74,12 +74,27 @@ class BusPriority:
 # --- Event types ------------------------------------------------------------
 
 
+@dataclass(slots=True)
 class Event:
-    """Marker base class for all kernel events.
+    """Base class for all kernel events.
 
-    Concrete events are dataclasses; this class exists so callers can write
-    ``isinstance(x, Event)`` if they want a structural check.
+    Carries a per-emission ``dispatch_id`` so observability consumers can
+    correlate a single ``agentm.event.dispatch`` log record with every
+    ``agentm.handler.invoke`` record fanned out from it. The field default
+    keeps test fixtures and standalone constructions sane; the
+    :class:`EventBus` **reassigns** ``dispatch_id`` on every ``emit`` /
+    ``emit_sync`` entry, so a re-emitted instance produces a fresh id.
+
+    Declared ``kw_only=True`` at the field level so subclass positional
+    fields remain compatible without re-ordering. The base is **not**
+    ``frozen`` — the bus needs to write ``dispatch_id`` on every emit, and
+    Python dataclasses forbid mixing frozen / non-frozen across the
+    inheritance chain — so every concrete Event subclass is also non-frozen.
     """
+
+    dispatch_id: str = field(
+        default_factory=lambda: uuid.uuid4().hex, kw_only=True
+    )
 
 
 # --- Termination causes -----------------------------------------------------
@@ -218,7 +233,7 @@ class Inject(LoopAction):
 # --- Event payloads ---------------------------------------------------------
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True)
 class AgentStartEvent(Event):
     """Emitted once at the start of ``AgentLoop.run``."""
 
@@ -226,7 +241,7 @@ class AgentStartEvent(Event):
     messages: list[AgentMessage]
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True)
 class AgentEndEvent(Event):
     """Emitted once when ``AgentLoop.run`` returns.
 
@@ -279,7 +294,7 @@ class DecideTurnActionEvent(Event):
     observation: TurnObservation
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True)
 class TurnStartEvent(Event):
     """Emitted at the start of each loop turn (one LLM call)."""
 
@@ -288,7 +303,7 @@ class TurnStartEvent(Event):
     turn_id: int = 0
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True)
 class TurnEndEvent(Event):
     """Emitted after a turn's assistant message is fully assembled.
 
@@ -341,7 +356,7 @@ class ToolResultEvent(Event):
     result: ToolResult
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True)
 class ToolErrorEvent(Event):
     """Emitted by the loop when a tool call cannot produce a normal result.
 
@@ -397,7 +412,7 @@ class BeforeSendToLlmEvent(Event):
     system: str | None
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True)
 class LlmRequestStartEvent(Event):
     """Emitted right before the loop drains ``stream_fn``."""
 
@@ -410,7 +425,7 @@ class LlmRequestStartEvent(Event):
     turn_id: int = 0
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True)
 class LlmRequestEndEvent(Event):
     """Emitted after the loop finishes draining ``stream_fn`` (success or
     error). ``error`` is ``repr(exc)`` on failure, ``None`` on success.
@@ -424,7 +439,7 @@ class LlmRequestEndEvent(Event):
     turn_id: int = 0
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True)
 class StreamDeltaEvent(Event):
     """One raw chunk from the provider stream, forwarded by the loop.
 
@@ -458,7 +473,7 @@ class ContextEvent(Event):
     messages: list[AgentMessage]
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True)
 class DiagnosticEvent(Event):
     """Non-fatal diagnostic from any subsystem during session construction
     or runtime. Emitted on the ``"diagnostic"`` channel. Used for failures
@@ -501,7 +516,7 @@ class BeforeAgentStartEvent(Event):
     system: str | None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class SessionShutdownEvent(Event):
     """Fires when ``AgentSession.shutdown`` is called.
 
@@ -531,7 +546,7 @@ class BeforeCompactEvent(Event):
     reason: str  # e.g. "auto_overflow", "manual", "scenario_request"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class AfterCompactEvent(Event):
     """Fires after compaction is committed to the SessionManager."""
 
@@ -542,7 +557,7 @@ class AfterCompactEvent(Event):
     details: Any = None  # extension-specific (e.g. artifact index)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ChildSessionStartEvent(Event):
     """Fires on the parent bus when a child AgentSession is created."""
 
@@ -552,7 +567,7 @@ class ChildSessionStartEvent(Event):
     purpose: str  # e.g. "subagent:worker", caller-defined
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ChildSessionExtendingEvent(Event):
     """Fires synchronously on the parent bus BEFORE the substrate spawns a
     child session, so extensions can contribute additional atoms to the
@@ -585,7 +600,7 @@ class ChildSessionExtendingEvent(Event):
     child_config: "AgentSessionConfig"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ChildSessionEndEvent(Event):
     """Fires on the parent bus when a child AgentSession terminates."""
 
@@ -596,7 +611,7 @@ class ChildSessionEndEvent(Event):
     error: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class CostBudgetExceededEvent(Event):
     """Fires when the ``cost_budget`` extension's accumulator crosses the
     configured limit.
@@ -613,7 +628,7 @@ class CostBudgetExceededEvent(Event):
     currency: str = "usd"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class PlanSubmittedEvent(Event):
     """Fires when the ``tool_submit_plan`` tool runs to completion.
 
@@ -627,7 +642,7 @@ class PlanSubmittedEvent(Event):
     plan_text: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class MessageAppendedEvent(Event):
     """Fires after :meth:`SessionManager._append_record` mutates in-memory
     state.
@@ -649,7 +664,7 @@ class MessageAppendedEvent(Event):
     record: dict[str, Any]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class SessionHeaderEmittedEvent(Event):
     """Fires when :meth:`SessionManager.new_session` mints a fresh session
     header.
@@ -665,7 +680,7 @@ class SessionHeaderEmittedEvent(Event):
     record: dict[str, Any]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class EntryAppendedEvent(Event):
     """Fires after :meth:`ReadonlySession.append_entry` persists an entry.
 
@@ -698,7 +713,7 @@ class EntryAppendedEvent(Event):
     payload: Any
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class SessionReadyEvent(Event):
     """Fires once after ``AgentSession.create`` has loaded every extension
     and the active provider has been picked, but before the first ``prompt``.
@@ -727,7 +742,7 @@ class SessionReadyEvent(Event):
     eval_task_id: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ResolveSubagentEvent(Event):
     """Request persona metadata for a named sub-agent type.
 
@@ -740,7 +755,7 @@ class ResolveSubagentEvent(Event):
     name: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ExtensionInstallEvent(Event):
     """Fires twice per ``load_extension`` call: ``"start"`` precedes
     ``install(api, config)``; ``"end"`` follows a successful return;
@@ -764,7 +779,7 @@ class ExtensionInstallEvent(Event):
     )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ExtensionReloadEvent(Event):
     """Fires after a transactional reload succeeds or hits rollback failure."""
 
@@ -810,7 +825,7 @@ class BeforeUnloadAtomEvent(Event):
     trigger: Literal["agent", "human", "propose_change_approved"]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class CommandDispatchedEvent(Event):
     """Fires when ``AgentSession.prompt`` dispatches a slash-command to a
     code-registered handler (i.e. a :class:`CommandSpec` in the session's
@@ -829,7 +844,7 @@ class CommandDispatchedEvent(Event):
     owner: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ExtensionUnloadEvent(Event):
     """Fires after a successful unload of an installed atom.
 
@@ -846,7 +861,7 @@ class ExtensionUnloadEvent(Event):
     error: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ApiRegisterEvent(Event):
     """Fires synchronously from ``ExtensionAPI`` register methods.
 
@@ -861,7 +876,7 @@ class ApiRegisterEvent(Event):
     payload: Any
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ApiSendUserMessageEvent(Event):
     """Fires when an extension calls ``api.send_user_message``."""
 
@@ -870,7 +885,7 @@ class ApiSendUserMessageEvent(Event):
     content: Any
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ResourcesDiscoverEvent(Event):
     """Fires when an extension wants peers to contribute resource paths."""
 
@@ -879,7 +894,7 @@ class ResourcesDiscoverEvent(Event):
     reason: Literal["startup", "reload"]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ResourceWriteEvent(Event):
     """Fires when a managed resource write lands as a git commit."""
 
@@ -913,6 +928,7 @@ class EventBusObserver(Protocol):
         self,
         channel: str,
         handler: Handler,
+        event: Any,
         result: Any,
         error: BaseException | None,
         duration_ns: int,
@@ -959,15 +975,6 @@ class EventBus:
     _observer_callbacks: list[ObserverRegistration] = field(default_factory=list)
     _strict_sync_handlers: bool = False
     _next_seq: int = 0
-    # Stack of in-flight dispatch ids. The top of the stack is the id of
-    # the dispatch currently being run; observers + handlers can read it via
-    # :meth:`current_dispatch_id` to correlate event.dispatch records with
-    # the handler.invoke records they fan out into. A list (not a single
-    # field) because a handler may re-emit on the same bus — that nested
-    # dispatch is its own id, and the outer one resumes once it returns.
-    # The id is freshly generated on each ``emit`` / ``emit_sync`` entry,
-    # so the same Event instance dispatched twice produces two distinct ids.
-    _dispatch_stack: list[str] = field(default_factory=list)
 
     def set_observer(self, observer: EventBusObserver | None) -> None:
         """Install (or clear) a single observer. The bus invokes its hooks
@@ -995,20 +1002,6 @@ class EventBus:
         development to surface mistakes; off by default for production.
         """
         self._strict_sync_handlers = strict
-
-    def current_dispatch_id(self) -> str | None:
-        """Return the id of the dispatch currently running on this bus.
-
-        ``None`` when no ``emit`` / ``emit_sync`` is on the call stack. When
-        a handler invokes the bus recursively, the returned id reflects the
-        innermost (most recent) dispatch — the same id that any observer
-        sees on the corresponding ``on_emit_start`` / ``on_handler_done``
-        call. Observability subscribers stamp this id onto their
-        ``agentm.event.dispatch`` and ``agentm.handler.invoke`` log records
-        so consumers can recover the dispatch ↔ handler join after the fact
-        (see ``.claude/designs/single-event-log.md`` "Bus correlation").
-        """
-        return self._dispatch_stack[-1] if self._dispatch_stack else None
 
     # Typed overloads for kernel-owned channels. Runtime-level channels
     # (``before_agent_start``, ``session_shutdown``, ``before_compact``,
@@ -1226,6 +1219,15 @@ class EventBus:
         Returns the list of handler return values (in registration order).
         Exceptions raised by individual handlers are logged and swallowed;
         the corresponding return slot holds ``None``.
+
+        **Dispatch id.** On entry, the bus assigns a fresh
+        ``uuid.uuid4().hex`` to ``event.dispatch_id`` when ``event`` is an
+        :class:`Event` instance. Re-emitting the same instance therefore
+        produces a fresh id — the field default on :class:`Event` is only
+        there for events that are constructed but never emitted (e.g. test
+        fixtures). Non-``Event`` payloads (raw dicts, extension-invented
+        shapes) are dispatched as-is; consumers that need a join key on
+        those payloads should use :class:`Event` subclasses.
         """
 
         handlers = self._handler_cache.get(channel)
@@ -1240,43 +1242,38 @@ class EventBus:
         )
         if not handlers and observer is None and not observer_callbacks:
             return []
-        self._dispatch_stack.append(uuid.uuid4().hex)
-        try:
-            self._safe_observe("on_emit_start", channel, event)
-            results: list[Any] = []
-            for h in handlers:
-                err: BaseException | None = None
-                start_ns = time.perf_counter_ns() if observe_handlers else 0
-                if observe_handlers:
-                    self._safe_observe("on_handler_start", channel, h, event)
-                try:
-                    value = h(event)
-                    if inspect.isawaitable(value):
-                        value = await value
-                except Exception as exc:
-                    logger.exception(
-                        "Event handler raised on channel %r; suppressing.", channel
-                    )
-                    err = exc
-                    value = None
-                if observe_handlers:
-                    self._safe_observe(
-                        "on_handler_done",
-                        channel,
-                        h,
-                        value,
-                        err,
-                        time.perf_counter_ns() - start_ns,
-                    )
-                results.append(value)
-            self._safe_observe("on_emit_end", channel, event, results)
-            return results
-        finally:
-            # Pop unconditionally even if a handler raised something we did
-            # not catch (we do catch ``Exception`` above, but BaseException
-            # subclasses like ``KeyboardInterrupt`` still propagate). The
-            # stack must not leak the id across emits.
-            self._dispatch_stack.pop()
+        if isinstance(event, Event):
+            event.dispatch_id = uuid.uuid4().hex
+        self._safe_observe("on_emit_start", channel, event)
+        results: list[Any] = []
+        for h in handlers:
+            err: BaseException | None = None
+            start_ns = time.perf_counter_ns() if observe_handlers else 0
+            if observe_handlers:
+                self._safe_observe("on_handler_start", channel, h, event)
+            try:
+                value = h(event)
+                if inspect.isawaitable(value):
+                    value = await value
+            except Exception as exc:
+                logger.exception(
+                    "Event handler raised on channel %r; suppressing.", channel
+                )
+                err = exc
+                value = None
+            if observe_handlers:
+                self._safe_observe(
+                    "on_handler_done",
+                    channel,
+                    h,
+                    event,
+                    value,
+                    err,
+                    time.perf_counter_ns() - start_ns,
+                )
+            results.append(value)
+        self._safe_observe("on_emit_end", channel, event, results)
+        return results
 
     def _safe_observe(self, method: str, *args: Any) -> None:
         for callback in tuple(self._observer_callbacks):
@@ -1313,6 +1310,10 @@ class EventBus:
         Exists so sync code paths (``ExtensionAPI.register_tool`` and friends,
         which cannot ``await``) can still publish events on the bus without
         forcing the API surface async. Observer hooks fire normally.
+
+        Dispatch-id assignment mirrors :meth:`emit`: ``event.dispatch_id`` is
+        overwritten with a fresh ``uuid.uuid4().hex`` when ``event`` is an
+        :class:`Event` instance.
         """
         handlers = self._handler_cache.get(channel)
         if handlers is None:
@@ -1326,49 +1327,48 @@ class EventBus:
         )
         if not handlers and observer is None and not observer_callbacks:
             return []
-        self._dispatch_stack.append(uuid.uuid4().hex)
+        if isinstance(event, Event):
+            event.dispatch_id = uuid.uuid4().hex
         async_violation: tuple[str, Any] | None = None
-        try:
-            self._safe_observe("on_emit_start", channel, event)
-            results: list[Any] = []
-            for h in handlers:
-                err: BaseException | None = None
-                start_ns = time.perf_counter_ns() if observe_handlers else 0
-                if observe_handlers:
-                    self._safe_observe("on_handler_start", channel, h, event)
-                try:
-                    value = h(event)
-                    if inspect.isawaitable(value):
-                        if hasattr(value, "close"):
-                            value.close()
-                        if self._strict_sync_handlers and async_violation is None:
-                            async_violation = (channel, h)
-                        else:
-                            logger.warning(
-                                "Async handler on channel %r skipped during emit_sync; "
-                                "use a sync handler or subscribe via an async-only channel.",
-                                channel,
-                            )
-                        value = None
-                except Exception as exc:
-                    logger.exception(
-                        "Event handler raised on channel %r; suppressing.", channel
-                    )
-                    err = exc
+        self._safe_observe("on_emit_start", channel, event)
+        results: list[Any] = []
+        for h in handlers:
+            err: BaseException | None = None
+            start_ns = time.perf_counter_ns() if observe_handlers else 0
+            if observe_handlers:
+                self._safe_observe("on_handler_start", channel, h, event)
+            try:
+                value = h(event)
+                if inspect.isawaitable(value):
+                    if hasattr(value, "close"):
+                        value.close()
+                    if self._strict_sync_handlers and async_violation is None:
+                        async_violation = (channel, h)
+                    else:
+                        logger.warning(
+                            "Async handler on channel %r skipped during emit_sync; "
+                            "use a sync handler or subscribe via an async-only channel.",
+                            channel,
+                        )
                     value = None
-                if observe_handlers:
-                    self._safe_observe(
-                        "on_handler_done",
-                        channel,
-                        h,
-                        value,
-                        err,
-                        time.perf_counter_ns() - start_ns,
-                    )
-                results.append(value)
-            self._safe_observe("on_emit_end", channel, event, results)
-        finally:
-            self._dispatch_stack.pop()
+            except Exception as exc:
+                logger.exception(
+                    "Event handler raised on channel %r; suppressing.", channel
+                )
+                err = exc
+                value = None
+            if observe_handlers:
+                self._safe_observe(
+                    "on_handler_done",
+                    channel,
+                    h,
+                    event,
+                    value,
+                    err,
+                    time.perf_counter_ns() - start_ns,
+                )
+            results.append(value)
+        self._safe_observe("on_emit_end", channel, event, results)
         if async_violation is not None:
             ch, handler = async_violation
             raise RuntimeError(
