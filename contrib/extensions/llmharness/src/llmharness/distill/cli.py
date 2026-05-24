@@ -39,6 +39,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from agentm.core.abi import TraceReader
+
 from ..replay.record import iter_records
 from .binding import read_sample_meta
 from .export import (
@@ -338,6 +340,28 @@ def _last_submit_final_report(main_jsonl: Path) -> dict[str, Any] | None:
     Returns the last matching args dict, or ``None`` if none seen.
     """
     last_args: dict[str, Any] | None = None
+    if not main_jsonl.is_file():
+        return None
+    # OTLP/JSON shape: walk spans for execute_tool submit_final_report and
+    # decode the JSON-encoded ``gen_ai.tool.call.arguments`` attribute via
+    # :class:`TraceReader` (which already unwraps the tagged union).
+    for span in TraceReader(main_jsonl).iter_spans(
+        name="execute_tool submit_final_report"
+    ):
+        raw = span.attributes.get("gen_ai.tool.call.arguments")
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            args = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(args, dict):
+            last_args = args
+    if last_args is not None:
+        return last_args
+    # Fallback: scan legacy + session-log shapes that may still live in
+    # older bundles untouched by the OTLP cutover. These shapes are
+    # already plain JSON lines so we read them directly.
     try:
         with main_jsonl.open("r", encoding="utf-8") as fh:
             for line in fh:
@@ -350,25 +374,6 @@ def _last_submit_final_report(main_jsonl: Path) -> dict[str, Any] | None:
                     continue
                 if not isinstance(rec, dict):
                     continue
-                # OTLP/JSON shape: walk spans for execute_tool submit_final_report.
-                for scope_spans in rec.get("scopeSpans", []) or []:
-                    for span in scope_spans.get("spans", []) or []:
-                        name = span.get("name")
-                        if name != "execute_tool submit_final_report":
-                            continue
-                        for attr in span.get("attributes", []) or []:
-                            if attr.get("key") != "gen_ai.tool.call.arguments":
-                                continue
-                            v = attr.get("value") or {}
-                            raw = v.get("stringValue") if isinstance(v, dict) else None
-                            if not isinstance(raw, str) or not raw:
-                                continue
-                            try:
-                                args = json.loads(raw)
-                            except (TypeError, ValueError):
-                                continue
-                            if isinstance(args, dict):
-                                last_args = args
                 # Legacy observability shape.
                 if (
                     rec.get("kind") == "event.dispatch"

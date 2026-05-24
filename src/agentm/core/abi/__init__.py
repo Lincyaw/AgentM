@@ -111,6 +111,18 @@ from agentm.core._internal.tools import FunctionTool  # noqa: E402
 # ``agentm.core.runtime.*`` directly.
 from agentm.core.runtime.otel_export import SessionTelemetry  # noqa: E402
 
+# ``TraceReader`` is the canonical reader API for the OTLP/JSON event log
+# (`.claude/designs/single-event-log.md` PR-G). Atoms cannot import
+# ``core.runtime.*`` directly under §11, so we re-export the read-only
+# surface — class + dataclass views + the ``attr`` helper — through the
+# ABI. The runtime impl stays in ``core.runtime.trace_reader``.
+from agentm.core.runtime.trace_reader import (  # noqa: E402
+    LogRecord,
+    Span,
+    TraceReader,
+    attr,
+)
+
 __all__ = [
     # loop
     "AgentLoop",
@@ -130,6 +142,12 @@ __all__ = [
     # telemetry (re-exported from core.runtime.otel_export — see comment
     # in __init__ body for the service-facade rationale).
     "SessionTelemetry",
+    # trace reader (re-exported from core.runtime.trace_reader — atoms
+    # use this to read the OTLP/JSON event log without violating §11).
+    "LogRecord",
+    "Span",
+    "TraceReader",
+    "attr",
     # messages
     "AgentMessage",
     "AssistantContent",

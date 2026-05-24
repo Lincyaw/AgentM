@@ -10,7 +10,6 @@ Layer purity: stdlib + ``agentm.core.abi`` only.
 from __future__ import annotations
 
 import copy
-import json
 import time
 import uuid
 from dataclasses import asdict, fields, is_dataclass
@@ -45,11 +44,8 @@ from agentm.core.abi.session import (
     compaction_entry,
     message_entry,
 )
-from agentm.core.runtime.otel_export import (
-    iter_log_records,
-    otlp_unwrap,
-    setup_session_telemetry,
-)
+from agentm.core.runtime.otel_export import setup_session_telemetry
+from agentm.core.runtime.trace_reader import TraceReader
 from opentelemetry._logs import SeverityNumber
 
 if TYPE_CHECKING:
@@ -231,28 +227,13 @@ def _infer_cwd_from_log(file_path: Path) -> str | None:
     record in an OTLP/JSON log. Used by :meth:`JsonlSessionManager.open`
     when the caller does not supply ``cwd_override``.
     """
-    try:
-        with file_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    raw = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(raw, dict):
-                    continue
-                for record in iter_log_records(raw):
-                    if record.get("eventName") != "agentm.session.header":
-                        continue
-                    body = otlp_unwrap(record.get("body"))
-                    if isinstance(body, dict):
-                        cwd_value = body.get("cwd")
-                        if isinstance(cwd_value, str):
-                            return cwd_value
-    except OSError:
-        return None
+    for record in TraceReader(file_path).iter_log_records(
+        name="agentm.session.header"
+    ):
+        if isinstance(record.body, dict):
+            cwd_value = record.body.get("cwd")
+            if isinstance(cwd_value, str):
+                return cwd_value
     return None
 
 
@@ -548,33 +529,19 @@ class SessionManager:
         self._leaf_id = None
         self._header = None
         latest_header: SessionHeader | None = None
-        with self._session_file.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    raw = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(raw, dict):
-                    continue
-                # Skip span lines: SessionManager state only lives in log
-                # records.
-                for record in iter_log_records(raw):
-                    event_name = record.get("eventName")
-                    body = otlp_unwrap(record.get("body"))
-                    if event_name == "agentm.session.header" and isinstance(
-                        body, dict
-                    ):
-                        latest_header = _header_from_record(body)
-                    elif event_name == "agentm.message.appended" and isinstance(
-                        body, dict
-                    ):
-                        entry = _entry_from_record(body)
-                        self._entries[entry.id] = entry
-                        self._order.append(entry.id)
-                        self._leaf_id = entry.id
+        # Skip span lines: SessionManager state only lives in log records.
+        # ``iter_log_records`` walks them in file order; the latest header
+        # wins, message.appended entries accumulate in their on-disk order.
+        for record in TraceReader(self._session_file).iter_log_records():
+            event_name = record.event_name
+            body = record.body
+            if event_name == "agentm.session.header" and isinstance(body, dict):
+                latest_header = _header_from_record(body)
+            elif event_name == "agentm.message.appended" and isinstance(body, dict):
+                entry = _entry_from_record(body)
+                self._entries[entry.id] = entry
+                self._order.append(entry.id)
+                self._leaf_id = entry.id
         if latest_header is not None:
             self._header = latest_header
             self._cwd = latest_header.cwd
