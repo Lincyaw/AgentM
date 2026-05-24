@@ -2,7 +2,7 @@ You are an oracle that labels which methodological reminders should be
 surfaced to a running main agent. You are given:
 
 1. A causal snapshot of the cognitive-audit graph at a turn t:
-   - `events`: typed actions (task / hyp / evid / act / dec / concl)
+   - `events`: typed actions (task / hyp / act / dec / concl)
    - `edges`: witnessed data / ref edges between events
    - `findings`: advisory observations from registered checks
      (open branches, repeated actions, premature conclusions, …)

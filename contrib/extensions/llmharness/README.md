@@ -291,5 +291,14 @@ to the wrong graph version.
 
 `src/llmharness/schema.py` is the public contract for downstream
 consumers (e.g. rca-autorl). Breaking changes bump the package
-version in `pyproject.toml`. The v3 schema break is documented in
-that module's docstring.
+version in `pyproject.toml`. The v3 and v4 schema breaks are
+documented in that module's docstring.
+
+**v4 (2026-05-24, package 0.4.0)** — the `evid` event kind is gone.
+Linear investigation blocks now collapse to ONE `act` node whose
+`summary` records both the probes the agent issued AND the results
+that came back, in time order. The hard "no passthrough" check on
+finalize is replaced by a soft warning attached to a successful
+finalize; the model is trusted to maintain a compact graph and only
+nudged when consecutive chain links are detected. Migration helper
+for existing run jsonl: `scripts/migrate_v3_to_v4_evid_fold.py`.

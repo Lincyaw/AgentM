@@ -60,7 +60,7 @@ def _make_source_session(
         # Sprinkle an audit_event entry between turns so we exercise the
         # "non-message entries on the branch get copied through" path —
         # the brief is explicit that filtering them out by hand is wrong.
-        mgr.append_custom_entry(et.AUDIT_EVENT, {"id": i + 1, "kind": "evid"})
+        mgr.append_custom_entry(et.AUDIT_EVENT, {"id": i + 1, "kind": "act"})
         if i < n_turns - 1:
             mgr.append(message_entry(text_message(f"user {i+1}"), mgr.get_leaf_id()))
     session_file = mgr.session_file

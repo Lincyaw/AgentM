@@ -158,16 +158,20 @@ class ExtractionState:
         return self._validate_and_append(events_payload)
 
     def finalize(self) -> str | None:
-        """Run the cross-graph degree check and freeze pending state.
+        """Freeze pending state and commit.
+
+        V4 (2026-05-24): finalize ALWAYS commits on a witness-valid,
+        id-monotonic graph. The previous "no passthrough" hard reject
+        is gone — a model that produces a chain shape no longer gets
+        stuck retrying. Use :meth:`compute_degree_warning` to retrieve
+        the soft advisory string (or ``None``) attached to the
+        successful commit; the caller surfaces that to the model so it
+        has feedback for the NEXT firing.
 
         Returns ``None`` on success; ``ExtractionState.committed`` is
-        then ``True`` and ``events`` / ``edges`` / ``dropped_edges`` are
-        populated. Returns an error string when the accumulated graph
-        has any passthrough event (in-degree=1 AND out-degree=1) — see
-        :func:`_validate_event_degrees`. On error the pending state
-        stays intact so the LLM can submit additional batches that
-        promote the offending events to true branch points (e.g. add a
-        later event with an extra ref back to the passthrough node).
+        then ``True`` and ``events`` / ``edges`` / ``dropped_edges``
+        are populated. The only remaining failure mode is calling
+        ``finalize`` after it already succeeded.
         """
         if self.committed:
             return "finalize: firing already finalized"
@@ -194,9 +198,6 @@ class ExtractionState:
                 ed for (src, dst, _kind), ed in edges_view.items()
                 if src in firing_node_ids or dst in firing_node_ids
             ]
-            degree_err = _validate_event_degrees(firing_events, firing_edges)
-            if degree_err is not None:
-                return degree_err
             self.events = tuple(firing_events)
             self.edges = tuple(firing_edges)
             self.dropped_edges = ()
@@ -209,11 +210,6 @@ class ExtractionState:
             self.dropped_edges = ()
             self.committed = True
             return None
-        degree_err = _validate_event_degrees(
-            self._events_pending, self._edges_pending
-        )
-        if degree_err is not None:
-            return degree_err
         finalized: list[Event] = [
             Event(
                 id=w.id,
@@ -229,6 +225,17 @@ class ExtractionState:
         self.dropped_edges = tuple(self._dropped_pending)
         self.committed = True
         return None
+
+    def compute_degree_warning(self) -> str | None:
+        """V4 soft advisory: return chain-link warning for the committed graph.
+
+        Call after :meth:`finalize` succeeds. Inspects the FROZEN
+        ``self.events`` / ``self.edges`` (not the pending lists) and
+        returns either ``None`` or a short advisory string the caller
+        attaches to the success result so the model gets feedback for
+        the next firing. Never raises; never blocks.
+        """
+        return _compute_degree_warning(list(self.events), list(self.edges))
 
     def reset_pending(self) -> None:
         """Drop pending batches so the LLM can re-submit from scratch.
@@ -1172,38 +1179,30 @@ def _validate_external_ref_shape(
     return None
 
 
-def _validate_event_degrees(
+def _compute_degree_warning(
     events: list[Event],
     edges: list[Edge],
 ) -> str | None:
-    """Reject any event whose (in_deg, out_deg) is (1, 1) — passthroughs.
+    """V4 soft advisory: flag consecutive ``(in=1, out=1)`` chain links.
 
-    A passthrough event sits on a linear chain with no branching role:
-    it adds no graph-level structure beyond its single predecessor and
-    successor. Such events are the v17 basic-block coalescence failure
-    mode in disguise — instead of merging the linear stretch into one
-    act+evid pair, the LLM emitted one event per tool_call/tool_result
-    pair and threaded a chain through them.
+    Returns ``None`` when there are no chain-link events worth nudging
+    the model about, or a short advisory string naming the offending
+    event ids and suggesting a remediation. NEVER raises and is NEVER
+    consulted to block finalize — :meth:`ExtractionState.finalize`
+    always commits a witness-valid graph and the caller surfaces the
+    warning (if any) on the SUCCESSFUL tool result so the model gets
+    feedback for the next firing.
 
-    The valid shapes are:
+    Detection rule: an event whose in-degree is 1 AND out-degree is 1
+    is a chain link. A natural, well-shaped trace
+    (``task → act → hyp → act → concl``) has chain links in the
+    middle and that's fine; this helper exists to nudge the model
+    when chain links accumulate AND the linear stretch could be
+    coalesced into one ``act`` or split by a branch event the model
+    forgot to emit.
 
-    * (0, 0): a single-node firing — rare; only legal when the firing
-      has exactly one event with no parents and no children.
-    * (0, k>=1): a starting node — typically the task event or the
-      genesis event of the very first firing.
-    * (k>=1, 0): a terminal node — typically a concl event or the last
-      observation in this firing's window.
-    * (in>=1, out>=2) / (in>=2, out>=1): a true branch / merge point.
-
-    Returns ``None`` on a clean graph; an error string on violation,
-    listing every offending event so the LLM can fix them all in one
-    retry (rather than bouncing on the first).
-
-    Note: only in-firing edges count toward degree. External refs are
-    intentionally excluded — they connect to prior firings, which the
-    aggregator stitches later, and counting them would let an event
-    "look like" a branch point in this firing while still being a
-    passthrough in the cumulative graph.
+    Only in-firing edges count toward degree. External refs are
+    intentionally excluded — the aggregator stitches them later.
     """
     if len(events) <= 1:
         return None
@@ -1214,29 +1213,29 @@ def _validate_event_degrees(
             in_deg[ed.dst] += 1
         if ed.src in out_deg:
             out_deg[ed.src] += 1
-    passthrough: list[Event] = [
+    chain_links: list[Event] = [
         ev for ev in events if in_deg[ev.id] == 1 and out_deg[ev.id] == 1
     ]
-    if not passthrough:
+    if not chain_links:
         return None
     lines = [
         f"  event[{ev.id}] kind={ev.kind.value} "
         f"'{ev.summary[:70]}': in=1, out=1"
-        for ev in passthrough
+        for ev in chain_links
     ]
     return (
-        "finalize: graph has passthrough events (in-degree=1 AND "
-        "out-degree=1). These events sit on a linear chain with no "
-        "branching role — they should be merged with their neighbour "
-        "into a single basic block (one act + one evid per linear "
-        "stretch), or promoted to true branch points by adding another "
-        "ref. A new event submitted in a later batch CAN boost the "
-        "out-degree of an existing event by ref-ing it again; that's "
-        "the recovery path when you want to keep the event but make "
-        "it a branch.\n"
-        f"Passthrough events ({len(passthrough)}):\n"
+        f"Soft warning: {len(chain_links)} chain-link event(s) "
+        "(in-degree=1 AND out-degree=1) detected. If two adjacent "
+        "``act`` nodes have nothing branching between them, consider "
+        "merging them into one coalesced ``act`` (record every probe "
+        "and result in time order in the summary). If a real "
+        "``hyp`` / ``dec`` reasoning move was made between them but "
+        "you didn't emit a node for it, add one in a follow-up "
+        "firing. Aim for compact graphs but do NOT fabricate refs "
+        "just to satisfy this heuristic.\n"
+        "Chain-link events:\n"
         + "\n".join(lines)
     )
 
 
-__all__ = ["ExtractionState"]
+__all__ = ["ExtractionState", "_compute_degree_warning"]

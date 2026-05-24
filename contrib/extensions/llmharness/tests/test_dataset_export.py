@@ -190,7 +190,7 @@ def test_dataset_export_handles_messages_appended_at_end(tmp_path: Path) -> None
             _audit_event(0, "task", "User: do X"),
             _cursor(1),
             _audit_event(1, "act", "Assistant did X"),
-            _audit_event(2, "evid", "tool: result"),
+            _audit_event(2, "act", "tool: result"),
             _cursor(3),
             _verdict(surface_reminder=True, reminder_text="loop detected"),
             # Messages 1-3 land here, after every audit entry — this mirrors
@@ -232,7 +232,7 @@ def test_dataset_export_pairs_inputs_with_outputs(tmp_path: Path) -> None:
             _msg("user", "follow up"),
             _msg("assistant", "done"),
             _audit_event(1, "act", "Assistant did X"),
-            _audit_event(2, "evid", "tool: result"),
+            _audit_event(2, "act", "tool: result"),
             _cursor(3),
             _verdict(surface_reminder=True, reminder_text="loop detected"),
         ],
@@ -321,7 +321,7 @@ def test_dataset_export_emits_multi_turn_extractor_trajectory() -> None:
             {
                 "type": "tool_call",
                 "name": "upsert_node",
-                "arguments": {"id": 2, "kind": "evid"},
+                "arguments": {"id": 2, "kind": "act"},
             },
             {
                 "type": "tool_call",
