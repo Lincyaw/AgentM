@@ -679,6 +679,26 @@ class PlanSubmittedEvent(Event):
 
 
 @dataclass(slots=True)
+class MessagePersistedEvent(Event):
+    """Fires from inside ``AgentLoop`` immediately after the loop's local
+    message list gains a new durable entry — assistant turn, tool_result, or
+    extension-injected message. The runtime subscribes once and routes each
+    event through ``SessionManager.append_message`` so the on-disk trajectory
+    is updated in real time rather than batched at the end of ``run``.
+
+    Whole-list replacements done by compaction / context-rewrite handlers
+    via ``messages[:] = ...`` deliberately do NOT emit this event — those
+    are ephemeral context rewrites, not durable additions.
+    """
+
+    CHANNEL: ClassVar[Literal["message_persisted"]] = "message_persisted"
+    message: AgentMessage
+    source: Literal["assistant", "tool_result", "injected"]
+    turn_index: int
+    turn_id: int
+
+
+@dataclass(slots=True)
 class MessageAppendedEvent(Event):
     """Fires after :meth:`SessionManager._append_record` mutates in-memory
     state.
@@ -1946,6 +1966,7 @@ __all__ = [
     "LoopAction",
     "MaxTurnsExhausted",
     "MessageAppendedEvent",
+    "MessagePersistedEvent",
     "ModelEndTurn",
     "NoPendingInput",
     "ObserverCallback",
