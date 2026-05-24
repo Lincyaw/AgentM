@@ -18,9 +18,9 @@ dependencies = [
     # HTTP/protobuf if configured). Ships by default so the atom never
     # falls back to its no-op path; if you really don't want OTel
     # dependencies, run with the atom disabled.
-    "opentelemetry-api>=1.27.0",
-    "opentelemetry-sdk>=1.27.0",
-    "opentelemetry-exporter-otlp>=1.27.0",
+    "opentelemetry-api>=1.30.0",
+    "opentelemetry-sdk>=1.30.0",
+    "opentelemetry-exporter-otlp>=1.30.0",
     # Backs the ``live_inspector`` contrib atom — a WebSocket server that
     # streams session events to an external UI (aegis-ui). Browsers cannot
     # speak raw TCP, so WS is the load-bearing transport choice;

@@ -129,29 +129,46 @@ def _local_grade(
                         continue
                     if not isinstance(rec, dict):
                         continue
-                    attrs = rec.get("attributes") or {}
-                    if rec.get("name") != "emit:tool_call":
-                        continue
-                    event = attrs.get("event") or {}
-                    if event.get("tool_name") != "submit_final_report":
-                        continue
-                    args = event.get("args") or {}
-                    if not isinstance(args, dict):
-                        continue
-                    found_report = True
-                    raw_payload = json.dumps(args)
-                    # rca_hfsm's submit_final_report schema is a single
-                    # ``root_cause`` string + ``supporting_observations``
-                    # list, NOT the rca scenario's ``root_causes[]`` of
-                    # {service, fault_kind} structs. So we scan the
-                    # whole args blob lowercased for the expected
-                    # tokens.
-                    for rc in args.get("root_causes") or []:
-                        if isinstance(rc, dict):
-                            if isinstance(rc.get("service"), str):
-                                services.append(rc["service"])
-                            if isinstance(rc.get("fault_kind"), str):
-                                fault_kinds.append(rc["fault_kind"])
+                    # OTLP/JSON shape: walk spans for
+                    # ``execute_tool submit_final_report`` and decode
+                    # the JSON-encoded ``gen_ai.tool.call.arguments``
+                    # attribute.
+                    for scope_spans in rec.get("scopeSpans", []) or []:
+                        for span in scope_spans.get("spans", []) or []:
+                            if span.get("name") != "execute_tool submit_final_report":
+                                continue
+                            args = None
+                            for attr in span.get("attributes", []) or []:
+                                if attr.get("key") != "gen_ai.tool.call.arguments":
+                                    continue
+                                v = attr.get("value") or {}
+                                raw = (
+                                    v.get("stringValue")
+                                    if isinstance(v, dict)
+                                    else None
+                                )
+                                if isinstance(raw, str) and raw:
+                                    try:
+                                        args = json.loads(raw)
+                                    except (TypeError, ValueError):
+                                        args = None
+                            if not isinstance(args, dict):
+                                continue
+                            found_report = True
+                            raw_payload = json.dumps(args)
+                            # rca_hfsm's submit_final_report schema is a
+                            # single ``root_cause`` string +
+                            # ``supporting_observations`` list, NOT the
+                            # rca scenario's ``root_causes[]`` of
+                            # {service, fault_kind} structs. So we scan
+                            # the whole args blob lowercased for the
+                            # expected tokens.
+                            for rc in args.get("root_causes") or []:
+                                if isinstance(rc, dict):
+                                    if isinstance(rc.get("service"), str):
+                                        services.append(rc["service"])
+                                    if isinstance(rc.get("fault_kind"), str):
+                                        fault_kinds.append(rc["fault_kind"])
         except OSError:
             pass
 

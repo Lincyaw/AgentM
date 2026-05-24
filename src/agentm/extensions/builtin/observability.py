@@ -1,57 +1,143 @@
-"""Builtin observability atom — streaming OTel-flavored JSONL of every
-event-bus dispatch, handler invocation (with mutation diff), API
-registration, LLM request, and turn summary. See
-``.claude/designs/observability.md``.
+"""Observability atom — emits the single per-session event log in OTLP/JSON
+ndjson via the OpenTelemetry SDK.
+
+This atom is the writer side of ``.claude/designs/single-event-log.md``:
+
+* **Spans** (paired start/end, written through ``api.get_session_telemetry().tracer``):
+  - ``invoke_agent <scenario_or_purpose>`` — INTERNAL, from
+    :class:`BeforeAgentStartEvent` to :class:`AgentEndEvent`. The
+    session-scoped span for one agent run.
+  - ``chat <model>`` — CLIENT, from :class:`LlmRequestStartEvent` to
+    :class:`LlmRequestEndEvent`. The LLM-call span; usage attributes
+    land on the paired ``agentm.turn.summary`` log record (usage is
+    only available at :class:`TurnEndEvent` time, after the chat span
+    has already ended).
+  - ``execute_tool <tool_name>`` — INTERNAL, from :class:`ToolCallEvent`
+    to :class:`ToolResultEvent`, paired by ``tool_call_id``. Captures
+    arguments and result as gen_ai semconv attributes on the span.
+
+* **Log records** (severity INFO, body or attributes; written through
+  ``api.get_session_telemetry().logger``):
+  - ``agentm.session.header`` — header at every
+    :class:`SessionHeaderEmittedEvent`. Body = the SessionHeader dict.
+    Read by :class:`SessionManager._load` to reconstruct the persisted
+    header without depending on an agent run.
+  - ``agentm.message.appended`` — every :class:`MessageAppendedEvent`.
+    Body = the existing SessionEntry record verbatim
+    (``{type, id, parent_id, timestamp, payload}``). Read by
+    :class:`SessionManager._load` to rebuild the in-memory trajectory.
+  - ``agentm.session.fingerprint`` — fingerprint at
+    :class:`SessionReadyEvent`. Attributes carry the atom hashes +
+    task metadata; consumers (catalog indexer, ``tool_query_traces``)
+    filter on these.
+  - ``agentm.turn.summary`` — per-turn aggregation at
+    :class:`TurnEndEvent`. Attributes carry tool_calls / tool_call_count
+    / tool_error_count / stop_reason / input_tokens / output_tokens.
+    Read by ``tool_guard_watch`` and ``catalog/indexer``.
+  - ``agentm.session.start`` / ``agentm.session.ready`` /
+    ``agentm.session.end`` / ``agentm.extension.install`` /
+    ``agentm.extension.reload`` / ``agentm.extension.unload`` /
+    ``agentm.api.register`` / ``agentm.api.send_user_message`` /
+    ``agentm.atom.reload`` / ``agentm.diagnostic`` — tier-1 lifecycle
+    log records. Consumers like ``build_trace_map`` and the baseline
+    grader pick them out by event name.
+  - ``agentm.event.dispatch`` (one per ``EventBus.emit`` end) +
+    ``agentm.handler.invoke`` (one per handler done) — both carry the
+    bus-owned ``agentm.event.dispatch_id`` so consumers can join the
+    fanout post-hoc. See ``.claude/designs/single-event-log.md`` "Bus
+    correlation".
+
+The on-disk wire format is one OTLP ``ResourceSpans`` / ``ResourceLogs``
+element per line (PR-A). Atoms downstream of this writer never see the
+legacy ``kind == "otel/span/v0"`` envelope — they walk the OTLP shape and
+pattern-match on event name + span name.
+
+``redact_prompts`` keeps the existing behaviour for ``api.send_user_message``
+and the message bodies surfaced through the ``chat`` span. The
+``BeforeSendToLlmEvent`` redaction shim from the old observability writer
+is gone: the trajectory canonical copy is the ``agentm.message.appended``
+log record stream, so ``before_send_to_llm`` produces no record at all.
 """
 
 from __future__ import annotations
 
-import atexit
 import inspect
 import json
 import logging
-import queue
-import threading
 import time
 import traceback
-import uuid
-from pathlib import Path
-from typing import IO, Any
+from typing import Any
 
 from agentm.core.abi import (
+    AgentEndEvent,
     BeforeSendToLlmEvent,
-    ContextEvent,
     EventBusObserver,
     LlmRequestEndEvent,
     LlmRequestStartEvent,
+    SessionTelemetry,
     StreamDeltaEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnEndEvent,
     TurnStartEvent,
 )
-from agentm.core.abi.messages import ToolCallBlock
-from agentm.core.lib import redact_messages, to_jsonable
-from agentm.extensions import ExtensionManifest
-from agentm.extensions.discover import discover_builtin
 from agentm.core.abi.events import (
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
     BeforeAgentStartEvent,
     BeforeCompactEvent,
+    ContextEvent,
+    DiagnosticEvent,
     ExtensionInstallEvent,
     ExtensionReloadEvent,
+    ExtensionUnloadEvent,
+    MessageAppendedEvent,
+    SessionHeaderEmittedEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
 )
 from agentm.core.abi.extension import ExtensionAPI, Handler
+from agentm.core.abi.messages import ToolCallBlock
+from agentm.core.lib import redact_messages, to_jsonable
+from agentm.extensions import ExtensionManifest
+from agentm.extensions.discover import discover_builtin
+from opentelemetry._logs import Logger as ApiLogger
+from opentelemetry._logs import SeverityNumber
+from opentelemetry.trace import (
+    Span,
+    SpanKind,
+    Status,
+    StatusCode,
+)
+
 
 logger = logging.getLogger(__name__)
 
 
-# Channels whose events are documented mutable (handlers may rewrite payload
-# in place). We restrict mutation diffing to these to avoid the O(N·M) cost
-# of double-serializing every event on every handler invocation.
+# Channels whose per-emission dispatch records add no diagnostic value over
+# the higher-level spans/records this atom writes — ``stream_delta`` fires
+# once per LLM token chunk; the assembled assistant message lands on
+# ``agentm.message.appended`` so the raw deltas are pure bloat.
+_DEFAULT_EXCLUDE_CHANNELS: frozenset[str] = frozenset({StreamDeltaEvent.CHANNEL})
+
+
+# Channels whose serialized event payload can carry user-supplied prompt
+# content. When ``redact_prompts=True`` (default), :func:`redact_messages`
+# rewrites the payload to a ``{role, chars, sha256_prefix}`` stub before it
+# hits the log record body — same shape as the old writer, narrower scope
+# (the ``before_send_to_llm`` channel no longer produces a record).
+_REDACTED_CHANNELS: frozenset[str] = frozenset(
+    {
+        LlmRequestStartEvent.CHANNEL,
+        LlmRequestEndEvent.CHANNEL,
+        ApiSendUserMessageEvent.CHANNEL,
+    }
+)
+
+
+# Mutable channels we diff for handler.invoke "what changed" attribute. Same
+# set the old writer tracked; restricting the diff to these avoids O(N·M)
+# double-serialization on every handler invocation.
 _MUTABLE_CHANNELS = frozenset(
     {
         BeforeAgentStartEvent.CHANNEL,
@@ -66,13 +152,13 @@ _MUTABLE_CHANNELS = frozenset(
 MANIFEST = ExtensionManifest(
     name="observability",
     description=(
-        "Stream every event dispatch, handler invocation (with mutation "
-        "diff), API registration, LLM request, and turn summary to an "
-        "OTel-flavored JSONL file for diagnostics."
+        "Stream every span, log record, event dispatch, and handler "
+        "invocation to a per-session OTLP/JSON ndjson file via the "
+        "OpenTelemetry SDK. Single event log."
     ),
     registers=(
-        "event:agent_start",
         "event:agent_end",
+        "event:before_agent_start",
         "event:turn_start",
         "event:turn_end",
         "event:tool_call",
@@ -83,24 +169,18 @@ MANIFEST = ExtensionManifest(
         "event:api_send_user_message",
         "event:extension_install",
         "event:extension_reload",
+        "event:extension_unload",
         "event:session_ready",
         "event:session_shutdown",
+        "event:session_header_emitted",
+        "event:message_appended",
+        "event:diagnostic",
     ),
     config_schema={
         "type": "object",
         "properties": {
-            "path": {
-                "type": "string",
-                "description": (
-                    "JSONL trace path. Relative paths resolve under cwd; "
-                    "the {session_id} placeholder is replaced with the "
-                    "current session id."
-                ),
-            },
             "include_handler_records": {"type": "boolean"},
             "include_mutation_diff": {"type": "boolean"},
-            "strict_sync_handlers": {"type": "boolean"},
-            "max_queue": {"type": "integer"},
             "exclude_channels": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -119,47 +199,23 @@ MANIFEST = ExtensionManifest(
         },
         "additionalProperties": False,
     },
-    requires=(),  # Leaf atom: observes events and discovers builtin metadata only.
+    requires=(),
 )
 
 
-# Channels whose per-emission spans add no diagnostic value over the
-# already-recorded summary events. ``stream_delta`` fires once per LLM
-# token chunk; assembled assistant messages arrive on ``turn_end``, so the
-# raw deltas are pure bloat for trace consumers. Anything in this set is
-# skipped from BOTH ``event.dispatch`` and ``handler.invoke`` records.
-_DEFAULT_EXCLUDE_CHANNELS: frozenset[str] = frozenset({StreamDeltaEvent.CHANNEL})
-
-
-# Channels whose serialized event payload can carry user-supplied prompt
-# content (pasted API keys, .env contents, private file paths). When
-# ``redact_prompts=True`` (default), :func:`redact_messages` rewrites the
-# payload to a ``{role, chars, sha256_prefix}`` stub before it hits disk.
-_REDACTED_CHANNELS: frozenset[str] = frozenset(
-    {
-        BeforeSendToLlmEvent.CHANNEL,
-        LlmRequestStartEvent.CHANNEL,
-        LlmRequestEndEvent.CHANNEL,
-        # ApiSendUserMessageEvent.CHANNEL added below — string literal to
-        # avoid a forward-ref cycle since the events module is already
-        # imported above.
-        "api_send_user_message",
-    }
-)
-
-
-def _new_id() -> str:
-    return uuid.uuid4().hex[:16]
-
-
-def _now_ns() -> int:
-    return time.time_ns()
+_HANDLER_OWNER_ATTR = "_agentm_obs_owner"
 
 
 def _handler_label(handler: Handler) -> str:
     mod = getattr(handler, "__module__", None) or "<unknown>"
     qual = getattr(handler, "__qualname__", None) or repr(handler)
     return f"{mod}.{qual}"
+
+
+def _format_traceback(exc: BaseException | None) -> str | None:
+    if exc is None or exc.__traceback__ is None:
+        return None
+    return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
 
 
 def _deep_diff(before: Any, after: Any, path: str = "") -> list[dict[str, Any]]:
@@ -199,448 +255,199 @@ def _deep_diff(before: Any, after: Any, path: str = "") -> list[dict[str, Any]]:
     return [{"path": path or "<root>", "before": before, "after": after}]
 
 
-def _format_traceback(exc: BaseException | None) -> str | None:
-    if exc is None or exc.__traceback__ is None:
-        return None
-    return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+def _to_otel_attr(value: Any) -> Any:
+    """Coerce a Python value to something OTel attributes accept.
 
-
-class _Sink:
-    """Async file sink: hot path is ``queue.put_nowait`` (O(1), no I/O).
-
-    A daemon thread drains the queue and does the actual ``json.dumps`` +
-    ``write`` + ``flush``. Bounded queue (drops on full so a stuck disk
-    cannot OOM the agent). ``atexit`` flushes on process exit so we don't
-    silently lose the tail.
+    OTel attribute values are restricted to str / bool / int / float / and
+    homogeneous sequences thereof. We round-trip anything richer through
+    JSON so the on-disk shape stays inspectable.
     """
-
-    _SENTINEL: Any = object()
-
-    def __init__(self, path: Path, max_queue: int = 10_000) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._handle: IO[str] = path.open("a", encoding="utf-8")
-        self._closed = False
-        self._queue: queue.Queue[Any] = queue.Queue(maxsize=max_queue)
-        self._dropped = 0
-        self._thread = threading.Thread(
-            target=self._run, daemon=True, name="agentm-obs-sink"
-        )
-        self._thread.start()
-        atexit.register(self.close)
-
-    def write(self, record: dict[str, Any]) -> None:
-        if self._closed:
-            return
-        try:
-            self._queue.put_nowait(record)
-        except queue.Full:
-            self._dropped += 1
-
-    def _run(self) -> None:
-        while True:
-            item = self._queue.get()
-            if item is self._SENTINEL:
-                self._queue.task_done()
-                return
-            try:
-                line = json.dumps(item, default=str, ensure_ascii=False)
-                self._handle.write(line)
-                self._handle.write("\n")
-                self._handle.flush()
-            except Exception:
-                logger.exception("agentm observability sink write failed")
-            finally:
-                self._queue.task_done()
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        if self._dropped:
-            try:
-                # Best-effort tail note about drops.
-                self._queue.put_nowait(
-                    {
-                        "schema": "otel/span/v0",
-                        "kind": "sink.drop_summary",
-                        "name": "sink.drop_summary",
-                        "attributes": {"dropped_record_count": self._dropped},
-                        "status": {"code": "ERROR"},
-                    }
-                )
-            except queue.Full:
-                pass
-        try:
-            self._queue.put(self._SENTINEL, timeout=1.0)
-        except queue.Full:
-            pass
-        self._thread.join(timeout=5.0)
-        try:
-            self._handle.close()
-        except OSError:
-            pass
-
-
-_HANDLER_OWNER_ATTR = "_agentm_obs_owner"
-
-
-class _Observer(EventBusObserver):
-    def __init__(
-        self,
-        sink: _Sink,
-        trace_id: str,
-        session_span_id: str,
-        include_handlers: bool,
-        include_diff: bool,
-        exclude_channels: frozenset[str],
-        redact_prompts: bool,
-    ) -> None:
-        self._sink = sink
-        self._trace_id = trace_id
-        self._redact_prompts = redact_prompts
-        # ``session_span_id`` (= the AgentSession's session_id) is the
-        # OTel span_id of the session-root span emitted by
-        # ``session.start``. Top-level dispatch spans (those with no
-        # ancestor in the dispatch stack) default their ``parent_span_id``
-        # to this id so the whole within-session tree is anchored to the
-        # session span rather than dangling at ``null``.
-        self._session_span_id = session_span_id
-        self._include_handlers = include_handlers
-        self._include_diff = include_diff
-        self._exclude_channels = exclude_channels
-        # Stack frame: (channel, span_id, start_ns, suppressed). When
-        # suppressed=True, on_emit_end skips the sink write and
-        # on_handler_done skips per-handler spans, but the frame still
-        # cycles through push/pop so parent-span bookkeeping stays consistent
-        # for non-suppressed siblings.
-        self._stack: list[tuple[str, str, int, bool]] = []
-        self._snapshots: list[tuple[str, Handler, Any, Any]] = []
-
-    def on_emit_start(self, channel: str, event: Any) -> None:
-        suppressed = channel in self._exclude_channels
-        self._stack.append((channel, _new_id(), _now_ns(), suppressed))
-
-    def on_handler_start(self, channel: str, handler: Handler, event: Any) -> None:
-        if not self._include_diff or channel not in _MUTABLE_CHANNELS:
-            return
-        if self._stack and self._stack[-1][3]:
-            return
-        try:
-            before = to_jsonable(event)
-        except Exception:
-            return
-        self._snapshots.append((channel, handler, before, event))
-
-    def on_handler_done(
-        self,
-        channel: str,
-        handler: Handler,
-        result: Any,
-        error: BaseException | None,
-        duration_ns: int,
-    ) -> None:
-        if not self._include_handlers or not self._stack:
-            self._record_mutation(channel, handler, None, error)
-            return
-        parent = self._stack[-1]
-        if parent[3]:
-            self._record_mutation(channel, handler, None, error)
-            return
-        end_ns = _now_ns()
-        owner = getattr(handler, _HANDLER_OWNER_ATTR, None)
-        self._record_mutation(channel, handler, owner, error)
-        self._sink.write(
-            {
-                "schema": "otel/span/v0",
-                "kind": "handler.invoke",
-                "trace_id": self._trace_id,
-                "span_id": _new_id(),
-                "parent_span_id": parent[1],
-                "name": f"handler:{channel}",
-                "start_time_unix_nano": end_ns - duration_ns,
-                "end_time_unix_nano": end_ns,
-                "attributes": {
-                    "channel": channel,
-                    "handler": _handler_label(handler),
-                    "extension": owner,
-                    "result": to_jsonable(result),
-                    "duration_ns": duration_ns,
-                },
-                "status": {
-                    "code": "ERROR" if error is not None else "OK",
-                    "message": repr(error) if error is not None else None,
-                    "traceback": _format_traceback(error),
-                },
-            }
-        )
-
-    def _record_mutation(
-        self,
-        channel: str,
-        handler: Handler,
-        owner: str | None,
-        error: BaseException | None,
-    ) -> None:
-        if not self._include_diff or channel not in _MUTABLE_CHANNELS:
-            return
-        before: Any | None = None
-        event: Any | None = None
-        for index in range(len(self._snapshots) - 1, -1, -1):
-            snap_channel, snap_handler, snap_before, snap_event = self._snapshots[index]
-            if snap_channel == channel and snap_handler is handler:
-                before = snap_before
-                event = snap_event
-                del self._snapshots[index]
-                break
-        if before is None:
-            return
-        try:
-            after = to_jsonable(event)
-            diff = _deep_diff(before, after)
-        except Exception:
-            return
-        if not diff:
-            return
-        self._sink.write(
-            {
-                "schema": "otel/span/v0",
-                "kind": "handler.mutated",
-                "trace_id": self._trace_id,
-                "span_id": _new_id(),
-                "name": f"mutate:{channel}",
-                "start_time_unix_nano": _now_ns(),
-                "attributes": {
-                    "channel": channel,
-                    "handler": _handler_label(handler),
-                    "extension": owner,
-                    "mutations": diff[:100],
-                    "raised": error is not None,
-                },
-                "status": {
-                    "code": "ERROR" if error is not None else "OK",
-                    "message": repr(error) if error is not None else None,
-                },
-            }
-        )
-
-    def on_emit_end(self, channel: str, event: Any, results: list[Any]) -> None:
-        if not self._stack:
-            return
-        ch, span_id, start_ns, suppressed = self._stack.pop()
-        if suppressed:
-            return
-        end_ns = _now_ns()
-        # Walk back through the stack for the nearest non-suppressed
-        # ancestor — siblings emitted underneath a suppressed parent still
-        # link to the closest real span instead of orphaning.
-        parent_span_id: str | None = self._session_span_id
-        for ancestor in reversed(self._stack):
-            if not ancestor[3]:
-                parent_span_id = ancestor[1]
-                break
-        event_payload = to_jsonable(event)
-        if self._redact_prompts and ch in _REDACTED_CHANNELS:
-            event_payload = redact_messages(event_payload)
-        self._sink.write(
-            {
-                "schema": "otel/span/v0",
-                "kind": "event.dispatch",
-                "trace_id": self._trace_id,
-                "span_id": span_id,
-                "parent_span_id": parent_span_id,
-                "name": f"emit:{ch}",
-                "start_time_unix_nano": start_ns,
-                "end_time_unix_nano": end_ns,
-                "attributes": {
-                    "channel": ch,
-                    "event": event_payload,
-                    "handler_count": len(results),
-                },
-                "status": {"code": "OK"},
-            }
-        )
-
-
-
-class _TurnAggregator:
-    """Writes ``turn.summary`` spans on ``turn_end``.
-
-    Tool-call counts and names come from the assistant message's content
-    blocks (the source of truth) rather than from ``on_tool_call``
-    subscriptions: ``AgentLoop`` emits ``turn_end`` BEFORE the per-call
-    ``tool_call`` events for the same turn, so any subscription-based
-    accumulator would always see an empty list at write time.
-
-    ``tool_error_count`` still has to come from ``on_tool_result``
-    observed during the *previous* turn's tool-execution phase, since
-    error status isn't on the assistant message. We snapshot and reset
-    that counter at each ``turn_start``.
-    """
-
-    def __init__(self, sink: _Sink, trace_id: str) -> None:
-        self._sink = sink
-        self._trace_id = trace_id
-        self._turn_start_ns: int = 0
-        self._previous_tool_errors: int = 0
-        self._current_tool_errors: int = 0
-
-    def on_turn_start(self, event: TurnStartEvent) -> None:
-        self._turn_start_ns = _now_ns()
-        # Tool errors observed between the previous turn's turn_end and
-        # this turn_start belong to the previous turn but couldn't be
-        # written into its summary (already flushed). We attribute them
-        # to whichever turn opens next via ``_previous_tool_errors``.
-        self._previous_tool_errors = self._current_tool_errors
-        self._current_tool_errors = 0
-
-    def on_tool_call(self, event: ToolCallEvent) -> None:
-        # No-op: tool calls are now read from ``event.message.content``
-        # in ``on_turn_end``. Kept subscribed so observability still
-        # records the dispatch span via the generic event.dispatch path.
-        del event
-
-    def on_tool_result(self, event: ToolResultEvent) -> None:
-        if getattr(event.result, "is_error", False):
-            self._current_tool_errors += 1
-
-    def on_turn_end(self, event: TurnEndEvent) -> None:
-        end_ns = _now_ns()
-        tool_calls = [
-            block.name
-            for block in event.message.content
-            if isinstance(block, ToolCallBlock)
-        ]
-        attributes: dict[str, Any] = {
-            "turn_index": event.turn_index,
-            "turn_id": event.turn_id,
-            "duration_ns": end_ns - self._turn_start_ns,
-            "tool_calls": tool_calls,
-            "tool_call_count": len(tool_calls),
-            # Errors from the prior turn's tool-execution phase,
-            # which run between turn_end[N-1] and turn_start[N].
-            "tool_error_count": self._previous_tool_errors,
-            "stop_reason": event.message.stop_reason,
-            "content_block_types": [
-                getattr(c, "type", type(c).__name__)
-                for c in event.message.content
-            ],
-        }
-        usage = getattr(event.message, "usage", None)
-        if usage is not None:
-            attributes["input_tokens"] = usage.input_tokens
-            attributes["output_tokens"] = usage.output_tokens
-            attributes["cache_read"] = usage.cache_read
-            attributes["cache_write"] = usage.cache_write
-        self._sink.write(
-            {
-                "schema": "otel/span/v0",
-                "kind": "turn.summary",
-                "trace_id": self._trace_id,
-                "span_id": _new_id(),
-                "name": f"turn:{event.turn_id}",
-                "start_time_unix_nano": self._turn_start_ns,
-                "end_time_unix_nano": end_ns,
-                "attributes": attributes,
-                "status": {"code": "OK"},
-            }
-        )
-        # Once written, the prior-turn carry no longer applies.
-        self._previous_tool_errors = 0
-
-
-def _make_simple_writer(sink: _Sink, trace_id: str, kind: str, name: str = ""):  # type: ignore[no-untyped-def]
-    """Return a handler that turns any dataclass event into one OTel record."""
-
-    def _write(event: Any) -> None:
-        sink.write(
-            {
-                "schema": "otel/span/v0",
-                "kind": kind,
-                "trace_id": trace_id,
-                "span_id": _new_id(),
-                "name": name or kind,
-                "start_time_unix_nano": _now_ns(),
-                "attributes": to_jsonable(event),
-                "status": {"code": "OK"},
-            }
-        )
-
-    return _write
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (str, int, float)):
+        return value
+    return json.dumps(to_jsonable(value), default=str, ensure_ascii=False)
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    # OTel-native projection:
-    #   * ``trace_id`` field on every event line  = ``api.root_session_id``
-    #     (the trace shared by this session + all its children).
-    #   * ``span_id`` on the ``session.start`` line = ``api.session_id``
-    #     (this session's root span; persisted so children can point
-    #     ``parent_span_id`` at it without an external mapping).
-    #   * ``parent_span_id`` on ``session.start`` = ``api.parent_session_id``
-    #     for spawned children; ``None`` for the top-level session.
-    # Result: grouping ``.agentm/observability/*.jsonl`` rows by their
-    # in-line ``trace_id`` recovers the full agent tree across files,
-    # and the span_id / parent_span_id columns wire the sessions into
-    # a proper OTel parent-child relationship.
-    trace_id = api.root_session_id
-    raw_path = config.get("path", ".agentm/observability/{session_id}.jsonl")
-    materialized = str(raw_path).replace("{session_id}", api.session_id)
-    file_path = Path(materialized)
-    if not file_path.is_absolute():
-        file_path = Path(api.cwd) / file_path
+    telemetry: SessionTelemetry = api.get_session_telemetry()
+    tracer = telemetry.tracer
+    log = telemetry.logger
+    bus = api.events
 
     include_handlers = bool(config.get("include_handler_records", True))
     include_diff = bool(config.get("include_mutation_diff", True))
-    max_queue = int(config.get("max_queue", 10_000))
     user_excludes = config.get("exclude_channels")
     exclude_channels = frozenset(_DEFAULT_EXCLUDE_CHANNELS) | (
         frozenset(str(ch) for ch in user_excludes) if user_excludes else frozenset()
     )
-    # Default redacted. Operators must opt in to raw prompt logging via
-    # ``redact_prompts: false`` — the trace file lives under .agentm/ which
-    # is commonly checked into evidence bundles, so the safe default wins.
     redact_prompts = bool(config.get("redact_prompts", True))
 
-    sink = _Sink(file_path, max_queue=max_queue)
-    observer = _Observer(
-        sink,
-        trace_id,
-        api.session_id,
-        include_handlers,
-        include_diff,
-        exclude_channels,
-        redact_prompts,
-    )
-    api.add_observer(observer)
+    # --- Open-span maps (paired start/end events) --------------------------
+    open_invoke_agent: dict[str, Span] = {}  # session_id -> span
+    open_chat_spans: dict[int, Span] = {}    # turn_id -> chat span
+    open_tool_spans: dict[str, Span] = {}    # tool_call_id -> execute_tool span
 
-    session_start_ns = _now_ns()
-    sink.write(
-        {
-            "schema": "otel/span/v0",
-            "kind": "session.start",
-            "trace_id": trace_id,
-            # span_id == session_id so this row IS the session-root
-            # span — child sessions emit their own ``session.start``
-            # with ``parent_span_id`` set to their parent's session_id
-            # and they all share the same trace_id.
-            "span_id": api.session_id,
-            "parent_span_id": api.parent_session_id,
-            "name": "session.start",
-            "start_time_unix_nano": session_start_ns,
-            "attributes": {
-                "session_id": api.session_id,
-                "root_session_id": api.root_session_id,
-                "parent_session_id": api.parent_session_id,
-                "purpose": api.purpose,
-                "scenario": api.scenario,
-                "cwd": api.cwd,
-                "log_path": str(file_path),
-            },
-            "status": {"code": "OK"},
-        }
+    aggregator_state: dict[str, int] = {
+        "turn_start_ns": 0,
+        "previous_tool_errors": 0,
+        "current_tool_errors": 0,
+    }
+
+    pending_diff_snapshots: list[tuple[str, Handler, Any, Any]] = []
+
+    # --- Session bootstrap log record -------------------------------------
+
+    session_start_ns = time.time_ns()
+    _emit_log(
+        log,
+        "agentm.session.start",
+        body={
+            "session_id": api.session_id,
+            "root_session_id": api.root_session_id,
+            "parent_session_id": api.parent_session_id,
+            "purpose": api.purpose,
+            "scenario": api.scenario,
+            "cwd": api.cwd,
+        },
+        attributes={
+            "agentm.session.id": api.session_id,
+            "agentm.session.root_id": api.root_session_id,
+            "agentm.session.parent_id": api.parent_session_id or "",
+            "agentm.session.purpose": api.purpose,
+            "agentm.session.scenario": api.scenario or "",
+        },
     )
 
-    # All other signals: subscribe to bus channels.
-    aggregator = _TurnAggregator(sink, trace_id)
+    # --- Bus observer for dispatch / handler.invoke records ---------------
+
+    class _Observer(EventBusObserver):
+        def on_emit_start(self, channel: str, event: Any) -> None:
+            del channel, event
+
+        def on_handler_start(
+            self, channel: str, handler: Handler, event: Any
+        ) -> None:
+            if not include_diff or channel not in _MUTABLE_CHANNELS:
+                return
+            try:
+                before = to_jsonable(event)
+            except Exception:
+                return
+            pending_diff_snapshots.append((channel, handler, before, event))
+
+        def on_handler_done(
+            self,
+            channel: str,
+            handler: Handler,
+            result: Any,
+            error: BaseException | None,
+            duration_ns: int,
+        ) -> None:
+            del result
+            self._record_mutation(channel, handler, error)
+            if not include_handlers or channel in exclude_channels:
+                return
+            owner = getattr(handler, _HANDLER_OWNER_ATTR, None)
+            dispatch_id = bus.current_dispatch_id() or ""
+            attrs: dict[str, Any] = {
+                "agentm.event.channel": channel,
+                "agentm.event.dispatch_id": dispatch_id,
+                "agentm.handler.name": _handler_label(handler),
+                "agentm.handler.duration_ns": duration_ns,
+                "agentm.handler.raised": error is not None,
+            }
+            if owner is not None:
+                attrs["agentm.handler.extension"] = owner
+            if error is not None:
+                attrs["agentm.handler.error.type"] = type(error).__name__
+                tb = _format_traceback(error)
+                if tb is not None:
+                    attrs["agentm.handler.error.traceback"] = tb
+            _emit_log(
+                log,
+                "agentm.handler.invoke",
+                body=None,
+                attributes=attrs,
+                severity=(
+                    SeverityNumber.ERROR if error is not None else SeverityNumber.INFO
+                ),
+            )
+
+        def on_emit_end(self, channel: str, event: Any, results: list[Any]) -> None:
+            if channel in exclude_channels:
+                return
+            dispatch_id = bus.current_dispatch_id() or ""
+            attrs: dict[str, Any] = {
+                "agentm.event.channel": channel,
+                "agentm.event.dispatch_id": dispatch_id,
+                "agentm.handler.count": len(results),
+            }
+            payload: Any = None
+            try:
+                payload = to_jsonable(event)
+            except Exception:
+                payload = None
+            if channel == BeforeSendToLlmEvent.CHANNEL and isinstance(payload, dict):
+                payload.pop("messages", None)
+            if redact_prompts and channel in _REDACTED_CHANNELS:
+                payload = redact_messages(payload)
+            if payload is not None:
+                attrs["agentm.event.payload"] = _to_otel_attr(payload)
+            _emit_log(
+                log,
+                "agentm.event.dispatch",
+                body=None,
+                attributes=attrs,
+            )
+
+        def _record_mutation(
+            self,
+            channel: str,
+            handler: Handler,
+            error: BaseException | None,
+        ) -> None:
+            if not include_diff or channel not in _MUTABLE_CHANNELS:
+                return
+            before: Any | None = None
+            event: Any | None = None
+            for index in range(len(pending_diff_snapshots) - 1, -1, -1):
+                snap_channel, snap_handler, snap_before, snap_event = (
+                    pending_diff_snapshots[index]
+                )
+                if snap_channel == channel and snap_handler is handler:
+                    before = snap_before
+                    event = snap_event
+                    del pending_diff_snapshots[index]
+                    break
+            if before is None:
+                return
+            try:
+                after = to_jsonable(event)
+                diff = _deep_diff(before, after)
+            except Exception:
+                return
+            if not diff:
+                return
+            _emit_log(
+                log,
+                "agentm.handler.mutated",
+                body=None,
+                attributes={
+                    "agentm.event.channel": channel,
+                    "agentm.event.dispatch_id": bus.current_dispatch_id() or "",
+                    "agentm.handler.name": _handler_label(handler),
+                    "agentm.handler.mutations": _to_otel_attr(diff[:100]),
+                    "agentm.handler.raised": error is not None,
+                },
+            )
+
+    api.add_observer(_Observer())
+
+    # --- Fingerprint state -------------------------------------------------
+
     discovered_builtin = discover_builtin()
     builtin_by_module_path = {
         entry.module_path: entry for entry in discovered_builtin.values()
@@ -650,13 +457,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     current_fingerprint: dict[str, Any] | None = None
 
     def _compute_loaded_fingerprint(*, scenario: str | None = None) -> dict[str, Any]:
-        """Build the active-set fingerprint for the builtins loaded in this session.
-
-        R10 deviation: ``session.start`` fires during ``install()`` before the
-        final loaded set exists, so the canonical fingerprint is emitted later
-        as ``session.fingerprint`` at ``session_ready``.
-        """
-
         nonlocal active_atom_hashes
         active_atom_hashes = {}
         writer = api.get_resource_writer()
@@ -679,166 +479,91 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             core_hash=None,
         )
 
+    # --- Handlers (lifecycle + identity) ----------------------------------
+
+    def _on_session_header(event: SessionHeaderEmittedEvent) -> None:
+        _emit_log(
+            log,
+            "agentm.session.header",
+            body=event.record,
+            attributes={
+                "agentm.session.id": api.session_id,
+                "agentm.session.header.id": str(event.record.get("id", "")),
+            },
+        )
+
+    def _on_message_appended(event: MessageAppendedEvent) -> None:
+        _emit_log(
+            log,
+            "agentm.message.appended",
+            body=event.record,
+            attributes={
+                "agentm.session.id": api.session_id,
+                "agentm.message.id": str(event.record.get("id", "")),
+                "agentm.message.parent_id": str(event.record.get("parent_id", "") or ""),
+                "agentm.message.type": str(event.record.get("type", "")),
+            },
+        )
+
+    def _on_session_ready(event: SessionReadyEvent) -> None:
+        nonlocal current_fingerprint
+        _emit_log(
+            log,
+            "agentm.session.ready",
+            body={
+                "session_id": event.session_id,
+                "cwd": event.cwd,
+                "tool_names": list(event.tool_names),
+                "command_names": list(event.command_names),
+                "extension_module_paths": list(event.extension_module_paths),
+                "model": to_jsonable(event.model),
+            },
+            attributes={
+                "agentm.session.id": event.session_id,
+                "agentm.session.scenario": api.scenario or "",
+                "agentm.session.tool_count": len(event.tool_names),
+                "agentm.session.command_count": len(event.command_names),
+                "agentm.session.extension_count": len(event.extension_module_paths),
+            },
+        )
+        current_fingerprint = _compute_loaded_fingerprint(scenario=api.scenario)
+        fp_body: dict[str, Any] = dict(current_fingerprint)
+        fp_body["task_meta"] = {
+            "type": None,
+            "difficulty": None,
+            "external_id": None,
+            "task_class": getattr(event, "task_class", None),
+            "eval_run_id": getattr(event, "eval_run_id", None),
+            "task_id": getattr(event, "eval_task_id", None),
+        }
+        _emit_log(
+            log,
+            "agentm.session.fingerprint",
+            body=fp_body,
+            attributes={
+                "agentm.session.id": event.session_id,
+                "agentm.session.scenario": api.scenario or "",
+                "agentm.task.class": getattr(event, "task_class", "") or "",
+                "agentm.task.eval_run_id": getattr(event, "eval_run_id", "") or "",
+                "agentm.task.eval_task_id": getattr(event, "eval_task_id", "") or "",
+            },
+        )
+
     def _on_extension_install(event: ExtensionInstallEvent) -> None:
         if event.phase == "end" and event.module_path in builtin_by_module_path:
             loaded_builtin_module_paths.add(event.module_path)
-        now = _now_ns()
-        sink.write(
-            {
-                "schema": "otel/span/v0",
-                "kind": "extension.install",
-                "trace_id": trace_id,
-                "span_id": _new_id(),
-                "name": f"install:{event.module_path}",
-                "start_time_unix_nano": now - event.duration_ns,
-                "end_time_unix_nano": now,
-                "attributes": {
-                    "module_path": event.module_path,
-                    "config": to_jsonable(event.config),
-                    "phase": event.phase,
-                    "duration_ns": event.duration_ns,
-                },
-                "status": {
-                    "code": "ERROR" if event.error else "OK",
-                    "message": event.error,
-                },
-            }
-        )
-
-    def _on_api_register(event: ApiRegisterEvent) -> None:
-        sink.write(
-            {
-                "schema": "otel/span/v0",
-                "kind": "api.register",
-                "trace_id": trace_id,
-                "span_id": _new_id(),
-                "name": f"register:{event.kind}:{event.name}",
-                "start_time_unix_nano": _now_ns(),
-                "attributes": {
-                    "kind": event.kind,
-                    "name": event.name,
-                    "extension": event.extension,
-                    "payload": to_jsonable(event.payload),
-                },
-                "status": {"code": "OK"},
-            }
-        )
-
-    def _on_api_send(event: ApiSendUserMessageEvent) -> None:
-        raw_content: Any = to_jsonable(event.content)
-        content_chars = (
-            len(event.content) if isinstance(event.content, str) else None
-        )
-        if redact_prompts:
-            # Round-trip through the shared redactor so the stub shape
-            # matches what redact_messages emits for embedded ``content``.
-            stub_payload = redact_messages({"content": raw_content})
-            attributes_content: Any = stub_payload["content"]
-        else:
-            attributes_content = raw_content
-        sink.write(
-            {
-                "schema": "otel/span/v0",
-                "kind": "api.send_user_message",
-                "trace_id": trace_id,
-                "span_id": _new_id(),
-                "name": "send_user_message",
-                "start_time_unix_nano": _now_ns(),
-                "attributes": {
-                    "extension": event.extension,
-                    "content": attributes_content,
-                    "content_chars": content_chars,
-                },
-                "status": {"code": "OK"},
-            }
-        )
-
-    def _on_llm_start(event: LlmRequestStartEvent) -> None:
-        payload = to_jsonable(event)
-        if redact_prompts:
-            payload = redact_messages(payload)
-        sink.write(
-            {
-                "schema": "otel/span/v0",
-                "kind": "llm.request.start",
-                "trace_id": trace_id,
-                "span_id": _new_id(),
-                "name": "llm.request",
-                "start_time_unix_nano": _now_ns(),
-                "attributes": payload,
-                "status": {"code": "OK"},
-            }
-        )
-
-    def _on_llm_end(event: LlmRequestEndEvent) -> None:
-        now = _now_ns()
-        payload = to_jsonable(event)
-        if redact_prompts:
-            payload = redact_messages(payload)
-        sink.write(
-            {
-                "schema": "otel/span/v0",
-                "kind": "llm.request.end",
-                "trace_id": trace_id,
-                "span_id": _new_id(),
-                "name": "llm.request.end",
-                "start_time_unix_nano": now - event.duration_ns,
-                "end_time_unix_nano": now,
-                "attributes": payload,
-                "status": {
-                    "code": "ERROR" if event.error else "OK",
-                    "message": event.error,
-                },
-            }
-        )
-
-    def _on_ready(event: SessionReadyEvent) -> None:
-        nonlocal current_fingerprint
-        sink.write(
-            {
-                "schema": "otel/span/v0",
-                "kind": "session.ready",
-                "trace_id": trace_id,
-                "span_id": _new_id(),
-                "name": "session.ready",
-                "start_time_unix_nano": _now_ns(),
-                "attributes": {
-                    "session_id": event.session_id,
-                    "cwd": event.cwd,
-                    "tool_names": list(event.tool_names),
-                    "command_names": list(event.command_names),
-                    "extension_module_paths": list(event.extension_module_paths),
-                    "model": to_jsonable(event.model),
-                },
-                "status": {"code": "OK"},
-            }
-        )
-        current_fingerprint = _compute_loaded_fingerprint(scenario=api.scenario)
-        sink.write(
-            {
-                "schema": "otel/span/v0",
-                "kind": "session.fingerprint",
-                "trace_id": trace_id,
-                "span_id": _new_id(),
-                "name": "session.fingerprint",
-                "start_time_unix_nano": _now_ns(),
-                "attributes": {
-                    **current_fingerprint,
-                    "task_meta": {
-                        "type": None,
-                        "difficulty": None,
-                        "external_id": None,
-                        # Per-task-evolution loop fields (per-task-
-                        # evolution-loop.md §4.1). ``task_class`` ties this
-                        # session to a tunable task family; the eval pair
-                        # is non-null only for eval-run child sessions.
-                        "task_class": getattr(event, "task_class", None),
-                        "eval_run_id": getattr(event, "eval_run_id", None),
-                        "task_id": getattr(event, "eval_task_id", None),
-                    },
-                },
-                "status": {"code": "OK"},
-            }
+        _emit_log(
+            log,
+            "agentm.extension.install",
+            body={"config": to_jsonable(event.config)},
+            attributes={
+                "agentm.extension.module_path": event.module_path,
+                "agentm.extension.phase": event.phase,
+                "agentm.extension.duration_ns": event.duration_ns,
+                "agentm.extension.trigger": event.trigger,
+                "agentm.extension.error": event.error or "",
+            },
+            severity=(SeverityNumber.ERROR if event.error else SeverityNumber.INFO),
         )
 
     def _on_extension_reload(event: ExtensionReloadEvent) -> None:
@@ -848,70 +573,355 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         fingerprint_after = api.catalog.compute_active_set_fingerprint(
             loaded=active_atom_hashes,
             scenario=(
-                None if current_fingerprint is None else current_fingerprint.get("scenario")
+                None
+                if current_fingerprint is None
+                else current_fingerprint.get("scenario")
             ),
             core_hash=None,
         )
         current_fingerprint = fingerprint_after
-        sink.write(
-            {
-                "schema": "otel/span/v0",
-                "kind": "atom.reload",
-                "trace_id": trace_id,
-                "span_id": _new_id(),
-                "name": f"atom.reload:{event.name}",
-                "start_time_unix_nano": _now_ns(),
-                "attributes": {
-                    "name": event.name,
-                    "old_hash": event.old_hash,
-                    "new_hash": event.new_hash,
-                    "trigger": event.trigger,
-                    "tier": event.tier,
-                    "fingerprint_after": fingerprint_after,
-                },
-                "status": {
-                    "code": "ERROR" if event.error else "OK",
-                    "message": event.error,
-                },
-            }
+        _emit_log(
+            log,
+            "agentm.atom.reload",
+            body={
+                "name": event.name,
+                "old_hash": event.old_hash,
+                "new_hash": event.new_hash,
+                "trigger": event.trigger,
+                "tier": event.tier,
+                "fingerprint_after": fingerprint_after,
+            },
+            attributes={
+                "agentm.atom.name": event.name,
+                "agentm.atom.new_hash": event.new_hash,
+                "agentm.atom.old_hash": event.old_hash or "",
+                "agentm.atom.trigger": event.trigger,
+                "agentm.atom.tier": event.tier,
+                "agentm.atom.error": event.error or "",
+            },
+            severity=(SeverityNumber.ERROR if event.error else SeverityNumber.INFO),
         )
 
-    def _on_shutdown(_: SessionShutdownEvent) -> None:
-        # Close the session-root span. ``span_id == api.session_id`` mirrors
-        # the ``session.start`` row so OTel collectors can pair the two as
-        # the start / end of the same span.
-        end_ns = _now_ns()
-        sink.write(
-            {
-                "schema": "otel/span/v0",
-                "kind": "session.end",
-                "trace_id": trace_id,
-                "span_id": api.session_id,
-                "parent_span_id": api.parent_session_id,
-                "name": "session.end",
-                "start_time_unix_nano": session_start_ns,
-                "end_time_unix_nano": end_ns,
-                "attributes": {
-                    "session_id": api.session_id,
-                    "root_session_id": api.root_session_id,
-                    "parent_session_id": api.parent_session_id,
-                    "purpose": api.purpose,
-                    "scenario": api.scenario,
-                },
-                "status": {"code": "OK"},
-            }
+    def _on_extension_unload(event: ExtensionUnloadEvent) -> None:
+        _emit_log(
+            log,
+            "agentm.extension.unload",
+            body={"trigger": event.trigger, "tier": event.tier},
+            attributes={
+                "agentm.extension.name": event.name,
+                "agentm.extension.module_path": event.module_path,
+                "agentm.extension.trigger": event.trigger,
+                "agentm.extension.error": event.error or "",
+            },
+            severity=(SeverityNumber.ERROR if event.error else SeverityNumber.INFO),
         )
-        sink.close()
 
+    def _on_api_register(event: ApiRegisterEvent) -> None:
+        _emit_log(
+            log,
+            "agentm.api.register",
+            body={"payload": to_jsonable(event.payload)},
+            attributes={
+                "agentm.api.kind": event.kind,
+                "agentm.api.name": event.name,
+                "agentm.api.extension": event.extension,
+            },
+        )
+
+    def _on_api_send(event: ApiSendUserMessageEvent) -> None:
+        raw_content: Any = to_jsonable(event.content)
+        content_chars = (
+            len(event.content) if isinstance(event.content, str) else None
+        )
+        if redact_prompts:
+            stub_payload = redact_messages({"content": raw_content})
+            attributes_content: Any = stub_payload["content"]
+        else:
+            attributes_content = raw_content
+        _emit_log(
+            log,
+            "agentm.api.send_user_message",
+            body={"content": attributes_content},
+            attributes={
+                "agentm.api.extension": event.extension,
+                "agentm.api.content_chars": (
+                    content_chars if content_chars is not None else -1
+                ),
+            },
+        )
+
+    def _on_diagnostic(event: DiagnosticEvent) -> None:
+        sev = {
+            "info": SeverityNumber.INFO,
+            "warning": SeverityNumber.WARN,
+            "error": SeverityNumber.ERROR,
+        }.get(event.level, SeverityNumber.INFO)
+        _emit_log(
+            log,
+            "agentm.diagnostic",
+            body={"message": event.message, "level": event.level},
+            attributes={
+                "agentm.diagnostic.level": event.level,
+                "agentm.diagnostic.source": event.source,
+            },
+            severity=sev,
+        )
+
+    # --- Span pairs: invoke_agent / chat / execute_tool -------------------
+
+    def _on_before_agent_start(event: BeforeAgentStartEvent) -> None:
+        del event
+        existing = open_invoke_agent.pop(api.session_id, None)
+        if existing is not None:
+            existing.set_status(Status(StatusCode.UNSET, "preempted by new run"))
+            existing.end()
+        scenario_label = api.scenario or api.purpose or "agent"
+        span = tracer.start_span(
+            f"invoke_agent {scenario_label}",
+            kind=SpanKind.INTERNAL,
+            attributes={
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.agent.name": scenario_label,
+                "gen_ai.conversation.id": api.session_id,
+                "agentm.session.id": api.session_id,
+                "agentm.session.purpose": api.purpose,
+                "agentm.session.scenario": api.scenario or "",
+            },
+        )
+        open_invoke_agent[api.session_id] = span
+
+    def _on_agent_end(event: AgentEndEvent) -> None:
+        span = open_invoke_agent.pop(api.session_id, None)
+        cause = event.cause
+        cause_attrs: dict[str, Any] = {
+            "agentm.agent.message_count": len(event.messages),
+            "agentm.agent.cause_kind": type(cause).__name__,
+            "agentm.agent.cause_final": type(cause).final,
+        }
+        cause_payload = to_jsonable(cause)
+        if isinstance(cause_payload, dict):
+            for key, value in cause_payload.items():
+                cause_attrs[f"agentm.agent.cause.{key}"] = _to_otel_attr(value)
+        if span is not None:
+            for key, value in cause_attrs.items():
+                span.set_attribute(key, value)
+            span.set_status(Status(StatusCode.OK))
+            span.end()
+        _emit_log(
+            log,
+            "agentm.agent.end",
+            body={"cause": cause_payload, "message_count": len(event.messages)},
+            attributes=cause_attrs,
+        )
+
+    def _on_llm_start(event: LlmRequestStartEvent) -> None:
+        model_id = event.model_id or "unknown"
+        span = tracer.start_span(
+            f"chat {model_id}",
+            kind=SpanKind.CLIENT,
+            attributes={
+                "gen_ai.operation.name": "chat",
+                "gen_ai.request.model": model_id,
+                "gen_ai.conversation.id": api.session_id,
+                "agentm.session.id": api.session_id,
+                "agentm.turn.index": event.turn_index,
+                "agentm.turn.id": event.turn_id,
+                "agentm.llm.message_count": event.message_count,
+                "agentm.llm.tool_count": event.tool_count,
+                "agentm.llm.system_chars": event.system_chars,
+            },
+        )
+        provider = api.provider
+        if provider is not None:
+            span.set_attribute("gen_ai.provider.name", provider.name)
+        open_chat_spans[event.turn_id] = span
+
+    def _on_llm_end(event: LlmRequestEndEvent) -> None:
+        span = open_chat_spans.pop(event.turn_id, None)
+        if span is None:
+            return
+        span.set_attribute("agentm.llm.chunk_count", event.chunk_count)
+        span.set_attribute("agentm.llm.duration_ns", event.duration_ns)
+        if event.error is not None:
+            span.set_attribute("agentm.llm.error", event.error)
+            span.set_status(Status(StatusCode.ERROR, event.error))
+        else:
+            span.set_status(Status(StatusCode.OK))
+        span.end()
+
+    def _on_tool_call(event: ToolCallEvent) -> None:
+        args = dict(event.args)
+        span = tracer.start_span(
+            f"execute_tool {event.tool_name}",
+            kind=SpanKind.INTERNAL,
+            attributes={
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.tool.name": event.tool_name,
+                "gen_ai.tool.call.id": event.tool_call_id,
+                "gen_ai.conversation.id": api.session_id,
+                "agentm.session.id": api.session_id,
+                "gen_ai.tool.call.arguments": _to_otel_attr(args),
+            },
+        )
+        open_tool_spans[event.tool_call_id] = span
+
+    def _on_tool_result(event: ToolResultEvent) -> None:
+        span = open_tool_spans.pop(event.tool_call_id, None)
+        if span is None:
+            return
+        result_payload = to_jsonable(event.result)
+        span.set_attribute(
+            "gen_ai.tool.call.result", _to_otel_attr(result_payload)
+        )
+        is_error = bool(getattr(event.result, "is_error", False))
+        if is_error:
+            span.set_attribute("agentm.tool.is_error", True)
+            span.set_status(Status(StatusCode.ERROR, "tool result is_error=True"))
+        else:
+            span.set_status(Status(StatusCode.OK))
+        span.end()
+
+    # --- Per-turn aggregator (turn.summary log record) --------------------
+
+    def _on_turn_start(event: TurnStartEvent) -> None:
+        del event
+        aggregator_state["turn_start_ns"] = time.time_ns()
+        aggregator_state["previous_tool_errors"] = aggregator_state[
+            "current_tool_errors"
+        ]
+        aggregator_state["current_tool_errors"] = 0
+
+    def _on_tool_result_for_aggregator(event: ToolResultEvent) -> None:
+        if getattr(event.result, "is_error", False):
+            aggregator_state["current_tool_errors"] += 1
+
+    def _on_turn_end(event: TurnEndEvent) -> None:
+        end_ns = time.time_ns()
+        tool_calls = [
+            block.name
+            for block in event.message.content
+            if isinstance(block, ToolCallBlock)
+        ]
+        usage = getattr(event.message, "usage", None)
+        body: dict[str, Any] = {
+            "turn_index": event.turn_index,
+            "turn_id": event.turn_id,
+            "duration_ns": end_ns - aggregator_state["turn_start_ns"],
+            "tool_calls": tool_calls,
+            "tool_call_count": len(tool_calls),
+            "tool_error_count": aggregator_state["previous_tool_errors"],
+            "stop_reason": event.message.stop_reason,
+            "content_block_types": [
+                getattr(c, "type", type(c).__name__) for c in event.message.content
+            ],
+        }
+        attrs: dict[str, Any] = {
+            "agentm.session.id": api.session_id,
+            "agentm.turn.index": event.turn_index,
+            "agentm.turn.id": event.turn_id,
+            "agentm.turn.duration_ns": end_ns - aggregator_state["turn_start_ns"],
+            "agentm.turn.tool_call_count": len(tool_calls),
+            "agentm.turn.tool_error_count": aggregator_state["previous_tool_errors"],
+            "agentm.turn.stop_reason": event.message.stop_reason or "",
+        }
+        if usage is not None:
+            body["input_tokens"] = usage.input_tokens
+            body["output_tokens"] = usage.output_tokens
+            body["cache_read"] = usage.cache_read
+            body["cache_write"] = usage.cache_write
+            attrs["gen_ai.usage.input_tokens"] = usage.input_tokens
+            attrs["gen_ai.usage.output_tokens"] = usage.output_tokens
+            attrs["gen_ai.usage.cache_read_tokens"] = usage.cache_read
+            attrs["gen_ai.usage.cache_write_tokens"] = usage.cache_write
+        _emit_log(log, "agentm.turn.summary", body=body, attributes=attrs)
+        aggregator_state["previous_tool_errors"] = 0
+
+    # --- Session shutdown ---------------------------------------------------
+
+    def _on_session_shutdown(_event: SessionShutdownEvent) -> None:
+        end_ns = time.time_ns()
+        for span in list(open_invoke_agent.values()):
+            span.set_status(Status(StatusCode.UNSET, "session shutdown"))
+            span.end()
+        open_invoke_agent.clear()
+        for span in list(open_chat_spans.values()):
+            span.set_status(Status(StatusCode.UNSET, "session shutdown"))
+            span.end()
+        open_chat_spans.clear()
+        for span in list(open_tool_spans.values()):
+            span.set_status(Status(StatusCode.UNSET, "session shutdown"))
+            span.end()
+        open_tool_spans.clear()
+        _emit_log(
+            log,
+            "agentm.session.end",
+            body={
+                "session_id": api.session_id,
+                "root_session_id": api.root_session_id,
+                "parent_session_id": api.parent_session_id,
+                "purpose": api.purpose,
+                "scenario": api.scenario,
+                "duration_ns": end_ns - session_start_ns,
+            },
+            attributes={
+                "agentm.session.id": api.session_id,
+                "agentm.session.duration_ns": end_ns - session_start_ns,
+            },
+        )
+
+    # --- Wire subscriptions -----------------------------------------------
+
+    api.on(SessionHeaderEmittedEvent.CHANNEL, _on_session_header)
+    api.on(MessageAppendedEvent.CHANNEL, _on_message_appended)
+    api.on(SessionReadyEvent.CHANNEL, _on_session_ready)
+    api.on(SessionShutdownEvent.CHANNEL, _on_session_shutdown)
     api.on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
+    api.on(ExtensionReloadEvent.CHANNEL, _on_extension_reload)
+    api.on(ExtensionUnloadEvent.CHANNEL, _on_extension_unload)
     api.on(ApiRegisterEvent.CHANNEL, _on_api_register)
     api.on(ApiSendUserMessageEvent.CHANNEL, _on_api_send)
+    api.on(DiagnosticEvent.CHANNEL, _on_diagnostic)
+
+    api.on(BeforeAgentStartEvent.CHANNEL, _on_before_agent_start)
+    api.on(AgentEndEvent.CHANNEL, _on_agent_end)
     api.on(LlmRequestStartEvent.CHANNEL, _on_llm_start)
     api.on(LlmRequestEndEvent.CHANNEL, _on_llm_end)
-    api.on(ExtensionReloadEvent.CHANNEL, _on_extension_reload)
-    api.on(SessionReadyEvent.CHANNEL, _on_ready)
-    api.on(SessionShutdownEvent.CHANNEL, _on_shutdown)
-    api.on(TurnStartEvent.CHANNEL, aggregator.on_turn_start)
-    api.on(ToolCallEvent.CHANNEL, aggregator.on_tool_call)
-    api.on(ToolResultEvent.CHANNEL, aggregator.on_tool_result)
-    api.on(TurnEndEvent.CHANNEL, aggregator.on_turn_end)
+    api.on(ToolCallEvent.CHANNEL, _on_tool_call)
+    api.on(ToolResultEvent.CHANNEL, _on_tool_result)
+
+    api.on(TurnStartEvent.CHANNEL, _on_turn_start)
+    api.on(ToolResultEvent.CHANNEL, _on_tool_result_for_aggregator)
+    api.on(TurnEndEvent.CHANNEL, _on_turn_end)
+
+
+def _emit_log(
+    log: ApiLogger,
+    event_name: str,
+    *,
+    body: Any = None,
+    attributes: dict[str, Any] | None = None,
+    severity: SeverityNumber = SeverityNumber.INFO,
+) -> None:
+    """Emit one log record through the per-session OTel ``Logger``.
+
+    The PR-A ``FileLogExporter`` writes one OTLP ``ResourceLogs`` element
+    per line to the per-session JSONL file. The ``event_name`` plays the
+    role of the OTel "event name" — consumers (session_manager, indexer,
+    tool_query_traces, llmharness CLI) filter on it instead of on the
+    legacy ``kind`` field.
+    """
+    if attributes is not None:
+        attributes = {
+            key: _to_otel_attr(value) for key, value in attributes.items()
+        }
+    log.emit(
+        body=to_jsonable(body) if body is not None else None,
+        severity_number=severity,
+        severity_text=severity.name,
+        event_name=event_name,
+        attributes=attributes,
+    )
+
+
+# Keep ``logger`` referenced (used implicitly by the SDK in error paths).
+_ = logger

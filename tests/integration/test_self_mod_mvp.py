@@ -87,15 +87,56 @@ def _write_trace(tmp_path: Path, trace_id: str, records: list[dict[str, object]]
     return trace_path
 
 
-def _record(kind: str, attributes: dict[str, object]) -> dict[str, object]:
+def _otlp_value(value: object) -> dict[str, object]:
+    if value is None:
+        return {"stringValue": ""}
+    if isinstance(value, bool):
+        return {"boolValue": value}
+    if isinstance(value, int):
+        return {"intValue": str(value)}
+    if isinstance(value, float):
+        return {"doubleValue": value}
+    if isinstance(value, str):
+        return {"stringValue": value}
+    if isinstance(value, dict):
+        return {
+            "kvlistValue": {
+                "values": [
+                    {"key": str(k), "value": _otlp_value(v)}
+                    for k, v in value.items()
+                ]
+            }
+        }
+    if isinstance(value, list):
+        return {"arrayValue": {"values": [_otlp_value(v) for v in value]}}
+    return {"stringValue": json.dumps(value, default=str)}
+
+
+def _record(event_name: str, body: dict[str, object]) -> dict[str, object]:
+    """One ``ResourceLogs`` line carrying a single log record (OTLP/JSON
+    ndjson, matching PR-A's :class:`FileLogExporter` wire shape).
+    """
     return {
-        "schema": "otel/span/v0",
-        "kind": kind,
-        "trace_id": "trace",
-        "span_id": "span",
-        "name": kind,
-        "attributes": attributes,
-        "status": {"code": "OK"},
+        "resource": {
+            "attributes": [
+                {"key": "service.name", "value": {"stringValue": "agentm"}},
+            ]
+        },
+        "scopeLogs": [
+            {
+                "scope": {"name": "agentm", "version": "0.1.0"},
+                "logRecords": [
+                    {
+                        "timeUnixNano": "0",
+                        "observedTimeUnixNano": "0",
+                        "severityNumber": "SEVERITY_NUMBER_INFO",
+                        "severityText": "INFO",
+                        "eventName": event_name,
+                        "body": _otlp_value(body),
+                    }
+                ],
+            }
+        ],
     }
 
 
@@ -118,14 +159,14 @@ async def test_E5_rebuild_is_idempotent(tmp_path: Path) -> None:
         "trace-e5",
         [
             _record(
-                "session.fingerprint",
+                "agentm.session.fingerprint",
                 {
                     "core": None,
                     "scenario": None,
                     "atoms": {"tool_read": f"tool_read@{SHA_TOOL_READ}"},
                 },
             ),
-            _record("agent_end", {"stop_reason": "end_turn"}),
+            _record("agentm.agent.end", {"stop_reason": "end_turn"}),
         ],
     )
 

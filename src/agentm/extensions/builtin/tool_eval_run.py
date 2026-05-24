@@ -643,9 +643,15 @@ def _save_budget(cwd: Path, scenario_key: str, budget: dict[str, Any]) -> None:
 
 
 def _read_trace_cost_usd(cwd: Path, session_id: str) -> float:
-    """Sum ``cost_usd`` across all ``llm.request.end`` records in the
-    child session's observability JSONL. Returns 0.0 if the trace is
-    missing or unreadable — the budget under-counts rather than aborts."""
+    """Sum ``cost_usd`` across every ``agentm.turn.summary`` log record in
+    the child session's OTLP/JSON observability log.
+
+    Returns 0.0 if the trace is missing, unreadable, or simply does not
+    carry cost data (the framework's default writer does not emit
+    ``cost_usd`` — providers that wish to attribute spend stamp it
+    themselves via a turn_end handler that mutates the message usage or
+    publishes an extension event). Budget under-counts rather than aborts.
+    """
     trace_path = cwd / ".agentm/observability" / f"{session_id}.jsonl"
     if not trace_path.is_file():
         return 0.0
@@ -657,20 +663,58 @@ def _read_trace_cost_usd(cwd: Path, session_id: str) -> float:
                 if not line:
                     continue
                 try:
-                    rec = json.loads(line)
+                    line_dict = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(rec, dict):
+                if not isinstance(line_dict, dict):
                     continue
-                if rec.get("kind") != "llm.request.end":
-                    continue
-                attrs = rec.get("attributes") or {}
-                cost = attrs.get("cost_usd") if isinstance(attrs, dict) else None
-                if isinstance(cost, (int, float)):
-                    total += float(cost)
+                for scope_logs in line_dict.get("scopeLogs", []) or []:
+                    for record in scope_logs.get("logRecords", []) or []:
+                        if record.get("eventName") != "agentm.turn.summary":
+                            continue
+                        body = _unwrap_otlp(record.get("body"))
+                        if not isinstance(body, dict):
+                            continue
+                        cost = body.get("cost_usd")
+                        if isinstance(cost, (int, float)):
+                            total += float(cost)
     except OSError:
         return 0.0
     return total
+
+
+def _unwrap_otlp(value: Any) -> Any:
+    """Tiny OTLP proto-JSON tagged-union unwrapper (kvlistValue +
+    primitives). Kept local to this atom so the §11 import allow-list
+    stays satisfied — atoms can't reach into ``core.runtime.otel_export``.
+    """
+    if not isinstance(value, dict):
+        return value
+    if "stringValue" in value:
+        return value["stringValue"]
+    if "boolValue" in value:
+        return value["boolValue"]
+    if "intValue" in value:
+        try:
+            return int(value["intValue"])
+        except (TypeError, ValueError):
+            return value["intValue"]
+    if "doubleValue" in value:
+        try:
+            return float(value["doubleValue"])
+        except (TypeError, ValueError):
+            return value["doubleValue"]
+    if "kvlistValue" in value:
+        out: dict[str, Any] = {}
+        for item in value["kvlistValue"].get("values", []) or []:
+            key = item.get("key")
+            if not isinstance(key, str):
+                continue
+            out[key] = _unwrap_otlp(item.get("value"))
+        return out
+    if "arrayValue" in value:
+        return [_unwrap_otlp(v) for v in value["arrayValue"].get("values", []) or []]
+    return value
 
 
 def _normalize_grade(value: Any) -> GradeResult:

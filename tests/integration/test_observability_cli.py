@@ -121,21 +121,39 @@ def test_cli_observability_trace_contains_identity_events(tmp_path: Path) -> Non
     assert completed.returncode == 0, completed.stderr
     trace_files = sorted((sandbox / ".agentm" / "observability").glob("*.jsonl"))
     assert len(trace_files) == 1
-    rows = [json.loads(line) for line in trace_files[0].read_text(encoding="utf-8").splitlines()]
-    kinds = {row.get("kind") for row in rows}
+    rows = [
+        json.loads(line)
+        for line in trace_files[0].read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    event_names: set[str] = set()
+    span_names: set[str] = set()
+    dispatch_channels: set[str] = set()
+    for row in rows:
+        for scope in row.get("scopeLogs", []) or []:
+            for record in scope.get("logRecords", []) or []:
+                name = record.get("eventName")
+                if isinstance(name, str):
+                    event_names.add(name)
+                if name == "agentm.event.dispatch":
+                    for attr in record.get("attributes", []) or []:
+                        if attr.get("key") == "agentm.event.channel":
+                            v = attr.get("value", {}).get("stringValue")
+                            if isinstance(v, str):
+                                dispatch_channels.add(v)
+        for scope in row.get("scopeSpans", []) or []:
+            for span in scope.get("spans", []) or []:
+                name = span.get("name")
+                if isinstance(name, str):
+                    span_names.add(name)
     assert {
-        "session.start",
-        "session.ready",
-        "llm.request.start",
-        "llm.request.end",
-        "turn.summary",
-        "session.end",
-    } <= kinds
-    assert any(
-        row.get("kind") == "event.dispatch"
-        and row.get("attributes", {}).get("channel") == "turn_end"
-        for row in rows
-    )
+        "agentm.session.start",
+        "agentm.session.ready",
+        "agentm.turn.summary",
+        "agentm.session.end",
+    } <= event_names
+    assert any(name.startswith("chat ") for name in span_names), span_names
+    assert "turn_end" in dispatch_channels
 
 
 def test_cli_retry_policy_composition_is_visible_in_observability(
@@ -208,23 +226,57 @@ def test_cli_retry_policy_composition_is_visible_in_observability(
     rows = [
         json.loads(line)
         for line in trace_files[0].read_text(encoding="utf-8").splitlines()
+        if line.strip()
     ]
+    log_records: list[dict[str, Any]] = []
+    for row in rows:
+        for scope in row.get("scopeLogs", []) or []:
+            log_records.extend(scope.get("logRecords", []) or [])
+
+    def _attr(record: dict[str, Any], key: str) -> Any:
+        for attr in record.get("attributes", []) or []:
+            if attr.get("key") == key:
+                v = attr.get("value") or {}
+                if "stringValue" in v:
+                    return v["stringValue"]
+                if "intValue" in v:
+                    try:
+                        return int(v["intValue"])
+                    except (TypeError, ValueError):
+                        return v["intValue"]
+                if "boolValue" in v:
+                    return v["boolValue"]
+        return None
+
     assert any(
-        row.get("kind") == "extension.install"
-        and row.get("attributes", {}).get("module_path")
+        r.get("eventName") == "agentm.extension.install"
+        and _attr(r, "agentm.extension.module_path")
         == "agentm.extensions.builtin.retry_policy"
-        for row in rows
+        for r in log_records
     )
     assert any(
-        row.get("kind") == "api.register"
-        and row.get("attributes", {}).get("kind") == "provider"
-        and row.get("attributes", {}).get("name") == "openai"
-        for row in rows
+        r.get("eventName") == "agentm.api.register"
+        and _attr(r, "agentm.api.kind") == "provider"
+        and _attr(r, "agentm.api.name") == "openai"
+        for r in log_records
     )
-    assert any(
-        row.get("kind") == "event.dispatch"
-        and row.get("attributes", {}).get("channel") == "diagnostic"
-        and "verify_ssl=False"
-        in row.get("attributes", {}).get("event", {}).get("message", "")
-        for row in rows
-    )
+    # The diagnostic dispatch carries the payload as a JSON-encoded
+    # attribute (since arbitrary dicts can't ride directly in OTel
+    # attribute slots). Decode and probe for the message substring.
+    found_diagnostic = False
+    for r in log_records:
+        if r.get("eventName") != "agentm.event.dispatch":
+            continue
+        if _attr(r, "agentm.event.channel") != "diagnostic":
+            continue
+        payload_str = _attr(r, "agentm.event.payload")
+        if not isinstance(payload_str, str):
+            continue
+        try:
+            payload = json.loads(payload_str)
+        except (TypeError, ValueError):
+            continue
+        if "verify_ssl=False" in str(payload.get("message", "")):
+            found_diagnostic = True
+            break
+    assert found_diagnostic

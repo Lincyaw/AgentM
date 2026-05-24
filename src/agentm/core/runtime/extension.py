@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import importlib
 import inspect
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from agentm.core.abi import (
@@ -54,6 +55,10 @@ from agentm.core.abi.operations import (
 )
 from agentm.core.abi.project_layout import ProjectLayout
 from agentm.core.abi.resource import ResourceWriter
+from agentm.core.runtime.otel_export import (
+    SessionTelemetry,
+    setup_session_telemetry,
+)
 from agentm.core.runtime.resource_writer import GitBackedResourceWriter
 from agentm.core.runtime.services import (
     default_catalog_service,
@@ -168,6 +173,103 @@ class _NoopChildSessionFactory:
         )
 
 
+# Callable that builds a ``SessionTelemetry`` for the current session. Lazy
+# construction means tests that never touch telemetry pay no SDK setup cost,
+# and the file handle / batch processor threads only spin up when something
+# actually wants to write spans or logs. See PR-A
+# (``agentm.core.runtime.otel_export``) for the underlying primitives.
+SessionTelemetryFactory = Callable[[], SessionTelemetry]
+
+
+class _SessionTelemetryHolder:
+    """Mutable single-slot container for the session's :class:`SessionTelemetry`.
+
+    Telemetry is a **default-pluggable** axis like :class:`_ResourceWriterHolder`:
+    the substrate has a working default (``setup_session_telemetry`` from
+    :mod:`agentm.core.runtime.otel_export`, which wires up the per-session
+    OTLP/JSON ndjson exporters), so the slot pre-populates with a *factory*
+    rather than a live handle — construction is deferred to the first
+    :meth:`_ExtensionAPIImpl.get_session_telemetry` call so tests / sessions
+    that never read telemetry pay no cost.
+
+    On first construction the holder also installs a ``SessionShutdownEvent``
+    handler on the session bus that calls :meth:`SessionTelemetry.shutdown`,
+    so the batch-processor threads + file handles drain cleanly when the
+    session ends. ``SessionTelemetry.shutdown`` is itself idempotent
+    (PR-A), so an explicit shutdown by the atom + the bus-driven teardown
+    is safe.
+
+    Sharing one holder across every :class:`_ExtensionAPIImpl` instance for
+    a session means later atoms see the same telemetry handle as the first
+    consumer (typically the observability atom).
+    """
+
+    __slots__ = ("_factory", "_bus", "_telemetry", "_shutdown_handler_registered")
+
+    def __init__(
+        self,
+        factory: SessionTelemetryFactory,
+        *,
+        bus: EventBus,
+    ) -> None:
+        self._factory: SessionTelemetryFactory = factory
+        self._bus = bus
+        self._telemetry: SessionTelemetry | None = None
+        self._shutdown_handler_registered = False
+
+    def get(self) -> SessionTelemetry:
+        if self._telemetry is None:
+            self._telemetry = self._factory()
+            self._register_shutdown_handler()
+        return self._telemetry
+
+    def _register_shutdown_handler(self) -> None:
+        if self._shutdown_handler_registered:
+            return
+        # Lazy import to keep the events module's runtime-level event names
+        # off the top-level import path here (matches the existing pattern
+        # used in ``_emit_register``).
+        from agentm.core.abi.events import BusPriority, SessionShutdownEvent
+
+        def _on_session_shutdown(_event: SessionShutdownEvent) -> None:
+            telemetry = self._telemetry
+            if telemetry is None:
+                return
+            telemetry.shutdown()
+
+        # ``POST`` priority: any observability atom subscribed at the
+        # default ``NORMAL`` tier gets to emit its closing
+        # ``agentm.session.end`` log record before we drain + close the
+        # exporters. Without this the closing record would land on a
+        # shut-down processor and silently disappear.
+        self._bus.on(
+            SessionShutdownEvent.CHANNEL,
+            _on_session_shutdown,
+            priority=BusPriority.POST,
+        )
+        self._shutdown_handler_registered = True
+
+
+def _default_session_telemetry_factory(
+    *, cwd: str, session_id: str, scenario: str | None
+) -> SessionTelemetryFactory:
+    """Bind a :func:`setup_session_telemetry` invocation to a session.
+
+    Extracted so callers (notably tests) can wrap or override the factory
+    without rebuilding the bind logic. The bound callable takes no
+    arguments — the holder calls it exactly once.
+    """
+
+    def _build() -> SessionTelemetry:
+        return setup_session_telemetry(
+            session_id=session_id,
+            cwd=Path(cwd) if cwd else Path.cwd(),
+            scenario_name=scenario,
+        )
+
+    return _build
+
+
 # --- Concrete impl ----------------------------------------------------------
 
 
@@ -205,6 +307,7 @@ class ExtensionAPIScope:
     catalog: CatalogService
     child_session_factory: ChildSessionFactory
     resource_writer: _ResourceWriterHolder
+    telemetry: _SessionTelemetryHolder
     service_registry: dict[str, Any]
 
 
@@ -231,6 +334,7 @@ def build_extension_api_scope(
     catalog: CatalogService | None = None,
     child_session_factory: ChildSessionFactory | None = None,
     resource_writer: ResourceWriter | None = None,
+    telemetry_factory: SessionTelemetryFactory | None = None,
     service_registry: dict[str, Any] | None = None,
 ) -> ExtensionAPIScope:
     """Resolve service defaults and return an :class:`ExtensionAPIScope`.
@@ -269,6 +373,13 @@ def build_extension_api_scope(
         resource_writer=_ResourceWriterHolder(
             resource_writer
             or GitBackedResourceWriter(cwd=cwd, session_id=session_id, bus=bus)
+        ),
+        telemetry=_SessionTelemetryHolder(
+            telemetry_factory
+            or _default_session_telemetry_factory(
+                cwd=cwd, session_id=session_id, scenario=scenario
+            ),
+            bus=bus,
         ),
         service_registry=service_registry if service_registry is not None else {},
     )
@@ -309,6 +420,7 @@ class _ExtensionAPIImpl:
         self._project_layout: ProjectLayout = scope.project_layout
         self._catalog = scope.catalog
         self._resource_writer_holder: _ResourceWriterHolder = scope.resource_writer
+        self._telemetry_holder: _SessionTelemetryHolder = scope.telemetry
         self._services = scope.service_registry
 
     def mark_stale(self) -> None:
@@ -503,6 +615,19 @@ class _ExtensionAPIImpl:
         self._assert_active()
         return self._resource_writer_holder.writer
 
+    def get_session_telemetry(self) -> SessionTelemetry:
+        """Return this session's :class:`SessionTelemetry` handle.
+
+        Lazily constructs the underlying OTLP/JSON ndjson exporters on the
+        first call (see :mod:`agentm.core.runtime.otel_export`); subsequent
+        calls return the same handle. The substrate also installs a
+        ``SessionShutdownEvent`` handler that drains the batch processors
+        and closes the file handles, so atoms do not have to call
+        :meth:`SessionTelemetry.shutdown` explicitly.
+        """
+        self._assert_active()
+        return self._telemetry_holder.get()
+
     def register_resource_writer(self, writer: ResourceWriter) -> None:
         """Replace the session's :class:`ResourceWriter` (see ExtensionAPI docs)."""
         self._assert_active()
@@ -668,11 +793,13 @@ __all__ = [
     "UnknownCommandError",
     "UnloadAtomResult",
     "Unsubscribe",
+    "SessionTelemetryFactory",
     "_ExtensionAPIImpl",
     "_NoopChildSessionFactory",
     "_NoopSessionGateway",
     "_OperationsHolder",
     "_SessionGateway",
+    "_SessionTelemetryHolder",
     "build_extension_api_scope",
     "load_extension",
 ]
