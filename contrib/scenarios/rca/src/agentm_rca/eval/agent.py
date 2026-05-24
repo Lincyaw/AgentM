@@ -345,32 +345,28 @@ class AgentMAgent(BaseAgent):
 
         final_run = session_runs[experiment.final.payload.session_log_id]
         metadata = dict(final_run.result.metadata or {})
+        # Chain topology comes straight from the experiment header
+        # (matches the ``<sid>.chained.jsonl`` first-line bundle so
+        # rcabench-platform and downstream tools see the same shape).
+        # Augment with presentational fields the sidecar doesn't carry:
+        # ``base_scenario``, ``chained_replay_path`` (string path), and
+        # per-segment ``run`` summaries from the rca eval driver.
+        chain_meta: dict[str, Any] = dict(experiment.header)
+        chain_meta["base_scenario"] = self._scenario
+        chain_meta["chained_replay_path"] = (
+            str(experiment.chained_replay_path)
+            if experiment.chained_replay_path is not None
+            else None
+        )
+        chain_meta["segments"] = [
+            {
+                **seg_header,
+                "run": _run_metadata(session_runs[seg_header["session_log_id"]]),
+            }
+            for seg_header in experiment.header["segments"]
+        ]
         metadata["intervention_mode"] = "chained_fork"
-        metadata["chained_fork"] = {
-            "max_interventions": self._max_interventions,
-            "base_scenario": self._scenario,
-            "chained_replay_path": (
-                str(experiment.chained_replay_path)
-                if experiment.chained_replay_path is not None
-                else None
-            ),
-            "segments": [
-                {
-                    "segment_index": s.segment_index,
-                    "session_log_id": s.payload.session_log_id,
-                    "is_control": s.seeded_reminder is None,
-                    "fork_turn_index": s.fork_turn_index,
-                    "reminder_text": (
-                        s.seeded_reminder.text
-                        if s.seeded_reminder is not None
-                        else None
-                    ),
-                    "surfaced_reminder_turn": s.surfaced_reminder_turn,
-                    "run": _run_metadata(session_runs[s.payload.session_log_id]),
-                }
-                for s in experiment.segments
-            ],
-        }
+        metadata["chained_fork"] = chain_meta
         return AgentResult(
             response=final_run.result.response,
             trajectory=final_run.result.trajectory,
