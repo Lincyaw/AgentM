@@ -26,6 +26,14 @@ def _make_bundle(
     submission: dict | None,
     observability_shape: bool = False,
 ) -> Path:
+    """Build a synthetic bundle directory.
+
+    ``observability_shape=True`` writes the current OTLP/JSON shape — an
+    ``execute_tool submit_final_report`` span with a JSON-encoded
+    ``gen_ai.tool.call.arguments`` attribute. The default writes the
+    bare session-log shape older bundles use. Both are recognised by
+    ``_last_submit_final_report`` in ``llmharness/distill/cli.py``.
+    """
     bundle = tmp_path / case_id
     bundle.mkdir()
     (bundle / "case_metadata.json").write_text(
@@ -44,14 +52,46 @@ def _make_bundle(
         if observability_shape:
             rows.append(
                 {
-                    "kind": "event.dispatch",
-                    "name": "emit:tool_call",
-                    "attributes": {
-                        "event": {
-                            "tool_name": "submit_final_report",
-                            "args": submission,
-                        }
+                    "resource": {
+                        "attributes": [
+                            {
+                                "key": "service.name",
+                                "value": {"stringValue": "agentm"},
+                            }
+                        ]
                     },
+                    "scopeSpans": [
+                        {
+                            "scope": {"name": "agentm", "version": "0.1.0"},
+                            "spans": [
+                                {
+                                    "traceId": "AAAA",
+                                    "spanId": "AAAA",
+                                    "name": "execute_tool submit_final_report",
+                                    "kind": "SPAN_KIND_INTERNAL",
+                                    "startTimeUnixNano": "0",
+                                    "endTimeUnixNano": "1",
+                                    "attributes": [
+                                        {
+                                            "key": "gen_ai.tool.name",
+                                            "value": {
+                                                "stringValue": "submit_final_report"
+                                            },
+                                        },
+                                        {
+                                            "key": "gen_ai.tool.call.arguments",
+                                            "value": {
+                                                "stringValue": json.dumps(
+                                                    submission
+                                                )
+                                            },
+                                        },
+                                    ],
+                                    "status": {},
+                                }
+                            ],
+                        }
+                    ],
                 }
             )
         else:

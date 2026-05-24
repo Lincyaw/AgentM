@@ -246,8 +246,12 @@ def _evaluate_and_maybe_rollback(
 
 
 def _summarize_trace(path: Path) -> dict[str, Any] | None:
-    """Heuristic tool_error_rate extractor for one trace file. Returns
-    None if the trace has no turns (empty session — can't measure).
+    """Heuristic tool_error_rate extractor for one OTLP/JSON trace file.
+
+    Walks ``agentm.turn.summary`` log records under
+    ``scopeLogs[*].logRecords[*]`` and reads ``tool_error_count`` from
+    each record's body. Returns None when the trace has no turn
+    summaries (empty session — can't measure).
     """
     turn_count = 0
     error_count = 0
@@ -258,21 +262,24 @@ def _summarize_trace(path: Path) -> dict[str, Any] | None:
                 if not line:
                     continue
                 try:
-                    rec = json.loads(line)
+                    line_dict = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(rec, dict):
+                if not isinstance(line_dict, dict):
                     continue
-                if rec.get("kind") == "turn.summary":
-                    turn_count += 1
-                    attrs = rec.get("attributes") or {}
-                    if isinstance(attrs, dict):
-                        try:
-                            error_count += int(
-                                attrs.get("tool_error_count") or 0
-                            )
-                        except (TypeError, ValueError):
-                            pass
+                for scope_logs in line_dict.get("scopeLogs", []) or []:
+                    for record in scope_logs.get("logRecords", []) or []:
+                        if record.get("eventName") != "agentm.turn.summary":
+                            continue
+                        turn_count += 1
+                        body = _unwrap_otlp(record.get("body"))
+                        if isinstance(body, dict):
+                            try:
+                                error_count += int(
+                                    body.get("tool_error_count") or 0
+                                )
+                            except (TypeError, ValueError):
+                                pass
     except OSError:
         return None
     if turn_count == 0:
@@ -284,6 +291,40 @@ def _summarize_trace(path: Path) -> dict[str, Any] | None:
         "tool_error_count": error_count,
         "tool_error_rate": rate,
     }
+
+
+def _unwrap_otlp(value: Any) -> Any:
+    """OTLP proto-JSON tagged-union unwrapper. Duplicated across atoms
+    because §11 forbids atom-to-atom imports; ``tool_eval_run`` carries
+    the same helper.
+    """
+    if not isinstance(value, dict):
+        return value
+    if "stringValue" in value:
+        return value["stringValue"]
+    if "boolValue" in value:
+        return value["boolValue"]
+    if "intValue" in value:
+        try:
+            return int(value["intValue"])
+        except (TypeError, ValueError):
+            return value["intValue"]
+    if "doubleValue" in value:
+        try:
+            return float(value["doubleValue"])
+        except (TypeError, ValueError):
+            return value["doubleValue"]
+    if "kvlistValue" in value:
+        out: dict[str, Any] = {}
+        for item in value["kvlistValue"].get("values", []) or []:
+            key = item.get("key")
+            if not isinstance(key, str):
+                continue
+            out[key] = _unwrap_otlp(item.get("value"))
+        return out
+    if "arrayValue" in value:
+        return [_unwrap_otlp(v) for v in value["arrayValue"].get("values", []) or []]
+    return value
 
 
 def _load_activations(path: Path) -> list[dict[str, Any]]:

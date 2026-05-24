@@ -36,21 +36,69 @@ def _write_trace(tmp_path: Path, trace_id: str, records: list[dict[str, Any]]) -
     return trace_path
 
 
-def _record(kind: str, attributes: dict[str, Any]) -> dict[str, Any]:
+def _otlp_value(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {"stringValue": ""}
+    if isinstance(value, bool):
+        return {"boolValue": value}
+    if isinstance(value, int):
+        return {"intValue": str(value)}
+    if isinstance(value, float):
+        return {"doubleValue": value}
+    if isinstance(value, str):
+        return {"stringValue": value}
+    if isinstance(value, dict):
+        return {
+            "kvlistValue": {
+                "values": [
+                    {"key": str(k), "value": _otlp_value(v)}
+                    for k, v in value.items()
+                ]
+            }
+        }
+    if isinstance(value, list):
+        return {"arrayValue": {"values": [_otlp_value(v) for v in value]}}
+    return {"stringValue": json.dumps(value, default=str)}
+
+
+def _record(event_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Build one ``ResourceLogs`` element line carrying one log record.
+
+    The indexer walks ``scopeLogs[*].logRecords[*]`` and matches on
+    ``eventName``; this mirrors the on-disk shape PR-A's
+    ``FileLogExporter`` emits.
+    """
     return {
-        "schema": "otel/span/v0",
-        "kind": kind,
-        "trace_id": "trace",
-        "span_id": "span",
-        "name": kind,
-        "attributes": attributes,
-        "status": {"code": "OK"},
+        "resource": {
+            "attributes": [
+                {"key": "service.name", "value": {"stringValue": "agentm"}},
+                {
+                    "key": "agentm.session.id",
+                    "value": {"stringValue": "sess-fixture"},
+                },
+            ]
+        },
+        "scopeLogs": [
+            {
+                "scope": {"name": "agentm", "version": "0.1.0"},
+                "logRecords": [
+                    {
+                        "timeUnixNano": "0",
+                        "observedTimeUnixNano": "0",
+                        "severityNumber": "SEVERITY_NUMBER_INFO",
+                        "severityText": "INFO",
+                        "eventName": event_name,
+                        "body": _otlp_value(body),
+                    }
+                ],
+            }
+        ],
     }
 
 
 def _fingerprint_record(atom_versions: dict[str, str]) -> dict[str, Any]:
     return _record(
-        "session.fingerprint",
+        "agentm.session.fingerprint",
         {
             "core": None,
             "scenario": None,
@@ -92,10 +140,10 @@ def test_E5_rebuild_is_idempotent(tmp_path: Path) -> None:
         [
             _fingerprint_record({"tool_read": SHA_TOOL_READ, "tool_write": SHA_TOOL_WRITE}),
             _record(
-                "llm.request.end",
-                {"usage": {"input_tokens": 120, "output_tokens": 30}},
+                "agentm.turn.summary",
+                {"input_tokens": 120, "output_tokens": 30},
             ),
-            _record("agent_end", {"stop_reason": "end_turn"}),
+            _record("agentm.agent.end", {"stop_reason": "end_turn"}),
         ],
     )
 
@@ -123,7 +171,7 @@ def test_index_trace_attributes_to_all_loaded_atoms(tmp_path: Path) -> None:
                     "observability": SHA_OBS,
                 }
             ),
-            _record("agent_end", {"stop_reason": "stop"}),
+            _record("agentm.agent.end", {"stop_reason": "stop"}),
         ],
     )
 
@@ -146,7 +194,7 @@ def test_index_trace_marks_mid_session_reload(tmp_path: Path) -> None:
         [
             _fingerprint_record({"tool_read": SHA_TOOL_READ}),
             _record(
-                "atom.reload",
+                "agentm.atom.reload",
                 {
                     "fingerprint_after": {
                         "core": None,
@@ -155,7 +203,7 @@ def test_index_trace_marks_mid_session_reload(tmp_path: Path) -> None:
                     }
                 },
             ),
-            _record("agent_end", {"stop_reason": "end_turn"}),
+            _record("agentm.agent.end", {"stop_reason": "end_turn"}),
         ],
     )
 
@@ -232,7 +280,7 @@ def test_extract_stop_reason_handles_new_cause_shapes(
         "trace-cause",
         [
             _fingerprint_record({"tool_read": SHA_TOOL_READ}),
-            _record("agent_end", {"cause": cause_payload}),
+            _record("agentm.agent.end", {"cause": cause_payload}),
         ],
     )
 
@@ -247,7 +295,7 @@ def test_index_trace_skips_legacy_content_hash_fingerprints(tmp_path: Path) -> N
         "trace-legacy",
         [
             _fingerprint_record({"tool_read": LEGACY_HASH}),
-            _record("agent_end", {"stop_reason": "end_turn"}),
+            _record("agentm.agent.end", {"stop_reason": "end_turn"}),
         ],
     )
 
@@ -265,7 +313,7 @@ def test_cli_rebuild_returns_zero_on_clean_run(tmp_path: Path) -> None:
         "trace-cli",
         [
             _fingerprint_record({"tool_read": SHA_TOOL_READ}),
-            _record("agent_end", {"stop_reason": "end_turn"}),
+            _record("agentm.agent.end", {"stop_reason": "end_turn"}),
         ],
     )
     observability = tmp_path / ".agentm" / "observability"

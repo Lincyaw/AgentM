@@ -198,6 +198,13 @@ def _extract_verdict_from_trace(task: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _parse_trace(path: Path, expected_task_id: str) -> dict[str, Any] | None:
+    """Parse an OTLP/JSON trace for the verdict matching ``expected_task_id``.
+
+    Identity comes from the ``agentm.session.fingerprint`` log record's
+    ``task_meta.task_id``. The verdict args come from the
+    ``execute_tool submit_final_report`` span's
+    ``gen_ai.tool.call.arguments`` attribute (JSON-encoded by the writer).
+    """
     services: list[str] = []
     fault_kinds: list[str] = []
     raw_payload: str = ""
@@ -214,23 +221,36 @@ def _parse_trace(path: Path, expected_task_id: str) -> dict[str, Any] | None:
                     continue
                 if not isinstance(rec, dict):
                     continue
-                kind = rec.get("kind")
-                attrs = rec.get("attributes") or {}
-                if kind == "session.fingerprint":
-                    task_meta = attrs.get("task_meta") or {}
-                    if (
-                        isinstance(task_meta, dict)
-                        and str(task_meta.get("task_id") or "") == expected_task_id
-                    ):
-                        matched = True
-                if kind == "event.dispatch" and rec.get("name") == "emit:tool_call":
-                    event = attrs.get("event") or {}
-                    if (
-                        isinstance(event, dict)
-                        and event.get("tool_name") == "submit_final_report"
-                    ):
-                        args = event.get("args") or {}
-                        if isinstance(args, dict):
+                for scope_logs in rec.get("scopeLogs", []) or []:
+                    for record in scope_logs.get("logRecords", []) or []:
+                        if record.get("eventName") != "agentm.session.fingerprint":
+                            continue
+                        body = _unwrap_otlp(record.get("body"))
+                        if isinstance(body, dict):
+                            task_meta = body.get("task_meta") or {}
+                            if (
+                                isinstance(task_meta, dict)
+                                and str(task_meta.get("task_id") or "")
+                                == expected_task_id
+                            ):
+                                matched = True
+                for scope_spans in rec.get("scopeSpans", []) or []:
+                    for span in scope_spans.get("spans", []) or []:
+                        if span.get("name") != "execute_tool submit_final_report":
+                            continue
+                        for attr in span.get("attributes", []) or []:
+                            if attr.get("key") != "gen_ai.tool.call.arguments":
+                                continue
+                            v = attr.get("value") or {}
+                            raw = v.get("stringValue") if isinstance(v, dict) else None
+                            if not isinstance(raw, str) or not raw:
+                                continue
+                            try:
+                                args = json.loads(raw)
+                            except (TypeError, ValueError):
+                                continue
+                            if not isinstance(args, dict):
+                                continue
                             raw_payload = json.dumps(args)
                             for rc in args.get("root_causes") or []:
                                 if not isinstance(rc, dict):
@@ -246,6 +266,36 @@ def _parse_trace(path: Path, expected_task_id: str) -> dict[str, Any] | None:
     if not matched:
         return None
     return {"services": services, "fault_kinds": fault_kinds, "raw": raw_payload}
+
+
+def _unwrap_otlp(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    if "stringValue" in value:
+        return value["stringValue"]
+    if "boolValue" in value:
+        return value["boolValue"]
+    if "intValue" in value:
+        try:
+            return int(value["intValue"])
+        except (TypeError, ValueError):
+            return value["intValue"]
+    if "doubleValue" in value:
+        try:
+            return float(value["doubleValue"])
+        except (TypeError, ValueError):
+            return value["doubleValue"]
+    if "kvlistValue" in value:
+        out: dict[str, Any] = {}
+        for item in value["kvlistValue"].get("values", []) or []:
+            key = item.get("key")
+            if not isinstance(key, str):
+                continue
+            out[key] = _unwrap_otlp(item.get("value"))
+        return out
+    if "arrayValue" in value:
+        return [_unwrap_otlp(v) for v in value["arrayValue"].get("values", []) or []]
+    return value
 
 
 def _detect_sql_quoting_issue(task: dict[str, Any]) -> str | None:

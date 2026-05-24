@@ -1,13 +1,15 @@
 """``llmharness review`` — read-only inspector for the cognitive-audit graph.
 
-The graph and verdicts the adapter writes live as custom entries inside the
-main AgentM session JSONL (``~/.agentm/sessions/--<cwd-slug>--/*.jsonl``),
-intermixed with messages. This CLI extracts and pretty-prints them so you
+The graph and verdicts the adapter writes live as ``message.appended``
+records (audit entries are persisted as custom-type messages) inside the
+main AgentM merged event log
+(``<cwd>/.agentm/observability/<session_id>.jsonl``), intermixed with the
+trajectory and OTel spans. This CLI extracts and pretty-prints them so you
 can audit a run without writing ad-hoc ``jq`` queries.
 
 It is read-only — it never imports the AgentM harness or mutates the
 session file. The session file format is the contract; if AgentM changes
-it, this tool only needs to track ``type``/``payload`` shape.
+it, this tool only needs to track the merged-log envelope shape.
 """
 
 from __future__ import annotations
@@ -33,21 +35,15 @@ _RECENT_VERDICTS_FOR_AUDITOR = _et.RECENT_VERDICTS_FOR_AUDITOR
 
 # --- session-file resolution ------------------------------------------------
 #
-# These helpers reproduce the AgentM session-directory rule (currently
-# ``~/.agentm/sessions/<cwd-slug>/``) so this CLI stays a read-only tool
-# with no AgentM-runtime dependency. Keep in sync if the SDK ever moves
-# the session root. (The legacy ``harness.session_manager`` module was
-# removed in the 2026-05-11 harness collapse; the rule itself is now
-# inlined in core.runtime.session_factory.)
+# Single-event-log merge (.claude/designs/single-event-log.md): the merged
+# session JSONL now lives under ``<cwd>/.agentm/observability/``. Keep this
+# rule in sync with ``SessionManager.default_session_dir`` if the SDK ever
+# moves it; this CLI stays a read-only tool with no AgentM-runtime
+# dependency.
 
 
-def _default_sessions_root() -> Path:
-    return Path.home() / ".agentm" / "sessions"
-
-
-def _cwd_slug(cwd: Path) -> str:
-    s = str(cwd.resolve()).strip(os.sep).replace(os.sep, "-") or "root"
-    return f"--{s}--"
+def _default_sessions_root(cwd: Path) -> Path:
+    return cwd / ".agentm" / "observability"
 
 
 def _resolve_session_file(arg: str | None, cwd: Path) -> Path:
@@ -56,7 +52,7 @@ def _resolve_session_file(arg: str | None, cwd: Path) -> Path:
         if not p.is_file():
             raise FileNotFoundError(f"session file not found: {arg}")
         return p
-    directory = _default_sessions_root() / _cwd_slug(cwd)
+    directory = _default_sessions_root(cwd)
     if not directory.is_dir():
         raise FileNotFoundError(f"no session directory for cwd {cwd} (looked in {directory})")
     files = sorted(
@@ -73,15 +69,68 @@ def _resolve_session_file(arg: str | None, cwd: Path) -> Path:
 
 
 def _iter_records(path: Path) -> Iterable[dict[str, Any]]:
+    """Yield SessionEntry-shaped records from an OTLP/JSON session log.
+
+    After the single-event-log OTLP cutover, each trajectory row is an
+    OTLP ``ResourceLogs`` element carrying one log record with
+    ``eventName == "agentm.message.appended"`` and a kvlist body that
+    encodes the original SessionEntry dict. We unwrap and yield the
+    inner SessionEntry so the rest of the CLI keeps reading
+    ``rec["type"]`` / ``rec["payload"]`` unchanged.
+    """
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                raw = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(raw, dict):
+                continue
+            for scope_logs in raw.get("scopeLogs", []) or []:
+                for record in scope_logs.get("logRecords", []) or []:
+                    if record.get("eventName") != "agentm.message.appended":
+                        continue
+                    body = _unwrap_otlp(record.get("body"))
+                    if isinstance(body, dict):
+                        yield body
+
+
+def _unwrap_otlp(value: Any) -> Any:
+    """OTLP proto-JSON tagged-union unwrapper. Inlined here so the
+    cognitive-audit CLI doesn't depend on agentm core internals — this
+    contrib package publishes its own version surface
+    (``pyproject.toml`` schema-stability note in CLAUDE.md).
+    """
+    if not isinstance(value, dict):
+        return value
+    if "stringValue" in value:
+        return value["stringValue"]
+    if "boolValue" in value:
+        return value["boolValue"]
+    if "intValue" in value:
+        try:
+            return int(value["intValue"])
+        except (TypeError, ValueError):
+            return value["intValue"]
+    if "doubleValue" in value:
+        try:
+            return float(value["doubleValue"])
+        except (TypeError, ValueError):
+            return value["doubleValue"]
+    if "kvlistValue" in value:
+        out: dict[str, Any] = {}
+        for item in value["kvlistValue"].get("values", []) or []:
+            key = item.get("key")
+            if not isinstance(key, str):
+                continue
+            out[key] = _unwrap_otlp(item.get("value"))
+        return out
+    if "arrayValue" in value:
+        return [_unwrap_otlp(v) for v in value["arrayValue"].get("values", []) or []]
+    return value
 
 
 def _collect(path: Path) -> tuple[list[Event], list[Verdict], int]:

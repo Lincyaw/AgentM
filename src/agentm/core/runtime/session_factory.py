@@ -170,7 +170,16 @@ async def create_agent_session(
     # ``<session_id>.jsonl`` and the OTel ``trace_id`` field on every
     # event is the caller's trace_id. Falls back to fresh uuid hex of the
     # appropriate length when no id is supplied.
-    session_id = config.session_id or uuid.uuid4().hex[:16]
+    # Single-event-log merge: observability writes the merged event log to
+    # ``<cwd>/.agentm/observability/<session_id>.jsonl`` and SessionManager
+    # is the authoritative source of the session header id, so the filename
+    # lines up with what ``continue_recent`` looks for. Pull from the
+    # manager when no caller-supplied id was provided.
+    session_id = (
+        config.session_id
+        or session_manager.get_session_id()
+        or uuid.uuid4().hex[:16]
+    )
     root_session_id = config.root_session_id or uuid.uuid4().hex
     session_view: ReadonlySession = SessionView(
         session_manager,
@@ -414,6 +423,14 @@ async def create_agent_session(
         config=loop_config_box["value"],
     )
     loop_box["value"] = loop
+
+    # Single-event-log merge (.claude/designs/single-event-log.md):
+    # SessionManager no longer writes its own JSONL. Attaching it to the
+    # bus here — after the extension-load loop installed observability —
+    # flushes any SessionHeaderEmittedEvent buffered during
+    # SessionManager.__init__ before any message rows, and routes every
+    # subsequent ``append_message`` through the merged log.
+    session_manager.attach_bus(bus)
 
     for msg in config.initial_messages:
         session_manager.append_message(msg)

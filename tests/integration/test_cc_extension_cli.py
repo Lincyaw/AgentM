@@ -63,28 +63,62 @@ def test_cli_cc_package_mount_records_extension_and_resource_events(tmp_path: Pa
     assert completed.returncode == 0, completed.stderr + completed.stdout
     trace_paths = sorted((sandbox / ".agentm" / "observability").glob("*.jsonl"))
     assert trace_paths, "CLI run did not write an observability trace"
-    records = [
+    rows = [
         json.loads(line)
         for line in trace_paths[-1].read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    ready = next(record for record in records if record.get("kind") == "session.ready")
-    assert "contrib.extensions.cc" in ready.get("attributes", {}).get("extension_module_paths", [])
+    log_records: list[dict] = []
+    span_names: set[str] = set()
+    for row in rows:
+        for scope in row.get("scopeLogs", []) or []:
+            log_records.extend(scope.get("logRecords", []) or [])
+        for scope in row.get("scopeSpans", []) or []:
+            for span in scope.get("spans", []) or []:
+                name = span.get("name")
+                if isinstance(name, str):
+                    span_names.add(name)
+
+    def _attr(record: dict, key: str):
+        for attr in record.get("attributes", []) or []:
+            if attr.get("key") == key:
+                v = attr.get("value") or {}
+                if "stringValue" in v:
+                    return v["stringValue"]
+        return None
+
+    def _payload(record: dict) -> dict:
+        raw = _attr(record, "agentm.event.payload")
+        if not isinstance(raw, str) or not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+
+    # session.ready body carries the loaded module paths inside the
+    # OTLP kvlist body; serialise the whole record and substring-check
+    # for the canonical path (the indented JSON is deterministic for
+    # short strings).
+    ready = next(
+        r for r in log_records if r.get("eventName") == "agentm.session.ready"
+    )
+    assert "contrib.extensions.cc" in json.dumps(ready)
     assert any(
-        record.get("kind") == "event.dispatch"
-        and record.get("name") == "emit:resources_discover"
-        for record in records
+        r.get("eventName") == "agentm.event.dispatch"
+        and _attr(r, "agentm.event.channel") == "resources_discover"
+        for r in log_records
     )
     assert any(
-        record.get("kind") == "event.dispatch"
-        and record.get("name") == "emit:command_dispatched"
-        and record.get("attributes", {}).get("event", {}).get("name") == "review"
-        for record in records
+        r.get("eventName") == "agentm.event.dispatch"
+        and _attr(r, "agentm.event.channel") == "command_dispatched"
+        and _payload(r).get("name") == "review"
+        for r in log_records
     )
     assert any(
-        record.get("kind") == "api.register"
-        and record.get("attributes", {}).get("kind") == "command"
-        and record.get("attributes", {}).get("name") == "review"
-        for record in records
+        r.get("eventName") == "agentm.api.register"
+        and _attr(r, "agentm.api.kind") == "command"
+        and _attr(r, "agentm.api.name") == "review"
+        for r in log_records
     )
-    assert not any(record.get("kind") == "llm.request.start" for record in records)
+    assert not any(name.startswith("chat ") for name in span_names)

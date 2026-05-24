@@ -145,11 +145,18 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
 
 def _summarize_trace(path: Path) -> dict[str, Any] | None:
-    """Walk a trace once and extract the load-bearing fields. Returns
-    ``None`` if the file isn't recognizably a session trace.
+    """Walk an OTLP/JSON trace once and extract load-bearing identity
+    fields. Returns ``None`` if the file isn't recognizably a session
+    trace (no ``agentm.session.fingerprint`` or ``agentm.session.ready``
+    log record was seen).
+
+    Identity lives in log records; ``total_turns`` is derived by counting
+    ``chat`` spans, and ``total_cost_usd`` is accumulated from any
+    provider that stamps cost on the chat span (the framework's default
+    writer does not emit cost).
     """
     trace_id: str | None = None
-    timestamp: str | None = None
+    timestamp_ns: int | None = None
     task_class: str | None = None
     eval_run_id: str | None = None
     task_id: str | None = None
@@ -157,6 +164,7 @@ def _summarize_trace(path: Path) -> dict[str, Any] | None:
     total_cost: float = 0.0
     total_turns: int = 0
     stop_reason: str | None = None
+    seen_identity = False
     try:
         with path.open("r", encoding="utf-8") as fh:
             for line in fh:
@@ -164,46 +172,77 @@ def _summarize_trace(path: Path) -> dict[str, Any] | None:
                 if not line:
                     continue
                 try:
-                    rec = json.loads(line)
+                    line_dict = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(rec, dict):
+                if not isinstance(line_dict, dict):
                     continue
+                for scope_logs in line_dict.get("scopeLogs", []) or []:
+                    for record in scope_logs.get("logRecords", []) or []:
+                        event_name = record.get("eventName")
+                        body = _unwrap_otlp(record.get("body"))
+                        if event_name == "agentm.session.fingerprint":
+                            seen_identity = True
+                            if isinstance(body, dict):
+                                task_meta = body.get("task_meta") or {}
+                                if isinstance(task_meta, dict):
+                                    task_class = (
+                                        task_meta.get("task_class") or task_class
+                                    )
+                                    eval_run_id = (
+                                        task_meta.get("eval_run_id") or eval_run_id
+                                    )
+                                    task_id = task_meta.get("task_id") or task_id
+                                atoms = body.get("atoms") or {}
+                                if isinstance(atoms, dict):
+                                    fingerprint_atoms = {
+                                        str(k): str(v) for k, v in atoms.items()
+                                    }
+                            if timestamp_ns is None:
+                                timestamp_ns = _parse_ns(record.get("timeUnixNano"))
+                        elif event_name == "agentm.session.ready":
+                            seen_identity = True
+                            if timestamp_ns is None:
+                                timestamp_ns = _parse_ns(record.get("timeUnixNano"))
+                        elif event_name == "agentm.agent.end" and isinstance(
+                            body, dict
+                        ):
+                            sr = body.get("stop_reason")
+                            if isinstance(sr, str) and sr:
+                                stop_reason = sr
+                            cause = body.get("cause")
+                            if isinstance(cause, dict) and not stop_reason:
+                                cause_kind = cause.get("cause_kind")
+                                if isinstance(cause_kind, str):
+                                    stop_reason = cause_kind
+                for scope_spans in line_dict.get("scopeSpans", []) or []:
+                    for span in scope_spans.get("spans", []) or []:
+                        name = span.get("name")
+                        if not isinstance(name, str):
+                            continue
+                        if name.startswith("chat "):
+                            total_turns += 1
+                            for attr in span.get("attributes", []) or []:
+                                if attr.get("key") in {
+                                    "agentm.cost_usd",
+                                    "gen_ai.usage.cost_usd",
+                                }:
+                                    v = attr.get("value") or {}
+                                    if "doubleValue" in v:
+                                        try:
+                                            total_cost += float(v["doubleValue"])
+                                        except (TypeError, ValueError):
+                                            pass
                 if trace_id is None:
-                    trace_id = rec.get("trace_id")
-                kind = rec.get("kind")
-                attrs = rec.get("attributes") or {}
-                if kind == "session.fingerprint":
-                    task_meta = attrs.get("task_meta") or {}
-                    if isinstance(task_meta, dict):
-                        task_class = task_meta.get("task_class") or task_class
-                        eval_run_id = task_meta.get("eval_run_id") or eval_run_id
-                        task_id = task_meta.get("task_id") or task_id
-                    atoms = attrs.get("atoms") or {}
-                    if isinstance(atoms, dict):
-                        fingerprint_atoms = {
-                            str(k): str(v) for k, v in atoms.items()
-                        }
-                    if timestamp is None:
-                        timestamp = _ns_to_iso(rec.get("start_time_unix_nano"))
-                elif kind == "session.ready" and timestamp is None:
-                    timestamp = _ns_to_iso(rec.get("start_time_unix_nano"))
-                elif kind == "turn.start":
-                    total_turns += 1
-                elif kind == "llm.request.end":
-                    cost = attrs.get("cost_usd")
-                    if isinstance(cost, (int, float)):
-                        total_cost += float(cost)
-                elif kind == "agent.end":
-                    stop_reason = attrs.get("stop_reason") or stop_reason
+                    trace_id = path.stem
     except OSError:
         return None
-    if trace_id is None:
+    if not seen_identity:
         return None
     return {
         "trace_id": trace_id,
         "path": str(path),
-        "timestamp": timestamp,
+        "timestamp": _ns_to_iso(timestamp_ns),
         "task_class": task_class,
         "eval_run_id": eval_run_id,
         "task_id": task_id,
@@ -214,12 +253,57 @@ def _summarize_trace(path: Path) -> dict[str, Any] | None:
     }
 
 
+def _parse_ns(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _ns_to_iso(value: Any) -> str | None:
     if not isinstance(value, (int, float)):
         return None
     import datetime as dt
 
     return dt.datetime.fromtimestamp(value / 1e9, tz=dt.timezone.utc).isoformat()
+
+
+def _unwrap_otlp(value: Any) -> Any:
+    """OTLP proto-JSON tagged-union unwrapper. Same shape as the helpers
+    in ``tool_eval_run`` / ``tool_guard_watch``; duplicated because §11
+    forbids atom-to-atom imports.
+    """
+    if not isinstance(value, dict):
+        return value
+    if "stringValue" in value:
+        return value["stringValue"]
+    if "boolValue" in value:
+        return value["boolValue"]
+    if "intValue" in value:
+        try:
+            return int(value["intValue"])
+        except (TypeError, ValueError):
+            return value["intValue"]
+    if "doubleValue" in value:
+        try:
+            return float(value["doubleValue"])
+        except (TypeError, ValueError):
+            return value["doubleValue"]
+    if "kvlistValue" in value:
+        out: dict[str, Any] = {}
+        for item in value["kvlistValue"].get("values", []) or []:
+            key = item.get("key")
+            if not isinstance(key, str):
+                continue
+            out[key] = _unwrap_otlp(item.get("value"))
+        return out
+    if "arrayValue" in value:
+        return [_unwrap_otlp(v) for v in value["arrayValue"].get("values", []) or []]
+    return value
 
 
 def _ok(text: str) -> ToolResult:

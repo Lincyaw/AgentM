@@ -122,8 +122,10 @@ def _seed_activations(decisions_dir: Path) -> None:
 
 
 def _seed_regressing_traces(obs_dir: Path, count: int) -> None:
-    """Each trace contains turn.summary records with tool_error_count
-    high enough to push tool_error_rate above the default threshold.
+    """Each trace contains ``agentm.turn.summary`` log records with
+    ``tool_error_count`` high enough to push tool_error_rate above the
+    default threshold. Emitted as OTLP/JSON ndjson (PR-A + Commit 2b
+    cutover wire shape).
     """
     obs_dir.mkdir(parents=True, exist_ok=True)
     for i in range(count):
@@ -132,26 +134,52 @@ def _seed_regressing_traces(obs_dir: Path, count: int) -> None:
         # 5 turns, 3 errors each -> rate = 0.6, well above default 0.20.
         lines = []
         for t in range(5):
+            body_kvlist = {
+                "kvlistValue": {
+                    "values": [
+                        {"key": "turn_index", "value": {"intValue": str(t)}},
+                        {
+                            "key": "tool_call_count",
+                            "value": {"intValue": "1"},
+                        },
+                        {
+                            "key": "tool_error_count",
+                            "value": {"intValue": "3"},
+                        },
+                    ]
+                }
+            }
             lines.append(
                 json.dumps(
                     {
-                        "schema": "otel/span/v0",
-                        "kind": "turn.summary",
-                        "trace_id": trace_id,
-                        "name": f"turn:{t}",
-                        "attributes": {
-                            "turn_index": t,
-                            "tool_calls": ["x"],
-                            "tool_call_count": 1,
-                            "tool_error_count": 3,
+                        "resource": {
+                            "attributes": [
+                                {
+                                    "key": "service.name",
+                                    "value": {"stringValue": "agentm"},
+                                }
+                            ]
                         },
-                        "status": {"code": "OK"},
+                        "scopeLogs": [
+                            {
+                                "scope": {"name": "agentm", "version": "0.1.0"},
+                                "logRecords": [
+                                    {
+                                        "timeUnixNano": "0",
+                                        "observedTimeUnixNano": "0",
+                                        "severityNumber": "SEVERITY_NUMBER_INFO",
+                                        "severityText": "INFO",
+                                        "eventName": "agentm.turn.summary",
+                                        "body": body_kvlist,
+                                    }
+                                ],
+                            }
+                        ],
                     },
                     sort_keys=True,
                 )
             )
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        # Stagger mtimes so the watcher's recency sort is deterministic.
         os_atime_mtime = time.time() - (count - i)
         import os as _os
 
