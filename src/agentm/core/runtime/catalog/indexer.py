@@ -18,6 +18,10 @@ from typing import Annotated, Any
 import typer
 
 from agentm.core.runtime.catalog import _layout
+from agentm.core.runtime.otel_export import (
+    iter_log_records,
+    otlp_unwrap,
+)
 
 logger = logging.getLogger(__name__)
 _LEGACY_FINGERPRINT_WARNED = False
@@ -74,15 +78,15 @@ def _parse_scenario(payload: Any) -> str | None:
     return scenario if isinstance(scenario, str) else None
 
 
-def _extract_usage_tokens(record: dict[str, Any]) -> int | None:
-    attributes = record.get("attributes")
-    if not isinstance(attributes, dict):
+def _extract_usage_tokens(turn_body: Any) -> int | None:
+    """Return input+output token count from an ``agentm.turn.summary`` log
+    record body. Returns ``None`` when usage is absent (e.g. providers
+    that don't report it).
+    """
+    if not isinstance(turn_body, dict):
         return None
-    usage = attributes.get("usage")
-    if not isinstance(usage, dict):
-        return None
-    input_tokens = usage.get("input_tokens")
-    output_tokens = usage.get("output_tokens")
+    input_tokens = turn_body.get("input_tokens")
+    output_tokens = turn_body.get("output_tokens")
     if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
         return None
     return input_tokens + output_tokens
@@ -100,33 +104,27 @@ _CAUSE_KIND_TO_LABEL: dict[str, str] = {
 }
 
 
-def _extract_stop_reason(record: dict[str, Any]) -> str | None:
-    """Read the termination identity from an ``agent_end`` record.
+def _extract_stop_reason_from_body(body: Any) -> str | None:
+    """Read the termination identity from the body of an
+    ``agentm.agent.end`` log record.
 
-    Two shapes accepted:
-    * Legacy: ``attributes.stop_reason`` is a bare string (test fixtures and
-      pre-redesign traces).
-    * Current: ``attributes.cause`` is a serialized :class:`TerminationCause`
-      stamped with a ``kind`` discriminator (the class name, written by
-      ``trajectory._serialize``) plus the cause's ClassVar ``final`` flag and
-      any subclass-specific fields. The ``kind`` field is the load-bearing
-      discriminator — without it ``ModelEndTurn`` / ``MaxTurnsExhausted`` /
-      ``SignalAborted`` (all serialize to no fields besides ``final``) are
-      indistinguishable.
+    The body shape is ``{"cause": <to_jsonable(TerminationCause)>, ...}``.
+    The cause dict carries a ``cause_kind`` discriminator (the class name
+    stamped by the standard dataclass serializer in
+    ``agentm.core.lib.serialization``) plus any subclass-specific fields.
+
+    Also tolerates a bare ``stop_reason`` string at the top level — used
+    by legacy unit-test fixtures that hand-build the body without going
+    through the writer.
     """
-
-    attributes = record.get("attributes")
-    if not isinstance(attributes, dict):
+    if not isinstance(body, dict):
         return None
-
-    legacy = attributes.get("stop_reason")
+    legacy = body.get("stop_reason")
     if isinstance(legacy, str):
         return legacy
-
-    cause = attributes.get("cause")
+    cause = body.get("cause")
     if not isinstance(cause, dict):
         return None
-
     cause_kind = cause.get("cause_kind")
     if isinstance(cause_kind, str):
         if cause_kind == "ProviderTruncated":
@@ -136,13 +134,10 @@ def _extract_stop_reason(record: dict[str, Any]) -> str | None:
             return "protocol_violation"
         label = _CAUSE_KIND_TO_LABEL.get(cause_kind)
         if label is not None:
-            # BudgetExhausted gets enriched with which budget tripped.
             detail = cause.get("detail")
             if cause_kind == "BudgetExhausted" and isinstance(detail, str) and detail:
                 return f"budget:{detail}"
             return label
-
-    # Unknown / pre-trajectory-stamping shape: best-effort fall-through.
     return None
 
 
@@ -249,35 +244,48 @@ def index_trace(trace_path: Path, *, root: Path | None = None) -> IndexerResult:
             if not line:
                 continue
             try:
-                record = json.loads(line)
+                line_dict = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{trace_path}:{lineno}: invalid JSON: {exc}") from exc
-            if not isinstance(record, dict):
+            if not isinstance(line_dict, dict):
                 continue
-            kind = record.get("kind") or record.get("type")
-            if kind == "session.fingerprint":
-                attributes = record.get("attributes")
-                parsed = _parse_atom_versions(attributes)
-                if parsed is not None:
-                    state.fingerprint = parsed
-                    state.scenario = _parse_scenario(attributes)
-            elif kind == "atom.reload":
-                attributes = record.get("attributes")
-                next_fingerprint = None
-                next_scenario = state.scenario
-                if isinstance(attributes, dict):
-                    next_fingerprint = _parse_atom_versions(attributes.get("fingerprint_after"))
-                    next_scenario = _parse_scenario(attributes.get("fingerprint_after")) or next_scenario
-                state.reset_for_reload(next_fingerprint or state.fingerprint, next_scenario)
-            elif kind == "agent_end":
-                stop_reason = _extract_stop_reason(record)
-                if stop_reason is not None:
-                    state.last_stop_reason = stop_reason
-            elif kind == "llm.request.end":
-                token_count = _extract_usage_tokens(record)
-                if token_count is not None:
-                    state.tokens_total = (state.tokens_total or 0) + token_count
-                    state.saw_tokens = True
+            # OTLP/JSON ndjson: each line is one ResourceSpans or
+            # ResourceLogs element. The indexer reads only log records
+            # (identity events live there); spans carry timing/lineage
+            # but no aggregation signal we don't already get from the
+            # paired log records.
+            for record in iter_log_records(line_dict):
+                event_name = record.get("eventName")
+                body = otlp_unwrap(record.get("body"))
+                if event_name == "agentm.session.fingerprint":
+                    if isinstance(body, dict):
+                        parsed = _parse_atom_versions(body)
+                        if parsed is not None:
+                            state.fingerprint = parsed
+                            state.scenario = _parse_scenario(body)
+                elif event_name == "agentm.atom.reload":
+                    next_fingerprint = None
+                    next_scenario = state.scenario
+                    if isinstance(body, dict):
+                        next_fingerprint = _parse_atom_versions(
+                            body.get("fingerprint_after")
+                        )
+                        next_scenario = (
+                            _parse_scenario(body.get("fingerprint_after"))
+                            or next_scenario
+                        )
+                    state.reset_for_reload(
+                        next_fingerprint or state.fingerprint, next_scenario
+                    )
+                elif event_name == "agentm.agent.end":
+                    stop_reason = _extract_stop_reason_from_body(body)
+                    if stop_reason is not None:
+                        state.last_stop_reason = stop_reason
+                elif event_name == "agentm.turn.summary":
+                    token_count = _extract_usage_tokens(body)
+                    if token_count is not None:
+                        state.tokens_total = (state.tokens_total or 0) + token_count
+                        state.saw_tokens = True
 
     if state.fingerprint is None:
         result.warnings.append(f"trace {trace_id!r} missing session.fingerprint record")

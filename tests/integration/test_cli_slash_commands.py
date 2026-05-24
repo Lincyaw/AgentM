@@ -56,15 +56,37 @@ def test_cli_slash_command_wins_over_prompt_template_collision(tmp_path: Path) -
 
     trace_paths = sorted((sandbox / ".agentm" / "observability").glob("*.jsonl"))
     assert trace_paths, "CLI run did not write an observability trace"
-    records = [
+    rows = [
         json.loads(line)
         for line in trace_paths[-1].read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    assert any(
-        record.get("kind") == "event.dispatch"
-        and record.get("name") == "emit:command_dispatched"
-        and record.get("attributes", {}).get("event", {}).get("name") == "ship"
-        for record in records
-    )
-    assert not any(record.get("kind") == "llm.request.start" for record in records)
+    # Walk OTLP log records: a slash-command dispatch shows up as an
+    # ``agentm.event.dispatch`` on the ``command_dispatched`` channel
+    # whose JSON-encoded payload names the command.
+    found_ship = False
+    saw_chat_span = False
+    for row in rows:
+        for scope in row.get("scopeLogs", []) or []:
+            for record in scope.get("logRecords", []) or []:
+                if record.get("eventName") != "agentm.event.dispatch":
+                    continue
+                attrs = {a.get("key"): a.get("value", {}) for a in record.get("attributes", []) or []}
+                channel = attrs.get("agentm.event.channel", {}).get("stringValue")
+                if channel != "command_dispatched":
+                    continue
+                payload_str = attrs.get("agentm.event.payload", {}).get("stringValue", "")
+                if not isinstance(payload_str, str) or not payload_str:
+                    continue
+                try:
+                    payload = json.loads(payload_str)
+                except (TypeError, ValueError):
+                    continue
+                if payload.get("name") == "ship":
+                    found_ship = True
+        for scope in row.get("scopeSpans", []) or []:
+            for span in scope.get("spans", []) or []:
+                if str(span.get("name", "")).startswith("chat "):
+                    saw_chat_span = True
+    assert found_ship
+    assert not saw_chat_span, "slash command should short-circuit before any LLM call"

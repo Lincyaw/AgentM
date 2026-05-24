@@ -320,12 +320,18 @@ def _cmd_rl_prompts(args: argparse.Namespace) -> int:
 def _last_submit_final_report(main_jsonl: Path) -> dict[str, Any] | None:
     """Scan a bundle's main.jsonl for the last submit_final_report args.
 
-    Recognizes two on-disk shapes:
+    Recognizes three on-disk shapes:
 
-    * AgentM observability rows: ``kind == "event.dispatch"`` with
+    * **OTLP/JSON observability** (current AgentM writer, post
+      single-event-log cutover): spans named ``execute_tool
+      submit_final_report`` whose ``gen_ai.tool.call.arguments`` attribute
+      carries the JSON-encoded args.
+    * **Legacy observability rows**: ``kind == "event.dispatch"`` with
       ``name == "emit:tool_call"`` and ``attributes.event.tool_name ==
       "submit_final_report"`` — args under ``attributes.event.args``.
-    * Bare session-log rows: ``type == "tool_call"`` with
+      Kept for backward compatibility with traces written before the
+      OTLP cutover.
+    * **Bare session-log rows**: ``type == "tool_call"`` with
       ``payload.tool_name == "submit_final_report"`` — args under
       ``payload.args``.
 
@@ -344,23 +350,41 @@ def _last_submit_final_report(main_jsonl: Path) -> dict[str, Any] | None:
                     continue
                 if not isinstance(rec, dict):
                     continue
-                # Observability shape.
+                # OTLP/JSON shape: walk spans for execute_tool submit_final_report.
+                for scope_spans in rec.get("scopeSpans", []) or []:
+                    for span in scope_spans.get("spans", []) or []:
+                        name = span.get("name")
+                        if name != "execute_tool submit_final_report":
+                            continue
+                        for attr in span.get("attributes", []) or []:
+                            if attr.get("key") != "gen_ai.tool.call.arguments":
+                                continue
+                            v = attr.get("value") or {}
+                            raw = v.get("stringValue") if isinstance(v, dict) else None
+                            if not isinstance(raw, str) or not raw:
+                                continue
+                            try:
+                                args = json.loads(raw)
+                            except (TypeError, ValueError):
+                                continue
+                            if isinstance(args, dict):
+                                last_args = args
+                # Legacy observability shape.
                 if (
                     rec.get("kind") == "event.dispatch"
                     and rec.get("name") == "emit:tool_call"
                 ):
                     attrs = rec.get("attributes") or {}
-                    if not isinstance(attrs, dict):
-                        continue
-                    event = attrs.get("event") or {}
-                    if (
-                        isinstance(event, dict)
-                        and event.get("tool_name") == "submit_final_report"
-                    ):
-                        args = event.get("args")
-                        if isinstance(args, dict):
-                            last_args = args
-                            continue
+                    if isinstance(attrs, dict):
+                        event = attrs.get("event") or {}
+                        if (
+                            isinstance(event, dict)
+                            and event.get("tool_name") == "submit_final_report"
+                        ):
+                            args = event.get("args")
+                            if isinstance(args, dict):
+                                last_args = args
+                                continue
                 # Session-log shape.
                 if rec.get("type") == "tool_call":
                     payload = rec.get("payload") or {}

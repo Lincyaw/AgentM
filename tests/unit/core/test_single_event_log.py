@@ -1,21 +1,22 @@
 """Fail-stop tests for the single-event-log merge.
 
-Three positions documented in ``.claude/designs/single-event-log.md``:
+Two positions documented in ``.claude/designs/single-event-log.md``:
 
 1. ``continue_recent`` must rebuild the same in-memory trajectory from a
-   merged JSONL containing interleaved ``message.appended`` rows and other
-   OTel-shaped event spans. Wrong → resumes silently truncate or drop
-   conversation history.
-2. The observability sink's bounded queue must **block** (not drop) on
-   overflow. Wrong → silent loss of ``message.appended`` rows = lost
-   trajectory entries (the spec explicitly forbids the old "drop on full"
-   policy now that this log is authoritative).
-3. ``atexit`` shutdown must drain the queue before process exit. Wrong →
-   tail loss on every CLI invocation.
+   merged OTLP/JSON ndjson file containing interleaved
+   ``agentm.message.appended`` log records and other OTLP-shaped lines
+   (spans, unrelated log records). Wrong → resumes silently truncate or
+   drop conversation history.
+2. The substrate-installed ``SessionTelemetry`` blocking batch processor
+   (PR-A) is the queue contract; backpressure / atexit drain are locked
+   down by ``tests/unit/core/test_otel_export.py``. We don't restate
+   those properties here — the seam is the SDK, not a bespoke sink.
 
-These tests don't go through the full ``AgentSession`` — they exercise the
-two seams (SessionManager._load, _Sink) directly because that's where the
-contract lives.
+We exercise the load path through a hand-crafted OTLP/JSON file rather
+than driving a real ``observability.install`` because the load contract
+(filter log records by ``eventName``, pick out ``agentm.session.header``
++ ``agentm.message.appended``) must hold for any file the bus + sink
+ever produce — including hand-edited fixtures from replay tools.
 """
 
 from __future__ import annotations
@@ -33,45 +34,110 @@ from agentm.core.abi.session import (
 from agentm.core.runtime.session_manager import SessionManager
 
 
-def _wrap_header(record: dict[str, Any]) -> dict[str, Any]:
+_RESOURCE_AGENTM = {
+    "attributes": [
+        {"key": "service.name", "value": {"stringValue": "agentm"}},
+        {"key": "agentm.session.id", "value": {"stringValue": "sess-fixture"}},
+    ]
+}
+
+
+def _kvlist(d: dict[str, Any]) -> dict[str, Any]:
+    """Build an OTLP ``kvlistValue`` wrapper for a Python dict."""
     return {
-        "schema": "session/header/v0",
-        "kind": "session.header",
-        "name": "session.header",
-        "record": record,
+        "kvlistValue": {
+            "values": [
+                {"key": str(k), "value": _otlp_value(v)} for k, v in d.items()
+            ]
+        }
     }
 
 
-def _wrap_message(record: dict[str, Any]) -> dict[str, Any]:
+def _otlp_value(value: Any) -> dict[str, Any]:
+    """Wrap a Python value in the OTLP proto-JSON tagged-union shape."""
+    if value is None:
+        return {"stringValue": ""}
+    if isinstance(value, bool):
+        return {"boolValue": value}
+    if isinstance(value, int):
+        return {"intValue": str(value)}
+    if isinstance(value, float):
+        return {"doubleValue": value}
+    if isinstance(value, str):
+        return {"stringValue": value}
+    if isinstance(value, dict):
+        return _kvlist(value)
+    if isinstance(value, list):
+        return {"arrayValue": {"values": [_otlp_value(v) for v in value]}}
+    return {"stringValue": json.dumps(value, default=str)}
+
+
+def _wrap_log_record(event_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    """One ``ResourceLogs`` element line as PR-A's exporter writes them.
+
+    Each line is a self-contained ``ResourceLogs`` element (no outer
+    ``resourceLogs`` wrapper — that's the request envelope, not the
+    on-disk shape).
+    """
     return {
-        "schema": "session/message/v0",
-        "kind": "message.appended",
-        "name": "message.appended",
-        "record": record,
+        "resource": dict(_RESOURCE_AGENTM),
+        "scopeLogs": [
+            {
+                "scope": {"name": "agentm", "version": "0.1.0"},
+                "logRecords": [
+                    {
+                        "timeUnixNano": "0",
+                        "observedTimeUnixNano": "0",
+                        "severityNumber": "SEVERITY_NUMBER_INFO",
+                        "severityText": "INFO",
+                        "eventName": event_name,
+                        "body": _kvlist(body),
+                    }
+                ],
+            }
+        ],
     }
 
 
 def _wrap_other_span() -> dict[str, Any]:
-    """A plausible OTel-shaped event row that ``_load`` must ignore."""
-
+    """A ``ResourceSpans`` element line ``_load`` must ignore."""
     return {
-        "schema": "otel/span/v0",
-        "kind": "turn.summary",
-        "trace_id": "abc",
-        "span_id": "1234",
-        "name": "turn:0",
-        "attributes": {"turn_index": 0, "tool_calls": []},
-        "status": {"code": "OK"},
+        "resource": dict(_RESOURCE_AGENTM),
+        "scopeSpans": [
+            {
+                "scope": {"name": "agentm", "version": "0.1.0"},
+                "spans": [
+                    {
+                        "traceId": "AAAA",
+                        "spanId": "AAAA",
+                        "name": "chat m-stub",
+                        "kind": "SPAN_KIND_CLIENT",
+                        "startTimeUnixNano": "0",
+                        "endTimeUnixNano": "1",
+                        "status": {},
+                    }
+                ],
+            }
+        ],
     }
 
 
-def test_continue_recent_reads_interleaved_merged_log(tmp_path: Path) -> None:
-    """The trajectory rebuilt from a merged log must equal the trajectory
-    that would have been built from the legacy split files.
+def _wrap_unrelated_log() -> dict[str, Any]:
+    """A log record with an event_name SessionManager must ignore."""
+    return _wrap_log_record(
+        "agentm.turn.summary",
+        {"turn_index": 0, "tool_call_count": 0},
+    )
 
-    We hand-craft a file containing the two SessionManager-relevant rows
-    interleaved with unrelated OTel spans; ``SessionManager.open`` must
-    pick out the header + messages in order and ignore the rest.
+
+def test_continue_recent_reads_interleaved_merged_log(tmp_path: Path) -> None:
+    """The trajectory rebuilt from the OTLP/JSON merged log must equal the
+    trajectory that would have been built from a clean in-memory session.
+
+    We hand-craft a file containing the two SessionManager-relevant log
+    records interleaved with unrelated spans and other-event log records;
+    ``SessionManager.open`` must pick the header + messages by event_name
+    and ignore the rest.
     """
 
     cwd = tmp_path
@@ -91,17 +157,15 @@ def test_continue_recent_reads_interleaved_merged_log(tmp_path: Path) -> None:
     e1 = message_entry(text_message("hello"), parent_id=None)
     e2 = message_entry(text_message("world"), parent_id=e1.id)
 
-    # Build the entry dict via the same serializer the runtime uses so
-    # the round-trip really matches production shape.
     from agentm.core.runtime.session_manager import _entry_to_record, _header_to_record
 
     rows = [
         _wrap_other_span(),
-        _wrap_header(_header_to_record(header)),
+        _wrap_log_record("agentm.session.header", _header_to_record(header)),
+        _wrap_unrelated_log(),
+        _wrap_log_record("agentm.message.appended", _entry_to_record(e1)),
         _wrap_other_span(),
-        _wrap_message(_entry_to_record(e1)),
-        {"schema": "otel/span/v0", "kind": "event.dispatch", "name": "x"},
-        _wrap_message(_entry_to_record(e2)),
+        _wrap_log_record("agentm.message.appended", _entry_to_record(e2)),
         _wrap_other_span(),
     ]
     with log.open("w", encoding="utf-8") as fh:
@@ -116,9 +180,6 @@ def test_continue_recent_reads_interleaved_merged_log(tmp_path: Path) -> None:
     assert [e.id for e in entries] == [e1.id, e2.id]
     assert mgr.get_leaf_id() == e2.id
 
-    # Compare against an equivalent in-memory build (the trajectory the
-    # legacy split-file path would have produced from the same emit
-    # sequence).
     expected = SessionManager.in_memory(cwd=str(cwd))
     expected.new_session(id=sid)
     expected.append(e1)
@@ -127,54 +188,23 @@ def test_continue_recent_reads_interleaved_merged_log(tmp_path: Path) -> None:
     assert mgr.get_session_id() == expected.get_session_id()
 
 
-def test_observability_sink_blocks_on_overflow(tmp_path: Path) -> None:
-    """A burst larger than the queue must NOT drop rows — the sink blocks
-    until the writer thread drains, and every record lands on disk.
-
-    Spec: ``Replace the current "bounded queue, drop on full" with
-    "bounded queue ... block on full"``. We pick a tiny queue (16 slots)
-    and a tiny batch so the test takes milliseconds, then push 200 records
-    — far more than the queue can hold — and assert all 200 are on disk
-    after close.
+def test_continue_recent_falls_back_to_new_session_when_file_has_no_header(
+    tmp_path: Path,
+) -> None:
+    """A file with only spans / unrelated log records carries no
+    SessionManager state. ``continue_recent`` must fall back to
+    ``new_session()`` rather than silently reusing the in-memory state.
     """
+    cwd = tmp_path
+    obs_dir = cwd / ".agentm" / "observability"
+    obs_dir.mkdir(parents=True)
+    log = obs_dir / "no-state.jsonl"
+    rows = [_wrap_other_span(), _wrap_unrelated_log(), _wrap_other_span()]
+    with log.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, default=str) + "\n")
 
-    from agentm.extensions.builtin.observability import _Sink
-
-    log = tmp_path / "trace.jsonl"
-    sink = _Sink(log, max_queue=16, batch_size=4)
-    try:
-        N = 200
-        for i in range(N):
-            sink.write({"i": i})
-    finally:
-        sink.close()
-
-    lines = [
-        line for line in log.read_text(encoding="utf-8").splitlines() if line.strip()
-    ]
-    assert len(lines) == N
-    seen = sorted(json.loads(line)["i"] for line in lines)
-    assert seen == list(range(N))
-
-
-def test_observability_sink_drains_on_close(tmp_path: Path) -> None:
-    """``close()`` is the ``atexit`` drain path — anything still in the
-    queue must reach disk before the writer thread exits.
-
-    We push one record, immediately ``close``, and assert the row is on
-    disk. The single-record case is the load-bearing one: it's what the
-    atexit hook protects against (tail loss of the final emit).
-    """
-
-    from agentm.extensions.builtin.observability import _Sink
-
-    log = tmp_path / "trace.jsonl"
-    sink = _Sink(log, max_queue=100, batch_size=8)
-    sink.write({"tail": True})
-    sink.close()
-
-    lines = [
-        line for line in log.read_text(encoding="utf-8").splitlines() if line.strip()
-    ]
-    assert len(lines) == 1
-    assert json.loads(lines[0]) == {"tail": True}
+    mgr = SessionManager.continue_recent(str(cwd))
+    # A fresh uuid header is minted because the file had no header record.
+    assert mgr.get_session_id() != ""
+    assert mgr.get_entries() == []

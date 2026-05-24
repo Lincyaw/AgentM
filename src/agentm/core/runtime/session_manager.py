@@ -45,6 +45,12 @@ from agentm.core.abi.session import (
     compaction_entry,
     message_entry,
 )
+from agentm.core.runtime.otel_export import (
+    iter_log_records,
+    otlp_unwrap,
+    setup_session_telemetry,
+)
+from opentelemetry._logs import SeverityNumber
 
 if TYPE_CHECKING:
     from agentm.core.abi.events import EventBus
@@ -220,6 +226,36 @@ def _header_to_record(header: SessionHeader) -> dict[str, Any]:
     return asdict(header)
 
 
+def _infer_cwd_from_log(file_path: Path) -> str | None:
+    """Best-effort scan for ``cwd`` on the first ``agentm.session.header``
+    record in an OTLP/JSON log. Used by :meth:`JsonlSessionManager.open`
+    when the caller does not supply ``cwd_override``.
+    """
+    try:
+        with file_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(raw, dict):
+                    continue
+                for record in iter_log_records(raw):
+                    if record.get("eventName") != "agentm.session.header":
+                        continue
+                    body = otlp_unwrap(record.get("body"))
+                    if isinstance(body, dict):
+                        cwd_value = body.get("cwd")
+                        if isinstance(cwd_value, str):
+                            return cwd_value
+    except OSError:
+        return None
+    return None
+
+
 def _header_from_record(record: dict[str, Any]) -> SessionHeader:
     return SessionHeader(
         type="session",
@@ -315,14 +351,7 @@ class SessionManager:
         file_path = Path(path)
         inferred_cwd = cwd_override
         if inferred_cwd is None and file_path.exists():
-            with file_path.open("r", encoding="utf-8") as handle:
-                first_line = handle.readline().strip()
-            if first_line:
-                try:
-                    record = json.loads(first_line)
-                    inferred_cwd = str(record.get("cwd", ""))
-                except json.JSONDecodeError:
-                    inferred_cwd = ""
+            inferred_cwd = _infer_cwd_from_log(file_path) or ""
         return cls(
             cwd=inferred_cwd or "",
             session_dir=session_dir or file_path.parent,
@@ -417,29 +446,60 @@ class SessionManager:
         self._pending_emits.append((channel, event))
 
     def _direct_append_event(self, channel: str, event: Any) -> None:
-        record: dict[str, Any]
+        """Append a single SessionManager event to the merged log directly.
+
+        Used when no ``EventBus`` is attached yet (replay tools, unit
+        fixtures that build a ``SessionManager`` without going through the
+        ``AgentSession`` factory). Writes OTLP/JSON ndjson through the same
+        SDK plumbing the observability atom uses, so on-disk shape stays
+        identical to the bus-driven path.
+        """
         if channel == SessionHeaderEmittedEvent.CHANNEL:
             assert isinstance(event, SessionHeaderEmittedEvent)
-            record = {
-                "schema": "session/header/v0",
-                "kind": "session.header",
-                "name": "session.header",
-                "record": event.record,
+            event_name = "agentm.session.header"
+            body = event.record
+            attributes: dict[str, Any] = {
+                "agentm.session.id": str(event.record.get("id", "")),
+                "agentm.session.header.id": str(event.record.get("id", "")),
             }
         elif channel == MessageAppendedEvent.CHANNEL:
             assert isinstance(event, MessageAppendedEvent)
-            record = {
-                "schema": "session/message/v0",
-                "kind": "message.appended",
-                "name": "message.appended",
-                "record": event.record,
+            event_name = "agentm.message.appended"
+            body = event.record
+            attributes = {
+                "agentm.session.id": (
+                    self._header.id if self._header is not None else ""
+                ),
+                "agentm.message.id": str(event.record.get("id", "")),
+                "agentm.message.parent_id": str(
+                    event.record.get("parent_id", "") or ""
+                ),
+                "agentm.message.type": str(event.record.get("type", "")),
             }
         else:
             return
         assert self._session_file is not None
-        with self._session_file.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, default=str))
-            handle.write("\n")
+        # Construct a transient SessionTelemetry, emit one log record, and
+        # tear it down. The SDK setup cost is one-time; replay-tool callers
+        # aren't on a hot path. ``file_path`` override pins the write to
+        # the SessionManager's exact configured file regardless of cwd
+        # layout (tests sometimes use bespoke paths).
+        telemetry = setup_session_telemetry(
+            session_id=(self._header.id if self._header is not None else "session"),
+            cwd=Path(self._cwd) if self._cwd else self._session_file.parent,
+            scenario_name=None,
+            file_path=self._session_file,
+        )
+        try:
+            telemetry.logger.emit(
+                body=body,
+                severity_number=SeverityNumber.INFO,
+                severity_text="INFO",
+                event_name=event_name,
+                attributes=attributes,
+            )
+        finally:
+            telemetry.shutdown()
 
     def new_session(
         self,
@@ -471,15 +531,15 @@ class SessionManager:
         return str(self._session_file) if self._session_file is not None else None
 
     def _load(self) -> None:
-        """Reconstruct in-memory state from the merged event log.
+        """Reconstruct in-memory state from the merged OTLP/JSON event log.
 
-        The on-disk JSONL is a stream of OTel-shaped event spans (see
-        ``observability.py``). Only ``kind == "session.header"`` and
-        ``kind == "message.appended"`` rows carry SessionManager state;
-        every other row (turn summaries, tool spans, etc.) is ignored on
-        load. If the file pre-dates the single-event-log merge and carries
-        bare ``{"type": "session", ...}`` / entry records at the top level,
-        we still understand those — see the ``type`` fallback below.
+        Each line on disk is a self-contained OTLP element — either a
+        ``resourceSpans`` wrapper or a ``resourceLogs`` wrapper (PR-A wire
+        format). We walk only the log records: SessionManager state lives
+        in ``agentm.session.header`` (body = SessionHeader dict) and
+        ``agentm.message.appended`` (body = the SessionEntry record dict).
+        Every other event name and every span line is ignored on load —
+        spans carry trace data, not persisted session state.
         """
 
         assert self._session_file is not None
@@ -499,31 +559,22 @@ class SessionManager:
                     continue
                 if not isinstance(raw, dict):
                     continue
-                kind = raw.get("kind")
-                if kind == "session.header":
-                    record = raw.get("record")
-                    if isinstance(record, dict):
-                        latest_header = _header_from_record(record)
-                    continue
-                if kind == "message.appended":
-                    record = raw.get("record")
-                    if isinstance(record, dict):
-                        entry = _entry_from_record(record)
+                # Skip span lines: SessionManager state only lives in log
+                # records.
+                for record in iter_log_records(raw):
+                    event_name = record.get("eventName")
+                    body = otlp_unwrap(record.get("body"))
+                    if event_name == "agentm.session.header" and isinstance(
+                        body, dict
+                    ):
+                        latest_header = _header_from_record(body)
+                    elif event_name == "agentm.message.appended" and isinstance(
+                        body, dict
+                    ):
+                        entry = _entry_from_record(body)
                         self._entries[entry.id] = entry
                         self._order.append(entry.id)
                         self._leaf_id = entry.id
-                    continue
-                # Legacy fallback: bare SessionManager records (pre-merge
-                # session files). Tolerated so existing on-disk fixtures
-                # still load; new writes never produce this shape.
-                if raw.get("type") == "session":
-                    latest_header = _header_from_record(raw)
-                    continue
-                if "type" in raw and "id" in raw and "timestamp" in raw:
-                    entry = _entry_from_record(raw)
-                    self._entries[entry.id] = entry
-                    self._order.append(entry.id)
-                    self._leaf_id = entry.id
         if latest_header is not None:
             self._header = latest_header
             self._cwd = latest_header.cwd
@@ -540,39 +591,64 @@ class SessionManager:
         )
 
     def _direct_write_merged_log(self) -> None:
-        """Write the current in-memory state to ``_session_file`` in the
-        merged single-event-log format.
+        """Rewrite the entire merged log to ``_session_file`` in OTLP/JSON shape.
 
         Used by :meth:`create_branched_session` — branched copies are
         constructed without an attached EventBus or observability writer, so
-        the bus-driven path can't reach them. The OTel envelope here mirrors
-        what the observability sink would emit, so the resulting file loads
-        through :meth:`_load` exactly like a normal session log.
+        the bus-driven path can't reach them. We open a transient
+        :class:`SessionTelemetry` pinned at the exact ``_session_file``
+        path, emit one ``agentm.session.header`` log record followed by one
+        ``agentm.message.appended`` per entry, and shut down — the result
+        loads through :meth:`_load` exactly like a normal session log.
+
+        Truncates first so re-running on an existing file produces a clean
+        snapshot rather than appending duplicates.
         """
 
         if not self._persist or self._session_file is None or self._header is None:
             return
-        records: list[dict[str, Any]] = [
-            {
-                "schema": "session/header/v0",
-                "kind": "session.header",
-                "name": "session.header",
-                "record": _header_to_record(self._header),
-            }
-        ]
-        for entry_id in self._order:
-            records.append(
-                {
-                    "schema": "session/message/v0",
-                    "kind": "message.appended",
-                    "name": "message.appended",
-                    "record": _entry_to_record(self._entries[entry_id]),
-                }
+        # Truncate so the transient SDK exporter (append-mode) writes a
+        # clean snapshot. Done explicitly here because the SDK's
+        # FileSpanExporter / FileLogExporter always open in append.
+        self._session_file.parent.mkdir(parents=True, exist_ok=True)
+        self._session_file.write_text("", encoding="utf-8")
+
+        telemetry = setup_session_telemetry(
+            session_id=self._header.id,
+            cwd=Path(self._cwd) if self._cwd else self._session_file.parent,
+            scenario_name=None,
+            file_path=self._session_file,
+        )
+        try:
+            header_record = _header_to_record(self._header)
+            telemetry.logger.emit(
+                body=header_record,
+                severity_number=SeverityNumber.INFO,
+                severity_text="INFO",
+                event_name="agentm.session.header",
+                attributes={
+                    "agentm.session.id": str(header_record.get("id", "")),
+                    "agentm.session.header.id": str(header_record.get("id", "")),
+                },
             )
-        with self._session_file.open("w", encoding="utf-8") as handle:
-            for record in records:
-                handle.write(json.dumps(record, default=str))
-                handle.write("\n")
+            for entry_id in self._order:
+                entry_record = _entry_to_record(self._entries[entry_id])
+                telemetry.logger.emit(
+                    body=entry_record,
+                    severity_number=SeverityNumber.INFO,
+                    severity_text="INFO",
+                    event_name="agentm.message.appended",
+                    attributes={
+                        "agentm.session.id": self._header.id,
+                        "agentm.message.id": str(entry_record.get("id", "")),
+                        "agentm.message.parent_id": str(
+                            entry_record.get("parent_id", "") or ""
+                        ),
+                        "agentm.message.type": str(entry_record.get("type", "")),
+                    },
+                )
+        finally:
+            telemetry.shutdown()
 
     # ------------------------------------------------------------------
     # Append / mutation

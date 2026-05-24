@@ -30,7 +30,7 @@ import time
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import IO, Sequence
+from typing import IO, Any, Sequence
 
 from google.protobuf.json_format import MessageToDict
 from opentelemetry.exporter.otlp.proto.common._log_encoder import encode_logs
@@ -57,8 +57,90 @@ __all__ = [
     "FileLogExporter",
     "FileSpanExporter",
     "SessionTelemetry",
+    "iter_log_records",
+    "iter_spans",
+    "otlp_unwrap",
     "setup_session_telemetry",
+    "span_attr",
 ]
+
+
+def otlp_unwrap(value: Any) -> Any:
+    """Unwrap an OTLP proto-JSON tagged-union value into a plain Python object.
+
+    OTLP encodes attribute and body values as tagged unions
+    (``{"stringValue": ...}``, ``{"intValue": "12"}``,
+    ``{"kvlistValue": {"values": [...]}}``, ``{"arrayValue": ...}``).
+    Readers (``SessionManager._load``, the catalog indexer, the tuner
+    tools) need plain Python types to pattern-match against; this helper
+    is the single canonical converter.
+
+    Returns the input unchanged when it isn't a tagged union — useful
+    for already-unwrapped intermediate dicts.
+    """
+    if not isinstance(value, dict):
+        return value
+    if "stringValue" in value:
+        return value["stringValue"]
+    if "boolValue" in value:
+        return value["boolValue"]
+    if "intValue" in value:
+        raw = value["intValue"]
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return raw
+    if "doubleValue" in value:
+        raw = value["doubleValue"]
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return raw
+    if "kvlistValue" in value:
+        out: dict[str, Any] = {}
+        for item in value["kvlistValue"].get("values", []) or []:
+            key = item.get("key")
+            if not isinstance(key, str):
+                continue
+            out[key] = otlp_unwrap(item.get("value"))
+        return out
+    if "arrayValue" in value:
+        return [otlp_unwrap(v) for v in value["arrayValue"].get("values", []) or []]
+    return value
+
+
+def span_attr(span: dict[str, Any], key: str) -> Any:
+    """Look up a single attribute value on an OTLP span / log record dict.
+
+    Returns ``None`` when the key is absent. The OTLP attribute list is a
+    sequence of ``{"key", "value": <tagged-union>}`` pairs; we walk it
+    linearly because span attribute counts are small (a few dozen at
+    most) and a per-span dict cache would cost more than it saves.
+    """
+    for attr in span.get("attributes", []) or []:
+        if attr.get("key") == key:
+            return otlp_unwrap(attr.get("value"))
+    return None
+
+
+def iter_spans(line: dict[str, Any]) -> "list[dict[str, Any]]":
+    """Iterate spans on one OTLP ``ResourceSpans``-line dict.
+
+    Returns a flat list of span dicts (one per ``scopeSpans[*].spans[*]``).
+    The list is empty for lines that aren't ``ResourceSpans`` elements.
+    """
+    out: list[dict[str, Any]] = []
+    for scope in line.get("scopeSpans", []) or []:
+        out.extend(scope.get("spans", []) or [])
+    return out
+
+
+def iter_log_records(line: dict[str, Any]) -> "list[dict[str, Any]]":
+    """Iterate log records on one OTLP ``ResourceLogs``-line dict."""
+    out: list[dict[str, Any]] = []
+    for scope in line.get("scopeLogs", []) or []:
+        out.extend(scope.get("logRecords", []) or [])
+    return out
 
 
 # Once the single event log is authoritative for conversation state, dropping
@@ -298,10 +380,16 @@ def setup_session_telemetry(
     schedule_delay_millis: int = 200,
     export_timeout_millis: int = 30_000,
     max_export_batch_size: int | None = None,
+    file_path: Path | None = None,
 ) -> SessionTelemetry:
     """Build a per-session telemetry handle.
 
-    The output path is ``<cwd>/.agentm/observability/<session_id>.jsonl``.
+    The output path defaults to ``<cwd>/.agentm/observability/<session_id>.jsonl``.
+    Callers that already know the absolute path (e.g.
+    :class:`SessionManager` direct-write callers that custom-place the
+    file) may override via ``file_path``; the ``cwd`` argument is then
+    only used as a hint for resource attribute defaults.
+
     The same file holds both spans and logs interleaved — the OTLP shape
     per line is what disambiguates them on read.
 
@@ -319,7 +407,10 @@ def setup_session_telemetry(
         resource_attrs["agentm.scenario.name"] = scenario_name
     resource = Resource.create(resource_attrs)
 
-    file_path = Path(cwd) / ".agentm" / "observability" / f"{session_id}.jsonl"
+    if file_path is None:
+        file_path = Path(cwd) / ".agentm" / "observability" / f"{session_id}.jsonl"
+    else:
+        file_path = Path(file_path)
 
     span_exporter = FileSpanExporter(file_path)
     log_exporter = FileLogExporter(file_path)

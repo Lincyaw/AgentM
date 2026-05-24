@@ -229,7 +229,7 @@ class _SessionTelemetryHolder:
         # Lazy import to keep the events module's runtime-level event names
         # off the top-level import path here (matches the existing pattern
         # used in ``_emit_register``).
-        from agentm.core.abi.events import SessionShutdownEvent
+        from agentm.core.abi.events import BusPriority, SessionShutdownEvent
 
         def _on_session_shutdown(_event: SessionShutdownEvent) -> None:
             telemetry = self._telemetry
@@ -237,7 +237,16 @@ class _SessionTelemetryHolder:
                 return
             telemetry.shutdown()
 
-        self._bus.on(SessionShutdownEvent.CHANNEL, _on_session_shutdown)
+        # ``POST`` priority: any observability atom subscribed at the
+        # default ``NORMAL`` tier gets to emit its closing
+        # ``agentm.session.end`` log record before we drain + close the
+        # exporters. Without this the closing record would land on a
+        # shut-down processor and silently disappear.
+        self._bus.on(
+            SessionShutdownEvent.CHANNEL,
+            _on_session_shutdown,
+            priority=BusPriority.POST,
+        )
         self._shutdown_handler_registered = True
 
 
