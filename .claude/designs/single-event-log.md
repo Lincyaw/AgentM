@@ -8,7 +8,7 @@ branch:
 - **PR-A** (`be78860`) — file exporters in `core.runtime.otel_export` +
   `setup_session_telemetry`. Isolated; not wired into the runtime yet.
 - **Commit 1** (`9bae7dc`) — bus-owned `dispatch_id` on `EventBus` with
-  `current_dispatch_id()` accessor. Superseded by PR-E (`__PR_E_SHA__`):
+  `current_dispatch_id()` accessor. Superseded by PR-E (`531378b`):
   the id moved onto the `Event` ABI as a real field, the bus stash and
   accessor were removed.
 - **Commit 2a** (`ad6c5cb`) — `ExtensionAPI.get_session_telemetry()` service
@@ -353,7 +353,7 @@ so a partial last line during a crash should not crash readers.
 
 Recorded here so they don't get lost; PR briefs to follow when dispatched.
 
-- **PR-E** — landed `__PR_E_SHA__`. `Event` is now `@dataclass(slots=True)`
+- **PR-E** — landed `531378b`. `Event` is now `@dataclass(slots=True)`
   with a `dispatch_id` field defaulted via `field(default_factory=...,
   kw_only=True)`; the `EventBus` reassigns the field on every emit. The
   `_dispatch_stack` + `current_dispatch_id()` workaround is gone. See
