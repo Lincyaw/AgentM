@@ -34,7 +34,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from agentm.core.abi.messages import AgentMessage
+from agentm.core.abi.messages import (
+    AgentMessage,
+    AssistantMessage,
+    ToolCallBlock,
+    ToolResultMessage,
+)
 
 from ..audit._offline_seams import InMemorySink, StandaloneChildRunner
 from ..audit._runner import (
@@ -133,6 +138,55 @@ def chained_replay_path(cwd: str | Path, branch_session_log_id: str) -> Path:
         / "audit_replay"
         / f"{branch_session_log_id}.chained.jsonl"
     )
+
+
+def _fork_prefix(
+    parent_messages: list[AgentMessage], turn_index: int
+) -> list[AgentMessage]:
+    """Return the parent-trajectory prefix that ends *cleanly* at ``turn_index``.
+
+    The auditor's cadence (``turn_count % audit_interval == 0``) is
+    role-agnostic, so ``turn_index`` regularly lands on an
+    :class:`AssistantMessage` that carries :class:`ToolCallBlock`s. The
+    naive cut ``messages[: turn_index + 1]`` would leave the branch
+    session's initial messages ending with an unanswered tool_call —
+    the next provider request then has a dangling assistant-tool_call
+    with no matching ToolResultMessage, and most providers fail-stop
+    on that shape. Bump the cut to include the paired
+    :class:`ToolResultMessage` so the branch starts from a well-formed
+    transcript.
+
+    Bump rule: include ``parent_messages[turn_index + 1]`` iff
+    ``parent_messages[turn_index]`` is an :class:`AssistantMessage`
+    with at least one :class:`ToolCallBlock`, and the next message is
+    a :class:`ToolResultMessage` whose result-blocks reference at
+    least one of those ``tool_call`` ids. Adjacency alone is not
+    enough — pairing is by id.
+    """
+    if turn_index < 0:
+        return []
+    cut = min(turn_index + 1, len(parent_messages))
+    if cut >= len(parent_messages):
+        return list(parent_messages[:cut])
+
+    current = parent_messages[turn_index]
+    following = parent_messages[cut]
+    if isinstance(current, AssistantMessage) and isinstance(
+        following, ToolResultMessage
+    ):
+        assistant_call_ids = {
+            block.id
+            for block in current.content
+            if isinstance(block, ToolCallBlock)
+        }
+        result_call_ids = {
+            block.tool_call_id
+            for block in following.content
+            if hasattr(block, "tool_call_id")
+        }
+        if assistant_call_ids and assistant_call_ids & result_call_ids:
+            cut += 1
+    return list(parent_messages[:cut])
 
 
 def _rebind_record(record: ReplayRecord, *, root_session_id: str) -> ReplayRecord:
@@ -234,9 +288,10 @@ async def run_chained_fork_experiment(
     for i in range(max_interventions):
         if next_reminder is None or next_fork_turn is None:
             break
-        # Fork prefix: turns [0..next_fork_turn] inclusive. The new
-        # segment begins replaying from turn next_fork_turn + 1.
-        prefix = list(parent_messages[: next_fork_turn + 1])
+        # Fork prefix: turns [0..next_fork_turn] inclusive, plus a
+        # paired ToolResultMessage when the surfacing turn was an
+        # assistant tool_call (see :func:`_fork_prefix`).
+        prefix = _fork_prefix(parent_messages, next_fork_turn)
         branch_payload = await session_factory(
             initial_messages=prefix,
             seed_reminder_text=next_reminder.text,
