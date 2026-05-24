@@ -290,38 +290,18 @@ class WireBridge:
         body = env.body if isinstance(env.body, dict) else {}
         channel_name = str(body.get("channel") or "")
         chat_id = str(body.get("chat_id") or "")
-        # Spoofing guard (issue #1): sender_id is bound to the
-        # authenticated peer's principal. A peer MAY omit sender_id
-        # entirely (we fill it in from the principal), but if it
-        # supplies one that disagrees we refuse the envelope rather
-        # than silently overwriting — silent overwrite hides attacks
-        # from observability.
-        bound_principal = peer_session.bound_principal
-        body_sender = body.get("sender_id")
-        if body_sender is not None and str(body_sender) != bound_principal:
-            log.warning(
-                "wire inbound rejected: sender_id=%r does not match "
-                "bound principal=%r (peer=%s id=%s)",
-                body_sender,
-                bound_principal,
-                peer_session.peer_id,
-                env.id,
-            )
-            await self._send_error(
-                peer_session.peer_id,
-                "sender_id_mismatch",
-                {
-                    "envelope_id": env.id,
-                    "correlation_id": env.correlation_id,
-                    "bound_principal": bound_principal,
-                    "detail": (
-                        "body.sender_id must equal the peer's authenticated "
-                        "principal; omit the field to have the gateway fill it"
-                    ),
-                },
-            )
-            return
-        sender_id = bound_principal
+        # ``sender_id`` is the channel-local message author reported by
+        # the authenticated client — a Feishu open_id, a terminal user,
+        # etc. It is NOT the wire connection identity: one chat client
+        # relays many humans, so the author is per-message and distinct
+        # from the peer principal. Peer impersonation is prevented by
+        # the channel-binding (squatting) guard in ``_ensure_channel``
+        # below — the first peer to claim a channel owns it, and no
+        # other peer can inject into it — not by forcing the author to
+        # equal the connection principal. Fall back to the peer
+        # principal when the client omits an author (single-user
+        # transports carry no per-message identity).
+        sender_id = str(body.get("sender_id") or peer_session.bound_principal)
         content = str(body.get("content") or "")
         button_value_raw = body.get("button_value")
         button_value = (
@@ -387,9 +367,11 @@ class WireBridge:
             # AgentSession instead of starting a fresh one — the whole
             # point of session-as-routing-primary.
             forwarded_body = dict(body)
-            # Stamp the server-side bound sender_id onto the forwarded
-            # envelope so downstream workers see the authenticated
-            # principal, not whatever the peer originally put in body.
+            # Normalize the author onto the forwarded envelope: the
+            # client-reported ``sender_id`` when present, else the peer
+            # principal fallback resolved above. Downstream workers see
+            # the real channel-local author (per-human approval authz,
+            # observability), not a collapsed connection identity.
             forwarded_body["sender_id"] = sender_id
             if resume_id is not None:
                 forwarded_body["resume_id"] = resume_id
