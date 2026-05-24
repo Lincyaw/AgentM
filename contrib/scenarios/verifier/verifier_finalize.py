@@ -143,7 +143,7 @@ class _State:
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     state = _State()
-    del config  # continuation_instruction config is no longer consumed; see note below
+    del config
 
     async def _submit(args: dict[str, Any]) -> ToolResult | ToolTerminate:
         try:
@@ -194,17 +194,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             fn=_submit,
         )
     )
-
-    # NOTE: an earlier revision installed a ``decide_turn_action`` handler
-    # that injected a "you must emit a tool_call" user message whenever
-    # the model voluntarily ended a turn with prose. Removed because it
-    # created an infinite loop on Doubao — the model returned a thinking
-    # block + text, agentm dropped thinking and ended the turn, we
-    # injected "call submit_propagation_report", model thought again,
-    # looped. The agent voluntarily exiting on a text turn is now
-    # accepted; the caller sees a session with no `submitted` flag and
-    # can treat that as the agent giving up. State is still tracked so
-    # `_submit` can mark its terminal transition.
 
 
 
