@@ -213,7 +213,7 @@ Key invariants:
 |---|---|---|
 | `audit/`, `adapters/`, `replay/` (atoms + sidecar I/O), `extensions/check_*`, `distill/_submit_*` | §11 atoms or modules consumed by atoms — single-file contract, no `core.runtime.*` import, no atom-to-atom imports | No |
 | `tools/` (`tools/engine.py`, `tools/prefix_replay.py`) | **Host-side drivers** that construct standalone AgentM sessions for offline replay / fork-and-replay | Yes — that is what `tools/` exists for |
-| `replay/strict_ab.py` | Orchestration helper that combines `tools/engine` runs with `replay/` sidecar I/O; called by host code (e.g. rca eval), not by atoms | No direct `core.runtime.*` import — it composes through the `tools/` helpers |
+| `replay/chained_fork.py` | Orchestration helper that combines `tools/engine` runs with `replay/` sidecar I/O; called by host code (e.g. rca eval), not by atoms | No direct `core.runtime.*` import — it composes through the `tools/` helpers |
 | `distill/` (the labeler / exporter) | Offline CLIs; not loaded into a live session | Yes (drives standalone children via `tools/engine`) |
 
 Structural rule: nothing under `llmharness/audit/`, `llmharness/adapters/`,
