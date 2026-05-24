@@ -148,15 +148,29 @@ def write_record(path: Path, record: ReplayRecord) -> None:
 
 
 def iter_records(path: Path) -> Iterator[ReplayRecord]:
-    """Yield every record in a sidecar file. Skips malformed lines."""
+    """Yield every record in a sidecar file. Skips malformed lines.
+
+    Skips chain-header lines (those carrying a ``__chain_header__`` key)
+    explicitly so a chained-fork sidecar reads cleanly through this
+    iterator. See :func:`llmharness.replay.chained_fork.read_chain_header`
+    for the matching reader of that header.
+    """
     with path.open("r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if not line:
                 continue
             try:
-                yield ReplayRecord.from_dict(json.loads(line))
-            except (json.JSONDecodeError, KeyError, ValueError):
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if "__chain_header__" in obj:
+                continue
+            try:
+                yield ReplayRecord.from_dict(obj)
+            except (KeyError, ValueError):
                 continue
 
 

@@ -61,11 +61,13 @@ from .audit.extractor import (
     load_extractor_prompt,
 )
 from .replay.chained_fork import (
+    CHAIN_HEADER_KEY,
     ChainedForkExperiment,
     ChainSegment,
     ChainSegmentPayload,
     SessionFactory,
     chained_replay_path,
+    read_chain_header,
     run_chained_fork_experiment,
     write_chained_replay,
 )
@@ -93,6 +95,7 @@ __all__ = [
     "AUDITOR_TERMINATION_REASON",
     "AUDITOR_TOOLS",
     "AUDITOR_TOOL_NAMES",
+    "CHAIN_HEADER_KEY",
     "EXTRACTOR_TERMINATION_REASON",
     "EXTRACTOR_TOOL_NAMES",
     "AuditorSettings",
@@ -119,6 +122,7 @@ __all__ = [
     "iter_records",
     "load_auditor_prompt",
     "load_extractor_prompt",
+    "read_chain_header",
     "replay_auditor_record",
     "replay_extractor_record",
     "run_chained_fork_experiment",

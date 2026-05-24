@@ -28,6 +28,7 @@ See ``.claude/designs/harness-runner.md`` §3 (P4+) for the rationale.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
@@ -55,11 +56,13 @@ from .record import ReplayRecord, write_record
 _logger = logging.getLogger(__name__)
 
 __all__ = [
+    "CHAIN_HEADER_KEY",
     "ChainSegment",
     "ChainSegmentPayload",
     "ChainedForkExperiment",
     "SessionFactory",
     "chained_replay_path",
+    "read_chain_header",
     "run_chained_fork_experiment",
     "write_chained_replay",
 ]
@@ -114,6 +117,13 @@ class ChainedForkExperiment:
 
     segments: list[ChainSegment]
     chained_replay_path: Path | None
+    header: dict[str, Any] = field(default_factory=dict)
+    """Chain topology header — the same dict written to the sidecar's
+    first line (under the ``__chain_header__`` key) and shared with
+    callers that want to build :class:`AgentResult.metadata` without
+    re-deriving it from :attr:`segments`. Schema: see
+    :func:`_build_chain_header` for the canonical layout.
+    """
 
     @property
     def control(self) -> ChainSegment:
@@ -285,7 +295,15 @@ async def run_chained_fork_experiment(
     ]
 
     if control_run.reminder is None:
-        return ChainedForkExperiment(segments=segments, chained_replay_path=None)
+        header = _build_chain_header(
+            segments=segments,
+            audit_interval=audit_interval,
+            extractor_interval=extractor_interval,
+            max_interventions=max_interventions,
+        )
+        return ChainedForkExperiment(
+            segments=segments, chained_replay_path=None, header=header
+        )
 
     cumulative: CumulativeAuditState = control_run.state
     parent_messages = control_payload.final_messages
@@ -382,8 +400,16 @@ async def run_chained_fork_experiment(
         if out_path is not None
         else chained_replay_path(cwd, segments[-1].payload.session_log_id)
     )
-    sidecar = write_chained_replay(segments, out_path=resolved_out)
-    return ChainedForkExperiment(segments=segments, chained_replay_path=sidecar)
+    header = _build_chain_header(
+        segments=segments,
+        audit_interval=audit_interval,
+        extractor_interval=extractor_interval,
+        max_interventions=max_interventions,
+    )
+    sidecar = write_chained_replay(segments, out_path=resolved_out, header=header)
+    return ChainedForkExperiment(
+        segments=segments, chained_replay_path=sidecar, header=header
+    )
 
 
 def _last_audited_turn(step_results: list[StepResult]) -> int | None:
@@ -401,12 +427,115 @@ def _last_audited_turn(step_results: list[StepResult]) -> int | None:
     return None
 
 
+CHAIN_HEADER_KEY = "__chain_header__"
+"""JSON key marking the chained-replay sidecar's header line.
+
+The header is the first line of a ``<final_sid>.chained.jsonl`` sidecar
+when the chain produced at least one segment. It carries the experiment
+topology (per-segment session ids, fork points, seeded reminders) so
+downstream consumers can join the per-firing :class:`ReplayRecord`
+stream back to the chain structure without re-running the driver. See
+:func:`_build_chain_header` for the field layout and
+:func:`read_chain_header` for the matching reader."""
+
+
+def _segment_to_header_dict(segment: ChainSegment) -> dict[str, Any]:
+    """JSON-safe summary of one segment, as it appears in the sidecar header."""
+    reminder_text = (
+        segment.seeded_reminder.text
+        if segment.seeded_reminder is not None
+        else None
+    )
+    return {
+        "segment_index": segment.segment_index,
+        "session_log_id": segment.payload.session_log_id,
+        "is_control": segment.seeded_reminder is None,
+        "fork_turn_index": segment.fork_turn_index,
+        "seeded_reminder_text": reminder_text,
+        "surfaced_reminder_turn": segment.surfaced_reminder_turn,
+        "msg_count": len(segment.payload.final_messages),
+    }
+
+
+def _build_chain_header(
+    *,
+    segments: list[ChainSegment],
+    audit_interval: int,
+    extractor_interval: int,
+    max_interventions: int,
+) -> dict[str, Any]:
+    """Build the chain-topology dict written as the sidecar header.
+
+    Schema (v1):
+
+    * ``schema_version``: int — bumps on breaking field changes.
+    * ``audit_interval`` / ``extractor_interval``: int — cadence the
+      runner was driven at.
+    * ``max_interventions``: int — chain cap the experiment was
+      configured with.
+    * ``segments``: list — one entry per :class:`ChainSegment`. Per
+      :func:`_segment_to_header_dict`: ``segment_index``,
+      ``session_log_id``, ``is_control``, ``fork_turn_index``,
+      ``seeded_reminder_text``, ``surfaced_reminder_turn``,
+      ``msg_count``.
+
+    The header excludes the audit ``ReplayRecord`` stream itself — that
+    lives in the remaining lines of the sidecar. Callers that want
+    rcabench-style ``AgentResult.metadata`` can copy this dict and
+    augment with presentational fields (per-segment ``run`` summaries)
+    on top.
+    """
+    return {
+        "schema_version": 1,
+        "audit_interval": audit_interval,
+        "extractor_interval": extractor_interval,
+        "max_interventions": max_interventions,
+        "segments": [_segment_to_header_dict(s) for s in segments],
+    }
+
+
+def read_chain_header(path: Path) -> dict[str, Any] | None:
+    """Return the chain-topology header from a chained-replay sidecar.
+
+    Reads only the first line. Returns ``None`` when the file is
+    missing, empty, the first line is not JSON, the JSON is not a dict,
+    or the dict does not carry :data:`CHAIN_HEADER_KEY` (i.e. an
+    older sidecar from before the header was introduced).
+
+    See :func:`_build_chain_header` for the header's field layout.
+    """
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8") as fh:
+        first = fh.readline().strip()
+    if not first:
+        return None
+    try:
+        obj = json.loads(first)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    header = obj.get(CHAIN_HEADER_KEY)
+    if not isinstance(header, dict):
+        return None
+    return header
+
+
 def write_chained_replay(
     segments: list[ChainSegment],
     *,
     out_path: Path,
+    header: dict[str, Any] | None = None,
 ) -> Path:
     """Materialise an N-segment chained replay sidecar.
+
+    The sidecar is laid out as:
+
+    1. Optional header line: ``{"__chain_header__": {...}}`` carrying
+       the chain topology (see :func:`_build_chain_header`). Skipped
+       by :func:`iter_records` so existing consumers ignore it.
+    2. One :class:`ReplayRecord` JSONL row per surviving firing.
 
     For each segment k, emit the extractor + auditor records captured
     in ``step_results`` whose ``turn_index`` falls inside the segment's
@@ -430,6 +559,17 @@ def write_chained_replay(
         out_path.unlink()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     final_sid = segments[-1].payload.session_log_id
+
+    if header is not None:
+        with out_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {CHAIN_HEADER_KEY: header},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+            fh.write("\n")
 
     for k, segment in enumerate(segments):
         if k == 0:
