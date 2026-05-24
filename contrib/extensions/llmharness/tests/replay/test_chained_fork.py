@@ -250,6 +250,10 @@ class _ScriptedReplay:
         self._scripted = list(scripted_reminders)
         self._call_index = 0
         self.calls_seen: list[dict[str, Any]] = []
+        self.return_values: list[OfflineRunResult] = []
+        # Per-segment surfacing turn: deterministic so callers can
+        # assert ``start_turn == surface_turn + 1`` on the next call.
+        self.surface_turns: list[int] = []
 
     async def __call__(self, **kwargs: Any) -> OfflineRunResult:
         idx = self._call_index
@@ -281,14 +285,21 @@ class _ScriptedReplay:
                 auditor_record=auditor_rec,
             )
             steps = [step]
+            self.surface_turns.append(surface_turn)
         else:
             steps = []
-        return OfflineRunResult(
+            self.surface_turns.append(-1)  # sentinel; never read for None
+        # Distinct CumulativeAuditState per call so the threading
+        # assertion can verify identity (segment k+1 must receive THE
+        # state object returned by segment k, not a fresh blank).
+        result = OfflineRunResult(
             reminder=reminder,
             state=CumulativeAuditState.fresh(),
             sidecar_path=None,
             all_step_results=steps,
         )
+        self.return_values.append(result)
+        return result
 
 
 def _factory_returning_n_msgs(
@@ -438,6 +449,28 @@ async def test_chained_fork_three_reminders_then_silent(
         s.seeded_reminder.text if s.seeded_reminder else None
         for s in experiment.segments
     ] == [None, "r1", "r2", "r3"]
+
+    # Fail-stop: the cumulative state of segment k must be the SAME
+    # object passed as ``seed_cumulative`` to segment k+1's call, and
+    # the next ``start_turn`` must equal segment k's surfacing turn + 1.
+    # Without this invariant the chain silently re-runs each segment
+    # from a blank state — the experiment compares apples to oranges.
+    # Control segment (idx 0) is called with seed_cumulative=None,
+    # start_turn=1 — verify that explicitly too.
+    assert scripted.calls_seen[0]["seed_cumulative"] is None
+    assert scripted.calls_seen[0]["start_turn"] == 1
+    for k in range(len(scripted.calls_seen) - 1):
+        assert (
+            scripted.calls_seen[k + 1]["seed_cumulative"]
+            is scripted.return_values[k].state
+        ), f"segment {k + 1} did not receive segment {k}'s cumulative state"
+        assert (
+            scripted.calls_seen[k + 1]["start_turn"]
+            == scripted.surface_turns[k] + 1
+        ), (
+            f"segment {k + 1} start_turn={scripted.calls_seen[k + 1]['start_turn']}, "
+            f"expected surface_turn+1={scripted.surface_turns[k] + 1}"
+        )
 
 
 # ---------------------------------------------------------------------------
