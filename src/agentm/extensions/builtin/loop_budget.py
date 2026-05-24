@@ -31,7 +31,7 @@ from agentm.extensions import ExtensionManifest
 MANIFEST = ExtensionManifest(
     name="loop_budget",
     description="Sets the agent-loop turn / tool-call budget for the session.",
-    registers=(),  # Registers a service, not a tool/event/role (cf. operations_local).
+    registers=(),  # Registers a service, not a tool/event/role — empty by design.
     config_schema={
         "type": "object",
         "properties": {

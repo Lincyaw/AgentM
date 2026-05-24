@@ -116,8 +116,8 @@ class LoopConfig:
     (``max_tool_calls``), an abort signal, or a provider error. A positive
     int reinstates a hard ceiling that ends the run with
     ``MaxTurnsExhausted`` once reached. Set a cap via the CLI
-    (``--max-turns``), a scenario manifest ``loop:`` block, or an explicit
-    ``LoopConfig`` in embedded use.
+    (``--max-turns``), the ``loop_budget`` atom listed in a scenario
+    manifest, or an explicit ``LoopConfig`` in embedded use.
     """
 
     max_turns: int | None = None
