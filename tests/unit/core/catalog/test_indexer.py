@@ -72,10 +72,6 @@ def _record(event_name: str, body: dict[str, Any]) -> dict[str, Any]:
         "resource": {
             "attributes": [
                 {"key": "service.name", "value": {"stringValue": "agentm"}},
-                {
-                    "key": "agentm.session.id",
-                    "value": {"stringValue": "sess-fixture"},
-                },
             ]
         },
         "scopeLogs": [
