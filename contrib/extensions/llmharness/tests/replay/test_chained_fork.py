@@ -29,7 +29,13 @@ from typing import Any
 
 import pytest
 from agentm.core.abi import AssistantMessage, TextContent
-from agentm.core.abi.messages import AgentMessage
+from agentm.core.abi.messages import (
+    AgentMessage,
+    ToolCallBlock,
+    ToolResultBlock,
+    ToolResultMessage,
+    UserMessage,
+)
 
 from llmharness.audit._atom_constants import EXTRACTOR_TOOLS_MODULE
 from llmharness.audit._offline_seams import InMemorySink
@@ -46,6 +52,7 @@ from llmharness.replay import chained_fork as _chained_fork_mod
 from llmharness.replay.chained_fork import (
     ChainedForkExperiment,
     ChainSegment,
+    _fork_prefix,
     run_chained_fork_experiment,
     write_chained_replay,
 )
@@ -614,3 +621,123 @@ def test_chained_fork_experiment_control_and_final_properties(tmp_path: Path) ->
     exp = ChainedForkExperiment(segments=[s0, s1], chained_replay_path=None)
     assert exp.control is s0
     assert exp.final is s1
+
+
+# ---------------------------------------------------------------------------
+# Test 4: _fork_prefix bumps the cut past a paired ToolResultMessage.
+#
+# The auditor cadence (`turn_count % 5 == 0`) is role-agnostic, so the
+# surfacing turn regularly lands on an assistant message that carries
+# ToolCallBlocks. If the fork prefix ends at exactly that index, the
+# branch session starts with a dangling tool_call — the next provider
+# call rejects the request (most providers fail-stop on an unmatched
+# assistant-tool_call). The bump is the load-bearing invariant that
+# keeps chained-fork branches viable.
+
+
+def _user(text: str) -> UserMessage:
+    return UserMessage(
+        role="user",
+        content=[TextContent(type="text", text=text)],
+        timestamp=0.0,
+    )
+
+
+def _assistant_text(text: str) -> AssistantMessage:
+    return AssistantMessage(
+        role="assistant",
+        content=[TextContent(type="text", text=text)],
+        timestamp=0.0,
+        stop_reason="end_turn",
+    )
+
+
+def _assistant_tool_call(call_id: str, name: str) -> AssistantMessage:
+    return AssistantMessage(
+        role="assistant",
+        content=[
+            ToolCallBlock(type="tool_call", id=call_id, name=name, arguments={}),
+        ],
+        timestamp=0.0,
+        stop_reason="tool_use",
+    )
+
+
+def _tool_result(call_id: str, text: str) -> ToolResultMessage:
+    return ToolResultMessage(
+        role="tool_result",
+        content=[
+            ToolResultBlock(
+                type="tool_result",
+                tool_call_id=call_id,
+                content=[TextContent(type="text", text=text)],
+                is_error=False,
+            )
+        ],
+        timestamp=0.0,
+    )
+
+
+def test_fork_prefix_bumps_past_paired_tool_result() -> None:
+    """When the surfacing turn is an assistant message with tool_calls
+    and the next message is its matching tool_result, the prefix must
+    include the tool_result. Otherwise the seeded-reminder branch
+    starts with a dangling tool_call → provider rejects.
+    """
+    messages: list[AgentMessage] = [
+        _user("kick off"),
+        _assistant_text("ok"),
+        _assistant_tool_call("c-1", "search"),  # index 2 = surfacing turn
+        _tool_result("c-1", "found"),  # index 3 = paired result
+        _assistant_text("done"),
+    ]
+
+    prefix = _fork_prefix(messages, turn_index=2)
+    assert len(prefix) == 4, (
+        f"expected the cut to bump past the paired tool_result; "
+        f"got prefix={[type(m).__name__ for m in prefix]}"
+    )
+    # The paired tool_result must be the last element.
+    assert isinstance(prefix[-1], ToolResultMessage)
+
+
+def test_fork_prefix_no_bump_when_no_pair() -> None:
+    """When the surfacing turn is a plain assistant message (no
+    tool_calls), the cut stays at turn_index + 1 — no bump.
+    """
+    messages: list[AgentMessage] = [
+        _user("kick off"),
+        _assistant_text("ok"),
+        _assistant_text("more"),  # index 2 = surfacing turn (no tool_call)
+        _assistant_text("done"),
+    ]
+    prefix = _fork_prefix(messages, turn_index=2)
+    assert len(prefix) == 3
+
+
+def test_fork_prefix_no_bump_when_pair_ids_mismatch() -> None:
+    """A ToolResultMessage that follows an assistant-with-tool_calls but
+    references a *different* call_id must NOT trigger the bump — the
+    pairing is by id, not by adjacency.
+    """
+    messages: list[AgentMessage] = [
+        _user("kick off"),
+        _assistant_tool_call("c-1", "search"),  # index 1 = surfacing turn
+        _tool_result("c-99", "unrelated"),  # different id
+        _assistant_text("done"),
+    ]
+    prefix = _fork_prefix(messages, turn_index=1)
+    assert len(prefix) == 2  # no bump
+
+
+def test_fork_prefix_at_trajectory_end() -> None:
+    """If the surfacing turn is the last message, there is no following
+    message to inspect — the cut is the whole trajectory regardless of
+    whether the final message carries tool_calls.
+    """
+    messages: list[AgentMessage] = [
+        _user("kick off"),
+        _assistant_tool_call("c-1", "search"),  # last index
+    ]
+    prefix = _fork_prefix(messages, turn_index=1)
+    assert len(prefix) == 2
