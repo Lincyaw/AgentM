@@ -57,6 +57,7 @@ from agentm.core.abi import (
 from agentm.core.abi.events import (
     BeforeAgentStartEvent,
     ChildSessionEndEvent,
+    MessagePersistedEvent,
     SessionShutdownEvent,
 )
 from agentm.core.abi.loop import resolve_loop_action
@@ -135,6 +136,23 @@ class AgentSession:
         # supplies overrides; cleaned up on ``shutdown``. ``None`` for
         # ordinary sessions — no filesystem cost.
         self._eval_sandbox: Path | None = eval_sandbox
+
+        # Real-time persistence: the loop emits MessagePersistedEvent for
+        # every durable addition (assistant turn / tool_result / injected
+        # message). Routing each event through the SessionManager here —
+        # rather than diffing the loop's return value at the end — means a
+        # mid-loop kill still leaves every completed turn on disk.
+        self._bus.on(
+            MessagePersistedEvent.CHANNEL, self._on_message_persisted
+        )
+
+    def _on_message_persisted(self, event: MessagePersistedEvent) -> None:
+        leaf = self._session_manager.get_leaf_id()
+        if leaf is None:
+            self._session_manager.reset_leaf()
+        else:
+            self._session_manager.branch(leaf)
+        self._session_manager.append_message(event.message)
 
     # --- Construction -----------------------------------------------------
 
@@ -251,7 +269,7 @@ class AgentSession:
         # 3. Build the caller's user message, after any drained queue items
         # so they appear as turn-prefix context.
         user_msg = self._build_user_message(text=text, images=images)
-        entry = self._append_message(user_msg)
+        self._append_message(user_msg)
 
         # 4. Gather active-branch messages and run before_agent_start.
         messages = self._session_manager.build_session_context().messages
@@ -271,42 +289,16 @@ class AgentSession:
         if replacement_system is not None:
             system_prompt = replacement_system
 
-        # Snapshot object identities of pre-run messages. We can't slice by
-        # index because per-turn extensions (e.g. micro_compact) may mutate
-        # the list in place via ``messages[:] = compacted`` from a
-        # ``before_send_to_llm`` handler — design ``extension-as-scenario``
-        # §10b.2: SessionManager owns durable history; context is per-turn
-        # ephemeral. Identity-based diff stays correct under any such
-        # rewrite.
-        pre_run_ids: set[int] = {id(m) for m in messages}
-
-        # 5. Run the loop.
-        final_messages = await self._loop.run(
+        # 5. Run the loop. Every new assistant / tool_result / injected
+        # message is persisted in real time by ``_on_message_persisted``;
+        # the loop's return value is the final live list.
+        return await self._loop.run(
             messages=messages,
             model=self._require_model(),
             tools=self._tools,
             system=system_prompt,
             signal=signal,
         )
-
-        # 6. Append every new assistant / tool_result message — those whose
-        # identities did not exist in the pre-run snapshot, in the order
-        # they appear in the returned list.
-        persisted_context = self._session_manager.build_session_context().messages
-        cursor: str | None = self._session_manager.get_leaf_id() or entry.id
-        for msg in final_messages:
-            if id(msg) in pre_run_ids:
-                continue
-            if msg in persisted_context:
-                continue
-            if cursor is None:
-                self._session_manager.reset_leaf()
-            else:
-                self._session_manager.branch(cursor)
-            child = self._session_manager.append_message(msg)
-            cursor = child.id
-
-        return final_messages
 
     # --- tick (resume-without-prompt) -------------------------------------
 
@@ -398,39 +390,20 @@ class AgentSession:
             )
             return messages
 
-        # Inject — splice the injected messages into the live context and
-        # run the kernel loop. Snapshot identities BEFORE the run so the
-        # post-loop diff is consistent with the ``prompt`` path. The
-        # injected messages themselves were materialised here in
-        # ``tick`` (not by the kernel loop), so they must be persisted as
-        # session entries — include them in the diff by NOT capturing
-        # their ids in the pre-run snapshot.
-        pre_run_ids: set[int] = {id(m) for m in messages}
+        # Inject — persist each injected message and splice into the live
+        # context. The kernel loop will then persist its assistant /
+        # tool_result messages in real time via ``_on_message_persisted``.
+        for injected_msg in action.messages:
+            self._session_manager.append_message(injected_msg)
         messages.extend(action.messages)
 
-        final_messages = await self._loop.run(
+        return await self._loop.run(
             messages=messages,
             model=self._require_model(),
             tools=self._tools,
             system=system_prompt,
             signal=signal,
         )
-
-        persisted_context = self._session_manager.build_session_context().messages
-        cursor: str | None = self._session_manager.get_leaf_id()
-        for msg in final_messages:
-            if id(msg) in pre_run_ids:
-                continue
-            if msg in persisted_context:
-                continue
-            if cursor is None:
-                self._session_manager.reset_leaf()
-            else:
-                self._session_manager.branch(cursor)
-            child = self._session_manager.append_message(msg)
-            cursor = child.id
-
-        return final_messages
 
     # --- prompt helpers ---------------------------------------------------
 
