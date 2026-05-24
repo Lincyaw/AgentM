@@ -6,10 +6,12 @@ that, if regressed, would let an authenticated peer impersonate another
 or exfiltrate token bits. They are deliberately narrow — they don't
 re-verify the full envelope contract (other tests do that).
 
-* ``test_inbound_sender_id_spoof_rejected`` — a peer cannot send an
-  inbound claiming another peer's principal. The bridge must emit a
-  ``KIND_ERROR`` envelope back to the offender and NOT publish the
-  inbound to the bus.
+* ``test_inbound_sender_id_preserved`` — a chat client relays many
+  humans, so the per-message ``sender_id`` (the channel-local author)
+  is the client's to assert and MUST be preserved end-to-end, not
+  collapsed onto the connection principal. Peer impersonation is
+  prevented by channel binding (the squatting test below), not by
+  forcing author == principal.
 * ``test_channel_name_squatting_rejected`` — once peer A binds
   ``channel_name=X``, peer B sending another inbound with the same
   ``channel_name`` must get a ``KIND_ERROR`` and NOT have its inbound
@@ -92,10 +94,15 @@ def _inbound(
 
 
 @pytest.mark.asyncio
-async def test_inbound_sender_id_spoof_rejected() -> None:
-    """Issue #1: body.sender_id that disagrees with the peer's bound
-    principal must be refused, with a ``KIND_ERROR`` back to the peer
-    and NO inbound published to the bus.
+async def test_inbound_sender_id_preserved() -> None:
+    """A chat client's per-message author must survive to the bus.
+
+    The connecting peer (``feishu-client``) relays a message authored
+    by a human (``ou_alice``) whose id is deliberately distinct from
+    the peer principal. The bridge must forward that author verbatim —
+    not overwrite it with the connection principal — so downstream
+    per-human authorization (approvals) and observability stay honest.
+    No ``KIND_ERROR`` may be sent back.
     """
     bus = _new_bus()
     manager = ChannelManager({}, bus)
@@ -104,28 +111,52 @@ async def test_inbound_sender_id_spoof_rejected() -> None:
         bus=bus, manager=manager, outbox=outbox  # type: ignore[arg-type]
     )
 
-    attacker = _peer("attacker-peer")
-    spoofed = _inbound(
-        env_id="spoof-1",
-        channel="terminal",
-        chat_id="c1",
-        sender_id="victim-peer",  # NOT the attacker's principal
+    client = _peer("feishu-client")
+    inbound = _inbound(
+        env_id="in-1",
+        channel="feishu",
+        chat_id="oc_chat",
+        sender_id="ou_alice",  # the human, NOT the peer principal
     )
-    await bridge.handle_inbound(attacker, spoofed)
+    await bridge.handle_inbound(client, inbound)
 
-    # The bus must not have seen the spoofed inbound.
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(bus.consume_inbound(), timeout=0.1)
+    # The author reaches the bus unchanged.
+    msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+    assert msg.sender_id == "ou_alice"
+    assert msg.channel == "feishu"
+    assert msg.chat_id == "oc_chat"
 
-    # Exactly one error envelope back to the attacker.
-    assert len(outbox.items) == 1, outbox.items
-    peer_id, err = outbox.items[0]
-    assert peer_id == "attacker-peer"
-    assert err.kind == KIND_ERROR
-    assert isinstance(err.body, dict)
-    assert err.body["reason"] == "sender_id_mismatch"
-    assert err.body["bound_principal"] == "attacker-peer"
-    assert err.body["envelope_id"] == "spoof-1"
+    # No spoof rejection — the client owns its channel.
+    errors = [env for (_pid, env) in outbox.items if env.kind == KIND_ERROR]
+    assert errors == [], errors
+
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_inbound_missing_sender_id_falls_back_to_principal() -> None:
+    """A single-user transport may omit the author; the bridge fills
+    it from the peer principal so downstream always sees a stable id.
+    """
+    bus = _new_bus()
+    manager = ChannelManager({}, bus)
+    outbox = _RecordedOutbox()
+    bridge = WireBridge(
+        bus=bus, manager=manager, outbox=outbox  # type: ignore[arg-type]
+    )
+
+    client = _peer("terminal-7f3a")
+    env = Envelope(
+        v=WIRE_VERSION,
+        id="in-2",
+        kind=KIND_INBOUND,
+        ts=time.time(),
+        body={"channel": "terminal", "chat_id": "c1", "content": "hi"},
+    )
+    await bridge.handle_inbound(client, env)
+
+    msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+    assert msg.sender_id == "terminal-7f3a"
 
     await manager.stop()
 
