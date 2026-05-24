@@ -13,11 +13,11 @@ dependencies = [
     "pathspec>=1.0.4",
     "typer>=0.25.1",
     "python-dotenv>=1.0",
-    # Backs the ``otel_tracing`` atom. Picks up standard ``OTEL_*`` env
-    # vars; ships spans to an OTel collector over OTLP (gRPC by default,
-    # HTTP/protobuf if configured). Ships by default so the atom never
-    # falls back to its no-op path; if you really don't want OTel
-    # dependencies, run with the atom disabled.
+    # Substrate dependency: the ``observability`` atom writes per-session
+    # OTLP/JSON ndjson via the SDK's standard processors + encoders. The
+    # ``otlp_export`` atom (opt-in) additionally fans spans + logs out
+    # over OTLP/gRPC or OTLP/HTTP-protobuf to a remote collector — picks
+    # up standard ``OTEL_EXPORTER_OTLP_*`` env vars.
     "opentelemetry-api>=1.30.0",
     "opentelemetry-sdk>=1.30.0",
     "opentelemetry-exporter-otlp>=1.30.0",

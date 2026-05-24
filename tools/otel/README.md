@@ -1,15 +1,15 @@
 # Local OTel collector for AgentM
 
-`agentm.extensions.builtin.otel_tracing` ships real OTLP spans for every
-session, turn, LLM request, tool call, handler invocation, and bus dispatch.
-This directory gives you a one-command collector + Jaeger UI to receive them.
+`agentm.extensions.builtin.otlp_export` ships AgentM's OTLP spans + logs
+to a remote collector in real time (in addition to the per-session
+ndjson file written by `observability`). This directory gives you a
+one-command collector + Jaeger UI to receive them locally.
 
 ## Start
 
 ```bash
 docker compose -f tools/otel/docker-compose.yaml up -d
-uv sync --extra otel
-uv run agentm "hello"             # default scenario mounts otel_tracing
+uv run agentm --extension agentm.extensions.builtin.otlp_export "hello"
 open http://localhost:16686       # Jaeger UI, service = "agentm"
 ```
 
@@ -17,30 +17,29 @@ Stop with `docker compose -f tools/otel/docker-compose.yaml down`.
 
 ## What you get
 
-Span tree per session (see `src/agentm/extensions/builtin/otel_tracing.py`):
+Span tree per session (GenAI semconv aligned):
 
 ```
-agentm.session
-├── agentm.extension.install:<module>
-├── agentm.atom.reload:<name>
-├── agentm.api.register:*
-├── agentm.event:<channel>
-│   └── agentm.handler:<channel>
-└── agentm.turn
-    ├── agentm.llm.request          (GenAI semconv attributes)
-    └── agentm.tool.execute         (args + result preview, bounded)
+invoke_agent <scenario>
+├── agentm.turn (index=0)
+│   ├── chat <model>            (gen_ai.* attributes)
+│   └── execute_tool <name>     (gen_ai.tool.call.{arguments,result})
+└── agentm.turn (index=1)
+    └── ...
 ```
 
-`stream_delta` channels are excluded by default (one span per LLM token
-would flood any collector); re-enable via the atom's `exclude_channels`
-config.
+Lifecycle events (`extension.install`, `atom.reload`, `api.register`,
+`api.send_user_message`, `agentm.session.start`, `agentm.session.end`,
+`agentm.message.appended`, `agentm.turn.summary`, `agentm.diagnostic`)
+are emitted as **log records** on the same OTel pipeline, not spans.
 
 ## Cross-session linkage
 
-Sub-agent + cognitive-audit child sessions reuse the same `trace_id`
-as the parent. The child's session-root span carries
-`agentm.parent_session_id`; the OTel parent context is wired so Jaeger
-nests them under the parent's session span automatically.
+Sub-agent + cognitive-audit child sessions share the parent's
+`trace_id` (W3C TraceContext propagation). Each session's
+`invoke_agent` span additionally carries `agentm.session.root_id` and
+`agentm.session.parent_id` attributes for stable Lucene/SQL grouping
+when traces span processes.
 
 ## Config knobs (all optional)
 
@@ -49,10 +48,8 @@ nests them under the parent's session span automatically.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `endpoint` | `http://localhost:4317` (gRPC) |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `protocol` | `grpc` (or `http/protobuf`) |
 | `OTEL_EXPORTER_OTLP_HEADERS` | `headers` | none |
-| — | `service_name` | `agentm` |
-| — | `insecure` | `true` |
-| — | `include_event_spans` | `true` |
-| — | `exclude_channels` | `{"stream_delta"}` |
+| `OTEL_EXPORTER_OTLP_INSECURE` | `insecure` | `true` (grpc only) |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `timeout` | `10` (seconds) |
 
 Send to a remote collector (Grafana Cloud / Honeycomb / etc.) by setting
 `OTEL_EXPORTER_OTLP_ENDPOINT` + `OTEL_EXPORTER_OTLP_HEADERS` — the
@@ -61,8 +58,6 @@ docker-compose here is for local dev only.
 ## Useful Jaeger queries
 
 * `gen_ai.request.model = "<your-model>"` — every LLM call.
-* `agentm.tool.name = "submit_verdict"` — only cognitive-audit verdicts.
-* tag `agentm.root_session_id = <hex>` — every span in one agent tree
+* `gen_ai.tool.name = "submit_verdict"` — only cognitive-audit verdicts.
+* tag `agentm.session.root_id = <hex>` — every span in one agent tree
   (parent + sub-agents + audit children).
-* span name `agentm.handler:diagnostic` — every `_record_failure` emission
-  from llmharness (silent-fail no longer silent).

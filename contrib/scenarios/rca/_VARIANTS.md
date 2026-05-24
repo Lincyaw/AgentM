@@ -2,9 +2,9 @@
 
 The `manifest.harness*.yaml` files share the same baseline atom stack
 (`operations_local`, `thinkdepth_sql`, `finalize`, `observability`,
-`otel_tracing`, `rcabench_contract`, `prompt_loader`, `runtime_context`)
-plus `llmharness.adapters.agentm`. They differ only in the adapter's
-config dict and (for a couple of them) which atoms are mounted on top.
+`rcabench_contract`, `prompt_loader`, `runtime_context`) plus
+`llmharness.adapters.agentm`. They differ only in the adapter's config
+dict and (for a couple of them) which atoms are mounted on top.
 
 The AgentM scenario loader has **no `extends:` / inheritance support**
 (see `src/agentm/extensions/loader.py`), so each manifest is repeated in
