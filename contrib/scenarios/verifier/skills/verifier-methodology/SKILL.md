@@ -16,99 +16,61 @@ type: skill
 
 # Verifier Methodology
 
-You are NOT doing root-cause analysis. `get_injection_spec` returns
-the root cause. Your job is:
+You are not doing root-cause analysis. The root cause is given —
+`get_injection_spec` returns it. Verification asks two questions:
 
-1. **Did the injection materialise?** Compare the target's behaviour
-   in the abnormal window vs the normal window.
-2. **What is the service-level propagation graph downstream?**
+1. **Did the injection actually materialise?** That is: do the
+   abnormal-window signals match what this fault kind should produce
+   on this target?
+2. **What is the full fault-propagation graph?** That is: every
+   service whose anomaly in the abnormal window can be traced back
+   to the injection target, plus every directed edge connecting
+   them. The output is a graph, not a list of examples — the impact
+   typically fans out through several hops (direct callers of the
+   target, then their callers, and so on) and you keep extending
+   until probes find no more candidates the evidence supports.
 
-Output is the directed graph of services affected by the injection,
-plus an effectiveness verdict. **An edge you cannot back with SQL is
-an edge you must not emit.**
+A propagation edge `from → to` is a *causal* claim: `from`'s
+anomaly causes `to`'s anomaly. Two parquet rows that both look
+abnormal in the same window are not, by themselves, a causal edge —
+co-occurrence is symmetric, causation is not. To justify direction
+you need either a timing argument (`from` shifts at-or-before `to`),
+a call-graph argument (a span shows `to` calling `from` and
+suffering), or a mechanistic argument grounded in what
+`get_injection_spec` says the fault does.
 
-## Stage 1 — confirm the injection
+An edge you cannot back with re-executable SQL is an edge you must
+not emit. Evidence is what separates verification from speculation.
 
-Pull the **fault-signatures** skill for the `fault_kind` returned by
-`get_injection_spec`. Run queries that compare abnormal vs normal on
-the kinds of signals that fault-kind would change.
+## What "downstream" means concretely
 
-- If the target is a **microservice that emits traces** (`ts-*`
-  services in train-ticket), expect span volume / error rate /
-  latency changes on `service_name = <target>`.
-- If the target is **infrastructure that doesn't emit traces of its
-  own** (`mysql`, `redis`, `mongo`, network proxies), the target
-  doesn't appear in `abnormal_traces.service_name` directly. Look at
-  - downstream services' DB / network spans (`db.system`,
-    `net.peer.name`, span name patterns) — these are how the
-    infrastructure shows up in traces;
-  - logs of services that depend on it;
-  - k8s-level metrics on the target's pod / container if exported
-    (`k8s.container.ready`, `kube_pod_status_phase`, restart count).
+`get_injection_spec.mechanism.what_happens` tells you the physical
+effect of the fault on the target. Re-derive who is downstream
+*from that*, not from generic heuristics. The same observable
+("service X reports errors when calling service Y") admits
+different causal readings depending on whether the injection is on
+X, Y, the network between them, or a shared dependency — the
+mechanism field disambiguates.
 
-If the target shows no anomaly, set `injection_effective="false"`
-with rationale citing the comparison and emit empty
-`propagation_edges`.
+## What good evidence looks like
 
-If the signature is partial / ambiguous (one signal moved, others
-didn't), set `injection_effective="ambiguous"` and document.
+`sql` is DuckDB SQL that runs against the case parquets and returns
+rows. `claim` is one sentence the rows justify. Specific is good
+("error rate 0% → 30% within the first minute of the abnormal
+window"); vague is not ("service degraded"). When citing magnitudes,
+cite both windows so the delta is visible.
 
-## Stage 2 — find direct-downstream services
+## When to stop
 
-A service is "directly affected" when its abnormal-window behaviour
-differs from normal AND the change is consistent with the injection
-target being the cause. **Don't guess service names — probe the
-data**. Pick the strategy that matches the target type:
+You stop when you can no longer find a service whose
+abnormal-window anomaly is both real and traceable to a service
+already in the graph. Until then, every service you add becomes a
+new pivot — its callers and the services it calls are the next
+candidates to probe. Stopping at the first hop almost always
+under-reports; a typical attributed fault reaches several services
+through a chain.
 
-- **Target emits traces** → walk the trace topology. Use
-  `parent_span_id` to find which services CALLED the target during
-  the abnormal window. Those services may be affected if their spans
-  show errors / latency rise / volume drop while the target is dead.
-- **Target is infrastructure** → query for the downstream services
-  that use this kind of infrastructure. For a DB target like mysql,
-  look at spans with DB-related attributes (`db.system='mysql'`,
-  `net.peer.name LIKE '%mysql%'`, span names like `SELECT`/`INSERT`).
-  For a network target, look at spans whose remote-peer matches the
-  isolated endpoint. Cross-reference with logs that mention the
-  target or generic connectivity errors.
-- **Fallback** — services with a sharp abnormal-window cliff
-  (throughput / error-rate / latency delta vs normal) are
-  candidates regardless of target type. Filter out services with
-  zero or unstable baselines.
-
-Each first-hop service → one `propagation_edges` entry with
-`from_service = <target>`, `to_service = <candidate>`, evidence =
-the SQL+claim showing the abnormal delta and a timing argument.
-
-## Stage 3 — extend the graph
-
-For each first-hop service, repeat the same probes scoped to that
-service as the new "target". A service that degraded because of a
-first-hop service (not because of the original target directly) is a
-second-hop. Add edges from the first-hop service to its downstream.
-
-Stop when probes return no new candidates or when adding more would
-require speculation. **Don't extend the graph speculatively.**
-
-## Evidence discipline
-
-Each edge MUST carry at least one `{sql, claim}` pair:
-- `sql` is re-executable DuckDB SQL against the case parquets.
-- `claim` is one short sentence the rows back. Specific is good
-  ("error rate 0% → 30% on T+12s"); vague is not ("service was
-  affected").
-
-Edge direction is **fault-impact** (failing service →
-caller-that-degraded), not the request-call direction. If A calls
-B and B is the broken one, the edge is `B → A`.
-
-## Rule out coincidence
-
-Before emitting an edge, ask:
-- Did the candidate's anomaly start AT or AFTER the injection?
-- Does the candidate have the same anomaly in the normal window
-  too (baseline noise)?
-- Could a different upstream service explain it?
-
-If you can't rule out coincidence, run one more query. If still
-unclear, leave the edge out.
+Don't stretch the graph past what evidence supports — an
+under-claimed report you can defend beats a wide one you can't —
+but don't quit early either: missing the multi-hop fan-out is the
+more common failure mode.
