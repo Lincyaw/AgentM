@@ -218,6 +218,7 @@ def _emit(
 _ANSI: dict[str, str] = {
     "user": "1;36",       # bold cyan
     "assistant": "1;32",  # bold green
+    "system": "1;34",     # bold blue
     "tool_result": "1;33",  # bold yellow
     "tool_error": "1;31",  # bold red
     "thinking": "2",      # dim
@@ -575,6 +576,12 @@ def messages_cmd(
 ) -> None:
     """Print the conversation trajectory (user / assistant / tool messages).
 
+    The system prompt is rebuilt by the loop on every turn and is not part
+    of the session message list, so it does NOT appear here by default.
+    Set ``AGENTM_TRACE_SYSTEM_PROMPT=1`` before running the agent to
+    persist it; the first turn's prompt will then surface as a synthetic
+    ``[system]`` message #0.
+
     Examples:
 
       agentm trace messages --latest
@@ -591,7 +598,35 @@ def messages_cmd(
         color = _color_enabled(sink, no_color)
 
         def _filtered() -> Iterator[dict[str, Any]]:
-            for entry in TraceReader(path).load_messages():
+            reader = TraceReader(path)
+            # If the loop recorded the system prompt (opt-in via
+            # AGENTM_TRACE_SYSTEM_PROMPT=1), surface the very first
+            # occurrence as a synthetic message #0 with role=system.
+            # Subsequent turns may mutate it (a real concern for KV
+            # prefix-cache invalidation) — use ``trace logs --name
+            # agentm.llm.system_prompt`` to inspect per-turn drift.
+            sys_iter = reader.iter_log_records(name="agentm.llm.system_prompt")
+            first_sys = next(sys_iter, None)
+            if first_sys is not None:
+                body = getattr(first_sys, "body", None) or {}
+                text = ""
+                if isinstance(body, dict):
+                    text = str(body.get("text") or "")
+                synth = {
+                    "type": "message",
+                    "id": "system-prompt-turn0",
+                    "parent_id": None,
+                    "timestamp": 0,
+                    "payload": {
+                        "role": "system",
+                        "content": [{"type": "text", "text": text}],
+                    },
+                }
+                if (not types or synth["type"] in types) and (
+                    not roles or "system" in roles
+                ):
+                    yield synth
+            for entry in reader.load_messages():
                 if types and entry.get("type") not in types:
                     continue
                 payload = entry.get("payload") or {}

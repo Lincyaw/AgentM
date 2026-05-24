@@ -368,6 +368,68 @@ def test_info_missing_metadata_exits_3(tmp_path: Path) -> None:
     assert result.exit_code == 3
 
 
+def test_system_prompt_surfaces_as_message_zero(tmp_path: Path) -> None:
+    """When the loop persisted an ``agentm.llm.system_prompt`` log,
+    ``messages`` prepends it as a synthetic role=system entry.
+    """
+
+    path = tmp_path / "session.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                _log_line(
+                    "agentm.llm.system_prompt",
+                    {"turn_index": 0, "turn_id": 0, "text": "be helpful"},
+                ),
+                _log_line(
+                    "agentm.message.appended",
+                    _message("user", "hi"),
+                    {"agentm.message.type": "message"},
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["messages", "--file", str(path), "--format", "ndjson"]
+    )
+    assert result.exit_code == 0, result.stderr
+    lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+    assert len(lines) == 2
+    first = json.loads(lines[0])
+    assert first["payload"]["role"] == "system"
+    assert first["payload"]["content"][0]["text"] == "be helpful"
+    # ``--role assistant`` must still exclude it.
+    result2 = runner.invoke(
+        app,
+        ["messages", "--file", str(path), "--role", "user", "--format", "ndjson"],
+    )
+    assert result2.exit_code == 0
+    lines2 = [ln for ln in result2.stdout.splitlines() if ln.strip()]
+    assert len(lines2) == 1
+    assert json.loads(lines2[0])["payload"]["role"] == "user"
+
+
+def test_no_system_prompt_log_means_no_synthetic_entry(trace_file: Path) -> None:
+    """Default traces (no ``agentm.llm.system_prompt`` log) must NOT
+    inject a synthetic system message — the env-gated record is opt-in.
+    """
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["messages", "--file", str(trace_file), "--format", "ndjson"]
+    )
+    assert result.exit_code == 0
+    roles = [
+        json.loads(ln)["payload"]["role"]
+        for ln in result.stdout.splitlines()
+        if ln.strip()
+    ]
+    assert "system" not in roles
+
+
 def test_info_scoped_to_header_only(trace_file: Path) -> None:
     """--what header surfaces only the header body."""
 
