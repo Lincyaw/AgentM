@@ -417,10 +417,12 @@ class _OtelObserver(EventBusObserver):
         self,
         channel: str,
         handler: Handler,
+        event: Any,
         result: Any,
         error: BaseException | None,
         duration_ns: int,
     ) -> None:
+        del event
         # Emit one ``agentm.handler.invoke`` span per handler invocation,
         # parented to the current emit span. Mirrors the JSONL
         # observability atom's ``handler.invoke`` records so OTel and

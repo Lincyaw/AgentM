@@ -496,6 +496,7 @@ class _BusObserver(EventBusObserver):
         self,
         channel: str,
         handler: Handler,
+        event: Any,
         result: Any,
         error: BaseException | None,
         duration_ns: int,

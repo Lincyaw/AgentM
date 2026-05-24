@@ -78,11 +78,12 @@ async def test_add_observer_object_receives_handler_and_end_hooks(tmp_path: Any)
             self,
             channel: str,
             handler: Any,
+            event: Any,
             result: Any,
             error: BaseException | None,
             duration_ns: int,
         ) -> None:
-            del handler, error, duration_ns
+            del handler, event, error, duration_ns
             calls.append(("handler", f"{channel}:{result}"))
 
         def on_emit_end(self, channel: str, event: Any, results: list[Any]) -> None:
