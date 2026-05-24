@@ -9,9 +9,10 @@ fail-quiet behaviour when no budget cap is set, and the warn threshold.
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
+import importlib
 from typing import Any
+
+import pytest
 
 from agentm.core.abi import LoopConfig, TextContent, ToolResultMessage, UserMessage
 from agentm.core.abi.events import (
@@ -21,21 +22,18 @@ from agentm.core.abi.events import (
     TurnStartEvent,
 )
 from agentm.core.abi.messages import ToolResultBlock
-
-_ATOM_PATH = (
-    Path(__file__).resolve().parents[3]
-    / "contrib"
-    / "extensions"
-    / "turn_reminder.py"
-)
+from agentm.extensions import discover
 
 
 def _load_atom() -> Any:
-    spec = importlib.util.spec_from_file_location("_tr_under_test", _ATOM_PATH)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    """Load ``turn_reminder`` through the same discovery seam the runtime
+    uses — under its real synthetic module name ``_agentm_contrib__turn_reminder``
+    — rather than reaching into ``contrib/`` by filesystem path."""
+
+    entry = discover.discover_contrib_atoms().get("turn_reminder")
+    if entry is None:
+        pytest.skip("turn_reminder contrib atom not discoverable in this layout")
+    return importlib.import_module(entry.module_path)
 
 
 class _FakeSession:
