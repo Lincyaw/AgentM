@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import itertools
 import json
-import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-import agentm.core.abi.events as events_mod
 from agentm.core.abi import EventBus
 from agentm.extensions.builtin import observability
 from agentm.core.abi.events import SessionShutdownEvent
@@ -63,12 +60,20 @@ def _handler(event: dict[str, Any]) -> dict[str, Any]:
 @pytest.mark.asyncio
 async def test_observability_trace_snapshot_uses_add_observer(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    counter = itertools.count(1)
-    monkeypatch.setattr(observability, "_now_ns", lambda: next(counter) * 1000)
-    monkeypatch.setattr(observability.uuid, "uuid4", lambda: uuid.UUID(int=next(counter)))
-    monkeypatch.setattr(events_mod.time, "perf_counter_ns", lambda: next(counter) * 100)
+    """Structural smoke: observability subscribes via ``add_observer`` (no
+    EventBus monkeypatch) and writes a session-start / event.dispatch /
+    handler.invoke / session-end quartet for a single ``emit`` round-trip.
+
+    Previously asserted on exact JSONL bytes; that shape was fragile to any
+    extra allocation on the emit path (e.g. the bus-owned ``dispatch_id``
+    landing in Commit 1 of the single-event-log cutover). The behavioural
+    contract — observer is wired, dispatches produce dispatch + invoke
+    records — is what we actually want to lock down; the exact integer
+    timestamps were never the point. The whole trace shape is rewritten in
+    Commit 2 of the cutover anyway, at which point this test is replaced
+    by the OTLP-semconv suite.
+    """
 
     api = _api(tmp_path)
     observability.install(api, {"path": "trace.jsonl", "include_handler_records": True})
@@ -80,19 +85,24 @@ async def test_observability_trace_snapshot_uses_add_observer(
         SessionShutdownEvent(cwd=str(tmp_path)),
     )
 
-    expected = "\n".join(
-        [
-            '{"schema": "otel/span/v0", "kind": "session.start", "trace_id": "session-1", "span_id": "session-1", "parent_span_id": null, "name": "session.start", "start_time_unix_nano": 1000, "attributes": {"session_id": "session-1", "root_session_id": "session-1", "parent_session_id": null, "purpose": "root", "scenario": null, "cwd": "'
-            + str(tmp_path)
-            + '", "log_path": "'
-            + str(tmp_path / "trace.jsonl")
-            + '"}, "status": {"code": "OK"}}',
-            '{"schema": "otel/span/v0", "kind": "handler.invoke", "trace_id": "session-1", "span_id": "0000000000000000", "parent_span_id": "0000000000000000", "name": "handler:alpha", "start_time_unix_nano": 5900, "end_time_unix_nano": 6000, "attributes": {"channel": "alpha", "handler": "tests.unit.extensions.test_observability._handler", "extension": null, "result": {"seen": 7}, "duration_ns": 100}, "status": {"code": "OK", "message": null, "traceback": null}}',
-            '{"schema": "otel/span/v0", "kind": "event.dispatch", "trace_id": "session-1", "span_id": "0000000000000000", "parent_span_id": "session-1", "name": "emit:alpha", "start_time_unix_nano": 3000, "end_time_unix_nano": 8000, "attributes": {"channel": "alpha", "event": {"value": 7}, "handler_count": 1}, "status": {"code": "OK"}}',
-            '{"schema": "otel/span/v0", "kind": "session.end", "trace_id": "session-1", "span_id": "session-1", "parent_span_id": null, "name": "session.end", "start_time_unix_nano": 1000, "end_time_unix_nano": 12000, "attributes": {"session_id": "session-1", "root_session_id": "session-1", "parent_session_id": null, "purpose": "root", "scenario": null}, "status": {"code": "OK"}}',
-        ]
-    ) + "\n"
-    assert (tmp_path / "trace.jsonl").read_text(encoding="utf-8") == expected
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    kinds = [r["kind"] for r in records]
+    assert "session.start" in kinds
+    assert "event.dispatch" in kinds
+    assert "handler.invoke" in kinds
+    assert "session.end" in kinds
+
+    dispatch = next(r for r in records if r["kind"] == "event.dispatch")
+    assert dispatch["attributes"]["channel"] == "alpha"
+    assert dispatch["attributes"]["event"] == {"value": 7}
+    assert dispatch["attributes"]["handler_count"] == 1
+
+    invoke = next(r for r in records if r["kind"] == "handler.invoke")
+    assert invoke["attributes"]["channel"] == "alpha"
+    assert invoke["attributes"]["result"] == {"seen": 7}
 
 
 def _mutating_handler(event: dict[str, Any]) -> str:
