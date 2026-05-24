@@ -69,13 +69,14 @@ def _resolve_session_file(arg: str | None, cwd: Path) -> Path:
 
 
 def _iter_records(path: Path) -> Iterable[dict[str, Any]]:
-    """Yield SessionEntry-shaped records from a merged session log.
+    """Yield SessionEntry-shaped records from an OTLP/JSON session log.
 
-    Post single-event-log merge each trajectory row is wrapped in an OTel
-    envelope (``kind == "message.appended"``, payload under ``record``);
-    we unwrap to the inner ``SessionEntry`` shape so the rest of the CLI
-    keeps reading ``rec["type"]`` / ``rec["payload"]`` unchanged. Legacy
-    bare-entry lines (pre-merge sessions) pass through unchanged.
+    After the single-event-log OTLP cutover, each trajectory row is an
+    OTLP ``ResourceLogs`` element carrying one log record with
+    ``eventName == "agentm.message.appended"`` and a kvlist body that
+    encodes the original SessionEntry dict. We unwrap and yield the
+    inner SessionEntry so the rest of the CLI keeps reading
+    ``rec["type"]`` / ``rec["payload"]`` unchanged.
     """
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -88,22 +89,48 @@ def _iter_records(path: Path) -> Iterable[dict[str, Any]]:
                 continue
             if not isinstance(raw, dict):
                 continue
-            kind = raw.get("kind")
-            if kind == "message.appended":
-                inner = raw.get("record")
-                if isinstance(inner, dict):
-                    yield inner
+            for scope_logs in raw.get("scopeLogs", []) or []:
+                for record in scope_logs.get("logRecords", []) or []:
+                    if record.get("eventName") != "agentm.message.appended":
+                        continue
+                    body = _unwrap_otlp(record.get("body"))
+                    if isinstance(body, dict):
+                        yield body
+
+
+def _unwrap_otlp(value: Any) -> Any:
+    """OTLP proto-JSON tagged-union unwrapper. Inlined here so the
+    cognitive-audit CLI doesn't depend on agentm core internals — this
+    contrib package publishes its own version surface
+    (``pyproject.toml`` schema-stability note in CLAUDE.md).
+    """
+    if not isinstance(value, dict):
+        return value
+    if "stringValue" in value:
+        return value["stringValue"]
+    if "boolValue" in value:
+        return value["boolValue"]
+    if "intValue" in value:
+        try:
+            return int(value["intValue"])
+        except (TypeError, ValueError):
+            return value["intValue"]
+    if "doubleValue" in value:
+        try:
+            return float(value["doubleValue"])
+        except (TypeError, ValueError):
+            return value["doubleValue"]
+    if "kvlistValue" in value:
+        out: dict[str, Any] = {}
+        for item in value["kvlistValue"].get("values", []) or []:
+            key = item.get("key")
+            if not isinstance(key, str):
                 continue
-            if kind == "session.header":
-                # Header carries no payload of interest to the inspector;
-                # skip rather than yield the wrapped form that would fail
-                # the downstream ``isinstance(payload, dict)`` checks.
-                continue
-            if kind is not None:
-                # Other OTel spans (event.dispatch, turn.summary, etc.)
-                # — irrelevant for the audit-graph view; skip them.
-                continue
-            yield raw
+            out[key] = _unwrap_otlp(item.get("value"))
+        return out
+    if "arrayValue" in value:
+        return [_unwrap_otlp(v) for v in value["arrayValue"].get("values", []) or []]
+    return value
 
 
 def _collect(path: Path) -> tuple[list[Event], list[Verdict], int]:

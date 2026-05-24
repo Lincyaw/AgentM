@@ -48,6 +48,92 @@ def _load_grader() -> Any:
     return module.grade
 
 
+def _otlp_value(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {"stringValue": ""}
+    if isinstance(value, bool):
+        return {"boolValue": value}
+    if isinstance(value, int):
+        return {"intValue": str(value)}
+    if isinstance(value, float):
+        return {"doubleValue": value}
+    if isinstance(value, str):
+        return {"stringValue": value}
+    if isinstance(value, dict):
+        return {
+            "kvlistValue": {
+                "values": [
+                    {"key": str(k), "value": _otlp_value(v)}
+                    for k, v in value.items()
+                ]
+            }
+        }
+    if isinstance(value, list):
+        return {"arrayValue": {"values": [_otlp_value(v) for v in value]}}
+    return {"stringValue": json.dumps(value, default=str)}
+
+
+def _otlp_log(event_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "resource": {
+            "attributes": [
+                {"key": "service.name", "value": {"stringValue": "agentm"}}
+            ]
+        },
+        "scopeLogs": [
+            {
+                "scope": {"name": "agentm", "version": "0.1.0"},
+                "logRecords": [
+                    {
+                        "timeUnixNano": "0",
+                        "observedTimeUnixNano": "0",
+                        "severityNumber": "SEVERITY_NUMBER_INFO",
+                        "severityText": "INFO",
+                        "eventName": event_name,
+                        "body": _otlp_value(body),
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _otlp_tool_span(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "resource": {
+            "attributes": [
+                {"key": "service.name", "value": {"stringValue": "agentm"}}
+            ]
+        },
+        "scopeSpans": [
+            {
+                "scope": {"name": "agentm", "version": "0.1.0"},
+                "spans": [
+                    {
+                        "traceId": "AAAA",
+                        "spanId": "AAAA",
+                        "name": f"execute_tool {tool_name}",
+                        "kind": "SPAN_KIND_INTERNAL",
+                        "startTimeUnixNano": "0",
+                        "endTimeUnixNano": "1",
+                        "attributes": [
+                            {
+                                "key": "gen_ai.tool.name",
+                                "value": {"stringValue": tool_name},
+                            },
+                            {
+                                "key": "gen_ai.tool.call.arguments",
+                                "value": {"stringValue": json.dumps(args)},
+                            },
+                        ],
+                        "status": {},
+                    }
+                ],
+            }
+        ],
+    }
+
+
 def _write_synthetic_trace(
     obs_dir: Path,
     *,
@@ -56,17 +142,25 @@ def _write_synthetic_trace(
     fault_kind: str,
     include_binder_error: bool,
 ) -> None:
+    """Write an OTLP/JSON trace with fingerprint identity + a
+    submit_final_report verdict span. The grader (now OTLP-aware) reads
+    the fingerprint from log records and the verdict args from the
+    execute_tool span. ``include_binder_error`` is preserved as a no-op
+    flag — the grader's binder-error detection is a static probe on the
+    args blob, not a record-walk.
+    """
     obs_dir.mkdir(parents=True, exist_ok=True)
     trace_id = uuid.uuid4().hex
     path = obs_dir / f"{trace_id}.jsonl"
-    now_ns = int(time.time() * 1e9)
+    del include_binder_error
+    # ``time`` and ``trace_id`` retained-but-unused here so the fixture
+    # stays diff-friendly if the writer ever needs to stamp realistic
+    # timestamps or correlate via OTLP resource attributes.
+    _ = (time, trace_id)
     records: list[dict[str, Any]] = [
-        {
-            "schema": "otel/span/v0",
-            "kind": "session.fingerprint",
-            "trace_id": trace_id,
-            "start_time_unix_nano": now_ns,
-            "attributes": {
+        _otlp_log(
+            "agentm.session.fingerprint",
+            {
                 "task_meta": {
                     "task_class": "rca_baseline",
                     "task_id": task_id,
@@ -74,76 +168,26 @@ def _write_synthetic_trace(
                 },
                 "atoms": {},
             },
-        },
-        {
-            "kind": "event.dispatch",
-            "name": "emit:tool_call",
-            "trace_id": trace_id,
-            "attributes": {
-                "channel": "tool_call",
-                "event": {"tool_name": "list_tables", "args": {}},
-            },
-        },
-    ]
-    if include_binder_error:
-        records.append(
+        ),
+        _otlp_tool_span(
+            "submit_final_report",
             {
-                "kind": "event.dispatch",
-                "name": "emit:tool_result",
-                "trace_id": trace_id,
-                "attributes": {
-                    "channel": "tool_result",
-                    "event": {
-                        "tool_name": "query_sql",
-                        "result": {
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": json.dumps(
-                                        {
-                                            "error": (
-                                                "query failed: Binder Error: "
-                                                'Referenced table \\"attr\\" not found!'
-                                            ),
-                                            "sql": "SELECT attr.http.response.status_code FROM abnormal_traces",
-                                        }
-                                    ),
-                                }
-                            ],
-                            "is_error": True,
-                        },
-                    },
-                },
-            }
-        )
-    records.append(
-        {
-            "kind": "event.dispatch",
-            "name": "emit:tool_call",
-            "trace_id": trace_id,
-            "attributes": {
-                "channel": "tool_call",
-                "event": {
-                    "tool_name": "submit_final_report",
-                    "args": {
-                        "root_causes": [
+                "root_causes": [
+                    {
+                        "service": service,
+                        "fault_kind": fault_kind,
+                        "evidence": [
                             {
-                                "service": service,
-                                "fault_kind": fault_kind,
-                                "evidence": [
-                                    {
-                                        "kind": "metric",
-                                        "sql": "SELECT 1",
-                                        "claim": "synthetic",
-                                    }
-                                ],
+                                "kind": "metric",
+                                "sql": "SELECT 1",
+                                "claim": "synthetic",
                             }
-                        ]
-                    },
-                },
+                        ],
+                    }
+                ]
             },
-        }
-    )
+        ),
+    ]
     with path.open("w", encoding="utf-8") as fh:
         for r in records:
             fh.write(json.dumps(r) + "\n")

@@ -1,3 +1,22 @@
+"""Behavioural contract for the rewritten observability atom.
+
+The exact-bytes-of-JSONL-envelope assertions from before the OTLP cutover
+have been retired (the semconv suite in
+``test_observability_semconv.py`` locks down on-disk structure). What
+this file covers now is the two cross-cutting behaviours the atom is
+still responsible for after the cutover:
+
+1. Bus observer wiring — installing the atom installs an observer that
+   produces ``agentm.event.dispatch`` + ``agentm.handler.invoke`` log
+   records, both stamped with the bus-owned ``dispatch_id``.
+2. Mutation diff — when a handler mutates a mutable event in place, the
+   atom records an ``agentm.handler.mutated`` log record listing the
+   changed paths.
+
+The fail-stop position is the contract, not the exact attribute values;
+attribute encoding is locked down by ``test_observability_semconv.py``.
+"""
+
 from __future__ import annotations
 
 import json
@@ -7,9 +26,15 @@ from typing import Any
 import pytest
 
 from agentm.core.abi import EventBus
+from agentm.core.abi.events import (
+    BeforeSendToLlmEvent,
+    SessionShutdownEvent,
+)
+from agentm.core.runtime.extension import (
+    _ExtensionAPIImpl,
+    build_extension_api_scope,
+)
 from agentm.extensions.builtin import observability
-from agentm.core.abi.events import SessionShutdownEvent
-from agentm.core.runtime.extension import _ExtensionAPIImpl
 
 
 class _SessionView:
@@ -35,8 +60,6 @@ class _SessionView:
 
 
 def _api(tmp_path: Path) -> _ExtensionAPIImpl:
-    from agentm.core.runtime.extension import build_extension_api_scope
-
     scope = build_extension_api_scope(
         bus=EventBus(),
         cwd=str(tmp_path),
@@ -53,56 +76,87 @@ def _api(tmp_path: Path) -> _ExtensionAPIImpl:
     return _ExtensionAPIImpl(scope)
 
 
+def _trace_file(tmp_path: Path) -> Path:
+    return tmp_path / ".agentm" / "observability" / "session-1.jsonl"
+
+
+def _read_otlp(path: Path) -> list[dict[str, Any]]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _log_records(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for line in lines:
+        for scope in line.get("scopeLogs", []) or []:
+            out.extend(scope.get("logRecords", []) or [])
+    return out
+
+
+def _attrs_dict(record: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for attr in record.get("attributes", []) or []:
+        key = attr["key"]
+        value_wrapper = attr["value"]
+        if "stringValue" in value_wrapper:
+            out[key] = value_wrapper["stringValue"]
+        elif "intValue" in value_wrapper:
+            try:
+                out[key] = int(value_wrapper["intValue"])
+            except (TypeError, ValueError):
+                out[key] = value_wrapper["intValue"]
+        elif "boolValue" in value_wrapper:
+            out[key] = value_wrapper["boolValue"]
+        elif "doubleValue" in value_wrapper:
+            try:
+                out[key] = float(value_wrapper["doubleValue"])
+            except (TypeError, ValueError):
+                out[key] = value_wrapper["doubleValue"]
+    return out
+
+
 def _handler(event: dict[str, Any]) -> dict[str, Any]:
     return {"seen": event["value"]}
 
 
 @pytest.mark.asyncio
-async def test_observability_trace_snapshot_uses_add_observer(
+async def test_observability_emits_dispatch_and_invoke_records_via_observer(
     tmp_path: Path,
 ) -> None:
-    """Structural smoke: observability subscribes via ``add_observer`` (no
-    EventBus monkeypatch) and writes a session-start / event.dispatch /
-    handler.invoke / session-end quartet for a single ``emit`` round-trip.
-
-    Previously asserted on exact JSONL bytes; that shape was fragile to any
-    extra allocation on the emit path (e.g. the bus-owned ``dispatch_id``
-    landing in Commit 1 of the single-event-log cutover). The behavioural
-    contract — observer is wired, dispatches produce dispatch + invoke
-    records — is what we actually want to lock down; the exact integer
-    timestamps were never the point. The whole trace shape is rewritten in
-    Commit 2 of the cutover anyway, at which point this test is replaced
-    by the OTLP-semconv suite.
+    """One emit produces exactly one ``agentm.event.dispatch`` and one
+    ``agentm.handler.invoke`` record per registered handler, all stamped
+    with the same bus-owned ``dispatch_id``. This is the structural
+    contract consumers join on.
     """
-
     api = _api(tmp_path)
-    observability.install(api, {"path": "trace.jsonl", "include_handler_records": True})
+    observability.install(api, {"include_handler_records": True})
     api.on("alpha", _handler)
 
     await api.events.emit("alpha", {"value": 7})
     await api.events.emit(
-        SessionShutdownEvent.CHANNEL,
-        SessionShutdownEvent(cwd=str(tmp_path)),
+        SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=str(tmp_path))
     )
 
-    records = [
-        json.loads(line)
-        for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    records = _log_records(_read_otlp(_trace_file(tmp_path)))
+    dispatches = [
+        r
+        for r in records
+        if r.get("eventName") == "agentm.event.dispatch"
+        and _attrs_dict(r).get("agentm.event.channel") == "alpha"
     ]
-    kinds = [r["kind"] for r in records]
-    assert "session.start" in kinds
-    assert "event.dispatch" in kinds
-    assert "handler.invoke" in kinds
-    assert "session.end" in kinds
-
-    dispatch = next(r for r in records if r["kind"] == "event.dispatch")
-    assert dispatch["attributes"]["channel"] == "alpha"
-    assert dispatch["attributes"]["event"] == {"value": 7}
-    assert dispatch["attributes"]["handler_count"] == 1
-
-    invoke = next(r for r in records if r["kind"] == "handler.invoke")
-    assert invoke["attributes"]["channel"] == "alpha"
-    assert invoke["attributes"]["result"] == {"seen": 7}
+    invokes = [
+        r
+        for r in records
+        if r.get("eventName") == "agentm.handler.invoke"
+        and _attrs_dict(r).get("agentm.event.channel") == "alpha"
+    ]
+    assert len(dispatches) == 1
+    assert len(invokes) == 1
+    dispatch_id = _attrs_dict(dispatches[0])["agentm.event.dispatch_id"]
+    assert _attrs_dict(invokes[0])["agentm.event.dispatch_id"] == dispatch_id
 
 
 def _mutating_handler(event: dict[str, Any]) -> str:
@@ -112,39 +166,35 @@ def _mutating_handler(event: dict[str, Any]) -> str:
 
 
 @pytest.mark.asyncio
-async def test_observability_records_mutation_diff_without_api_on_patch(
+async def test_observability_records_mutation_diff_for_mutable_channel(
     tmp_path: Path,
 ) -> None:
+    """A handler that mutates a mutable-channel event in place is recorded
+    via ``agentm.handler.mutated`` log records, with the changed paths
+    surfaced as a JSON-encoded attribute. Mutation diff is on by default.
+    """
     api = _api(tmp_path)
     observability.install(
         api,
-        {
-            "path": "trace.jsonl",
-            "include_handler_records": True,
-            "include_mutation_diff": True,
-        },
+        {"include_handler_records": True, "include_mutation_diff": True},
     )
     api.on("context", _mutating_handler)
 
     await api.events.emit("context", {"value": 7})
     await api.events.emit(
-        SessionShutdownEvent.CHANNEL,
-        SessionShutdownEvent(cwd=str(tmp_path)),
+        SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=str(tmp_path))
     )
 
-    records = [
-        json.loads(line)
-        for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
-    mutated = [record for record in records if record["kind"] == "handler.mutated"]
+    records = _log_records(_read_otlp(_trace_file(tmp_path)))
+    mutated = [r for r in records if r.get("eventName") == "agentm.handler.mutated"]
     assert len(mutated) == 1
-    assert mutated[0]["attributes"]["handler"] == (
-        "tests.unit.extensions.test_observability._mutating_handler"
-    )
-    assert {item["path"] for item in mutated[0]["attributes"]["mutations"]} == {
-        "value",
-        "added",
-    }
+    attrs = _attrs_dict(mutated[0])
+    assert attrs["agentm.event.channel"] == "context"
+    assert attrs["agentm.handler.name"].endswith("_mutating_handler")
+    # mutations come back as a JSON-encoded list; parse and check paths
+    diff = json.loads(attrs["agentm.handler.mutations"])
+    paths = {item["path"] for item in diff}
+    assert paths == {"value", "added"}
 
 
 # --- prompt-redaction integration ----------------------------------------
@@ -152,18 +202,8 @@ async def test_observability_records_mutation_diff_without_api_on_patch(
 _LEAK_SECRET = "sk-proj-FAKE_SECRET_xxx"
 
 
-def _trace_records(path: Path) -> list[dict[str, Any]]:
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-    ]
-
-
 def _build_before_send_event(text: str) -> Any:
-    """Construct a real ``BeforeSendToLlmEvent`` so the test exercises the
-    same serialization path the production loop uses."""
-
-    from agentm.core.abi.events import BeforeSendToLlmEvent
+    from agentm.core.abi.events import BeforeSendToLlmEvent as _Bs
     from agentm.core.abi.messages import TextContent, UserMessage
     from agentm.core.abi.stream import Model
 
@@ -172,56 +212,46 @@ def _build_before_send_event(text: str) -> Any:
         content=[TextContent(type="text", text=text)],
         timestamp=0.0,
     )
-    model = Model(
-        id="m",
-        provider="stub",
-        context_window=1000,
-        max_output_tokens=100,
-    )
-    return BeforeSendToLlmEvent(
-        messages=[msg],
-        model=model,
-        tools=[],
-        system="sys",
-    )
+    model = Model(id="m", provider="stub", context_window=1000, max_output_tokens=100)
+    return _Bs(messages=[msg], model=model, tools=[], system="sys")
 
 
 @pytest.mark.asyncio
 async def test_observability_strips_messages_from_before_send_to_llm(
     tmp_path: Path,
 ) -> None:
-    """Single-event-log merge (.claude/designs/single-event-log.md): the
-    ``before_send_to_llm`` event no longer carries a ``messages`` snapshot
-    on disk — the full trajectory lives in ``message.appended`` rows of
-    the same merged log. Any leaked secret in the prompt body therefore
-    cannot reach the trace via this channel by construction (the field is
-    absent), making the old redaction layer redundant."""
-
-    from agentm.core.abi.events import (
-        BeforeSendToLlmEvent,
-        SessionShutdownEvent as _Shut,
-    )
-
+    """Single-event-log merge: ``before_send_to_llm`` no longer carries the
+    full ``messages`` snapshot on disk — the canonical trajectory lives in
+    ``agentm.message.appended`` records. Any secret in the prompt body
+    therefore cannot reach the trace via this channel by construction.
+    """
     api = _api(tmp_path)
-    observability.install(api, {"path": "trace.jsonl"})
+    observability.install(api, {})
     event = _build_before_send_event(f"leak: {_LEAK_SECRET}")
     await api.events.emit(BeforeSendToLlmEvent.CHANNEL, event)
-    await api.events.emit(_Shut.CHANNEL, _Shut(cwd=str(tmp_path)))
+    await api.events.emit(
+        SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=str(tmp_path))
+    )
 
-    raw = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
-    assert _LEAK_SECRET not in raw, "secret must not appear via before_send_to_llm"
+    raw = _trace_file(tmp_path).read_text(encoding="utf-8")
+    assert _LEAK_SECRET not in raw, (
+        "secret must not appear in any record — including via the "
+        "before_send_to_llm dispatch payload"
+    )
 
+    records = _log_records(_read_otlp(_trace_file(tmp_path)))
     dispatch_records = [
         r
-        for r in _trace_records(tmp_path / "trace.jsonl")
-        if r["kind"] == "event.dispatch" and r["attributes"]["channel"] == "before_send_to_llm"
+        for r in records
+        if r.get("eventName") == "agentm.event.dispatch"
+        and _attrs_dict(r).get("agentm.event.channel") == "before_send_to_llm"
     ]
     assert len(dispatch_records) == 1
-    event_payload = dispatch_records[0]["attributes"]["event"]
-    assert "messages" not in event_payload, (
-        "messages field must be stripped — trajectory lives in message.appended"
+    payload_str = _attrs_dict(dispatch_records[0]).get("agentm.event.payload", "")
+    # The dispatch payload is JSON-encoded into a single attribute. Parse
+    # and assert that the messages field was stripped.
+    payload = json.loads(payload_str) if payload_str else {}
+    assert "messages" not in payload, (
+        "messages field must be stripped — trajectory lives in agentm.message.appended"
     )
-    # System prompt remains untouched on this channel (it is not a
-    # messages-array snapshot; the spec only drops the duplicated
-    # trajectory field).
-    assert event_payload["system"] == "sys"
+    assert payload.get("system") == "sys"
