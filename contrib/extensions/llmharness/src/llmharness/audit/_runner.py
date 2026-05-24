@@ -107,9 +107,18 @@ class ExtractorSettings:
         """Built-in extractor defaults — same prompt + empty configs the live
         ``rca:harness.sync`` variant uses when no overrides are supplied.
 
-        Used by callers (notably ``agentm_rca`` ``baseline_fork`` with a
+        Used by callers (notably ``agentm_rca`` ``chained_fork`` with a
         ``rca:baseline`` control) that need to drive the offline runner
         without a recorded sidecar to crib settings from.
+
+        Observability is **enabled** by default (``observability_config={}``
+        rather than ``None``): the per-firing extractor child session
+        writes OTLP/JSON ndjson to ``<cwd>/.agentm/observability/<sid>.jsonl``
+        just like the live path does, so downstream consumers see
+        symmetric traces for live and offline runs. Passing ``None``
+        suppresses the atom entirely, which was the historical default
+        and broke offline-trace parity — see commit log for the
+        ``chained_fork`` investigation that surfaced this.
         """
         from .extractor import compose_extractor_extensions
         from .extractor.prompt import load_extractor_prompt
@@ -118,12 +127,12 @@ class ExtractorSettings:
         compose_kwargs: dict[str, Any] = {
             "base_prompt": base_prompt,
             "cards_tools_config": None,
-            "observability_config": None,
+            "observability_config": {},
         }
         extensions = compose_extractor_extensions(
             base_prompt=base_prompt,
             cards_tools_config=None,
-            observability_config=None,
+            observability_config={},
         )
         return cls(extensions=extensions, compose_kwargs=compose_kwargs)
 
@@ -197,13 +206,18 @@ class AuditorSettings:
         that never fire the auditor (``base_prompt=""``); ``default``
         loads the canonical framing so the offline runner can actually
         execute auditor firings.
+
+        Observability is **enabled** by default (``observability_config={}``
+        rather than ``None``) so each auditor child session emits the
+        same OTLP/JSON trace shape a live auditor would. See the
+        symmetric note on :meth:`ExtractorSettings.default`.
         """
         from .auditor.prompt import load_auditor_prompt
 
         return cls(
             base_prompt=load_auditor_prompt("minimal"),
             cards_tools_config=None,
-            observability_config=None,
+            observability_config={},
             summary_threshold=30,
             tools=(SUBMIT_VERDICT_TOOL_NAME,),
         )
