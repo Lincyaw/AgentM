@@ -38,11 +38,7 @@ from typing import Any, Final
 
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI, ExtensionLoadError
-from opentelemetry import _logs as _otel_logs
-from opentelemetry import trace as _otel_trace
-from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
-from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 
@@ -95,7 +91,12 @@ def _parse_headers(raw: str | None) -> dict[str, str] | None:
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    del api  # process-level — no per-session wiring needed
+    # Reach the process-level SDK TracerProvider + LoggerProvider through
+    # the per-session telemetry handle. The substrate does not register
+    # these as OTel globals (so ``opentelemetry.trace.get_tracer_provider``
+    # returns ``ProxyTracerProvider``); the handle holds direct references
+    # we can attach our network processors to.
+    telemetry = api.get_session_telemetry()
     global _attached
     with _lock:
         if _attached:
@@ -174,26 +175,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 timeout=timeout,
             )
 
-        tracer_provider = _otel_trace.get_tracer_provider()
-        logger_provider = _otel_logs.get_logger_provider()
-        if not isinstance(tracer_provider, TracerProvider) or not isinstance(
-            logger_provider, LoggerProvider
-        ):
-            raise ExtensionLoadError(
-                __name__,
-                RuntimeError(
-                    "otlp_export requires the observability atom to install "
-                    "first so process-level TracerProvider / LoggerProvider "
-                    "are SDK instances; got "
-                    f"tracer={type(tracer_provider).__name__}, "
-                    f"logger={type(logger_provider).__name__}"
-                ),
-            )
-
         span_processor = BatchSpanProcessor(span_exporter)
         log_processor = BatchLogRecordProcessor(log_exporter)
-        tracer_provider.add_span_processor(span_processor)
-        logger_provider.add_log_record_processor(log_processor)
+        telemetry.tracer_provider.add_span_processor(span_processor)
+        telemetry.logger_provider.add_log_record_processor(log_processor)
 
         def _shutdown() -> None:
             try:
