@@ -54,6 +54,7 @@ from .events import (
     LlmRequestStartEvent,
     LoopAction,
     MaxTurnsExhausted,
+    MessagePersistedEvent,
     ModelEndTurn,
     ProviderProtocolViolation,
     ProviderTruncated,
@@ -547,6 +548,15 @@ class AgentLoop:
                 last_assistant = assistant_msg
                 messages.append(assistant_msg)
                 await self._bus.emit(
+                    MessagePersistedEvent.CHANNEL,
+                    MessagePersistedEvent(
+                        message=assistant_msg,
+                        source="assistant",
+                        turn_index=turn_index,
+                        turn_id=turn_id,
+                    ),
+                )
+                await self._bus.emit(
                     TurnEndEvent.CHANNEL,
                     TurnEndEvent(
                         turn_index=turn_index,
@@ -564,6 +574,8 @@ class AgentLoop:
                         tool_calls=tool_calls,
                         tool_index=tool_index,
                         signal=signal,
+                        turn_index=turn_index,
+                        turn_id=turn_id,
                     )
                     if raw_outcomes is None:
                         # Signal tripped mid-tool-execution. Route through
@@ -590,6 +602,16 @@ class AgentLoop:
                     return await self._finish_with_cause(messages, action.cause)
                 if isinstance(action, Inject):
                     messages.extend(action.messages)
+                    for injected_msg in action.messages:
+                        await self._bus.emit(
+                            MessagePersistedEvent.CHANNEL,
+                            MessagePersistedEvent(
+                                message=injected_msg,
+                                source="injected",
+                                turn_index=turn_index,
+                                turn_id=turn_id,
+                            ),
+                        )
                     continue
                 # Step → fall through to next turn
 
@@ -618,6 +640,8 @@ class AgentLoop:
         tool_calls: list[ToolCallBlock],
         tool_index: dict[str, Tool],
         signal: asyncio.Event | None,
+        turn_index: int,
+        turn_id: int,
     ) -> list[tuple[str, ToolOutcome]] | None:
         """Run each ``tool_call`` sequentially, collecting paired outcomes.
 
@@ -724,12 +748,20 @@ class AgentLoop:
             )
             paired.append((tc.name, outcome))
 
-        messages.append(
-            ToolResultMessage(
-                role="tool_result",
-                content=result_blocks,
-                timestamp=_now(),
-            )
+        tool_result_msg = ToolResultMessage(
+            role="tool_result",
+            content=result_blocks,
+            timestamp=_now(),
+        )
+        messages.append(tool_result_msg)
+        await self._bus.emit(
+            MessagePersistedEvent.CHANNEL,
+            MessagePersistedEvent(
+                message=tool_result_msg,
+                source="tool_result",
+                turn_index=turn_index,
+                turn_id=turn_id,
+            ),
         )
         return paired
 

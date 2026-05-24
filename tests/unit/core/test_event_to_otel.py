@@ -88,6 +88,12 @@ _INTENTIONAL_NO_OP_EVENTS: frozenset[str] = frozenset(
         "ResourcesDiscoverEvent",
         "ResourceWriteEvent",
         "EntryAppendedEvent",
+        # Real-time persistence trigger emitted by ``AgentLoop`` — the
+        # downstream :class:`MessageAppendedEvent` (fired when SessionManager
+        # actually persists) carries the on-disk log via its own
+        # ``to_otel``; this event only routes the persistence call, so a
+        # separate OTel record would be a redundant duplicate.
+        "MessagePersistedEvent",
         # Atom-install / -reload lifecycle — the observability atom owns
         # these because they need the fingerprint state (catalog hash
         # machinery) that is not on :class:`SessionTelemetry`.
