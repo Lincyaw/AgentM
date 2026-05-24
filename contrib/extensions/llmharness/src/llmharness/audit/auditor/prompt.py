@@ -103,8 +103,8 @@ def build_auditor_system_prompt(
         sections.append("## PHASES (primary view — merged basic blocks)")
         sections.append(
             f"phases ({len(phases)} total). Each phase wraps one or more raw "
-            "events; ``member_event_ids`` lists them in order. ``act`` and "
-            "``evid`` events are coalesced into ``act_evid_run`` blocks; "
+            "events; ``member_event_ids`` lists them in order. Consecutive "
+            "``act`` events are coalesced into ``act_run`` blocks; "
             "``task`` / ``hyp`` / ``dec`` / ``concl`` always stay singleton. "
             "Reason at this level by default; consult the raw events block "
             "below when a specific witness needs verification."

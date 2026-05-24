@@ -6,12 +6,19 @@ classes here keeps the schema in lockstep with ``schema.py`` and removes
 hand-listed copies that can silently drift. JSON-Schema ``enum``
 literals declared in ``audit/extractor/*`` import from this module.
 
-V3 (issue #134, 2026-05-10):
-- ``EVENT_KIND_VALUES`` short-form values: ``task``, ``hyp``, ``evid``,
-  ``act``, ``dec``, ``concl`` — derived from
-  :class:`~llmharness.schema.EventKind`.
+V4 (2026-05-24): ``EventKind.EVID`` is gone. ``EVENT_KIND_VALUES`` now
+holds ``task``, ``hyp``, ``act``, ``dec``, ``concl`` (five) — derived
+from :class:`~llmharness.schema.EventKind`. Linear blocks fold into a
+single ``act`` whose summary records both probes and results.
+
+V3 (issue #134, 2026-05-10) — historical:
+- ``EVENT_KIND_VALUES`` historically included ``evid`` alongside
+  ``task``, ``hyp``, ``act``, ``dec``, ``concl``; ``evid`` was
+  dropped in V4 (see note above). Values are derived from
+  :class:`~llmharness.schema.EventKind`, so this list updates
+  automatically with the enum.
 - ``EDGE_KIND_VALUES`` added: ``data``, ``ref`` — derived from
-  :class:`~llmharness.schema.EdgeKind`.
+  :class:`~llmharness.schema.EdgeKind` (unchanged in V4).
 
 V2 carried-forward: the auditor's ``submit_verdict`` schema (V2,
 design §6.2) uses no drift-type enum; the verdict shape is free-text

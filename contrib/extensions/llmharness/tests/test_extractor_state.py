@@ -37,7 +37,7 @@ def _state() -> ExtractionState:
 
 
 def _evid(eid: int, *, turns: list[int], summary: str = "evt") -> dict[str, Any]:
-    return {"id": eid, "kind": "evid", "summary": summary, "source_turns": turns}
+    return {"id": eid, "kind": "act", "summary": summary, "source_turns": turns}
 
 
 # --- happy path -------------------------------------------------------------
@@ -201,7 +201,7 @@ def test_commit_rejects_empty_summary() -> None:
     state = _state()
     err = state.commit(
         [
-            {"id": 1, "kind": "evid", "summary": "   ", "source_turns": [10]},
+            {"id": 1, "kind": "act", "summary": "   ", "source_turns": [10]},
         ]
     )
     assert err is not None and "summary" in err
@@ -210,7 +210,7 @@ def test_commit_rejects_empty_summary() -> None:
 
 def test_commit_rejects_empty_source_turns() -> None:
     state = _state()
-    err = state.commit([{"id": 1, "kind": "evid", "summary": "x", "source_turns": []}])
+    err = state.commit([{"id": 1, "kind": "act", "summary": "x", "source_turns": []}])
     assert err is not None and "source_turns" in err
     assert state.committed is False
 
@@ -408,7 +408,7 @@ def test_commit_rejects_first_event_when_recent_graph_non_empty() -> None:
     """
     from llmharness.schema import Event, EventKind
 
-    prior = Event(id=1, kind=EventKind("evid"), summary="prior", source_turns=[5])
+    prior = Event(id=1, kind=EventKind("act"), summary="prior", source_turns=[5])
     state = ExtractionState(
         turn_texts={5: "irrelevant prior text", 10: "irrelevant new text"},
         recent_graph=(prior,),
@@ -447,7 +447,7 @@ def test_external_ref_accepted_and_attached_to_event() -> None:
 
     prior = Event(
         id=1,
-        kind=EventKind("evid"),
+        kind=EventKind("act"),
         summary="prior",
         source_turns=[5],
     )
@@ -462,7 +462,7 @@ def test_external_ref_accepted_and_attached_to_event() -> None:
         [
             {
                 "id": 1,
-                "kind": "evid",
+                "kind": "act",
                 "summary": "new",
                 "source_turns": [10],
                 "refs": [],
@@ -495,7 +495,7 @@ def test_external_ref_alone_satisfies_connection_requirement() -> None:
 
     prior = Event(
         id=1,
-        kind=EventKind("evid"),
+        kind=EventKind("act"),
         summary="prior",
         source_turns=[5],
     )
@@ -511,7 +511,7 @@ def test_external_ref_alone_satisfies_connection_requirement() -> None:
         [
             {
                 "id": 2,
-                "kind": "evid",
+                "kind": "act",
                 "summary": "first event of this firing, external_ref only",
                 "source_turns": [11],
                 "refs": [],
@@ -536,7 +536,7 @@ def test_external_ref_unknown_id_rejected() -> None:
         [
             {
                 "id": 1,
-                "kind": "evid",
+                "kind": "act",
                 "summary": "g",
                 "source_turns": [10],
                 "refs": [],
@@ -568,7 +568,7 @@ def test_apply_node_delete_targets_prior_firing_node() -> None:
     from llmharness.schema import Event, EventKind
 
     prior_a = Event(id=1, kind=EventKind("task"), summary="prior a", source_turns=[1])
-    prior_b = Event(id=2, kind=EventKind("evid"), summary="prior b", source_turns=[2])
+    prior_b = Event(id=2, kind=EventKind("act"), summary="prior b", source_turns=[2])
     state = ExtractionState(
         turn_texts={1: "alpha", 2: "bravo"},
         recent_graph_dict={1: prior_a, 2: prior_b},
@@ -614,7 +614,7 @@ def test_apply_edge_upsert_requires_existing_endpoints_in_folded_view() -> None:
 
     # Now create the dst, then attach the edge. Both succeed.
     res = state.apply_node_upsert(
-        {"id": 3, "kind": "evid", "summary": "new", "source_turns": [3]}
+        {"id": 3, "kind": "act", "summary": "new", "source_turns": [3]}
     )
     assert not isinstance(res, str), res
 
@@ -645,7 +645,7 @@ def test_apply_edge_upsert_rejects_fabricated_ref_quote() -> None:
     )
     # Build two nodes in this firing first.
     state.apply_node_upsert(
-        {"id": 1, "kind": "evid", "summary": "src", "source_turns": [10]}
+        {"id": 1, "kind": "act", "summary": "src", "source_turns": [10]}
     )
     state.apply_node_upsert(
         {"id": 2, "kind": "act", "summary": "dst", "source_turns": [11]}
@@ -689,7 +689,7 @@ def test_apply_edge_delete_requires_kind() -> None:
     state = ExtractionState(
         turn_texts={1: "alpha", 2: "bravo alpha"}
     )
-    state.apply_node_upsert({"id": 1, "kind": "evid", "summary": "s", "source_turns": [1]})
+    state.apply_node_upsert({"id": 1, "kind": "act", "summary": "s", "source_turns": [1]})
     state.apply_node_upsert({"id": 2, "kind": "act", "summary": "d", "source_turns": [2]})
     state.apply_edge_upsert(
         {"src": 1, "dst": 2, "kind": "data", "reason": "r", "cited_entities": ["alpha"]}
@@ -712,7 +712,7 @@ def test_external_ref_witness_failure_drops_into_dropped_edges() -> None:
 
     prior = Event(
         id=1,
-        kind=EventKind("evid"),
+        kind=EventKind("act"),
         summary="prior",
         source_turns=[5],
     )
@@ -724,7 +724,7 @@ def test_external_ref_witness_failure_drops_into_dropped_edges() -> None:
         [
             {
                 "id": 1,
-                "kind": "evid",
+                "kind": "act",
                 "summary": "g",
                 "source_turns": [10],
                 "refs": [],

@@ -17,13 +17,19 @@ All dataclasses are `frozen=True` and ship `to_dict` / `from_dict`.
 ```python
 Event(
   id: int,                        # per-firing fresh-numbered (1, 2, ...)
-  kind: EventKind,                # task | hyp | evid | act | dec | concl
+  kind: EventKind,                # task | hyp | act | dec | concl
   summary: str,
   source_turns: list[int],        # turn indices this event was extracted from
 )
 ```
 
-V3 short-form kinds: `task`, `hyp`, `evid`, `act`, `dec`, `concl`.
+V4 short-form kinds: `task`, `hyp`, `act`, `dec`, `concl` (five).
+V3 also defined `evid` as a separate kind; v4 folds it into `act`
+— every linear investigation block is now a single `act` whose
+`summary` records both the probe AND the result in time order.
+To migrate v3 records into v4, run
+`scripts/migrate_v3_to_v4_evid_fold.py <input.jsonl>` — the script
+merges each `evid` into its preceding `act` and rewrites edge refs.
 The v2 long forms (`hypothesis`, `evidence`, …) and `REFLECTION`
 are gone.
 
@@ -80,15 +86,15 @@ Verdict(
 ### `Phase`
 
 A merged "basic block" over consecutive raw events. `task` /
-`hyp` / `dec` / `concl` stay singleton; consecutive `act` / `evid`
-events coalesce into a single block tagged `act_evid_run`. The
-auditor reads the phase view for high-level reasoning and drills
-back to raw events via `get_event_detail` when needed.
+`hyp` / `dec` / `concl` stay singleton; consecutive `act` events
+coalesce into a single block tagged `act_run`. The auditor reads
+the phase view for high-level reasoning and drills back to raw
+events via `get_event_detail` when needed.
 
 ```python
 Phase(
   id: int,
-  kind: str,                      # EventKind value OR "act_evid_run"
+  kind: str,                      # EventKind value OR "act_run"
   member_event_ids: tuple[int, ...],
   source_turns: tuple[int, ...],
   summary: str,

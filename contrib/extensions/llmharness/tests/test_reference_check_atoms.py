@@ -117,7 +117,7 @@ def test_open_branches_triggers_on_dec_or_hyp_without_outgoing_data_edge() -> No
     events = (
         Event(id=1, kind=EventKind.HYP, summary="maybe table A is the cause"),
         Event(id=2, kind=EventKind.DEC, summary="picked option B"),
-        Event(id=3, kind=EventKind.EVID, summary="A row count is 0"),
+        Event(id=3, kind=EventKind.ACT, summary="A row count is 0"),
     )
     # only event 1 has an outgoing data edge -> events 2 stays open;
     # event 3 isn't dec/hyp so it's irrelevant.
@@ -146,7 +146,7 @@ def test_open_branches_silent_when_every_dec_hyp_has_outgoing_data_edge() -> Non
 
     events = (
         Event(id=1, kind=EventKind.HYP, summary="hyp"),
-        Event(id=2, kind=EventKind.EVID, summary="evid"),
+        Event(id=2, kind=EventKind.ACT, summary="evid"),
     )
     edges = (
         Edge(
@@ -174,7 +174,7 @@ def test_premature_conclusion_triggers_on_concl_with_few_incoming_edges() -> Non
     check_premature_conclusion.install(api, {})  # type: ignore[arg-type]
 
     events = (
-        Event(id=1, kind=EventKind.EVID, summary="evid"),
+        Event(id=1, kind=EventKind.ACT, summary="evid"),
         Event(id=2, kind=EventKind.CONCL, summary="root cause is X"),
     )
     # only one incoming edge into concl #2 -> below threshold (2)
@@ -202,8 +202,8 @@ def test_premature_conclusion_silent_when_concl_has_two_incoming_edges() -> None
     check_premature_conclusion.install(api, {})  # type: ignore[arg-type]
 
     events = (
-        Event(id=1, kind=EventKind.EVID, summary="evid 1"),
-        Event(id=2, kind=EventKind.EVID, summary="evid 2"),
+        Event(id=1, kind=EventKind.ACT, summary="evid 1"),
+        Event(id=2, kind=EventKind.ACT, summary="evid 2"),
         Event(id=3, kind=EventKind.CONCL, summary="root cause is X"),
     )
     edges = (
