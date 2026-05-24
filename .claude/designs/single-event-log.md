@@ -361,8 +361,13 @@ Recorded here so they don't get lost; PR briefs to follow when dispatched.
 - **PR-F** — Declarative `Event → OTel` mapping via per-class `to_otel()`
   method (or registered translator), eliminating the giant translator
   switch in `observability.install`.
-- **PR-G** — `TraceReader` API in core, closing the OTLP-unwrap duplication
-  flagged above.
+- **PR-G** — Landed. `TraceReader` API extracted into
+  `core.runtime.trace_reader` and re-exported via `agentm.core.abi`;
+  every reader (`SessionManager`, the catalog indexer, the three
+  `tool_*` atoms, the llmharness CLIs, both rca graders, the rca_hfsm
+  Phase 2 runner) now depends on it. See the "TraceReader API" section
+  above for the surface; `tests/unit/core/test_trace_reader.py` locks
+  it down.
 - **PR-H** — Process-level `TracerProvider` with `session_id` moved from
   resource attribute to span attribute, aligning with OTel ecosystem
   assumptions about one provider per process.

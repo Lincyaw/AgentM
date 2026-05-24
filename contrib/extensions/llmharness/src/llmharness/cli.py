@@ -22,6 +22,8 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, TextIO
 
+from agentm.core.abi import TraceReader
+
 from .audit import entry_types as _et
 from .schema import Event, Verdict
 
@@ -74,63 +76,12 @@ def _iter_records(path: Path) -> Iterable[dict[str, Any]]:
     After the single-event-log OTLP cutover, each trajectory row is an
     OTLP ``ResourceLogs`` element carrying one log record with
     ``eventName == "agentm.message.appended"`` and a kvlist body that
-    encodes the original SessionEntry dict. We unwrap and yield the
-    inner SessionEntry so the rest of the CLI keeps reading
-    ``rec["type"]`` / ``rec["payload"]`` unchanged.
+    encodes the original SessionEntry dict. :class:`TraceReader` handles
+    the line walk and kvlist unwrap; we yield the SessionEntry body so
+    the rest of the CLI keeps reading ``rec["type"]`` / ``rec["payload"]``
+    unchanged.
     """
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(raw, dict):
-                continue
-            for scope_logs in raw.get("scopeLogs", []) or []:
-                for record in scope_logs.get("logRecords", []) or []:
-                    if record.get("eventName") != "agentm.message.appended":
-                        continue
-                    body = _unwrap_otlp(record.get("body"))
-                    if isinstance(body, dict):
-                        yield body
-
-
-def _unwrap_otlp(value: Any) -> Any:
-    """OTLP proto-JSON tagged-union unwrapper. Inlined here so the
-    cognitive-audit CLI doesn't depend on agentm core internals — this
-    contrib package publishes its own version surface
-    (``pyproject.toml`` schema-stability note in CLAUDE.md).
-    """
-    if not isinstance(value, dict):
-        return value
-    if "stringValue" in value:
-        return value["stringValue"]
-    if "boolValue" in value:
-        return value["boolValue"]
-    if "intValue" in value:
-        try:
-            return int(value["intValue"])
-        except (TypeError, ValueError):
-            return value["intValue"]
-    if "doubleValue" in value:
-        try:
-            return float(value["doubleValue"])
-        except (TypeError, ValueError):
-            return value["doubleValue"]
-    if "kvlistValue" in value:
-        out: dict[str, Any] = {}
-        for item in value["kvlistValue"].get("values", []) or []:
-            key = item.get("key")
-            if not isinstance(key, str):
-                continue
-            out[key] = _unwrap_otlp(item.get("value"))
-        return out
-    if "arrayValue" in value:
-        return [_unwrap_otlp(v) for v in value["arrayValue"].get("values", []) or []]
-    return value
+    yield from TraceReader(path).load_messages()
 
 
 def _collect(path: Path) -> tuple[list[Event], list[Verdict], int]:
