@@ -28,7 +28,7 @@ UPSERT_NODE_TOOL_NAME = "upsert_node"
 # Use a Literal so the generated JSON schema carries the closed-set
 # enum verbatim — pydantic_to_openai_tool_schema strips title keys for
 # parity with the legacy hand-written ``enum: [...]`` constants.
-_EventKindLiteral = Literal["task", "hyp", "evid", "act", "dec", "concl"]
+_EventKindLiteral = Literal["task", "hyp", "act", "dec", "concl"]
 
 
 class UpsertNodeArgs(BaseModel):
@@ -56,13 +56,14 @@ class UpsertNodeArgs(BaseModel):
             "LENGTH PROPORTIONAL TO source_turns COUNT. A "
             "single-turn branch event (task / hyp / dec / concl) is "
             "one focused sentence with the concrete claim. A linear "
-            "act or evid that COALESCES N consecutive turns must be "
-            "a paragraph that walks through what happened across "
-            "those N turns: roughly one short sentence per covered "
-            "turn. Name every distinct tool_call's concrete "
-            "parameters verbatim (services, time windows, query "
-            "filters, file paths, error codes, span/log/metric "
-            "names) and quote the key numbers each result returned."
+            "act that COALESCES N consecutive turns must be a "
+            "paragraph that walks through what happened across those "
+            "N turns: roughly one short sentence per covered turn. "
+            "Name every distinct tool_call's concrete parameters "
+            "verbatim (services, time windows, query filters, file "
+            "paths, error codes, span/log/metric names) AND quote the "
+            "key numbers each result returned — v4 act nodes record "
+            "both probes and results in one summary."
         ),
     )
     source_turns: list[int] = Field(

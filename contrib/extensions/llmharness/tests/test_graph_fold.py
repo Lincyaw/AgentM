@@ -28,7 +28,7 @@ from llmharness.audit.graph_ops import (
 from llmharness.schema import EdgeKind, EventKind, ExternalRef
 
 
-def _nu(eid: int, *, kind: str = "evid", summary: str = "x", turns: tuple[int, ...] = (1,)) -> NodeUpsert:
+def _nu(eid: int, *, kind: str = "act", summary: str = "x", turns: tuple[int, ...] = (1,)) -> NodeUpsert:
     return NodeUpsert(id=eid, kind=kind, summary=summary, source_turns=turns)
 
 
@@ -191,7 +191,7 @@ def test_nodes_and_edges_iterate_in_insertion_order() -> None:
         # and live op-log writes preserve cumulative connectivity.
         NodeUpsert(
             id=8,
-            kind="evid",
+            kind="act",
             summary="evidence",
             source_turns=(10,),
             external_refs=(
@@ -244,7 +244,7 @@ def test_parse_op_rejects_unknown_discriminator() -> None:
 
 def test_parse_op_rejects_missing_discriminator() -> None:
     with pytest.raises(ValueError):
-        parse_op({"id": 1, "kind": "evid"})
+        parse_op({"id": 1, "kind": "act"})
 
 
 def test_node_upsert_carries_external_refs_through_fold() -> None:

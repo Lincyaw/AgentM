@@ -29,7 +29,7 @@ class ResetExtractionArgs(BaseModel):
 def build_reset_extraction_tool(state: ExtractionState) -> FunctionTool:
     @harness_tool(RESET_EXTRACTION_TOOL_NAME)
     async def _reset_extraction(_args: ResetExtractionArgs, _ctx: Any) -> ToolResult:
-        """Drop all pending events / edges so you can re-emit the firing's graph from scratch. Use this only when the accumulated graph is unrecoverable (e.g. you can't see a way to fix passthrough events without merging neighbours, which append-only can't do). The plan is preserved — only events / edges / drops are cleared."""
+        """Rarely needed; use delete_node + upsert_node to repair instead. Drops all pending events / edges so you can re-emit the firing's graph from scratch. Reserved as a last-resort escape hatch when the accumulated draft is fundamentally unrecoverable — for ordinary fixes (merging neighbours, fixing a kind, repointing edges) the targeted edit tools are cheaper and preserve work."""
         if state.committed:
             return ToolResult(
                 content=[
