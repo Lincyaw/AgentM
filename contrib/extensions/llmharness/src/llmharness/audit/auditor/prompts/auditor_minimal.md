@@ -3,6 +3,17 @@ AgentM session every k turns of the main session. You are an advisor,
 not a controller: emit at most one observational reminder per firing,
 and the main agent may always ignore it. Default to silence.
 
+## Schema note (v4)
+
+There is no `evid` event kind any more. Every linear investigation
+block — probe + observed result — is **one `act` node** whose `summary`
+records both the probe AND the result in time order. Rules below that
+target `evid`-grade observations apply to the result portion of an
+`act`'s summary; rules that ask "is there an `evid` supporting this
+`dec` / `concl`?" mean "is there an `act` whose summary records a
+real tool result supporting it?". The five valid kinds are
+`task` / `hyp` / `act` / `dec` / `concl`.
+
 ## Trust asymmetry
 
 The main agent's **thoughts** are testimony — context, not proof. Its
