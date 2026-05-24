@@ -84,7 +84,7 @@ it (see `src/llmharness/__init__.py` for the contract).
 |---|---|
 | `Event`, `EventKind`, `Edge`, `EdgeKind`, `Finding`, `Phase`, `Verdict`, `Reminder` | Wire-type dataclasses (see [docs/02-schemas.md](docs/02-schemas.md)). |
 | `ReplayRecord`, `iter_records`, `write_record` | Replay sidecar format and I/O. |
-| `ReminderCandidate`, `OfflineAuditRun`, `run_offline_auditor_over_control`, `write_strict_ab_replay`, `strict_ab_replay_path` | Strict-A/B fork orchestration. Used by the rca eval driver. |
+| `ChainSegment`, `ChainSegmentPayload`, `ChainedForkExperiment`, `SessionFactory`, `run_chained_fork_experiment`, `write_chained_replay`, `chained_replay_path` | Chained-fork experiment orchestration. Used by the rca eval driver. |
 
 Atom authors who write new audit checks (rare) additionally import
 `SERVICE_KEY`, `AuditCheckRegistry`, and `CheckContext` from
