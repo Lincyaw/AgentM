@@ -2,8 +2,7 @@
 #
 # Usage:
 #   docker compose -f tools/otel/docker-compose.yaml up -d
-#   uv sync --extra otel
-#   uv run agentm "hello"           # default scenario already mounts otel_tracing
+#   uv run agentm --extension agentm.extensions.builtin.otlp_export "hello"
 #   open http://localhost:16686     # Jaeger UI
 #
 # Stop:

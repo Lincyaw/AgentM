@@ -470,7 +470,7 @@ This design does **not** deprecate it. The new scenario reuses:
 - `duckdb_sql` and any data-source-specific tool atoms
 - `worker_skills` + `skill_loader` for SKILL.md-shaped methodology resources
 - `rcabench_contract` for the eval harness contract
-- `observability` and `otel_tracing` builtins
+- `observability` builtin (OTLP spans + logs to per-session ndjson)
 - `sub_agent` for worker dispatch
 
 And **replaces**:

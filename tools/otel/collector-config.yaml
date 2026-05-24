@@ -1,6 +1,6 @@
 # Minimal OpenTelemetry Collector config for local AgentM tracing.
 #
-# Receives OTLP from `agentm.extensions.builtin.otel_tracing`, fans out to:
+# Receives OTLP from `agentm.extensions.builtin.otlp_export`, fans out to:
 #   * Jaeger (UI at http://localhost:16686)
 #   * debug exporter (writes a span-summary line per batch to collector stdout
 #     — set `verbosity: detailed` if you want full attributes printed).

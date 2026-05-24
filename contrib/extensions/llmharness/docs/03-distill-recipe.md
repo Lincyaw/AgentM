@@ -143,10 +143,10 @@ total: kept=13 dropped=3 out=distill_labels/
 ```
 
 The two child sessions are spawned with a **minimal extension
-list** (see §5 D3 below): observability + otel_tracing +
-operations_local + system_prompt + one submit tool. No FS, no
-bash, no skills, no cards. The student will see the same surface
-at inference, so training matches deployment.
+list** (see §5 D3 below): observability + operations_local +
+system_prompt + one submit tool. No FS, no bash, no skills, no
+cards. The student will see the same surface at inference, so
+training matches deployment.
 
 ---
 
@@ -198,10 +198,9 @@ a function it cannot reproduce. Six fail-stop tests in
 
 ### D3 — Minimal extensions on the audit children
 
-Oracle and rewriter children run with five atoms only:
+Oracle and rewriter children run with four atoms only:
 
-* `observability` — events to JSONL (debug only)
-* `otel_tracing` — spans
+* `observability` — events + spans to JSONL via OTLP
 * `operations_local` — required by substrate freeze
 * `system_prompt` — the short, focused prompt
 * one submit tool — `submit_oracle_label` or `submit_rewrite`
