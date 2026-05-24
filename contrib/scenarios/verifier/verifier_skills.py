@@ -17,8 +17,7 @@ from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_SKILLS_DIR = _REPO_ROOT / "contrib" / "scenarios" / "verifier" / "skills"
+_SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 
 
 MANIFEST = ExtensionManifest(

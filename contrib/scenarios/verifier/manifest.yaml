@@ -1,12 +1,14 @@
 name: verifier
 description: >
   Fault-injection verifier. Single agent. Tools: get_injection_spec,
-  list_tables, query_sql, submit_propagation_report. Output is the
-  service-level fault-propagation graph (edges only) with SQL
-  evidence per hop. Bundled skills (methodology + per-fault-kind
-  signatures) are loaded into the system prompt for diagnostic
-  guidance. Reuses the rca scenario's DuckDB+parquet data layout via
-  AGENTM_RCA_DATA_DIR.
+  get_fault_kind_doc, list_tables, query_sql,
+  submit_propagation_report. Output is the service-level fault-
+  propagation graph (edges only) with SQL evidence per hop. The
+  per-fault-kind reference (mechanism / signatures / propagation)
+  lives in fault_kinds/<kind>.md and is fetched on demand by
+  get_fault_kind_doc — the methodology skill is the only thing
+  spliced into the system prompt. Reuses the rca scenario's
+  DuckDB+parquet data layout via AGENTM_RCA_DATA_DIR.
 
 extensions:
   - module: agentm.extensions.builtin.operations_local
@@ -15,15 +17,17 @@ extensions:
     config:
       exclude:
         - conclusion.parquet
-  - module: contrib.extensions.verifier_fault_context
-  - module: contrib.extensions.verifier_finalize
+  - local: verifier_fault_context
+  - local: verifier_fault_docs
+  - local: verifier_finalize
   - module: agentm.extensions.builtin.observability
 
-  # Skill bundle: methodology + fault-signatures. ``verifier_skills``
-  # publishes the skills/ directory via ResourcesDiscoverEvent;
-  # ``skill_loader`` reads the hook and splices SKILL.md bodies into
-  # the system prompt.
-  - module: contrib.extensions.verifier_skills
+  # Methodology skill only. ``verifier_skills`` publishes the
+  # skills/ directory via ResourcesDiscoverEvent; ``skill_loader``
+  # reads the hook and splices SKILL.md bodies into the system
+  # prompt. Per-fault docs are NOT in skills/ — they're served on
+  # demand by verifier_fault_docs.
+  - local: verifier_skills
   - module: agentm.extensions.builtin.skill_loader
     config:
       include_defaults: false
@@ -34,10 +38,12 @@ extensions:
       prompt: |
         You verify a known fault injection against rcabench parquet
         data. `get_injection_spec` returns what was injected and the
-        normal / abnormal time windows; `list_tables` and `query_sql`
-        let you read the parquets; `submit_propagation_report` ends
-        the session. Consult the verifier-methodology and
-        fault-signatures skills loaded above for guidance.
+        normal / abnormal time windows; `get_fault_kind_doc` returns
+        the per-kind reference for whatever `fault_kind` that spec
+        names; `list_tables` and `query_sql` let you read the
+        parquets; `submit_propagation_report` ends the session.
+        Consult the verifier-methodology skill loaded above for
+        guidance.
 
         Output is **service-level only**. The report has two parts:
 
