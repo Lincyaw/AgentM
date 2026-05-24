@@ -299,7 +299,8 @@ Each is one Python module with `install(api, config)` doing **one thing**. The a
 | Module | Behavior |
 |---|---|
 | `extensions.builtin.system_prompt` | `before_agent_start`: prepends `config["prompt"]` to the assembled system prompt. Single most-reused atom. |
-| `extensions.builtin.turn_reminder` | (was `system_reminder`) Re-injects `config["reminder"]` every `every_n_turns`. |
+| `extensions.builtin.loop_budget` | `install`: registers a `LoopConfig` under `LOOP_BUDGET_SERVICE` from `config["max_turns"]` / `config["max_tool_calls"]`. The session factory reads it to cap the agent loop; absent ⇒ no cap. |
+| `contrib.extensions.turn_reminder` | `before_send_to_llm`: when the loop nears its `max_turns`/`max_tool_calls` cap (read via `get_loop_config()`), appends a runway warning to the **last message's tail** — never the system prompt, to preserve prompt cache. Pairs with `loop_budget`. |
 | `extensions.builtin.micro_compact` | Compacts context near limit; emits `before_compact` / `after_compact`. |
 | `extensions.builtin.llm_compaction` | Performs LLM-driven compaction when the durable session branch exceeds the reserved-token threshold; rebuilds context from the session tree after persisting a `compaction` entry. |
 | `extensions.builtin.trajectory` | Records every event to JSONL. |
