@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from llmharness.cli import main as cli_main
 from llmharness.distill.export import (
@@ -24,11 +25,88 @@ from llmharness.distill.export import (
 )
 
 
+def _otlp_value(value: Any) -> dict[str, Any]:
+    """Wrap a Python value in the OTLP ``AnyValue`` tagged-union form.
+
+    Mirrors what ``otel_export`` writes on the live path so TraceReader
+    can unwrap the body back to its original shape.
+    """
+
+    if value is None:
+        return {"stringValue": ""}
+    if isinstance(value, bool):
+        return {"boolValue": value}
+    if isinstance(value, int):
+        return {"intValue": str(value)}
+    if isinstance(value, float):
+        return {"doubleValue": value}
+    if isinstance(value, str):
+        return {"stringValue": value}
+    if isinstance(value, dict):
+        return {
+            "kvlistValue": {
+                "values": [
+                    {"key": str(k), "value": _otlp_value(v)}
+                    for k, v in value.items()
+                ]
+            }
+        }
+    if isinstance(value, list):
+        return {"arrayValue": {"values": [_otlp_value(v) for v in value]}}
+    return {"stringValue": json.dumps(value, default=str)}
+
+
+def _otlp_message_log(entry: dict[str, Any]) -> dict[str, Any]:
+    """Wrap a SessionEntry dict as an ``agentm.message.appended`` log line.
+
+    Matches what ``MessageAppendedEvent.to_otel`` emits on the live path:
+    ``eventName`` is ``agentm.message.appended`` and the body is the
+    SessionEntry dict verbatim. TraceReader.load_messages() yields the
+    body, so the rest of the CLI keeps reading ``rec["type"]`` /
+    ``rec["payload"]`` unchanged.
+    """
+
+    return {
+        "resource": {
+            "attributes": [
+                {"key": "service.name", "value": {"stringValue": "agentm"}}
+            ]
+        },
+        "scopeLogs": [
+            {
+                "scope": {"name": "agentm", "version": "0.1.0"},
+                "logRecords": [
+                    {
+                        "timeUnixNano": "0",
+                        "observedTimeUnixNano": "0",
+                        "severityNumber": "SEVERITY_NUMBER_INFO",
+                        "severityText": "INFO",
+                        "eventName": "agentm.message.appended",
+                        "body": _otlp_value(entry),
+                    }
+                ],
+            }
+        ],
+    }
+
+
 def _write_session(path: Path, records: list[dict]) -> None:
+    """Write ``records`` as OTLP/JSON ndjson — one ResourceLogs per line.
+
+    Production code reads sessions through :class:`TraceReader`, which
+    expects OTLP wire format; bare SessionEntry dicts on disk would be
+    skipped. Records typed ``"session"`` are dropped here because the
+    live writer persists the session header as its own log record
+    (``agentm.session.header``), not as a message; tests don't exercise
+    that path.
+    """
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as h:
         for r in records:
-            h.write(json.dumps(r))
+            if r.get("type") == "session":
+                continue
+            h.write(json.dumps(_otlp_message_log(r)))
             h.write("\n")
 
 

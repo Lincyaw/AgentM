@@ -134,6 +134,43 @@ def _otlp_tool_span(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _otlp_tool_result_log(
+    tool_name: str, result_text: str
+) -> dict[str, Any]:
+    """Emit an ``agentm.tool.call.result`` log carrying ``result_text``.
+
+    The grader's binder-error detection is a substring scan over the raw
+    trace file (``_detect_sql_quoting_issue``); placing the marker text
+    inside a tool-result log record gives the scan something to find
+    without depending on any single span/log shape.
+    """
+
+    return {
+        "resource": {
+            "attributes": [
+                {"key": "service.name", "value": {"stringValue": "agentm"}}
+            ]
+        },
+        "scopeLogs": [
+            {
+                "scope": {"name": "agentm", "version": "0.1.0"},
+                "logRecords": [
+                    {
+                        "timeUnixNano": "0",
+                        "observedTimeUnixNano": "0",
+                        "severityNumber": "SEVERITY_NUMBER_INFO",
+                        "severityText": "INFO",
+                        "eventName": "agentm.tool.call.result",
+                        "body": _otlp_value(
+                            {"tool": tool_name, "text": result_text}
+                        ),
+                    }
+                ],
+            }
+        ],
+    }
+
+
 def _write_synthetic_trace(
     obs_dir: Path,
     *,
@@ -145,17 +182,14 @@ def _write_synthetic_trace(
     """Write an OTLP/JSON trace with fingerprint identity + a
     submit_final_report verdict span. The grader (now OTLP-aware) reads
     the fingerprint from log records and the verdict args from the
-    execute_tool span. ``include_binder_error`` is preserved as a no-op
-    flag — the grader's binder-error detection is a static probe on the
-    args blob, not a record-walk.
+    execute_tool span. When ``include_binder_error`` is set the fixture
+    also emits a query_sql tool-result log whose text contains the
+    canonical DuckDB ``Binder Error / Referenced table / attr`` triple
+    so ``_detect_sql_quoting_issue`` finds the SQL quoting hint.
     """
     obs_dir.mkdir(parents=True, exist_ok=True)
     trace_id = uuid.uuid4().hex
     path = obs_dir / f"{trace_id}.jsonl"
-    del include_binder_error
-    # ``time`` and ``trace_id`` retained-but-unused here so the fixture
-    # stays diff-friendly if the writer ever needs to stamp realistic
-    # timestamps or correlate via OTLP resource attributes.
     _ = (time, trace_id)
     records: list[dict[str, Any]] = [
         _otlp_log(
@@ -169,6 +203,16 @@ def _write_synthetic_trace(
                 "atoms": {},
             },
         ),
+    ]
+    if include_binder_error:
+        records.append(
+            _otlp_tool_result_log(
+                "query_sql",
+                f"task_id={task_id} Binder Error: Referenced table "
+                f'"attr" was not found in any catalog',
+            )
+        )
+    records.append(
         _otlp_tool_span(
             "submit_final_report",
             {
@@ -187,7 +231,7 @@ def _write_synthetic_trace(
                 ]
             },
         ),
-    ]
+    )
     with path.open("w", encoding="utf-8") as fh:
         for r in records:
             fh.write(json.dumps(r) + "\n")
