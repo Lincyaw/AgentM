@@ -453,6 +453,12 @@ class LlmRequestStartEvent(Event):
     system_chars: int
     model_id: str | None
     turn_id: int = 0
+    # Full system-prompt text. None means the loop chose not to persist
+    # the body — only ``system_chars`` (the length) is recorded on the
+    # ``chat`` span. Populated when ``AGENTM_TRACE_SYSTEM_PROMPT=1`` so
+    # auditors can diff what was actually sent turn-by-turn (the prompt
+    # is rebuilt each turn and may drift, which breaks prefix cache).
+    system_text: str | None = None
 
 
 @dataclass(slots=True)
@@ -1542,6 +1548,21 @@ def _llm_request_start_to_otel(
     if telemetry.obs_provider_name:
         span.set_attribute("gen_ai.provider.name", telemetry.obs_provider_name)
     telemetry.open_span(_SPAN_CHAT, str(self.turn_id), span)
+    if self.system_text is not None:
+        telemetry.emit_log(
+            "agentm.llm.system_prompt",
+            body={
+                "turn_index": self.turn_index,
+                "turn_id": self.turn_id,
+                "text": self.system_text,
+            },
+            attributes={
+                "agentm.session.id": telemetry.session_id,
+                "agentm.turn.index": self.turn_index,
+                "agentm.turn.id": self.turn_id,
+                "agentm.llm.system_chars": self.system_chars,
+            },
+        )
 
 
 LlmRequestStartEvent.to_otel = _llm_request_start_to_otel  # type: ignore[assignment]
