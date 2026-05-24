@@ -744,8 +744,25 @@ def list_extensions_cmd(
     print(f"\n{total} extension(s) shown.", file=sys.stderr)
 
 
+def _trace_subcommand() -> None:
+    """Hand-off to the ``agentm trace`` typer app (see ``cli_trace``).
+
+    Marked ``__agentm_owns_argv__`` so the main dispatcher invokes us
+    directly instead of wrapping with ``typer.run`` (which would try to
+    parse ``trace``'s args against this zero-arg shim's signature).
+    """
+
+    from agentm.cli_trace import main as trace_main
+
+    trace_main()
+
+
+_trace_subcommand.__agentm_owns_argv__ = True  # type: ignore[attr-defined]
+
+
 _BUILTIN_SUBCOMMANDS: dict[str, Any] = {
     "list-extensions": list_extensions_cmd,
+    "trace": _trace_subcommand,
 }
 
 
@@ -826,7 +843,16 @@ def main() -> None:
         sub = argv[0]
         if sub in _BUILTIN_SUBCOMMANDS:
             sys.argv = [f"{sys.argv[0]} {sub}", *argv[1:]]
-            typer.run(_BUILTIN_SUBCOMMANDS[sub])
+            target = _BUILTIN_SUBCOMMANDS[sub]
+            # Builtin subcommands come in two shapes: a single typer-decorated
+            # function (e.g. ``list_extensions_cmd``) — wrap with ``typer.run``
+            # so its options parse; or a no-arg dispatcher that owns its own
+            # ``typer.Typer()`` app (e.g. ``_trace_subcommand``) — call
+            # directly so the inner app consumes ``sys.argv``.
+            if getattr(target, "__agentm_owns_argv__", False):
+                target()
+            else:
+                typer.run(target)
             return
         if sub in external:
             target = external[sub].load()
