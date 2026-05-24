@@ -10,6 +10,7 @@ than raising; only a missing provider is fatal.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -20,7 +21,7 @@ from dotenv import load_dotenv
 
 from agentm.ai import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
 from agentm.core.abi import LoopConfig
-from agentm.core.abi.events import DiagnosticEvent, EventBus
+from agentm.core.abi.events import DiagnosticEvent, EventBus, MessagePersistedEvent
 from agentm.core.abi.session_store import SessionState, SessionStore
 from agentm.core.lib.render import final_summary
 from agentm.core.abi.events import ExtensionInstallEvent
@@ -86,11 +87,9 @@ def _print_final(
     provider: str | None = None,
     output: TextIO = sys.stdout,
 ) -> None:
+    # Body text was already streamed live via ``_attach_streaming_presenter``;
+    # only emit the summary line so we don't double-print the trajectory.
     report = final_summary(final_messages)
-    print("\n" + "=" * 60, file=output)
-    print("AGENT FINAL OUTPUT", file=output)
-    print("=" * 60, file=output)
-    print(report.text if report.text else "<no text output>", file=output)
     print("=" * 60, file=output)
     print(f"messages={report.message_count} tool_calls={report.tool_calls}", file=output)
     usage = report.usage
@@ -229,6 +228,69 @@ def _make_install_warner() -> Any:
     return _on_install
 
 
+def _attach_streaming_presenter(bus: EventBus, output: TextIO) -> None:
+    """Stream agent activity to ``output`` as the loop produces it.
+
+    Subscribes to :class:`MessagePersistedEvent` (one event per durable
+    message append in the loop) and renders:
+
+    * ``assistant`` text blocks verbatim, tool calls as ``→ name(args)``
+    * ``tool_result`` blocks as ``⇐ name: text`` (truncated to 400 chars)
+    * ``injected`` messages as ``[injected role] text``
+
+    Thinking blocks are dropped — they are noisy on terminal and the
+    provider often strips them anyway. Use ``agentm trace messages``
+    against the JSONL for the full trajectory after the fact.
+    """
+
+    def _truncate(text: str, limit: int = 400) -> str:
+        text = text.strip()
+        if len(text) <= limit:
+            return text
+        return text[:limit] + f"... <+{len(text) - limit} chars>"
+
+    def _short_args(args: Any) -> str:
+        if isinstance(args, dict):
+            parts = []
+            for k, v in args.items():
+                vs = v if isinstance(v, str) else json.dumps(v, default=str, ensure_ascii=False)
+                parts.append(f"{k}={_truncate(str(vs), 80)}")
+            return ", ".join(parts)
+        return _truncate(str(args), 160)
+
+    def _on_message(event: MessagePersistedEvent) -> None:
+        content = getattr(event.message, "content", None) or []
+        if event.source == "assistant":
+            for block in content:
+                btype = getattr(block, "type", None)
+                if btype == "text":
+                    text = getattr(block, "text", "") or ""
+                    if text.strip():
+                        print(text, file=output, flush=True)
+                        print(file=output, flush=True)
+                elif btype == "tool_call":
+                    name = getattr(block, "name", "?")
+                    args = getattr(block, "input", None) or getattr(block, "arguments", None)
+                    print(f"→ {name}({_short_args(args)})", file=output, flush=True)
+        elif event.source == "tool_result":
+            for block in content:
+                if getattr(block, "type", None) != "tool_result":
+                    continue
+                sub = getattr(block, "content", None) or []
+                text = "".join(getattr(c, "text", "") or "" for c in sub if getattr(c, "type", None) == "text")
+                is_error = getattr(block, "is_error", False)
+                prefix = "⇐ ERROR" if is_error else "⇐"
+                print(f"  {prefix} {_truncate(text)}", file=output, flush=True)
+            print(file=output, flush=True)
+        elif event.source == "injected":
+            role = getattr(event.message, "role", "?")
+            for block in content:
+                if getattr(block, "type", None) == "text":
+                    print(f"[injected:{role}] {_truncate(getattr(block, 'text', ''))}", file=output, flush=True)
+
+    bus.on(MessagePersistedEvent.CHANNEL, _on_message)
+
+
 def _attach_default_diagnostics(bus: EventBus) -> dict[str, bool]:
     state = {"error_seen": False}
 
@@ -335,6 +397,8 @@ async def run(
 
     bus = EventBus()
     diagnostic_state = _attach_default_diagnostics(bus)
+    if not quiet:
+        _attach_streaming_presenter(bus, output)
 
     # Build an explicit loop_config only when the user actually passed a cap;
     # otherwise leave it None so the scenario's ``loop_budget`` atom (or the
