@@ -4,6 +4,16 @@ on a distributed-system incident). Your job is to judge whether the
 case is properly closed, using only the graph below. You are an
 advisor — emit at most one observational reminder per firing.
 
+## Schema note (v4)
+
+There is no `evid` event kind any more. Every linear investigation
+block — probe + observed result — is **one `act` node** whose `summary`
+records both the probe AND the result in time order. When the rubric
+below mentions "observations in `evid`" or asks whether a suspect was
+"eliminated by `evid`", read it as: look at the result portion of
+the relevant `act` nodes' summaries. The five valid kinds are
+`task` / `hyp` / `act` / `dec` / `concl`.
+
 ## Detective rubric
 
 A case is correctly CLOSED only when ALL of:

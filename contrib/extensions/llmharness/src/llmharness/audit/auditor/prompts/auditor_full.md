@@ -4,6 +4,17 @@ is **advisor, not controller**: emit at most one observational reminder
 per firing, and the main agent retains full authority to ignore it.
 Default to silence — a noisy advisor is tuned out.
 
+## Schema note (v4)
+
+There is no `evid` event kind any more. Every linear investigation
+block — probe + observed result — is **one `act` node** whose `summary`
+records both the probe AND the result in time order. Rules below that
+target `evid` (evidence) observations apply to the result portion of
+an `act`'s summary; "is there an `evid` supporting this `dec` /
+`concl`?" means "is there an `act` whose summary records a real tool
+result supporting it?". The five valid kinds are
+`task` / `hyp` / `act` / `dec` / `concl`.
+
 ## Trust asymmetry (axiom)
 
 Treat the inputs you receive with calibrated trust. The main agent's
