@@ -250,6 +250,11 @@ async def test_writer_emits_invoke_agent_chat_execute_tool_spans(
         BeforeAgentStartEvent(messages=[], system="sys"),
     )
 
+    # TurnStart -> open agentm.turn span (parent of chat / execute_tool)
+    await api.events.emit(
+        TurnStartEvent.CHANNEL, TurnStartEvent(turn_index=0, turn_id=42)
+    )
+
     # LlmRequestStart -> open chat span
     await api.events.emit(
         LlmRequestStartEvent.CHANNEL,
@@ -302,6 +307,11 @@ async def test_writer_emits_invoke_agent_chat_execute_tool_spans(
         timestamp=0.0,
         stop_reason="end_turn",
     )
+    # TurnEnd -> close the agentm.turn span before AgentEnd closes invoke_agent
+    await api.events.emit(
+        TurnEndEvent.CHANNEL,
+        TurnEndEvent(turn_index=0, turn_id=42, message=msg),
+    )
     await api.events.emit(
         AgentEndEvent.CHANNEL, AgentEndEvent(messages=[msg], cause=ModelEndTurn())
     )
@@ -317,10 +327,12 @@ async def test_writer_emits_invoke_agent_chat_execute_tool_spans(
     chat_spans = [s for s in spans if s.get("name", "").startswith("chat ")]
     invoke_spans = [s for s in spans if s.get("name", "").startswith("invoke_agent ")]
     tool_spans = [s for s in spans if s.get("name", "").startswith("execute_tool ")]
+    turn_spans = [s for s in spans if s.get("name", "") == "agentm.turn"]
 
     assert len(chat_spans) == 1, [s["name"] for s in spans]
     assert len(invoke_spans) == 1
     assert len(tool_spans) == 1
+    assert len(turn_spans) == 1
 
     chat_attrs = _span_attrs(chat_spans[0])
     assert chat_attrs["gen_ai.operation.name"] == "chat"
@@ -331,11 +343,26 @@ async def test_writer_emits_invoke_agent_chat_execute_tool_spans(
     assert invoke_attrs["gen_ai.operation.name"] == "invoke_agent"
     assert invoke_attrs["gen_ai.agent.name"] == "unit_semconv"
     assert invoke_attrs["gen_ai.conversation.id"] == api.session_id
+    # Session-tree linkage attributes must live on the invoke_agent span so
+    # span-only consumers (ClickHouse-backed UIs) can group sessions without
+    # joining the agentm.session.start log record. obs_root_session_id and
+    # obs_parent_session_id default to "" on a top-level session — assert
+    # both keys are present even when their values are empty strings.
+    assert "agentm.session.root_id" in invoke_attrs
+    assert "agentm.session.parent_id" in invoke_attrs
 
     tool_attrs = _span_attrs(tool_spans[0])
     assert tool_attrs["gen_ai.operation.name"] == "execute_tool"
     assert tool_attrs["gen_ai.tool.name"] == "read"
     assert tool_attrs["gen_ai.tool.call.id"] == "tc-1"
+
+    # Parent-child: agentm.turn is child of invoke_agent; chat + execute_tool
+    # are children of agentm.turn (legacy double-emission would have made
+    # them siblings of invoke_agent).
+    turn_span = turn_spans[0]
+    assert turn_span.get("parentSpanId") == invoke_spans[0].get("spanId")
+    assert chat_spans[0].get("parentSpanId") == turn_span.get("spanId")
+    assert tool_spans[0].get("parentSpanId") == turn_span.get("spanId")
 
 
 @pytest.mark.asyncio

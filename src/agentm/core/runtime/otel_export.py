@@ -579,6 +579,12 @@ class SessionTelemetry:
             "current_tool_errors": 0,
         }
     )
+    # Live ``agentm.turn`` span for the currently open turn, used as the
+    # parent context for ``chat`` and ``execute_tool`` child spans so the
+    # span tree groups per turn under ``invoke_agent``. Set by
+    # :meth:`TurnStartEvent.to_otel`, cleared by :meth:`TurnEndEvent.to_otel`.
+    # ``None`` between turns or when no turn lifecycle has fired.
+    current_turn_span: Span | None = None
     _shutdown: bool = False
 
     # --- Lifecycle-pairing helper -----------------------------------------
