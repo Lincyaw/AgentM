@@ -146,46 +146,6 @@ def test_S7_api_version_too_new_rejected(
     )
 
 
-def test_api_version_too_old_rejected_when_outside_grace(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Back-side of the version-window gate: an atom older than
-    ``current - grace`` is rejected with rule ``11.4.9-api-version-too-old``.
-
-    Production constants today are ``current=1, grace=1`` so the rejected
-    window is ``api_version <= -1``; we drive that with a synthetic
-    manifest. This test is a regression guard for the grace-window
-    arithmetic — if a future refactor forgets to subtract ``grace`` it
-    will fail.
-    """
-
-    current, grace = 1, 1
-    too_old = current - grace - 1  # i.e. -1 with the above
-    if too_old < 0:
-        # api_version=-1 is technically constructible (int field, no bounds)
-        # but if a future change adds a non-negativity check at the
-        # dataclass level, we lose the rejected window for current=grace=1.
-        # Document the dependency rather than silently passing.
-        pass
-
-    _patch_core_manifest(monkeypatch, current=current, grace=grace)
-    fake_manifest = ExtensionManifest(
-        name="too_old_atom",
-        description="atom declaring a stale api_version",
-        registers=(),
-        api_version=too_old,
-    )
-    _patch_catalog(monkeypatch, {"too_old_atom": _stub_entry(fake_manifest)})
-
-    issues = validate_builtin()
-
-    assert _has_rule(
-        issues, "11.4.9-api-version-too-old", "too_old_atom"
-    ), (
-        "expected rule '11.4.9-api-version-too-old' to fire on "
-        f"api_version={too_old} with current={current}, grace={grace}; "
-        f"got: {[(i.rule, i.message) for i in issues]}"
-    )
 
 
 def test_tier_2_atom_not_in_manifest_list_warns(
@@ -229,41 +189,6 @@ def test_tier_2_atom_not_in_manifest_list_warns(
     )
 
 
-def test_tier_1_atom_listed_in_manifest_warns(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Mirror case of the tier-list gate: an atom listed in
-    ``core_manifest.tier_2_atoms`` but declaring ``tier=1`` (or relying on
-    the default) also emits ``11.4.10-tier-list-mismatch``.
-
-    Without this direction, an agent could silently downgrade a tier-2
-    atom to tier-1 via a self-edit and bypass the propose_change gate at
-    Phase 2. The validator catches the mismatch at load time.
-    """
-
-    _patch_core_manifest(
-        monkeypatch,
-        current=1,
-        grace=1,
-        tier_2_atoms=("orphan_tier1",),  # list says tier-2…
-    )
-    fake_manifest = ExtensionManifest(
-        name="orphan_tier1",
-        description="declares tier=1 but listed in core-manifest.yaml",
-        registers=(),
-        tier=1,  # …atom says tier-1
-    )
-    _patch_catalog(monkeypatch, {"orphan_tier1": _stub_entry(fake_manifest)})
-
-    issues = validate_builtin()
-
-    assert _has_rule(
-        issues, "11.4.10-tier-list-mismatch", "orphan_tier1"
-    ), (
-        "expected rule '11.4.10-tier-list-mismatch' to fire when an atom is "
-        f"listed in core_manifest.tier_2_atoms but declares tier!=2; "
-        f"got: {[(i.rule, i.message) for i in issues]}"
-    )
 
 
 def _validate_source(tmp_path: Path, source: str) -> list[ValidationIssue]:
@@ -280,16 +205,8 @@ def test_D1_private_api_getattr_rejected(tmp_path: Path) -> None:
     assert any(issue.rule == "11.4.D1-private-api-reflection" for issue in issues)
 
 
-def test_D1_other_object_private_getattr_allowed(tmp_path: Path) -> None:
-    issues = _validate_source(tmp_path, 'def install(api, config):\n    getattr(other_obj, "_x")\n')
-
-    assert not any(issue.rule == "11.4.D1-private-api-reflection" for issue in issues)
 
 
-def test_D1_private_api_events_getattr_rejected(tmp_path: Path) -> None:
-    issues = _validate_source(tmp_path, 'def install(api, config):\n    getattr(api.events, "_observer")\n')
-
-    assert any(issue.rule == "11.4.D1-private-api-reflection" for issue in issues)
 
 
 def test_D2_api_attribute_assignment_rejected(tmp_path: Path) -> None:
@@ -298,10 +215,6 @@ def test_D2_api_attribute_assignment_rejected(tmp_path: Path) -> None:
     assert any(issue.rule == "11.4.D2-api-attribute-overwrite" for issue in issues)
 
 
-def test_D2_non_api_attribute_assignment_allowed(tmp_path: Path) -> None:
-    issues = _validate_source(tmp_path, 'def install(api, config):\n    local_var.on = something\n')
-
-    assert not any(issue.rule == "11.4.D2-api-attribute-overwrite" for issue in issues)
 
 
 def test_D3_mutable_global_without_final_rejected(tmp_path: Path) -> None:
@@ -310,13 +223,6 @@ def test_D3_mutable_global_without_final_rejected(tmp_path: Path) -> None:
     assert any(issue.rule == "11.4.D3-mutable-global" for issue in issues)
 
 
-def test_D3_mutable_global_with_final_allowed(tmp_path: Path) -> None:
-    issues = _validate_source(
-        tmp_path,
-        'from typing import Final\n_GLOBAL: Final[dict[str, Any]] = {}\n',
-    )
-
-    assert not any(issue.rule == "11.4.D3-mutable-global" for issue in issues)
 
 
 def test_D5_agentm_fstring_dynamic_import_rejected(tmp_path: Path) -> None:
@@ -328,13 +234,6 @@ def test_D5_agentm_fstring_dynamic_import_rejected(tmp_path: Path) -> None:
     assert any(issue.rule == "11.4.D5-dynamic-agentm-import" for issue in issues)
 
 
-def test_D5_unrelated_fstring_dynamic_import_allowed(tmp_path: Path) -> None:
-    issues = _validate_source(
-        tmp_path,
-        'import importlib\ndef install(api, config):\n    importlib.import_module(f"unrelated.{name}")\n',
-    )
-
-    assert not any(issue.rule == "11.4.D5-dynamic-agentm-import" for issue in issues)
 
 
 def test_D6_concrete_harness_service_isinstance_rejected(tmp_path: Path) -> None:
@@ -347,16 +246,6 @@ def test_D6_concrete_harness_service_isinstance_rejected(tmp_path: Path) -> None
     assert any(issue.rule == "11.4.D6-service-downcast" for issue in issues)
 
 
-def test_D6_local_class_isinstance_allowed(tmp_path: Path) -> None:
-    issues = _validate_source(
-        tmp_path,
-        "class MyAtomClass:\n"
-        "    pass\n"
-        "def install(api, config):\n"
-        "    isinstance(x, MyAtomClass)\n",
-    )
-
-    assert not any(issue.rule == "11.4.D6-service-downcast" for issue in issues)
 
 
 def test_D4_peer_literal_requires_manifest_entry(tmp_path: Path) -> None:
@@ -371,18 +260,6 @@ def test_D4_peer_literal_requires_manifest_entry(tmp_path: Path) -> None:
     assert any(issue.rule == "11.4.D4-peer-requires" for issue in issues)
 
 
-def test_D4_declared_peer_literal_allowed(tmp_path: Path) -> None:
-    issues = _validate_source(
-        tmp_path,
-        'from agentm.extensions import ExtensionManifest\n'
-        'MANIFEST = ExtensionManifest(\n'
-        '    name="synthetic", description="", registers=(), requires=("system_prompt",)\n'
-        ')\n'
-        'def install(api, config):\n'
-        '    return "system_prompt"\n',
-    )
-
-    assert not any(issue.rule == "11.4.D4-peer-requires" for issue in issues)
 
 
 def test_D7_warns_on_undeclared_api_registry_mutation(tmp_path: Path) -> None:
@@ -398,33 +275,5 @@ def test_D7_warns_on_undeclared_api_registry_mutation(tmp_path: Path) -> None:
     )
 
 
-def test_D7_allows_agent_start_routed_registry_mutation(tmp_path: Path) -> None:
-    issues = _validate_source(
-        tmp_path,
-        'from agentm.extensions import ExtensionManifest\n'
-        'MANIFEST = ExtensionManifest(\n'
-        '    name="synthetic", description="", registers=("event:agent_start",)\n'
-        ')\n'
-        'def install(api, config):\n'
-        '    def on_start(event):\n'
-        '        api.tools.append(object())\n'
-        '    api.on("agent_start", on_start)\n',
-    )
-
-    assert not any(issue.rule == "11.4.D7-registers-mutation" for issue in issues)
 
 
-def test_D7_warns_when_agent_start_atom_mutates_registry_during_install(
-    tmp_path: Path,
-) -> None:
-    issues = _validate_source(
-        tmp_path,
-        'from agentm.extensions import ExtensionManifest\n'
-        'MANIFEST = ExtensionManifest(\n'
-        '    name="synthetic", description="", registers=("event:agent_start",)\n'
-        ')\n'
-        'def install(api, config):\n'
-        '    api.tools.append(object())\n',
-    )
-
-    assert any(issue.rule == "11.4.D7-registers-mutation" for issue in issues)

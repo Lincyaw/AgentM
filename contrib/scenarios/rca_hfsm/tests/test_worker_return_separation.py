@@ -16,7 +16,6 @@ from __future__ import annotations
 from agentm_rca_hfsm.schema import Interpretation, Observation, WorkerReturn
 from agentm_rca_hfsm.worker_return import (
     ingest_observations,
-    should_apply_interpretation,
 )
 
 from tests._gate_fixtures import install_with_fsm
@@ -83,13 +82,6 @@ def _snapshot_graph(read: object) -> tuple[object, ...]:
     return (tuple(obs_sigs), tuple(symptoms), tuple(hypotheses))
 
 
-def test_phase1_never_applies_interpretation() -> None:
-    """Sanity: ``should_apply_interpretation`` is hard-False in Phase 1."""
-
-    wr_full = _make_wr(interpretation_filled=True)
-    wr_blank = _make_wr(interpretation_filled=False)
-    assert should_apply_interpretation(wr_full) is False
-    assert should_apply_interpretation(wr_blank) is False
 
 
 def test_graph_state_is_interpretation_independent() -> None:

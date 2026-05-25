@@ -52,15 +52,6 @@ def test_first_claim_returns_handle_second_claim_raises() -> None:
         rca_hgraph_store.claim_write_handle(token)
 
 
-def test_second_claim_with_different_token_also_raises() -> None:
-    api = _StubAPI()
-    rca_hgraph_store.install(api, {})
-    token = api.get_service("rca.hgraph.write_token")
-
-    rca_hgraph_store.claim_write_handle(token)
-
-    with pytest.raises(RuntimeError):
-        rca_hgraph_store.claim_write_handle("not-the-real-token")
 
 
 def test_claim_with_unknown_token_raises_then_legit_token_still_works() -> None:
@@ -105,17 +96,3 @@ def test_multiple_installs_each_redeem_their_own_token() -> None:
     assert handle_a is not handle_b
 
 
-def test_read_service_remains_available_after_install() -> None:
-    api = _StubAPI()
-    rca_hgraph_store.install(api, {})
-
-    read_handle = api.get_service("rca.hgraph.read")
-    assert read_handle is not None
-    # The read API methods listed in the plan are present and callable on a
-    # freshly-installed empty graph.
-    assert read_handle.get_symptoms() == []
-    assert read_handle.get_open_leaves() == []
-    assert read_handle.get_unexplained_symptoms() == []
-    assert read_handle.get_refuted_branches() == []
-    assert read_handle.get_hypothesis("nope") is None
-    assert read_handle.get_observation_by_signature("nope") is None

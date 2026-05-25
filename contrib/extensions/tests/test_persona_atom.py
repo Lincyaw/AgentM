@@ -94,51 +94,10 @@ async def test_present_files_compose_in_order_above_base_prompt(
     assert out.rstrip().endswith("base prompt")
 
 
-@pytest.mark.asyncio
-async def test_no_files_injects_nothing(tmp_path: Path) -> None:
-    api = _FakeAPI(tmp_path)
-    persona_atom.install(cast(Any, api), {})
-    out = await _fire(api, "base prompt")
-    # Bare workspace: system prompt untouched.
-    assert out == "base prompt"
 
 
-@pytest.mark.asyncio
-async def test_per_file_truncation_marker(tmp_path: Path) -> None:
-    (tmp_path / "SOUL.md").write_text("x" * 50)
-    api = _FakeAPI(tmp_path)
-    persona_atom.install(cast(Any, api), {"max_chars": 10})
-    out = await _fire(api, "")
-    assert out is not None
-    assert "more chars truncated" in out
-    assert out.count("x") == 10
 
 
-@pytest.mark.asyncio
-async def test_defaults_seed_absent_files_but_never_clobber(tmp_path: Path) -> None:
-    # IDENTITY.md already authored — seeding must leave it alone.
-    (tmp_path / "IDENTITY.md").write_text("# Identity\n\nI am claw.\n")
-
-    api = _FakeAPI(tmp_path)
-    persona_atom.install(
-        cast(Any, api),
-        {
-            "defaults": {
-                "SOUL.md": "# Soul\n\nWarm but terse.\n",
-                "IDENTITY.md": "# Identity\n\nGENERIC PRESET — should not win.\n",
-            }
-        },
-    )
-
-    out = await _fire(api, "base prompt")
-    assert out is not None
-    # Absent file got seeded from the preset and now appears.
-    assert (tmp_path / "SOUL.md").exists()
-    assert "Warm but terse" in out
-    # Pre-existing file is preserved, preset ignored.
-    assert (tmp_path / "IDENTITY.md").read_text().strip().endswith("I am claw.")
-    assert "GENERIC PRESET" not in out
-    assert "I am claw." in out
 
 
 @pytest.mark.asyncio

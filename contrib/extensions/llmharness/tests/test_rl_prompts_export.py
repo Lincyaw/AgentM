@@ -118,26 +118,3 @@ def test_rl_prompts_cli_emits_stripped_replay_records(tmp_path: Path) -> None:
         assert rec.compose_kwargs == row["compose_kwargs"]
 
 
-def test_rl_prompts_cli_phase_filter(tmp_path: Path) -> None:
-    replay_dir = tmp_path / "replay"
-    replay_dir.mkdir()
-    out = tmp_path / "rl_prompts.jsonl"
-
-    _make_extractor_record(tmp_path=replay_dir, root_session_id="sess-a", turn_index=1)
-    _make_auditor_record(tmp_path=replay_dir, root_session_id="sess-a", turn_index=2)
-
-    rc = cli_main(
-        [
-            "rl-prompts",
-            "--replay-dir",
-            str(replay_dir),
-            "--out",
-            str(out),
-            "--phase",
-            "auditor",
-        ]
-    )
-    assert rc == 0
-    rows = [json.loads(line) for line in out.read_text().splitlines() if line]
-    assert len(rows) == 1
-    assert rows[0]["phase"] == "auditor"

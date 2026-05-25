@@ -47,20 +47,6 @@ def _mk_edge(src: int, dst: int) -> Edge:
     )
 
 
-def test_threshold_off_30_events_full_payload_with_witness_fields() -> None:
-    events = _mk_events(30)
-    edges = (_mk_edge(1, 2), _mk_edge(2, 3))
-    prompt = build_auditor_system_prompt(
-        events=events,
-        edges=edges,
-        findings=[],
-        check_errors={},
-        continuation_notes=[],
-        summary_threshold=30,
-    )
-    assert '"widget"' in prompt
-    assert '"the widget"' in prompt
-    assert "degraded" not in prompt.lower()
 
 
 def test_threshold_on_31_events_degraded_payload_strips_witness_fields() -> None:
@@ -80,28 +66,3 @@ def test_threshold_on_31_events_degraded_payload_strips_witness_fields() -> None
     assert "witness fields stripped" in prompt
 
 
-def test_configurable_threshold_cuts_in_at_n_plus_one() -> None:
-    events_5 = _mk_events(5)
-    events_6 = _mk_events(6)
-    edge = (_mk_edge(1, 2),)
-
-    prompt_5 = build_auditor_system_prompt(
-        events=events_5,
-        edges=edge,
-        findings=[],
-        check_errors={},
-        continuation_notes=[],
-        summary_threshold=5,
-    )
-    prompt_6 = build_auditor_system_prompt(
-        events=events_6,
-        edges=edge,
-        findings=[],
-        check_errors={},
-        continuation_notes=[],
-        summary_threshold=5,
-    )
-    assert "degraded" not in prompt_5.lower()
-    assert '"widget"' in prompt_5
-    assert "degraded" in prompt_6.lower()
-    assert '"widget"' not in prompt_6

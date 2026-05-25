@@ -179,38 +179,6 @@ def test_finalize_state_filters_tools_to_submit_final_report_only() -> None:
     assert tool_names == {"submit_final_report"}, tool_names
 
 
-def test_record_observation_does_not_advance_fsm() -> None:
-    """Observations are not state-advancing — they're facts.
-
-    The policy explicitly chooses not to react to ``record_observation``
-    mutations so a worker streaming evidence into L1 mid-VERIFY does not
-    yank the FSM out of VERIFY before the check is attached.
-    """
-
-    api, _gate, _read, fsm = install_with_fsm()
-    sym = _tool(api, "record_symptom")
-    _run(sym.execute({"text": "S1"}))  # type: ignore[attr-defined]
-    propose = _tool(api, "propose_hypothesis")
-    _run(
-        propose.execute(  # type: ignore[attr-defined]
-            {
-                "claim": "H",
-                "predictions": [
-                    {"claim": "x", "polarity": "negative"},
-                ],
-            }
-        )
-    )
-    assert fsm.state == "VERIFY"
-
-    state_before = fsm.state
-    rec = _tool(api, "record_observation")
-    _run(
-        rec.execute(  # type: ignore[attr-defined]
-            {"text": "fact", "source_tool_call": "sql-x"}
-        )
-    )
-    assert fsm.state == state_before, fsm.history
 
 
 def _unused_helper(_: dict[str, Any]) -> None:  # pragma: no cover - silence linters

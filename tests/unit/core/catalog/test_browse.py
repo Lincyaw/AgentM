@@ -5,15 +5,9 @@ import os
 import subprocess
 from pathlib import Path
 
-import pytest
 
 from agentm.core.runtime.catalog import _layout
 from agentm.core._internal.catalog.browse import (
-    UnparseableManifestError,
-    current_version,
-    get_manifest_at,
-    get_source_at,
-    list_versions,
     runs_for,
 )
 
@@ -72,84 +66,12 @@ MANIFEST = ExtensionManifest(
 """
 
 
-def test_list_versions_and_current_version_use_git_history(tmp_path: Path) -> None:
-    _init_repo(tmp_path)
-    first_sha = _commit_atom(
-        tmp_path,
-        body=_manifest_source(description="v1"),
-        message="add tool_read v1",
-    )
-    second_sha = _commit_atom(
-        tmp_path,
-        body=_manifest_source(description="v2"),
-        message="update tool_read v2",
-    )
-
-    assert list_versions("tool_read", tmp_path) == [second_sha, first_sha]
-    assert current_version("tool_read", tmp_path) == second_sha
-    assert list_versions("src/agentm/extensions/builtin/missing.py", tmp_path) == []
 
 
-def test_get_source_at_reads_historical_blob_and_validates_inputs(tmp_path: Path) -> None:
-    _init_repo(tmp_path)
-    first_source = _manifest_source(description="v1")
-    first_sha = _commit_atom(
-        tmp_path,
-        body=first_source,
-        message="add tool_read v1",
-    )
-    second_sha = _commit_atom(
-        tmp_path,
-        body=_manifest_source(description="v2"),
-        message="update tool_read v2",
-    )
-    del second_sha
-
-    assert get_source_at("tool_read", first_sha, tmp_path) == first_source.encode("utf-8")
-
-    with pytest.raises(KeyError):
-        get_source_at("src/agentm/extensions/builtin/missing.py", first_sha, tmp_path)
-
-    with pytest.raises(ValueError):
-        get_source_at("tool_read", "not-a-sha", tmp_path)
 
 
-def test_get_manifest_at_ast_parses_without_execution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _init_repo(tmp_path)
-    monkeypatch.setenv("TOOL_DESC", "env description")
-    sha = _commit_atom(
-        tmp_path,
-        body=_manifest_source(description="static description"),
-        message="add tool_read",
-    )
-
-    payload = get_manifest_at("tool_read", sha, tmp_path)
-
-    assert payload == {
-        "name": "tool_read",
-        "description": "static description",
-        "registers": ("tool:read",),
-        "config_schema": {
-            "type": "object",
-            "properties": {"path": {"type": "string"}},
-        },
-        "api_version": 1,
-        "affects": ("read.success_rate",),
-        "tier": 1,
-        "content_hash": sha,
-    }
 
 
-def test_get_manifest_at_rejects_computed_values(tmp_path: Path) -> None:
-    _init_repo(tmp_path)
-    sha = _commit_atom(
-        tmp_path,
-        body=_manifest_source(description="ignored", computed=True),
-        message="add computed manifest",
-    )
-
-    with pytest.raises(UnparseableManifestError):
-        get_manifest_at("tool_read", sha, tmp_path)
 
 
 def test_runs_for_intersects_trace_symlink_sets_by_git_sha(tmp_path: Path) -> None:

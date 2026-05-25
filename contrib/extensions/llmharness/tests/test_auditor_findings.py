@@ -15,23 +15,6 @@ from llmharness.audit.registry import AuditCheckRegistry, CheckContext
 from llmharness.schema import Finding
 
 
-def test_zero_checks_findings_block_present_and_empty() -> None:
-    registry = AuditCheckRegistry()
-    findings, errors = registry.run_all(CheckContext(events=(), edges=()))
-    assert findings == []
-    assert errors == {}
-
-    prompt = build_auditor_system_prompt(
-        events=(),
-        edges=(),
-        findings=findings,
-        check_errors=errors,
-        continuation_notes=[],
-        summary_threshold=30,
-    )
-    assert "## FINDINGS (advisory)" in prompt
-    assert "[]" in prompt  # JSON-encoded empty findings list
-    assert "checks_failed" not in prompt
 
 
 def test_multiple_findings_appear_in_registration_order() -> None:

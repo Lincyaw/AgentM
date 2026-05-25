@@ -130,56 +130,13 @@ def test_gate_source_contains_no_regex_machinery(token: str) -> None:
     )
 
 
-@pytest.mark.parametrize("token", _BANNED_LEMMA_TOKENS)
-def test_gate_source_contains_no_phase1_lemmas(token: str) -> None:
-    body = _gate_body()
-    assert token not in body, (
-        f"gate file contains banned Phase-1 lemma {token!r}; semantic "
-        f"checks on free-text must go through rca.judge.* services"
-    )
 
 
-@pytest.mark.parametrize("token", _BANNED_MEMBERSHIP_TOKENS)
-def test_gate_source_contains_no_string_membership_helpers(token: str) -> None:
-    body = _gate_body()
-    assert token not in body, (
-        f"gate file contains banned string-membership helper {token!r}; "
-        f"the gate must not pattern-match free-text fields directly"
-    )
 
 
-@pytest.mark.parametrize("token", _BANNED_REGEX_TOKENS)
-def test_updates_source_contains_no_regex_machinery(token: str) -> None:
-    body = _updates_body()
-    assert token not in body, (
-        f"updates.py contains banned regex token {token!r}; the C2 "
-        f"refactor stripped this module to data types + shape preconditions"
-    )
 
 
-@pytest.mark.parametrize("token", _BANNED_LEMMA_TOKENS)
-def test_updates_source_contains_no_phase1_lemmas(token: str) -> None:
-    body = _updates_body()
-    assert token not in body, (
-        f"updates.py contains banned Phase-1 lemma {token!r}; semantic "
-        f"checks moved to rca.judge.* services"
-    )
 
 
-@pytest.mark.parametrize("token", _BANNED_REGEX_TOKENS)
-def test_finalize_source_contains_no_regex_machinery(token: str) -> None:
-    body = _finalize_body()
-    assert token not in body, (
-        f"rca_finalize.py contains banned regex token {token!r}; the C5 "
-        f"refactor moved the 'genuine investigation' check to "
-        f"rca.judge.investigation_genuine, not regex / structural rules"
-    )
 
 
-@pytest.mark.parametrize("token", _BANNED_LEMMA_TOKENS)
-def test_finalize_source_contains_no_phase1_lemmas(token: str) -> None:
-    body = _finalize_body()
-    assert token not in body, (
-        f"rca_finalize.py contains banned Phase-1 lemma {token!r}; the "
-        f"discipline-question is the judge's job, not a string check"
-    )

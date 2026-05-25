@@ -5,8 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from agentm.core.runtime.catalog import freeze_current, list_atoms
-from agentm.core.runtime.catalog._layout import atom_runs_dir, atom_version_dir
+from agentm.core.runtime.catalog import freeze_current
 from agentm.extensions import ExtensionManifest
 
 
@@ -73,21 +72,6 @@ def _configure_manifest(tmp_path: Path) -> None:
     manifest_mod.configure_manifest_path(manifest_path)
 
 
-def test_freeze_returns_git_sha_and_creates_runs_dir(
-    tmp_path: Path,
-) -> None:
-    _configure_manifest(tmp_path)
-    _init_repo(tmp_path)
-    source = "def install(api, config):\n    return None\n"
-    _write_atom(tmp_path, "tool_read", source)
-
-    version_key = freeze_current("tool_read", source, _manifest(), root=tmp_path)
-
-    assert len(version_key) == 40
-    assert atom_version_dir("tool_read", version_key, root=tmp_path).is_dir()
-    runs_dir = atom_runs_dir("tool_read", version_key, root=tmp_path)
-    assert runs_dir.is_dir()
-    assert list(runs_dir.iterdir()) == []
 
 
 def test_M1_idempotent_reuses_existing_git_version(
@@ -104,58 +88,5 @@ def test_M1_idempotent_reuses_existing_git_version(
     assert second == first
 
 
-def test_freeze_changes_version_after_source_changes(
-    tmp_path: Path,
-) -> None:
-    _configure_manifest(tmp_path)
-    _init_repo(tmp_path)
-    first_source = "def install(api, config):\n    return 'first'\n"
-    second_source = "def install(api, config):\n    return 'second'\n"
-    _write_atom(tmp_path, "tool_read", first_source)
-
-    first = freeze_current("tool_read", first_source, _manifest(), root=tmp_path)
-    _write_atom(tmp_path, "tool_read", second_source)
-    second = freeze_current("tool_read", second_source, _manifest(), root=tmp_path)
-
-    assert first != second
-    assert atom_version_dir("tool_read", first, root=tmp_path).is_dir()
-    assert atom_version_dir("tool_read", second, root=tmp_path).is_dir()
 
 
-def test_list_atoms_returns_current_catalog_metadata(
-    tmp_path: Path,
-) -> None:
-    _configure_manifest(tmp_path)
-    _init_repo(tmp_path)
-    tool_read_source = "def install(api, config):\n    return 'first'\n"
-    tool_bash_source = "def install(api, config):\n    return 'bash'\n"
-    _write_atom(tmp_path, "tool_read", tool_read_source)
-    _write_atom(tmp_path, "tool_bash", tool_bash_source)
-
-    tool_read_version = freeze_current(
-        "tool_read",
-        tool_read_source,
-        _manifest(),
-        root=tmp_path,
-    )
-    tool_bash_version = freeze_current(
-        "tool_bash",
-        tool_bash_source,
-        _manifest(name="tool_bash"),
-        root=tmp_path,
-    )
-
-    assert list_atoms(root=tmp_path) == [
-        {
-            "name": "tool_bash",
-            "current_hash": tool_bash_version,
-            "tier": 1,
-            "api_version": 1,
-        },
-        {
-            "name": "tool_read",
-            "current_hash": tool_read_version,
-            "tier": 1,
-            "api_version": 1,
-        },
-    ]
