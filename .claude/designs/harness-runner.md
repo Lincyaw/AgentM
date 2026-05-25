@@ -24,7 +24,7 @@ of "drive the audit pipeline over a trajectory":
 |---|---|---|---|---|
 | 1 | `adapters/agentm.py::_drain_extractor` + `_drain_auditor` | `api.session.get_branch()` (live session log) | `api.spawn_child_session` | `api.session.append_entry` |
 | 2 | `replay/runner.py::replay_extractor_record` / `replay_auditor_record` | a single recorded `ReplayRecord` | `tools.engine.run_phase_standalone` (top-level session) | nothing |
-| 3 | `replay/chained_fork.py::run_chained_fork_experiment` (was `replay/strict_ab.py::run_offline_auditor_over_control` pre-2026-05-24) | re-runs the offline pipeline over each segment's trajectory | `StandaloneChildRunner` (via `replay_pipeline_over_trajectory`) | `InMemorySink` |
+| 3 | `replay/fork_tree.py::run_fork_tree_experiment` (was `replay/chained_fork.py` linear chain pre-2026-05-25; `replay/strict_ab.py::run_offline_auditor_over_control` pre-2026-05-24) | re-runs the offline pipeline over each tree node's trajectory | `StandaloneChildRunner` (via `replay_pipeline_over_trajectory`) | `InMemorySink` |
 
 The duplication has three concrete costs:
 
@@ -343,65 +343,98 @@ async def replay_pipeline_over_trajectory(
 
 The (deleted) `run_offline_auditor_over_control` and the
 no-cumulative-threading behaviour of `chain_replay` both collapse into
-this single function; the `chained_fork` driver builds N-segment
-experiments on top by calling it once per segment with the prior
-segment's `state` threaded back in via `seed_cumulative`.
+this single function; the `fork_tree` driver builds the counterfactual
+tree on top by calling it once per node, threading the parent node's
+state into each child via `seed_cumulative`.
 
-## 3. End-to-end pipeline (the user-facing goal)
+## 3. End-to-end pipeline (the user-facing goal): fork tree
 
-The motivation for the refactor is being able to run, for each case, a
-chained-fork pipeline of the form **control segment → offline
-extract+audit → seed reminder, fork → offline extract+audit → ...** for
-N segments, all under the same scenario:
+A *fork* is a parallel-universe split: at every turn where the auditor
+surfaces a reminder, the trajectory branches into "don't intervene" (the
+backbone keeps running — free, already on the trajectory) and "intervene"
+(a new child rollout forked at that turn with the reminder seeded). Each
+child is itself a backbone that surfaces its own reminders and splits
+again, so the full structure is a **tree of counterfactuals**, not a
+single chain. The old linear `chained_fork` (take only the *first*
+surface per backbone, never re-examine the rest) was just the greedy
+spine of this tree; it is now one degenerate policy of the general
+engine.
+
+The engine is a **producer-consumer self-feeding work queue** — *consuming
+one node produces its children*:
 
 ```
-┌── one-shot per-case chained-fork ─────────────────────────────────────┐
+┌── one-shot per-case fork tree ────────────────────────────────────────┐
 │                                                                       │
-│ SEGMENT 0 (control)                                                   │
-│   session_factory(initial_messages=None, seed_reminder_text=None)     │
-│     → control.final_messages, control.session_log_id                  │
+│ queue ← ForkTask(prefix=(), seed_reminder=None, depth=0)   # control  │
 │                                                                       │
-│   offline_run = await replay_pipeline_over_trajectory(                │
-│       messages = control.final_messages,                              │
-│       cumulative = CumulativeAuditState.fresh(),                      │
-│       stop_on_first_surface = True,                                   │
+│ while queue not empty and node budget remains:                        │
+│   task = queue.pop()                                                  │
+│                                                                       │
+│   # CONSUME: run this universe's backbone (root's seed=None = control)│
+│   backbone = await session_factory(                                   │
+│       initial_messages = list(task.prefix),                           │
+│       seed_reminder_text = task.seed_reminder,                        │
 │   )                                                                   │
-│   # offline_run carries: reminder, state, all_step_results            │
-│   # (per-firing extractor_record + auditor_record captured even with  │
-│   # sidecar_path=None, so write_chained_replay can stitch later)      │
 │                                                                       │
-│ for k in 1..max_interventions while a reminder surfaces:              │
-│   SEGMENT k (branch)                                                  │
-│     prefix = _fork_prefix(parent.final_messages, surface_turn_{k-1})  │
-│     # ^ inclusive cut + paired-tool_result bump                       │
-│     branch = await session_factory(                                   │
-│         initial_messages = prefix,                                    │
-│         seed_reminder_text = reminder_{k-1}.text,                     │
-│     )                                                                 │
-│     offline_run = await replay_pipeline_over_trajectory(              │
-│         messages = branch.final_messages,                             │
-│         seed_cumulative = previous.state,                             │
-│         start_turn      = surface_turn_{k-1} + 1,                     │
-│         stop_on_first_surface = True,                                 │
+│   # find ALL surfaces on this backbone (stop_on_first_surface=False)  │
+│   run = await replay_pipeline_over_trajectory(                        │
+│       messages = backbone.final_messages,                             │
+│       seed_cumulative = task.seed_cumulative,                         │
+│       start_turn = task.fork_turn + (0 if root else 1),  # see ⚑      │
+│       stop_on_first_surface = False,                                  │
+│   )                                                                   │
+│   surfaces = run.surfaces   # [SurfaceFiring(turn_index, text, snap)] │
+│   emit ForkNode(node_id, parent_id, surfaces, submission, path, ...)  │
+│                                                                       │
+│   # PRODUCE: one child task per surface (the "intervene" universe)    │
+│   for s in surfaces (depth+1 ≤ max_depth, nodes < max_total_nodes):   │
+│     queue ← ForkTask(                                                 │
+│         prefix          = _fork_prefix(backbone.final_messages,        │
+│                                        s.turn_index),  # incl. + bump │
+│         seed_reminder   = s.reminder_text,                            │
+│         seed_cumulative = s.cumulative_snapshot,  # indep. deep copy  │
+│         fork_turn       = s.turn_index + 1,                           │
+│         parent_id = task.node_id, depth = task.depth + 1,             │
+│         path = task.path + (s.reminder_text,),                        │
 │     )                                                                 │
 │                                                                       │
 │ FINALISE                                                              │
-│   write_chained_replay(                                               │
-│       segments, out_path = <final_sid>.chained.jsonl                  │
-│   )                                                                   │
-│   # Each segment k contributes records in [turn_lo_k, turn_hi_k];     │
-│   # all entries rebound to segments[-1].payload.session_log_id.       │
+│   write_fork_tree_replay(nodes, out=<root_sid>.chained.jsonl)         │
+│   # header = __fork_tree_header__ {nodes:[…parent_id, path…]};        │
+│   # every record tagged extras{node_id, parent_node_id};              │
+│   # tree recovered from parent links.                                 │
 │                                                                       │
 └───────────────────────────────────────────────────────────────────────┘
+
+⚑ children resume one turn *past* the fork boundary (start_turn =
+  fork_turn + 1) so the boundary turn — already audited by the parent and
+  carried in seed_cumulative — is not re-audited (no wasted auditor call,
+  no duplicate verdict). The non-progressing-surface floor
+  (drop surfaces ≤ fork_turn − 1) stays as defence-in-depth.
 ```
 
-A 100-case batch is the same pipeline in a per-case loop, parallelisable
-within provider rate limits. The `chained_fork` intervention in
-`agentm_rca/eval/agent.py` is a thin caller: it supplies the
-`SessionFactory` closure that turns `(initial_messages,
+The queue **drains naturally**: a backbone whose auditor stays silent
+produces no children, so in practice the tree is small (most cadence
+boundaries are silent). `max_depth` / `max_total_nodes` are soft guards
+against a misbehaving auditor, not the expected bound. Policies fall out
+of the same engine: `surfaces[:1]` per node ⇒ the old linear chain;
+`max_depth=1` ⇒ a "star" (control + one fork per first-level surface);
+all surfaces, unbounded ⇒ the full tree (the default).
+
+A 100-case batch is the same pipeline in a per-case loop. The
+`fork_tree` intervention in `agentm_rca/eval/agent.py` is a thin caller:
+it supplies the `SessionFactory` closure that turns `(initial_messages,
 seed_reminder_text)` into an `_SessionRun`; everything else (cadence,
-windowing, cumulative-state threading, sidecar emission) lives inside
-`replay_pipeline_over_trajectory` + `run_chained_fork_experiment`.
+windowing, cumulative-state threading + per-surface snapshots, sidecar
+emission) lives inside `replay_pipeline_over_trajectory` +
+`run_fork_tree_experiment`. The user-facing `--ak chained_fork=true`
+flag is retained and maps onto the tree engine (`max_interventions`
+→ `max_depth`); the reported submission is the **root/control** node's,
+with every node's submission + intervention path in
+`metadata["chained_fork"]` (a node list — switch on
+`intervention_mode == "fork_tree"`, not the old `segments` shape) so a
+control-vs-leaf comparison is recoverable downstream.
 
 ## 4. Acceptance invariants
 
@@ -467,6 +500,7 @@ Phased, no shims, hard-cut per phase:
 | P3 | Collapse `run_offline_auditor_over_control` + rewrite `replay_extractor_record` / `replay_auditor_record` as thin wrappers | **Shipped:** `HarnessRunner.fire_extractor_from_record` / `fire_auditor_from_record` are the new seams; `replay/runner.py` wrappers route through them. `NoopSink` (in `audit/_offline_seams.py`) is the sink for single-firing replay. Invariant #2 holds. |
 | P4 | Wire `agentm_rca` `baseline_fork` to support `rca:baseline → rca:baseline` via the offline runner | **Superseded by P5.** Initially shipped as `_HARNESS_VARIANT_TO_CONTROL[rca:baseline] = rca:baseline` + a baseline-branch inside `_run_baseline_fork`; replaced 2026-05-24 (see P5). |
 | P5 | Replace strict-A/B `baseline_fork` with N-segment `chained_fork` | **Shipped 2026-05-24:** `replay_pipeline_over_trajectory` gains `seed_cumulative` + `start_turn` so segment k+1's auditor sees segment k's verdicts; `StepResult` gains `extractor_record` (mirroring `auditor_record`) so multi-segment sidecars assemble in-process. New driver `llmharness.replay.chained_fork.run_chained_fork_experiment` runs the loop; `write_chained_replay` materialises a single `<final_sid>.chained.jsonl`. `strict_ab.py` deleted; `_HARNESS_VARIANT_TO_CONTROL` deleted (every segment uses the same scenario); `agentm_rca` constructor narrowed to `chained_fork: bool` + `max_interventions: int`. Previously: strict_ab — see git history (commit `7b259e2..c966e24`). |
+| P6 | Generalise the linear `chained_fork` chain into a producer-consumer **fork tree** | **Shipped 2026-05-25:** the linear chain only ever followed the greedy spine (first surface per backbone). `chained_fork.py` deleted → `replay/fork_tree.py::run_fork_tree_experiment`: a self-feeding work queue where consuming a `ForkTask` (one backbone rollout + an `stop_on_first_surface=False` offline replay) emits a `ForkNode` and produces one child task per surface. `offline_driver` gains `SurfaceFiring` (`OfflineRunResult.surfaces`) carrying a per-surface `CumulativeAuditState.snapshot()` (independent deep copy) so each child seeds from its fork-point state; children resume at `start_turn = fork_turn + 1` (boundary turn already audited by the parent, not re-fired). Sidecar keeps the `<root_sid>.chained.jsonl` filename but is now root-keyed + tree-shaped (`__fork_tree_header__`, per-record `extras{node_id, parent_node_id}`); reader `read_fork_tree_header`. `max_depth` / `max_total_nodes` are soft guards (tree is small because the auditor is usually silent). Linear chain = `surfaces[:1]`; star = `max_depth=1`. Cadence bug fixed en route (`replay_pipeline_over_trajectory` now steps per agent *turn*, not per message; commit `1f74c5a`). `agentm_rca` keeps `--ak chained_fork=true` (→ `max_depth`), reports the root/control submission, and writes a node-list `metadata["chained_fork"]` discriminated by `intervention_mode == "fork_tree"`. Commits `1f74c5a..cc30268`. |
 
 Each phase is independently revert-able: P1's wrapper preserves the
 existing live behaviour; P2-P4 add capability without changing P1.
