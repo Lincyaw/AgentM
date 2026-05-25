@@ -24,8 +24,13 @@ from pathlib import Path
 
 
 def _domain_dir(domain: str) -> Path:
-    """``<this-file's-dir>/<domain>/prompts``."""
-    return Path(__file__).parent / domain / "prompts"
+    """``<audit/>/<domain>/prompts``.
+
+    This module now lives at ``audit/toolkit/`` so the domain dirs
+    (``audit/auditor/`` / ``audit/extractor/``) are one level up from
+    ``__file__``.
+    """
+    return Path(__file__).parent.parent / domain / "prompts"
 
 
 def _resolve_path(domain: str, name_or_path: str, *, filename_prefix: str) -> Path:

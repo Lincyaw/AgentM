@@ -1,6 +1,6 @@
 """Offline seams for :class:`HarnessRunner`.
 
-Symmetric to :mod:`llmharness.audit._live_seams` but for paths that drive
+Symmetric to :mod:`llmharness.audit.seams.live` but for paths that drive
 the audit pipeline without a parent :class:`ExtensionAPI`:
 
 * :class:`StandaloneChildRunner` — spawns a top-level audit child via
@@ -23,21 +23,21 @@ import json
 import logging
 from typing import Any
 
-from ..schema import Edge, Event, Phase
-from ..tools.engine import run_phase_standalone
-from ._extractor_directive import build_extractor_directive
-from ._runner import (
-    AuditorChildResult,
-    ExtractorSpawnError,
-    _flatten_assistant_blocks,
-)
-from .auditor import (
+from ...schema import Edge, Event, Phase
+from ...tools.engine import run_phase_standalone
+from ..auditor import (
     SUBMIT_VERDICT_TOOL_NAME,
     AuditorOutputError,
     RawVerdictOutput,
 )
-from .extractor import FINALIZE_EXTRACTION_TOOL_NAME
-from .graph_ops import GraphOp
+from ..extractor import FINALIZE_EXTRACTION_TOOL_NAME
+from ..graph.ops import GraphOp
+from ..runner import (
+    AuditorChildResult,
+    ExtractorSpawnError,
+    _flatten_assistant_blocks,
+)
+from ..toolkit.extractor_directive import build_extractor_directive
 
 _logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ _logger = logging.getLogger(__name__)
 class StandaloneChildRunner:
     """:class:`ChildRunner` impl driven by :func:`run_phase_standalone`.
 
-    Mirrors :class:`llmharness.audit._live_seams.LiveChildRunner` shape
+    Mirrors :class:`llmharness.audit.seams.live.LiveChildRunner` shape
     for shape — same return signatures, same failure routing — but
     spawns a top-level session per phase. There is no parent
     ``ExtensionAPI``; ``cwd`` is the working directory the child

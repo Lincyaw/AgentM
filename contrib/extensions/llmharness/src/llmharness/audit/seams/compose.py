@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._atom_constants import (
+from ..toolkit.atom_constants import (
     OBSERVABILITY_MODULE,
     OPERATIONS_MODULE,
     SYSTEM_PROMPT_MODULE,

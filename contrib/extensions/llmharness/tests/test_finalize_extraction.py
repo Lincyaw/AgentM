@@ -20,11 +20,11 @@ from __future__ import annotations
 import pytest
 from agentm.core.abi import ToolTerminate
 
-from llmharness.audit.extractor.finalize_extraction import (
+from llmharness.audit.extractor.state import ExtractionState
+from llmharness.audit.extractor.tools.finalize_extraction import (
     FINALIZE_EXTRACTION_REASON,
     build_finalize_extraction_tool,
 )
-from llmharness.audit.extractor.state import ExtractionState
 from llmharness.schema import Event, EventKind
 
 

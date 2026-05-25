@@ -42,13 +42,13 @@ from agentm.core.abi.messages import (
     ToolResultMessage,
 )
 
-from ..audit._offline_seams import InMemorySink, StandaloneChildRunner
-from ..audit._runner import (
+from ..audit.runner import (
     AuditorSettings,
     CumulativeAuditState,
     ExtractorSettings,
     StepResult,
 )
+from ..audit.seams.offline import InMemorySink, StandaloneChildRunner
 from ..schema import Reminder
 from .offline_driver import replay_pipeline_over_trajectory
 from .record import ReplayRecord, write_record

@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..schema import Edge, EdgeKind, Event, EventKind, ExternalRef
+from ...schema import Edge, EdgeKind, Event, EventKind, ExternalRef
 
 
 @dataclass(frozen=True)
@@ -202,7 +202,7 @@ def op_from_event(ev: Event) -> NodeUpsert:
 
     Preserves ``external_refs`` so cross-firing connectivity survives the
     round-trip — see
-    :meth:`llmharness.audit._runner.CumulativeAuditState.hydrate_from_session_log`
+    :meth:`llmharness.audit.runner.CumulativeAuditState.hydrate_from_session_log`
     for the legacy-``AUDIT_EVENT`` translation contract.
     """
     return NodeUpsert(

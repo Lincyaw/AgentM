@@ -32,7 +32,6 @@ from typing import Annotated, Any
 
 import typer
 
-from ..audit._session_helpers import bind_extractor_state
 from ..audit.extractor import (
     FINALIZE_EXTRACTION_TOOL_NAME,
     ExtractionState,
@@ -40,6 +39,7 @@ from ..audit.extractor import (
     compose_extractor_extensions,
 )
 from ..audit.extractor.prompt import load_extractor_prompt
+from ..audit.seams.session import bind_extractor_state
 from ..replay.record import ReplayRecord, now_ns, write_record
 from ..schema import Event as SchemaEvent
 from ..tools.engine import run_phase_standalone

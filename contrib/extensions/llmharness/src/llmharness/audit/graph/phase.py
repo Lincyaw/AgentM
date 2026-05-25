@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from ..schema import Event, EventKind, Phase
+from ...schema import Event, EventKind, Phase
 
 # Event kinds that always force a singleton phase. They are decision /
 # framing points and we never want their summary fused into a

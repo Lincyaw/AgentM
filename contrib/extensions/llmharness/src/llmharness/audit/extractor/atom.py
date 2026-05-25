@@ -38,21 +38,21 @@ from typing import Any
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from .._atom_constants import EXTRACTOR_STATE_SERVICE_KEY
-from .delete_edge import DELETE_EDGE_TOOL_NAME, build_delete_edge_tool
-from .delete_node import DELETE_NODE_TOOL_NAME, build_delete_node_tool
-from .finalize_extraction import (
+from ..toolkit.atom_constants import EXTRACTOR_STATE_SERVICE_KEY
+from .state import ExtractionState
+from .tools.delete_edge import DELETE_EDGE_TOOL_NAME, build_delete_edge_tool
+from .tools.delete_node import DELETE_NODE_TOOL_NAME, build_delete_node_tool
+from .tools.finalize_extraction import (
     FINALIZE_EXTRACTION_REASON,
     FINALIZE_EXTRACTION_TOOL_NAME,
     build_finalize_extraction_tool,
 )
-from .reset_extraction import (
+from .tools.reset_extraction import (
     RESET_EXTRACTION_TOOL_NAME,
     build_reset_extraction_tool,
 )
-from .state import ExtractionState
-from .upsert_edge import UPSERT_EDGE_TOOL_NAME, build_upsert_edge_tool
-from .upsert_node import UPSERT_NODE_TOOL_NAME, build_upsert_node_tool
+from .tools.upsert_edge import UPSERT_EDGE_TOOL_NAME, build_upsert_edge_tool
+from .tools.upsert_node import UPSERT_NODE_TOOL_NAME, build_upsert_node_tool
 
 EXTRACTOR_TOOL_NAMES: tuple[str, ...] = (
     UPSERT_NODE_TOOL_NAME,

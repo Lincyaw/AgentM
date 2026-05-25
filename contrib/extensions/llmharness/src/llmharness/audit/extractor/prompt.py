@@ -13,7 +13,7 @@ and pointing the adapter config at it.
 
 from __future__ import annotations
 
-from .._prompt_loader import load_prompt
+from ..toolkit.prompt_loader import load_prompt
 
 DEFAULT_PROMPT_NAME = "default"
 

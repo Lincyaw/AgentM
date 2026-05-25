@@ -35,7 +35,7 @@ AUDIT_EVENT = "llmharness.audit_event"
 AUDIT_EDGE = "llmharness.audit_edge"
 # One graph op produced by an extractor firing under the event-sourcing
 # refactor (2026-05-22). Payload is the result of
-# ``llmharness.audit.graph_ops.GraphOp.to_dict()`` — i.e. an ``"op"``
+# ``llmharness.audit.graph.ops.GraphOp.to_dict()`` — i.e. an ``"op"``
 # discriminator (``node_upsert`` / ``node_delete`` / ``edge_upsert`` /
 # ``edge_delete``) plus the op-specific fields, augmented with firing
 # metadata: ``firing_id`` (int), ``op_index`` (int — the op's position
@@ -46,7 +46,7 @@ AUDIT_EDGE = "llmharness.audit_edge"
 # scanners translate them into ops in branch order.
 AUDIT_GRAPH_OP = "llmharness.audit_graph_op"
 # One Phase record produced by the mechanical merger
-# (``audit.phase.merge_to_phases``). Persisted after the raw events of
+# (``audit.graph.phase.merge_to_phases``). Persisted after the raw events of
 # a successful firing so the auditor can read a coalesced "basic block"
 # view of the trajectory and drill back to raw events via
 # ``get_event_detail``. Payload: ``Phase.to_dict()``.

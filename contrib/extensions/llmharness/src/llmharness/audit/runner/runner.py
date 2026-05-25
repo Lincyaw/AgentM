@@ -36,27 +36,27 @@ from typing import Any, Final, Protocol
 from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolResultMessage
 from agentm.core.abi.session import SessionEntry
 
-from ..replay.record import ReplayRecord, now_ns, write_record
-from ..schema import Edge, Event, Phase, Reminder, Verdict
-from ..tools.engine import PhaseResult, run_phase_standalone
-from . import entry_types as _et
-from ._session_helpers import bind_extractor_state
-from .auditor import (
+from ...replay.record import ReplayRecord, now_ns, write_record
+from ...schema import Edge, Event, Phase, Reminder, Verdict
+from ...tools.engine import PhaseResult, run_phase_standalone
+from .. import entry_types as _et
+from ..auditor import (
     SUBMIT_VERDICT_TOOL_NAME,
     AuditorOutputError,
     RawVerdictOutput,
     compose_auditor_extensions,
 )
-from .extractor import (
+from ..extractor import (
     FINALIZE_EXTRACTION_TOOL_NAME,
     ExtractionState,
     RawExtractorOutput,
 )
-from .graph_fold import fold_graph
-from .graph_ops import GraphOp, op_from_edge, op_from_event, parse_op
-from .phase import merge_to_phases
-from .registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
-from .registry import AuditCheckRegistry, CheckContext
+from ..graph.fold import fold_graph
+from ..graph.ops import GraphOp, op_from_edge, op_from_event, parse_op
+from ..graph.phase import merge_to_phases
+from ..registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
+from ..registry import AuditCheckRegistry, CheckContext
+from ..seams.session import bind_extractor_state
 
 _logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ class ExtractorSettings:
         compose state from a recorded :class:`ReplayRecord`. Honours the
         legacy ``prompt_override`` key from pre-profile replay sidecars.
         """
-        from .extractor import compose_extractor_extensions
+        from ..extractor import compose_extractor_extensions
 
         ck = dict(compose_kwargs or {})
         effective_prompt = (
@@ -119,8 +119,8 @@ class ExtractorSettings:
         and broke offline-trace parity — see commit log for the
         ``chained_fork`` investigation that surfaced this.
         """
-        from .extractor import compose_extractor_extensions
-        from .extractor.prompt import load_extractor_prompt
+        from ..extractor import compose_extractor_extensions
+        from ..extractor.prompt import load_extractor_prompt
 
         base_prompt = load_extractor_prompt("default")
         compose_kwargs: dict[str, Any] = {
@@ -206,7 +206,7 @@ class AuditorSettings:
         same OTLP/JSON trace shape a live auditor would. See the
         symmetric note on :meth:`ExtractorSettings.default`.
         """
-        from .auditor.prompt import load_auditor_prompt
+        from ..auditor.prompt import load_auditor_prompt
 
         return cls(
             base_prompt=load_auditor_prompt("minimal"),
@@ -1259,7 +1259,7 @@ class HarnessRunner:
         ``dropped_edges`` on success) is byte-identical to the legacy
         wrapper output — many tests pin this.
         """
-        from .extractor.state import ExtractionState
+        from ..extractor.state import ExtractionState
 
         if record.phase != "extractor":
             raise ValueError(
@@ -1353,7 +1353,7 @@ class HarnessRunner:
         :func:`run_phase_standalone` with ``record.payload`` as the
         user message verbatim.
         """
-        from ..schema import Finding
+        from ...schema import Finding
 
         if record.phase != "auditor":
             raise ValueError(

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..audit._atom_constants import (
+from ..audit.toolkit.atom_constants import (
     OBSERVABILITY_MODULE,
     OPERATIONS_MODULE,
     SYSTEM_PROMPT_MODULE,
