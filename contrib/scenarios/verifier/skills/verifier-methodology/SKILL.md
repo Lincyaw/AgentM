@@ -41,8 +41,16 @@ Before judging any edge, build a causal model of the injection from
 
 Do not memorise a list of "valid signals". A fault kind the reference
 doesn't cover is reasoned out the same way: what does it break, what
-would that cause. The per-kind doc (`get_fault_kind_doc`) is your
-authority for how each fault propagates and what symptom to expect.
+would that cause.
+
+The per-kind doc (`get_fault_kind_doc`) is a REFERENCE to inform that
+reasoning — the TYPICAL way the fault manifests — not a rule to satisfy.
+The DATA is the authority. A fault can manifest differently than the doc
+describes (e.g. a pod-kill that disrupts via a latency spike rather than
+the textbook zero-span collapse); when the data and the doc disagree,
+trust the data and your own causal reasoning, not the doc's canonical
+signature. Use the doc to form expectations, then judge what actually
+happened.
 
 ## What an edge means
 
