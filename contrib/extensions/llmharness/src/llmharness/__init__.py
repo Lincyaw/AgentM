@@ -22,11 +22,15 @@ Currently exported:
 * :class:`ReplayRecord` + :func:`iter_records` / :func:`write_record`
   — replay sidecar record format and I/O. Used directly by both the
   strict-A/B helpers and downstream consumers that read sidecars.
-* Chained-fork experiment orchestration —
-  :func:`run_chained_fork_experiment`, :class:`ChainSegment`,
-  :class:`ChainSegmentPayload`, :class:`ChainedForkExperiment`,
-  :func:`write_chained_replay`, :func:`chained_replay_path`. The primary
-  entry points the rca eval driver calls.
+* Fork-tree experiment orchestration —
+  :func:`run_fork_tree_experiment`, :class:`ForkTask`, :class:`ForkNode`,
+  :class:`Surface`, :class:`ForkTreeExperiment`, :class:`SessionPayload`,
+  :func:`write_fork_tree_replay`, :func:`forktree_replay_path`,
+  :data:`FORK_TREE_HEADER_KEY`, :func:`read_fork_tree_header`. The primary
+  entry points the rca eval driver calls. (Replaced the old linear
+  ``run_chained_fork_experiment`` / ``ChainSegment`` surface — the tree
+  engine subsumes the linear chain as a degenerate
+  ``max_surfaces_per_node=1`` policy.)
 
 * Replay drivers — :func:`replay_extractor_record`,
   :func:`replay_auditor_record`, plus the shared :class:`PhaseResult` /
@@ -60,16 +64,18 @@ from .audit.extractor import (
     load_extractor_prompt,
 )
 from .audit.runner import AuditorSettings, ExtractorSettings
-from .replay.chained_fork import (
-    CHAIN_HEADER_KEY,
-    ChainedForkExperiment,
-    ChainSegment,
-    ChainSegmentPayload,
+from .replay.fork_tree import (
+    FORK_TREE_HEADER_KEY,
+    ForkNode,
+    ForkTask,
+    ForkTreeExperiment,
     SessionFactory,
-    chained_replay_path,
-    read_chain_header,
-    run_chained_fork_experiment,
-    write_chained_replay,
+    SessionPayload,
+    Surface,
+    forktree_replay_path,
+    read_fork_tree_header,
+    run_fork_tree_experiment,
+    write_fork_tree_replay,
 )
 from .replay.record import ReplayRecord, Status, iter_records, write_record
 from .replay.runner import replay_auditor_record, replay_extractor_record
@@ -95,38 +101,40 @@ __all__ = [
     "AUDITOR_TERMINATION_REASON",
     "AUDITOR_TOOLS",
     "AUDITOR_TOOL_NAMES",
-    "CHAIN_HEADER_KEY",
     "EXTRACTOR_TERMINATION_REASON",
     "EXTRACTOR_TOOL_NAMES",
+    "FORK_TREE_HEADER_KEY",
     "AuditorSettings",
-    "ChainSegment",
-    "ChainSegmentPayload",
-    "ChainedForkExperiment",
     "Edge",
     "EdgeKind",
     "Event",
     "EventKind",
     "ExtractorSettings",
     "Finding",
+    "ForkNode",
+    "ForkTask",
+    "ForkTreeExperiment",
     "Phase",
     "PhaseResult",
     "Reminder",
     "ReplayRecord",
     "SessionFactory",
+    "SessionPayload",
     "Status",
+    "Surface",
     "ToolEvent",
     "Verdict",
     "auditor_process_reward",
-    "chained_replay_path",
     "extractor_process_reward",
+    "forktree_replay_path",
     "iter_records",
     "load_auditor_prompt",
     "load_extractor_prompt",
-    "read_chain_header",
+    "read_fork_tree_header",
     "replay_auditor_record",
     "replay_extractor_record",
-    "run_chained_fork_experiment",
+    "run_fork_tree_experiment",
     "tool_events_from_phase_result",
-    "write_chained_replay",
+    "write_fork_tree_replay",
     "write_record",
 ]

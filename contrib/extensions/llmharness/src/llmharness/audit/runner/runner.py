@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import copy
 import json
 import logging
 from collections.abc import Sequence
@@ -322,6 +323,19 @@ class CumulativeAuditState:
         """Offline-mode seed: empty state."""
         return cls()
 
+    def snapshot(self) -> CumulativeAuditState:
+        """Return an independent deep copy of this cumulative state.
+
+        Used by the fork-tree driver to capture the auditor state *as of*
+        a surface point: the snapshot is handed to a child fork as its
+        ``seed_cumulative`` and must not change when the backbone replay
+        keeps mutating the live state afterward. Every mutable container
+        (``ops``, ``recent_verdicts``, ``last_continuation_notes``,
+        ``_phases``) is copied; the frozen :class:`GraphOp` / :class:`Phase`
+        elements are safe to share but ``deepcopy`` copies them too. The
+        ``recent_verdicts`` deque's ``maxlen`` is preserved.
+        """
+        return copy.deepcopy(self)
 
     @classmethod
     def hydrate_from_session_log(cls, branch: list[SessionEntry]) -> CumulativeAuditState:
@@ -589,10 +603,10 @@ class StepResult:
     extractor_record: ReplayRecord | None = None
     """Synthetic extractor :class:`ReplayRecord` for the firing, when
     one occurred. Mirrors :attr:`auditor_record`: populated even when
-    the sidecar writer is ``None`` so multi-segment offline drivers
-    (notably :func:`llmharness.replay.run_chained_fork_experiment`) can
-    assemble a chained replay sidecar without re-invoking the runner or
-    routing through a per-segment temp file. ``None`` when the firing
+    the sidecar writer is ``None`` so multi-node offline drivers
+    (notably :func:`llmharness.replay.run_fork_tree_experiment`) can
+    assemble a fork-tree replay sidecar without re-invoking the runner or
+    routing through a per-node temp file. ``None`` when the firing
     short-circuited before producing a record (e.g. an empty
     window)."""
 
