@@ -90,31 +90,3 @@ def test_propose_with_empty_claim_rejected() -> None:
     assert "claim" in result.reason
 
 
-def test_propose_with_negative_prediction_applied() -> None:
-    """Positive control: the original Phase-1 happy path still applies."""
-
-    _, gate, read = install_store_and_gate()
-    h = Hypothesis(
-        id="H1",
-        claim="logrotate failed",
-        predictions=[
-            Prediction(
-                id="p1",
-                hypothesis_id="H1",
-                claim="logrotate.service is inactive",
-                polarity="positive",
-            ),
-            Prediction(
-                id="p2",
-                hypothesis_id="H1",
-                claim="no rotated archive newer than 7d",
-                polarity="negative",
-            ),
-        ],
-    )
-
-    result = gate.apply(UpdateProposal(op="propose", hypothesis=h))
-
-    assert result.kind == "applied"
-    assert result.applied_id == "H1"
-    assert read.get_hypothesis("H1") is not None

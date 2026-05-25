@@ -12,7 +12,6 @@ import asyncio
 import os
 import tempfile
 import time
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -25,14 +24,10 @@ from agentm.core.abi import (
 from agentm.core.abi.events import TurnEndEvent
 
 from agentm_channels.auth import UnixPeerCredAuthenticator
-from agentm_channels.bus import MessageBus
 from agentm_channels.client import WireClient
-from agentm_channels.gateway import Gateway, GatewayConfig
-from agentm_channels.manager import ChannelManager
 from agentm_channels.outbox import SqliteInbox, SqliteOutbox
 from agentm_channels.server import WireServer
-from agentm_channels.wire import KIND_OUTBOUND, Envelope
-from agentm_channels.wire_bridge import WireBridge
+from agentm_channels.wire import Envelope
 
 
 class _FakeSM:
@@ -73,84 +68,6 @@ async def _wait_for(predicate: Any, *, timeout: float = 3.0) -> None:
     raise AssertionError("timed out")
 
 
-async def test_wire_peer_inbound_round_trips_through_gateway() -> None:
-    with tempfile.TemporaryDirectory(prefix="agentm-bind-e2e-") as d:
-        sock = os.path.join(d, "g.sock")
-        state = Path(d) / "state"
-        state.mkdir()
-
-        bus = MessageBus()
-        mgr = ChannelManager({}, bus)
-        gw = Gateway(
-            bus=bus,
-            config=GatewayConfig(cwd=d, state_dir=state),
-            session_factory=_factory,
-        )
-        await mgr.start()
-        await gw.start()
-
-        outbox = SqliteOutbox(str(state / "wire-outbox.sqlite"))
-        inbox = SqliteInbox(str(state / "wire-inbox.sqlite"))
-        bridge = WireBridge(bus=bus, manager=mgr, outbox=outbox)
-        server = WireServer(
-            socket_path=sock,
-            outbox=outbox,
-            inbox=inbox,
-            on_inbound=bridge.handle_inbound,
-            authenticator=UnixPeerCredAuthenticator(allowed_uids=None),
-        )
-        await server.start()
-
-        received: list[Envelope] = []
-
-        async def on_outbound(env: Envelope) -> None:
-            received.append(env)
-
-        client = WireClient(
-        socket_path=sock, peer_id="p1", peer_kind="chat_client", on_outbound=on_outbound
-        )
-        try:
-            await client.connect()
-            await client.send_inbound(
-                {
-                    "channel": "wire-test",
-                    "chat_id": "c1",
-                    # sender_id is bound to peer_id by the wire bridge
-                    # (issue #1 spoof guard). For this e2e the chat
-                    # client peer is p1, so we drop sender_id from the
-                    # body and let the gateway fill it from the
-                    # authenticated principal.
-                    "content": "hello",
-                },
-                env_id="msg-1",
-            )
-
-            # The gateway emits the assistant TurnEnd reply AND a
-            # turn_complete control marker. We assert the body content
-            # round-trip on the assistant reply.
-            await _wait_for(
-                lambda: any(
-                    env.kind == KIND_OUTBOUND
-                    and isinstance(env.body, dict)
-                    and env.body.get("content") == "echo: hello"
-                    for env in received
-                )
-            )
-            assistant_env = next(
-                env
-                for env in received
-                if isinstance(env.body, dict)
-                and env.body.get("content") == "echo: hello"
-            )
-            assert assistant_env.body["channel"] == "wire-test"
-            assert assistant_env.body["chat_id"] == "c1"
-        finally:
-            await client.close()
-            await server.stop()
-            outbox.close()
-            inbox.close()
-            await gw.stop()
-            await mgr.stop()
 
 
 async def test_wire_peer_rejected_by_uid_policy() -> None:

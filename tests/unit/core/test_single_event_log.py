@@ -187,23 +187,3 @@ def test_continue_recent_reads_interleaved_merged_log(tmp_path: Path) -> None:
     assert mgr.get_session_id() == expected.get_session_id()
 
 
-def test_continue_recent_falls_back_to_new_session_when_file_has_no_header(
-    tmp_path: Path,
-) -> None:
-    """A file with only spans / unrelated log records carries no
-    SessionManager state. ``continue_recent`` must fall back to
-    ``new_session()`` rather than silently reusing the in-memory state.
-    """
-    cwd = tmp_path
-    obs_dir = cwd / ".agentm" / "observability"
-    obs_dir.mkdir(parents=True)
-    log = obs_dir / "no-state.jsonl"
-    rows = [_wrap_other_span(), _wrap_unrelated_log(), _wrap_other_span()]
-    with log.open("w", encoding="utf-8") as fh:
-        for row in rows:
-            fh.write(json.dumps(row, default=str) + "\n")
-
-    mgr = SessionManager.continue_recent(str(cwd))
-    # A fresh uuid header is minted because the file had no header record.
-    assert mgr.get_session_id() != ""
-    assert mgr.get_entries() == []

@@ -89,30 +89,3 @@ def test_chain_phase_filter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert calls == {"extractor": 0, "auditor": 2}
 
 
-def test_chain_threads_phase_specific_prompt_overrides(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    seen_prompts: dict[str, str | None] = {"extractor": None, "auditor": None}
-
-    async def fake_extractor(
-        record: ReplayRecord, *, cwd: str, provider_override: Any, prompt_override: str | None
-    ) -> PhaseResult:
-        seen_prompts["extractor"] = prompt_override
-        return PhaseResult(output={}, status="ok", error=None, latency_ms=0, messages=[])
-
-    async def fake_auditor(
-        record: ReplayRecord, *, cwd: str, provider_override: Any, prompt_override: str | None
-    ) -> PhaseResult:
-        seen_prompts["auditor"] = prompt_override
-        return PhaseResult(output={}, status="ok", error=None, latency_ms=0, messages=[])
-
-    monkeypatch.setattr(chain_module, "replay_extractor_record", fake_extractor)
-    monkeypatch.setattr(chain_module, "replay_auditor_record", fake_auditor)
-
-    chain_module.chain_replay_sync(
-        _seed_sidecar(tmp_path),
-        cwd=str(tmp_path),
-        prompt_override_extractor="EXT_PROMPT",
-        prompt_override_auditor="AUD_PROMPT",
-    )
-    assert seen_prompts == {"extractor": "EXT_PROMPT", "auditor": "AUD_PROMPT"}

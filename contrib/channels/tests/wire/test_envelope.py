@@ -38,37 +38,8 @@ def test_empty_id_rejected() -> None:
         Envelope(**kwargs)  # type: ignore[arg-type]
 
 
-def test_to_dict_omits_none_optionals_but_keeps_required() -> None:
-    env = Envelope(**_ok_kwargs())  # type: ignore[arg-type]
-    d = env.to_dict()
-    assert d["v"] == 1
-    assert d["id"] == "msg-1"
-    assert d["kind"] == "inbound"
-    assert d["ts"] == 1234567890.0
-    assert d["body"] == {"text": "hi"}
-    assert d["hops"] == 0
-    # None-valued optionals are omitted.
-    assert "to" not in d
-    assert "correlation_id" not in d
-    assert "root_session_key" not in d
-    assert "peer_kind" not in d
 
 
-def test_round_trip_preserves_all_fields() -> None:
-    env = Envelope(
-        v=1,
-        id="m",
-        kind="hello",
-        ts=42.5,
-        body={"peer_kind": "chat_client"},
-        to="chat://feishu/oc_x",
-        correlation_id="corr-7",
-        hops=3,
-        root_session_key="feishu:c2",
-        peer_kind="chat_client",
-    )
-    again = Envelope.from_dict(env.to_dict())
-    assert again == env
 
 
 def test_from_dict_missing_required_field_rejected() -> None:

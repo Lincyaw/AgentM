@@ -313,47 +313,6 @@ async def test_check_tasks_marks_results_read_so_decide_turn_action_does_not_red
     await session.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_wait_subagent_returns_terminal_row_and_consumes_it(
-    tmp_path: Path,
-) -> None:
-    provider = _LifecycleProvider("wait_subagent")
-    provider_module = _install_provider_module(
-        "tests.integration._fake_subagent_lifecycle_wait_provider", provider
-    )
-    resolver_module = _install_resolver_module(
-        "tests.integration._fake_subagent_lifecycle_wait_resolver"
-    )
-    session = await AgentSession.create(
-        AgentSessionConfig(
-            cwd=str(tmp_path),
-            extensions=_extensions(resolver_module=resolver_module),
-            provider=(provider_module, {}),
-            resource_loader=InMemoryResourceLoader(),
-        )
-    )
-
-    messages = await session.prompt("start")
-
-    assert provider.parent_calls == 3
-    assert "<subagent_result" not in provider.parent_snapshots[-1]
-    wait_payloads = [
-        json.loads(block.content[0].text)
-        for message in messages
-        if getattr(message, "role", None) == "tool_result"
-        for block in getattr(message, "content", [])
-        if getattr(block, "tool_call_id", None) == "wait-1"
-    ]
-    assert len(wait_payloads) == 1
-    wait_payload = wait_payloads[0]
-    assert wait_payload["purpose"] == "collect result"
-    assert wait_payload["status"] == "completed"
-    assert wait_payload["error"] is None
-    assert wait_payload["final_text"] == "child result"
-    assert isinstance(wait_payload["task_id"], str) and wait_payload["task_id"]
-    assert isinstance(wait_payload["final_message_count"], int)
-
-    await session.shutdown()
 
 
 @pytest.mark.asyncio

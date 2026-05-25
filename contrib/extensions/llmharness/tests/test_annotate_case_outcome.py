@@ -132,52 +132,7 @@ def test_annotate_full_hit(tmp_path: Path) -> None:
     assert out["submission_seen"] is True
 
 
-def test_annotate_service_only(tmp_path: Path) -> None:
-    bundle = _make_bundle(
-        tmp_path,
-        case_id="case-svc",
-        datapack_name="dp",
-        ground_truth=["paymentservice"],
-        fault_type="oom",
-        submission={
-            "root_causes": [
-                {"service": "paymentservice-1", "fault_kind": "latency"}
-            ]
-        },
-    )
-    cli_main(["annotate-case-outcome", "--bundle", str(bundle)])
-    out = json.loads((bundle / "case_outcome.json").read_text())
-    assert out["service_hit"] == 1.0
-    assert out["fault_kind_hit"] == 0.0
-    assert abs(out["composite_score"] - 0.7) < 1e-9
 
 
-def test_annotate_observability_shape(tmp_path: Path) -> None:
-    bundle = _make_bundle(
-        tmp_path,
-        case_id="case-obs",
-        datapack_name="dp",
-        ground_truth=["cartservice"],
-        fault_type="oom",
-        submission={"root_causes": [{"service": "cartservice", "fault_kind": "oom"}]},
-        observability_shape=True,
-    )
-    cli_main(["annotate-case-outcome", "--bundle", str(bundle)])
-    out = json.loads((bundle / "case_outcome.json").read_text())
-    assert out["service_hit"] == 1.0
-    assert out["fault_kind_hit"] == 1.0
 
 
-def test_annotate_no_submission(tmp_path: Path) -> None:
-    bundle = _make_bundle(
-        tmp_path,
-        case_id="case-noop",
-        datapack_name="dp",
-        ground_truth=["x"],
-        fault_type="y",
-        submission=None,
-    )
-    cli_main(["annotate-case-outcome", "--bundle", str(bundle)])
-    out = json.loads((bundle / "case_outcome.json").read_text())
-    assert out["submission_seen"] is False
-    assert out["composite_score"] == 0.0

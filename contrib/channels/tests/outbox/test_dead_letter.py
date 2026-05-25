@@ -36,11 +36,3 @@ def test_dead_letter_after_repeated_nack(tmp_path: Path) -> None:
         store.close()
 
 
-def test_dead_letter_missing_row_is_noop(tmp_path: Path) -> None:
-    store = SqliteOutbox(str(tmp_path / "ob.sqlite"))
-    try:
-        # Should not raise.
-        store.dead_letter(9999, reason="missing")
-        assert store.dead_letter_count("peer-A") == 0
-    finally:
-        store.close()

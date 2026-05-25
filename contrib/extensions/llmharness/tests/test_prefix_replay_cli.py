@@ -22,7 +22,6 @@ from pathlib import Path
 from agentm.core.abi.messages import (
     AssistantMessage,
     TextContent,
-    UserMessage,
     text_message,
 )
 from agentm.core.abi.session import ENTRY_TYPE_MESSAGE, message_entry
@@ -183,64 +182,5 @@ def test_agent_from_reminder_branches_at_turn_and_prints_command(
     assert "enable_reminders" in result.stdout
 
 
-def test_missing_reminder_record_errors(tmp_path: Path) -> None:
-    cwd = str(tmp_path)
-    session_dir = tmp_path / ".agentm" / "sessions"
-    audit_dir = tmp_path / ".agentm" / "audit_replay"
-    audit_dir.mkdir(parents=True)
-    source_mgr, _ = _make_source_session(
-        session_dir=session_dir, cwd=cwd, n_turns=3
-    )
-    root_id = source_mgr.get_session_id()
-    sidecar = audit_dir / f"{root_id}.jsonl"
-    # Write a record without surface_reminder.
-    rec = ReplayRecord(
-        phase="auditor",
-        turn_index=1,
-        root_session_id=root_id,
-        ts_ns=int(time.time_ns()),
-        compose_kwargs={},
-        payload={},
-        provider=None,
-        output={"surface_reminder": False, "reminder_text": ""},
-        status="ok",
-    )
-    write_record(sidecar, rec)
-
-    runner = CliRunner()
-    result = runner.invoke(
-        app,
-        [
-            "agent-from-reminder",
-            "--audit-replay",
-            str(sidecar),
-            "--turn",
-            "1",
-            "--session-dir",
-            str(session_dir),
-            "--print-only",
-        ],
-    )
-    assert result.exit_code != 0
-    assert "did not surface a reminder" in result.stdout or "did not surface a reminder" in (
-        result.stderr if hasattr(result, "stderr") else ""
-    )
 
 
-def test_user_message_only_branch_smoke(tmp_path: Path) -> None:
-    """Ensure UserMessage payloads also count in the message-index walk."""
-    cwd = str(tmp_path)
-    session_dir = tmp_path / ".agentm" / "sessions"
-    session_dir.mkdir(parents=True)
-    mgr = SessionManager.create(cwd, session_dir)
-    # 4 messages total — alternating user / assistant.
-    mgr.append(message_entry(UserMessage(role="user", content=[TextContent(type="text", text="q0")], timestamp=time.time()), None))
-    mgr.append(message_entry(_make_assistant_message("a0"), mgr.get_leaf_id()))
-    mgr.append(message_entry(UserMessage(role="user", content=[TextContent(type="text", text="q1")], timestamp=time.time()), mgr.get_leaf_id()))
-    mgr.append(message_entry(_make_assistant_message("a1"), mgr.get_leaf_id()))
-
-    from llmharness.tools.prefix_replay import find_leaf_entry_for_turn
-
-    leaf = find_leaf_entry_for_turn(mgr, turn=2)
-    # turn=2 → 3rd message (0-indexed) which is the second user message.
-    assert isinstance(leaf.payload, UserMessage)

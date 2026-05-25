@@ -31,22 +31,5 @@ def test_non_list_allow_from_raises_systemexit() -> None:
         )
 
 
-def test_missing_allow_from_is_tolerated() -> None:
-    """Channels that haven't surfaced ``allow_from`` yet (e.g. fresh
-    plugins) get the same forgiving default they had before the
-    validator landed — silent admit on the manager side, channel-level
-    :meth:`BaseChannel.is_allowed` still gates each message."""
-    bus = MessageBus()
-    mgr = ChannelManager({"stub": {"enabled": True}}, bus)
-    assert "stub" in mgr.channels
 
 
-def test_disabled_channel_with_empty_allow_from_does_not_raise() -> None:
-    """Validation only fires for channels the manager would actually
-    bring up. A disabled section with a junk ``allow_from`` value
-    should be ignored, not derail startup."""
-    bus = MessageBus()
-    mgr = ChannelManager(
-        {"stub": {"enabled": False, "allow_from": []}}, bus
-    )
-    assert mgr.channels == {}

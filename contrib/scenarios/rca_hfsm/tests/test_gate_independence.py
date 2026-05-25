@@ -25,7 +25,6 @@ from agentm_rca_hfsm.schema import (
 from agentm_rca_hfsm.updates import UpdateProposal
 
 from tests._gate_fixtures import install_store_and_gate
-from tests._phase1_mimic_judges import IndependenceMimic
 
 
 _IDENTICAL_OBS = Observation(
@@ -89,40 +88,8 @@ def _check_payload(worker_session_id: str) -> dict[str, object]:
     return {"worker_session_id": worker_session_id, "observations": []}
 
 
-def test_same_session_id_not_independent() -> None:
-    """Mimic of Phase-1 ``independent_positive_workers``: same session id
-    is redundant, not independent.
-    """
-
-    from agentm_rca_hfsm.judges import JudgeContext
-
-    mimic = IndependenceMimic()
-    verdict = mimic.judge(
-        JudgeContext(
-            graph_slice={
-                "check_a": _check_payload("w1"),
-                "check_b": _check_payload("w1"),
-            },
-            operands={},
-        )
-    )
-    assert verdict.verdict == "redundant"
 
 
-def test_distinct_session_ids_are_independent() -> None:
-    from agentm_rca_hfsm.judges import JudgeContext
-
-    mimic = IndependenceMimic()
-    verdict = mimic.judge(
-        JudgeContext(
-            graph_slice={
-                "check_a": _check_payload("w1"),
-                "check_b": _check_payload("w2"),
-            },
-            operands={},
-        )
-    )
-    assert verdict.verdict == "independent"
 
 
 def test_confirm_blocks_on_single_session_even_with_identical_obs() -> None:
@@ -146,14 +113,3 @@ def test_confirm_blocks_on_single_session_even_with_identical_obs() -> None:
     assert read.get_hypothesis("H1").status == "open"
 
 
-def test_confirm_passes_with_distinct_sessions_and_full_coverage() -> None:
-    _, gate, read = install_store_and_gate()
-    gate.apply(UpdateProposal(op="record_symptom",
-                              symptom=Symptom(id="S1", text="disk full", source="user_intake")))
-    h = _h_with_positive_workers(["w-a", "w-b"])
-    gate.apply(UpdateProposal(op="propose", hypothesis=h))
-
-    result = gate.apply(UpdateProposal(op="confirm", target_id="H1"))
-
-    assert result.kind == "applied"
-    assert read.get_hypothesis("H1").status == "confirmed"

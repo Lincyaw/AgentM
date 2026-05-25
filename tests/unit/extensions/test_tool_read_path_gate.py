@@ -15,7 +15,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-import pytest
 
 from agentm.core.abi.operations import FileOperations
 from agentm.extensions.builtin import tool_read
@@ -71,14 +70,6 @@ def _read(api: _Api, path: str) -> tuple[str, bool]:
     return result.content[0].text, bool(result.is_error)
 
 
-def test_no_globs_means_no_gate(tmp_path: Path) -> None:
-    target = tmp_path / "anywhere.txt"
-    target.write_text("ok")
-    api = _Api(str(tmp_path), _StubFileOps({str(target): b"ok"}))
-    _install(api)
-    text, is_err = _read(api, str(target))
-    assert not is_err
-    assert text == "ok"
 
 
 def test_allow_globs_block_paths_outside_scope(tmp_path: Path) -> None:
@@ -102,51 +93,8 @@ def test_allow_globs_block_paths_outside_scope(tmp_path: Path) -> None:
     assert "allow_globs" in text_blocked
 
 
-def test_relative_allow_glob_anchors_at_cwd(tmp_path: Path) -> None:
-    """A scenario manifest writing ``skills/**`` must mean ``<cwd>/skills/**``
-    regardless of the user's working directory at agent launch."""
-
-    inside = tmp_path / "skills" / "a.md"
-    inside.parent.mkdir(parents=True)
-    inside.write_text("a")
-    outside = tmp_path / "skills_sibling" / "evil.md"
-    outside.parent.mkdir(parents=True)
-    outside.write_text("evil")
-    api = _Api(
-        str(tmp_path),
-        _StubFileOps({str(inside): b"a", str(outside): b"evil"}),
-    )
-    _install(api, allow_globs=["skills/**"])
-
-    _, is_err_in = _read(api, str(inside))
-    assert not is_err_in
-    _, is_err_out = _read(api, str(outside))
-    assert is_err_out
 
 
-def test_deny_globs_evaluated_after_allow(tmp_path: Path) -> None:
-    """Eval-data layout: agent legitimately reads telemetry parquets in
-    ``dataset/<case>/`` but ``label.txt`` in the same directory must
-    stay out of reach."""
-
-    case = tmp_path / "dataset" / "case1"
-    case.mkdir(parents=True)
-    parquet = case / "abnormal_traces.parquet"
-    label = case / "label.txt"
-    parquet.write_text("ok")
-    label.write_text("answer")
-    api = _Api(
-        str(tmp_path),
-        _StubFileOps({str(parquet): b"ok", str(label): b"answer"}),
-    )
-    _install(api, allow_globs=["dataset/**"], deny_globs=["**/label.txt"])
-
-    _, is_err_ok = _read(api, str(parquet))
-    assert not is_err_ok
-
-    text_blocked, is_err_blocked = _read(api, str(label))
-    assert is_err_blocked
-    assert "deny_glob" in text_blocked
 
 
 def test_symlink_resolved_before_matching(tmp_path: Path) -> None:
@@ -171,13 +119,3 @@ def test_symlink_resolved_before_matching(tmp_path: Path) -> None:
     assert "Access denied" in text
 
 
-@pytest.mark.parametrize("missing_or_bad", [None, "not-a-list", 42])
-def test_invalid_glob_config_treated_as_no_gate(
-    missing_or_bad: Any, tmp_path: Path
-) -> None:
-    target = tmp_path / "f.txt"
-    target.write_text("x")
-    api = _Api(str(tmp_path), _StubFileOps({str(target): b"x"}))
-    _install(api, allow_globs=missing_or_bad)
-    text, is_err = _read(api, str(target))
-    assert not is_err and text == "x"

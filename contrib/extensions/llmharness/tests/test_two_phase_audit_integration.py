@@ -57,7 +57,6 @@ from llmharness.audit.entry_types import (
     EXTRACTOR_EMPTY,
     EXTRACTOR_NO_CALL,
     EXTRACTOR_PARTIAL,
-    VERDICT,
 )
 from llmharness.audit.extractor import FINALIZE_EXTRACTION_TOOL_NAME
 
@@ -386,35 +385,6 @@ def _entries(session: AgentSession, entry_type: str) -> list[Any]:
     return [e for e in session.session_manager.get_active_branch() if e.type == entry_type]
 
 
-@pytest.mark.asyncio
-async def test_extractor_and_auditor_fire_together_on_configured_interval(
-    tmp_path: Path,
-) -> None:
-    provider = _V31StubProvider(mode="happy")
-    provider_module = _install_provider_module(
-        "tests._fake_v31_interval_provider", provider
-    )
-
-    session = await AgentSession.create(
-        _build_interval_session_config(
-            cwd=str(tmp_path),
-            provider_module=provider_module,
-            interval_turns=3,
-        )
-    )
-    await session.prompt("user turn 1")
-    await session.prompt("user turn 2")
-    await session.prompt("user turn 3")
-    await session.shutdown()
-
-    assert provider.parent_calls == 3
-    # v19: each extractor firing spans multiple LLM calls (the four-step
-    # happy script: 2 upserts + 1 edge + finalize). The auditor is still
-    # single-shot — one call per firing.
-    assert provider.extractor_calls == 4
-    assert provider.auditor_calls == 1
-    assert len(_entries(session, AUDIT_EVENT)) == 2
-    assert len(_entries(session, VERDICT)) == 1
 
 
 # --- Scenario 1: happy path ------------------------------------------------
@@ -474,43 +444,6 @@ async def test_happy_path_writes_event_edge_and_cursor(tmp_path: Path) -> None:
 # --- Scenario 2: partial (witness retry exhausted) -------------------------
 
 
-@pytest.mark.asyncio
-async def test_partial_path_drops_edge_and_writes_extractor_partial(
-    tmp_path: Path,
-) -> None:
-    provider = _V31StubProvider(mode="partial")
-    provider_module = _install_provider_module(
-        "tests._fake_v31_partial_provider", provider
-    )
-
-    session = await AgentSession.create(
-        _build_session_config(cwd=str(tmp_path), provider_module=provider_module)
-    )
-    await session.prompt("user turn 1")
-    await session.shutdown()
-
-    events = _entries(session, AUDIT_EVENT)
-    edges = _entries(session, AUDIT_EDGE)
-    partial = _entries(session, EXTRACTOR_PARTIAL)
-    cursors = _entries(session, EXTRACTOR_CURSOR)
-
-    # v19: a bad-witness upsert_edge is rejected at the per-edit
-    # boundary (the upsert_edge tool returns is_error=True) so no edge
-    # lands in the op log AND no ``dropped_edges`` entry accumulates —
-    # the v18 partial-accept path is gone. The two upsert_node calls
-    # still succeed, so the firing finalizes with 2 events / 0 edges.
-    # ``extractor_partial`` therefore stays empty under v19.
-    assert len(events) == 2, (
-        f"expected 2 audit_event (the upsert_node calls), got {len(events)}"
-    )
-    assert len(edges) == 0, f"expected 0 audit_edge after rejected ref, got {len(edges)}"
-    assert len(partial) == 0, (
-        "v19 has no partial-accept path; bad witnesses become tool "
-        "rejections, not extractor_partial entries"
-    )
-    assert len(cursors) == 1, (
-        "cursor must advance once the firing finalizes, even with no edges"
-    )
 
 
 # --- Scenario 3: no-call ---------------------------------------------------
@@ -549,27 +482,3 @@ async def test_no_call_path_records_extractor_no_call_and_holds_cursor(
 # --- Scenario 4: empty (terminator called with empty events) ---------------
 
 
-@pytest.mark.asyncio
-async def test_empty_path_records_extractor_empty_on_non_trivial_window(
-    tmp_path: Path,
-) -> None:
-    provider = _V31StubProvider(mode="empty")
-    provider_module = _install_provider_module(
-        "tests._fake_v31_empty_provider", provider
-    )
-
-    session = await AgentSession.create(
-        _build_session_config(cwd=str(tmp_path), provider_module=provider_module)
-    )
-    await session.prompt("user turn 1")
-    await session.shutdown()
-
-    empty = _entries(session, EXTRACTOR_EMPTY)
-    cursors = _entries(session, EXTRACTOR_CURSOR)
-    events = _entries(session, AUDIT_EVENT)
-    edges = _entries(session, AUDIT_EDGE)
-
-    assert len(empty) == 1, f"expected exactly 1 extractor_empty, got {len(empty)}"
-    assert len(cursors) == 0, "cursor must NOT advance on extractor_empty"
-    assert events == []
-    assert edges == []

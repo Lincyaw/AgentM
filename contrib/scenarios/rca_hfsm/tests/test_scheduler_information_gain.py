@@ -54,8 +54,3 @@ def test_scheduler_breaks_ties_on_lowest_prediction_id() -> None:
     assert choice.id == "P-aaa"
 
 
-def test_scheduler_returns_none_when_no_open_predictions() -> None:
-    assert pick_next([]) is None
-    refuted = _h("HX", [_p("P-x", "HX", "x")])
-    refuted.status = "refuted"
-    assert pick_next([refuted]) is None

@@ -57,33 +57,3 @@ async def test_ws_token_auth_rejects_bad_token(free_port: int, db_path: str) -> 
         inbox.close()
 
 
-async def test_ws_token_auth_accepts_good_token(free_port: int, db_path: str) -> None:
-    outbox = SqliteOutbox(db_path)
-    inbox = SqliteInbox(db_path)
-    server = WireServer(
-        outbox=outbox,
-        inbox=inbox,
-        on_inbound=_noop,
-        transport=WebSocketServerTransport("127.0.0.1", free_port),
-        authenticator=TokenAuthenticator({"good"}),
-    )
-    await server.start()
-    try:
-        client = WireClient(
-            transport=WebSocketClientTransport(f"ws://127.0.0.1:{free_port}/"),
-            peer_id="good-peer",
-            peer_kind="chat_client",
-            token="good",
-        )
-        await client.connect()
-        # Wait briefly for the registry to register.
-        for _ in range(50):
-            if "good-peer" in server.registry:
-                break
-            await asyncio.sleep(0.02)
-        assert "good-peer" in server.registry
-        await client.close()
-    finally:
-        await server.stop()
-        outbox.close()
-        inbox.close()

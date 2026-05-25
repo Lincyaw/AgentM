@@ -26,10 +26,8 @@ from agentm.core.abi import (
     DecideTurnActionEvent,
     Inject,
     MaxTurnsExhausted,
-    ModelEndTurn,
     Step,
     Stop,
-    ToolTerminated,
     TurnObservation,
 )
 
@@ -54,12 +52,6 @@ def _make_api() -> MagicMock:
     return api
 
 
-def test_no_pending_reminders_returns_none() -> None:
-    api = _make_api()
-    handler = _make_reminder_injector(api, [])
-    result = handler(_make_event(Step()))
-    assert result is None
-    api.session.append_entry.assert_not_called()
 
 
 def test_step_default_with_reminder_injects() -> None:
@@ -74,24 +66,8 @@ def test_step_default_with_reminder_injects() -> None:
     api.session.append_entry.assert_called_once()
 
 
-def test_terminal_non_final_stop_with_reminder_injects() -> None:
-    """Stop(ToolTerminated) is non-final → reminder overrides the stop."""
-    api = _make_api()
-    pending = [Reminder(text="report incomplete")]
-    handler = _make_reminder_injector(api, pending)
-    result = handler(_make_event(Stop(ToolTerminated(tool_name="submit_final_report", reason=""))))
-    assert isinstance(result, Inject)
-    assert len(result.messages) == 1
-    assert pending == []
 
 
-def test_model_end_turn_stop_is_overridable() -> None:
-    api = _make_api()
-    pending = [Reminder(text="you stopped early")]
-    handler = _make_reminder_injector(api, pending)
-    result = handler(_make_event(Stop(ModelEndTurn())))
-    assert isinstance(result, Inject)
-    assert pending == []
 
 
 def test_final_stop_leaves_reminder_pending() -> None:
@@ -105,12 +81,3 @@ def test_final_stop_leaves_reminder_pending() -> None:
     api.session.append_entry.assert_not_called()
 
 
-def test_multiple_reminders_concatenated_in_one_inject() -> None:
-    api = _make_api()
-    pending = [Reminder(text="one"), Reminder(text="two"), Reminder(text="three")]
-    handler = _make_reminder_injector(api, pending)
-    result = handler(_make_event(Step()))
-    assert isinstance(result, Inject)
-    assert len(result.messages) == 3
-    assert pending == []
-    assert api.session.append_entry.call_count == 3

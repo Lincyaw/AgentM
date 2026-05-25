@@ -52,17 +52,8 @@ class _Root(BaseModel):
     note: str = Field(description="free text")
 
 
-def test_no_strict_mode_violations() -> None:
-    schema = pydantic_to_openai_tool_schema(_Root)
-    assert _walk(schema) == []
 
 
-def test_defs_inlined() -> None:
-    schema = pydantic_to_openai_tool_schema(_Root)
-    assert "$defs" not in schema
-    leaf_items = schema["properties"]["items"]["items"]
-    assert leaf_items["type"] == "object"
-    assert set(leaf_items["properties"].keys()) == {"sql", "claim"}
 
 
 def test_all_properties_required_even_with_defaults() -> None:

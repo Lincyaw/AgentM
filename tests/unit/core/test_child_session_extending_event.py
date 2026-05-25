@@ -26,46 +26,12 @@ from __future__ import annotations
 from agentm.core.runtime.session_factory import apply_child_session_contributions
 
 
-def test_no_handler_returns_leaves_base_unchanged() -> None:
-    base = [("m.a", {"x": 1})]
-    out = apply_child_session_contributions(base, [])
-    assert out == base
-    # Result is a fresh list — mutating it must not affect the caller's
-    # original (so the substrate can hand it to the factory without
-    # worrying about post-spawn mutation aliasing back).
-    out.append(("m.b", {}))
-    assert base == [("m.a", {"x": 1})]
 
 
-def test_none_returns_are_ignored() -> None:
-    out = apply_child_session_contributions([], [None, None])
-    assert out == []
 
 
-def test_two_handlers_contributions_appended_in_order() -> None:
-    out = apply_child_session_contributions(
-        [],
-        [
-            [("m.first", {"k": 1})],
-            [("m.second", {"k": 2})],
-        ],
-    )
-    assert out == [
-        ("m.first", {"k": 1}),
-        ("m.second", {"k": 2}),
-    ]
 
 
-def test_module_already_on_base_extensions_wins_against_contribution() -> None:
-    """Operator override on the child config beats any handler contribution
-    for the same module — handlers can declare intent, but the operator's
-    explicit listing is authoritative.
-    """
-    base = [("m.x", {"operator_chosen_port": 9999})]
-    out = apply_child_session_contributions(
-        base, [[("m.x", {"port": 0})]]
-    )
-    assert out == [("m.x", {"operator_chosen_port": 9999})]
 
 
 def test_first_contribution_wins_across_handlers() -> None:

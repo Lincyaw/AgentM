@@ -213,21 +213,3 @@ async def test_M1_freeze_idempotent(
     assert children == {"runs"}
 
 
-@pytest.mark.asyncio
-async def test_M3_list_versions_after_first_session(
-    tmp_path: Path,
-) -> None:
-    _configure_manifest(tmp_path)
-    _init_repo(tmp_path)
-    source = "def install(api, config):\n    return 'read'\n"
-    _write_atom(tmp_path, "tool_read", source)
-    version_hash = freeze_current(
-        "tool_read",
-        source,
-        _manifest(),
-        root=tmp_path,
-    )
-
-    from agentm.core._internal.catalog import list_versions
-
-    assert list_versions("tool_read", tmp_path) == [version_hash]

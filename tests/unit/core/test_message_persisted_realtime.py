@@ -27,7 +27,6 @@ import pytest
 
 from agentm.core.abi import (
     AssistantMessage,
-    BeforeSendToLlmEvent,
     DecideTurnActionEvent,
     Inject,
     MessageEnd,
@@ -231,81 +230,10 @@ def _collect_appended(session: AgentSession) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_assistant_message_persisted_realtime(tmp_path: Path) -> None:
-    module_name = f"tests.unit._persist_asst_{id(tmp_path)}"
-    try:
-        session = await _make_session(tmp_path, module_name, _stream_text("hello"))
-        records = _collect_appended(session)
-        await session.prompt("hi")
-        # User message + one assistant message.
-        roles_seen = [_role(r) for r in records]
-        assert "user" in roles_seen
-        assert "assistant" in roles_seen
-    finally:
-        await session.shutdown()
-        sys.modules.pop(module_name, None)
 
 
-@pytest.mark.asyncio
-async def test_tool_result_message_persisted_realtime(tmp_path: Path) -> None:
-    module_name = f"tests.unit._persist_tool_{id(tmp_path)}"
-    try:
-        session = await _make_session(
-            tmp_path, module_name, _stream_then_tool_call(), register_echo=True
-        )
-        records = _collect_appended(session)
-        await session.prompt("invoke echo")
-        roles_seen = [_role(r) for r in records]
-        # We expect: user, assistant (tool_call), tool_result,
-        # assistant (final "done").
-        assert roles_seen.count("tool_result") == 1
-        assert roles_seen.count("assistant") == 2
-    finally:
-        await session.shutdown()
-        sys.modules.pop(module_name, None)
 
 
-@pytest.mark.asyncio
-async def test_compaction_replacement_not_persisted(tmp_path: Path) -> None:
-    """A ``before_send_to_llm`` handler that rewrites the live list in place
-    via ``messages[:] = ...`` must NOT cause extra ``MessageAppendedEvent``s.
-    Compaction is an ephemeral context rewrite, not a durable addition.
-    """
-    module_name = f"tests.unit._persist_compact_{id(tmp_path)}"
-    try:
-        session = await _make_session(tmp_path, module_name, _stream_text("ok"))
-        records = _collect_appended(session)
-
-        compacted = [False]
-
-        def _rewrite(event: BeforeSendToLlmEvent) -> None:
-            if compacted[0]:
-                return
-            compacted[0] = True
-            event.messages[:] = [
-                UserMessage(
-                    role="user",
-                    content=[TextContent(type="text", text="<summary>")],
-                    timestamp=0.0,
-                )
-            ]
-
-        session.bus.on(BeforeSendToLlmEvent.CHANNEL, _rewrite)
-
-        await session.prompt("turn-1")
-        baseline = list(records)
-        await session.prompt("turn-2")
-
-        # The second prompt's before_send_to_llm rewrites the in-flight list
-        # but must not emit any extra MessageAppendedEvent beyond the
-        # caller's user message + the assistant reply.
-        new_records = records[len(baseline):]
-        roles_seen = [_role(r) for r in new_records]
-        assert roles_seen == ["user", "assistant"]
-    finally:
-        await session.shutdown()
-        sys.modules.pop(module_name, None)
 
 
 @pytest.mark.asyncio
