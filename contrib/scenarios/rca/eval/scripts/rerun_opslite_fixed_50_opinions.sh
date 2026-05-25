@@ -47,21 +47,42 @@ echo
 echo "[2/2] aggregating replay sidecars to $out_dir/"
 mkdir -p "$out_dir"
 
-# Pair each rolled-out trace with its case name from eval.db, then drive
-# llmharness-aggregate once per (root_session_id, sample_id) pair so the
+# Pair each rolled-out session with its case name from eval.db, then
+# drive llmharness-aggregate once per (session_id, sample_id) pair so the
 # case directory is keyed by the dataset case name rather than the bare
 # session id.
+#
+# WARNING — identity mismatch: ``evaluation_data.trace_id`` stores the
+# OTel *trace_id* (= ``session.root_session_id``), but the replay sidecar
+# is named ``.agentm/audit_replay/<session_id>.jsonl`` where session_id =
+# ``session.session_manager.get_session_id()`` (see
+# agentm_rca/eval/agent.py:554,571). The two differ for a real root
+# session, so a trace_id cannot locate the sidecar. The per-row
+# session_id is persisted in the trajectory metadata as
+# ``session_log_id``; we extract it from the ``trajectories`` JSON column
+# (falling back to ``trace_id`` only for legacy rows where the two
+# coincide). ``--session-id`` then receives the correct sidecar stem.
 mapfile -t pairs < <(
   uv run --no-sync python - <<PY "$exp_id"
-import sys, sqlite3
+import sys, sqlite3, json
 exp_id = sys.argv[1]
 con = sqlite3.connect("eval.db")
-for trace_id, source in con.execute(
-    "select trace_id, source from evaluation_data "
+for trace_id, trajectories, source in con.execute(
+    "select trace_id, trajectories, source from evaluation_data "
     "where exp_id=? and stage='rolled_out' and trace_id is not null",
     (exp_id,),
 ):
-    print(f"{trace_id}\t{source}")
+    session_id = ""
+    if trajectories:
+        try:
+            meta = (json.loads(trajectories) or {}).get("metadata") or {}
+            session_id = meta.get("session_log_id") or ""
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            session_id = ""
+    # Legacy rows that predate session_log_id metadata fall back to the
+    # trace_id; aggregation then skips them via the sidecar-exists guard
+    # below rather than crashing.
+    print(f"{session_id or trace_id}\t{source}")
 PY
 )
 
@@ -71,16 +92,16 @@ if [[ ${#pairs[@]} -eq 0 ]]; then
 fi
 
 for line in "${pairs[@]}"; do
-    sid="${line%%$'\t'*}"
+    session_id="${line%%$'\t'*}"
     case_name="${line##*$'\t'}"
-    [[ -z "$sid" || -z "$case_name" ]] && continue
-    if [[ ! -f ".agentm/audit_replay/${sid}.jsonl" ]]; then
-        echo "  skip $case_name — no replay sidecar at .agentm/audit_replay/${sid}.jsonl" >&2
+    [[ -z "$session_id" || -z "$case_name" ]] && continue
+    if [[ ! -f ".agentm/audit_replay/${session_id}.jsonl" ]]; then
+        echo "  skip $case_name — no replay sidecar at .agentm/audit_replay/${session_id}.jsonl" >&2
         continue
     fi
     uv run --no-sync llmharness-aggregate \
         --cwd "$repo_root" \
-        --root-session-id "$sid" \
+        --session-id "$session_id" \
         --sample-id "$case_name" \
         --dataset-name "ops-lite" \
         --dataset-path "$RCA_DATASET_ROOT" \
