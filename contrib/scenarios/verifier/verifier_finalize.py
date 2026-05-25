@@ -5,23 +5,22 @@ RCA scenario (which submits a guess at the unknown root cause), the
 verifier already knows what was injected — it submits:
 
 * ``injection_effective`` — did the injection actually materialize? One
-  of ``true`` / ``false`` / ``ambiguous`` (free-text rationale required).
-* ``injection_evidence`` — SQL-backed claims that the injection target
-  itself shows the expected anomaly inside the abnormal window.
-* ``slo_impact`` — user-visible service-level regressions observed
-  during the abnormal window.
-* ``propagation_nodes`` — every component whose state changed because
-  of the injection (NOT just the injection target). Each node carries a
-  ``component`` (``container|name``, ``service|name``, ``span|name``,
-  …), a free-text ``state`` description, the affected window, and SQL
-  evidence. Free-text by design — see [[feedback_no_preset_subjective_labels]].
-* ``propagation_edges`` — directed edges ``from`` → ``to`` with a
-  free-text ``mechanism`` (e.g. "JDBC connection failure surfaces as
-  500s in callers") and SQL evidence per edge.
+  of ``true`` / ``false`` / ``ambiguous`` (free-text rationale required,
+  citing the injection target's own normal-vs-abnormal symptom).
+* ``propagation_nodes`` — every service proven to have degraded. Each
+  node carries a ``symptom_sql`` that compares the normal and abnormal
+  windows (delta visible) plus a short ``claim``. A flat/improved metric
+  is not a symptom, so such a service is not a node.
+* ``propagation_edges`` — directed fault-impact hops ``from_service`` →
+  ``to_service`` between nodes. Each carries a ``relationship_sql``
+  proving the two services are directly connected (trace parent/child
+  call, either direction, or a shared k8s deployment/node) plus a
+  ``claim``. Both endpoints must also be ``propagation_nodes``.
 
-Schema correctness is enforced by Pydantic here; vocabulary alignment
-(component IDs must match strings observed in the parquets) is
-enforced in the prompt.
+The graph is thus built only from queryable facts: symptomatic nodes
+joined by proven relationships. Schema + edge↔node referential
+integrity are enforced by Pydantic here; the driver re-executes every
+SQL after submission to confirm each is queryable and returns rows.
 
 Mirrors the rca ``finalize`` atom's loop-keepalive behaviour: while
 the agent has not yet submitted, voluntarily ending a turn with
@@ -36,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from agentm.core.lib import pydantic_to_openai_tool_schema
 
@@ -87,62 +86,106 @@ _SYNTHETIC = frozenset(
 _STRICT = ConfigDict(extra="forbid")
 
 
-class SqlEvidence(BaseModel):
+class PropagationNode(BaseModel):
+    """A service shown — by re-executable SQL — to carry a fault symptom in
+    the abnormal window.
+
+    The graph is built from queryable facts: every node is a service whose
+    symptom is proven by a single SQL that compares the NORMAL and ABNORMAL
+    windows. A flat or improved metric is NOT a symptom — such a service is
+    not a node.
+    """
+
     model_config = _STRICT
-    sql: str = Field(description="DuckDB SQL re-executable against case parquets.")
-    claim: str = Field(description="<=25-word natural-language assertion the SQL backs.")
+    service: str = Field(
+        description="Bare service_name as in the parquet column. Not a "
+        "synthetic load generator (loadgenerator, locust, wrk2, dsb-wrk2, k6)."
+    )
+    symptom_sql: str = Field(
+        description="ONE DuckDB SELECT that returns BOTH the normal and the "
+        "abnormal window side by side (e.g. UNION ALL of the two windows) so "
+        "the delta is visible — proving this service degraded (worse latency / "
+        "errors / throughput collapse) in the abnormal window."
+    )
+    claim: str = Field(
+        description="<=25-word delta the SQL shows, e.g. 'p99 0.15ms->0.25ms (+64%)'."
+    )
 
 
 class PropagationEdge(BaseModel):
-    """One service-to-service hop in the fault impact graph.
+    """A directed fault-impact hop ``from_service`` → ``to_service``.
 
-    Both ``from_service`` and ``to_service`` are bare service names as
-    they appear in the parquet ``service_name`` column. The edge
-    direction is fault-impact (upstream-failing → downstream-affected),
-    NOT request-call direction.
+    Direction is fault-impact (upstream-failing → downstream-affected), the
+    OPPOSITE of the request-call direction. BOTH endpoints must also appear in
+    ``propagation_nodes`` (both must be proven symptomatic); the edge itself is
+    proven by a SQL that shows the two services are directly connected — a
+    trace parent/child call (either direction) or a shared k8s
+    deployment/node relationship.
 
-    Synthetic traffic generators (``loadgenerator``, ``locust``,
-    ``wrk2``, ``dsb-wrk2``, ``k6``) are not real services and must NOT
-    appear in either ``from_service`` or ``to_service``.
+    Synthetic traffic generators (``loadgenerator``, ``locust``, ``wrk2``,
+    ``dsb-wrk2``, ``k6``) are not real services and must NOT appear here.
     """
 
     model_config = _STRICT
     from_service: str = Field(
         description="Service whose degradation causes the downstream change. "
-        "Do NOT use synthetic load generators (loadgenerator, locust, wrk2, "
-        "dsb-wrk2, k6) — those are not services."
+        "Must appear in propagation_nodes. Not a synthetic load generator."
     )
     to_service: str = Field(
-        description="Service that degraded because of ``from_service``. "
-        "Do NOT use synthetic load generators."
+        description="Service that degraded because of from_service. Must "
+        "appear in propagation_nodes. Not a synthetic load generator."
     )
-    evidence: list[SqlEvidence] = Field(
-        description="At least one SQL+claim showing to_service's "
-        "behaviour in the abnormal window differs from normal AND the "
-        "timing is consistent with from_service being the cause."
+    relationship_sql: str = Field(
+        description="ONE DuckDB SELECT that returns rows proving from_service "
+        "and to_service are DIRECTLY connected — a trace parent/child call "
+        "(either direction; look in the normal window) or a shared k8s "
+        "deployment/node relationship. This proves the edge can carry impact."
+    )
+    claim: str = Field(
+        description="<=25-word statement of the connection and why from's "
+        "degradation reaches to (impact rides on the reverse call)."
     )
 
 
 class VerifierReport(BaseModel):
-    """Service-level fault propagation report.
+    """Service-level fault propagation report — an SQL-backed graph.
 
-    The verifier outputs the directed graph of services affected by a
-    known injection, plus an effectiveness verdict on the injection
-    itself. Lower-granularity targets (container / pod / span) are
-    intentionally NOT part of the contract — only services and the
-    SQL evidence that proves each propagation hop.
+    Every node and every edge is queryable: nodes carry a normal-vs-abnormal
+    symptom SQL, edges carry a connection SQL. The graph is the set of
+    symptomatic nodes joined by proven relationships. Lower-granularity
+    targets (container / pod / span) are intentionally NOT part of the
+    contract.
     """
 
     model_config = _STRICT
     injection_effective: Literal["true", "false", "ambiguous"]
     effectiveness_rationale: str = Field(
         description="Why effective / not / ambiguous, citing the abnormal "
-        "vs normal window comparison."
+        "vs normal window comparison of the injection TARGET's own symptom."
+    )
+    propagation_nodes: list[PropagationNode] = Field(
+        description="Every service proven (by symptom_sql) to have degraded. "
+        "Empty list is acceptable when injection_effective='false'."
     )
     propagation_edges: list[PropagationEdge] = Field(
-        description="Service-to-service fault propagation hops. Empty "
-        "list is acceptable when injection_effective='false'."
+        description="Directed fault-impact hops between propagation_nodes. "
+        "Empty list is acceptable when injection_effective='false'."
     )
+
+    @model_validator(mode="after")
+    def _edges_reference_nodes(self) -> "VerifierReport":
+        node_services = {n.service for n in self.propagation_nodes}
+        edge_services = {e.from_service for e in self.propagation_edges} | {
+            e.to_service for e in self.propagation_edges
+        }
+        dangling = sorted(edge_services - node_services)
+        if dangling:
+            raise ValueError(
+                "every edge endpoint must also be a propagation_node (with its "
+                f"own symptom_sql); these services are used in edges but are not "
+                f"nodes: {dangling}"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -303,12 +346,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             name="submit_propagation_report",
             description=(
                 "Submit the verifier's final report: an effectiveness "
-                "verdict on the injection itself plus the service-level "
-                "fault-propagation graph. Each edge is a directed "
-                "service-to-service hop in the fault-impact direction "
-                "(upstream-failing → downstream-affected) with at least "
-                "one SQL+claim evidence pair. Service names must match "
-                "strings observed in the parquet service_name column."
+                "verdict on the injection plus an SQL-backed propagation "
+                "graph. propagation_nodes = every degraded service, each with "
+                "a symptom_sql comparing normal vs abnormal. propagation_edges "
+                "= directed fault-impact hops between those nodes, each with a "
+                "relationship_sql proving the two services are directly "
+                "connected. Every edge endpoint must also be a node. Service "
+                "names must match the parquet service_name column. Every SQL "
+                "is re-executed after submission — it must run and return rows."
             ),
             parameters=pydantic_to_openai_tool_schema(VerifierReport),
             fn=_submit,

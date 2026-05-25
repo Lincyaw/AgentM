@@ -88,9 +88,33 @@ or non-materialised injection (e.g. a CPU stress with no observed CPU
 rise and no downstream effect) did not engage and must NOT be a
 propagation source — leave its edges out even if the labels include them.
 
-## Evidence
+## Everything is a query — points and edges
 
-`sql` is DuckDB that runs against the case parquets and returns rows;
-`claim` is one sentence the rows justify. Cite both windows so the delta
-is visible. An edge you cannot back with re-executable SQL is one you
-must not emit.
+The graph you submit is built only from queryable facts. Two SQL-backed
+pieces, both re-executed after you submit (each must run and return rows):
+
+- a **node** (`propagation_nodes`) is a service proven to have degraded.
+  Its `symptom_sql` returns the NORMAL and the ABNORMAL window side by
+  side (e.g. `... WHERE <normal window> UNION ALL ... WHERE <abnormal
+  window>`) so the delta is visible. The rows must show the service got
+  WORSE in the abnormal window — higher latency (p95/p99), errors, or a
+  throughput/completed-span collapse. A metric that is flat or IMPROVED
+  is not a symptom: that service is not a node. (rate's p99 falling is
+  evidence AGAINST, not for.)
+- an **edge** (`propagation_edges`) is a directed hop `from → to` between
+  two nodes. Its `relationship_sql` proves the two services are DIRECTLY
+  connected — a trace parent/child call (either direction; look in the
+  normal window) or a shared k8s deployment/node. This proves the edge
+  can physically carry impact.
+
+Both endpoints of every edge MUST also appear in `propagation_nodes`
+(both must be independently proven symptomatic) — submission is rejected
+otherwise. So an edge means: from is symptomatic (its node SQL), to is
+symptomatic (its node SQL), and the two are connected (the edge SQL). The
+fault-impact direction (`from`'s failure drags down `to`) rides on the
+reverse call, exactly as in "What an edge means" above.
+
+If you cannot produce a passing `symptom_sql` for a service, it is not a
+node and cannot be in any edge. If you cannot produce a passing
+`relationship_sql`, there is no edge. Co-occurrence, or a uniform
+throughput drop shared by unrelated services, proves neither.

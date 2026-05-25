@@ -78,6 +78,61 @@ def extract_report(obs_dir: Path):
     return best
 
 
+def _duck_conn(data_dir: Path):
+    """Replicate the duckdb_sql tool's view setup: one view per parquet
+    (filename stem), excluding conclusion.parquet (ground truth)."""
+    import duckdb
+
+    conn = duckdb.connect(":memory:")
+    for f in sorted(data_dir.iterdir()):
+        if f.is_file() and f.suffix == ".parquet" and f.name != "conclusion.parquet":
+            path = f.as_posix().replace("'", "''")
+            conn.execute(f"CREATE OR REPLACE VIEW {f.stem} AS SELECT * FROM read_parquet('{path}')")
+    return conn
+
+
+def _run_sql(conn, sql: str) -> dict:
+    """Re-execute one evidence SQL. Status: ok (>=1 row) / empty (0 rows) / error."""
+    if not isinstance(sql, str) or not sql.strip():
+        return {"status": "error", "detail": "empty sql", "rows": 0}
+    try:
+        rows = conn.execute(sql).fetchall()
+    except Exception as exc:  # noqa: BLE001 — surface the DB error verbatim
+        return {"status": "error", "detail": str(exc).splitlines()[0][:200], "rows": 0}
+    return {"status": "ok" if rows else "empty", "rows": len(rows)}
+
+
+def verify_report_sql(data_dir: Path, report: dict) -> dict:
+    """Re-run every node symptom_sql and edge relationship_sql against the case
+    parquets. The checker only confirms each SQL is queryable (runs + returns
+    rows); semantic judgement (does the evidence prove propagation) is left to
+    the agent / an optional critic. An edge is 'verified' iff its
+    relationship_sql is ok AND both endpoints' node symptom_sql are ok."""
+    conn = _duck_conn(data_dir)
+    nodes = {}
+    for n in report.get("propagation_nodes", []) or []:
+        nodes[n.get("service")] = _run_sql(conn, n.get("symptom_sql", ""))
+    edges = []
+    for e in report.get("propagation_edges", []) or []:
+        f, t = e.get("from_service"), e.get("to_service")
+        rel = _run_sql(conn, e.get("relationship_sql", ""))
+        verified = (
+            rel["status"] == "ok"
+            and nodes.get(f, {}).get("status") == "ok"
+            and nodes.get(t, {}).get("status") == "ok"
+        )
+        edges.append({"from": f, "to": t, "relationship": rel, "verified": verified})
+    conn.close()
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "node_sql_ok": sum(v["status"] == "ok" for v in nodes.values()),
+        "node_sql_total": len(nodes),
+        "edge_verified": sum(e["verified"] for e in edges),
+        "edge_total": len(edges),
+    }
+
+
 def candidate_edges(causal_graph: dict) -> list[tuple[str, str]]:
     comp2svc = causal_graph.get("component_to_service") or {}
 
@@ -165,7 +220,14 @@ def main() -> int:
         print("FAIL: verifier produced no report (see stderr.log)")
         return 1
 
-    verified = {(e["from_service"], e["to_service"]) for e in report["propagation_edges"]}
+    # Verification layer: re-run every node/edge SQL, keep only SQL-verified
+    # edges as the verifier's graph. A submitted edge whose evidence does not
+    # re-execute is not counted.
+    verif = verify_report_sql(data_dir, report)
+    (out / "verification.json").write_text(json.dumps(verif, ensure_ascii=False, indent=2))
+    verified = {(e["from"], e["to"]) for e in verif["edges"] if e["verified"]}
+    unverified = sorted((e["from"], e["to"]) for e in verif["edges"] if not e["verified"])
+
     cand_set = set(cand)
     dropped = sorted(cand_set - verified)   # suspected label false-positives
     added = sorted(verified - cand_set)     # suspected label false-negatives
@@ -176,11 +238,20 @@ def main() -> int:
         "kept": kept,
         "dropped_suspected_label_FP": dropped,
         "added_suspected_label_FN": added,
+        "sql_unverified_edges": unverified,
+        "sql_check": {
+            "node_sql_ok": verif["node_sql_ok"], "node_sql_total": verif["node_sql_total"],
+            "edge_verified": verif["edge_verified"], "edge_total": verif["edge_total"],
+        },
     }
     (out / "label_findings.json").write_text(json.dumps(findings, ensure_ascii=False, indent=2))
     print(f"candidate edges: {len(cand_set)}  kept: {len(kept)}")
+    print(f"  SQL check: nodes {verif['node_sql_ok']}/{verif['node_sql_total']} ok, "
+          f"edges {verif['edge_verified']}/{verif['edge_total']} verified")
     print(f"  suspected label FP (dropped): {dropped}")
     print(f"  suspected label FN (added)  : {added}")
+    if unverified:
+        print(f"  edges dropped (SQL failed to verify): {unverified}")
     return 0
 
 
