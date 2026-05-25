@@ -123,6 +123,7 @@ class _DuckDBState:
         self.token_limit = token_limit
         self.conn: duckdb.DuckDBPyConnection | None = None
         self.tables: list[str] = []
+        self.sql_cache: dict[str, ToolResult] = {}
 
     def connect(self) -> duckdb.DuckDBPyConnection:
         if self.conn is not None:
@@ -214,6 +215,24 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "use SELECT/WITH/EXPLAIN/DESCRIBE/SHOW/SUMMARIZE"
             )
 
+        cache_key = " ".join(sql.split())
+        cached = state.sql_cache.get(cache_key)
+        if cached is not None:
+            return _ok(
+                json.dumps(
+                    {
+                        "_duplicate": True,
+                        "_hint": "You already ran this exact query earlier in this "
+                        "session and got the same result. Re-read that result from "
+                        "your context instead of re-querying. Try a DIFFERENT query "
+                        "or move on to submit your report.",
+                        "sql": sql,
+                    },
+                    ensure_ascii=False,
+                ),
+                is_error=True,
+            )
+
         wrapped = (
             sql
             if head in {"EXPLAIN", "DESCRIBE", "SHOW", "SUMMARIZE"}
@@ -244,7 +263,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             default=str,
             indent=2,
         )
-        return _ok(_truncate(body, token_limit=state.token_limit, rows=rows))
+        result = _ok(_truncate(body, token_limit=state.token_limit, rows=rows))
+        state.sql_cache[cache_key] = result
+        return result
 
     api.register_tool(
         FunctionTool(
