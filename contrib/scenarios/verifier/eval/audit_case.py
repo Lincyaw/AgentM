@@ -30,7 +30,18 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[4]
+VERIFIER_DIR = REPO / "contrib/scenarios/verifier"
+FAULT_DOCS = VERIFIER_DIR / "fault_kinds"
 SYNTHETIC = {"loadgenerator", "locust", "wrk2", "dsb-wrk2", "k6", "load-generator", "load_generator"}
+
+
+def _load(modpath: Path, name: str):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, modpath)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _walk(obj):
@@ -105,16 +116,30 @@ def main() -> int:
     cand = candidate_edges(json.loads((data_dir / "causal_graph.json").read_text()))
     cand_json = [{"from_service": a, "to_service": b} for a, b in cand]
 
+    # Inject the injection spec + per-fault mechanism docs in-context (proven
+    # more reliable than leaving them to on-demand tool calls — the agent
+    # otherwise reverts to a first-hop star on deep pod-failure graphs).
+    spec_mod = _load(VERIFIER_DIR / "verifier_fault_context.py", "vfc_audit")
+    inj_spec = spec_mod._build_spec(data_dir)
+    docs = []
+    for kind in inj_spec.get("fault_kinds", []):
+        doc = FAULT_DOCS / f"{kind}.md"
+        if doc.exists():
+            docs.append(f"### {kind}\n{doc.read_text()}")
+
     prompt = (
-        "A candidate service-level fault-propagation graph derived from this "
-        "case's existing labels is below. Call get_injection_spec and "
-        "get_fault_kind_doc to learn the mechanism, then verify each "
-        "candidate edge against the parquets (drop the unsupported, 查准) and "
-        "add any missing data-supported edges (查漏). Submit the corrected "
-        "graph via submit_propagation_report.\n\n"
-        "## Candidate graph\n```json\n"
+        "Verify this case's service-level fault-propagation labels against the "
+        "data. A candidate graph derived from the existing labels is below.\n\n"
+        "## Known injection spec\n```json\n"
+        + json.dumps(inj_spec, ensure_ascii=False, indent=2)
+        + "\n```\n\n## Per-fault mechanism reference\n"
+        + ("\n\n".join(docs) if docs else "(none)")
+        + "\n\n## Candidate graph (from existing labels)\n```json\n"
         + json.dumps(cand_json, ensure_ascii=False, indent=2)
-        + "\n```"
+        + "\n```\n\nVerify EVERY candidate edge against the parquets one by one "
+        "(查准: keep supported, drop unsupported) and add any missing "
+        "data-supported edges (查漏), then submit the corrected graph via "
+        "submit_propagation_report."
     )
 
     env = dict(os.environ)
