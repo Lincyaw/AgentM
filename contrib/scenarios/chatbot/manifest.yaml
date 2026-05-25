@@ -92,3 +92,6 @@ extensions:
   # --- project-local persistent memory: MEMORY.md index + typed
   # frontmatter files, the evolving-facts companion to persona. ---
   - module: agentm.extensions.builtin.memory
+
+  # --- memory lifecycle: auto-extract, pre-compact sink, per-turn prefetch ---
+  - module: _agentm_contrib__memory_lifecycle
