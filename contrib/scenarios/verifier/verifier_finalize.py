@@ -32,7 +32,9 @@ prose-only is rejected via an ``Inject``.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -218,8 +220,64 @@ class _State:
     submitted: bool = False
 
 
+def _validate_sqls(data_dir: Path, report: VerifierReport) -> list[dict[str, str]]:
+    """Re-execute every SQL in the report. Returns a list of failures (empty = all ok)."""
+    try:
+        import duckdb
+    except ImportError:
+        return []
+
+    conn = duckdb.connect(":memory:")
+    for f in sorted(data_dir.iterdir()):
+        if f.is_file() and f.suffix == ".parquet" and f.name != "conclusion.parquet":
+            path = f.as_posix().replace("'", "''")
+            conn.execute(
+                f"CREATE OR REPLACE VIEW {f.stem} AS SELECT * FROM read_parquet('{path}')"
+            )
+
+    failures: list[dict[str, str]] = []
+
+    for node in report.propagation_nodes:
+        for i, ev in enumerate(node.symptom_evidence):
+            try:
+                rows = conn.execute(ev.sql).fetchall()
+                if not rows:
+                    failures.append({
+                        "location": f"propagation_nodes[{node.service}].symptom_evidence[{i}]",
+                        "error": "query returned 0 rows",
+                        "sql": ev.sql,
+                    })
+            except Exception as exc:  # noqa: BLE001
+                failures.append({
+                    "location": f"propagation_nodes[{node.service}].symptom_evidence[{i}]",
+                    "error": str(exc).splitlines()[0][:300],
+                    "sql": ev.sql,
+                })
+
+    for edge in report.propagation_edges:
+        try:
+            rows = conn.execute(edge.relationship_sql).fetchall()
+            if not rows:
+                failures.append({
+                    "location": f"propagation_edges[{edge.from_service}→{edge.to_service}].relationship_sql",
+                    "error": "query returned 0 rows",
+                    "sql": edge.relationship_sql,
+                })
+        except Exception as exc:  # noqa: BLE001
+            failures.append({
+                "location": f"propagation_edges[{edge.from_service}→{edge.to_service}].relationship_sql",
+                "error": str(exc).splitlines()[0][:300],
+                "sql": edge.relationship_sql,
+            })
+
+    conn.close()
+    return failures
+
+
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     state = _State()
+    raw_dir = config.get("data_dir") or os.environ.get("AGENTM_RCA_DATA_DIR")
+    data_dir = Path(raw_dir) if raw_dir else None
 
     async def _submit(args: dict[str, Any]) -> ToolResult | ToolTerminate:
         try:
@@ -241,11 +299,27 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 is_error=True,
             )
 
-        # No entry-tier "completeness" nudge: forcing the graph toward the
-        # request entry tier pressured the agent into inventing symptomless
-        # nodes just to reach further. Reachability is an OUTCOME of honest
-        # first-principles tracing (see the methodology skill), not a goal the
-        # termination protocol enforces.
+        if data_dir and data_dir.is_dir():
+            failures = _validate_sqls(data_dir, report)
+            if failures:
+                return ToolResult(
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=json.dumps(
+                                {
+                                    "error": "sql_validation_failed",
+                                    "failures": failures,
+                                    "hint": "Fix the failing SQLs and resubmit. "
+                                    "Each SQL must execute without error and return at least one row.",
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    ],
+                    is_error=True,
+                )
+
         state.submitted = True
         return ToolTerminate(
             result=ToolResult(
