@@ -141,8 +141,13 @@ class ForkTask:
     """Parent's audit-state snapshot at the fork point. ``None`` for the
     root (a fresh state is used)."""
     fork_turn: int
-    """``start_turn`` floor (a message index) for the child's offline
-    replay. ``1`` for the root."""
+    """Fork-boundary message index + 1 — i.e. the message-prefix length at
+    the fork point. ``1`` for the root. Drives the recorded
+    ``fork_turn_index`` (``fork_turn - 1``) and the non-progressing floor.
+    The child's auditing resumes one turn *past* the boundary
+    (``start_turn = fork_turn + 1``) so the parent's fork-point firing —
+    already carried by ``seed_cumulative`` — is not re-audited; see
+    :func:`run_fork_tree_experiment`."""
     depth: int
     """``0`` for the root; ``parent.depth + 1`` for a child."""
     path: tuple[str, ...]
@@ -389,7 +394,16 @@ async def run_fork_tree_experiment(
             sink=sink,
             child=child,
             seed_cumulative=task.seed_cumulative,
-            start_turn=task.fork_turn,
+            # Resume the child's auditing ONE turn past the fork boundary.
+            # The parent's fork-point firing is already folded into
+            # ``seed_cumulative``; re-auditing the boundary turn would burn
+            # an auditor LLM call, write a duplicate verdict into the
+            # child's ``recent_verdicts``, and surface a duplicate reminder
+            # that the non-progressing floor below then discards. The root
+            # (no boundary to skip) starts at ``fork_turn`` == 1.
+            start_turn=(
+                task.fork_turn if task.parent_id is None else task.fork_turn + 1
+            ),
         )
         surfaces = _collect_surfaces(run.surfaces)
         # Defence-in-depth: ignore any surface at or before the fork floor.

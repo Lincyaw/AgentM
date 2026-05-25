@@ -301,6 +301,61 @@ async def test_full_tree_run_captures_independent_surface_snapshots(
     assert len(first_snap.ops) == before, "snapshot must be independent of live state"
 
 
+@pytest.mark.asyncio
+async def test_child_resume_past_boundary_skips_fork_turn_firing(
+    tmp_path: Path,
+) -> None:
+    """A forked child must NOT re-audit its own fork-boundary turn.
+
+    Fail-stop position: with ``start_turn = fork_boundary + 1`` the offline
+    driver skips the boundary cadence firing entirely, so the auditor is
+    not invoked there (no wasted LLM call) and no duplicate surface lands
+    at the boundary turn. The parent's fork-point verdict reaches the
+    child via ``seed_cumulative`` instead.
+
+    Concretely: a 20-turn backbone with cadence 5 fires at turns 5, 10,
+    15, 20. Forking at boundary turn 5 (message index 4 → prefix length
+    5) and resuming at ``start_turn = 6`` must drop the turn-5 firing —
+    leaving firings at 10, 15, 20 only.
+    """
+    messages = _make_trajectory(20)
+    stub = _SurfacingTwiceStub()
+    settings_kw = dict(
+        extractor_settings=ExtractorSettings(
+            extensions=[(EXTRACTOR_TOOLS_MODULE, {})],
+            compose_kwargs={"base_prompt": "stub"},
+        ),
+        auditor_settings=AuditorSettings(
+            base_prompt="stub", observability_config=None, summary_threshold=30, tools=()
+        ),
+    )
+
+    # fork boundary = message index 4 (prefix length 5); resume at 6.
+    result = await replay_pipeline_over_trajectory(
+        messages=messages,
+        cwd=str(tmp_path),
+        root_session_id="child",
+        provider=None,
+        extractor_interval=5,
+        audit_interval=5,
+        enable_auditor=True,
+        stop_on_first_surface=False,
+        sink=InMemorySink(),
+        child=stub,  # type: ignore[arg-type]
+        seed_cumulative=CumulativeAuditState.fresh(),
+        start_turn=6,
+        **settings_kw,  # type: ignore[arg-type]
+    )
+
+    # No surface (and no auditor firing) at the fork boundary turn 4.
+    surfaced_turns = [s.turn_index for s in result.surfaces]
+    assert 4 not in surfaced_turns
+    assert surfaced_turns == [9, 14, 19]
+    # The auditor was invoked exactly 3 times — the turn-5 boundary firing
+    # was skipped, not merely discarded after the call.
+    assert stub.auditor_calls == 3
+
+
 # ---------------------------------------------------------------------------
 # Scripted replay for engine-level tests (monkeypatches the offline driver).
 
@@ -512,8 +567,11 @@ async def test_child_receives_independent_seed_snapshot(
     root_snapshot = scripted.snapshots["sess-0"][0]
     child_call = scripted.calls_seen[1]
     assert child_call["seed_cumulative"] is root_snapshot
-    # start_turn floor = surface index + 1.
-    assert child_call["start_turn"] == 5
+    # The child resumes auditing ONE turn past the fork boundary
+    # (surface index 4 → fork boundary prefix-length 5 → start_turn 6),
+    # so the parent's fork-point firing (carried by seed_cumulative) is
+    # not re-audited.
+    assert child_call["start_turn"] == 6
 
     before = len(root_snapshot.ops)
     root_snapshot.ops.append(NodeUpsert(id=1, kind="task", summary="x", source_turns=(0,)))
