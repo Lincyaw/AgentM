@@ -119,6 +119,9 @@ class _TurnStreamState:
     """Per tool_call_id args snapshot. ToolResultEvent does not carry
     args, but the terminal frame must echo them so renderers can show
     one self-contained card."""
+    tool_summaries: list[tuple[str, str]] = field(default_factory=list)
+    """Accumulated (tool_name, truncated_result) pairs. Used by
+    ``_render`` as a fallback when the turn has no assistant text."""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Token-delta coalescer: TextDelta handlers set ``dirty`` instead of
     # publishing directly; a background flusher publishes at most every
@@ -520,12 +523,16 @@ class Gateway:
             if state is None:
                 return
             ended_at = time.time()
+            result_text = _result_text(event.result)
+            preview = result_text[:_TOOL_RESULT_PREVIEW_CAP]
+            if len(result_text) > _TOOL_RESULT_PREVIEW_CAP:
+                preview += "…"
             async with state.lock:
                 started_at = state.tool_started_at.pop(
                     event.tool_call_id, ended_at
                 )
                 args = state.tool_args.pop(event.tool_call_id, {})
-            result_text = _result_text(event.result)
+                state.tool_summaries.append((event.tool_name, preview))
             status = "error" if event.result.is_error else "ok"
             await self._bus.publish_outbound(
                 OutboundMessage(
@@ -709,14 +716,27 @@ def _assistant_text(message: AssistantMessage) -> str:
     )
 
 
+_TOOL_RESULT_PREVIEW_CAP = 200
+
+
 def _render(state: _TurnStreamState) -> str:
     """Assemble the streamed-card body from per-turn state.
 
-    Only the assistant text stream lives here; structured tool-call
-    envelopes are emitted on their own per-call ``stream_id`` and never
-    fold into this body.
+    When the turn produced assistant text, return that.  For tool-only
+    turns (no assistant text) fall back to a compact summary of each
+    tool call so channels don't show an empty placeholder.
     """
-    return state.assistant_buf
+    if state.assistant_buf:
+        return state.assistant_buf
+    if not state.tool_summaries:
+        return ""
+    lines: list[str] = []
+    for name, preview in state.tool_summaries:
+        if preview:
+            lines.append(f"**{name}** → `{preview}`")
+        else:
+            lines.append(f"**{name}** ✓")
+    return "\n".join(lines)
 
 
 _RESULT_TEXT_CAP = 32 * 1024
