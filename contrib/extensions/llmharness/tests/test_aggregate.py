@@ -110,7 +110,6 @@ def sample_run(tmp_path: Path) -> tuple[Path, Path]:
                 "reminder_text": "verify",
                 "matched_event_ids": [1],
                 "continuation_notes": ["watch hyp 1"],
-                "cited_cards": [],
             },
         ),
     ]

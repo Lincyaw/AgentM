@@ -79,7 +79,6 @@ Verdict(
   reminder_text: str,             # required non-empty when surface_reminder
   continuation_notes: list[str],  # passed into the NEXT auditor firing
   matched_event_ids: list[int],   # event ids that justify the verdict
-  cited_cards: list[str],         # AFC card ids cited (optional)
 )
 ```
 
@@ -146,7 +145,6 @@ One line per phase invocation. Source: `replay/record.py`.
 
   "compose_kwargs": {
     "base_prompt": "<resolved framing text>",
-    "cards_tools_config": {},
     "observability_config": {},
     "trajectory_snapshot": [...],   // auditor only
     "events": [...],                // auditor only
@@ -175,8 +173,7 @@ One line per phase invocation. Source: `replay/record.py`.
     "events": [...], "edges": [...], "dropped_edges": [...]   // extractor
     |
     "surface_reminder": false, "reminder_text": "",           // auditor
-    "continuation_notes": [], "matched_event_ids": [],
-    "cited_cards": []
+    "continuation_notes": [], "matched_event_ids": []
   } | null,
 
   "status": "ok" | "no_call" | "spawn_error" | "prompt_error",
@@ -271,8 +268,7 @@ auditor firing.
     "surface_reminder": true,
     "reminder_text": "...",
     "matched_event_ids": [2, 7],
-    "continuation_notes": [...],
-    "cited_cards": []
+    "continuation_notes": [...]
   } | null,
 
   "drop": false,
@@ -368,7 +364,7 @@ follows the OpenAI-compatible function-call convention
             "type": "function",
             "function": {
               "name": "submit_verdict",
-              "arguments": "{\"verdict\": {\"surface_reminder\": true, \"reminder_text\": \"...\", \"matched_event_ids\": [2, 7], \"continuation_notes\": [], \"cited_cards\": []}}"
+              "arguments": "{\"verdict\": {\"surface_reminder\": true, \"reminder_text\": \"...\", \"matched_event_ids\": [2, 7], \"continuation_notes\": []}}"
             }
           }
         ]

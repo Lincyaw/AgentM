@@ -15,8 +15,6 @@ from llmharness.audit.registry import AuditCheckRegistry, CheckContext
 from llmharness.schema import Finding
 
 
-
-
 def test_multiple_findings_appear_in_registration_order() -> None:
     f1 = Finding(category="loop", description="repeated act #3", related_event_ids=(3,))
     f2 = Finding(category="branch", description="open dec #5", related_event_ids=(5,))

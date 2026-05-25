@@ -163,7 +163,6 @@ def _verdict(surface_reminder: bool, reminder_text: str = "") -> dict:
             "reminder_text": reminder_text,
             "continuation_notes": [],
             "matched_event_ids": [1] if surface_reminder else [],
-            "cited_cards": [],
         },
     }
 

@@ -238,7 +238,7 @@ DATA.verdicts.forEach((v, i) => {
   const matched = v.matched_event_ids || [];
   div.innerHTML = `
     <div class="head">verdict #${i} — drift=${v.drift}${v.type ? " · " + escapeHtml(v.type) : ""}</div>
-    <div class="meta">matched=[${matched.join(", ")}]${v.cited_cards && v.cited_cards.length ? " · cards=[" + v.cited_cards.map(escapeHtml).join(", ") + "]" : ""}</div>
+    <div class="meta">matched=[${matched.join(", ")}]</div>
     ${v.reminder ? `<div class="reminder">${escapeHtml(v.reminder)}</div>` : ""}
   `;
   div.addEventListener("click", () => selectVerdict(i));

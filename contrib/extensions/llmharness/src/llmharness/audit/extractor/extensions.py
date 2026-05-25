@@ -9,8 +9,8 @@ typed composer that points at it.
 The atom alone — usable via ``agentm --extension
 llmharness.audit.extractor.atom`` — registers the seven tools listed in
 :data:`atom.EXTRACTOR_TOOL_NAMES`. The composer wires in the
-observability / operations / cards_tools / system_prompt scaffolding
-that surrounds it for an audit child.
+observability / operations / system_prompt scaffolding that surrounds it
+for an audit child.
 """
 
 from __future__ import annotations
@@ -30,23 +30,16 @@ from .prompt import DEFAULT_PROMPT_NAME, load_extractor_prompt
 def compose_extractor_extensions(
     *,
     base_prompt: str | None = None,
-    cards_tools_config: dict[str, Any] | None = UNSET,
     observability_config: dict[str, Any] | None = UNSET,
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Default order: observability -> cards_tools -> extractor_tools -> system_prompt.
+    """Default order: observability -> extractor_tools -> system_prompt.
 
     ``base_prompt`` defaults to the ``default`` variant loaded via
     :func:`load_extractor_prompt`. Pass an alternate framing — a name,
     a path resolved via that loader, or raw text — to A/B prompts.
 
-    Pass ``None`` for ``cards_tools_config`` / ``observability_config``
-    to drop that extension; ``extractor_tools`` and ``system_prompt``
-    always survive.
-
-    Note. v18's ``witness_retry_budget`` knob is gone in v19: the new
-    tool surface gets per-edit feedback so there is no batch to bounce
-    back. The ``submit_tool_config`` slot below stays an empty dict;
-    the adapter no longer threads a retry budget through.
+    Pass ``None`` for ``observability_config`` to drop that extension;
+    ``extractor_tools`` and ``system_prompt`` always survive.
     """
     framing = (
         base_prompt
@@ -57,7 +50,6 @@ def compose_extractor_extensions(
         submit_tool_module=_EXTRACTOR_TOOLS_MODULE,
         default_prompt=framing,
         prompt_override=None,
-        cards_tools_config=cards_tools_config,
         observability_config=observability_config,
         submit_tool_config=None,
     )

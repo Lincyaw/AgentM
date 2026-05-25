@@ -1,18 +1,16 @@
 [project]
 name = "llmharness"
-version = "0.4.0"
+version = "0.5.0"
 description = "LLM-as-harness: cognitive-audit AgentM extension that supervises a running main agent via TurnEndEvent → child diagnostic session → BeforeAgentStart reminder injection."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "rca-autorl" }]
-# ``pyyaml`` is the only third-party runtime import outside the AgentM
-# workspace (used by ``audit.cards`` for card-corpus loading). ``agentm``
+# ``agentm``
 # is consumed by ``adapters/agentm.py`` but is supplied by the parent
 # AgentM workspace at install time (path-installed by rca-autorl) rather
 # than as a PyPI dependency, so it is intentionally not listed here.
 dependencies = [
-  "pyyaml>=6",
   "typer>=0.12",
   # Pydantic v2 backs the @harness_tool decorator (audit/_tool_decorator.py):
   # tool args are declared as BaseModel subclasses, the JSON schema feeds

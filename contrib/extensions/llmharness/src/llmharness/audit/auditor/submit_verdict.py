@@ -6,8 +6,8 @@ sees the returned :class:`ToolTerminate`, and ends the loop. The adapter
 reads the structured payload directly off the assistant message — no JSON
 extraction from free text.
 
-V2 schema (design §6.2): ``surface_reminder``, ``reminder_text``,
-``continuation_notes``, ``matched_event_ids``, ``cited_cards``.
+Verdict schema (design §6.2): ``surface_reminder``, ``reminder_text``,
+``continuation_notes``, ``matched_event_ids``.
 No ``drift`` field, no ``DriftType`` enum, no ``if/then`` clause.
 The ``surface_reminder=True ⇒ non-empty reminder_text`` invariant is
 enforced at the adapter-side coercer (:class:`RawVerdictOutput`), not at
@@ -66,12 +66,6 @@ class _VerdictModel(BaseModel):
             "finding is traceable; may be empty when surface_reminder=false."
         ),
     )
-    cited_cards: list[str] = Field(
-        description=(
-            "AFC card ids that materially shaped the finding. Empty "
-            "array when no card was decisive."
-        ),
-    )
 
 
 class SubmitVerdictArgs(BaseModel):
@@ -84,7 +78,7 @@ class SubmitVerdictArgs(BaseModel):
 
 @harness_tool(SUBMIT_VERDICT_TOOL_NAME, terminates=True)
 async def _submit(args: SubmitVerdictArgs, _ctx: Any) -> ToolTerminate | ToolResult:
-    """Submit the cognitive-audit verdict. Call this exactly ONCE per auditor firing as your final action — the loop terminates the moment this tool returns. To stay silent, pass verdict={surface_reminder:false, reminder_text:"", continuation_notes:[], matched_event_ids:[], cited_cards:[]}."""
+    """Submit the cognitive-audit verdict. Call this exactly ONCE per auditor firing as your final action — the loop terminates the moment this tool returns. To stay silent, pass verdict={surface_reminder:false, reminder_text:"", continuation_notes:[], matched_event_ids:[]}."""
     # Run the adapter-side coercion here so a malformed payload becomes
     # a visible tool-result error inside the auditor child loop. The
     # LLM sees the error message and gets another turn to retry; only

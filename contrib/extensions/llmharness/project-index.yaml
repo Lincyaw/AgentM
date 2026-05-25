@@ -33,12 +33,11 @@ requirements:
         - New Finding dataclass — output shape for scenario-registered
           audit checks (see audit/registry.py, design §4.c).
 
-      V2 Verdict shape (carried forward unchanged in v3, design §6.2):
+      Verdict shape (v4, design §6.2):
         surface_reminder: bool
         reminder_text: str
         continuation_notes: list[str]
         matched_event_ids: list[int]
-        cited_cards: list[str]
 
       DriftType / Reminder.type stay removed. Breaking changes —
       pyproject version bump required; rca-autorl backwards-
@@ -52,22 +51,20 @@ requirements:
   # Cognitive-audit pipeline (P0 — the entire feature)
 
   - id: REQ-016
-    title: cards.py loader + cards_list/cards_get tools + axis_hint
+    title: cards.py loader + cards_list/cards_get tools + axis_hint (REMOVED)
     description: |
-      Module exposing the 42 AFC cards as searchable tools to the
-      cognitive-audit diagnostic agent (design: .claude/designs/llmharness-cognitive-audit.md §2).
-      ``cards_list()`` returns one CardSummary per YAML on disk (id, name,
-      axis_hint, one_line_mechanism). ``cards_get(card_id)`` returns the
-      full CardFull payload; raises KeyError on unknown id. ``_AXIS_HINT``
-      is curated in Python code, NOT a YAML field. Lazy load (no import-time
-      I/O); cache after first call; ``LLMHARNESS_CARDS_ROOT`` env override
-      supported. Coverage: all 42 cards across memory/reflection/planning/
-      action/specification/inter_agent/verification/termination/cognitive/
-      system_level/. Distribution: axis 1 = 13, axis 2 = 14, axis 3 = 13,
-      None = 2 (AFC-0032 / AFC-0033 — pure infra failures).
+      Removed 2026-05-25. The 42-card AFC library, its loader, the
+      cards_tools atom, and the ``cited_cards`` verdict field were
+      deleted: the subsystem was wired through compose / extensions /
+      runner / adapter but no scenario ever activated it (always
+      ``cards_tools_config=None``) and no observed verdict ever
+      populated ``cited_cards``. Wire-breaking removal — version bump
+      accompanies. Downstream consumers (rca-autorl test, aegis-ui
+      schema) need follow-up edits.
     priority: P0
-    status: implemented
-    code: [src/llmharness/cards.py]
+    status: deprecated
+    code: []
+    tests: []
     depends_on: [REQ-001]
 
   - id: REQ-017
@@ -315,11 +312,11 @@ requirements:
   - id: REQ-025
     title: V2 verdict schema — surface_reminder + continuation_notes
     description: |
-      Issue #134 PR 1 (P0). The submit_verdict terminal tool uses the V2
+      Issue #134 PR 1 (P0). The submit_verdict terminal tool uses the
       JSON Schema shape (design §6.2): surface_reminder bool,
       reminder_text str, continuation_notes list[str], matched_event_ids
-      list[int], cited_cards list[str]. No drift field, no DriftType
-      enum, no if/then clause. Adapter gate changes from
+      list[int]. No drift field, no DriftType enum, no if/then clause.
+      Adapter gate changes from
       ``verdict.drift and verdict.type`` to
       ``verdict.surface_reminder and verdict.reminder_text``.
       continuation_notes are forwarded into the next auditor child's
@@ -877,13 +874,13 @@ requirements:
     depends_on: [REQ-001]
 
   - id: REQ-015
-    title: Verdict cited_cards / downstream_reaction (PARTIALLY SUPERSEDED)
+    title: Verdict cited_cards / downstream_reaction (SUPERSEDED)
     description: |
-      Superseded 2026-05-10 by REQ-025 (V2 verdict shape).
-      ``cited_cards`` field survives in V2.
-      ``downstream_reaction`` is REMOVED — its role is taken by
-      ``continuation_notes: list[str]`` in V2 (free-text recheck list
-      the auditor writes for itself across firings).
+      Superseded 2026-05-10 by REQ-025 (V2 verdict shape) and removed
+      entirely in v4 (2026-05-25). ``cited_cards`` was a never-activated
+      hook into the AFC card library; the whole cards subsystem was
+      deleted along with the field. ``downstream_reaction`` was removed
+      in V2 — its role taken by ``continuation_notes: list[str]``.
     priority: P0
     status: deprecated
     code: []
