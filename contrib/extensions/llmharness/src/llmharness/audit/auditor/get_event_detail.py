@@ -40,7 +40,7 @@ from agentm.core.lib import pydantic_to_openai_tool_schema
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...schema import Edge, Event
-from .._tool_decorator import harness_tool
+from ..toolkit.decorator import harness_tool
 
 GET_EVENT_DETAIL_TOOL_NAME = "get_event_detail"
 

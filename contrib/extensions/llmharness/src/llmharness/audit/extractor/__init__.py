@@ -33,13 +33,13 @@ from .atom import (
     EXTRACTOR_TOOL_NAMES,
 )
 from .extensions import compose_extractor_extensions
-from .finalize_extraction import (
-    FINALIZE_EXTRACTION_REASON,
-    FINALIZE_EXTRACTION_TOOL_NAME,
-)
 from .output import RawExtractorOutput
 from .prompt import load_extractor_prompt
 from .state import ExtractionState
+from .tools.finalize_extraction import (
+    FINALIZE_EXTRACTION_REASON,
+    FINALIZE_EXTRACTION_TOOL_NAME,
+)
 
 __all__ = [
     "EXTRACTOR_STATE_SERVICE_KEY",

@@ -5,7 +5,7 @@ Replay path: this module creates a brand-new top-level session with the
 same extensions and pumps the recorded payload through it.
 
 Both paths share :mod:`llmharness.audit.{extractor,auditor}.extensions`
-composers and the helpers in :mod:`llmharness.audit._session_helpers`,
+composers and the helpers in :mod:`llmharness.audit.seams.session`,
 so the system prompt, tool surface, and payload shape are identical to
 a live firing.
 
@@ -32,7 +32,7 @@ from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
 from agentm.core.runtime.session_factory import create_agent_session
 
-from ..audit._session_helpers import find_terminal_tool_arguments, safe_shutdown
+from ..audit.seams.session import find_terminal_tool_arguments, safe_shutdown
 from ..replay.record import Status
 
 

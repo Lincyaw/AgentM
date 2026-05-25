@@ -37,17 +37,17 @@ from agentm.core.abi.messages import (
     UserMessage,
 )
 
-from llmharness.audit._atom_constants import EXTRACTOR_TOOLS_MODULE
-from llmharness.audit._offline_seams import InMemorySink
-from llmharness.audit._runner import (
+from llmharness.audit.extractor.state import ExtractionState
+from llmharness.audit.graph.ops import NodeUpsert
+from llmharness.audit.runner import (
     AuditorChildResult,
     AuditorSettings,
     CumulativeAuditState,
     ExtractorSettings,
     StepResult,
 )
-from llmharness.audit.extractor.state import ExtractionState
-from llmharness.audit.graph_ops import NodeUpsert
+from llmharness.audit.seams.offline import InMemorySink
+from llmharness.audit.toolkit.atom_constants import EXTRACTOR_TOOLS_MODULE
 from llmharness.replay import chained_fork as _chained_fork_mod
 from llmharness.replay.chained_fork import (
     CHAIN_HEADER_KEY,

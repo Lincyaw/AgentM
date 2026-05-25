@@ -20,8 +20,8 @@ from typing import Any
 from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
 from pydantic import BaseModel, ConfigDict
 
-from .._tool_decorator import harness_tool
-from .state import ExtractionState
+from ...toolkit.decorator import harness_tool
+from ..state import ExtractionState
 
 FINALIZE_EXTRACTION_TOOL_NAME = "finalize_extraction"
 FINALIZE_EXTRACTION_REASON = "llmharness:finalize_extraction"

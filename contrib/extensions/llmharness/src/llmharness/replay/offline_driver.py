@@ -20,8 +20,7 @@ from typing import Any
 
 from agentm.core.abi.messages import AgentMessage
 
-from ..audit._offline_seams import InMemorySink, StandaloneChildRunner
-from ..audit._runner import (
+from ..audit.runner import (
     AuditorSettings,
     CumulativeAuditState,
     ExtractorSettings,
@@ -29,6 +28,7 @@ from ..audit._runner import (
     SidecarWriter,
     StepResult,
 )
+from ..audit.seams.offline import InMemorySink, StandaloneChildRunner
 from ..schema import Reminder
 
 __all__ = [

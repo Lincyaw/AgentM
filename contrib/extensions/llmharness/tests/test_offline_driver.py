@@ -19,11 +19,11 @@ from agentm.core.abi import (
 )
 from agentm.core.abi.messages import AgentMessage
 
-from llmharness.audit._atom_constants import EXTRACTOR_TOOLS_MODULE
-from llmharness.audit._offline_seams import InMemorySink
-from llmharness.audit._runner import AuditorSettings, ExtractorSettings
 from llmharness.audit.extractor.state import ExtractionState
-from llmharness.audit.graph_ops import NodeUpsert
+from llmharness.audit.graph.ops import NodeUpsert
+from llmharness.audit.runner import AuditorSettings, ExtractorSettings
+from llmharness.audit.seams.offline import InMemorySink
+from llmharness.audit.toolkit.atom_constants import EXTRACTOR_TOOLS_MODULE
 from llmharness.replay.offline_driver import replay_pipeline_over_trajectory
 
 _REPLAY_RECORD_KEYS = {
@@ -135,7 +135,7 @@ class _StubChildRunner:
         self.auditor_calls += 1
         self.auditor_graphs.append(list(graph_events))
 
-        from llmharness.audit._runner import AuditorChildResult
+        from llmharness.audit.runner import AuditorChildResult
         from llmharness.schema import Verdict
 
         verdict = Verdict(
@@ -176,7 +176,7 @@ class _SurfacingStubChildRunner(_StubChildRunner):
         self.auditor_calls += 1
         self.auditor_graphs.append(list(graph_events))
 
-        from llmharness.audit._runner import AuditorChildResult
+        from llmharness.audit.runner import AuditorChildResult
         from llmharness.schema import Verdict
 
         verdict = Verdict(

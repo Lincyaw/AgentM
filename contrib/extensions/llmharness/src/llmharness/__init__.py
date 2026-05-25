@@ -48,7 +48,6 @@ The runtime entry point is the AgentM extension at
 V2 breaking change (issue #134, 2026-05-10): ``DriftType`` is removed.
 """
 
-from .audit._runner import AuditorSettings, ExtractorSettings
 from .audit.auditor import (
     AUDITOR_TERMINATION_REASON,
     AUDITOR_TOOL_NAMES,
@@ -60,6 +59,7 @@ from .audit.extractor import (
     EXTRACTOR_TOOL_NAMES,
     load_extractor_prompt,
 )
+from .audit.runner import AuditorSettings, ExtractorSettings
 from .replay.chained_fork import (
     CHAIN_HEADER_KEY,
     ChainedForkExperiment,

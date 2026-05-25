@@ -14,13 +14,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..audit._offline_seams import NoopSink, StandaloneChildRunner
-from ..audit._runner import (
+from ..audit.runner import (
     AuditorSettings,
     CumulativeAuditState,
     ExtractorSettings,
     HarnessRunner,
 )
+from ..audit.seams.offline import NoopSink, StandaloneChildRunner
 from ..tools.engine import PhaseResult
 from .record import ReplayRecord
 

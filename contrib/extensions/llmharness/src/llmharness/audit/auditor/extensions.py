@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...schema import Edge, Event, Finding, Phase
-from .._compose import UNSET, compose_audit_extensions
+from ..seams.compose import UNSET, compose_audit_extensions
 from .profiles import (
     DEFAULT_PROFILE,
     PROFILES,

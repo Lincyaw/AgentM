@@ -33,8 +33,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from ..audit._runner import CumulativeAuditState
-from ..audit.graph_ops import op_from_edge, op_from_event
+from ..audit.graph.ops import op_from_edge, op_from_event
+from ..audit.runner import CumulativeAuditState
 from ..schema import Edge, Event, Verdict
 from ..tools.engine import PhaseResult
 from .record import Phase, ReplayRecord, iter_records

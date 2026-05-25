@@ -32,7 +32,7 @@ from llmharness.audit.entry_types import (
     AUDIT_GRAPH_OP,
     EXTRACTOR_CURSOR,
 )
-from llmharness.audit.graph_ops import NodeDelete, NodeUpsert
+from llmharness.audit.graph.ops import NodeDelete, NodeUpsert
 
 
 def _entry(etype: str, payload: dict[str, Any]) -> SessionEntry:

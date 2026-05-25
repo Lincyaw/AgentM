@@ -49,14 +49,14 @@ Reminder delivery (unified path):
 
 P1 refactor (2026-05-23). All of cadence / windowing / cumulative-state
 threading / payload composition / sidecar emission has moved to
-:class:`llmharness.audit._runner.HarnessRunner`. The adapter constructs
+:class:`llmharness.audit.runner.HarnessRunner`. The adapter constructs
 exactly one runner per install (seeded by
 :meth:`CumulativeAuditState.hydrate_from_session_log`) and routes
 ``TurnEndEvent`` through ``runner.on_trajectory_progress``. The async
 worker now drains :class:`_RunnerStepJob` jobs; the body of the legacy
 ``_drain_extractor`` / ``_drain_auditor`` / ``_spawn_extractor_child`` /
 ``_run_auditor`` lives inside the runner and
-:mod:`llmharness.audit._live_seams` (:class:`LiveChildRunner` +
+:mod:`llmharness.audit.seams.live` (:class:`LiveChildRunner` +
 :class:`LiveOpSink`).
 """
 
@@ -84,10 +84,20 @@ from agentm.core.abi.session import SessionEntry
 from agentm.extensions import ExtensionManifest
 
 from ..audit import entry_types as _et
-from ..audit._live_seams import LiveChildRunner, LiveOpSink
-from ..audit._reminder_format import REMINDER_PREAMBLE as _SHARED_REMINDER_PREAMBLE
-from ..audit._reminder_format import build_reminder_message
-from ..audit._runner import (
+from ..audit.auditor.profiles import resolve_tools as _resolve_auditor_tools
+from ..audit.auditor.prompt import load_auditor_prompt
+from ..audit.extractor import compose_extractor_extensions
+from ..audit.extractor.prompt import load_extractor_prompt
+from ..audit.graph.fold import fold_graph
+from ..audit.graph.ops import (
+    EdgeUpsert,
+    GraphOp,
+    NodeUpsert,
+    parse_op,
+)
+from ..audit.registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
+from ..audit.registry import AuditCheckRegistry
+from ..audit.runner import (
     AuditorSettings,
     CumulativeAuditState,
     ExtractorSettings,
@@ -96,19 +106,9 @@ from ..audit._runner import (
     _flatten_assistant_blocks,
     _serialize_full_trajectory,
 )
-from ..audit.auditor.profiles import resolve_tools as _resolve_auditor_tools
-from ..audit.auditor.prompt import load_auditor_prompt
-from ..audit.extractor import compose_extractor_extensions
-from ..audit.extractor.prompt import load_extractor_prompt
-from ..audit.graph_fold import fold_graph
-from ..audit.graph_ops import (
-    EdgeUpsert,
-    GraphOp,
-    NodeUpsert,
-    parse_op,
-)
-from ..audit.registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
-from ..audit.registry import AuditCheckRegistry
+from ..audit.seams.live import LiveChildRunner, LiveOpSink
+from ..audit.toolkit.reminder_format import REMINDER_PREAMBLE as _SHARED_REMINDER_PREAMBLE
+from ..audit.toolkit.reminder_format import build_reminder_message
 from ..replay.record import replay_log_path
 from ..schema import Edge, Event, Phase, Reminder
 

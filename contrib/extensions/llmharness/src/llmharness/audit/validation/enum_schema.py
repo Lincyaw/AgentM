@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from ..schema import EdgeKind, EventKind
+from ...schema import EdgeKind, EventKind
 
 EVENT_KIND_VALUES: Final[list[str]] = [k.value for k in EventKind]
 """All ``EventKind`` string values, in declaration order."""

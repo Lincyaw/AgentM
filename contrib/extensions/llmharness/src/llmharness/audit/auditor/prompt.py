@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 
 from ...schema import Edge, Event, Finding, Phase
-from .._prompt_loader import load_prompt
+from ..toolkit.prompt_loader import load_prompt
 
 DEFAULT_PROMPT_NAME = "minimal"
 

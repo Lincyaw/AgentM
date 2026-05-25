@@ -22,22 +22,22 @@ from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolCallBlock
 from agentm.core.abi.session_config import AgentSessionConfig
 
-from ..schema import Edge, Event, Phase
-from . import entry_types as _et
-from ._extractor_directive import build_extractor_directive
-from ._runner import (
-    AuditorChildResult,
-    ExtractorSpawnError,
-    _flatten_assistant_blocks,
-)
-from ._session_helpers import find_terminal_tool_arguments, safe_shutdown
-from .auditor import (
+from ...schema import Edge, Event, Phase
+from .. import entry_types as _et
+from ..auditor import (
     SUBMIT_VERDICT_TOOL_NAME,
     AuditorOutputError,
     RawVerdictOutput,
 )
-from .extractor import FINALIZE_EXTRACTION_TOOL_NAME
-from .graph_ops import GraphOp
+from ..extractor import FINALIZE_EXTRACTION_TOOL_NAME
+from ..graph.ops import GraphOp
+from ..runner import (
+    AuditorChildResult,
+    ExtractorSpawnError,
+    _flatten_assistant_blocks,
+)
+from ..toolkit.extractor_directive import build_extractor_directive
+from .session import find_terminal_tool_arguments, safe_shutdown
 
 _logger = logging.getLogger(__name__)
 
