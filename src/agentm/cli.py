@@ -24,6 +24,7 @@ from agentm.core.abi import LoopConfig
 from agentm.core.abi.events import DiagnosticEvent, EventBus, MessagePersistedEvent
 from agentm.core.abi.session_store import SessionState, SessionStore
 from agentm.core.lib.render import final_summary
+from agentm.core.lib.user_config import ModelProfile, resolve_model_profile
 from agentm.core.abi.events import ExtensionInstallEvent
 
 
@@ -160,8 +161,8 @@ def _resolve_provider_model_cwd(
     model_flag: str | None,
     cwd_flag: str | None,
     registry: ProviderRegistry = DEFAULT_PROVIDER_REGISTRY,
-) -> tuple[str, str, str]:
-    """Apply ``CLI flag > env var > built-in default`` for provider/model/cwd.
+) -> tuple[str, str, str, ModelProfile | None]:
+    """Apply ``CLI flag > env var > config.toml profile > built-in default``.
 
     Resolved at command-invocation time, NOT at module import — so:
 
@@ -170,20 +171,33 @@ def _resolve_provider_model_cwd(
       provider happened to win at import time;
     * ``--cwd`` honours the directory the user names, not the process
       cwd when ``agentm`` was first imported.
+
+    Returns ``(provider, model, cwd, profile)`` where *profile* is the
+    matched :class:`ModelProfile` if the resolved model name corresponds
+    to a ``~/.agentm/config.toml`` profile, or ``None`` otherwise.
     """
 
-    provider = (
-        provider_flag
-        or os.environ.get("AGENTM_PROVIDER")
-        or registry.default_provider().id
-    )
-    model = (
-        model_flag
-        or os.environ.get("AGENTM_MODEL")
-        or registry.default_model(provider)
-    )
+    raw_model = model_flag or os.environ.get("AGENTM_MODEL")
+
+    # Check whether the model name matches a config.toml profile.
+    # When raw_model is None, resolve_model_profile falls back to
+    # config.default_model (if any).
+    profile = resolve_model_profile(raw_model)
+
+    if profile is not None:
+        # Explicit --provider overrides the profile's provider.
+        provider = provider_flag or os.environ.get("AGENTM_PROVIDER") or profile.provider
+        model = profile.model
+    else:
+        provider = (
+            provider_flag
+            or os.environ.get("AGENTM_PROVIDER")
+            or registry.default_provider().id
+        )
+        model = raw_model or registry.default_model(provider)
+
     cwd = cwd_flag or os.environ.get("AGENTM_CWD") or os.getcwd()
-    return provider, model, cwd
+    return provider, model, cwd, profile
 
 
 def _make_default_session_store(cwd: str) -> SessionStore:
@@ -340,6 +354,7 @@ def _build_session_config(
     session_store: SessionStore | None = None,
     provider_registry: ProviderRegistry = DEFAULT_PROVIDER_REGISTRY,
     loop_config: LoopConfig | None = None,
+    profile: ModelProfile | None = None,
 ) -> tuple[Any, SessionState]:
     from agentm.core.abi.session_config import AgentSessionConfig
 
@@ -351,7 +366,21 @@ def _build_session_config(
         session_store=store,
     )
     try:
-        provider_spec = provider_registry.build(provider, {"model": model})
+        if profile is not None:
+            build_config: dict[str, Any] = {"model": profile.model}
+            if profile.base_url:
+                build_config["base_url"] = profile.base_url
+            if profile.api_key:
+                build_config["api_key"] = profile.api_key
+            if profile.name:
+                build_config["name"] = profile.name
+            if profile.context_window:
+                build_config["context_window"] = profile.context_window
+            if profile.max_output_tokens:
+                build_config["max_output_tokens"] = profile.max_output_tokens
+            provider_spec = provider_registry.build(provider, build_config)
+        else:
+            provider_spec = provider_registry.build(provider, {"model": model})
     except KeyError as exc:
         raise typer.BadParameter(str(exc)) from exc
     # CLI explicitly opts in to disk-resident project context (CLAUDE.md /
@@ -406,6 +435,7 @@ async def run(
     max_turns: int | None = None,
     max_tool_calls: int | None = None,
     output: TextIO = sys.stdout,
+    profile: ModelProfile | None = None,
 ) -> int:
     from agentm.core.runtime.session import AgentSession
 
@@ -438,6 +468,7 @@ async def run(
         resume=resume,
         continue_recent=continue_recent,
         loop_config=loop_config,
+        profile=profile,
     )
     if not quiet and session_manager.session_file is not None:
         print(f"INFO: session log: {session_manager.session_file}", file=sys.stderr)
@@ -636,7 +667,7 @@ def run_cmd(
     # ``--cwd /b`` still consults ``/b/.env`` not the process cwd.
     pre_cwd = cwd or os.environ.get("AGENTM_CWD") or os.getcwd()
     autoload_dotenv(Path(pre_cwd))
-    provider, model, cwd = _resolve_provider_model_cwd(
+    provider, model, cwd, profile = _resolve_provider_model_cwd(
         provider_flag=provider,
         model_flag=model,
         cwd_flag=cwd,
@@ -691,6 +722,7 @@ def run_cmd(
             continue_recent=continue_recent,
             max_turns=max_turns,
             max_tool_calls=max_tool_calls,
+            profile=profile,
         )
     )
     raise typer.Exit(code=rc)

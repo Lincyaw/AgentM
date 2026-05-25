@@ -35,13 +35,13 @@ def test_resolve_precedence_flag_over_env_over_default(monkeypatch) -> None:
     monkeypatch.setenv("AGENTM_CWD", "/from/env")
 
     # Env wins when no flag.
-    provider, model, cwd = _resolve_provider_model_cwd(
+    provider, model, cwd, _profile = _resolve_provider_model_cwd(
         provider_flag=None, model_flag=None, cwd_flag=None
     )
     assert (provider, model, cwd) == ("openai", "env-model", "/from/env")
 
     # Flag beats env.
-    provider, model, cwd = _resolve_provider_model_cwd(
+    provider, model, cwd, _profile = _resolve_provider_model_cwd(
         provider_flag="anthropic",
         model_flag="flag-model",
         cwd_flag="/from/flag",

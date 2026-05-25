@@ -55,6 +55,7 @@ import typer
 
 from agentm.ai import DEFAULT_PROVIDER_REGISTRY
 from agentm.core.abi import EventBus
+from agentm.core.lib.user_config import resolve_model_profile
 
 from . import DEFAULT_SOCKET_URL, autoload_dotenv
 from .approval import ApprovalPolicy
@@ -189,12 +190,30 @@ def _build_session_factory(
         resolve_session_state,
     )
 
+    # Resolve the model profile once at factory-construction time so
+    # every session built from this factory uses the same config.
+    profile = resolve_model_profile(model)
+
     async def factory(cwd: str, bus: EventBus, resume: str | None) -> Any:
         store = make_default_session_store(cwd)
         state = resolve_session_state(
             cwd=cwd, resume=resume, continue_recent=False, session_store=store
         )
-        provider_spec = DEFAULT_PROVIDER_REGISTRY.build(provider, {"model": model})
+        if profile is not None:
+            build_config: dict[str, Any] = {"model": profile.model}
+            if profile.base_url:
+                build_config["base_url"] = profile.base_url
+            if profile.api_key:
+                build_config["api_key"] = profile.api_key
+            if profile.name:
+                build_config["name"] = profile.name
+            if profile.context_window:
+                build_config["context_window"] = profile.context_window
+            if profile.max_output_tokens:
+                build_config["max_output_tokens"] = profile.max_output_tokens
+            provider_spec = DEFAULT_PROVIDER_REGISTRY.build(provider, build_config)
+        else:
+            provider_spec = DEFAULT_PROVIDER_REGISTRY.build(provider, {"model": model})
         config = AgentSessionConfig(
             cwd=cwd,
             provider=provider_spec,
@@ -776,10 +795,16 @@ async def _arun(
 
     channels_cfg: dict[str, Any] = raw_channels
 
-    resolved_provider = provider_flag or cfg.get("provider") or _default_provider()
-    resolved_model = (
-        model_flag or cfg.get("model") or _default_model(resolved_provider)
-    )
+    raw_model = model_flag or cfg.get("model")
+    profile = resolve_model_profile(raw_model if isinstance(raw_model, str) else None)
+    if profile is not None:
+        resolved_provider = provider_flag or cfg.get("provider") or profile.provider
+        resolved_model = profile.model
+    else:
+        resolved_provider = provider_flag or cfg.get("provider") or _default_provider()
+        resolved_model = (
+            raw_model if isinstance(raw_model, str) else _default_model(resolved_provider)
+        )
     resolved_scenario = scenario_flag or cfg.get("scenario")
 
     bus = MessageBus()
