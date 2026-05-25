@@ -71,10 +71,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         FunctionTool(
             name="get_fault_kind_doc",
             description=(
-                "Return the reference doc for a given fault_kind: how "
-                "the injection works, what signals it produces, and how "
-                "it tends to propagate. Call after get_injection_spec "
-                "returns the fault_kind for this case."
+                "Return the REFERENCE doc for a given fault_kind: how the "
+                "injection typically works, what signals it tends to produce, "
+                "and how it tends to propagate. This is background to inform "
+                "your reasoning, NOT a spec to satisfy — the data is the "
+                "authority; a fault may manifest differently than described. "
+                "Call after get_injection_spec returns the fault_kind."
             ),
             parameters={
                 "type": "object",
