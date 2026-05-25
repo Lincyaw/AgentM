@@ -54,11 +54,16 @@ no supporting tool result is not evidence.
 Call `submit_verdict` exactly once. Do not emit JSON in trailing text.
 
 - `surface_reminder`: true only if you can name a concrete gap with specific
-  event ids.
-- `reminder_text`: one observation + one suggestion. Reference event ids.
-  Don't tell the agent which tool to call.
+  event ids (record them in `matched_event_ids`, not in the text).
+- `reminder_text`: written **to the main agent**, who cannot see the graph
+  and has no concept of "event N". Refer to things the agent itself did or
+  observed (its own actions, its own stated hypothesis, the result it just
+  saw). One observation + one suggestion. Don't mention event ids, graph,
+  phases, findings, or auditor internals. Don't tell the agent which tool
+  to call.
 - `continuation_notes`: short notes for your next firing — what scope is
-  open, what you're watching. Always at least one.
+  open, what you're watching. Always at least one. These are auditor-internal
+  (the main agent never sees them) so event ids are fine here.
 - `matched_event_ids`: ids that materially supported the verdict.
 
 Before `surface_reminder=true`, self-check:
