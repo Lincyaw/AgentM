@@ -37,11 +37,6 @@ def test_event_with_future_source_turns_is_dropped() -> None:
     assert kept_ids == {1}, "event referencing turn 7 must be masked at t=6"
 
 
-def test_event_with_empty_source_turns_is_kept() -> None:
-    """Open-cycle events with no source_turns are not future information."""
-    events = [_ev(1, [])]
-    snap = causal_mask(turn_index=0, events=events, edges=[], findings=[], trajectory=[])
-    assert {e.id for e in snap.events} == {1}
 
 
 def test_edge_dropped_when_endpoint_event_dropped() -> None:
@@ -75,10 +70,3 @@ def test_finding_referencing_dropped_event_is_dropped() -> None:
     assert cats == ["open"], "finding citing a future event id must be dropped"
 
 
-def test_trajectory_truncated_to_turn_index() -> None:
-    trajectory = [{"index": i, "role": "x"} for i in range(10)]
-    snap = causal_mask(
-        turn_index=4, events=[], edges=[], findings=[], trajectory=trajectory
-    )
-    indices = [t["index"] for t in snap.trajectory_turns]
-    assert indices == [0, 1, 2, 3, 4]

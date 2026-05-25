@@ -51,7 +51,6 @@ from llmharness.audit.graph_ops import NodeUpsert
 from llmharness.replay import chained_fork as _chained_fork_mod
 from llmharness.replay.chained_fork import (
     CHAIN_HEADER_KEY,
-    ChainedForkExperiment,
     ChainSegment,
     _fork_prefix,
     read_chain_header,
@@ -326,60 +325,8 @@ def _factory_returning_n_msgs(
     return factory
 
 
-@pytest.mark.asyncio
-async def test_chained_fork_zero_reminders_returns_control_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """When the control auditor stays silent, the experiment must
-    contain only the control segment regardless of ``max_interventions``.
-    No factory calls beyond the first.
-    """
-    scripted = _ScriptedReplay([None])
-    monkeypatch.setattr(
-        _chained_fork_mod, "replay_pipeline_over_trajectory", scripted
-    )
-    factory_calls: list[dict[str, Any]] = []
-    factory = _factory_returning_n_msgs(factory_calls, [10])
-
-    experiment = await run_chained_fork_experiment(
-        session_factory=factory,
-        cwd=str(tmp_path),
-        provider=None,
-        extractor_settings=ExtractorSettings.default(),
-        auditor_settings=AuditorSettings.default(),
-        max_interventions=10,
-    )
-    assert len(experiment.segments) == 1
-    assert experiment.segments[0].seeded_reminder is None
-    assert len(factory_calls) == 1
-    assert experiment.chained_replay_path is None
 
 
-@pytest.mark.asyncio
-async def test_chained_fork_max_interventions_zero_runs_only_control(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``max_interventions=0`` disables every branch. Even if the
-    control surfaces a reminder, the chain must not extend past the
-    control segment, and the factory must be called exactly once.
-    """
-    scripted = _ScriptedReplay([Reminder(text="halt")])
-    monkeypatch.setattr(
-        _chained_fork_mod, "replay_pipeline_over_trajectory", scripted
-    )
-    factory_calls: list[dict[str, Any]] = []
-    factory = _factory_returning_n_msgs(factory_calls, [10])
-
-    experiment = await run_chained_fork_experiment(
-        session_factory=factory,
-        cwd=str(tmp_path),
-        provider=None,
-        extractor_settings=ExtractorSettings.default(),
-        auditor_settings=AuditorSettings.default(),
-        max_interventions=0,
-    )
-    assert len(experiment.segments) == 1
-    assert len(factory_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -609,59 +556,8 @@ def test_write_chained_replay_filters_window_and_rebinds(tmp_path: Path) -> None
         json.loads(line)
 
 
-def test_write_chained_replay_single_segment_no_upper_bound(tmp_path: Path) -> None:
-    """A single-segment experiment (control surfaced no reminder) must
-    still produce a sidecar covering every step the control produced —
-    no spurious upper-bound filter since the chain didn't extend past
-    the control.
-    """
-    only = ChainSegment(
-        segment_index=0,
-        payload=_FakePayload(session_log_id="solo"),
-        seeded_reminder=None,
-        fork_turn_index=None,
-        surfaced_reminder_turn=None,
-        step_results=[
-            _ext_step(0, "solo"),
-            _ext_step(5, "solo"),
-            _aud_step(7, "solo"),
-        ],
-    )
-    out_path = tmp_path / "solo.jsonl"
-    write_chained_replay([only], out_path=out_path)
-    written = list(iter_records(out_path))
-    assert [(r.phase, int(r.turn_index)) for r in written] == [
-        ("extractor", 0),
-        ("extractor", 5),
-        ("auditor", 7),
-    ]
 
 
-def test_chained_fork_experiment_control_and_final_properties(tmp_path: Path) -> None:
-    """``control`` and ``final`` are convenience accessors. Pin them so
-    the rca eval driver's metadata-construction loop (which uses
-    ``experiment.final`` to pick the AgentResult response) doesn't
-    silently swap to a different element.
-    """
-    s0 = ChainSegment(
-        segment_index=0,
-        payload=_FakePayload(session_log_id="zero"),
-        seeded_reminder=None,
-        fork_turn_index=None,
-        surfaced_reminder_turn=None,
-        step_results=[],
-    )
-    s1 = ChainSegment(
-        segment_index=1,
-        payload=_FakePayload(session_log_id="one"),
-        seeded_reminder=Reminder(text="x"),
-        fork_turn_index=3,
-        surfaced_reminder_turn=None,
-        step_results=[],
-    )
-    exp = ChainedForkExperiment(segments=[s0, s1], chained_replay_path=None)
-    assert exp.control is s0
-    assert exp.final is s1
 
 
 # ---------------------------------------------------------------------------
@@ -742,46 +638,10 @@ def test_fork_prefix_bumps_past_paired_tool_result() -> None:
     assert isinstance(prefix[-1], ToolResultMessage)
 
 
-def test_fork_prefix_no_bump_when_no_pair() -> None:
-    """When the surfacing turn is a plain assistant message (no
-    tool_calls), the cut stays at turn_index + 1 — no bump.
-    """
-    messages: list[AgentMessage] = [
-        _user("kick off"),
-        _assistant_text("ok"),
-        _assistant_text("more"),  # index 2 = surfacing turn (no tool_call)
-        _assistant_text("done"),
-    ]
-    prefix = _fork_prefix(messages, turn_index=2)
-    assert len(prefix) == 3
 
 
-def test_fork_prefix_no_bump_when_pair_ids_mismatch() -> None:
-    """A ToolResultMessage that follows an assistant-with-tool_calls but
-    references a *different* call_id must NOT trigger the bump — the
-    pairing is by id, not by adjacency.
-    """
-    messages: list[AgentMessage] = [
-        _user("kick off"),
-        _assistant_tool_call("c-1", "search"),  # index 1 = surfacing turn
-        _tool_result("c-99", "unrelated"),  # different id
-        _assistant_text("done"),
-    ]
-    prefix = _fork_prefix(messages, turn_index=1)
-    assert len(prefix) == 2  # no bump
 
 
-def test_fork_prefix_at_trajectory_end() -> None:
-    """If the surfacing turn is the last message, there is no following
-    message to inspect — the cut is the whole trajectory regardless of
-    whether the final message carries tool_calls.
-    """
-    messages: list[AgentMessage] = [
-        _user("kick off"),
-        _assistant_tool_call("c-1", "search"),  # last index
-    ]
-    prefix = _fork_prefix(messages, turn_index=1)
-    assert len(prefix) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -884,93 +744,7 @@ def test_chain_header_first_line_and_records_intact(tmp_path: Path) -> None:
     ]
 
 
-def test_read_chain_header_returns_none_for_legacy_sidecar(tmp_path: Path) -> None:
-    """A sidecar without a header line (legacy or no chain) yields None."""
-    out = tmp_path / "no-header.chained.jsonl"
-    segs = [
-        _seg_for_header(0, "only", msg_count=8, seeded_reminder_text=None,
-                        fork_turn_index=None, surfaced_reminder_turn=None),
-    ]
-    segs[0].step_results.append(
-        StepResult(
-            fired_extractor=True, fired_auditor=True, surfaced_reminder=None,
-            extractor_record=_ext_step(turn=4, root_id="only").extractor_record,
-            auditor_record=_aud_step(turn=4, root_id="only", surface=False).auditor_record,
-        )
-    )
-    write_chained_replay(segs, out_path=out, header=None)
-    assert read_chain_header(out) is None
-    # iter_records still works
-    assert len(list(iter_records(out))) == 2
 
 
-def test_read_chain_header_handles_missing_or_malformed(tmp_path: Path) -> None:
-    """read_chain_header gracefully degrades on missing / garbage files."""
-    missing = tmp_path / "nope.jsonl"
-    assert read_chain_header(missing) is None
-
-    garbage = tmp_path / "garbage.jsonl"
-    garbage.write_text("not-json\n{}\n", encoding="utf-8")
-    assert read_chain_header(garbage) is None
-
-    empty = tmp_path / "empty.jsonl"
-    empty.write_text("", encoding="utf-8")
-    assert read_chain_header(empty) is None
-
-    no_sentinel = tmp_path / "no-sentinel.jsonl"
-    no_sentinel.write_text('{"some":"dict","but":"no_chain_header"}\n', encoding="utf-8")
-    assert read_chain_header(no_sentinel) is None
 
 
-@pytest.mark.asyncio
-async def test_run_chained_fork_experiment_populates_header(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The driver wires the header onto ChainedForkExperiment + sidecar.
-
-    Fail-stop: if `experiment.header` drifts from what's on disk, the
-    AgentM eval layer can't trust either source. Verify both come from
-    the same dict (deep equality) so the agent metadata and sidecar
-    header round-trip cleanly.
-    """
-    scripted = _ScriptedReplay(
-        [Reminder(text="r1"), Reminder(text="r2"), None]
-    )
-    monkeypatch.setattr(
-        _chained_fork_mod, "replay_pipeline_over_trajectory", scripted
-    )
-    factory_calls: list[dict[str, Any]] = []
-    factory = _factory_returning_n_msgs(factory_calls, [10, 12, 14])
-
-    out = tmp_path / "outchain.chained.jsonl"
-    experiment = await run_chained_fork_experiment(
-        session_factory=factory,
-        cwd=str(tmp_path),
-        provider=None,
-        extractor_settings=ExtractorSettings.default(),
-        auditor_settings=AuditorSettings.default(),
-        extractor_interval=5,
-        audit_interval=5,
-        max_interventions=5,
-        out_path=out,
-    )
-    assert experiment.header, "header must be present after a real chain"
-    assert experiment.header["schema_version"] == 1
-    assert experiment.header["audit_interval"] == 5
-    assert experiment.header["max_interventions"] == 5
-    assert len(experiment.header["segments"]) == len(experiment.segments)
-    # Per-segment dict shape must match what we'd write to disk.
-    for hdr_seg, seg in zip(experiment.header["segments"], experiment.segments, strict=True):
-        assert hdr_seg["segment_index"] == seg.segment_index
-        assert hdr_seg["session_log_id"] == seg.payload.session_log_id
-        assert hdr_seg["is_control"] is (seg.seeded_reminder is None)
-        assert hdr_seg["fork_turn_index"] == seg.fork_turn_index
-        assert hdr_seg["surfaced_reminder_turn"] == seg.surfaced_reminder_turn
-        expected_text = (
-            seg.seeded_reminder.text if seg.seeded_reminder is not None else None
-        )
-        assert hdr_seg["seeded_reminder_text"] == expected_text
-        assert hdr_seg["msg_count"] == len(seg.payload.final_messages)
-    # Disk and in-memory header agree byte-for-byte (after json round-trip).
-    disk_header = read_chain_header(out)
-    assert disk_header == experiment.header

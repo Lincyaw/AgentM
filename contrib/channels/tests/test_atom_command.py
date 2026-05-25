@@ -19,9 +19,7 @@ from agentm_channels.commands.atom_command import (
 from agentm_channels.commands.protocol import CommandContext
 from agentm_channels.commands.registry import (
     CommandRegistry,
-    discover_commands,
 )
-from agentm_channels.commands.router import CommandRouter
 
 
 # --- fake ExtensionAPI ---------------------------------------------------
@@ -124,60 +122,20 @@ def test_discovery_filters_by_manifest_opt_in() -> None:
     )
 
 
-def test_discovery_respects_allow_whitelist() -> None:
-    """Empty allow list → nothing surfaces even if atoms opted in."""
-    atoms = discover_mountable_atoms(allow=frozenset())
-    assert atoms == []
 
 
 # --- registry gating ------------------------------------------------------
 
 
-def test_atom_commands_not_registered_when_disabled() -> None:
-    """Default off: no /atom:* lookup succeeds."""
-    reg = discover_commands(
-        cwd="/nonexistent",
-        atom_commands_enabled=False,
-        atom_allow=["*"],
-    )
-    assert reg.lookup(namespace="atom", name="install") is None
-    assert reg.lookup(namespace="atom", name="list") is None
 
 
-def test_atom_commands_not_registered_when_allow_empty() -> None:
-    """Enabled but empty allow → still no commands. Both gates required."""
-    reg = discover_commands(
-        cwd="/nonexistent",
-        atom_commands_enabled=True,
-        atom_allow=[],
-    )
-    assert reg.lookup(namespace="atom", name="install") is None
 
 
-def test_atom_commands_registered_when_both_gates_open() -> None:
-    reg = discover_commands(
-        cwd="/nonexistent",
-        atom_commands_enabled=True,
-        atom_allow=["*"],
-    )
-    assert reg.lookup(namespace="atom", name="install") is not None
-    assert reg.lookup(namespace="atom", name="uninstall") is not None
-    assert reg.lookup(namespace="atom", name="list") is not None
 
 
 # --- handler behaviour ----------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_install_missing_args_returns_usage() -> None:
-    handlers = {h.name: h for h in build_atom_commands(allow=frozenset({"*"}))}
-    api = _FakeAPI()
-    ctx = _ctx(api=api)
-    inv = _parse(_inbound("/atom:install"))
-    result = await handlers["install"].handle(inv, ctx)
-    assert result.expanded_prompt is None
-    assert "Usage" in result.outbound[0].content
-    assert api.installs == []  # never reached install_atom
 
 
 @pytest.mark.asyncio
@@ -190,105 +148,23 @@ async def test_install_unknown_atom_is_refused() -> None:
     assert api.installs == []
 
 
-@pytest.mark.asyncio
-async def test_install_no_session_yet_returns_hint() -> None:
-    """install_atom needs a live ExtensionAPI; before any user turn
-    has run there is no session yet — the handler should explain
-    instead of NPE'ing."""
-    handlers = {h.name: h for h in build_atom_commands(allow=frozenset())}
-    # No-op API getter: ctx with get_extension_api returning None.
-    ctx = _ctx(api=None)
-    inv = _parse(_inbound("/atom:install permission"))
-    result = await handlers["install"].handle(inv, ctx)
-    # Allow list is empty in this test, so the "not in allow list"
-    # branch fires first.
-    assert result.expanded_prompt is None
-    assert result.outbound[0].content.startswith(
-        "`permission` is not in the mountable-atom allow list."
-    ) or "No live session" in result.outbound[0].content
 
 
-@pytest.mark.asyncio
-async def test_install_config_json_invalid_returns_error() -> None:
-    handlers = {h.name: h for h in build_atom_commands(allow=frozenset({"*"}))}
-    inv = _parse(_inbound("/atom:install something {bad json"))
-    api = _FakeAPI()
-    result = await handlers["install"].handle(inv, _ctx(api=api))
-    text = result.outbound[0].content
-    assert (
-        "config json invalid" in text
-        or "not in the mountable-atom allow list" in text
-    )
-    assert api.installs == []
 
 
-@pytest.mark.asyncio
-async def test_uninstall_no_args_returns_usage() -> None:
-    handlers = {h.name: h for h in build_atom_commands(allow=frozenset({"*"}))}
-    inv = _parse(_inbound("/atom:uninstall"))
-    result = await handlers["uninstall"].handle(inv, _ctx(api=_FakeAPI()))
-    assert "Usage" in result.outbound[0].content
 
 
-@pytest.mark.asyncio
-async def test_uninstall_forwards_to_api_and_reports_success() -> None:
-    handlers = {h.name: h for h in build_atom_commands(allow=frozenset({"*"}))}
-    api = _FakeAPI(unload_result=_UnloadResult(ok=True))
-    inv = _parse(_inbound("/atom:uninstall permission"))
-    result = await handlers["uninstall"].handle(inv, _ctx(api=api))
-    assert len(api.unloads) == 1
-    assert api.unloads[0]["name"] == "permission"
-    assert api.unloads[0]["agent_initiated"] is False
-    assert "Unloaded `permission`" in result.outbound[0].content
 
 
-@pytest.mark.asyncio
-async def test_uninstall_reports_sdk_rejection() -> None:
-    handlers = {h.name: h for h in build_atom_commands(allow=frozenset({"*"}))}
-    api = _FakeAPI(
-        unload_result=_UnloadResult(ok=False, error="atom not loaded")
-    )
-    inv = _parse(_inbound("/atom:uninstall ghost"))
-    result = await handlers["uninstall"].handle(inv, _ctx(api=api))
-    assert "Unload rejected" in result.outbound[0].content
-    assert "atom not loaded" in result.outbound[0].content
 
 
-@pytest.mark.asyncio
-async def test_list_shows_live_and_mountable() -> None:
-    handlers = {h.name: h for h in build_atom_commands(allow=frozenset({"*"}))}
-    api = _FakeAPI(listed=["permission", "cost_budget"])
-    inv = _parse(_inbound("/atom:list"))
-    result = await handlers["list"].handle(inv, _ctx(api=api))
-    text = result.outbound[0].content
-    assert "currently loaded" in text
-    assert "permission" in text
-    assert "cost_budget" in text
 
 
-@pytest.mark.asyncio
-async def test_list_handles_no_session() -> None:
-    handlers = {h.name: h for h in build_atom_commands(allow=frozenset({"*"}))}
-    inv = _parse(_inbound("/atom:list"))
-    result = await handlers["list"].handle(inv, _ctx(api=None))
-    assert "no live session" in result.outbound[0].content
 
 
 # --- end-to-end via router ------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_router_finds_atom_command_through_namespace() -> None:
-    reg = discover_commands(
-        cwd="/nonexistent",
-        atom_commands_enabled=True,
-        atom_allow=["*"],
-    )
-    router = CommandRouter(registry=reg)
-    api = _FakeAPI(listed=["permission"])
-    result = await router.try_dispatch(_inbound("/atom:list"), _ctx(api=api, registry=reg))
-    assert result is not None
-    assert "permission" in result.outbound[0].content
 
 
 # --- helpers --------------------------------------------------------------

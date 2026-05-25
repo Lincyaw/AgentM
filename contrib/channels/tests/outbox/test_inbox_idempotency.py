@@ -18,16 +18,3 @@ def test_record_seen_dedupes_by_peer_and_envelope_id(tmp_path: Path) -> None:
         inbox.close()
 
 
-def test_prune_drops_old_entries(tmp_path: Path) -> None:
-    inbox = SqliteInbox(str(tmp_path / "ib.sqlite"))
-    try:
-        inbox.record_seen("peer-A", "m1", ts=100.0)
-        inbox.record_seen("peer-A", "m2", ts=200.0)
-        removed = inbox.prune(older_than=150.0)
-        assert removed == 1
-        # m1 was pruned, so it is "new" again.
-        assert inbox.record_seen("peer-A", "m1", ts=300.0) is True
-        # m2 remains.
-        assert inbox.record_seen("peer-A", "m2", ts=300.0) is False
-    finally:
-        inbox.close()

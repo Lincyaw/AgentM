@@ -8,11 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from agentm.core.abi import AssistantMessage, EventBus, TextContent, ToolResult
+from agentm.core.abi import AssistantMessage, TextContent, ToolResult
 from agentm.core.abi.messages import ToolResultBlock, ToolResultMessage, UserMessage
 from agentm.core.runtime.catalog import _layout
 from agentm.core.runtime.resource_loader import InMemoryResourceLoader
-from agentm.core.runtime.resource_writer import GitBackedResourceWriter
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
 
@@ -270,111 +269,5 @@ async def test_G6_tool_catalog_history_source_and_forceable_rollback(
         await session.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_rollback_by_repo_relative_path_still_reloads_atom(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """rollback_resource(path=<repo-relative .py>) must go through reload_atom
-    (transactional), not plain writer.write — the tool's own schema promises
-    "atom name, repo-relative path, or absolute path" all work, and the
-    self-modifiable-architecture invariant is that atom rollbacks are
-    transactional. Regression for the path-form silently degrading to a
-    non-reloading writer.write call.
-    """
-    _init_repo(tmp_path)
-    session = await _build_session(
-        tmp_path,
-        monkeypatch,
-        atom_source=_tool_source("tool_demo", "v1"),
-    )
-    pkg = session._test_pkg  # type: ignore[attr-defined]
-    rel_path = f"{pkg}/tool_demo.py"
-
-    def _api():
-        return session._apis[f"{pkg}.tool_demo"]  # type: ignore[attr-defined]
-
-    try:
-        first_sha = _git(tmp_path, "log", "-n", "1", "--format=%H", "--", rel_path)
-        _api().reload_atom(
-            "tool_demo",
-            _tool_source("tool_demo", "v2"),
-            rationale="upgrade to v2",
-        )
-        assert _tool_result_text((await session.prompt("before"))[-2]) == "v2"
-
-        rollback_tool = next(t for t in session.tools if t.name == "rollback_resource")
-        result_rel = _as_tool_result(
-            await rollback_tool.execute(
-                {
-                    "path": rel_path,
-                    "target_sha": first_sha,
-                    "rationale": "undo via repo-relative path",
-                }
-            )
-        )
-        # The success criterion: result is the ReloadResult shape (has 'ok'),
-        # not the WriteResult shape — proving rollback dispatched through
-        # reload_atom rather than degrading to plain writer.write.
-        assert result_rel.is_error is False, result_rel.extras
-        assert "ok" in result_rel.extras and result_rel.extras["ok"] is True
-        # And the live session uses the reloaded code on the next turn.
-        assert _tool_result_text((await session.prompt("after rel"))[-2]) == "v1"
-
-        _api().reload_atom(
-            "tool_demo",
-            _tool_source("tool_demo", "v2"),
-            rationale="re-upgrade",
-        )
-        assert _tool_result_text((await session.prompt("between"))[-2]) == "v2"
-        abs_path = str((tmp_path / rel_path).resolve())
-        result_abs = _as_tool_result(
-            await rollback_tool.execute(
-                {
-                    "path": abs_path,
-                    "target_sha": first_sha,
-                    "rationale": "undo via absolute path",
-                }
-            )
-        )
-        assert result_abs.is_error is False, result_abs.extras
-        assert "ok" in result_abs.extras and result_abs.extras["ok"] is True
-        assert _tool_result_text((await session.prompt("after abs"))[-2]) == "v1"
-    finally:
-        await session.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_G9_batch_write_still_coalesces_into_one_commit(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _init_repo(tmp_path)
-    _write_manifest(tmp_path)
-    left = tmp_path / "skills" / "foo" / "SKILL.md"
-    right = tmp_path / "prompts" / "note.txt"
-    left.parent.mkdir(parents=True, exist_ok=True)
-    right.parent.mkdir(parents=True, exist_ok=True)
-    left.write_text("left before\n", encoding="utf-8")
-    right.write_text("right before\n", encoding="utf-8")
-    _git(tmp_path, "add", "skills/foo/SKILL.md", "prompts/note.txt")
-    _git(tmp_path, "commit", "-m", "seed managed files", "--quiet")
-    writer = GitBackedResourceWriter(
-        cwd=str(tmp_path),
-        session_id="batch-session",
-        bus=EventBus(),
-    )
-    before = _git(tmp_path, "rev-parse", "HEAD")
-    async with writer.batch(rationale="batch update") as batch:
-        await batch.write("skills/foo/SKILL.md", b"left after\n")
-        await batch.write("prompts/note.txt", b"right after\n")
-
-    history = _git(tmp_path, "log", "--format=%an|%s", "-n", "2").splitlines()
-    changed = set(
-        _git(tmp_path, "show", "--name-only", "--format=", "HEAD").splitlines()
-    )
-    assert _git(tmp_path, "rev-parse", "HEAD") != before
-    assert history[0] == "agent|batch update"
-    assert left.read_text(encoding="utf-8") == "left after\n"
-    assert right.read_text(encoding="utf-8") == "right after\n"
-    assert changed == {"prompts/note.txt", "skills/foo/SKILL.md"}

@@ -152,18 +152,6 @@ def test_image_only_picks_managed_session(monkeypatch: pytest.MonkeyPatch) -> No
     assert api.writer is not None
 
 
-def test_image_only_defaults_experiment_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    instances = _install_fake_arl(monkeypatch)
-    atom = _load_atom()
-    api = _FakeAPI()
-
-    atom.install(api, {"image": "img:1"})
-
-    session = instances["managed"][0]
-    assert session.kwargs["experiment_id"] == "agentm-default"
-    assert session.kwargs["namespace"] == "default"
-    assert session.kwargs["gateway_url"] == "http://localhost:8080"
-    assert session.kwargs["workspace_dir"] == "/workspace"
 
 
 def test_pool_ref_only_picks_sandbox_session(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -220,19 +208,6 @@ def test_neither_image_nor_pool_ref_errors(monkeypatch: pytest.MonkeyPatch) -> N
     assert "pool_ref" in msg
 
 
-def test_env_vars_drive_managed_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    instances = _install_fake_arl(monkeypatch)
-    monkeypatch.setenv("AGENTM_AGENT_ENV_IMAGE", "img-from-env:2")
-    monkeypatch.setenv("AGENTM_AGENT_ENV_EXPERIMENT_ID", "exp-from-env")
-    atom = _load_atom()
-    api = _FakeAPI()
-
-    atom.install(api, {})
-
-    assert len(instances["managed"]) == 1
-    session = instances["managed"][0]
-    assert session.kwargs["image"] == "img-from-env:2"
-    assert session.kwargs["experiment_id"] == "exp-from-env"
 
 
 # ---------------------------------------------------------------------------

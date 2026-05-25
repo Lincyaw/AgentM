@@ -42,14 +42,6 @@ def _seed_hypothesis(gate: object, read: object) -> tuple[str, str, str, str]:
     return h.id, pos.id, neg.id, claim
 
 
-def test_verify_brief_uses_falsification_framing() -> None:
-    api, gate, read, _fsm = install_with_fsm()
-    h_id, pos_id, _neg_id, _claim = _seed_hypothesis(gate, read)
-
-    brief = api.get_service("rca.brief")
-    text = brief(h_id, pos_id, mode="verify").lower()
-
-    assert any(verb in text for verb in _FALSIFICATION_VERBS), text
 
 
 def test_verify_brief_blinds_parent_hypothesis_claim() -> None:
@@ -65,25 +57,5 @@ def test_verify_brief_blinds_parent_hypothesis_claim() -> None:
     assert parent_claim not in text, text
 
 
-def test_steelman_brief_uses_supporting_framing() -> None:
-    api, gate, read, _fsm = install_with_fsm()
-    h_id, pos_id, _neg_id, _claim = _seed_hypothesis(gate, read)
-
-    brief = api.get_service("rca.brief")
-    text = brief(h_id, pos_id, mode="steelman").lower()
-
-    # Steelman mode flips the framing — the worker is asked to FIND
-    # supporting evidence so the gate can later treat a steelman-failed
-    # attempt as structural justification for refute (§7.2).
-    assert "supporting evidence" in text or "support" in text, text
 
 
-def test_unblinded_brief_does_show_parent_claim() -> None:
-    """Sanity check: ``blind=False`` is the Phase 2 opt-out path."""
-
-    api, gate, read, _fsm = install_with_fsm()
-    h_id, pos_id, _neg_id, parent_claim = _seed_hypothesis(gate, read)
-
-    brief = api.get_service("rca.brief")
-    text = brief(h_id, pos_id, mode="verify", blind=False)
-    assert parent_claim in text

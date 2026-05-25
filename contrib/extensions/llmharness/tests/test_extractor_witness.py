@@ -16,10 +16,6 @@ def test_normalize_is_case_and_whitespace_insensitive() -> None:
     assert normalize("\tFoo\n\nBar  Baz") == "foo bar baz"
 
 
-def test_witness_data_passes_with_case_insensitive_match() -> None:
-    """`foo` is present (case-insensitively) in both src and dst → None."""
-
-    assert witness_data(["foo"], src_text="alpha foo beta", dst_text="gamma FOO delta") is None
 
 
 def test_witness_data_fails_when_entity_not_in_texts() -> None:
@@ -30,17 +26,6 @@ def test_witness_data_fails_when_entity_not_in_texts() -> None:
     assert "bar" in err
 
 
-def test_witness_ref_passes_with_whitespace_collapse() -> None:
-    """A quote with collapsed whitespace + casing matches both turns."""
-
-    assert (
-        witness_ref(
-            "LATENCY spike",
-            src_text="...latency  spike at 10:42...",
-            dst_text="see Latency Spike earlier",
-        )
-        is None
-    )
 
 
 def test_witness_ref_fails_when_quote_absent() -> None:

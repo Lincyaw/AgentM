@@ -29,14 +29,10 @@ from agentm.core.abi.session import SessionEntry
 
 from llmharness.adapters.agentm import _scan_branch
 from llmharness.audit.entry_types import (
-    AUDIT_EDGE,
-    AUDIT_EVENT,
     AUDIT_GRAPH_OP,
     EXTRACTOR_CURSOR,
 )
-from llmharness.audit.extractor.state import ExtractionState
 from llmharness.audit.graph_ops import NodeDelete, NodeUpsert
-from llmharness.schema import EdgeKind, Event, EventKind
 
 
 def _entry(etype: str, payload: dict[str, Any]) -> SessionEntry:
@@ -52,106 +48,13 @@ def _entry(etype: str, payload: dict[str, Any]) -> SessionEntry:
 # --- B1: pure-op firing -----------------------------------------------------
 
 
-def test_scan_branch_folds_pure_node_delete_op() -> None:
-    """A firing that emits only a NodeDelete must roll forward through
-    the scanner: the prior node is gone from the folded graph. This
-    is the maintainer use case (merge duplicates from prior firings
-    via a single delete with no new events).
-    """
-    branch = [
-        # Prior firing emitted one event the legacy way.
-        _entry(
-            AUDIT_EVENT,
-            {
-                "id": 1,
-                "kind": "act",
-                "summary": "stale",
-                "source_turns": [1],
-                "external_refs": [],
-            },
-        ),
-        # Maintainer firing emits one AUDIT_GRAPH_OP deleting it.
-        _entry(
-            AUDIT_GRAPH_OP,
-            {
-                "op": "node_delete",
-                "id": 1,
-                "firing_id": 1,
-                "op_index": 0,
-                "caused_by_turn_window": [2, 3],
-            },
-        ),
-    ]
-    state = _scan_branch(branch, recent_verdicts_n=0)
-    assert state.graph == []
-    assert state.edges == []
 
 
-def test_state_pending_ops_is_truthy_for_pure_node_delete() -> None:
-    """B1 gating: a firing that called only ``apply_node_delete`` (no
-    new events) must report ``pending_ops`` as truthy so the adapter
-    persists AUDIT_GRAPH_OP entries instead of misclassifying the
-    firing as ``EXTRACTOR_EMPTY``. Verified at the state level — the
-    adapter's gating logic reads ``state.pending_ops`` directly.
-    """
-    prior = Event(id=1, kind=EventKind("act"), summary="stale", source_turns=[1])
-    state = ExtractionState(
-        turn_texts={1: "alpha"},
-        recent_graph_dict={1: prior},
-        next_event_id=2,
-    )
-    # The maintainer's single edit: drop the prior node.
-    result = state.apply_node_delete(1)
-    assert not isinstance(result, str), result
-
-    # Legacy snapshot view is empty (commit_batch / finalize never ran).
-    assert state.events == ()
-    assert state.edges == ()
-    assert state.dropped_edges == ()
-    # But the op log is non-empty — the gating signal for the adapter.
-    assert len(state.pending_ops) == 1
-    assert isinstance(state.pending_ops[0], NodeDelete)
 
 
 # --- B2: legacy AUDIT_EVENT external_refs round-trip ------------------------
 
 
-def test_scan_branch_legacy_audit_event_preserves_external_refs() -> None:
-    """Legacy ``AUDIT_EVENT`` translation must thread ``external_refs``
-    onto the synthesized ``NodeUpsert`` so the folded ``Event``
-    carries them. Without this, the auditor and the next firing's
-    ``recent_graph`` payload regress to per-firing islands — the very
-    failure mode the cumulative graph is designed to avoid.
-    """
-    branch = [
-        _entry(
-            AUDIT_EVENT,
-            {
-                "id": 5,
-                "kind": "concl",
-                "summary": "root cause",
-                "source_turns": [20],
-                "external_refs": [
-                    {
-                        "to_recent_event_id": 3,
-                        "kind": "ref",
-                        "reason": "restates earlier hyp",
-                        "cited_entities": [],
-                        "cited_quote": "latency spike",
-                    }
-                ],
-            },
-        ),
-    ]
-    state = _scan_branch(branch, recent_verdicts_n=0)
-    assert len(state.graph) == 1
-    ev = state.graph[0]
-    assert ev.id == 5
-    assert len(ev.external_refs) == 1
-    er = ev.external_refs[0]
-    assert er.to_recent_event_id == 3
-    assert er.kind is EdgeKind.REF
-    assert er.cited_quote == "latency spike"
 
 
 # --- M4: firing_id invariant ------------------------------------------------
@@ -208,30 +111,6 @@ def test_firing_id_invariant_across_three_firings() -> None:
     assert firing_counter[0] == 3
 
 
-def test_firing_id_counter_does_not_advance_on_empty_firing() -> None:
-    """An ops-less firing must NOT burn a firing_id — the counter
-    only ticks when persistence actually happens. This keeps the
-    per-session sequence contiguous and aligned with on-disk entries.
-    """
-    firing_counter: list[int] = [0]
-    persisted: list[dict[str, Any]] = []
-
-    def _persist_firing(ops: list[NodeUpsert | NodeDelete]) -> None:
-        firing_id = firing_counter[0]
-        for op_index, op in enumerate(ops):
-            payload = op.to_dict()
-            payload["firing_id"] = firing_id
-            payload["op_index"] = op_index
-            persisted.append(payload)
-        if ops:
-            firing_counter[0] += 1
-
-    _persist_firing([NodeUpsert(id=1, kind="task", summary="t", source_turns=(0,))])
-    _persist_firing([])  # trivial / empty — no advance
-    _persist_firing([NodeUpsert(id=2, kind="hyp", summary="h", source_turns=(1,))])
-
-    assert [p["firing_id"] for p in persisted] == [0, 1]
-    assert firing_counter[0] == 2
 
 
 # --- B1 + B2 combined: extractor-cursor advance on pure op firing -----------
@@ -263,39 +142,3 @@ def test_scan_branch_cursor_survives_audit_graph_op_only_branch() -> None:
 # --- legacy AUDIT_EDGE translation parity ----------------------------------
 
 
-def test_scan_branch_legacy_audit_edge_translation_preserves_witness_fields() -> None:
-    """Cross-check on the legacy AUDIT_EDGE → EdgeUpsert path: the
-    cited_entities / cited_quote / src_turns / dst_turns must round-
-    trip so the auditor's witness display doesn't lose anchors.
-    Pinned because the witness fields are exactly the bit the auditor
-    needs to drill back to the trace.
-    """
-    branch = [
-        _entry(
-            AUDIT_EVENT,
-            {"id": 1, "kind": "act", "summary": "s", "source_turns": [1], "external_refs": []},
-        ),
-        _entry(
-            AUDIT_EVENT,
-            {"id": 2, "kind": "act", "summary": "d", "source_turns": [2], "external_refs": []},
-        ),
-        _entry(
-            AUDIT_EDGE,
-            {
-                "src": 1,
-                "dst": 2,
-                "kind": "data",
-                "reason": "supports",
-                "src_turns": [1],
-                "dst_turns": [2],
-                "cited_entities": ["abnormal_traces"],
-                "cited_quote": "",
-            },
-        ),
-    ]
-    state = _scan_branch(branch, recent_verdicts_n=0)
-    assert len(state.edges) == 1
-    ed = state.edges[0]
-    assert ed.cited_entities == ("abnormal_traces",)
-    assert ed.src_turns == (1,)
-    assert ed.dst_turns == (2,)

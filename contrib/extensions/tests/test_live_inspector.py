@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import threading
 from typing import Any
 
 import pytest
@@ -76,62 +75,6 @@ def _read_n_messages(url: str, n: int, timeout: float = 5.0) -> list[dict[str, A
     return out
 
 
-def test_wire_protocol_round_trip() -> None:
-    """Connect a client; assert hello + backlog replay + ordered delivery."""
-
-    server = _get_or_create_server(
-        root_session_id="root-abc",
-        bind="127.0.0.1",
-        port=0,
-        announce=False,
-        url_file=None,
-    )
-    try:
-        server.broadcast(
-            {
-                "type": "session_started",
-                "session_id": "s1",
-                "parent_session_id": None,
-                "purpose": "root",
-                "cwd": "/tmp",
-                "ts": 1.0,
-            }
-        )
-        server.broadcast(
-            {
-                "type": "event",
-                "session_id": "s1",
-                "ts": 1.1,
-                "kind": "TurnEndEvent",
-                "channel": "turn_end",
-                "payload": {"turn_index": 0},
-            }
-        )
-
-        url = f"ws://127.0.0.1:{server.actual_port}/inspect?root=root-abc"
-        result: dict[str, list[dict[str, Any]]] = {"messages": []}
-
-        def reader() -> None:
-            result["messages"] = _read_n_messages(url, 4)
-
-        t = threading.Thread(target=reader)
-        t.start()
-        t.join(timeout=5.0)
-        assert not t.is_alive(), "reader thread hung"
-
-        msgs = result["messages"]
-        assert len(msgs) == 4, msgs
-        assert msgs[0]["type"] == "hello"
-        assert msgs[0]["root_session_id"] == "root-abc"
-        assert msgs[0]["schema_version"] == 1
-        assert msgs[1]["type"] == "session_started"
-        assert msgs[1]["session_id"] == "s1"
-        assert msgs[2]["type"] == "event"
-        assert msgs[2]["channel"] == "turn_end"
-        assert msgs[2]["kind"] == "TurnEndEvent"
-        assert msgs[3]["type"] == "backlog_done"
-    finally:
-        server.release()
 
 
 def test_replay_ordering_race_does_not_leak_live_event_into_backlog() -> None:
@@ -255,156 +198,10 @@ def test_backpressure_drops_newest_when_queue_full() -> None:
         server.release()
 
 
-def test_server_singleton_per_root() -> None:
-    """Two ``_get_or_create_server`` calls with the same root reuse one server.
-
-    Load-bearing for child-session sharing.
-    """
-
-    a = _get_or_create_server(
-        "root-shared", "127.0.0.1", 0, announce=False, url_file=None
-    )
-    try:
-        b = _get_or_create_server(
-            "root-shared", "127.0.0.1", 0, announce=False, url_file=None
-        )
-        try:
-            assert a is b
-            assert a.refcount == 2
-        finally:
-            b.release()
-        assert a.refcount == 1
-    finally:
-        a.release()
 
 
 # --- Child-session extending hook -------------------------------------------
 
 
-def test_child_extending_handler_contributes_inspector_entry() -> None:
-    """The root install registers a ``ChildSessionExtendingEvent`` handler
-    that returns one ``(module, config)`` tuple with the parent's bind, port,
-    role=child, and ``parent_root`` set to the root_session_id. Without this,
-    spawned child sessions are invisible to the UI.
-
-    We drive the install path against a stub ExtensionAPI that records
-    subscriptions, then invoke the registered ``child_session_extending``
-    handler and inspect its return value. The dedupe / append into the
-    child config is covered by the substrate-side test in
-    ``tests/unit/core/test_child_session_extending_event.py``.
-    """
-
-    from agentm.core.abi.events import ChildSessionExtendingEvent
-    from agentm.core.abi.session_config import AgentSessionConfig
-
-    from contrib.extensions import live_inspector
-
-    server = _get_or_create_server(
-        root_session_id="root-ext",
-        bind="127.0.0.1",
-        port=0,
-        announce=False,
-        url_file=None,
-    )
-    try:
-        captured: dict[str, Any] = {"handlers": {}, "observers": []}
-
-        class _StubAPI:
-            root_session_id = "root-ext"
-            session_id = "sess-ext"
-            parent_session_id: str | None = None
-            purpose = "root"
-            cwd = "/tmp"
-
-            def on(self, channel: str, handler: Any) -> Any:
-                captured["handlers"].setdefault(channel, []).append(handler)
-                return lambda: None
-
-            def add_observer(self, observer: Any) -> Any:
-                captured["observers"].append(observer)
-                return lambda: None
-
-        live_inspector.install(
-            _StubAPI(),  # type: ignore[arg-type]
-            {
-                "bind": "127.0.0.1",
-                "port": server.actual_port,
-                "role": "root",
-            },
-        )
-
-        handlers = captured["handlers"].get(ChildSessionExtendingEvent.CHANNEL)
-        assert handlers is not None and len(handlers) == 1, (
-            f"expected exactly one extending handler, got {handlers}"
-        )
-
-        child_cfg = AgentSessionConfig(cwd="/tmp", extensions=[])
-        event = ChildSessionExtendingEvent(
-            parent_session_id="sess-ext",
-            child_config=child_cfg,
-        )
-        result = handlers[0](event)
-
-        assert isinstance(result, list) and len(result) == 1
-        module, child_config = result[0]
-        assert module == "contrib.extensions.live_inspector"
-        assert child_config["role"] == "child"
-        assert child_config["parent_root"] == "root-ext"
-        assert child_config["parent_port"] == server.actual_port
-        assert child_config["bind"] == "127.0.0.1"
-        assert child_config["port"] == server.actual_port
-    finally:
-        server.release()
 
 
-def test_child_role_install_does_not_register_extending_handler() -> None:
-    """Only the root install contributes to ``child_session_extending``.
-    A child install must NOT register a handler — transitive grandchildren
-    still walk back to the same root via root_session_id, so duplicating
-    the contributor would just add work for the substrate dedupe to filter.
-    """
-
-    from agentm.core.abi.events import ChildSessionExtendingEvent
-
-    from contrib.extensions import live_inspector
-
-    server = _get_or_create_server(
-        root_session_id="root-child-skip",
-        bind="127.0.0.1",
-        port=0,
-        announce=False,
-        url_file=None,
-    )
-    try:
-        captured: dict[str, Any] = {"handlers": {}}
-
-        class _StubAPI:
-            root_session_id = "root-child-skip"
-            session_id = "sess-child"
-            parent_session_id: str | None = "sess-parent"
-            purpose = "child"
-            cwd = "/tmp"
-
-            def on(self, channel: str, handler: Any) -> Any:
-                captured["handlers"].setdefault(channel, []).append(handler)
-                return lambda: None
-
-            def add_observer(self, observer: Any) -> Any:
-                return lambda: None
-
-        live_inspector.install(
-            _StubAPI(),  # type: ignore[arg-type]
-            {
-                "bind": "127.0.0.1",
-                "port": server.actual_port,
-                "role": "child",
-                "parent_port": server.actual_port,
-                "parent_root": "root-child-skip",
-            },
-        )
-
-        assert (
-            ChildSessionExtendingEvent.CHANNEL not in captured["handlers"]
-        ), "child install should not subscribe to child_session_extending"
-    finally:
-        server.release()

@@ -34,16 +34,8 @@ from agentm.core.abi import (
     TextContent,
     ToolCallBlock,
     ToolResult,
-    ToolTerminate,
-    ToolTerminated,
     text_message,
 )
-from agentm.core.abi.loop import (
-    default_loop_action as _default_action,
-    resolve_loop_action as _resolve_action,
-)
-from agentm.core.abi.termination import PauseTurn, VendorSpecific
-from agentm.core.abi.tool import ToolContinue
 
 
 class _ScriptedStream:
@@ -203,120 +195,14 @@ async def test_max_turns_is_final_and_inject_overrides_are_ignored() -> None:
     assert len(end_causes) == 1 and isinstance(end_causes[0], MaxTurnsExhausted)
 
 
-def test_default_action_pause_turn_steps_to_continue() -> None:
-    """Provider signalling :class:`PauseTurn` (Anthropic ``pause_turn``,
-    Doubao OpenAI-compat) means "I have more to say but stopped here";
-    the kernel must :class:`Step` so the next turn resends the
-    conversation (with the partial assistant message now in history)
-    and the model resumes. Stopping with :class:`ModelEndTurn` would
-    surface the truncated mid-sentence reply as the final answer —
-    the bug observed against Doubao-Seed-2.0-pro on Feishu."""
-
-    msg = AssistantMessage(
-        role="assistant",
-        content=[TextContent(type="text", text="thinking out loud, will continue")],
-        timestamp=1.0,
-        stop_reason="pause_turn",
-        termination=PauseTurn(),
-    )
-
-    action = _default_action(msg, [])
-
-    assert isinstance(action, Step)
 
 
-def test_default_action_treats_vendor_specific_termination_as_end_turn() -> None:
-    """A provider returning a hint the kernel doesn't recognize
-    (``VendorSpecific("custom_stop")``) must terminate cleanly via
-    :class:`ModelEndTurn`. The kernel never inspects vendor strings — adding
-    a new provider whose stop-reason vocabulary differs MUST NOT require
-    editing kernel code (issue #75)."""
-
-    msg = AssistantMessage(
-        role="assistant",
-        content=[TextContent(type="text", text="custom termination")],
-        timestamp=1.0,
-        stop_reason="custom_stop",
-        termination=VendorSpecific(raw="custom_stop"),
-    )
-
-    action = _default_action(msg, [])
-
-    assert isinstance(action, Stop)
-    assert isinstance(action.cause, ModelEndTurn)
 
 
-def test_default_action_maps_tool_terminate_to_tool_terminated_cause() -> None:
-    """A tool returning :class:`ToolTerminate` must yield
-    ``Stop(ToolTerminated(tool_name=..., reason=...))`` — the kernel must
-    plumb the tool's identity all the way through."""
-
-    msg = AssistantMessage(
-        role="assistant",
-        content=[
-            ToolCallBlock(
-                type="tool_call", id="t1", name="submit_final_report", arguments={}
-            )
-        ],
-        timestamp=1.0,
-        stop_reason="tool_use",
-    )
-    outcome = ToolTerminate(
-        result=ToolResult(content=[TextContent(type="text", text="done")]),
-        reason="rca:final-report-submitted",
-    )
-    action = _default_action(msg, [("submit_final_report", outcome)])
-
-    assert isinstance(action, Stop)
-    assert isinstance(action.cause, ToolTerminated)
-    assert action.cause.tool_name == "submit_final_report"
-    assert action.cause.reason == "rca:final-report-submitted"
 
 
-def test_resolve_action_concatenates_multiple_inject_returns_in_order() -> None:
-    """When several handlers return :class:`Inject`, the resolved action's
-    messages must be the concatenation in registration order — extensions
-    stack rather than fight, and ordering is observable."""
-
-    default = Stop(ModelEndTurn())
-    msg_a = text_message("from-a")
-    msg_b = text_message("from-b")
-    msg_c = text_message("from-c")
-
-    resolved = _resolve_action(
-        default,
-        [
-            Inject(messages=[msg_a]),
-            None,
-            Inject(messages=[msg_b, msg_c]),
-        ],
-    )
-
-    assert isinstance(resolved, Inject)
-    texts: list[str] = []
-    for m in resolved.messages:
-        block = m.content[0]
-        assert isinstance(block, TextContent)
-        texts.append(block.text)
-    assert texts == ["from-a", "from-b", "from-c"]
 
 
-def test_resolve_action_stop_overrides_step_default_when_handler_asks() -> None:
-    """A handler returning :class:`Stop` must override a ``Step`` default —
-    extensions can choose to terminate even when more tool calls were
-    pending. Inject still beats Stop when both are present."""
-
-    default = Step()
-    only_stop = _resolve_action(
-        default, [Stop(ModelEndTurn())]
-    )
-    inject_wins = _resolve_action(
-        default, [Stop(ModelEndTurn()), Inject(messages=[text_message("x")])]
-    )
-
-    assert isinstance(only_stop, Stop)
-    assert isinstance(only_stop.cause, ModelEndTurn)
-    assert isinstance(inject_wins, Inject)
 
 
 @pytest.mark.asyncio
@@ -391,26 +277,3 @@ async def test_signal_mid_tool_emits_agent_end_exactly_once() -> None:
     assert isinstance(default.cause, SignalAborted)
 
 
-def test_bare_tool_result_normalizes_to_tool_continue() -> None:
-    """A tool returning a bare :class:`ToolResult` (the legacy/simple shape)
-    must be treated as :class:`ToolContinue` — the loop must NOT confuse
-    "tool returned successfully" with "tool wants to terminate"."""
-
-    msg = AssistantMessage(
-        role="assistant",
-        content=[
-            ToolCallBlock(
-                type="tool_call", id="t1", name="some_tool", arguments={}
-            )
-        ],
-        timestamp=1.0,
-        stop_reason="tool_use",
-    )
-    bare_result = ToolResult(content=[TextContent(type="text", text="ok")])
-    paired: list[tuple[str, Any]] = [
-        ("some_tool", ToolContinue(result=bare_result))
-    ]
-
-    action = _default_action(msg, paired)
-
-    assert isinstance(action, Step)

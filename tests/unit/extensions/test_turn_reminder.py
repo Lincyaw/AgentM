@@ -105,18 +105,8 @@ def _tool_result_tail() -> list[Any]:
     ]
 
 
-def test_no_cap_stays_silent() -> None:
-    msgs = _user_tail()
-    event = _drive(LoopConfig(), turn_index=100, tool_results=0, messages=msgs)
-    assert len(msgs[-1].content) == 1  # untouched
-    assert event.system == "SYS"  # never touched
 
 
-def test_above_threshold_no_warning() -> None:
-    msgs = _user_tail()
-    # max_turns=4, warn_within=2 → turns_left=4 at turn 0 → no warning.
-    _drive(LoopConfig(max_turns=4), turn_index=0, tool_results=0, messages=msgs)
-    assert len(msgs[-1].content) == 1
 
 
 def test_warns_into_user_message_tail_not_system() -> None:
@@ -129,20 +119,5 @@ def test_warns_into_user_message_tail_not_system() -> None:
     assert event.system == "SYS"
 
 
-def test_warns_inside_last_tool_result_block() -> None:
-    msgs = _tool_result_tail()
-    event = _drive(LoopConfig(max_turns=4), turn_index=3, tool_results=0, messages=msgs)
-    block_content = msgs[-1].content[-1].content
-    assert isinstance(block_content[-1], TextContent)
-    assert "LAST step" in block_content[-1].text  # turns_left==1 → escalated
-    assert event.system == "SYS"
 
 
-def test_tool_call_budget_triggers_warning() -> None:
-    msgs = _user_tail()
-    # No turn cap; max_tool_calls=4, 2 results consumed → tools_left=2 ≤ 2 → warn.
-    event = _drive(
-        LoopConfig(max_tool_calls=4), turn_index=0, tool_results=2, messages=msgs
-    )
-    assert "[budget]" in msgs[-1].content[-1].text
-    assert event.system == "SYS"

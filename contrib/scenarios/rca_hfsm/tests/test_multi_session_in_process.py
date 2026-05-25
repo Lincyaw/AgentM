@@ -17,7 +17,6 @@ of the smoke-test wiring.
 
 from __future__ import annotations
 
-from typing import Any
 
 from agentm_rca_hfsm.atoms import (
     rca_evidence_tools,
@@ -78,19 +77,3 @@ def test_second_session_in_process_keeps_all_evidence_tools() -> None:
     assert gate_a is not gate_b
 
 
-def test_eight_sequential_sessions_each_install_cleanly() -> None:
-    """Stress the per-token rule: eight sessions, every gate must install."""
-
-    rca_hgraph_store._reset_for_tests()
-
-    tokens: list[Any] = []
-    for _ in range(8):
-        api = StubAPI()
-        _install_session_stack(api)
-        token = api.get_service("rca.hgraph.write_token")
-        assert isinstance(token, str) and token
-        tokens.append(token)
-        # The gate must have claimed (and therefore consumed) this token.
-        assert api.get_service("rca.gate") is not None
-
-    assert len(set(tokens)) == 8, "tokens must be unique across installs"

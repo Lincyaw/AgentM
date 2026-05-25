@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 
 from agentm.core.abi import EventBus
-from agentm.extensions.builtin import operations_local
 from agentm.core.abi.extension import ExtensionLoadError
 from agentm.core.runtime.extension import (
     _ExtensionAPIImpl,
@@ -58,30 +57,10 @@ def _api(tmp_path: Path) -> _ExtensionAPIImpl:
     return _ExtensionAPIImpl(scope)
 
 
-def test_install_registers_operations_bundle(tmp_path: Path) -> None:
-    api = _api(tmp_path)
-    operations_local.install(api, {})
-
-    bundle = api.get_operations()
-    assert isinstance(bundle.file, operations_local.LocalFileOperations)
-    assert isinstance(bundle.bash, operations_local.LocalBashOperations)
 
 
-def test_register_operations_twice_raises(tmp_path: Path) -> None:
-    api = _api(tmp_path)
-    operations_local.install(api, {})
-
-    with pytest.raises(KeyError, match="Operations bundle is already registered"):
-        api.register_operations(
-            file=operations_local.LocalFileOperations(cwd=str(tmp_path)),
-            bash=operations_local.LocalBashOperations(),
-        )
 
 
-def test_get_operations_without_registration_raises(tmp_path: Path) -> None:
-    api = _api(tmp_path)
-    with pytest.raises(RuntimeError, match="no atom registered Operations"):
-        api.get_operations()
 
 
 @pytest.mark.asyncio

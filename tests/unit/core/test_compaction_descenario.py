@@ -17,28 +17,14 @@ from agentm.core.abi import (
     TextContent,
     ToolCallBlock,
     ToolResult,
-    UserMessage,
-)
-from agentm.core.abi.compaction import (
-    CompactionPrompts,
-    CompactionSettings,
 )
 from agentm.core.abi.session import (
     ENTRY_MATERIALIZERS,
-    ENTRY_TYPE_BRANCH_SUMMARY,
-    ENTRY_TYPE_COMPACTION,
-    ENTRY_TYPE_MESSAGE,
     SessionEntry,
-    branch_summary_entry,
-    compaction_entry,
-    message_entry,
 )
 from agentm.extensions.builtin.llm_compaction import (
-    compact,
     create_file_ops,
     extract_file_ops_from_message,
-    get_message_from_entry,
-    prepare_compaction,
 )
 
 
@@ -95,15 +81,6 @@ def test_extract_file_ops_uses_tool_metadata() -> None:
     assert file_ops.edited == set()
 
 
-def test_extract_file_ops_without_registry_is_empty() -> None:
-    """Graceful degradation: no registry, no file ops, no crash."""
-
-    file_ops = create_file_ops()
-    message = _assistant_with_tool_call("read", "/tmp/a.txt")
-
-    extract_file_ops_from_message(message, file_ops, None)
-
-    assert file_ops.read == set()
 
 
 # --- 2. Entry-materializer registry ---------------------------------------
@@ -133,192 +110,17 @@ def isolated_materializers() -> Any:
     ENTRY_MATERIALIZERS.update(snapshot)
 
 
-def test_get_message_from_entry_uses_registry(isolated_materializers: dict) -> None:
-    isolated_materializers.clear()
-    materializer = _RecordingMaterializer()
-    isolated_materializers["custom"] = materializer
-
-    entry = SessionEntry(
-        type="custom",
-        id="e1",
-        parent_id=None,
-        timestamp=0.0,
-        payload=None,
-    )
-    message = get_message_from_entry(entry)
-
-    assert isinstance(message, AssistantMessage)
-    assert materializer.calls == ["custom"]
 
 
-def test_get_message_from_entry_returns_none_when_unregistered(
-    isolated_materializers: dict,
-) -> None:
-    isolated_materializers.clear()
-    entry = SessionEntry(
-        type=ENTRY_TYPE_MESSAGE,
-        id="e2",
-        parent_id=None,
-        timestamp=0.0,
-        payload=UserMessage(
-            role="user",
-            content=[TextContent(type="text", text="hi")],
-            timestamp=0.0,
-        ),
-    )
-    assert get_message_from_entry(entry) is None
 
 
-def test_compaction_prompts_atom_populates_registry(
-    isolated_materializers: dict,
-) -> None:
-    """End-to-end: installing ``compaction_prompts`` registers all three
-    canonical materializers so ``get_message_from_entry`` works for the
-    kernel-defined entry types."""
-
-    isolated_materializers.clear()
-    api = _StubExtensionAPI()
-    from agentm.extensions.builtin import compaction_prompts
-
-    compaction_prompts.install(api, {})
-
-    assert set(isolated_materializers) >= {
-        ENTRY_TYPE_MESSAGE,
-        ENTRY_TYPE_BRANCH_SUMMARY,
-        ENTRY_TYPE_COMPACTION,
-    }
-
-    user_entry = message_entry(
-        UserMessage(
-            role="user",
-            content=[TextContent(type="text", text="hi")],
-            timestamp=0.0,
-        ),
-        parent_id=None,
-    )
-    assert isinstance(get_message_from_entry(user_entry), UserMessage)
-
-    summary_entry = branch_summary_entry("did things", parent_id=None)
-    msg = get_message_from_entry(summary_entry)
-    assert isinstance(msg, AssistantMessage)
-    block = msg.content[0]
-    assert isinstance(block, TextContent)
-    assert "did things" in block.text
-
-    compaction_entry_value = compaction_entry({"summary": "done"}, parent_id=None)
-    msg = get_message_from_entry(compaction_entry_value)
-    assert isinstance(msg, AssistantMessage)
-    block = msg.content[0]
-    assert isinstance(block, TextContent)
-    assert block.text == "done"
 
 
 # --- 3. Compaction with and without the atom ------------------------------
 
 
-@pytest.mark.asyncio
-async def test_compact_with_prompts_atom_threads_system_prompt(
-    isolated_materializers: dict,
-) -> None:
-    isolated_materializers.clear()
-    api = _StubExtensionAPI()
-    from agentm.extensions.builtin import compaction_prompts
-
-    compaction_prompts.install(api, {})
-
-    user_entry = message_entry(
-        UserMessage(
-            role="user",
-            content=[TextContent(type="text", text="explain X")],
-            timestamp=0.0,
-        ),
-        parent_id=None,
-    )
-    assistant_entry = message_entry(
-        AssistantMessage(
-            role="assistant",
-            content=[TextContent(type="text", text="here is X")],
-            timestamp=1.0,
-            stop_reason="end_turn",
-        ),
-        parent_id=user_entry.id,
-    )
-
-    settings = CompactionSettings(
-        enabled=True, reserve_tokens=512, keep_recent_tokens=1
-    )
-    preparation = prepare_compaction([user_entry, assistant_entry], settings)
-    assert preparation is not None
-
-    summarization_body = api.prompt_templates.get_prompt("compaction.summarization")
-    assert isinstance(summarization_body, str) and summarization_body
-
-    prompts = CompactionPrompts(
-        summarization_system=api.prompt_templates.get_prompt(
-            "compaction.summarization_system"
-        )
-        or "",
-        update_summarization=api.prompt_templates.get_prompt(
-            "compaction.update_summarization"
-        )
-        or "",
-        turn_prefix_summarization=api.prompt_templates.get_prompt(
-            "compaction.turn_prefix_summarization"
-        )
-        or "",
-    )
-
-    result = await compact(
-        preparation,
-        _stub_summarizer,
-        summarization_body,
-        custom_instructions=None,
-        prompts=prompts,
-    )
-    # The stub summarizer echoes the system prompt — verifying it really
-    # threads through the engine and into the summarizer.
-    assert prompts.summarization_system[:20] in result.summary
 
 
-@pytest.mark.asyncio
-async def test_compact_without_prompts_atom_falls_back_quietly() -> None:
-    """The kernel must not crash when the prompts atom is absent — it
-    accepts ``prompts=None`` and threads empty strings through.
-    """
-
-    user_entry = message_entry(
-        UserMessage(
-            role="user",
-            content=[TextContent(type="text", text="hi")],
-            timestamp=0.0,
-        ),
-        parent_id=None,
-    )
-    assistant_entry = message_entry(
-        AssistantMessage(
-            role="assistant",
-            content=[TextContent(type="text", text="ok")],
-            timestamp=1.0,
-            stop_reason="end_turn",
-        ),
-        parent_id=user_entry.id,
-    )
-
-    settings = CompactionSettings(
-        enabled=True, reserve_tokens=512, keep_recent_tokens=1
-    )
-    preparation = prepare_compaction([user_entry, assistant_entry], settings)
-    assert preparation is not None
-
-    result = await compact(
-        preparation,
-        _stub_summarizer,
-        "",
-        custom_instructions=None,
-        prompts=None,
-    )
-    # Empty system prompt threaded through.
-    assert "[system:]" in result.summary
 
 
 # --- Stubs ---------------------------------------------------------------

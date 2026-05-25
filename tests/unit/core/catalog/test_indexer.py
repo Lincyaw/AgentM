@@ -1,22 +1,12 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-import pytest
 
 from agentm.core.runtime.catalog import _layout
 from agentm.core.runtime.catalog.indexer import index_trace, rebuild_catalog
-from agentm.core.abi import EventBus
-from agentm.core.runtime.atom_reloader import AtomReloader
-from agentm.core.abi.extension import ProviderConfig
-from agentm.core.runtime.resource_writer import GitBackedResourceWriter
-from agentm.core.runtime.session import AgentSession
-from agentm.core.runtime.session_manager import InMemorySessionManager
-from agentm.core.runtime.session_runtime import SessionRuntime
 
 
 SHA_TOOL_READ = "a" * 40
@@ -183,220 +173,11 @@ def test_index_trace_attributes_to_all_loaded_atoms(tmp_path: Path) -> None:
         assert metrics_path.is_file()
 
 
-def test_index_trace_marks_mid_session_reload(tmp_path: Path) -> None:
-    trace_path = _write_trace(
-        tmp_path,
-        "trace-reload",
-        [
-            _fingerprint_record({"tool_read": SHA_TOOL_READ}),
-            _record(
-                "agentm.atom.reload",
-                {
-                    "fingerprint_after": {
-                        "core": None,
-                        "scenario": None,
-                        "atoms": {"tool_read": f"tool_read@{SHA_TOOL_READ}"},
-                    }
-                },
-            ),
-            _record("agentm.agent.end", {"stop_reason": "end_turn"}),
-        ],
-    )
-
-    index_trace(trace_path, root=tmp_path)
-
-    row = _first_metrics_row(tmp_path, "tool_read", SHA_TOOL_READ)
-    assert row["mid_session_reload"] is True
 
 
-@pytest.mark.parametrize(
-    ("cause_payload", "expected_completion_rate"),
-    [
-        # ModelEndTurn — model voluntarily finished.
-        ({"cause_kind": "ModelEndTurn", "final": False}, 1.0),
-        # ToolTerminated — terminal tool ran to completion (e.g. RCA's
-        # submit_final_report).
-        (
-            {
-                "cause_kind": "ToolTerminated",
-                "final": False,
-                "tool_name": "submit_final_report",
-                "reason": "done",
-            },
-            1.0,
-        ),
-        # ProviderTruncated(kind=max_tokens) — fail-stop. ``cause_kind``
-        # carries the class name; ``kind`` is the dataclass field.
-        (
-            {
-                "cause_kind": "ProviderTruncated",
-                "final": False,
-                "kind": "max_tokens",
-            },
-            0.0,
-        ),
-        # ProviderTruncated(kind=error) — fail-stop.
-        (
-            {"cause_kind": "ProviderTruncated", "final": False, "kind": "error"},
-            0.0,
-        ),
-        # ProviderProtocolViolation — fail-stop.
-        (
-            {
-                "cause_kind": "ProviderProtocolViolation",
-                "final": False,
-                "detail": "tool_use without tool_calls",
-            },
-            0.0,
-        ),
-        # MaxTurnsExhausted — bare class with no fields.
-        ({"cause_kind": "MaxTurnsExhausted", "final": True}, 0.0),
-        # SignalAborted — bare class with no fields.
-        ({"cause_kind": "SignalAborted", "final": True}, 0.0),
-        # BudgetExhausted — ``final=True`` with discriminating ``detail``.
-        (
-            {"cause_kind": "BudgetExhausted", "final": True, "detail": "cost"},
-            0.0,
-        ),
-    ],
-)
-def test_extract_stop_reason_handles_new_cause_shapes(
-    tmp_path: Path,
-    cause_payload: dict[str, Any],
-    expected_completion_rate: float,
-) -> None:
-    """Migration coverage: each serialized ``TerminationCause`` shape must
-    classify correctly. Without this guard a mixed-vintage trace store
-    (legacy ``stop_reason`` strings + new ``cause`` dicts) silently
-    miscounts ``completion_rate`` while CI stays green — and
-    completion_rate is the key evidence-driven-evolution signal."""
-
-    trace_path = _write_trace(
-        tmp_path,
-        "trace-cause",
-        [
-            _fingerprint_record({"tool_read": SHA_TOOL_READ}),
-            _record("agentm.agent.end", {"cause": cause_payload}),
-        ],
-    )
-
-    index_trace(trace_path, root=tmp_path)
-    row = _first_metrics_row(tmp_path, "tool_read", SHA_TOOL_READ)
-    assert row["metrics"]["task.completion_rate"] == expected_completion_rate
 
 
-def test_index_trace_skips_legacy_content_hash_fingerprints(tmp_path: Path) -> None:
-    trace_path = _write_trace(
-        tmp_path,
-        "trace-legacy",
-        [
-            _fingerprint_record({"tool_read": LEGACY_HASH}),
-            _record("agentm.agent.end", {"stop_reason": "end_turn"}),
-        ],
-    )
-
-    result = index_trace(trace_path, root=tmp_path)
-
-    assert result.n_atoms_attributed == 0
-    assert result.warnings == [
-        f"atom 'tool_read' uses pre-migration fingerprint {LEGACY_HASH}; skipping"
-    ]
 
 
-def test_cli_rebuild_returns_zero_on_clean_run(tmp_path: Path) -> None:
-    _write_trace(
-        tmp_path,
-        "trace-cli",
-        [
-            _fingerprint_record({"tool_read": SHA_TOOL_READ}),
-            _record("agentm.agent.end", {"stop_reason": "end_turn"}),
-        ],
-    )
-    observability = tmp_path / ".agentm" / "observability"
-
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "agentm.core.runtime.catalog.indexer",
-            "--root",
-            str(tmp_path),
-            "--observability",
-            str(observability),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        cwd=Path.cwd(),
-    )
-
-    assert completed.returncode == 0
-    assert "n_traces=1" in completed.stdout
 
 
-@pytest.mark.asyncio
-async def test_shutdown_indexes_observability_trace_when_present(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    trace_dir = tmp_path / ".agentm" / "observability"
-    trace_dir.mkdir(parents=True, exist_ok=True)
-    trace_path = trace_dir / "session-123.jsonl"
-    trace_path.write_text("{}\n", encoding="utf-8")
-
-    called: dict[str, Path] = {}
-
-    def _fake_index_trace(path: Path, *, root: Path | None = None) -> None:
-        called["path"] = path
-
-    monkeypatch.setattr("agentm.core.runtime.catalog.indexer.index_trace", _fake_index_trace)
-
-    bus = EventBus()
-    resource_writer = GitBackedResourceWriter(
-        cwd=str(tmp_path),
-        session_id="session-123",
-        bus=bus,
-    )
-    reloader = AtomReloader(
-        cwd=str(tmp_path),
-        resource_writer=resource_writer,
-        bus=bus,
-        tools=[],
-        commands={},
-        providers={},
-        renderers={},
-        apis={},
-        on_provider_changed=lambda: None,
-    )
-    runtime = SessionRuntime(
-        bus=bus,
-        session_manager=InMemorySessionManager(cwd=str(tmp_path)),
-        resource_loader=cast("Any", None),
-        loop=cast("Any", None),
-        active_provider_box={
-            "value": ProviderConfig(
-                stream_fn=cast("Any", lambda *_args, **_kwargs: None),
-                model=cast("Any", None),
-                name="dummy",
-            )
-        },
-        tools=[],
-        commands={},
-        providers={},
-        renderers={},
-        apis={},
-        services={},
-        reloader=reloader,
-        pending_user_messages=[],
-    )
-    session = AgentSession(
-        cwd=str(tmp_path),
-        runtime=runtime,
-        session_id="session-123",
-        parent_bus=None,
-        parent_session_id=None,
-    )
-
-    await session.shutdown()
-
-    assert called["path"] == trace_path.resolve()

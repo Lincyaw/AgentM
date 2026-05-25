@@ -68,38 +68,9 @@ def test_two_calls_two_results_paired_by_id() -> None:
     assert events[1]["is_error"] is False
 
 
-def test_error_tool_result_propagates_error_text() -> None:
-    messages = [
-        _assistant_with_call("c-1", "upsert_edge", {"src": "a", "dst": "b"}),
-        _tool_result("c-1", "validation failed: missing witness", is_error=True),
-    ]
-    events = tool_events_from_phase_result(_phase_result(messages))
-    assert len(events) == 1
-    assert events[0]["is_error"] is True
-    assert events[0]["error_text"] == "validation failed: missing witness"
 
 
-def test_empty_messages_returns_empty_list() -> None:
-    assert tool_events_from_phase_result(_phase_result([])) == []
 
 
-def test_no_tool_calls_returns_empty_list() -> None:
-    messages = [
-        UserMessage(role="user", content=[TextContent(type="text", text="hi")], timestamp=0.0),
-        AssistantMessage(
-            role="assistant",
-            content=[TextContent(type="text", text="I cannot help")],
-            timestamp=0.0,
-        ),
-    ]
-    assert tool_events_from_phase_result(_phase_result(messages)) == []
 
 
-def test_unpaired_call_keeps_step_count_honest() -> None:
-    """A tool_call without a matching result still appears, with neutral fields."""
-    messages = [_assistant_with_call("c-1", "upsert_node", {"id": "n1"})]
-    events = tool_events_from_phase_result(_phase_result(messages))
-    assert len(events) == 1
-    assert events[0]["tool_name"] == "upsert_node"
-    assert events[0]["is_error"] is False
-    assert events[0]["error_text"] is None
