@@ -1,0 +1,5 @@
+# Single-case fixture pinned to case-3 from the v31 chained-fork run.
+# GT={search, profile} — the case where the old auditor prompt misled the
+# main agent toward the frontend symptom. Used to validate the rewritten
+# auditor_minimal.md prompt end-to-end.
+batch-01KQHDBBNP9A2BWM50Z37QJT3A

@@ -1,0 +1,7 @@
+# Single-case fixture: a baseline-FAILED multi-root-cause case.
+# GT = {search, rate, recommendation}. Clean baseline reported only
+# {search} (1 of 3) — a textbook "silent narrowing" failure: the agent
+# found one root cause and committed without ruling out the others.
+# Used to test whether the auditor's reminder recovers the missing
+# root causes under chained_fork (opinions10, clean baseline).
+batch-01KQJ2C5B42PRP003GBETSMEWX
