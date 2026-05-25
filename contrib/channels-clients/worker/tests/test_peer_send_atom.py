@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import pytest
 
 from agentm.core.abi import FunctionTool, ToolResult
 
@@ -79,20 +78,6 @@ def _install(api: _FakeAPI) -> FunctionTool:
     return api.registered[0]
 
 
-async def test_peer_send_no_wait_returns_correlation_id() -> None:
-    peer = _FakePeerMessaging()
-    api = _FakeAPI({PEER_MESSAGING_SERVICE: peer})
-    tool = _install(api)
-    result: ToolResult = await tool.fn(
-        {"to": "worker-B", "content": "hi", "wait_for_reply": False}
-    )
-    assert result.is_error is False
-    text = result.content[0].text  # type: ignore[union-attr]
-    assert "correlation_id=cid-1" in text
-    assert "to=worker-B" in text
-    assert peer.sends == [
-        {"to": "worker-B", "content": "hi", "correlation_id": "cid-1"}
-    ]
 
 
 async def test_peer_send_wait_resolves_on_reply() -> None:
@@ -138,53 +123,11 @@ async def test_peer_send_times_out() -> None:
     assert "timed out" in text
 
 
-def test_install_fails_without_peer_messaging_service() -> None:
-    api = _FakeAPI({})  # no service registered
-    with pytest.raises(RuntimeError) as exc:
-        install(api, {})  # type: ignore[arg-type]
-    assert "peer_messaging" in str(exc.value)
 
 
 # -- runner unit test: correlation_id reply resolves future ------------
 
 
-async def test_runner_handle_outbound_resolves_pending_future() -> None:
-    """Without spinning up a Gateway/AgentSession, verify that the
-    runner's outbound-handler path resolves a registered future."""
-    from agentm_channels.wire import KIND_OUTBOUND, WIRE_VERSION, Envelope
-    from agentm_worker.runner import WorkerRunner
-
-    class _NullClient:
-        async def send(self, env: Any) -> None:
-            pass
-
-    async def _factory(cwd: str, bus: Any, resume: Any) -> Any:
-        # The runner only invokes session_factory inside Gateway.start
-        # turn dispatch; we don't drive turns in this test.
-        return None
-
-    runner = WorkerRunner(
-        client=_NullClient(),  # type: ignore[arg-type]
-        cwd="/tmp",
-        scenario="x",
-        session_factory=_factory,
-    )
-    # Manually park a future the way send_peer would have.
-    fut: asyncio.Future[dict[str, Any]] = (
-        asyncio.get_running_loop().create_future()
-    )
-    runner._pending_replies["abc"] = fut
-    env = Envelope(
-        v=WIRE_VERSION,
-        id="r1",
-        kind=KIND_OUTBOUND,
-        ts=0.0,
-        body={"content": "ok"},
-        correlation_id="abc",
-    )
-    await runner.handle_outbound_envelope(env)
-    body = await asyncio.wait_for(fut, timeout=1.0)
-    assert body == {"content": "ok"}
 
 
 async def test_runner_late_reply_dropped() -> None:

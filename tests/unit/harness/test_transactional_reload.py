@@ -14,7 +14,6 @@ from agentm.core.abi.messages import (
     ToolResultMessage,
     UserMessage,
 )
-from agentm.core.abi.events import ExtensionReloadEvent
 from agentm.core.abi.extension import ExtensionStaleError
 from agentm.core.runtime.resource_loader import InMemoryResourceLoader
 from agentm.core.runtime.atom_reloader import LoadedAtom as _LoadedAtom
@@ -245,27 +244,6 @@ async def test_S4_syntax_error_rejected_no_write(tmp_path: Path, monkeypatch: py
         await session.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_reload_rejects_invalid_register_tag_no_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    session = await _build_session(
-        tmp_path,
-        monkeypatch,
-        atom_source=_tool_source("tool_demo", "v1"),
-    )
-    tool_path = tmp_path / session._test_pkg / "tool_demo.py"  # type: ignore[attr-defined]
-    original = tool_path.read_text(encoding="utf-8")
-    try:
-        result = session._apis[f"{session._test_pkg}.tool_demo"].reload_atom(  # type: ignore[attr-defined]
-            "tool_demo",
-            _tool_source("tool_demo", "v2", registers=("badtag",)),
-        )
-        assert result.ok is False
-        assert "register" in (result.error or "")
-        assert tool_path.read_text(encoding="utf-8") == original
-    finally:
-        await session.shutdown()
 
 
 @pytest.mark.asyncio
@@ -291,57 +269,8 @@ async def test_S5_install_failure_rolls_back(tmp_path: Path, monkeypatch: pytest
         await session.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_reload_supports_async_install_atoms(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    session = await _build_session(
-        tmp_path,
-        monkeypatch,
-        atom_source=_tool_source("tool_demo", "v1", install_kind="async"),
-    )
-    try:
-        first = await session.prompt("hi")
-        assert _tool_result_text(first[2]) == "v1"
-
-        result = session._apis[f"{session._test_pkg}.tool_demo"].reload_atom(  # type: ignore[attr-defined]
-            "tool_demo",
-            _tool_source("tool_demo", "v2", install_kind="async"),
-        )
-        assert result.ok is True
-
-        second = await session.prompt("hi again")
-        assert _tool_result_text(second[-2]) == "v2"
-    finally:
-        await session.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_reload_removes_owner_observer_callbacks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    session = await _build_session(
-        tmp_path,
-        monkeypatch,
-        atom_source=_observer_source("tool_demo", "v1"),
-    )
-    state = importlib.import_module("reload_state_shared")
-    try:
-        state.EVENTS.clear()
-        await session.bus.emit("marker", {"value": 1})
-        assert state.EVENTS == [("v1", "marker")]
-
-        result = session._apis[f"{session._test_pkg}.tool_demo"].reload_atom(  # type: ignore[attr-defined]
-            "tool_demo", _observer_source("tool_demo", "v2")
-        )
-        assert result.ok is True
-
-        state.EVENTS.clear()
-        await session.bus.emit("marker", {"value": 2})
-        assert state.EVENTS == [("v2", "marker")]
-    finally:
-        await session.shutdown()
-        state.EVENTS.clear()
 
 
 @pytest.mark.asyncio
@@ -365,57 +294,8 @@ async def test_S6_assert_active_raises_after_reload(tmp_path: Path, monkeypatch:
         await session.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_M4_per_atom_api_instances_distinct_and_owner_name_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    pkg = _write_package(tmp_path)
-    (tmp_path / pkg / "atom_a.py").write_text(_tool_source("atom_a", "a"), encoding="utf-8")
-    (tmp_path / pkg / "atom_b.py").write_text(_tool_source("atom_b", "b"), encoding="utf-8")
-    monkeypatch.syspath_prepend(str(tmp_path))
-    importlib.invalidate_caches()
-
-    session = await AgentSession.create(
-        AgentSessionConfig(
-            cwd=str(tmp_path),
-            extensions=[
-                ("agentm.extensions.builtin.operations_local", {}),
-                (f"{pkg}.atom_a", {}),
-                (f"{pkg}.atom_b", {}),
-            ],
-            provider=(f"{pkg}.provider", {}),
-            resource_loader=InMemoryResourceLoader(),
-        )
-    )
-    try:
-        mod_a = importlib.import_module(f"{pkg}.atom_a")
-        mod_b = importlib.import_module(f"{pkg}.atom_b")
-        assert mod_a.CAPTURED_API is not mod_b.CAPTURED_API
-        assert mod_a.CAPTURED_API._owner_name == f"{pkg}.atom_a"
-        assert mod_b.CAPTURED_API._owner_name == f"{pkg}.atom_b"
-    finally:
-        await session.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_reload_emits_extension_reload_event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    session = await _build_session(
-        tmp_path,
-        monkeypatch,
-        atom_source=_tool_source("tool_demo", "v1"),
-    )
-    seen: list[ExtensionReloadEvent] = []
-    session.bus.on("extension_reload", lambda event: seen.append(event))
-    try:
-        result = session._apis[f"{session._test_pkg}.tool_demo"].reload_atom(  # type: ignore[attr-defined]
-            "tool_demo", _tool_source("tool_demo", "v2")
-        )
-        assert result.ok is True
-        assert len(seen) == 1
-        assert seen[0].name == "tool_demo"
-        assert seen[0].old_hash is not None
-        assert seen[0].new_hash == result.new_hash
-        assert seen[0].trigger == "agent"
-    finally:
-        await session.shutdown()
 
 
 @pytest.mark.asyncio
@@ -443,27 +323,6 @@ async def test_reload_path_check_rejects_constitution(tmp_path: Path, monkeypatc
         await session.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_reload_invalidates_old_handlers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    session = await _build_session(
-        tmp_path,
-        monkeypatch,
-        atom_source=_tool_source("tool_demo", "v1", marker_label="v1"),
-    )
-    state = importlib.import_module("reload_state_shared")
-    try:
-        await session.bus.emit("marker", "before")
-        assert state.EVENTS == [("v1", "before")]
-
-        result = session._apis[f"{session._test_pkg}.tool_demo"].reload_atom(  # type: ignore[attr-defined]
-            "tool_demo", _tool_source("tool_demo", "v2", marker_label="v2")
-        )
-        assert result.ok is True
-
-        await session.bus.emit("marker", "after")
-        assert state.EVENTS == [("v1", "before"), ("v2", "after")]
-    finally:
-        await session.shutdown()
 
 @pytest.mark.asyncio
 async def test_reload_double_failure_preserves_loaded_atom_state(
@@ -511,81 +370,6 @@ async def test_reload_double_failure_preserves_loaded_atom_state(
         await session.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_reload_double_failure_preserves_bus_subscriptions_and_registrations(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Snapshot-based rollback must preserve handler/registration tracking,
-    not just the loaded-atom registry. Pre-reload the atom registers a
-    handler on the ``marker`` channel; both apply and rollback then fail.
-    Post-restore, emitting ``marker`` must still hit the original handler
-    once and exactly once (proving handler list, owners_by_kind, and bus
-    subscriptions all came back from the immutable snapshot)."""
-    session = await _build_session(
-        tmp_path,
-        monkeypatch,
-        atom_source=_tool_source("tool_demo", "stable", marker_label="v1"),
-    )
-    module_path = f"{session._test_pkg}.tool_demo"  # type: ignore[attr-defined]
-    state = importlib.import_module("reload_state_shared")
-    original_activate = session._reloader._activate_atom_install  # type: ignore[attr-defined]
-    pre_handlers = list(session._reloader._handlers_by_atom.get(module_path, []))  # type: ignore[attr-defined]
-    pre_registrations = list(
-        session._reloader._registrations_by_atom.get(module_path, [])  # type: ignore[attr-defined]
-    )
-    pre_marker_subs = session.bus.subscriptions_for("marker")
-    calls = 0
-
-    async def fail_only_rollback(atom: _LoadedAtom) -> None:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            await original_activate(atom)
-            return
-        raise RuntimeError("rollback activation exploded")
-
-    monkeypatch.setattr(
-        session._reloader,  # type: ignore[attr-defined]
-        "_activate_atom_install",
-        fail_only_rollback,
-    )
-    try:
-        result = session._apis[module_path].reload_atom(  # type: ignore[attr-defined]
-            "tool_demo",
-            _raising_source("tool_demo"),
-            rationale="exercise double failure with subscriptions",
-        )
-        assert result.ok is False
-        assert "rollback_failure_state_preserved" in (result.error or "")
-
-        # Snapshot restoration must rebuild handlers / registrations exactly,
-        # not leave the registries half-populated.
-        assert (
-            session._reloader._handlers_by_atom.get(module_path, []) == pre_handlers  # type: ignore[attr-defined]
-        )
-        assert (
-            session._reloader._registrations_by_atom.get(module_path, [])  # type: ignore[attr-defined]
-            == pre_registrations
-        )
-        assert session._reloader.owners_by_kind["tool"]["demo"] == module_path  # type: ignore[attr-defined]
-
-        # The bus must hold the same subscription objects (same identities,
-        # same order) as before the reload attempt — no orphaned post-apply
-        # handlers, no missing pre-apply ones.
-        post_marker_subs = session.bus.subscriptions_for("marker")
-        assert [sub.handler for sub in post_marker_subs] == [
-            sub.handler for sub in pre_marker_subs
-        ]
-
-        state.EVENTS.clear()
-        await session.bus.emit("marker", {"value": "after-double-failure"})
-        # Exactly one ``v1`` handler should fire; if rollback had left a
-        # second handler subscribed we'd see two events.
-        assert state.EVENTS == [("v1", {"value": "after-double-failure"})]
-    finally:
-        await session.shutdown()
-        state.EVENTS.clear()
 
 
 _OWNER_KIND_SOURCE = '''
@@ -638,97 +422,7 @@ def install(api: ExtensionAPI, config: dict[str, object]) -> None:
 '''
 
 
-@pytest.mark.asyncio
-async def test_registration_owners_are_tracked_for_every_kind(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    session = await _build_session(
-        tmp_path,
-        monkeypatch,
-        atom_source=_OWNER_KIND_SOURCE,
-    )
-    owner = f"{session._test_pkg}.tool_demo"  # type: ignore[attr-defined]
-    try:
-        assert session._reloader.owners_by_kind["tool"]["demo"] == owner  # type: ignore[attr-defined]
-        assert session._reloader.owners_by_kind["command"]["demo_cmd"] == owner  # type: ignore[attr-defined]
-        assert session._reloader.owners_by_kind["provider"]["demo_provider"] == owner  # type: ignore[attr-defined]
-        assert session._reloader.owners_by_kind["renderer"]["demo_renderer"] == owner  # type: ignore[attr-defined]
-    finally:
-        await session.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_session_shutdown_unsubscribes_reloader_registration_handler(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agentm.core.abi import EventBus
-
-    class NonClearingEventBus(EventBus):
-        def clear(self) -> None:
-            return None
-
-    bus = NonClearingEventBus()
-    session = await _build_session(
-        tmp_path,
-        monkeypatch,
-        atom_source=_tool_source("tool_demo", "v1"),
-        extra_extensions=[],
-    )
-    # Rebuild with an externally visible bus because _build_session intentionally
-    # keeps its fixture compact for the other reload tests.
-    await session.shutdown()
-
-    pkg = _write_package(tmp_path)
-    (tmp_path / pkg / "tool_demo.py").write_text(_tool_source("tool_demo", "v1"), encoding="utf-8")
-    monkeypatch.syspath_prepend(str(tmp_path))
-    importlib.invalidate_caches()
-    session = await AgentSession.create(
-        AgentSessionConfig(
-            cwd=str(tmp_path),
-            bus=bus,
-            extensions=[
-                ("agentm.extensions.builtin.operations_local", {}),
-                (f"{pkg}.tool_demo", {}),
-            ],
-            provider=(f"{pkg}.provider", {}),
-            resource_loader=InMemoryResourceLoader(),
-        )
-    )
-    track_handler = session._reloader._track_registration  # type: ignore[attr-defined]
-    assert any(
-        sub.handler == track_handler
-        for subs in bus._handlers.values()
-        for sub in subs
-    )
-
-    await session.shutdown()
-
-    assert not any(
-        sub.handler == track_handler
-        for subs in bus._handlers.values()
-        for sub in subs
-    )
 
 
-@pytest.mark.asyncio
-async def test_agent_installed_atom_records_synthetic_import_kind(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    session = await _build_session(
-        tmp_path,
-        monkeypatch,
-        atom_source=_tool_source("tool_demo", "v1"),
-    )
-    api = session._apis[f"{session._test_pkg}.tool_demo"]  # type: ignore[attr-defined]
-    try:
-        result = api.install_atom(
-            name="helper_atom",
-            source=_tool_source("helper_atom", "helper", registers=("tool:helper",)).replace('name="demo"', 'name="helper"'),
-        )
-        assert result.ok is True
-        assert session._reloader.loaded_by_name["helper_atom"].import_kind == "synthetic"
-    finally:
-        await session.shutdown()

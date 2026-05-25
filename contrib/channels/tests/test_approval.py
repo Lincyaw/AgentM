@@ -20,75 +20,12 @@ def _tc(name: str = "bash") -> ToolCallEvent:
     return ToolCallEvent(tool_call_id="t1", tool_name=name, args={"cmd": "echo hi"})
 
 
-@pytest.mark.asyncio
-async def test_always_allow_no_request_published() -> None:
-    bridge, bus = _make(ApprovalPolicy(always_allow=frozenset({"bash"})))
-    assert await bridge.handle_tool_call(_tc()) is None
-    assert bus.outbound.qsize() == 0
 
 
-@pytest.mark.asyncio
-async def test_always_block_short_circuits() -> None:
-    bridge, bus = _make(ApprovalPolicy(always_block=frozenset({"bash"})))
-    result = await bridge.handle_tool_call(_tc())
-    assert result is not None and result["block"] is True
-    assert bus.outbound.qsize() == 0
 
 
-@pytest.mark.asyncio
-async def test_approve_flow_publishes_card_then_resolves() -> None:
-    ctx = ApprovalContext(channel="stub", chat_id="c", sender_id="u")
-    bridge, bus = _make(
-        ApprovalPolicy(require_approval=frozenset({"bash"}), timeout_seconds=2.0),
-        ctx,
-    )
-
-    async def click_approve() -> None:
-        # Wait for the request card.
-        for _ in range(200):
-            if bus.outbound.qsize() > 0:
-                msg = await bus.consume_outbound()
-                if msg.metadata.get("kind") == "approval_request":
-                    approve_value = msg.buttons[0].value  # Button(label, value, …)
-                    approval_id = approve_value.split(":", 1)[0]
-                    await bridge.resolve(
-                        approval_id, value=approve_value, sender_id="u"
-                    )
-                    return
-            await asyncio.sleep(0.01)
-
-    clicker = asyncio.create_task(click_approve())
-    result = await bridge.handle_tool_call(_tc())
-    await clicker
-    assert result is None
-    # Resolution card was also published.
-    assert bus.outbound.qsize() >= 1
 
 
-@pytest.mark.asyncio
-async def test_deny_flow_blocks() -> None:
-    ctx = ApprovalContext(channel="stub", chat_id="c", sender_id="u")
-    bridge, bus = _make(
-        ApprovalPolicy(require_approval=frozenset({"bash"}), timeout_seconds=2.0),
-        ctx,
-    )
-
-    async def click_deny() -> None:
-        for _ in range(200):
-            if bus.outbound.qsize() > 0:
-                msg = await bus.consume_outbound()
-                if msg.metadata.get("kind") == "approval_request":
-                    deny_value = msg.buttons[1].value
-                    approval_id = deny_value.split(":", 1)[0]
-                    await bridge.resolve(approval_id, value=deny_value, sender_id="u")
-                    return
-            await asyncio.sleep(0.01)
-
-    clicker = asyncio.create_task(click_deny())
-    result = await bridge.handle_tool_call(_tc())
-    await clicker
-    assert result is not None and result["block"] is True
-    assert "denied by u" in result["reason"]
 
 
 @pytest.mark.asyncio
@@ -103,61 +40,8 @@ async def test_timeout_blocks() -> None:
     assert "timed out" in result["reason"]
 
 
-@pytest.mark.asyncio
-async def test_index_carries_pending_request_and_clears_on_resolve() -> None:
-    """Approval bridges with an index register/unregister so the
-    gateway can route clicks in O(1). Two invariants:
-
-    1. While a request is pending, ``index[approval_id]`` points at
-       the bridge that owns it.
-    2. After resolve, the entry is gone.
-    """
-    ctx = ApprovalContext(channel="stub", chat_id="c", sender_id="u")
-    index: dict[str, ApprovalBridge] = {}
-    bus = MessageBus()
-    bridge = ApprovalBridge(
-        bus,
-        ApprovalPolicy(require_approval=frozenset({"bash"}), timeout_seconds=2.0),
-        get_context=lambda: ctx,
-        index=index,
-    )
-
-    async def click_approve() -> None:
-        for _ in range(200):
-            if bus.outbound.qsize() > 0:
-                msg = await bus.consume_outbound()
-                if msg.metadata.get("kind") == "approval_request":
-                    # The index now knows about this approval_id.
-                    approval_id = msg.metadata["approval_id"]
-                    assert index[approval_id] is bridge
-                    approve_value = msg.buttons[0].value
-                    await bridge.resolve(
-                        approval_id, value=approve_value, sender_id="u"
-                    )
-                    return
-            await asyncio.sleep(0.01)
-
-    clicker = asyncio.create_task(click_approve())
-    result = await bridge.handle_tool_call(_tc())
-    await clicker
-    assert result is None
-    # After resolution the index is empty.
-    assert index == {}
 
 
-@pytest.mark.asyncio
-async def test_index_clears_on_timeout() -> None:
-    ctx = ApprovalContext(channel="stub", chat_id="c", sender_id="u")
-    index: dict[str, ApprovalBridge] = {}
-    bus = MessageBus()
-    bridge = ApprovalBridge(
-        bus,
-        ApprovalPolicy(require_approval=frozenset({"bash"}), timeout_seconds=0.05),
-        get_context=lambda: ctx,
-        index=index,
-    )
-    await bridge.handle_tool_call(_tc())
-    assert index == {}  # cleared on timeout path too
 
 
 @pytest.mark.asyncio

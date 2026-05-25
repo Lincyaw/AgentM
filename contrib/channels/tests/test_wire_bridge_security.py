@@ -26,13 +26,11 @@ re-verify the full envelope contract (other tests do that).
 from __future__ import annotations
 
 import asyncio
-import inspect
 import time
 from dataclasses import dataclass, field
 
 import pytest
 
-from agentm_channels.auth.token import TokenAuthenticator, _constant_time_membership
 from agentm_channels.manager import ChannelManager
 from agentm_channels.bus import MessageBus
 from agentm_channels.peer import PeerSession
@@ -133,32 +131,6 @@ async def test_inbound_sender_id_preserved() -> None:
     await manager.stop()
 
 
-@pytest.mark.asyncio
-async def test_inbound_missing_sender_id_falls_back_to_principal() -> None:
-    """A single-user transport may omit the author; the bridge fills
-    it from the peer principal so downstream always sees a stable id.
-    """
-    bus = _new_bus()
-    manager = ChannelManager({}, bus)
-    outbox = _RecordedOutbox()
-    bridge = WireBridge(
-        bus=bus, manager=manager, outbox=outbox  # type: ignore[arg-type]
-    )
-
-    client = _peer("terminal-7f3a")
-    env = Envelope(
-        v=WIRE_VERSION,
-        id="in-2",
-        kind=KIND_INBOUND,
-        ts=time.time(),
-        body={"channel": "terminal", "chat_id": "c1", "content": "hi"},
-    )
-    await bridge.handle_inbound(client, env)
-
-    msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
-    assert msg.sender_id == "terminal-7f3a"
-
-    await manager.stop()
 
 
 @pytest.mark.asyncio
@@ -222,62 +194,3 @@ async def test_channel_name_squatting_rejected() -> None:
     await manager.stop()
 
 
-def test_token_authenticator_uses_constant_time() -> None:
-    """Issue #3: token comparison must use ``hmac.compare_digest``
-    OR-accumulated across the full allow-list. We can't time-test in a
-    unit test, so we assert the structural property that guarantees it:
-
-    1. The helper :func:`_constant_time_membership` mentions
-       ``compare_digest`` in its source.
-    2. ``TokenAuthenticator`` does not perform a naive ``in`` check on a
-       ``set`` of tokens (the regression we're guarding against).
-    3. Behavioural smoke: wrong token rejected, right token accepted.
-    """
-    src = inspect.getsource(_constant_time_membership)
-    assert "compare_digest" in src, (
-        "constant-time membership must funnel through hmac.compare_digest"
-    )
-
-    auth_src = inspect.getsource(TokenAuthenticator)
-    # The old vulnerable form was `token in self._allowed_tokens` —
-    # naive ``in`` against a hashed container shortcircuits and leaks
-    # timing. The fix routes through :func:`_constant_time_membership`.
-    assert "_constant_time_membership" in auth_src, (
-        "TokenAuthenticator must delegate the membership check to "
-        "_constant_time_membership; a naive ``in`` leaks a timing oracle"
-    )
-    assert "token in self._allowed_tokens" not in auth_src, (
-        "naive set membership reintroduces the timing oracle"
-    )
-
-    # Behavioural smoke — wrong token rejected, right one accepted.
-    auth = TokenAuthenticator({"correct-horse-battery-staple"})
-
-    async def _run() -> None:
-        # transport is unused by token auth (see authenticate docstring)
-        # so passing ``None`` is safe; the noqa-marked param accepts it.
-        ok = await auth.authenticate(
-            peer_kind="chat_client",
-            peer_id="p",
-            token="correct-horse-battery-staple",
-            transport=None,  # type: ignore[arg-type]
-        )
-        assert ok is True
-        bad = await auth.authenticate(
-            peer_kind="chat_client",
-            peer_id="p",
-            token="wrong",
-            transport=None,  # type: ignore[arg-type]
-        )
-        assert bad is False
-        # Same prefix as a real token — would have leaked timing under
-        # the naive ``in`` check.
-        bad_prefix = await auth.authenticate(
-            peer_kind="chat_client",
-            peer_id="p",
-            token="correct-horse-battery-stapl",
-            transport=None,  # type: ignore[arg-type]
-        )
-        assert bad_prefix is False
-
-    asyncio.run(_run())

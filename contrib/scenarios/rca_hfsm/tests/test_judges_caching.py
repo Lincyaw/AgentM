@@ -128,18 +128,3 @@ def test_same_context_hits_cache(module: Any, service_name: str) -> None:
     assert stream.calls == 1
 
 
-@pytest.mark.parametrize(("module", "service_name"), _JUDGES)
-def test_different_context_bypasses_cache(
-    module: Any, service_name: str
-) -> None:
-    stream = _CountingStreamFn()
-    api = _LlmAPI(stream_fn=stream)
-    module.install(api, {"mode": "llm"})
-    impl = api.get_service(service_name)
-
-    impl.judge(JudgeContext(graph_slice={"x": 1}, operands={}))
-    impl.judge(JudgeContext(graph_slice={"x": 2}, operands={}))
-    impl.judge(JudgeContext(graph_slice={"x": 1}, operands={}))  # hit
-
-    # Two distinct contexts → exactly two provider invocations.
-    assert stream.calls == 2

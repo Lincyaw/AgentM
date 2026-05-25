@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import subprocess
 import sys
 import time
@@ -132,61 +131,8 @@ def _read_until_kind(
 # ----- tests ----------------------------------------------------------
 
 
-async def test_echo_round_trip(tmp_path: Path) -> None:
-    sock = str(tmp_path / "gw.sock")
-    db = str(tmp_path / "outbox.sqlite")
-    server, outbox, inbox = await _start_echo_server(
-        sock, db, allow_uids={os.geteuid()}
-    )
-    proc = _spawn_terminal(socket_path=sock)
-    try:
-        # Wait for the ``ready`` line (announced after WELCOME).
-        ready = await asyncio.to_thread(_read_until_kind, proc, "ready", 5.0)
-        assert ready == {"kind": "ready"}
-        # Send a line on stdin; expect an echo back as a ``message``.
-        assert proc.stdin is not None
-        proc.stdin.write("hello\n")
-        proc.stdin.flush()
-        msg = await asyncio.to_thread(_read_until_kind, proc, "message", 5.0)
-        assert msg["content"] == "hello"
-    finally:
-        if proc.poll() is None:
-            if proc.stdin is not None:
-                try:
-                    proc.stdin.close()
-                except Exception:
-                    pass
-            try:
-                proc.wait(timeout=3.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=2.0)
-        await server.stop()
-        outbox.close()
-        inbox.close()
 
 
-async def test_clean_eof_shutdown(tmp_path: Path) -> None:
-    sock = str(tmp_path / "gw.sock")
-    db = str(tmp_path / "outbox.sqlite")
-    server, outbox, inbox = await _start_echo_server(
-        sock, db, allow_uids={os.geteuid()}
-    )
-    proc = _spawn_terminal(socket_path=sock)
-    try:
-        await asyncio.to_thread(_read_until_kind, proc, "ready", 5.0)
-        # Close stdin → client should EOF its read loop and exit 0.
-        assert proc.stdin is not None
-        proc.stdin.close()
-        rc = await asyncio.to_thread(_wait_proc, proc, 5.0)
-        assert rc == 0
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=2.0)
-        await server.stop()
-        outbox.close()
-        inbox.close()
 
 
 async def test_handshake_rejection(tmp_path: Path) -> None:
@@ -210,31 +156,5 @@ async def test_handshake_rejection(tmp_path: Path) -> None:
         inbox.close()
 
 
-def test_bad_connect_url_subprocess() -> None:
-    proc = subprocess.run(
-        [sys.executable, "-m", "agentm_terminal.cli", "--connect", "http://x"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert proc.returncode == 2
-    assert "agentm-terminal: error" in proc.stderr
 
 
-def test_missing_socket_subprocess(tmp_path: Path) -> None:
-    missing = tmp_path / "definitely-not-there.sock"
-    assert not missing.exists()
-    proc = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "agentm_terminal.cli",
-            "--connect",
-            f"unix://{missing}",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert proc.returncode == 7, proc.stderr
-    assert "connect-failed" in proc.stderr

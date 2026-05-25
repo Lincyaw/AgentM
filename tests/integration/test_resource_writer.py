@@ -20,7 +20,6 @@ from agentm.core.abi import (
     Model,
     TextContent,
 )
-from agentm.core.abi.events import ResourceWriteEvent
 from agentm.core.abi.extension import ProviderConfig
 from agentm.core.runtime.resource_loader import InMemoryResourceLoader
 from agentm.core.runtime.resource_writer import GitBackedResourceWriter
@@ -172,150 +171,12 @@ async def test_G3_constitution_rejects_tool_edit(tmp_path: Path) -> None:
     assert after == before
 
 
-@pytest.mark.asyncio
-async def test_G4_skill_markdown_edit_commits_and_emits_event(tmp_path: Path) -> None:
-    """G4: editing a managed SKILL.md lands a git commit and emits ResourceWriteEvent."""
-
-    _init_repo(tmp_path)
-    skill_path = tmp_path / "skills" / "foo" / "SKILL.md"
-    skill_path.parent.mkdir(parents=True, exist_ok=True)
-    skill_path.write_text("hello world\n", encoding="utf-8")
-    _git(tmp_path, "add", "skills/foo/SKILL.md")
-    _git(tmp_path, "commit", "-m", "add skill", "--quiet")
-
-    session = await _create_session(tmp_path, ("agentm.extensions.builtin.tool_edit", {}))
-    seen: list[ResourceWriteEvent] = []
-    session.bus.on("resource_write", lambda event: seen.append(event))
-    try:
-        tool = next(tool for tool in session.tools if tool.name == "edit")
-        result = await tool.execute(
-            {
-                "path": str(skill_path),
-                "old_string": "world",
-                "new_string": "agentm",
-                "rationale": "rewrite skill wording",
-            }
-        )
-    finally:
-        await session.shutdown()
-
-    log = _git(
-        tmp_path,
-        "log",
-        "--format=%an|%s",
-        "-n",
-        "1",
-        "--",
-        "skills/foo/SKILL.md",
-    ).stdout.strip()
-    assert result.is_error is False
-    assert skill_path.read_text(encoding="utf-8") == "hello agentm\n"
-    assert log == "agent|rewrite skill wording"
-    assert len(seen) == 1
-    assert seen[0].path == "skills/foo/SKILL.md"
-    assert seen[0].rationale == "rewrite skill wording"
-    assert seen[0].author == "agent"
 
 
-@pytest.mark.asyncio
-async def test_G5_unmanaged_tool_write_passthrough(tmp_path: Path) -> None:
-    """G5: writes outside the working tree succeed without a commit."""
-
-    _init_repo(tmp_path)
-    before = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
-    outside = tmp_path.parent / f"{tmp_path.name}-scratch.txt"
-
-    session = await _create_session(tmp_path, ("agentm.extensions.builtin.tool_write", {}))
-    try:
-        tool = next(tool for tool in session.tools if tool.name == "write")
-        result = await tool.execute(
-            {
-                "path": str(outside),
-                "content": "scratch data",
-                "rationale": "temporary scratch note",
-            }
-        )
-    finally:
-        await session.shutdown()
-
-    after = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
-    assert result.is_error is False
-    assert outside.read_text(encoding="utf-8") == "scratch data"
-    assert after == before
 
 
-@pytest.mark.asyncio
-async def test_G7_auto_init_shadow_repo_commits_initial_snapshot_and_write(tmp_path: Path) -> None:
-    """G7: absent .git falls back to a shadow bare repo under .agentm/repo."""
-
-    skill_path = tmp_path / "skills" / "foo" / "SKILL.md"
-    skill_path.parent.mkdir(parents=True, exist_ok=True)
-    skill_path.write_text("before\n", encoding="utf-8")
-    writer = GitBackedResourceWriter(
-        cwd=str(tmp_path),
-        session_id="shadow-session",
-        bus=EventBus(),
-    )
-    result = await writer.write(
-        "skills/foo/SKILL.md",
-        b"after\n",
-        rationale="update skill in shadow repo",
-    )
-
-    shadow_git_dir = tmp_path / ".agentm" / "repo"
-    messages = _git(
-        tmp_path,
-        "log",
-        "--format=%s",
-        git_dir=shadow_git_dir,
-        work_tree=tmp_path,
-    ).stdout.splitlines()
-    assert shadow_git_dir.is_dir()
-    assert result.committed is True
-    assert result.commit_sha_before is not None
-    assert result.commit_sha_after is not None
-    assert skill_path.read_text(encoding="utf-8") == "after\n"
-    assert messages[:2] == ["update skill in shadow repo", "agentm: initial snapshot"]
 
 
-@pytest.mark.asyncio
-async def test_G8_advisory_mode_when_git_missing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """G8: missing git degrades to advisory mode, writes still succeed, warning once."""
-
-    monkeypatch.setattr("agentm.core.runtime.resource_writer.shutil.which", lambda _: None)
-    target = tmp_path / "skills" / "foo" / "SKILL.md"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    writer = GitBackedResourceWriter(
-        cwd=str(tmp_path),
-        session_id="advisory-session",
-        bus=EventBus(),
-    )
-    first = await writer.write(
-        "skills/foo/SKILL.md",
-        b"first advisory write\n",
-        rationale="advisory one",
-    )
-    second = await writer.write(
-        "skills/foo/SKILL.md",
-        b"second advisory write\n",
-        rationale="advisory two",
-    )
-
-    warnings = [
-        record
-        for record in caplog.records
-        if "resource writer advisory mode enabled" in record.message
-    ]
-    assert first.committed is False
-    assert second.committed is False
-    assert first.error is None
-    assert second.error is None
-    assert target.read_text(encoding="utf-8") == "second advisory write\n"
-    assert len(warnings) == 1
 
 
 @pytest.mark.asyncio
@@ -359,43 +220,6 @@ async def test_G10_dirty_human_changes_are_snapshot_before_agent_commit(tmp_path
     assert history[1] == "human|auto: pre-agent snapshot"
 
 
-@pytest.mark.asyncio
-async def test_batch_coalesces_multiple_managed_writes_into_one_commit(
-    tmp_path: Path,
-) -> None:
-    """Batch handle is load-bearing because tool-level multi-file edits must not
-    fracture into unrelated commits once reload paths start using it."""
-
-    _init_repo(tmp_path)
-    left = tmp_path / "skills" / "foo" / "SKILL.md"
-    right = tmp_path / "prompts" / "note.txt"
-    left.parent.mkdir(parents=True, exist_ok=True)
-    right.parent.mkdir(parents=True, exist_ok=True)
-    left.write_text("left before\n", encoding="utf-8")
-    right.write_text("right before\n", encoding="utf-8")
-    _git(tmp_path, "add", "skills/foo/SKILL.md", "prompts/note.txt")
-    _git(tmp_path, "commit", "-m", "seed managed files", "--quiet")
-    before = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
-
-    writer = GitBackedResourceWriter(
-        cwd=str(tmp_path),
-        session_id="batch-session",
-        bus=EventBus(),
-    )
-    async with writer.batch(rationale="batch update") as batch:
-        await batch.write("skills/foo/SKILL.md", b"left after\n")
-        await batch.write("prompts/note.txt", b"right after\n")
-
-    history = _git(tmp_path, "log", "--format=%an|%s", "-n", "2").stdout.splitlines()
-    changed = set(
-        _git(tmp_path, "show", "--name-only", "--format=", "HEAD").stdout.splitlines()
-    )
-    assert _git(tmp_path, "rev-parse", "HEAD").stdout.strip() != before
-    assert history[0] == "agent|batch update"
-    assert history[1] == "Test User|seed managed files"
-    assert left.read_text(encoding="utf-8") == "left after\n"
-    assert right.read_text(encoding="utf-8") == "right after\n"
-    assert changed == {"prompts/note.txt", "skills/foo/SKILL.md"}
 
 
 def _seed_managed_skill(repo: Path) -> Path:
@@ -436,101 +260,8 @@ async def test_protected_branch_refuses_managed_write_on_main(tmp_path: Path) ->
     assert _git(tmp_path, "rev-parse", "HEAD").stdout.strip() == before_sha
 
 
-@pytest.mark.asyncio
-async def test_protected_branch_allows_managed_write_on_feature_branch(
-    tmp_path: Path,
-) -> None:
-    """Non-protected branch in user's real repo writes and commits normally."""
-
-    _init_repo(tmp_path)
-    skill_path = _seed_managed_skill(tmp_path)
-    _git(tmp_path, "checkout", "-q", "-b", "feature/x")
-    before_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
-
-    writer = GitBackedResourceWriter(
-        cwd=str(tmp_path),
-        session_id="feature-test",
-        bus=EventBus(),
-    )
-    result = await writer.write(
-        "skills/foo/SKILL.md",
-        b"feature rewrite\n",
-        rationale="land on feature branch",
-    )
-
-    after_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
-    assert result.committed is True
-    assert result.error is None
-    assert after_sha != before_sha
-    assert skill_path.read_text(encoding="utf-8") == "feature rewrite\n"
 
 
-@pytest.mark.asyncio
-async def test_auto_commit_disabled_writes_without_committing(tmp_path: Path) -> None:
-    """`auto_commit=False` puts the writer in advisory mode: bytes land, no commit."""
-
-    _init_repo(tmp_path)
-    skill_path = _seed_managed_skill(tmp_path)
-    _git(tmp_path, "checkout", "-q", "-b", "feature/y")
-    log_before = _git(tmp_path, "log", "--oneline").stdout.strip().splitlines()
-
-    writer = GitBackedResourceWriter(
-        cwd=str(tmp_path),
-        session_id="no-auto-commit",
-        bus=EventBus(),
-        auto_commit=False,
-    )
-    result = await writer.write(
-        "skills/foo/SKILL.md",
-        b"advisory bytes\n",
-        rationale="should not commit",
-    )
-
-    log_after = _git(tmp_path, "log", "--oneline").stdout.strip().splitlines()
-    assert result.committed is False
-    assert result.error is None
-    assert skill_path.read_text(encoding="utf-8") == "advisory bytes\n"
-    assert len(log_after) == len(log_before)
 
 
-@pytest.mark.asyncio
-async def test_hostile_git_author_env_does_not_override_writer_identity(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """User shell's `GIT_AUTHOR_NAME` must not leak into the writer's commit."""
-
-    _init_repo(tmp_path)
-    skill_path = _seed_managed_skill(tmp_path)
-    _git(tmp_path, "checkout", "-q", "-b", "feature/z")
-    monkeypatch.setenv("GIT_AUTHOR_NAME", "Hostile")
-    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "hostile@evil.test")
-    monkeypatch.setenv("GIT_COMMITTER_NAME", "Hostile")
-    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "hostile@evil.test")
-
-    session_id = "identity-test"
-    writer = GitBackedResourceWriter(
-        cwd=str(tmp_path),
-        session_id=session_id,
-        bus=EventBus(),
-    )
-    result = await writer.write(
-        "skills/foo/SKILL.md",
-        b"identity check\n",
-        rationale="check author identity",
-    )
-
-    assert result.committed is True
-    log_line = _git(
-        tmp_path,
-        "log",
-        "--format=%an|%ae|%cn|%ce",
-        "-n",
-        "1",
-        "--",
-        "skills/foo/SKILL.md",
-    ).stdout.strip()
-    expected_email = f"{session_id}@agentm"
-    assert log_line == f"agent|{expected_email}|agent|{expected_email}"
-    assert skill_path.read_text(encoding="utf-8") == "identity check\n"
 

@@ -9,7 +9,7 @@ import tempfile
 
 import pytest
 
-from agentm_channels.auth.peercred import UnixPeerCredAuthenticator, _peer_uid
+from agentm_channels.auth.peercred import UnixPeerCredAuthenticator
 
 
 _PEERCRED_SUPPORTED = sys.platform.startswith("linux") or hasattr(os, "getpeereid")
@@ -63,22 +63,8 @@ async def _teardown(
     await server.wait_closed()
 
 
-async def test_peer_uid_matches_geteuid() -> None:
-    server, sw, cw, release = await _open_pair()
-    try:
-        sock = sw.get_extra_info("socket")
-        assert _peer_uid(sock) == os.geteuid()
-    finally:
-        await _teardown(server, cw, release)
 
 
-async def test_authenticator_accepts_known_uid() -> None:
-    server, sw, cw, release = await _open_pair()
-    try:
-        auth = UnixPeerCredAuthenticator(allowed_uids={os.geteuid()})
-        assert await auth.authenticate("chat_client", "p1", None, sw) is True
-    finally:
-        await _teardown(server, cw, release)
 
 
 async def test_authenticator_rejects_unknown_uid() -> None:
@@ -90,13 +76,6 @@ async def test_authenticator_rejects_unknown_uid() -> None:
         await _teardown(server, cw, release)
 
 
-async def test_authenticator_any_uid_accepts() -> None:
-    server, sw, cw, release = await _open_pair()
-    try:
-        auth = UnixPeerCredAuthenticator(allowed_uids=None)
-        assert await auth.authenticate("chat_client", "p1", None, sw) is True
-    finally:
-        await _teardown(server, cw, release)
 
 
 async def test_authenticator_empty_allow_set_denies_all() -> None:

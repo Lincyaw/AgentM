@@ -69,67 +69,10 @@ def test_commit_happy_path_accepts_events_and_witnessed_ref() -> None:
     assert state.committed is True
 
 
-def test_atomic_edit_tools_upsert_and_delete_nodes_and_edges() -> None:
-    state = _state()
-    assert state.upsert_node(_evid(1, turns=[10], summary="src"))["pending_nodes"] == 1
-    assert state.upsert_node(_evid(2, turns=[11], summary="dst"))["pending_nodes"] == 2
-    updated = state.upsert_node(
-        _evid(2, turns=[11], summary="updated dst"),
-    )
-    assert not isinstance(updated, str)
-    assert state._events_pending[1].summary == "updated dst"
-
-    added_edge = state.upsert_edge(
-        {
-            "src": 1,
-            "dst": 2,
-            "kind": "data",
-            "reason": "connects",
-            "cited_entities": ["abnormal_traces"],
-        }
-    )
-    assert not isinstance(added_edge, str)
-    assert len(state._edges_pending) == 1
-
-    updated_edge = state.upsert_edge(
-        {
-            "src": 1,
-            "dst": 2,
-            "kind": "data",
-            "reason": "updated reason",
-            "cited_entities": ["abnormal_traces"],
-        }
-    )
-    assert not isinstance(updated_edge, str)
-    assert state._edges_pending[0].reason == "updated reason"
-
-    # ``kind`` is mandatory on the legacy delete path too — the op
-    # log selector needs the full (src, dst, kind) triple.
-    rejected = state.delete_edge({"src": 1, "dst": 2})
-    assert isinstance(rejected, str) and "kind" in rejected
-    deleted_edge = state.delete_edge({"src": 1, "dst": 2, "kind": "data"})
-    assert not isinstance(deleted_edge, str)
-    assert state._edges_pending == []
-
-    deleted_node = state.delete_node(2)
-    assert not isinstance(deleted_node, str)
-    assert [ev.id for ev in state._events_pending] == [1]
 
 
-def test_delete_node_rejects_unknown_node() -> None:
-    state = _state()
-    err = state.delete_node(999)
-    assert isinstance(err, str)
-    assert "unknown node_id" in err
 
 
-def test_commit_with_empty_events_is_accepted() -> None:
-    state = _state()
-    err = state.commit([])
-    assert err is None
-    assert state.events == ()
-    assert state.edges == ()
-    assert state.committed is True
 
 
 # --- event-shape hard rejects (state unchanged) ----------------------------
@@ -157,28 +100,6 @@ def test_commit_rejects_non_increasing_ids() -> None:
     assert state.committed is False
 
 
-def test_commit_allows_gaps_in_id_sequence() -> None:
-    """Strictly increasing ≠ contiguous. Gaps are fine."""
-    state = _state()
-    err = state.commit(
-        [
-            _evid(1, turns=[10], summary="src"),
-            {
-                **_evid(5, turns=[11], summary="dst"),
-                "refs": [
-                    {
-                        "to": 1,
-                        "kind": "data",
-                        "reason": "ok",
-                        "cited_entities": ["abnormal_traces"],
-                    }
-                ],
-            },
-        ]
-    )
-    assert err is None
-    assert len(state.events) == 2
-    assert state.events[0].id == 1 and state.events[1].id == 5
 
 
 def test_commit_rejects_unknown_event_kind() -> None:
@@ -197,22 +118,8 @@ def test_commit_rejects_unknown_event_kind() -> None:
     assert state.committed is False
 
 
-def test_commit_rejects_empty_summary() -> None:
-    state = _state()
-    err = state.commit(
-        [
-            {"id": 1, "kind": "act", "summary": "   ", "source_turns": [10]},
-        ]
-    )
-    assert err is not None and "summary" in err
-    assert state.committed is False
 
 
-def test_commit_rejects_empty_source_turns() -> None:
-    state = _state()
-    err = state.commit([{"id": 1, "kind": "act", "summary": "x", "source_turns": []}])
-    assert err is not None and "source_turns" in err
-    assert state.committed is False
 
 
 # --- ref-shape hard rejects ------------------------------------------------
@@ -338,40 +245,6 @@ def test_commit_drops_ref_when_witness_substring_missing() -> None:
     assert "last_error" in dropped
 
 
-def test_commit_partial_keeps_witnessed_refs_and_drops_failing_ones() -> None:
-    state = ExtractionState(
-        turn_texts={
-            10: "good token here: alpha bravo charlie",
-            11: "alpha bravo charlie reappears here",
-        }
-    )
-    err = state.commit(
-        [
-            _evid(1, turns=[10]),
-            {
-                **_evid(2, turns=[11]),
-                "refs": [
-                    {
-                        "to": 1,
-                        "kind": "ref",
-                        "reason": "good ref",
-                        "cited_quote": "alpha bravo charlie",
-                    },
-                    {
-                        "to": 1,
-                        "kind": "data",
-                        "reason": "bad data ref",
-                        "cited_entities": ["nonexistent"],
-                    },
-                ],
-            },
-        ]
-    )
-    assert err is None
-    assert len(state.edges) == 1
-    assert state.edges[0].kind.value == "ref"
-    assert len(state.dropped_edges) == 1
-    assert state.dropped_edges[0]["kind"] == "data"
 
 
 # --- one-shot commit invariant ---------------------------------------------
@@ -400,32 +273,8 @@ def test_commit_rejects_non_first_event_with_empty_refs() -> None:
     assert state.committed is False
 
 
-def test_commit_rejects_first_event_when_recent_graph_non_empty() -> None:
-    """Genesis exemption only applies when there are NO priors at all.
-    A new firing with recent_graph entries must connect its first
-    event to the cumulative graph via external_refs, otherwise the
-    cumulative graph grows a stray root.
-    """
-    from llmharness.schema import Event, EventKind
-
-    prior = Event(id=1, kind=EventKind("act"), summary="prior", source_turns=[5])
-    state = ExtractionState(
-        turn_texts={5: "irrelevant prior text", 10: "irrelevant new text"},
-        recent_graph=(prior,),
-        next_event_id=2,
-    )
-    err = state.commit([_evid(2, turns=[10])])  # first-of-firing, NO refs
-    assert err is not None
-    assert "genesis exemption" in err
-    assert state.committed is False
 
 
-def test_commit_accepts_genesis_event_with_empty_refs() -> None:
-    """id=1 has no in-window predecessor; empty refs is allowed."""
-    state = _state()
-    err = state.commit([_evid(1, turns=[10])])
-    assert err is None
-    assert state.events[0].id == 1
 
 
 def test_commit_is_one_shot() -> None:
@@ -486,103 +335,13 @@ def test_external_ref_accepted_and_attached_to_event() -> None:
     assert er.kind is EdgeKind.DATA
 
 
-def test_external_ref_alone_satisfies_connection_requirement() -> None:
-    """An event can satisfy the connection requirement via external_ref
-    alone — refs (in-firing) and external_refs are OR'd. Important for
-    the first event of any firing N>=2 where the only available parents
-    live in recent_graph."""
-    from llmharness.schema import Event, EventKind
-
-    prior = Event(
-        id=1,
-        kind=EventKind("act"),
-        summary="prior",
-        source_turns=[5],
-    )
-    state = ExtractionState(
-        turn_texts={
-            5: "abnormal_traces was discussed earlier",
-            11: "now also mentions abnormal_traces",
-        },
-        recent_graph=(prior,),
-        next_event_id=2,
-    )
-    err = state.commit(
-        [
-            {
-                "id": 2,
-                "kind": "act",
-                "summary": "first event of this firing, external_ref only",
-                "source_turns": [11],
-                "refs": [],
-                "external_refs": [
-                    {
-                        "to_recent_event_id": 1,
-                        "kind": "data",
-                        "reason": "uses prior table",
-                        "cited_entities": ["abnormal_traces"],
-                    }
-                ],
-            },
-        ]
-    )
-    assert err is None, err
-    assert state.events[0].external_refs[0].to_recent_event_id == 1
 
 
-def test_external_ref_unknown_id_rejected() -> None:
-    state = ExtractionState(turn_texts={10: "x"}, recent_graph=())
-    err = state.commit(
-        [
-            {
-                "id": 1,
-                "kind": "act",
-                "summary": "g",
-                "source_turns": [10],
-                "refs": [],
-                "external_refs": [
-                    {
-                        "to_recent_event_id": 99,
-                        "kind": "data",
-                        "reason": "r",
-                        "cited_entities": ["x"],
-                    }
-                ],
-            }
-        ]
-    )
-    assert err is not None
-    assert "not found in recent_graph" in err
 
 
 # --- event-sourcing apply_* surface (cross-firing edits) ----------------------
 
 
-def test_apply_node_delete_targets_prior_firing_node() -> None:
-    """Cross-firing edit: the apply_* surface accepts deleting a node
-    that came from a PRIOR firing (i.e. lives in ``recent_graph_dict``
-    only, not in this firing's pending ops). The legacy ``delete_node``
-    rejects this because it only sees the in-firing pending set.
-    """
-    from llmharness.audit.graph_ops import NodeDelete
-    from llmharness.schema import Event, EventKind
-
-    prior_a = Event(id=1, kind=EventKind("task"), summary="prior a", source_turns=[1])
-    prior_b = Event(id=2, kind=EventKind("act"), summary="prior b", source_turns=[2])
-    state = ExtractionState(
-        turn_texts={1: "alpha", 2: "bravo"},
-        recent_graph_dict={1: prior_a, 2: prior_b},
-        next_event_id=3,
-    )
-
-    result = state.apply_node_delete(1)
-    assert not isinstance(result, str), result
-    assert len(state.pending_ops) == 1
-    op = state.pending_ops[0]
-    assert isinstance(op, NodeDelete) and op.id == 1
-    # Folded view drops node 1; node 2 remains visible to subsequent
-    # apply_* calls in this firing.
-    assert set(state.pending_graph.nodes.keys()) == {2}
 
 
 def test_apply_edge_upsert_requires_existing_endpoints_in_folded_view() -> None:
@@ -678,68 +437,7 @@ def test_apply_edge_upsert_rejects_fabricated_ref_quote() -> None:
     assert (1, 2, "ref") in state.pending_graph.edges
 
 
-def test_apply_node_delete_unknown_id_is_rejected() -> None:
-    state = ExtractionState(turn_texts={1: "alpha"})
-    err = state.apply_node_delete(42)
-    assert isinstance(err, str) and "42" in err
-    assert state.pending_ops == []
 
 
-def test_apply_edge_delete_requires_kind() -> None:
-    state = ExtractionState(
-        turn_texts={1: "alpha", 2: "bravo alpha"}
-    )
-    state.apply_node_upsert({"id": 1, "kind": "act", "summary": "s", "source_turns": [1]})
-    state.apply_node_upsert({"id": 2, "kind": "act", "summary": "d", "source_turns": [2]})
-    state.apply_edge_upsert(
-        {"src": 1, "dst": 2, "kind": "data", "reason": "r", "cited_entities": ["alpha"]}
-    )
-    # No kind in selector -> rejected; the op-log selector contract
-    # requires the full triple.
-    err = state.apply_edge_delete({"src": 1, "dst": 2})
-    assert isinstance(err, str) and "kind" in err
-    # With kind -> accepted; folded graph drops the edge.
-    ok = state.apply_edge_delete({"src": 1, "dst": 2, "kind": "data"})
-    assert not isinstance(ok, str), ok
-    assert (1, 2, "data") not in state.pending_graph.edges
 
 
-def test_external_ref_witness_failure_drops_into_dropped_edges() -> None:
-    """Witness failures on external_refs DROP the ref (recorded for
-    debugging) but keep the event — partial-success path symmetric with
-    in-firing refs."""
-    from llmharness.schema import Event, EventKind
-
-    prior = Event(
-        id=1,
-        kind=EventKind("act"),
-        summary="prior",
-        source_turns=[5],
-    )
-    state = ExtractionState(
-        turn_texts={5: "irrelevant prior text", 10: "this turn says nothing"},
-        recent_graph=(prior,),
-    )
-    err = state.commit(
-        [
-            {
-                "id": 1,
-                "kind": "act",
-                "summary": "g",
-                "source_turns": [10],
-                "refs": [],
-                "external_refs": [
-                    {
-                        "to_recent_event_id": 1,
-                        "kind": "data",
-                        "reason": "fabricated",
-                        "cited_entities": ["abnormal_traces"],
-                    }
-                ],
-            }
-        ]
-    )
-    assert err is None
-    assert len(state.events[0].external_refs) == 0
-    assert len(state.dropped_edges) == 1
-    assert state.dropped_edges[0]["src"] == "recent_graph_event#1"

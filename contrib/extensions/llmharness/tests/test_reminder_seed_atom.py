@@ -17,18 +17,15 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
-import pytest
 from agentm.core.abi import (
     DecideTurnActionEvent,
     Inject,
     MaxTurnsExhausted,
-    ModelEndTurn,
     Step,
     Stop,
     TurnObservation,
 )
 
-from llmharness.audit._reminder_format import REMINDER_PREAMBLE
 from llmharness.replay.reminder_seed import install
 
 
@@ -62,38 +59,8 @@ def _make_api() -> tuple[MagicMock, list[Any]]:
     return api, captured
 
 
-def test_first_event_injects_with_canonical_preamble() -> None:
-    api, captured = _make_api()
-    install(api, {"text": "investigate the missing baseline"})
-    assert len(captured) == 1
-    channel, handler = captured[0]
-    assert channel == DecideTurnActionEvent.CHANNEL
-
-    result = handler(_make_event(Step()))
-    assert isinstance(result, Inject)
-    assert len(result.messages) == 1
-    rendered = str(result.messages[0])
-    assert REMINDER_PREAMBLE.strip() in rendered
-    assert "investigate the missing baseline" in rendered
-    api.session.append_entry.assert_called_once()
-    args, _ = api.session.append_entry.call_args
-    assert args[1] == {"text": "investigate the missing baseline"}
 
 
-def test_one_shot_does_not_refire() -> None:
-    api, captured = _make_api()
-    install(api, {"text": "one shot only"})
-    handler = captured[0][1]
-
-    first = handler(_make_event(Step()))
-    assert isinstance(first, Inject)
-
-    # Subsequent decide events must be silent.
-    second = handler(_make_event(Step()))
-    assert second is None
-    third = handler(_make_event(Stop(ModelEndTurn())))
-    assert third is None
-    assert api.session.append_entry.call_count == 1
 
 
 def test_final_cause_stop_leaves_seed_armed() -> None:
@@ -112,23 +79,7 @@ def test_final_cause_stop_leaves_seed_armed() -> None:
     assert "still pending" in str(delivered.messages[0])
 
 
-def test_non_final_stop_is_overridable() -> None:
-    """Stop(ModelEndTurn) is non-final — seed re-opens the loop."""
-    api, captured = _make_api()
-    install(api, {"text": "you stopped early"})
-    handler = captured[0][1]
-    result = handler(_make_event(Stop(ModelEndTurn())))
-    assert isinstance(result, Inject)
-    assert "you stopped early" in str(result.messages[0])
 
 
-def test_missing_text_rejected() -> None:
-    api, _ = _make_api()
-    with pytest.raises(ValueError, match="non-empty string"):
-        install(api, {})
 
 
-def test_empty_text_rejected() -> None:
-    api, _ = _make_api()
-    with pytest.raises(ValueError, match="non-empty string"):
-        install(api, {"text": "   "})

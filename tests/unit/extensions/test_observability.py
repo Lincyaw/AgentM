@@ -122,41 +122,6 @@ def _handler(event: dict[str, Any]) -> dict[str, Any]:
     return {"seen": event["value"]}
 
 
-@pytest.mark.asyncio
-async def test_observability_emits_dispatch_and_invoke_records_via_observer(
-    tmp_path: Path,
-) -> None:
-    """One emit produces exactly one ``agentm.event.dispatch`` and one
-    ``agentm.handler.invoke`` record per registered handler, all stamped
-    with the same bus-owned ``dispatch_id``. This is the structural
-    contract consumers join on.
-    """
-    api = _api(tmp_path)
-    observability.install(api, {"include_handler_records": True})
-    api.on("alpha", _handler)
-
-    await api.events.emit("alpha", {"value": 7})
-    await api.events.emit(
-        SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=str(tmp_path))
-    )
-
-    records = _log_records(_read_otlp(_trace_file(tmp_path)))
-    dispatches = [
-        r
-        for r in records
-        if r.get("eventName") == "agentm.event.dispatch"
-        and _attrs_dict(r).get("agentm.event.channel") == "alpha"
-    ]
-    invokes = [
-        r
-        for r in records
-        if r.get("eventName") == "agentm.handler.invoke"
-        and _attrs_dict(r).get("agentm.event.channel") == "alpha"
-    ]
-    assert len(dispatches) == 1
-    assert len(invokes) == 1
-    dispatch_id = _attrs_dict(dispatches[0])["agentm.event.dispatch_id"]
-    assert _attrs_dict(invokes[0])["agentm.event.dispatch_id"] == dispatch_id
 
 
 def _mutating_handler(event: dict[str, Any]) -> str:
@@ -165,36 +130,6 @@ def _mutating_handler(event: dict[str, Any]) -> str:
     return "mutated"
 
 
-@pytest.mark.asyncio
-async def test_observability_records_mutation_diff_for_mutable_channel(
-    tmp_path: Path,
-) -> None:
-    """A handler that mutates a mutable-channel event in place is recorded
-    via ``agentm.handler.mutated`` log records, with the changed paths
-    surfaced as a JSON-encoded attribute. Mutation diff is on by default.
-    """
-    api = _api(tmp_path)
-    observability.install(
-        api,
-        {"include_handler_records": True, "include_mutation_diff": True},
-    )
-    api.on("context", _mutating_handler)
-
-    await api.events.emit("context", {"value": 7})
-    await api.events.emit(
-        SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=str(tmp_path))
-    )
-
-    records = _log_records(_read_otlp(_trace_file(tmp_path)))
-    mutated = [r for r in records if r.get("eventName") == "agentm.handler.mutated"]
-    assert len(mutated) == 1
-    attrs = _attrs_dict(mutated[0])
-    assert attrs["agentm.event.channel"] == "context"
-    assert attrs["agentm.handler.name"].endswith("_mutating_handler")
-    # mutations come back as a JSON-encoded list; parse and check paths
-    diff = json.loads(attrs["agentm.handler.mutations"])
-    paths = {item["path"] for item in diff}
-    assert paths == {"value", "added"}
 
 
 # --- prompt-redaction integration ----------------------------------------

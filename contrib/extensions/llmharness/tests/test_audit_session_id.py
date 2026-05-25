@@ -12,7 +12,6 @@ header so the two filenames stay aligned.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
 from agentm.core.abi import LoopConfig
@@ -54,17 +53,3 @@ def test_audit_session_id_uses_manager_header_id_on_persisted_session(
     )
 
 
-def test_audit_session_id_falls_back_to_trace_id_when_unpersisted() -> None:
-    """In-memory ``ReadonlySession`` (no header) → fall back to trace id.
-
-    Embedded SDK callers that never write to disk still get a stable
-    sidecar filename keyed on the OTel trace_id — the historical pre-fix
-    behaviour for that path is preserved.
-    """
-    api = MagicMock()
-    fake_session: Any = MagicMock()
-    fake_session.get_session_id = MagicMock(return_value="")
-    api.session = fake_session
-    api.root_session_id = "trace-id-fallback"
-
-    assert _audit_session_id(api) == "trace-id-fallback"

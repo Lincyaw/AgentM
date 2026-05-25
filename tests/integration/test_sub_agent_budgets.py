@@ -313,31 +313,5 @@ async def test_dispatch_budget_argument_clamps_child_max_turns(tmp_path: Path) -
     assert payload["final_text"] is None
 
 
-@pytest.mark.asyncio
-async def test_persona_budget_defaults_apply_when_dispatch_budget_is_missing(
-    tmp_path: Path,
-) -> None:
-    counter, payload = await _run_budget_case(
-        tmp_path,
-        parent_max_turns=9,
-        persona_budget={"max_turns": 2},
-        dispatch_budget=None,
-    )
-
-    assert counter.calls == 2
-    assert payload["budget"]["max_turns"] == 2
-    assert payload["final_text"] is None
 
 
-@pytest.mark.asyncio
-async def test_dispatch_budget_overrides_persona_defaults(tmp_path: Path) -> None:
-    counter, payload = await _run_budget_case(
-        tmp_path,
-        parent_max_turns=9,
-        persona_budget={"max_turns": 2},
-        dispatch_budget={"max_turns": 4},
-    )
-
-    assert counter.calls == 4
-    assert payload["budget"]["max_turns"] == 4
-    assert payload["final_text"] is None

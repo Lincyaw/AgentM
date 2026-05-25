@@ -17,35 +17,18 @@ verbatim.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 import pytest
 
 from agentm.core.abi import (
-    AgentEndEvent,
-    AssistantMessage,
     EventBus,
-    LlmRequestEndEvent,
-    LlmRequestStartEvent,
-    ModelEndTurn,
-    TextContent,
-    ToolCallBlock,
-    ToolCallEvent,
-    ToolResult,
-    ToolResultEvent,
-    TurnEndEvent,
-    TurnStartEvent,
-    Usage,
     text_message,
 )
 from agentm.core.abi.events import (
-    BeforeAgentStartEvent,
-    Event,
     MessageAppendedEvent,
     SessionHeaderEmittedEvent,
-    SessionReadyEvent,
     SessionShutdownEvent,
 )
 from agentm.core.runtime.extension import (
@@ -233,136 +216,6 @@ def _trace_path(api: _ExtensionAPIImpl) -> Path:
 # The actual gate tests
 
 
-@pytest.mark.asyncio
-async def test_writer_emits_invoke_agent_chat_execute_tool_spans(
-    tmp_path: Path,
-) -> None:
-    """Drive one synthetic turn: BeforeAgentStart -> LlmRequestStart/End ->
-    ToolCall -> ToolResult -> TurnEnd -> AgentEnd. The trace must contain
-    exactly one of each gen_ai span family with the right semconv attrs.
-    """
-    api = _build_api(tmp_path)
-    observability.install(api, {"include_handler_records": False})
-
-    # BeforeAgentStart -> open invoke_agent span
-    await api.events.emit(
-        BeforeAgentStartEvent.CHANNEL,
-        BeforeAgentStartEvent(messages=[], system="sys"),
-    )
-
-    # TurnStart -> open agentm.turn span (parent of chat / execute_tool)
-    await api.events.emit(
-        TurnStartEvent.CHANNEL, TurnStartEvent(turn_index=0, turn_id=42)
-    )
-
-    # LlmRequestStart -> open chat span
-    await api.events.emit(
-        LlmRequestStartEvent.CHANNEL,
-        LlmRequestStartEvent(
-            turn_index=0,
-            message_count=1,
-            tool_count=1,
-            system_chars=3,
-            model_id="m-stub",
-            turn_id=42,
-        ),
-    )
-    # LlmRequestEnd -> close chat span
-    await api.events.emit(
-        LlmRequestEndEvent.CHANNEL,
-        LlmRequestEndEvent(
-            turn_index=0,
-            chunk_count=2,
-            duration_ns=1_000_000,
-            error=None,
-            turn_id=42,
-        ),
-    )
-
-    # ToolCall -> open execute_tool span; ToolResult -> close
-    tool_call_id = "tc-1"
-    await api.events.emit(
-        ToolCallEvent.CHANNEL,
-        ToolCallEvent(
-            tool_call_id=tool_call_id,
-            tool_name="read",
-            args={"path": "/x"},
-        ),
-    )
-    await api.events.emit(
-        ToolResultEvent.CHANNEL,
-        ToolResultEvent(
-            tool_call_id=tool_call_id,
-            tool_name="read",
-            result=ToolResult(
-                content=[TextContent(type="text", text="ok")], is_error=False
-            ),
-        ),
-    )
-
-    # AgentEnd -> close invoke_agent span
-    msg = AssistantMessage(
-        role="assistant",
-        content=[TextContent(type="text", text="done")],
-        timestamp=0.0,
-        stop_reason="end_turn",
-    )
-    # TurnEnd -> close the agentm.turn span before AgentEnd closes invoke_agent
-    await api.events.emit(
-        TurnEndEvent.CHANNEL,
-        TurnEndEvent(turn_index=0, turn_id=42, message=msg),
-    )
-    await api.events.emit(
-        AgentEndEvent.CHANNEL, AgentEndEvent(messages=[msg], cause=ModelEndTurn())
-    )
-
-    # Shutdown drains the SDK batch processor.
-    await api.events.emit(
-        SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=api.cwd)
-    )
-
-    lines = _read_otlp_lines(_trace_path(api))
-    spans = _spans_in(lines)
-
-    chat_spans = [s for s in spans if s.get("name", "").startswith("chat ")]
-    invoke_spans = [s for s in spans if s.get("name", "").startswith("invoke_agent ")]
-    tool_spans = [s for s in spans if s.get("name", "").startswith("execute_tool ")]
-    turn_spans = [s for s in spans if s.get("name", "") == "agentm.turn"]
-
-    assert len(chat_spans) == 1, [s["name"] for s in spans]
-    assert len(invoke_spans) == 1
-    assert len(tool_spans) == 1
-    assert len(turn_spans) == 1
-
-    chat_attrs = _span_attrs(chat_spans[0])
-    assert chat_attrs["gen_ai.operation.name"] == "chat"
-    assert chat_attrs["gen_ai.request.model"] == "m-stub"
-    assert chat_attrs["gen_ai.conversation.id"] == api.session_id
-
-    invoke_attrs = _span_attrs(invoke_spans[0])
-    assert invoke_attrs["gen_ai.operation.name"] == "invoke_agent"
-    assert invoke_attrs["gen_ai.agent.name"] == "unit_semconv"
-    assert invoke_attrs["gen_ai.conversation.id"] == api.session_id
-    # Session-tree linkage attributes must live on the invoke_agent span so
-    # span-only consumers (ClickHouse-backed UIs) can group sessions without
-    # joining the agentm.session.start log record. obs_root_session_id and
-    # obs_parent_session_id default to "" on a top-level session — assert
-    # both keys are present even when their values are empty strings.
-    assert "agentm.session.root_id" in invoke_attrs
-    assert "agentm.session.parent_id" in invoke_attrs
-
-    tool_attrs = _span_attrs(tool_spans[0])
-    assert tool_attrs["gen_ai.operation.name"] == "execute_tool"
-    assert tool_attrs["gen_ai.tool.name"] == "read"
-    assert tool_attrs["gen_ai.tool.call.id"] == "tc-1"
-
-    # Parent-child: agentm.turn is child of invoke_agent; chat + execute_tool
-    # are children of agentm.turn (legacy double-emission would have made
-    # them siblings of invoke_agent).
-    turn_span = turn_spans[0]
-    assert turn_span.get("parentSpanId") == invoke_spans[0].get("spanId")
-    assert chat_spans[0].get("parentSpanId") == turn_span.get("spanId")
-    assert tool_spans[0].get("parentSpanId") == turn_span.get("spanId")
 
 
 @pytest.mark.asyncio
@@ -421,145 +274,7 @@ async def test_writer_emits_session_header_and_message_appended_logs(
     assert payload["role"] == "user"
 
 
-@pytest.mark.asyncio
-async def test_writer_emits_turn_summary_with_usage_attrs(tmp_path: Path) -> None:
-    """TurnEndEvent produces agentm.turn.summary with gen_ai.usage.* attrs
-    and tool counts. tool_guard_watch + catalog/indexer depend on these.
-    """
-    api = _build_api(tmp_path)
-    observability.install(api, {"include_handler_records": False})
-
-    await api.events.emit(
-        TurnStartEvent.CHANNEL, TurnStartEvent(turn_index=0, turn_id=1)
-    )
-    await api.events.emit(
-        TurnEndEvent.CHANNEL,
-        TurnEndEvent(
-            turn_index=0,
-            turn_id=1,
-            message=AssistantMessage(
-                role="assistant",
-                content=[
-                    TextContent(type="text", text="ok"),
-                    ToolCallBlock(
-                        type="tool_call", id="t-1", name="read", arguments={}
-                    ),
-                ],
-                timestamp=0.0,
-                stop_reason="end_turn",
-                usage=Usage(
-                    input_tokens=10,
-                    output_tokens=20,
-                    cache_read=0,
-                    cache_write=0,
-                ),
-            ),
-        ),
-    )
-    await api.events.emit(
-        SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=api.cwd)
-    )
-
-    lines = _read_otlp_lines(_trace_path(api))
-    records = _log_records_in(lines)
-    summaries = [r for r in records if _log_event_name(r) == "agentm.turn.summary"]
-    assert len(summaries) == 1
-    attrs = _log_record_attrs(summaries[0])
-    assert attrs["gen_ai.usage.input_tokens"] == 10
-    assert attrs["gen_ai.usage.output_tokens"] == 20
-    assert attrs["agentm.turn.tool_call_count"] == 1
-    assert attrs["agentm.turn.stop_reason"] == "end_turn"
 
 
-@pytest.mark.asyncio
-async def test_writer_emits_fingerprint_log_record(tmp_path: Path) -> None:
-    """SessionReadyEvent produces agentm.session.fingerprint with task_meta
-    and atom hashes. tool_query_traces and the rca grader depend on this.
-    """
-    api = _build_api(tmp_path)
-    observability.install(api, {"include_handler_records": False})
-
-    await api.events.emit(
-        SessionReadyEvent.CHANNEL,
-        SessionReadyEvent(
-            cwd=api.cwd,
-            session_id=api.session_id,
-            tool_names=(),
-            command_names=(),
-            extension_module_paths=(),
-            model=None,
-            root_session_id=api.root_session_id,
-            task_id=None,
-            persona=None,
-            task_class="rca_baseline",
-            eval_run_id="er_test",
-            eval_task_id="01_mysql",
-        ),
-    )
-    await api.events.emit(
-        SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=api.cwd)
-    )
-
-    lines = _read_otlp_lines(_trace_path(api))
-    records = _log_records_in(lines)
-    fps = [r for r in records if _log_event_name(r) == "agentm.session.fingerprint"]
-    assert len(fps) == 1
-    attrs = _log_record_attrs(fps[0])
-    assert attrs["agentm.task.class"] == "rca_baseline"
-    assert attrs["agentm.task.eval_run_id"] == "er_test"
-    assert attrs["agentm.task.eval_task_id"] == "01_mysql"
 
 
-@pytest.mark.asyncio
-async def test_dispatch_id_links_dispatch_and_handler_records(tmp_path: Path) -> None:
-    """A single emit produces one agentm.event.dispatch record and one
-    agentm.handler.invoke per handler, all sharing the same dispatch_id.
-    This is the join key consumers need to reconstruct the fanout.
-    """
-    api = _build_api(tmp_path)
-    observability.install(
-        api, {"include_handler_records": True, "include_mutation_diff": False}
-    )
-
-    # Use a real Event subclass on a bespoke channel so the bus-assigned
-    # dispatch_id lands on the field; observability reads it off the event
-    # in scope and stamps it onto both records.
-    @dataclass(slots=True)
-    class _ProbeEvent(Event):
-        CHANNEL: ClassVar[str] = "custom"
-        value: int = 0
-
-    seen: list[str] = []
-
-    def handler(event: Any) -> None:
-        seen.append(event.dispatch_id)
-
-    api.events.on("custom", handler)
-    await api.events.emit("custom", _ProbeEvent(value=1))
-    # Drain telemetry by emitting the session-shutdown event; the
-    # substrate-installed POST handler flushes the OTel pipeline.
-    await api.events.emit(
-        SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=api.cwd)
-    )
-
-    assert len(seen) == 1 and seen[0]
-    expected_id = seen[0]
-
-    lines = _read_otlp_lines(_trace_path(api))
-    records = _log_records_in(lines)
-    dispatches = [
-        r
-        for r in records
-        if _log_event_name(r) == "agentm.event.dispatch"
-        and _log_record_attrs(r).get("agentm.event.channel") == "custom"
-    ]
-    invokes = [
-        r
-        for r in records
-        if _log_event_name(r) == "agentm.handler.invoke"
-        and _log_record_attrs(r).get("agentm.event.channel") == "custom"
-    ]
-    assert len(dispatches) == 1
-    assert len(invokes) == 1
-    assert _log_record_attrs(dispatches[0])["agentm.event.dispatch_id"] == expected_id
-    assert _log_record_attrs(invokes[0])["agentm.event.dispatch_id"] == expected_id

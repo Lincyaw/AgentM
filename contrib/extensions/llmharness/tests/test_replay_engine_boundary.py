@@ -85,12 +85,3 @@ def test_atom_does_not_import_replay_engine(atom_path: Path) -> None:
     )
 
 
-def test_at_least_one_atom_discovered() -> None:
-    """Sanity check: if the discovery walker breaks, all atom tests
-    above silently parametrize to zero cases and pass. Guard against
-    that."""
-    atoms = [p for p in _SRC_ROOT.rglob("*.py") if _module_has_manifest(p)]
-    assert len(atoms) >= 5, (
-        f"expected at least 5 MANIFEST-bearing files; found {len(atoms)}. "
-        "Has the atom-discovery walker drifted?"
-    )

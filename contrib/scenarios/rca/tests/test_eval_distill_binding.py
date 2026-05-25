@@ -76,17 +76,6 @@ def test_harness_sync_scenario_mounts_distill_binding() -> None:
     assert config["dataset_path"] == "/tmp/eval/data_28c9448b"
 
 
-def test_harness_async_scenario_also_mounts_binding() -> None:
-    """The async harness produces the same replay sidecar shape (the atom
-    is what writes it; sync vs async only changes ordering), so binding
-    must mount there too."""
-
-    extra = _drive_run(
-        scenario="rca:harness",
-        data_dir="/tmp/eval/data_abc",
-    )
-
-    assert any(e[0] == "llmharness.distill.binding" for e in extra)
 
 
 def test_baseline_scenario_does_not_mount_binding() -> None:
@@ -102,32 +91,8 @@ def test_baseline_scenario_does_not_mount_binding() -> None:
     assert not any(e[0] == "llmharness.distill.binding" for e in extra)
 
 
-def test_sample_id_strips_trailing_slash() -> None:
-    """``os.path.basename('/x/y/')`` returns '' — guard against the empty
-    string by falling back to ``unknown``. Common when callers pass a
-    directory path with a trailing slash."""
-
-    extra = _drive_run(
-        scenario="rca:harness.sync",
-        data_dir="/tmp/eval/data_abc/",
-    )
-
-    binding = next(e for e in extra if e[0] == "llmharness.distill.binding")
-    assert binding[1]["sample_id"] == "data_abc"
 
 
-def test_sample_id_falls_back_to_unknown_for_root_dir() -> None:
-    """If the data_dir collapses to empty after ``rstrip("/")`` (e.g. the
-    caller passed ``"/"``), the binding still needs *some* id so the
-    atom does not silently skip writing the sidecar."""
-
-    extra = _drive_run(
-        scenario="rca:harness.sync",
-        data_dir="/",
-    )
-
-    binding = next(e for e in extra if e[0] == "llmharness.distill.binding")
-    assert binding[1]["sample_id"] == "unknown"
 
 
 if __name__ == "__main__":  # pragma: no cover

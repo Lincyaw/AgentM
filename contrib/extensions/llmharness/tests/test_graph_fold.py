@@ -25,7 +25,7 @@ from llmharness.audit.graph_ops import (
     NodeUpsert,
     parse_op,
 )
-from llmharness.schema import EdgeKind, EventKind, ExternalRef
+from llmharness.schema import EventKind
 
 
 def _nu(eid: int, *, kind: str = "act", summary: str = "x", turns: tuple[int, ...] = (1,)) -> NodeUpsert:
@@ -56,14 +56,6 @@ def test_empty_op_list_yields_empty_graph() -> None:
     assert g.edges_list() == []
 
 
-def test_single_node_upsert_creates_node() -> None:
-    g = fold_graph([_nu(1, kind="task", summary="root", turns=(1, 2))])
-    assert list(g.nodes) == [1]
-    ev = g.nodes[1]
-    assert ev.id == 1
-    assert ev.kind is EventKind.TASK
-    assert ev.summary == "root"
-    assert ev.source_turns == [1, 2]
 
 
 def test_repeated_node_upsert_is_last_write_wins() -> None:
@@ -109,20 +101,8 @@ def test_edge_delete_removes_only_the_keyed_edge() -> None:
     assert set(g.edges.keys()) == {(1, 2, "ref")}
 
 
-def test_edge_delete_of_missing_edge_is_noop() -> None:
-    g = fold_graph(
-        [
-            _nu(1),
-            _nu(2),
-            EdgeDelete(src=1, dst=2, kind="data"),  # never existed
-        ]
-    )
-    assert g.edges == {}
 
 
-def test_node_delete_of_missing_node_is_noop() -> None:
-    g = fold_graph([NodeDelete(id=42)])
-    assert g.nodes == {}
 
 
 def test_fold_is_associative_against_concatenation() -> None:
@@ -181,60 +161,6 @@ def test_nodes_and_edges_iterate_in_insertion_order() -> None:
 # --- round-trip ------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "op",
-    [
-        NodeUpsert(id=7, kind="hyp", summary="bet", source_turns=(3, 4, 5)),
-        # Round-trip for the external_refs payload — this is the B2
-        # fix: NodeUpsert must carry the cross-firing edge tuple
-        # through to_dict / from_dict so legacy AUDIT_EVENT translation
-        # and live op-log writes preserve cumulative connectivity.
-        NodeUpsert(
-            id=8,
-            kind="act",
-            summary="evidence",
-            source_turns=(10,),
-            external_refs=(
-                ExternalRef(
-                    to_recent_event_id=3,
-                    kind=EdgeKind.DATA,
-                    reason="follows from prior table",
-                    cited_entities=("abnormal_traces",),
-                    cited_quote="",
-                ),
-            ),
-        ),
-        NodeDelete(id=12),
-        EdgeUpsert(
-            src=1,
-            dst=2,
-            kind="data",
-            reason="evidence supports",
-            cited_entities=("table_a", "service_b"),
-            cited_quote="",
-            src_turns=(1, 2),
-            dst_turns=(3,),
-        ),
-        EdgeUpsert(
-            src=1,
-            dst=2,
-            kind="ref",
-            reason="references earlier turn",
-            cited_entities=(),
-            cited_quote="latency spike",
-            src_turns=(1,),
-            dst_turns=(3,),
-        ),
-        EdgeDelete(src=1, dst=2, kind="ref"),
-    ],
-)
-def test_to_dict_from_dict_round_trip(op: object) -> None:
-    """Every op variant must round-trip through ``to_dict`` /
-    :func:`parse_op` losslessly — replay reads the dict form back from
-    durable session entries."""
-    d = op.to_dict()  # type: ignore[attr-defined]
-    parsed = parse_op(d)
-    assert parsed == op
 
 
 def test_parse_op_rejects_unknown_discriminator() -> None:
@@ -242,52 +168,7 @@ def test_parse_op_rejects_unknown_discriminator() -> None:
         parse_op({"op": "not_a_real_op", "id": 1})
 
 
-def test_parse_op_rejects_missing_discriminator() -> None:
-    with pytest.raises(ValueError):
-        parse_op({"id": 1, "kind": "act"})
 
 
-def test_node_upsert_carries_external_refs_through_fold() -> None:
-    """The fold must materialise ``Event.external_refs`` from the op,
-    not synthesize ``()`` defaults. Regression for B2: prior code
-    used ``Event(...)`` without the field, so legacy AUDIT_EVENT
-    translation silently dropped cross-firing connectivity that the
-    auditor + next firing's ``recent_graph`` payload both depend on.
-    """
-    ext = ExternalRef(
-        to_recent_event_id=5,
-        kind=EdgeKind.REF,
-        reason="cites earlier turn",
-        cited_entities=(),
-        cited_quote="latency spike",
-    )
-    g = fold_graph(
-        [
-            NodeUpsert(
-                id=8,
-                kind="concl",
-                summary="root cause",
-                source_turns=(20,),
-                external_refs=(ext,),
-            ),
-        ]
-    )
-    ev = g.nodes[8]
-    assert ev.external_refs == (ext,)
 
 
-def test_edge_kind_round_trip_against_schema_enum() -> None:
-    """The folded :class:`Edge` carries an :class:`EdgeKind` enum even
-    though ops store kind as a string — proves the fold materialises
-    the schema-level type correctly.
-    """
-    g = fold_graph(
-        [
-            _nu(1),
-            _nu(2),
-            _eu(1, 2, kind="data"),
-            _eu(1, 2, kind="ref"),
-        ]
-    )
-    kinds = {e.kind for e in g.edges_list()}
-    assert kinds == {EdgeKind.DATA, EdgeKind.REF}

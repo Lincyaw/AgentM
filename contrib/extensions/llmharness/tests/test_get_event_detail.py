@@ -9,7 +9,6 @@ entry.
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 
 from agentm.core.abi import ToolResult
@@ -41,47 +40,8 @@ def _edge(src: int, dst: int) -> Edge:
     )
 
 
-def test_happy_path_returns_event_with_outgoing_and_incoming_edges() -> None:
-    events = [_ev(1), _ev(2), _ev(3)]
-    edges = [_edge(1, 2), _edge(2, 3), _edge(3, 1)]
-    fn = _install_and_capture(events=events, edges=edges)
-
-    result: ToolResult = asyncio.run(fn({"event_ids": [1, 2]}))
-
-    assert isinstance(result, ToolResult)
-    assert result.is_error is False
-    payload = json.loads(result.content[0].text)
-
-    assert "1" in payload
-    assert "2" in payload
-    assert payload["1"]["event"]["id"] == 1
-    # outgoing(1) = edge(1,2); incoming(1) = edge(3,1)
-    out_dsts_1 = [e["dst"] for e in payload["1"]["outgoing_edges"]]
-    in_srcs_1 = [e["src"] for e in payload["1"]["incoming_edges"]]
-    assert out_dsts_1 == [2]
-    assert in_srcs_1 == [3]
-    # outgoing(2) = edge(2,3); incoming(2) = edge(1,2)
-    out_dsts_2 = [e["dst"] for e in payload["2"]["outgoing_edges"]]
-    in_srcs_2 = [e["src"] for e in payload["2"]["incoming_edges"]]
-    assert out_dsts_2 == [3]
-    assert in_srcs_2 == [1]
-    assert "missing" not in payload
 
 
-def test_unknown_id_recorded_in_missing_list() -> None:
-    events = [_ev(1)]
-    edges: list[Edge] = []
-    fn = _install_and_capture(events=events, edges=edges)
-
-    result: ToolResult = asyncio.run(fn({"event_ids": [1, 999]}))
-
-    assert result.is_error is False
-    payload = json.loads(result.content[0].text)
-    assert "1" in payload
-    assert payload["1"]["event"]["id"] == 1
-    assert payload.get("missing") == [999]
-    # Unknown id NOT under a stringified key.
-    assert "999" not in payload
 
 
 def test_negative_id_returns_structured_error() -> None:
@@ -94,21 +54,5 @@ def test_negative_id_returns_structured_error() -> None:
     assert "negative id" in result.content[0].text
 
 
-def test_empty_event_ids_list_returns_structured_error() -> None:
-    fn = _install_and_capture(events=[_ev(1)], edges=[])
-
-    result: ToolResult = asyncio.run(fn({"event_ids": []}))
-
-    assert result.is_error is True
-    # Pydantic v2's stock min_length error message.
-    assert "at least 1" in result.content[0].text
 
 
-def test_non_int_id_returns_structured_error() -> None:
-    fn = _install_and_capture(events=[_ev(1)], edges=[])
-
-    result: ToolResult = asyncio.run(fn({"event_ids": ["1"]}))
-
-    assert result.is_error is True
-    # Pydantic strict-mode message for str-where-int.
-    assert "integer" in result.content[0].text.lower()

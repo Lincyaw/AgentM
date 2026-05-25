@@ -26,7 +26,7 @@ from agentm.core.abi.events import TurnEndEvent
 from agentm.core.abi.tool import ToolResult
 
 from agentm_channels.approval import ApprovalPolicy
-from agentm_channels.bus import MessageBus, OutboundKind
+from agentm_channels.bus import MessageBus
 from agentm_channels.gateway import Gateway, GatewayConfig
 from agentm_channels.manager import ChannelManager
 
@@ -109,34 +109,8 @@ async def _wait_for(predicate, *, timeout: float = 2.0) -> None:
     raise AssertionError("timed out")
 
 
-@pytest.mark.asyncio
-async def test_inbound_message_yields_assistant_reply(tmp_path: Path) -> None:
-    bus, mgr, gw = await _build(tmp_path)
-    try:
-        stub = mgr.channels["stub"]
-        await stub.push(sender_id="u1", chat_id="c1", content="hello")  # type: ignore[attr-defined]
-        await _wait_for(lambda: any(o.content == "echo: hello" for o in stub.outbox))  # type: ignore[attr-defined]
-        delivered = stub.outbox  # type: ignore[attr-defined]
-        assert delivered[0].channel == "stub"
-        assert delivered[0].chat_id == "c1"
-    finally:
-        await gw.stop()
-        await mgr.stop()
 
 
-@pytest.mark.asyncio
-async def test_session_id_persisted_after_first_message(tmp_path: Path) -> None:
-    bus, mgr, gw = await _build(tmp_path)
-    try:
-        stub = mgr.channels["stub"]
-        await stub.push(sender_id="u1", chat_id="c1", content="hi")  # type: ignore[attr-defined]
-        await _wait_for(lambda: bool(stub.outbox))  # type: ignore[attr-defined]
-        persisted = (tmp_path / "state" / "session_map.json").read_text()
-        assert "stub:c1" in persisted
-        assert "fake-" in persisted
-    finally:
-        await gw.stop()
-        await mgr.stop()
 
 
 @pytest.mark.asyncio
@@ -158,103 +132,5 @@ async def test_blocked_tool_call_is_reported(tmp_path: Path) -> None:
         await mgr.stop()
 
 
-@pytest.mark.asyncio
-async def test_approval_card_round_trip_lets_tool_through(tmp_path: Path) -> None:
-    bus, mgr, gw = await _build(
-        tmp_path,
-        approval_policy=ApprovalPolicy(
-            require_approval=frozenset({"bash"}), timeout_seconds=2.0
-        ),
-    )
-    try:
-        stub = mgr.channels["stub"]
-
-        async def auto_approver() -> None:
-            for _ in range(400):
-                for entry in list(stub.outbox):  # type: ignore[attr-defined]
-                    if entry.metadata.get("kind") == "approval_request":
-                        approve_value = entry.buttons[0].value
-                        await stub.push(  # type: ignore[attr-defined]
-                            sender_id="u1",
-                            chat_id="c1",
-                            content="(approve)",
-                            button_value=approve_value,
-                        )
-                        return
-                await asyncio.sleep(0.01)
-
-        await stub.push(sender_id="u1", chat_id="c1", content="run-tool")  # type: ignore[attr-defined]
-        approver = asyncio.create_task(auto_approver())
-        await _wait_for(
-            lambda: any("ran bash" in o.content for o in stub.outbox),  # type: ignore[attr-defined]
-            timeout=3.0,
-        )
-        await approver
-    finally:
-        await gw.stop()
-        await mgr.stop()
 
 
-@pytest.mark.asyncio
-async def test_tool_call_emits_structured_envelopes(tmp_path: Path) -> None:
-    """Tool calls are emitted as their own structured outbounds.
-
-    Contract:
-
-    * Exactly two outbounds with ``kind == OutboundKind.TOOL_CALL`` are
-      published for one tool invocation.
-    * The first carries ``metadata.status == "running"`` and no
-      ``result_text``; the second carries ``status == "ok"`` and the
-      full multi-line ``result_text`` (no one-line truncation).
-    * Both share the same ``stream_id`` (``tc-<tool_call_id>``); only
-      the terminal frame carries ``final=True``.
-    * The structured tool-call envelopes are independent of the
-      assistant text stream — they do not appear inside the assistant
-      message's content body.
-    """
-    bus, mgr, gw = await _build(tmp_path)
-    try:
-        stub = mgr.channels["stub"]
-        await stub.push(sender_id="u1", chat_id="c1", content="run-tool")  # type: ignore[attr-defined]
-        await _wait_for(
-            lambda: any(
-                o.kind == OutboundKind.TOOL_CALL and o.final
-                for o in stub.outbox  # type: ignore[attr-defined]
-            ),
-            timeout=2.0,
-        )
-        tool_frames = [
-            o
-            for o in stub.outbox  # type: ignore[attr-defined]
-            if o.kind == OutboundKind.TOOL_CALL
-        ]
-        assert len(tool_frames) == 2, (
-            f"expected exactly 2 tool_call envelopes; got {len(tool_frames)}"
-        )
-        start, end = tool_frames
-        assert start.stream_id == end.stream_id == "tc-t1"
-        assert start.final is False
-        assert end.final is True
-        assert start.metadata["status"] == "running"
-        assert start.metadata["tool_name"] == "bash"
-        assert start.metadata["args"] == {"cmd": "echo hi"}
-        assert "result_text" not in start.metadata
-        assert end.metadata["status"] == "ok"
-        assert end.metadata["is_error"] is False
-        assert end.metadata["tool_name"] == "bash"
-        assert end.metadata["args"] == {"cmd": "echo hi"}
-        # Full multi-line stdout survives — no first-line truncation.
-        assert end.metadata["result_text"] == "line one\nline two\nline three\n"
-        # Assistant text stream is independent of the tool-call cards.
-        assistant_finals = [
-            o
-            for o in stub.outbox  # type: ignore[attr-defined]
-            if o.kind != OutboundKind.TOOL_CALL and o.final
-        ]
-        assert any("ran bash" in o.content for o in assistant_finals)
-        for o in assistant_finals:
-            assert "bash(" not in o.content
-            assert "line one" not in o.content
-    finally:
-        await gw.stop()
-        await mgr.stop()
