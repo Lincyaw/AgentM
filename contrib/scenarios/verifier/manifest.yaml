@@ -53,13 +53,22 @@ extensions:
         `from_service → to_service` edges. Your job is to check it against
         the data and emit the CORRECTED graph.
 
-        `get_injection_spec` returns what was injected (target, fault_kind,
-        intensity, and — for hybrid cases — every injected fault) and the
-        normal / abnormal windows; `get_fault_kind_doc(fault_kind)` returns
-        the per-kind mechanism reference; `list_tables` and `query_sql` give
-        read-only access to the parquets; `submit_propagation_report` ends
-        the session. Consult the verifier-methodology skill loaded above —
+        `get_injection_spec` returns what was injected and the normal /
+        abnormal windows; `get_fault_kind_doc(fault_kind)` returns the
+        per-kind mechanism REFERENCE (background to reason from, not a rule to
+        satisfy — the data is the authority); `list_tables` and `query_sql`
+        give read-only access to the parquets; `submit_propagation_report`
+        ends the session. Consult the verifier-methodology skill loaded above —
         reason from the fault MECHANISM, not from a fixed signal checklist.
+
+        A case may have SEVERAL injections. Judge each one independently — all,
+        some, or none may have engaged — and remember that multiple faults can
+        combine and cascade. So there is no single "effective" verdict, and the
+        number of degraded services (and the evidence for them) ranges from
+        zero (nothing engaged) to many. One fault commonly surfaces across
+        SEVERAL signals, so dig DIVERSE evidence — trace latency / throughput /
+        errors, the various metrics tables, logs, and deployment relationships
+        (`list_tables` shows everything available) — not just one table.
 
         Do two things against the candidate graph:
 
@@ -69,25 +78,28 @@ extensions:
           false-positive — leave it out of your output).
         - 查漏 / supplement — add any edge the data supports that the
           candidate graph is missing (a label false-negative), tracing the
-          fault's impact outward to the user-facing entry tier.
+          fault's impact outward only as far as the data shows it genuinely
+          reaching.
 
         Output is **service-level only**, and the whole graph is built from
         queryable facts — every node and every edge carries a SQL that is
         re-executed after you submit (it must run and return rows):
 
-        - `injection_effective` (true / false / ambiguous) — reason from the
-          mechanism what this injection should have done to its TARGET, then
-          judge from the data whether the target bears that out. Free-text
-          rationale. An injection whose target shows no genuine sign of the
+        - `injections` — ONE verdict per injected fault (true / false /
+          ambiguous): reason from the mechanism what THAT injection should have
+          done to its own target, then judge from the data whether the target
+          bears it out. An injection whose target shows no genuine sign of the
           fault did not engage and must NOT be a propagation source.
         - `propagation_nodes` — every service you JUDGE to have been genuinely
-          dragged down by the fault. Each carries a `symptom_sql` returning
-          the normal AND abnormal window side by side (delta visible). Judge
-          the whole picture against baseline the way the mechanism predicts —
-          NOT a checklist; a service whose overall behaviour is unchanged or
-          improved is not a node, however much one cherry-picked metric
-          dipped. Distinguish fault-induced degradation from system-wide load
-          drift (a change shared by the whole system is the environment).
+          dragged down. Each carries `symptom_evidence` — one or more SQLs
+          (prefer DIVERSE signals: trace latency/throughput/errors, metrics,
+          logs) each returning the normal AND abnormal window side by side
+          (delta visible). Judge the whole picture against baseline the way the
+          mechanism predicts — NOT a checklist; a service whose overall
+          behaviour is unchanged or improved is not a node, however much one
+          cherry-picked metric dipped. Distinguish fault-induced degradation
+          from system-wide load drift (a change shared by the whole system is
+          the environment).
         - `propagation_edges` — directed hops `from_service → to_service`
           between nodes, where `from`'s anomaly CAUSES `to`'s. This is the
           fault-impact direction, the OPPOSITE of the request-call direction

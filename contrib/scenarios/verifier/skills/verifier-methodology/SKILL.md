@@ -112,14 +112,17 @@ the entry, decide honestly which case you are in — you have not finished
 tracing the real failures, or the impact truly dies out here — and never
 invent a node with no real degradation just to reach further.
 
-## Effectiveness, per injection
+## Effectiveness — one verdict per injection
 
-When several faults were injected, judge each on its own merits by the
-same reasoning: from the mechanism, what should this injection have done
-to its own target, and does the target's data bear that out? An injection
+A case may carry SEVERAL injections; they can combine and cascade. There
+is no single "effective" verdict — submit one entry per injection in
+`injections`, judging each on its own merits: from the mechanism, what
+should THIS injection have done to its own target, and does the target's
+data bear that out? All, some, or none may have engaged. An injection
 whose target shows no genuine sign of the fault did not engage and must
 NOT be used as a propagation source — leave its edges out even if the
-labels include them.
+labels include them. So the degraded-service count, and the evidence
+behind it, ranges from zero (nothing engaged) to many.
 
 ## Everything is a query — points and edges
 
@@ -128,13 +131,15 @@ pieces, both re-executed after you submit (each must run and return rows):
 
 - a **node** (`propagation_nodes`) is a service you have JUDGED to be
   genuinely dragged down by the fault (per "Judging a candidate edge").
-  Its `symptom_sql` returns the NORMAL and the ABNORMAL window side by
-  side (e.g. `... WHERE <normal window> UNION ALL ... WHERE <abnormal
-  window>`) so the delta is visible, and the rows must actually bear out
-  that judgement — the whole picture, the way the mechanism predicts, not
-  one cherry-picked metric. A service whose overall behaviour is
-  unchanged or improved is not a node, however much one number you could
-  point at dipped.
+  It carries `symptom_evidence` — one or more SQLs, each returning the
+  NORMAL and ABNORMAL window side by side (e.g. `... WHERE <normal> UNION
+  ALL ... WHERE <abnormal>`) so the delta is visible. Prefer DIVERSE
+  signals (trace latency / throughput / errors, the metrics tables, logs)
+  — one fault often shows in several, and corroboration across signals is
+  stronger than one number. The rows must bear out the judgement — the
+  whole picture, the way the mechanism predicts, not one cherry-picked
+  metric. A service whose overall behaviour is unchanged or improved is
+  not a node, however much one number you could point at dipped.
 - an **edge** (`propagation_edges`) is a directed hop `from → to` between
   two nodes. Its `relationship_sql` proves the two services are DIRECTLY
   connected — a trace parent/child call (either direction; look in the
@@ -148,7 +153,7 @@ symptomatic (its node SQL), and the two are connected (the edge SQL). The
 fault-impact direction (`from`'s failure drags down `to`) rides on the
 reverse call, exactly as in "What an edge means" above.
 
-If you cannot produce a passing `symptom_sql` for a service, it is not a
-node and cannot be in any edge. If you cannot produce a passing
+If you cannot produce passing `symptom_evidence` for a service, it is not
+a node and cannot be in any edge. If you cannot produce a passing
 `relationship_sql`, there is no edge. Co-occurrence, or a uniform
 throughput drop shared by unrelated services, proves neither.

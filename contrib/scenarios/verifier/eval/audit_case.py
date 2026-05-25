@@ -54,7 +54,7 @@ def extract_report(obs_dir: Path):
                 continue
             for s in _walk(row):
                 t = s.strip()
-                if not t.startswith("{") or '"injection_effective"' not in t or '"propagation_edges"' not in t:
+                if not t.startswith("{") or '"injections"' not in t or '"propagation_edges"' not in t:
                     continue
                 if "You verify" in t:  # system-prompt echo
                     continue
@@ -62,7 +62,7 @@ def extract_report(obs_dir: Path):
                     obj = json.loads(t)
                 except Exception:
                     continue
-                if isinstance(obj, dict) and "propagation_edges" in obj:
+                if isinstance(obj, dict) and "propagation_edges" in obj and "injections" in obj:
                     best = obj
     return best
 
@@ -100,7 +100,10 @@ def verify_report_sql(data_dir: Path, report: dict) -> dict:
     conn = _duck_conn(data_dir)
     nodes = {}
     for n in report.get("propagation_nodes", []) or []:
-        nodes[n.get("service")] = _run_sql(conn, n.get("symptom_sql", ""))
+        evs = [_run_sql(conn, ev.get("sql", "")) for ev in (n.get("symptom_evidence") or [])]
+        ok = any(e["status"] == "ok" for e in evs)
+        status = "ok" if ok else ("error" if not evs else "empty")
+        nodes[n.get("service")] = {"status": status, "evidence": evs}
     edges = []
     for e in report.get("propagation_edges", []) or []:
         f, t = e.get("from_service"), e.get("to_service")
@@ -211,7 +214,11 @@ def main() -> int:
     added = sorted(verified - cand_set)     # suspected label false-negatives
     kept = sorted(cand_set & verified)
     findings = {
-        "injection_effective": report.get("injection_effective"),
+        "injections": [
+            {"target_service": i.get("target_service"), "fault_kind": i.get("fault_kind"),
+             "verdict": i.get("verdict")}
+            for i in report.get("injections", []) or []
+        ],
         "candidate_edges": len(cand_set),
         "kept": kept,
         "dropped_suspected_label_FP": dropped,
