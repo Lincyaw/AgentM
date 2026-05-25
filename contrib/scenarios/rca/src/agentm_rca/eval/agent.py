@@ -381,6 +381,11 @@ class AgentMAgent(BaseAgent):
             for node_header in experiment.header["nodes"]
         ]
         metadata["intervention_mode"] = "fork_tree"
+        # The ``chained_fork`` key name is RETAINED for backward compat with
+        # existing dashboards / parsers, but its schema CHANGED: it now holds
+        # a fork-tree shape (``nodes`` list with parent links + paths), not
+        # the old linear ``segments`` list. Downstream consumers should
+        # switch on ``intervention_mode == "fork_tree"`` and read ``nodes``.
         metadata["chained_fork"] = tree_meta
         return AgentResult(
             response=root_run.result.response,
