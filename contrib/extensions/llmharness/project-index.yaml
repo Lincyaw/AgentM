@@ -29,7 +29,7 @@ requirements:
           entry. Edge carries witness fields (cited_entities,
           cited_quote) plus per-side source-turn tuples.
         - New EdgeKind enum (data | ref) and EDGE_KIND_VALUES
-          constant in audit/_enum_schema.py.
+          constant in audit/validation/enum_schema.py.
         - New Finding dataclass — output shape for scenario-registered
           audit checks (see audit/registry.py, design §4.c).
 
@@ -256,7 +256,7 @@ requirements:
   - id: REQ-023
     title: Schema enum-parity helper — single source of truth for EventKind
     description: |
-      Design §7.2. ``audit/_enum_schema.py`` derives the JSON-Schema
+      Design §7.2. ``audit/validation/enum_schema.py`` derives the JSON-Schema
       ``enum`` array for ``EventKind`` directly from the enum class,
       so the extractor's ``submit_events`` schema cannot drift away
       from ``schema.py``.
@@ -268,10 +268,10 @@ requirements:
       stays in lockstep with EdgeKind. The auditor's submit_verdict
       schema uses no drift-type enum — the verdict shape is defined
       in full in audit/auditor/submit_verdict.py without referencing
-      _enum_schema.py for drift classification.
+      validation/enum_schema.py for drift classification.
     priority: P0
     status: implemented
-    code: [src/llmharness/audit/_enum_schema.py]
+    code: [src/llmharness/audit/validation/enum_schema.py]
     depends_on: [REQ-001]
 
   - id: REQ-024
@@ -328,7 +328,7 @@ requirements:
     status: tested
     code:
       - src/llmharness/schema.py
-      - src/llmharness/audit/_enum_schema.py
+      - src/llmharness/audit/validation/enum_schema.py
       - src/llmharness/audit/auditor/submit_verdict.py
       - src/llmharness/audit/auditor/output.py
       - src/llmharness/audit/auditor/prompt.py
@@ -628,7 +628,7 @@ requirements:
         final-cause Stop guard) and persists a
         ``REMINDER_DELIVERED`` entry. Train/inference parity is
         enforced by sourcing the message format from the shared
-        ``audit/_reminder_format.py`` helper.
+        ``audit/toolkit/reminder_format.py`` helper.
 
       - ``llmharness.tools.prefix_replay`` — orchestration helpers.
         Picks the auditor record at ``turn=t`` whose
@@ -666,7 +666,7 @@ requirements:
       - src/llmharness/replay/reminder_seed.py
       - src/llmharness/tools/prefix_replay.py
       - src/llmharness/replay/cli.py
-      - src/llmharness/audit/_reminder_format.py
+      - src/llmharness/audit/toolkit/reminder_format.py
     tests:
       - tests/test_reminder_seed_atom.py
       - tests/test_prefix_replay_cli.py
