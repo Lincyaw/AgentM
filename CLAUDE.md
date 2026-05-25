@@ -1,329 +1,176 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Index for Claude Code working in this repo. Pointers, not exhaustive docs —
+follow links for detail.
 
-## Project Overview
+## Project
 
-AgentM is a pluggable agent framework in Python (v0.1.0). The SDK is a **mechanism**;
-every policy is a port; every port has a default; every default is a replaceable
-extension. Boundary contract in `.claude/designs/pluggable-architecture.md`.
+AgentM — pluggable agent framework. Python 3.12+, `uv` only. The SDK is a
+mechanism; every policy is a replaceable atom. Boundary contract in
+`.claude/designs/pluggable-architecture.md`.
 
-- **Language**: Python 3.12+
-- **Package manager / build backend**: `uv` / `uv_build`
-- **Source layout**: `src/agentm/`
-- **Entry point**: `agentm:main` (console script)
+## CLI
 
-## Build & Development Commands
+- `agentm "<prompt>"` — one-shot prompt (default scenario `general_purpose`).
+- `agentm trace …` — query the OTLP/JSON session log
+  (`messages` · `turns` · `tools` · `chats` · `info`); preferred over
+  hand-parsing `.agentm/observability/*.jsonl`.
+- Channel CLIs: `agentm-gateway`, `agentm-worker`, `agentm-terminal`,
+  `agentm-feishu`.
+- Shared `AGENTM_*` env namespace; `.env` autoloaded; precedence
+  flag > env > `.env` > default. Per-CLI prefixes (`AGENTM_GATEWAY_*`)
+  are **not** supported. Run `<cli> --help` for flags.
+- Optional extra: `uv sync --extra agent-env` installs `arl-env` for the
+  `operations_agent_env` atom (ARL-sandboxed Operations).
 
-```bash
-uv sync                                # install deps
-uv run agentm "<prompt>"               # default = general_purpose scenario (minimal atom set)
-uv run pytest                          # run tests (excludes nested workspaces, ui)
-uv run pytest -m ui                    # Textual TUI tests (opt-in)
-uv run ruff check src/                 # lint
-uv run mypy src/                       # type check
-uv add <package>                       # add a runtime dep
-```
+## Repo exploration
 
-After modifying code, **always** lint and type-check the touched files:
+- `agentm list-extensions [--source builtin|contrib|user|all] [--filter X]`
+- `ls contrib/scenarios/` — names usable as `--scenario <name>`
+- `ls src/agentm/extensions/builtin/` — builtin atoms (one file per atom)
+- `ls contrib/extensions/` — third-party atoms (flat files auto-discover;
+  nested packages need `--extension <dotted.path>`)
+- `.claude/index.yaml` — design-concept graph; `.claude/designs/` — concept docs
+- `CONTEXT.md` — project glossary; check here when an unfamiliar term appears.
+- `core-manifest.yaml` — constitution layer (kernel-singleton declarations); read-only.
 
-```bash
-uv run ruff check <changed-files>
-uv run mypy <changed-files>
-```
-
-For `mypy` issues on dynamic/duck-typed parameters, prefer targeted
-`# type: ignore[attr-defined]` over broad suppression.
-
-## CLI environment variables
-
-All four CLIs (`agentm`, `agentm-gateway`, `agentm-worker`, `agentm-feishu`,
-`agentm-terminal`) are typer-based and share a single `AGENTM_*` namespace.
-`.env` is autoloaded at module-import time from `<cwd>/.env` and the
-workspace-root `.env`; existing env vars win (override=False). Set
-`AGENTM_SKIP_DOTENV=1` to disable autoload (tests do this).
-
-Precedence per option: **CLI flag > env var > `.env` file > built-in default.**
-
-| Variable | Consumed by | Equivalent flag |
-|---|---|---|
-| `AGENTM_PROVIDER` | gateway, worker, agentm | `--provider` |
-| `AGENTM_MODEL` | gateway, worker, agentm | `--model` |
-| `AGENTM_SCENARIO` | gateway, worker | `--scenario` |
-| `AGENTM_CWD` | gateway, worker | `--cwd` |
-| `AGENTM_SOCKET` | gateway, terminal, worker, feishu | `--bind` / `--connect` |
-| `AGENTM_TOKEN` | worker, terminal, feishu | `--token` |
-| `AGENTM_CONFIG` | gateway | `--config` |
-| `AGENTM_STATE_DIR` | gateway | `--state-dir` |
-| `AGENTM_LOG_LEVEL` | gateway | `--log-level` |
-| `AGENTM_FORMAT` | terminal | `--format` |
-| `AGENTM_SKIP_DOTENV` | all | (disables `.env` autoload) |
-| `LARK_APP_ID` | feishu | `--app-id` |
-| `LARK_APP_SECRET` | feishu | (reads from env; not a flag — secrets stay out of argv) |
-| `NO_COLOR` | terminal | `--no-color` |
-
-CLI-specific per-prefix variables (`AGENTM_GATEWAY_*`, `AGENTM_WORKER_*`) are
-**not** supported — set the unified `AGENTM_*` form and pass an explicit flag
-when CLIs need to differ on the same host.
-
-## Architecture (three layers, dependency arrows down only)
+## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  agentm.cli  /  embedded SDK  /  (future: HTTP, RPC)                     │  presenters
-├──────────────────────────────────────────────────────────────────────────┤
-│  agentm.extensions.builtin/  +  contrib/extensions/                      │  atoms (policy)
-│    operations_local · llm_<provider> · session_state_memory              │
-│    read_file · write_file · edit · bash · skills · ...                   │
-├──────────────────────────────────────────────────────────────────────────┤
-│  agentm.core (unreplaceable substrate, write-protected)                  │  substrate
-│    abi/      Protocols + dataclasses + typed events                      │
-│    runtime/  AgentSession · EventBus · SessionManager · Loader           │
-│              · catalog freeze · reload transaction                       │
-│    lib/      pure helpers (edit_diff · frontmatter · path_utils)         │
-└──────────────────────────────────────────────────────────────────────────┘
+presenters: agentm.cli  /  embedded SDK
+atoms:      src/agentm/extensions/builtin/  +  contrib/extensions/
+substrate:  agentm.core/  (abi · runtime · lib — write-protected)
 ```
 
-**Unreplaceable-substrate axiom**: the only thing that cannot be a replaceable
-extension is *the act of loading replacements*. Everything else — including
-"defaults" — lives as an atom. Judgement rule: *"if it were replaceable, who
-would execute the replacement?"* No answer ⇒ substrate; otherwise ⇒ atom.
+- Atoms reach stateful subsystems only through `ExtensionAPI` services;
+  `extensions.validate` rejects direct `core.runtime.*` imports.
+- Five pluggability axes are `Protocol`s in `core.abi`, registered by atoms
+  via `api.register_*`. See `.claude/designs/pluggable-architecture.md`.
 
-`agentm.core` must import in a Jupyter notebook **with zero side effects at
-import time** — module-load-time, not subpackage-content. `core.abi` and
-`core.lib` are pure types + pure functions; `core.runtime` *contains*
-stateful classes (sessions, writers, stores) but its modules perform no I/O
-at import. Side effects only happen when a session is **constructed**.
-`agentm.harness` and `agentm.llm` no longer exist as separate packages —
-session orchestration lives in `core.runtime/`; provider `StreamFn` impls live
-as atoms (`extensions/builtin/llm_<provider>.py`). Atoms reach stateful
-subsystems exclusively through ExtensionAPI services (`api.get_operations()`,
-`api.skills`, `api.prompt_templates`, `api.catalog`, `api.compaction`). The
-`extensions.validate` checker rejects atoms that import `core.runtime.*`
-directly.
+## Extensions & scenarios
 
-**Five pluggability axes** (each is a `typing.Protocol` in `core.abi`,
-registered by an atom via the corresponding `api.register_*` hook): LLM
-stream · Tool environment · Session state · Project context · Policy /
-cross-cut. The substrate provides registration hooks and asserts at freeze
-time that the required services have been registered; it never instantiates a
-default. The default scenario manifest is what enumerates the working set.
+- **Builtin atom**: `src/agentm/extensions/builtin/<name>.py` — one file,
+  exports `MANIFEST` + `install(api, config)`. §11 contract: no
+  atom-to-atom imports, no `core.runtime.*`, no `core._internal`.
+- **Scenario**: YAML at `contrib/scenarios/<name>/manifest.yaml`, selected
+  via `--scenario <name>`. Default is `general_purpose`.
+- **contrib/extensions/**: flat `<name>.py` auto-discovers; nested packages
+  mount via `--extension <dotted.path>` and are **not** scenarios.
 
-> **Migration status**: harness-collapse completed 2026-05-11; the
-> `agentm.harness` and `agentm.llm` packages have been deleted. See
-> `.claude/plans/2026-05-11-collapse-harness-into-core.md` for the trail.
+## Design docs (`.claude/`)
 
-## Extension-as-Scenario
+- `index.yaml` — concept graph; keep in sync on every concept change.
+- `designs/<concept>.md` — continuously maintained.
+- `plans/YYYY-MM-DD-*.md`, `tasks/YYYY-MM-DD-*.md` — append-only.
 
-A scenario is a *composition of atomic extensions* expressed as YAML data, not
-code. There is no privileged path between built-in and third-party scenarios.
+Concept-change flow: update the design doc → check `index.yaml`
+`related_concepts` → propagate → update `index.yaml` → append plan/task
+if implementing.
 
-- **Built-in atoms**: `src/agentm/extensions/builtin/<name>.py` — one file per atom
-  exporting `MANIFEST` and `install(api, config)`. §11 single-file contract:
-  no atom-to-atom imports, no `core.runtime.*` import, no `core._internal` import.
-- **Default scenario**: `contrib/scenarios/general_purpose/manifest.yaml` —
-  the curated minimal atom set (read/write/edit/bash + observability +
-  prompt assembly + skills). Loaded when `agentm` runs without
-  `--scenario`. Other scenarios under `contrib/scenarios/` opt-in via
-  `--scenario <name>`.
+## Testing
 
-## contrib/ layout
-
-Everything that is **not** SDK core lives under `contrib/`. SDK builtins still
-live under `src/agentm/extensions/builtin/` (auto-discovered); `contrib/` is for
-opt-in, separately-maintained extras.
-
-```
-contrib/
-├── extensions/        # third-party-maintained atoms (workspace members)
-│   └── llmharness/    # cognitive-audit package: atoms + adapter + tests
-└── scenarios/         # scenario manifests (loader entry point)
-    ├── general_purpose/  # default — used when no --scenario is given
-    ├── agent_env/        # ARL-sandboxed Operations + ResourceWriter
-    ├── format_fix/       # toy task class + tuner
-    └── rca/              # also a workspace member (agentm_rca/)
-```
-
-- `contrib/scenarios/<name>/manifest.yaml` — resolved by `agentm --scenario <name>`.
-  Loader at `src/agentm/extensions/loader.py` looks up
-  `<cwd>/contrib/scenarios/<name>/manifest.yaml`.
-- `contrib/extensions/<name>.py` — flat-file atoms, auto-discovered alongside
-  `src/agentm/extensions/builtin/`, registered under synthetic module names
-  `_agentm_contrib__<name>`.
-- `contrib/extensions/<name>/` — Python packages whose `MANIFEST` makes them
-  mountable via `agentm --extension <dotted.module.path>` (repeatable; stacks
-  on top of `--scenario` or auto-discovery). **Not** a scenario — don't put
-  `manifest.yaml` here.
-
-Don't add scenario-loader logic that walks subdirs blindly — keep the layout
-open to nested projects.
-
-## Design Documentation System
-
-All design documents live in `.claude/`. `index.yaml` is the relationship graph
-and must always stay in sync.
-
-```
-.claude/
-├── index.yaml          # concept index — must stay current
-├── designs/            # high-level design docs (continuously maintained)
-├── plans/              # YYYY-MM-DD-<plan>.md (append-only, never modify)
-└── tasks/              # YYYY-MM-DD-<task>.md (append-only, never modify)
-```
-
-| Directory | Lifecycle | Naming |
-|-----------|-----------|--------|
-| `designs/` | continuously maintained | `<concept>.md` |
-| `plans/` | append-only | `YYYY-MM-DD-<plan-name>.md` |
-| `tasks/` | append-only | `YYYY-MM-DD-<task-name>.md` |
-
-**Change propagation:** when any design concept changes, (1) update the design
-doc, (2) query `index.yaml` for `related_concepts`, (3) update affected docs,
-(4) update `index.yaml`, (5) if implementation needed, append new plan/task.
-
-**Cross-references** use relative paths:
-`[concept](other-concept.md)`, `[plan](../plans/YYYY-MM-DD-plan.md)`, etc.
-## Testing philosophy
-
-**Quality over quantity. Only test positions where AgentM's value proposition
-fails if broken.** Single-tool happy paths, vendor wiring, utility helpers, and
-framework guarantees are NOT core. The fail-stop positions:
+Quality over quantity. A test exists only to protect a **fail-stop
+position**:
 
 | Position | Why load-bearing |
 |---|---|
-| Constitution boundary (`is_constitution_path`, manifest reload) | Wrong → agent self-modifies kernel |
-| Atom hash determinism (`compute_atom_hash`) | Wrong → evidence attribution corrupt |
-| Active-set fingerprint pairing | Wrong → observation can't link to atom version |
-| Catalog freeze idempotence | Wrong → catalog state untrustworthy |
-| Indexer rebuild idempotence | Wrong → evolution evidence drifts |
-| Transactional reload atomicity | Wrong → live agent in inconsistent state |
-| §11 extension contract validator | Wrong → bad atoms slip into catalog |
+| Constitution boundary (`is_constitution_path`, manifest reload) | Agent self-modifies kernel |
+| Atom hash determinism (`compute_atom_hash`) | Evidence attribution corrupt |
+| Active-set fingerprint pairing | Observation can't link to atom version |
+| Catalog freeze idempotence | Catalog state untrustworthy |
+| Indexer rebuild idempotence | Evolution evidence drifts |
+| Transactional reload atomicity | Live agent in inconsistent state |
+| §11 extension contract validator | Bad atoms slip into catalog |
 
-New tests outside this list require explicit justification of which fail-stop
-they protect. **Test behavior, not structure.** Don't test framework guarantees.
+`pytest` markers: `ui` (Textual TUI) and `slow` (real-LLM E2E,
+minutes-long) — both opt-in.
 
-### E2E methodology (load-bearing)
+**E2E** = drive `agentm` with NL prompts on a sandbox repo and verify
+through `agentm trace`. Never substitute SDK-internal assertions
+(`session._tools`, `session._apis`). Lock real bugs down with a
+stub-provider integration test.
 
-E2E means: drive the agent with natural-language prompts and verify by
-inspecting the trajectory. **Do not call SDK / harness internals to "shortcut"
-the verification.** Identity bugs only show through `agentm` CLI in →
-trajectory out.
+## Dev loop
 
-Procedure: run `uv run agentm --cwd <sandbox> "<NL prompt>"` against a real
-git sandbox; inspect `<sandbox>/.agentm/observability/<trace>.jsonl` for
-`emit:tool_call`, `emit:tool_result`, `install:*`, `emit:diagnostic`;
-cross-check on-disk state for writes. When a real bug surfaces, lock it down
-with a stub-provider integration test so CI catches the regression without
-API keys.
+After every change:
+
+```bash
+uv run ruff check <files>
+uv run mypy <files>
+uv run pytest --tb=short
+```
+
+Prefer targeted `# type: ignore[attr-defined]` over broad suppression.
+For identity-affecting changes (atoms, kernel, catalog): also run an E2E
+prompt against a sandbox repo and inspect the trace.
+
+CI lints/types a broader scope — `src/`, `contrib/channels/src/`,
+`contrib/extensions/llmharness/src`, `contrib/scenarios/rca/src` — and
+runs mypy per workspace from each member's root (per-package overrides).
+For sweeping changes, mirror that scope locally.
+
+## Iteration tracking
+
+- `progress.tsv` — dev-loop keep/discard decisions + metric values.
+- `decisions.md` — long-horizon autonomous decisions (L2+).
+- `.claude/{plans,tasks}/` — append-only design history.
+
+## Conventions
+
+- **Language**: code, comments, commits, design docs in English;
+  conversation in Chinese.
+- **No SDK / scenario conflation**: scenario-specific logic never inside
+  `agentm.core`.
+- **§11 atom contract**: enforced by `extensions.validate`.
+- **No preset enums for subjective fields** — free-text + LLM-decided.
+- **Auto-commit awareness**: `agentm` auto-commits during sessions; run
+  E2E in a sandbox, never on `main`.
+
+## Requirements index
+
+`project-index.yaml` (repo root) is the single source of truth for product
+requirements. Every code change keeps `code` / `tests` paths and `status`
+in sync — many entries currently have stale paths from the harness-collapse
+migration (e.g. `src/agentm/harness/`, `src/agentm/llm/`); fix them as you
+touch the affected requirements. Validation runs through the autoharness
+skill. Distinct from `.claude/index.yaml` (design-concept graph).
 
 <!-- auto-harness:begin -->
 ## Core principles
 
-Three axioms govern all work. Fall back to these when a skill's instructions don't cover a situation:
+1. **Quality over quantity** — a few things done well beats many done poorly.
+2. **Surface problems early** — fail fast, validate before investing, outline before drafting.
+3. **Deliberate execution** — every decision traceable to a reason.
 
-1. **Quality over quantity** — a few things done well beats many done poorly. Applies to tests, observations, skills, code, docs, experiments, ideas. If you can't say why each item exists, there are too many.
-2. **Surface problems early** — fail fast, validate before investing, outline before drafting. Never hide complexity to make something look simpler.
-3. **Deliberate execution** — every decision traceable to a reason. Understand before acting; validate manually before automating; measure before optimizing; consider removing before adding.
-
-Full text: `/home/ddq/.claude/plugins/cache/autoharness/autoharness/1.1.3/references/principles.md`.
+Full text: `/autoharness:guide`.
 
 ## North-star targets
 
-1. **Spec coverage** — fraction of active requirements at `tested` status (currently: unmeasured — index not yet built)
-   Measure: `python /home/ddq/.claude/plugins/cache/autoharness/autoharness/1.1.3/scripts/validate_index.py project-index.yaml`
-   Mechanism: script
+| Target | Measure |
+|---|---|
+| Spec coverage | fraction of `project-index.yaml` requirements at `status: tested` |
+| Test health | `uv run pytest --tb=short` pass rate; every `implemented` requirement has tests |
+| Index integrity | `validate_index.py` reports 0 violations |
+| Code health | `uv run mypy src/` + `uv run ruff check src/` both clean |
 
-2. **Test health** — pass rate + every implemented requirement has tests (currently: unmeasured)
-   Measure: `uv run pytest --tb=short`
-   Mechanism: script
-
-3. **Index integrity** — `validate_index.py` reports 0 violations (currently: n/a — index not yet built)
-   Measure: `python /home/ddq/.claude/plugins/cache/autoharness/autoharness/1.1.3/scripts/validate_index.py project-index.yaml`
-   Mechanism: script
-
-4. **Code health** — 0 mypy errors, 0 critical ruff violations on `src/` (currently: unmeasured)
-   Measure: `uv run mypy src/ && uv run ruff check src/`
-   Mechanism: script
-
-Secondary: simpler code that maps clearly to requirements > clever abstractions
-that serve five requirements but belong to none.
-
-## Dev-loop stages
-
-| Stage | Command | Notes |
-|-------|---------|-------|
-| Test | `uv run pytest --tb=short` | Run after every change; fail-stop tests only (see "Testing philosophy" above) |
-| Type check | `uv run mypy src/` | Targeted ignores OK on duck-typed args |
-| Lint | `uv run ruff check src/` | |
-| Index validate | `python /home/ddq/.claude/plugins/cache/autoharness/autoharness/1.1.3/scripts/validate_index.py project-index.yaml` | Run once `project-index.yaml` exists |
-| E2E | `uv run agentm --cwd <sandbox> "<NL prompt>"` + trajectory inspection | For identity-affecting changes (atoms, kernel, catalog) |
-
-## Iteration tracking
-
-- Progress log: `progress.tsv` — dev-loop records keep/discard decisions and metric values
-- Decision log: `decisions.md` — long-horizon logs autonomous decisions (L2+)
-- Design log: `.claude/{plans,tasks}/` — append-only history of design-driven work
-
-## Project conventions
-
-- **Language rule**: code, comments, commits, design docs are **English**;
-  conversation with the user is **Chinese**.
-- **Package manager**: `uv` only — never `pip`, `poetry`, `pipenv`.
-- **Python**: 3.12+ required; build backend `uv_build`.
-- **No SDK / scenario conflation**: never put scenario-specific logic inside
-  `agentm.core`. Core is the mechanism; scenarios are compositions of atoms.
-- **§11 atom contract**: each builtin atom is one file, no atom-to-atom imports,
-  no `core.runtime.*` import, no `core._internal` import. Validator enforces.
-- **contrib/ layout**: scenarios are manifest-only YAML; flat-file atoms
-  auto-discover; nested packages mount via `--extension`. Don't extend the
-  scenario loader to walk subdirs blindly.
-- **Design doc workflow**: changes propagate via `index.yaml`. `designs/`
-  is continuously updated; `plans/` and `tasks/` are append-only.
-- **Tests gate on fail-stop positions** (see "Testing philosophy"). Reject
-  PRs that add tests for framework guarantees.
-- **E2E by trajectory** — never assert on `session._tools` / `session._apis`
-  as a substitute for CLI + JSONL inspection.
-- **No preset enums for subjective dimensions** — use free-text + LLM-decided
-  for relationship/status/classification fields where reasonable
-  interpretations differ.
-- **Auto-commit awareness**: `agentm` auto-commits during sessions. Run E2E
-  in a sandbox repo, never on `main`.
-
-## Requirements index (MANDATORY once `project-index.yaml` exists)
-
-This project will use `project-index.yaml` as the single source of truth for
-all requirements. The index does **not** yet exist — bootstrap it via
-`/autoharness:existing-project` (recover requirements from current code/docs).
-
-Once it exists, every code change MUST keep the index synchronized:
-
-1. **Before implementing**: find the matching requirement in `project-index.yaml`. If none exists, add one first.
-2. **After implementing**: update the requirement's `code` paths and set `status: implemented`.
-3. **After adding tests**: update the requirement's `tests` paths and set `status: tested`.
-4. **After refactoring**: update any affected `code`/`tests` paths if files were moved or renamed.
-5. **Never skip**: a code change without the corresponding index update is incomplete work.
-
-Validate with: `python /home/ddq/.claude/plugins/cache/autoharness/autoharness/1.1.3/scripts/validate_index.py project-index.yaml`
-
-> Note: this index is at the repo root and tracks **product requirements**.
-> Distinguish from `.claude/index.yaml`, which is the **design-concept**
-> relationship graph. Both coexist.
+Secondary: simple code mapping cleanly to requirements > clever abstractions
+serving five.
 
 ## Active skills
 
-- /autoharness:guide          — methodology briefing at session start
-- /autoharness:dev-loop       — full dev cycle: implement → test → vibe → review → measure
-- /autoharness:north-star     — define and track optimization targets
-- /autoharness:long-horizon   — autonomous decision-making with escalation ladder
-- /autoharness:notify         — push iteration reports to Telegram/Feishu/email (not yet configured)
-- /autoharness:existing-project — recover `project-index.yaml` from current code/docs
-- /autoharness:skill-feedback — file issues/PRs back to the autoharness plugin when a skill misfires
+| Skill | Purpose |
+|---|---|
+| `/autoharness:guide` | methodology briefing |
+| `/autoharness:dev-loop` | implement → test → vibe → review → measure |
+| `/autoharness:north-star` | define and track optimization targets |
+| `/autoharness:long-horizon` | autonomous decisions with escalation ladder |
+| `/autoharness:existing-project` | recover `project-index.yaml` from current code/docs |
+| `/autoharness:notify` | push iteration reports (not yet configured) |
+| `/autoharness:skill-feedback` | file issues back to the autoharness plugin |
 <!-- auto-harness:end -->
 
 ## Related plugins
 
 - **workbuddy** — pipeline monitoring / repo setup / incident handling.
-  This repo has `.github/workbuddy/` (config + agents + workflows), so
-  workbuddy is recommended:
-  `/plugin install workbuddy@workbuddy-local`
-  (requires the marketplace registered first).
+  Repo carries `.github/workbuddy/`; install with
+  `/plugin install workbuddy@workbuddy-local`.
