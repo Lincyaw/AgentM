@@ -7,7 +7,7 @@ v22-style runs are extractor-only (no auditor records), so
 post-extractor event graph from ``cases/<row>/event_graph/after_extractor_NNN.json``,
 builds auditor extensions via ``compose_auditor_extensions``, and pumps
 a synthetic payload through ``run_phase_standalone`` with a chosen
-auditor prompt (typically ``auditor_detective.md``).
+auditor prompt (typically ``auditor_minimal.md``).
 
 Concurrency is across rows, matching ``rerun_extractor.py``. Provider
 config comes from the raw records.jsonl (any extractor record) so the
@@ -36,8 +36,8 @@ Usage::
         --cases-root runs/iters/v22/cases \\
         --raw-root runs/iters/v22/raw/openrca-2-lite-n500-t20 \\
         --rows-file runs/iters/pinned-10.txt \\
-        --prompt src/llmharness/audit/auditor/prompts/auditor_detective.md \\
-        --out runs/audit/detective-v1 \\
+        --prompt src/llmharness/audit/auditor/prompts/auditor_minimal.md \\
+        --out runs/audit/minimal-v1 \\
         --concurrency 5
 """
 
@@ -173,6 +173,7 @@ async def _audit_one_row(
     raw_dir: Path,
     out_dir: Path,
     prompt_text: str,
+    prompt_variant: str,
     cwd: str,
     semaphore: asyncio.Semaphore,
     max_output_tokens: int | None,
@@ -281,7 +282,7 @@ async def _audit_one_row(
                     "check_errors": {},
                     "tools_profile": "minimal",
                     "trajectory_snapshot_len": 0,
-                    "prompt_variant": "detective",
+                    "prompt_variant": prompt_variant,
                 },
                 "output": inner_verdict,
             }
@@ -303,6 +304,7 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     prompt_path = Path(args.prompt).resolve()
     prompt_text = prompt_path.read_text(encoding="utf-8")
+    prompt_variant = prompt_path.stem.removeprefix("auditor_") or prompt_path.stem
     (out_root / "prompt-used.md").write_text(prompt_text, encoding="utf-8")
 
     semaphore = asyncio.Semaphore(args.concurrency)
@@ -321,6 +323,7 @@ async def _main_async(args: argparse.Namespace) -> int:
                     raw_dir=raw_dir,
                     out_dir=out_dir,
                     prompt_text=prompt_text,
+                    prompt_variant=prompt_variant,
                     cwd=cwd,
                     semaphore=semaphore,
                     max_output_tokens=args.max_output_tokens,
@@ -381,7 +384,7 @@ def main() -> int:
         "--max-output-tokens",
         type=int,
         default=8192,
-        help="cap on model output tokens; detective prompts need 4-8k",
+        help="cap on model output tokens",
     )
     p.add_argument(
         "--skip-case-write",

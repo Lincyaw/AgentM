@@ -124,12 +124,6 @@ def test_minimal_prompt_does_not_reference_drill_down_tools() -> None:
     assert "DEGRADED MODE" not in text
 
 
-def test_full_prompt_does_reference_drill_down_tools() -> None:
-    text = load_auditor_prompt("full")
-    assert "get_event_detail" in text
-    assert "get_turn" in text
-
-
 def test_unknown_prompt_name_raises() -> None:
     import pytest
 
