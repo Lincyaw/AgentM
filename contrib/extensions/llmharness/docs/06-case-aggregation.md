@@ -33,7 +33,7 @@ Aggregate a single session:
 ```bash
 llmharness-aggregate replay \
   --cwd /path/to/run-dir \
-  --root-session-id abc123def \
+  --session-id abc123def \
   --out ./cases
 ```
 
@@ -45,7 +45,7 @@ sample-id manually:
 ```bash
 llmharness-aggregate replay \
   --cwd . \
-  --root-session-id eddfe314... \
+  --session-id eddfe314... \
   --sample-id ts0-mysql-corrupt-kwx8n5 \
   --dataset-name rca-openrca2-lite \
   --dataset-path /abs/path/to/data.jsonl \
@@ -227,7 +227,7 @@ rca llm-eval run config.yaml -a agentm --ak scenario=rca:harness.sync -l 1
 
 llmharness-aggregate replay \
   --cwd "$AGENTM_CWD" \
-  --root-session-id <sid> \
+  --session-id <sid> \
   --sample-id <sample_id_from_dataset> \
   --dataset-name rca-openrca2-lite \
   --dataset-path /abs/path/to/data.jsonl \

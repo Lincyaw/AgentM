@@ -19,7 +19,7 @@ Examples::
     llmharness-aggregate replay --cwd /run --out ./cases
 
     # Single session from a live run
-    llmharness-aggregate replay --cwd /run --root-session-id abc123 --out ./cases
+    llmharness-aggregate replay --cwd /run --session-id abc123 --out ./cases
 
     # eval-db extract output (every row → one case)
     llmharness-aggregate eval-db --src runs/eval_db/openrca-2-lite-n500-t20 \\
