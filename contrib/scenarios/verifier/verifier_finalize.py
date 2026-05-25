@@ -32,6 +32,7 @@ prose-only is rejected via an ``Inject``.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -215,17 +216,17 @@ class VerifierReport(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass
 class _State:
     submitted: bool = False
+    critic_done: bool = False
 
 
-def _validate_sqls(data_dir: Path, report: VerifierReport) -> list[dict[str, str]]:
-    """Re-execute every SQL in the report. Returns a list of failures (empty = all ok)."""
-    try:
-        import duckdb
-    except ImportError:
-        return []
+def _duck_conn(data_dir: Path) -> Any:
+    import duckdb
 
     conn = duckdb.connect(":memory:")
     for f in sorted(data_dir.iterdir()):
@@ -234,6 +235,237 @@ def _validate_sqls(data_dir: Path, report: VerifierReport) -> list[dict[str, str
             conn.execute(
                 f"CREATE OR REPLACE VIEW {f.stem} AS SELECT * FROM read_parquet('{path}')"
             )
+    return conn
+
+
+# ---------------------------------------------------------------------------
+# Critic — single-shot LLM review of the submitted report
+# ---------------------------------------------------------------------------
+
+
+def _collect_critic_context(conn: Any, report: VerifierReport) -> dict[str, Any]:
+    """Gather system-level data the critic needs to judge drift vs fault."""
+    try:
+        rows = conn.execute(
+            "SELECT n.service_name, n.cnt AS normal, a.cnt AS abnormal, "
+            "ROUND(a.cnt * 1.0 / n.cnt, 3) AS ratio "
+            "FROM (SELECT service_name, COUNT(*) AS cnt FROM normal_traces "
+            "  GROUP BY service_name) n "
+            "JOIN (SELECT service_name, COUNT(*) AS cnt FROM abnormal_traces "
+            "  GROUP BY service_name) a "
+            "ON n.service_name = a.service_name ORDER BY ratio"
+        ).fetchall()
+        throughput = [
+            {"service": r[0], "normal": r[1], "abnormal": r[2], "ratio": float(r[3])}
+            for r in rows
+        ]
+    except Exception:  # noqa: BLE001
+        throughput = []
+
+    try:
+        rows = conn.execute(
+            "SELECT 'normal' AS win, service_name, COUNT(*) AS cnt, "
+            "AVG(duration) AS avg_dur, APPROX_QUANTILE(duration, 0.99) AS p99 "
+            "FROM normal_traces GROUP BY service_name "
+            "UNION ALL "
+            "SELECT 'abnormal' AS win, service_name, COUNT(*) AS cnt, "
+            "AVG(duration) AS avg_dur, APPROX_QUANTILE(duration, 0.99) AS p99 "
+            "FROM abnormal_traces GROUP BY service_name "
+            "ORDER BY service_name, win"
+        ).fetchall()
+        latency = [
+            {"win": r[0], "service": r[1], "cnt": r[2],
+             "avg_ms": round(r[3] / 1e6, 3), "p99_ms": round(r[4] / 1e6, 3)}
+            for r in rows
+        ]
+    except Exception:  # noqa: BLE001
+        latency = []
+
+    try:
+        rows = conn.execute(
+            "SELECT parent.service_name AS caller, child.service_name AS callee, "
+            "COUNT(*) AS calls "
+            "FROM normal_traces child "
+            "JOIN normal_traces parent ON child.parent_span_id = parent.span_id "
+            "WHERE child.service_name <> parent.service_name "
+            "GROUP BY parent.service_name, child.service_name ORDER BY calls DESC"
+        ).fetchall()
+        call_graph = [{"caller": r[0], "callee": r[1], "calls": r[2]} for r in rows]
+    except Exception:  # noqa: BLE001
+        call_graph = []
+
+    return {
+        "throughput_ratios": throughput,
+        "latency_overview": latency,
+        "call_graph": call_graph,
+    }
+
+
+def _build_critic_prompt(
+    report: VerifierReport,
+    injection_spec: dict[str, Any],
+    context: dict[str, Any],
+) -> str:
+    inj_lines = []
+    for inj in injection_spec.get("engine_config", []):
+        inj_lines.append(
+            f"- {inj.get('app', '?')}: {inj.get('chaos_type', '?')} "
+            f"(duration={inj.get('duration', '?')}m)"
+        )
+    inj_text = "\n".join(inj_lines) or "(none)"
+
+    tp = context.get("throughput_ratios", [])
+    ratios = [r["ratio"] for r in tp]
+    median_ratio = sorted(ratios)[len(ratios) // 2] if ratios else 0
+    tp_lines = [
+        f"| {'service':25s} | {'normal':>7s} | {'abnorm':>7s} | {'ratio':>6s} |",
+        f"|{'-' * 27}|{'-' * 9}|{'-' * 9}|{'-' * 8}|",
+    ]
+    for r in tp:
+        tp_lines.append(
+            f"| {r['service']:25s} | {r['normal']:7d} | {r['abnormal']:7d} "
+            f"| {r['ratio']:6.3f} |"
+        )
+    tp_lines.append(f"\nMedian system ratio: {median_ratio:.3f}")
+
+    lat = context.get("latency_overview", [])
+    lat_lines = [
+        f"| {'win':8s} | {'service':25s} | {'cnt':>6s} | {'avg_ms':>10s} "
+        f"| {'p99_ms':>10s} |",
+        f"|{'-' * 10}|{'-' * 27}|{'-' * 8}|{'-' * 12}|{'-' * 12}|",
+    ]
+    for r in lat:
+        lat_lines.append(
+            f"| {r['win']:8s} | {r['service']:25s} | {r['cnt']:6d} | "
+            f"{r['avg_ms']:10.3f} | {r['p99_ms']:10.3f} |"
+        )
+
+    cg = context.get("call_graph", [])
+    cg_lines = [f"  {r['caller']} -> {r['callee']} ({r['calls']} calls)" for r in cg]
+
+    verdicts = "\n".join(
+        f"- {i.target_service}/{i.fault_kind}: verdict={i.verdict}. {i.rationale}"
+        for i in report.injections
+    )
+    nodes = "\n".join(
+        f"- {n.service}: " + "; ".join(e.claim for e in n.symptom_evidence)
+        for n in report.propagation_nodes
+    )
+    edges = "\n".join(
+        f"- {e.from_service} -> {e.to_service}: {e.claim}"
+        for e in report.propagation_edges
+    )
+
+    nl = "\n"
+    return f"""\
+You are a critic reviewing a fault-propagation report. Find errors in \
+reasoning — do NOT redo the analysis.
+
+## Injections performed
+{inj_text}
+
+## System-wide throughput (all services, abnormal/normal)
+{nl.join(tp_lines)}
+
+## Latency overview (all services, both windows)
+{nl.join(lat_lines)}
+
+## Call graph (normal window, caller -> callee)
+{nl.join(cg_lines)}
+
+## Report to review
+
+### Injection verdicts
+{verdicts}
+
+### Propagation nodes
+{nodes}
+
+### Propagation edges
+{edges}
+
+## What to check
+
+1. **DRIFT vs FAULT**: The system throughput dropped overall (median \
+ratio {median_ratio:.3f}). A node whose throughput ratio is close to \
+the system median, AND whose latency change is small (sub-millisecond \
+or <2x), is likely just following the system-wide load change — not \
+being dragged down by the fault. Flag such nodes.
+
+2. **EFFECTIVENESS GATE**: For mem_stress / cpu_stress, the target must \
+show a LATENCY rise (not just resource metric changes like memory \
+usage). Memory going up without latency impact means the stress did \
+not materialize into observable service degradation. Check the latency \
+overview above.
+
+3. **CAUSAL DIRECTION**: Impact flows from broken dependency to its \
+CALLERS (upstream in the request path). If service A is slow and A \
+calls B, A's slowness does NOT make B slow — only A's callers are \
+affected (they wait for A). Check: for each edge from->to, the call \
+graph should show to calls from (not from calls to). If from calls \
+to, that edge's causal direction is wrong.
+
+4. **WEAK EVIDENCE**: A latency change of <1ms absolute AND <2x \
+relative, in a service whose throughput drop matches the system \
+median, is noise — not fault evidence.
+
+## Output format
+
+Write a concise review. For each issue, state which node/edge is \
+problematic, why (citing the data), and what should change (drop the \
+node, drop the edge, change a verdict, etc.).
+
+If the report is sound, write ONLY the word: APPROVED"""
+
+
+async def _run_critic(data_dir: Path, report: VerifierReport) -> str | None:
+    """Single-shot LLM critic. Returns review feedback or None if approved."""
+    try:
+        from anthropic import AsyncAnthropic
+    except ImportError:
+        return None
+
+    inj_path = data_dir / "injection.json"
+    injection_spec = json.loads(inj_path.read_text()) if inj_path.exists() else {}
+
+    conn = _duck_conn(data_dir)
+    context = _collect_critic_context(conn, report)
+    conn.close()
+
+    prompt = _build_critic_prompt(report, injection_spec, context)
+
+    headers_raw = os.environ.get("ANTHROPIC_DEFAULT_HEADERS")
+    default_headers = json.loads(headers_raw) if headers_raw else None
+    client = AsyncAnthropic(default_headers=default_headers)
+    model = os.environ.get("AGENTM_MODEL", "K2.6")
+
+    try:
+        response = await client.messages.create(
+            model=model,
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("critic LLM call failed: %s", exc)
+        return None
+
+    feedback = response.content[0].text.strip()  # type: ignore[union-attr]
+    if feedback.upper() == "APPROVED":
+        return None
+    return feedback
+
+
+# ---------------------------------------------------------------------------
+# SQL validation
+# ---------------------------------------------------------------------------
+
+
+def _validate_sqls(data_dir: Path, report: VerifierReport) -> list[dict[str, str]]:
+    """Re-execute every SQL in the report. Returns a list of failures (empty = all ok)."""
+    try:
+        conn = _duck_conn(data_dir)
+    except Exception:  # noqa: BLE001
+        return []
 
     failures: list[dict[str, str]] = []
 
@@ -319,6 +551,29 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     ],
                     is_error=True,
                 )
+
+            if not state.critic_done:
+                state.critic_done = True
+                feedback = await _run_critic(data_dir, report)
+                if feedback:
+                    return ToolResult(
+                        content=[
+                            TextContent(
+                                type="text",
+                                text=json.dumps(
+                                    {
+                                        "review": "critic_feedback",
+                                        "feedback": feedback,
+                                        "hint": "A critic has reviewed your report "
+                                        "and found issues. Address the feedback "
+                                        "above, then resubmit with corrections.",
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            )
+                        ],
+                        is_error=True,
+                    )
 
         state.submitted = True
         return ToolTerminate(

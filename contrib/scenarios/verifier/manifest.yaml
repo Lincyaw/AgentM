@@ -17,10 +17,16 @@ extensions:
     config:
       exclude:
         - conclusion.parquet
+      token_limit: 3000
   - local: verifier_fault_context
   - local: verifier_fault_docs
   - local: verifier_finalize
   - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.tool_read
+  - module: agentm.extensions.builtin.tool_result_cap
+    config:
+      max_chars: 6000
+      preview_chars: 1500
 
   # Budget runway warning. Without it the agent explores (查漏) until the
   # hard max_tool_calls cap and gets cut off before ever calling

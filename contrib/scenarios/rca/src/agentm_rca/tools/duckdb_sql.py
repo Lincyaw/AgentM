@@ -62,11 +62,22 @@ _DEFAULT_TOKEN_LIMIT = 5000  # rationale: fits RCA result rows in a compact tool
 _DEFAULT_ROW_LIMIT = 200  # rationale: enough rows for patterns without flooding context.
 
 
+_ID_COLUMNS = frozenset({
+    "trace_id", "span_id", "parent_span_id",
+    "attr.trace_id", "attr.span_id",
+})
+_ID_KEEP = 12
+
+
 def _serialize(obj: Any) -> Any:
     if isinstance(obj, datetime):
         return obj.isoformat()
-    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
-        return None
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        if abs(obj) < 1e12:
+            return round(obj, 4)
+        return obj
     if isinstance(obj, dict):
         return {k: _serialize(v) for k, v in obj.items()}
     if isinstance(obj, list | tuple):
@@ -74,6 +85,22 @@ def _serialize(obj: Any) -> Any:
     if isinstance(obj, bytes):
         return obj.decode("utf-8", errors="replace")
     return obj
+
+
+def _compact_ids(rows: list[dict[str, Any]], cols: list[str]) -> list[dict[str, Any]]:
+    """Truncate long hex ID columns to save tokens."""
+    id_cols = [c for c in cols if c in _ID_COLUMNS]
+    if not id_cols:
+        return rows
+    out = []
+    for row in rows:
+        r = dict(row)
+        for c in id_cols:
+            v = r.get(c)
+            if isinstance(v, str) and len(v) > _ID_KEEP:
+                r[c] = v[:_ID_KEEP] + "…"
+        out.append(r)
+    return out
 
 
 def _estimate_tokens(text: str) -> int:
@@ -93,7 +120,7 @@ def _truncate(payload: str, *, token_limit: int, rows: list[dict[str, Any]]) -> 
         "_suggestion": "Add WHERE filters, narrower time range, or a smaller LIMIT.",
         "rows": rows[:keep],
     }
-    return json.dumps(out, ensure_ascii=False, default=str, indent=2)
+    return json.dumps(out, ensure_ascii=False, default=str)
 
 
 def _ok(text: str, *, is_error: bool = False) -> ToolResult:
@@ -250,18 +277,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         except duckdb.Error as exc:
             return _err(f"query failed: {exc}", sql=sql)
 
+        rows = _compact_ids(rows, cols)
         body = json.dumps(
             {
-                "sql": sql,
                 "row_count": len(rows),
                 "rows": rows,
-                "row_limit_applied": state.row_limit
-                if head in {"SELECT", "WITH"}
-                else None,
             },
             ensure_ascii=False,
             default=str,
-            indent=2,
         )
         result = _ok(_truncate(body, token_limit=state.token_limit, rows=rows))
         state.sql_cache[cache_key] = result
