@@ -24,7 +24,12 @@ full. Document drift first; collapse later if a loader feature lands.
 When adding a new variant, update this table. Chained-fork mode (the
 current intervention pipeline — see `README.md`'s
 "Chained-fork intervention" section) runs every segment under the same
-scenario, so no per-variant control mapping is needed anymore.
+scenario, so no per-variant control mapping is needed anymore. **But the
+scenario you pick must have `enable_reminders: false`** — otherwise the
+control segment gets the first auditor surface injected live and the A/B
+counterfactual is destroyed before the first branch ever runs. Pair
+`chained_fork=true` with `harness.sync.opinions` or
+`harness.sync.opinions10`, never with the default `harness.sync`.
 
 ## Chained-fork mode (2026-05-24)
 
