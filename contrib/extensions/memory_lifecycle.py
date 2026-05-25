@@ -5,8 +5,8 @@ files under ``.agentm/memory/``) and the session lifecycle, providing:
 
 1. **Auto-extract** (``TurnEndEvent``, POST priority) — regex heuristics
    detect memory-worthy facts in user messages (preferences, identity,
-   corrections, decisions, project facts). Writes directly through
-   ``file_ops`` with no LLM call, keeping cost zero for most turns.
+   corrections, decisions, project facts). Writes through
+   ``ResourceWriter`` with no LLM call, keeping cost zero for most turns.
 
 2. **Pre-compact sink** (``BeforeCompactEvent``) — before compaction
    discards messages, re-scan the buffer for uncaptured facts using the
@@ -19,14 +19,13 @@ files under ``.agentm/memory/``) and the session lifecycle, providing:
    calling ``memory_read``.
 
 The atom is purely event-driven — no tools, invisible to the user/LLM.
-File I/O goes through ``api.get_operations().file`` (write) and
-``api.get_operations().file`` (read).  S11-compliant: no ``core.runtime.*``
-or atom-to-atom imports.
+Reads go through ``api.get_operations().file``; writes go through
+``api.get_resource_writer()`` (matching the ``memory`` atom's contract).
+§11-compliant: no ``core.runtime.*`` or atom-to-atom imports.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import time
@@ -66,40 +65,36 @@ MANIFEST = ExtensionManifest(
 # Heuristic patterns (inspired by Hermes holographic plugin)
 # ---------------------------------------------------------------------------
 
-_MIN_MSG_LEN: Final[int] = 15
+_MIN_MSG_LEN: Final[int] = 30
 _MAX_EXTRACT_CHARS: Final[int] = 400
 _MAX_PREFETCH_RESULTS: Final[int] = 3
 _MAX_PREFETCH_BODY_CHARS: Final[int] = 600
+_MAX_PREFETCH_CACHE: Final[int] = 64
 
 _PATTERNS: Final[list[tuple[str, re.Pattern[str]]]] = [
-    # User preferences
+    # Durable preferences (not transient "I want X done")
     ("user", re.compile(
-        r"(?:I|i)\s+(?:prefer|like|use|want|need|always|usually)\s+",
+        r"\b(?:I|my)\s+(?:always|never|prefer(?:red)?|favorite)\b",
         re.IGNORECASE,
     )),
     # User identity
     ("user", re.compile(
-        r"(?:my\s+name\s+is|I\s+am\s+a|I\s+work\s+(?:at|on|as|in))\s+",
+        r"\b(?:my\s+name\s+is|I\s+am\s+a\s+\w+|I\s+work\s+(?:at|as|in)\s+\w+)\b",
         re.IGNORECASE,
     )),
-    # Corrections / feedback (EN)
+    # Explicit memory requests (EN)
     ("feedback", re.compile(
-        r"(?:don'?t\s+do\s+that|remember\s+that|please\s+(?:always|never))\b",
+        r"\b(?:remember\s+(?:that|this)|don'?t\s+(?:ever|again)|please\s+(?:always|never)\s+\w+)\b",
         re.IGNORECASE,
     )),
-    # Corrections / feedback (ZH)
+    # Explicit memory requests (ZH)
     ("feedback", re.compile(
-        r"(?:不要|记住|请记得|请不要|以后)",
+        r"(?:记住|请记得|不要再|以后都|以后不要)",
     )),
-    # Decisions
+    # Team/project decisions
     ("project", re.compile(
-        r"(?:we|I)\s+(?:decided|agreed|chose|will\s+use|settled\s+on)\s+",
-        re.IGNORECASE,
-    )),
-    # Project facts
-    ("project", re.compile(
-        r"(?:the\s+project|this\s+project|our\s+project|the\s+codebase)"
-        r"\s+(?:uses?|needs?|requires?|depends?\s+on)\s+",
+        r"\b(?:we\s+(?:decided|agreed|settled)\s+(?:to|on)\s+"
+        r"|the\s+project\s+(?:uses|requires)\s+)",
         re.IGNORECASE,
     )),
 ]
@@ -134,11 +129,12 @@ def _match_patterns(text: str) -> str | None:
 
 
 def _serialize_memory(mem_type: str, name: str, description: str, content: str) -> str:
+    safe_desc = description.replace("\\", "\\\\").replace('"', '\\"')
     body = content if content.endswith("\n") else content + "\n"
     return (
         "---\n"
         f"name: {name}\n"
-        f"description: {description}\n"
+        f'description: "{safe_desc}"\n'
         f"type: {mem_type}\n"
         "---\n\n"
         f"{body}"
@@ -147,30 +143,23 @@ def _serialize_memory(mem_type: str, name: str, description: str, content: str) 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     base_path = _resolve_base(api.cwd, config.get("path", ".agentm/memory"))
+    cwd_path = Path(api.cwd).resolve()
     file_ops = api.get_operations().file
+    writer = api.get_resource_writer()
 
-    # Session-scoped dedup set: names already extracted this session.
     extracted_names: set[str] = set()
-
-    # Prefetch cache: keyed by hash of last user message text.
     prefetch_cache: dict[str, str] = {}
-
-    # Memory index cache: (mtime_proxy, entries). mtime_proxy is bumped
-    # after every write so we know when to re-scan.
     index_state: dict[str, Any] = {"version": 0, "entries": []}
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    async def _ensure_dir() -> None:
-        """Create the memory directory if it does not exist."""
-        def _mkdir() -> None:
-            base_path.mkdir(parents=True, exist_ok=True)
+    def _to_cwd_relative(path: Path) -> str:
         try:
-            await asyncio.to_thread(_mkdir)
-        except Exception:
-            pass
+            return str(path.resolve().relative_to(cwd_path))
+        except ValueError:
+            return str(path)
 
     async def _list_memory_files() -> list[Path]:
         try:
@@ -203,10 +192,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             for name, mem_type, desc in entries
         ]
         body = "\n".join(lines) + ("\n" if lines else "")
-        def _write_index() -> None:
-            (base_path / "MEMORY.md").write_bytes(body.encode("utf-8"))
+        rel = _to_cwd_relative(base_path / "MEMORY.md")
         try:
-            await asyncio.to_thread(_write_index)
+            await writer.write(rel, body.encode("utf-8"), rationale="memory_lifecycle_index_rebuild")
         except Exception:
             pass
 
@@ -237,15 +225,17 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         filename = f"{mem_type}_{name}.md"
         filepath = base_path / filename
         body = _serialize_memory(mem_type, name, description, content)
-        def _do_write() -> None:
-            filepath.write_bytes(body.encode("utf-8"))
+        rel = _to_cwd_relative(filepath)
         try:
-            await _ensure_dir()
-            await asyncio.to_thread(_do_write)
+            result = await writer.write(rel, body.encode("utf-8"), rationale="memory_lifecycle_auto_extract")
+            if getattr(result, "error", None) is not None:
+                logger.debug("memory_lifecycle: write failed: %s", result.error)
+                return False
         except Exception:
             logger.debug("memory_lifecycle: failed to write %s", filepath)
             return False
         index_state["version"] += 1
+        prefetch_cache.clear()
         await _rebuild_index()
         return True
 
@@ -258,10 +248,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return
 
         slug = _slugify(user_text)
-        ts = str(int(time.time()))
+        ts = str(time.time_ns())
         name = f"auto-{slug}-{ts}"
-        # Sanitise to valid memory name chars
-        name = re.sub(r"[^A-Za-z0-9_-]", "-", name)
+        name = re.sub(r"[^A-Za-z0-9_一-鿿-]", "-", name)
 
         if name in extracted_names:
             return
@@ -312,6 +301,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return
 
         cache_key = str(hash(user_text))
+        if len(prefetch_cache) > _MAX_PREFETCH_CACHE:
+            prefetch_cache.clear()
         cached = prefetch_cache.get(cache_key)
         if cached is not None:
             if cached:
