@@ -52,55 +52,81 @@ other way (B calls A) — expected, because a broken dependency A drags
 down its caller B. So impact `A → B` normally rides on a call `B → A`;
 the reversed call CONFIRMS the edge, it never refutes it.
 
-## Judging a candidate edge A → B
+## Judging a candidate edge A → B — reason, don't pattern-match
 
-Tell the causal story and check it with SQL: does A's fault,
-mechanism-propagated through the A–B connection, produce B's observed
-abnormal-window state? You need
+Tell the causal story from the mechanism, then ask whether the data
+actually bears it out. Two things must hold:
 
-- a direct call relationship between A and B (look in the NORMAL window,
-  EITHER direction — they just have to be wired together);
-- A is a fault source (an injection target, or already shown impacted, so
-  the chain runs through it);
-- B shows the abnormal-window symptom the mechanism PREDICTS (whatever it
-  is — throughput collapse, latency, errors, retries).
+- A and B are DIRECTLY connected — a call (NORMAL window, either
+  direction) or a shared k8s deployment/node. With no physical path there
+  is no edge.
+- A is a fault source (the injection target, or already shown dragged
+  down so the chain runs through it), AND B's abnormal-window behaviour,
+  read AS A WHOLE against its own baseline, is what "A's fault dragging B
+  down" would actually look like.
 
-If the predicted consequence is there → keep the edge (write the SQL). If
-the data contradicts the mechanism → drop it. Co-occurrence alone (two
-services both look off but never call each other) is never an edge.
+That second judgement is not a checklist — do NOT scan for any single
+metric that moved and call it a hit. Look at B's whole picture together
+(latency, errors, throughput, where B sits relative to A on the call
+path, the timing) and decide: does it cohere into "B was dragged down by
+A", or is B just behaving normally — or even better — under a different
+overall load? One dipping number inside an otherwise unchanged-or-improved
+picture is not degradation; it is noise or the environment. If the story
+and the data genuinely agree, keep the edge and write the SQL; if the
+data does not show B actually suffering, drop it, even if the label
+asserts it.
 
-## Propagation is transitive
+Two things to reason past (not rules to memorise):
+- the abnormal window can carry different total load than the normal one,
+  so a change B shares with the whole system is the environment, not your
+  fault. Separate fault-induced degradation from system-wide drift by
+  asking how B moved relative to its baseline AND relative to how the
+  rest of the system moved.
+- co-occurrence — two services both looking off but never touching — is
+  never an edge.
 
-Impact spreads as a GROWING affected frontier, not a star around the
-injection target. Begin with the target as the only affected node;
-confirm each direct neighbour; then treat THAT neighbour as itself
-affected and look at ITS neighbours next. The `from` of an edge is
-whichever already-affected service sits on the dependency side of the
-hop — **not always the injection target**. A second- or third-hop `from`
-is normal; rejecting an edge merely because `from` is not the injection
-target is the most common mistake. Keep extending toward the user-facing
-entry tier until the mechanism's symptom no longer appears.
+## Propagation spreads only as far as the damage actually reaches
+
+Impact is a growing frontier, not a star: the target is dragged down,
+then whoever depends on it, then their dependents. The `from` of a hop is
+whichever already-dragged-down service sits on the dependency side —
+**not always the injection target** (rejecting an edge merely because
+`from` is not the target is a classic mistake).
+
+Follow the damage outward ONLY as far as it genuinely reaches. At each
+hop ask whether the next service is actually suffering because this one
+is; when the answer becomes no, the frontier ends there — that is the
+real blast radius. Reaching the user-facing entry tier is an OUTCOME, not
+a goal: some faults ride all the way to the entry, others attenuate
+before it (an outage often leaves the entry merely serving fewer or
+faster requests — which is not degradation). If your graph stops short of
+the entry, decide honestly which case you are in — you have not finished
+tracing the real failures, or the impact truly dies out here — and never
+invent a node with no real degradation just to reach further.
 
 ## Effectiveness, per injection
 
-When several faults were injected, judge each on its own signals. A weak
-or non-materialised injection (e.g. a CPU stress with no observed CPU
-rise and no downstream effect) did not engage and must NOT be a
-propagation source — leave its edges out even if the labels include them.
+When several faults were injected, judge each on its own merits by the
+same reasoning: from the mechanism, what should this injection have done
+to its own target, and does the target's data bear that out? An injection
+whose target shows no genuine sign of the fault did not engage and must
+NOT be used as a propagation source — leave its edges out even if the
+labels include them.
 
 ## Everything is a query — points and edges
 
 The graph you submit is built only from queryable facts. Two SQL-backed
 pieces, both re-executed after you submit (each must run and return rows):
 
-- a **node** (`propagation_nodes`) is a service proven to have degraded.
+- a **node** (`propagation_nodes`) is a service you have JUDGED to be
+  genuinely dragged down by the fault (per "Judging a candidate edge").
   Its `symptom_sql` returns the NORMAL and the ABNORMAL window side by
   side (e.g. `... WHERE <normal window> UNION ALL ... WHERE <abnormal
-  window>`) so the delta is visible. The rows must show the service got
-  WORSE in the abnormal window — higher latency (p95/p99), errors, or a
-  throughput/completed-span collapse. A metric that is flat or IMPROVED
-  is not a symptom: that service is not a node. (rate's p99 falling is
-  evidence AGAINST, not for.)
+  window>`) so the delta is visible, and the rows must actually bear out
+  that judgement — the whole picture, the way the mechanism predicts, not
+  one cherry-picked metric. A service whose overall behaviour is
+  unchanged or improved is not a node, however much one number you could
+  point at dipped.
 - an **edge** (`propagation_edges`) is a directed hop `from → to` between
   two nodes. Its `relationship_sql` proves the two services are DIRECTLY
   connected — a trace parent/child call (either direction; look in the

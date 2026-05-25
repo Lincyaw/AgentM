@@ -75,16 +75,19 @@ extensions:
         queryable facts — every node and every edge carries a SQL that is
         re-executed after you submit (it must run and return rows):
 
-        - `injection_effective` (true / false / ambiguous) — whether each
-          injection's expected signal appears on the injection TARGET itself
-          in the abnormal window, with a free-text rationale. Judge each
-          injected fault on its own signal; a weak / non-materialised
-          injection (target metric flat) must NOT be a propagation source.
-        - `propagation_nodes` — every service proven to have degraded. Each
-          carries a `symptom_sql` returning the normal AND abnormal window
-          side by side (delta visible) showing the service got WORSE
-          (latency / errors / throughput collapse). Flat or improved = not a
-          node.
+        - `injection_effective` (true / false / ambiguous) — reason from the
+          mechanism what this injection should have done to its TARGET, then
+          judge from the data whether the target bears that out. Free-text
+          rationale. An injection whose target shows no genuine sign of the
+          fault did not engage and must NOT be a propagation source.
+        - `propagation_nodes` — every service you JUDGE to have been genuinely
+          dragged down by the fault. Each carries a `symptom_sql` returning
+          the normal AND abnormal window side by side (delta visible). Judge
+          the whole picture against baseline the way the mechanism predicts —
+          NOT a checklist; a service whose overall behaviour is unchanged or
+          improved is not a node, however much one cherry-picked metric
+          dipped. Distinguish fault-induced degradation from system-wide load
+          drift (a change shared by the whole system is the environment).
         - `propagation_edges` — directed hops `from_service → to_service`
           between nodes, where `from`'s anomaly CAUSES `to`'s. This is the
           fault-impact direction, the OPPOSITE of the request-call direction
@@ -93,6 +96,9 @@ extensions:
           carries a `relationship_sql` proving the two services are directly
           connected (trace parent/child call, or shared k8s deployment).
           BOTH endpoints of every edge must also be `propagation_nodes`.
+          Follow the damage only as far as it genuinely reaches; reaching the
+          entry tier is an outcome, not a goal — never invent a symptomless
+          node to extend further.
 
         Service names must match the parquet `service_name` column exactly.
         Synthetic load generators are not services. Emit one tool_call per
