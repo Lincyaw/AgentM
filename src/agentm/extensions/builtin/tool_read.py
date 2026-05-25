@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
-from pathlib import Path
+from pathlib import PurePath, Path
 from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
@@ -58,6 +58,36 @@ _PARAMETERS: Final = {
 }
 
 
+_BINARY_EXTENSIONS: Final[frozenset[str]] = frozenset({
+    # Video
+    ".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv",
+    # Audio
+    ".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a",
+    # Image
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp", ".ico", ".svg",
+    # Archive
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
+    # Binary / native
+    ".bin", ".exe", ".dll", ".so", ".dylib", ".o", ".a", ".pyc", ".class",
+    # Documents
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    # Database
+    ".sqlite", ".db",
+})
+
+
+def _check_binary(path: str) -> str | None:
+    """Return an error string if *path* looks like a binary file, else None."""
+    ext = PurePath(path).suffix.lower()
+    if ext in _BINARY_EXTENSIONS:
+        return (
+            f"Cannot read binary file {path!r} ({ext} format). "
+            "Use bash to inspect metadata (e.g. `file <path>`, `ls -la <path>`) "
+            "or process it with appropriate tools."
+        )
+    return None
+
+
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     file_ops = _coerce_file_ops(api, config.get("file_ops"))
     allow_globs = _coerce_globs(config.get("allow_globs"), api.cwd)
@@ -71,6 +101,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         gate_error = _check_path_allowed(path, allow_globs, deny_globs)
         if gate_error is not None:
             return _error(gate_error)
+
+        binary_error = _check_binary(path)
+        if binary_error is not None:
+            return _error(binary_error)
 
         try:
             data = await file_ops.read_file(path)
