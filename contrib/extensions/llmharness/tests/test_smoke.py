@@ -12,11 +12,6 @@ import pytest
 
 from llmharness.audit.auditor.output import AuditorOutputError, RawVerdictOutput
 
-
-
-
-
-
 # --- RawVerdictOutput negative cases ---
 
 
@@ -36,7 +31,6 @@ def test_raw_verdict_surface_reminder_not_bool() -> None:
                     "reminder_text": "hello",
                     "continuation_notes": [],
                     "matched_event_ids": [],
-                    "cited_cards": [],
                 }
             }
         )
@@ -52,7 +46,6 @@ def test_raw_verdict_surface_reminder_true_empty_text() -> None:
                     "reminder_text": "",
                     "continuation_notes": [],
                     "matched_event_ids": [],
-                    "cited_cards": [],
                 }
             }
         )
@@ -70,7 +63,6 @@ def test_raw_verdict_continuation_notes_not_list_of_strings() -> None:
                     "reminder_text": "",
                     "continuation_notes": [1, 2, 3],
                     "matched_event_ids": [],
-                    "cited_cards": [],
                 }
             }
         )

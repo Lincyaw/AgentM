@@ -178,7 +178,6 @@ MANIFEST = ExtensionManifest(
                     "force-included."
                 ),
             },
-            "cards_tools_config": {"type": ["object", "null"]},
             "observability_config": {"type": ["object", "null"]},
             "shutdown_timeout_s": {
                 "type": "number",
@@ -467,9 +466,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     if shutdown_timeout < 0:
         shutdown_timeout = _DEFAULT_SHUTDOWN_TIMEOUT_S
 
-    cards_cfg_raw = config.get("cards_tools_config", {})
     obs_cfg_raw = config.get("observability_config", {})
-    cards_cfg = cards_cfg_raw if isinstance(cards_cfg_raw, dict) else None
     obs_cfg = obs_cfg_raw if isinstance(obs_cfg_raw, dict) else None
 
     prompt_extractor_raw = config.get("prompt_override_extractor")
@@ -513,12 +510,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     extractor_extensions = compose_extractor_extensions(
         base_prompt=extractor_base_prompt,
-        cards_tools_config=cards_cfg,
         observability_config=obs_cfg,
     )
     extractor_compose_kwargs = {
         "base_prompt": extractor_base_prompt,
-        "cards_tools_config": cards_cfg,
         "observability_config": obs_cfg,
     }
     api.set_service(
@@ -531,7 +526,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     )
     auditor_settings = AuditorSettings(
         base_prompt=auditor_base_prompt,
-        cards_tools_config=cards_cfg,
         observability_config=obs_cfg,
         summary_threshold=summary_threshold,
         tools=auditor_tools,

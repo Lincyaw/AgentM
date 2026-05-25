@@ -60,7 +60,6 @@ Call `submit_verdict` exactly once. Do not emit JSON in trailing text.
 - `continuation_notes`: short notes for your next firing — what scope is
   open, what you're watching. Always at least one.
 - `matched_event_ids`: ids that materially supported the verdict.
-- `cited_cards`: empty unless AFC cards were consulted.
 
 Before `surface_reminder=true`, self-check:
 - Is the gap real and concrete, or am I being noisy?

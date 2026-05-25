@@ -41,7 +41,6 @@ _AUDITOR_TOOLS_MODULE = "llmharness.audit.auditor.atom"
 def compose_auditor_extensions(
     *,
     base_prompt: str | None = None,
-    cards_tools_config: dict[str, Any] | None = UNSET,
     observability_config: dict[str, Any] | None = UNSET,
     trajectory_snapshot: list[dict[str, Any]] | None = None,
     events: tuple[Event, ...] | None = None,
@@ -109,7 +108,6 @@ def compose_auditor_extensions(
         submit_tool_module=_AUDITOR_TOOLS_MODULE,
         default_prompt=prompt_text,
         prompt_override=None,
-        cards_tools_config=cards_tools_config,
         observability_config=observability_config,
         submit_tool_config=auditor_tools_cfg,
     )

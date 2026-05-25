@@ -9,8 +9,8 @@ This module gives the adapter a typed view over that dict — coercing it
 to a :class:`llmharness.schema.Verdict` so downstream code never sees
 ``Any``.
 
-V2 shape (design §6.2): ``surface_reminder``, ``reminder_text``,
-``continuation_notes``, ``matched_event_ids``, ``cited_cards``.
+Verdict shape (design §6.2): ``surface_reminder``, ``reminder_text``,
+``continuation_notes``, ``matched_event_ids``.
 No ``drift`` field, no ``DriftType`` enum, no ``downstream_reaction``.
 
 A malformed payload (missing ``verdict`` object, missing / non-bool
@@ -51,7 +51,6 @@ class RawVerdictOutput:
     reminder_text: str
     continuation_notes: list[str]
     matched_event_ids: list[int]
-    cited_cards: list[str]
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> RawVerdictOutput:
@@ -62,8 +61,7 @@ class RawVerdictOutput:
         - missing or non-bool ``surface_reminder`` field,
         - ``surface_reminder=True`` with empty or whitespace-only ``reminder_text``,
         - ``continuation_notes`` not a list of strings,
-        - ``matched_event_ids`` not a list of ints,
-        - ``cited_cards`` not a list of strings.
+        - ``matched_event_ids`` not a list of ints.
         """
         verdict_raw = raw.get("verdict")
         if not isinstance(verdict_raw, dict):
@@ -102,16 +100,11 @@ class RawVerdictOutput:
                 "submit_verdict.verdict.matched_event_ids must be a list of integers"
             )
 
-        cards_raw = verdict_raw.get("cited_cards", [])
-        if not isinstance(cards_raw, list) or not all(isinstance(c, str) for c in cards_raw):
-            raise AuditorOutputError("submit_verdict.verdict.cited_cards must be a list of strings")
-
         return cls(
             surface_reminder=surface_reminder_raw,
             reminder_text=reminder_text_raw,
             continuation_notes=list(notes_raw),
             matched_event_ids=list(matched_raw),
-            cited_cards=list(cards_raw),
         )
 
     def to_verdict(self) -> Verdict:
@@ -121,7 +114,6 @@ class RawVerdictOutput:
             reminder_text=self.reminder_text,
             continuation_notes=list(self.continuation_notes),
             matched_event_ids=list(self.matched_event_ids),
-            cited_cards=list(self.cited_cards),
         )
 
 

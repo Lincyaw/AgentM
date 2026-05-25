@@ -83,7 +83,6 @@ def _write_audit_record(
             "reminder_text": reminder,
             "continuation_notes": [],
             "matched_event_ids": [],
-            "cited_cards": [],
         },
         status="ok",
     )

@@ -37,9 +37,9 @@ V3 breaking changes (issue #134, 2026-05-10):
   source-turn tuples — see design §4.c, §7.1.
 - New ``Finding`` dataclass — output shape for scenario-registered
   audit checks (see ``audit/registry.py``, design §4.c).
-- ``Verdict`` shape is unchanged from v2 (design §6.2 / decision #9):
+- ``Verdict`` shape (design §6.2 / decision #9):
   ``surface_reminder``, ``reminder_text``, ``continuation_notes``,
-  ``matched_event_ids``, ``cited_cards``.
+  ``matched_event_ids``.
 
 V2 breaking changes carried forward unchanged:
 - ``DriftType`` enum stays removed. ``Reminder.type`` stays removed.
@@ -245,7 +245,6 @@ class Verdict:
     reminder_text: str = ""
     continuation_notes: list[str] = field(default_factory=list)
     matched_event_ids: list[int] = field(default_factory=list)
-    cited_cards: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -253,7 +252,6 @@ class Verdict:
             "reminder_text": self.reminder_text,
             "continuation_notes": list(self.continuation_notes),
             "matched_event_ids": list(self.matched_event_ids),
-            "cited_cards": list(self.cited_cards),
         }
 
     @classmethod
@@ -263,7 +261,6 @@ class Verdict:
             reminder_text=str(data.get("reminder_text", "")),
             continuation_notes=[str(n) for n in (data.get("continuation_notes") or [])],
             matched_event_ids=list(data.get("matched_event_ids") or []),
-            cited_cards=[str(c) for c in (data.get("cited_cards") or [])],
         )
 
 

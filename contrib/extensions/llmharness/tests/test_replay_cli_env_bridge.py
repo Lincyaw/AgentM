@@ -14,12 +14,6 @@ import pytest
 from llmharness.replay.cli import _parse_provider
 
 
-
-
-
-
-
-
 def test_parse_provider_explicit_json_skips_env_bridge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

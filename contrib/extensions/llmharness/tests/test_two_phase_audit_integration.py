@@ -298,7 +298,6 @@ def _submit_verdict_call() -> AssistantMessage:
                         "reminder_text": "",
                         "continuation_notes": ["stub auditor saw the graph"],
                         "matched_event_ids": [],
-                        "cited_cards": [],
                     }
                 },
             )
@@ -351,7 +350,6 @@ def _build_session_config(*, cwd: str, provider_module: str) -> AgentSessionConf
                 {
                     "mode": "sync",
                     "audit_interval_turns": 100,  # auditor never fires
-                    "cards_tools_config": None,
                     "observability_config": None,
                 },
             ),
@@ -373,7 +371,6 @@ def _build_interval_session_config(
             "mode": "sync",
             "extractor_interval_turns": interval_turns,
             "audit_interval_turns": interval_turns,
-            "cards_tools_config": None,
             "observability_config": None,
         },
     )

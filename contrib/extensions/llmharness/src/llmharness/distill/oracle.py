@@ -325,7 +325,6 @@ async def label_auditor_record(
             "reminder_text": "",
             "continuation_notes": list(label.continuation_notes),
             "matched_event_ids": [],
-            "cited_cards": [],
         }
         return LabeledSample(
             sample_id=sample_id,
@@ -399,7 +398,6 @@ async def label_auditor_record(
         "reminder_text": rewrite.reminder_text,
         "continuation_notes": list(label.continuation_notes),
         "matched_event_ids": list(matched),
-        "cited_cards": [],
     }
     return LabeledSample(
         sample_id=sample_id,

@@ -139,7 +139,6 @@ class _NodeAddingStubChildRunner:
             reminder_text="",
             continuation_notes=[],
             matched_event_ids=[],
-            cited_cards=[],
         )
         return AuditorChildResult(verdict=verdict, raw_blocks=[])
 
@@ -181,7 +180,6 @@ async def test_replay_pipeline_honors_seed_cumulative_and_start_turn(tmp_path: P
     )
     auditor_settings = AuditorSettings(
         base_prompt="stub",
-        cards_tools_config=None,
         observability_config=None,
         summary_threshold=30,
         tools=(),

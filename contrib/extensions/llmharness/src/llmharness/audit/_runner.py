@@ -97,7 +97,6 @@ class ExtractorSettings:
         )
         extensions = compose_extractor_extensions(
             base_prompt=effective_prompt,
-            cards_tools_config=ck.get("cards_tools_config"),
             observability_config=ck.get("observability_config"),
         )
         return cls(extensions=extensions, compose_kwargs=ck)
@@ -126,12 +125,10 @@ class ExtractorSettings:
         base_prompt = load_extractor_prompt("default")
         compose_kwargs: dict[str, Any] = {
             "base_prompt": base_prompt,
-            "cards_tools_config": None,
             "observability_config": {},
         }
         extensions = compose_extractor_extensions(
             base_prompt=base_prompt,
-            cards_tools_config=None,
             observability_config={},
         )
         return cls(extensions=extensions, compose_kwargs=compose_kwargs)
@@ -146,7 +143,6 @@ class AuditorSettings:
     """
 
     base_prompt: str
-    cards_tools_config: dict[str, Any] | None
     observability_config: dict[str, Any] | None
     summary_threshold: int
     tools: tuple[str, ...]
@@ -173,7 +169,6 @@ class AuditorSettings:
         )
         return cls(
             base_prompt=effective_prompt or "",
-            cards_tools_config=ck.get("cards_tools_config"),
             observability_config=ck.get("observability_config"),
             summary_threshold=int(ck.get("summary_threshold", 30)),
             tools=tools_tuple,
@@ -190,7 +185,6 @@ class AuditorSettings:
         """
         return cls(
             base_prompt="",
-            cards_tools_config=None,
             observability_config=None,
             summary_threshold=30,
             tools=(SUBMIT_VERDICT_TOOL_NAME,),
@@ -216,7 +210,6 @@ class AuditorSettings:
 
         return cls(
             base_prompt=load_auditor_prompt("minimal"),
-            cards_tools_config=None,
             observability_config={},
             summary_threshold=30,
             tools=(SUBMIT_VERDICT_TOOL_NAME,),
@@ -1123,7 +1116,6 @@ class HarnessRunner:
 
         firing_extensions = compose_auditor_extensions(
             base_prompt=self._auditor_settings.base_prompt,
-            cards_tools_config=self._auditor_settings.cards_tools_config,
             observability_config=self._auditor_settings.observability_config,
             trajectory_snapshot=trajectory_snapshot,
             events=events_tuple,
@@ -1144,7 +1136,6 @@ class HarnessRunner:
         # round-trip.
         replay_compose_kwargs: dict[str, Any] = {
             "base_prompt": self._auditor_settings.base_prompt,
-            "cards_tools_config": self._auditor_settings.cards_tools_config,
             "observability_config": self._auditor_settings.observability_config,
             "trajectory_snapshot": trajectory_snapshot,
             "events": [e.to_dict() for e in events_tuple],
@@ -1378,7 +1369,6 @@ class HarnessRunner:
         s = self._auditor_settings
         extensions = compose_auditor_extensions(
             base_prompt=s.base_prompt or None,
-            cards_tools_config=s.cards_tools_config,
             observability_config=s.observability_config,
             trajectory_snapshot=ck.get("trajectory_snapshot"),
             events=tuple(_coerce_schema_list(Event, ck.get("events") or [])),

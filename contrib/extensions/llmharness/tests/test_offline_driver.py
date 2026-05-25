@@ -143,7 +143,6 @@ class _StubChildRunner:
             reminder_text="",
             continuation_notes=[f"audit-call-{self.auditor_calls}"],
             matched_event_ids=[],
-            cited_cards=[],
         )
         raw_block = {
             "type": "tool_call",
@@ -185,7 +184,6 @@ class _SurfacingStubChildRunner(_StubChildRunner):
             reminder_text="halt",
             continuation_notes=[],
             matched_event_ids=[],
-            cited_cards=[],
         )
         raw_block = {
             "type": "tool_call",
@@ -216,7 +214,6 @@ async def test_replay_pipeline_breaks_on_first_surface(tmp_path: Path) -> None:
     )
     auditor_settings = AuditorSettings(
         base_prompt="stub-auditor-prompt",
-        cards_tools_config=None,
         observability_config=None,
         summary_threshold=30,
         tools=(),
