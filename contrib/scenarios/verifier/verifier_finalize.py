@@ -155,10 +155,12 @@ class PropagationEdge(BaseModel):
         "appear in propagation_nodes. Not a synthetic load generator."
     )
     relationship_sql: str = Field(
-        description="ONE DuckDB SELECT that returns rows proving from_service "
-        "and to_service are DIRECTLY connected — a trace parent/child call "
-        "(either direction; look in the normal window) or a shared k8s "
-        "deployment/node relationship. This proves the edge can carry impact."
+        description="ONE DuckDB SELECT proving a real path between the two "
+        "services — a span parent/child call chain (direct, or one an ancestor "
+        "of the other via parent_span_id=span_id) or a shared k8s "
+        "deployment/node. NOT mere same-trace co-occurrence (a trace holds "
+        "parallel siblings that never call each other). Proves the edge can "
+        "carry impact."
     )
     claim: str = Field(
         description="<=25-word statement of the connection and why from's "

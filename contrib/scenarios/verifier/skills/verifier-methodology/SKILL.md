@@ -60,14 +60,41 @@ other way (B calls A) — expected, because a broken dependency A drags
 down its caller B. So impact `A → B` normally rides on a call `B → A`;
 the reversed call CONFIRMS the edge, it never refutes it.
 
+## What counts as a connection — call vs deployment
+
+For impact to travel from one service to another there must be a real
+physical path between them. Two kinds, both provable by SQL; mere
+co-occurrence is NEITHER:
+
+- **Call relationship** — proven by the span parent/child chain:
+  `child.parent_span_id = parent.span_id` within one trace. A DIRECT call
+  is one such hop (`B`'s span is the direct parent of `A`'s); a
+  TRANSITIVE dependency is a chain of them — `B` is an ANCESTOR of `A` in
+  the span tree, i.e. `B`'s request passes through `A`. Either supports an
+  impact edge `A → B` (A's failure can reach B through that path).
+- **Deployment relationship** — the two services share infrastructure
+  that couples their fate: the same k8s node/host, or co-located
+  pods/containers (read the k8s attributes on the spans / metrics). This
+  is the path for faults that travel through the platform (node pressure,
+  noisy neighbour) rather than the call graph.
+
+What is NOT a connection: two services merely sharing a `trace_id`. A
+trace is ONE request's entire span tree, so it also contains PARALLEL
+SIBLINGS that never call each other — e.g. `checkout` calls both
+`payment` and `shipping`, so they share every trace, yet `payment`'s
+failure cannot reach `shipping`. Same-trace membership proves nothing on
+its own; you must show the parent/child chain (direct or ancestor) or a
+deployment coupling.
+
 ## Judging a candidate edge A → B — reason, don't pattern-match
 
 Tell the causal story from the mechanism, then ask whether the data
 actually bears it out. Two things must hold:
 
-- A and B are DIRECTLY connected — a call (NORMAL window, either
-  direction) or a shared k8s deployment/node. With no physical path there
-  is no edge.
+- A and B are connected by a real path — a call chain (direct parent/
+  child, or B an ancestor of A in the span tree) or a shared k8s
+  deployment, per "What counts as a connection"; NOT mere same-trace
+  co-occurrence. With no physical path there is no edge.
 - A is a fault source (the injection target, or already shown dragged
   down so the chain runs through it), AND B's abnormal-window behaviour,
   read AS A WHOLE against its own baseline, is what "A's fault dragging B
@@ -141,10 +168,11 @@ pieces, both re-executed after you submit (each must run and return rows):
   metric. A service whose overall behaviour is unchanged or improved is
   not a node, however much one number you could point at dipped.
 - an **edge** (`propagation_edges`) is a directed hop `from → to` between
-  two nodes. Its `relationship_sql` proves the two services are DIRECTLY
-  connected — a trace parent/child call (either direction; look in the
-  normal window) or a shared k8s deployment/node. This proves the edge
-  can physically carry impact.
+  two nodes. Its `relationship_sql` proves a real path between them — a
+  parent/child call chain (direct, or one an ancestor of the other in the
+  span tree) or a shared k8s deployment — per "What counts as a
+  connection". Same-trace co-occurrence does NOT count. This proves the
+  edge can physically carry impact.
 
 Both endpoints of every edge MUST also appear in `propagation_nodes`
 (both must be independently proven symptomatic) — submission is rejected
