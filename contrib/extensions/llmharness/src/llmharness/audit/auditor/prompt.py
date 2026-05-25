@@ -2,17 +2,15 @@
 
 The framing text — trust-asymmetry, reminder bar, lenses, verdict
 shape — lives in markdown files under :mod:`audit.auditor.prompts`.
-Pick a variant by name (e.g. ``"minimal"``, ``"full"``) or by an
-absolute path. The dynamic per-firing data (events / edges / phases /
-findings / continuation notes) is appended on top of the chosen
-framing inside :func:`build_auditor_system_prompt`.
+Pick a variant by name (e.g. ``"minimal"``) or by an absolute path.
+The dynamic per-firing data (events / edges / phases / findings /
+continuation notes) is appended on top of the chosen framing inside
+:func:`build_auditor_system_prompt`.
 
 Available named variants:
 
 * ``minimal`` (default) — pairs with the ``minimal`` profile (only
   ``submit_verdict``). No drill-down references.
-* ``full`` — pairs with the ``with_drill_down`` profile. Mentions
-  ``get_event_detail`` / ``get_turn``.
 
 Drop in a new variant by adding ``audit/auditor/prompts/auditor_<name>.md``
 and pointing the adapter config at it; no code change needed.
