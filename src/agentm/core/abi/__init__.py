@@ -118,6 +118,7 @@ from agentm.core.runtime.otel_export import SessionTelemetry  # noqa: E402
 # ABI. The runtime impl stays in ``core.runtime.trace_reader``.
 from agentm.core.runtime.trace_reader import (  # noqa: E402
     LogRecord,
+    SessionIdentity,
     Span,
     TraceReader,
     attr,
@@ -145,6 +146,7 @@ __all__ = [
     # trace reader (re-exported from core.runtime.trace_reader — atoms
     # use this to read the OTLP/JSON event log without violating §11).
     "LogRecord",
+    "SessionIdentity",
     "Span",
     "TraceReader",
     "attr",

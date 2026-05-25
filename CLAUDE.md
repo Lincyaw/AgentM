@@ -13,8 +13,8 @@ mechanism; every policy is a replaceable atom. Boundary contract in
 
 - `agentm "<prompt>"` — one-shot prompt (default scenario `general_purpose`).
 - `agentm trace …` — query the OTLP/JSON session log
-  (`messages` · `turns` · `tools` · `chats` · `info`); preferred over
-  hand-parsing `.agentm/observability/*.jsonl`.
+  (`messages` · `turns` · `tools` · `chats` · `info` · `index`); preferred
+  over hand-parsing `.agentm/observability/*.jsonl`.
 - Channel CLIs: `agentm-gateway`, `agentm-worker`, `agentm-terminal`,
   `agentm-feishu`.
 - Shared `AGENTM_*` env namespace; `.env` autoloaded; precedence
@@ -22,6 +22,32 @@ mechanism; every policy is a replaceable atom. Boundary contract in
   are **not** supported. Run `<cli> --help` for flags.
 - Optional extra: `uv sync --extra agent-env` installs `arl-env` for the
   `operations_agent_env` atom (ARL-sandboxed Operations).
+
+### Trace debugging combos
+
+A logical trace spans many JSONL files — one root session + N spawned
+children (`purpose` distinguishes `root` / `cognitive_audit_extractor` /
+`cognitive_audit_auditor`). Composition pattern:
+
+- `agentm trace index` is the **selection layer**: it scans the
+  observability dir and emits one identity row per session file
+  (`{path, trace_id, session_id, parent_session_id, purpose, scenario,
+  records}`). It maps a `trace_id` — the id `eval.db.evaluation_data.trace_id`
+  stores — to its session files. It's the **only** directory-granular verb;
+  every other verb stays single-file by design (`--file`/`--session`/`--latest`).
+- Idiom: `index --format ndjson | jq 'select(.trace_id==…)' | <loop per .path>
+  agentm trace {tools,messages,…} --file "$f" --format ndjson | jq …`.
+- Canonical example — extract auditor verdicts across one trace:
+
+  ```bash
+  TID=dfc09e403bd64ca59c01bfa805962526
+  agentm trace index --format ndjson \
+   | jq -r --arg t "$TID" 'select(.trace_id==$t and .purpose=="cognitive_audit_auditor")|.path' \
+   | while read f; do agentm trace tools --file "$f" --tool submit_verdict --format ndjson; done \
+   | jq -c '.args.verdict|{fired:.surface_reminder, reminder:.reminder_text}'
+  ```
+
+  Filtering is the consumer's job (jq) — `index` has no `--trace` flag.
 
 ## Repo exploration
 

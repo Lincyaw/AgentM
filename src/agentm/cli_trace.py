@@ -27,7 +27,7 @@ from typing import Annotated, Any, Callable, TextIO
 
 import typer
 
-from agentm.core.abi import LogRecord, Span, TraceReader
+from agentm.core.abi import LogRecord, SessionIdentity, Span, TraceReader
 
 app = typer.Typer(
     name="trace",
@@ -1125,6 +1125,103 @@ def stats_cmd(
         else:  # ndjson
             sink.write(json.dumps(summary, ensure_ascii=False))
             sink.write("\n")
+    finally:
+        if close:
+            sink.close()
+
+
+# ---------- index (directory-granular session topology) ---------------------
+
+
+def _count_lines(path: Path) -> int | None:
+    """Cheap line count for a session file (proxy for record volume).
+
+    Returns ``None`` if the file can't be read — the identity fields are
+    the priority, so a missing count never blocks a row.
+    """
+
+    try:
+        with path.open("rb") as handle:
+            return sum(1 for _ in handle)
+    except OSError:
+        return None
+
+
+@app.command("index")
+def index_cmd(
+    cwd: CwdOpt = Path("."),
+    directory: Annotated[
+        Path | None,
+        typer.Option(
+            "--dir",
+            help="Observability directory to scan (default <cwd>/.agentm/observability/).",
+        ),
+    ] = None,
+    limit: LimitOpt = None,
+    fmt: FormatOpt = None,
+    out: OutputOpt = None,
+) -> None:
+    """Map every session file to its trace-tree identity (one row per file).
+
+    A logical "trace" spans many JSONL files — one root session plus N
+    spawned children (extractor / auditor / ...). This is the only
+    directory-granular verb: it scans the observability dir and emits one
+    identity row per ``agentm.session.start`` file, so jq + shell can go
+    from a ``trace_id`` to its session files. Files with no session.start
+    record are skipped. Filtering is the consumer's job — pipe through jq.
+
+    Each row: {path, trace_id, session_id, parent_session_id, purpose,
+    scenario, records}.
+
+    Examples:
+
+      agentm trace index --format ndjson | jq 'select(.trace_id=="…")'
+      agentm trace index --dir /path/to/.agentm/observability --format text
+    """
+
+    obs_dir = directory if directory is not None else cwd / ".agentm" / "observability"
+    if not obs_dir.is_dir():
+        _fail(
+            3,
+            "not_found",
+            f"observability directory not found: {obs_dir}",
+            "pass --dir, or cd into a run directory / pass --cwd",
+        )
+    sink, close = _open_output(out)
+    try:
+        chosen_fmt = _resolve_format(fmt, sink)
+
+        def _rows() -> Iterator[dict[str, Any]]:
+            for path in sorted(obs_dir.glob("*.jsonl")):
+                if not path.is_file():
+                    continue
+                identity: SessionIdentity | None = TraceReader(
+                    path
+                ).first_session_identity()
+                if identity is None:
+                    continue
+                yield {
+                    "path": str(path),
+                    "trace_id": identity.trace_id,
+                    "session_id": identity.session_id,
+                    "parent_session_id": identity.parent_session_id,
+                    "purpose": identity.purpose,
+                    "scenario": identity.scenario,
+                    "records": _count_lines(path),
+                }
+
+        def _render(d: dict[str, Any]) -> str:
+            return (
+                f"[session {d.get('session_id') or '?'}] "
+                f"trace={d.get('trace_id') or '?'} "
+                f"parent={d.get('parent_session_id') or '-'} "
+                f"purpose={d.get('purpose') or '-'} "
+                f"records={d.get('records') if d.get('records') is not None else '?'} "
+                f"{d['path']}"
+            )
+
+        n = _emit(_rows(), chosen_fmt, _render, sink, limit)
+        _info(f"{n} session file(s)")
     finally:
         if close:
             sink.close()
