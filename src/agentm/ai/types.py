@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -55,6 +56,7 @@ class ProviderDescriptor:
     base_url_env: str | None = None
     verify_ssl_env: str | None = None
     default_query_ticket_env: str | None = None
+    default_headers_env: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +160,20 @@ class ProviderRegistry:
             values["name"] = descriptor.id
         if descriptor.base_url_env and source.get(descriptor.base_url_env):
             values.setdefault("base_url", source[descriptor.base_url_env])
+        if descriptor.default_headers_env and source.get(descriptor.default_headers_env):
+            try:
+                headers = json.loads(source[descriptor.default_headers_env])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{descriptor.default_headers_env} must be a JSON object of "
+                    f"header name to string value: {exc}"
+                ) from exc
+            if not isinstance(headers, dict):
+                raise ValueError(
+                    f"{descriptor.default_headers_env} must be a JSON object, "
+                    f"got {type(headers).__name__}"
+                )
+            values.setdefault("default_headers", headers)
         if descriptor.default_query_ticket_env and source.get(
             descriptor.default_query_ticket_env
         ):
@@ -206,6 +222,7 @@ DEFAULT_PROVIDER_DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         extension_module="agentm.extensions.builtin.llm_anthropic",
         default_model="claude-sonnet-4-6",
         base_url_env="ANTHROPIC_BASE_URL",
+        default_headers_env="ANTHROPIC_DEFAULT_HEADERS",
     ),
     ProviderDescriptor(
         id="openai",

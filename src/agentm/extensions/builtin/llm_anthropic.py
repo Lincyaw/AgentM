@@ -91,6 +91,10 @@ MANIFEST = ExtensionManifest(
             },
             "api_key": {"type": "string"},
             "base_url": {"type": "string"},
+            "default_headers": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+            },
             "context_window": {"type": "integer", "minimum": 1},
             "max_output_tokens": {"type": "integer", "minimum": 1},
             "thinking_budgets": {
@@ -362,6 +366,7 @@ class AnthropicStreamFn:
 
     api_key: str | None = None
     base_url: str | None = None
+    default_headers: Mapping[str, str] | None = None
     thinking_budgets: Mapping[str, int] | None = None
     retry_policy: RetryPolicy | None = None
     client: AsyncAnthropic | None = None
@@ -389,6 +394,11 @@ class AnthropicStreamFn:
         kwargs: dict[str, Any] = {"api_key": api_key}
         if self.base_url is not None:
             kwargs["base_url"] = self.base_url
+        if self.default_headers:
+            # The SDK merges these last, so they override its built-in headers
+            # (e.g. ``User-Agent``) — used to present as a Claude-Code client to
+            # Anthropic-compatible "coding" endpoints that gate on it.
+            kwargs["default_headers"] = dict(self.default_headers)
         self.client = _AsyncAnthropic(**kwargs)
         return self.client
 
@@ -635,9 +645,16 @@ def install(api: Any, config: dict[str, Any]) -> None:
 
     api_key = config.get("api_key")
     base_url = config.get("base_url")
+    default_headers = config.get("default_headers")
+    if default_headers is not None and not isinstance(default_headers, Mapping):
+        raise ValueError(
+            "agentm.extensions.builtin.llm_anthropic.install: config['default_headers'] "
+            "must be a mapping of header name to string value."
+        )
     stream_fn = AnthropicStreamFn(
         api_key=api_key,
         base_url=base_url,
+        default_headers=default_headers,
         thinking_budgets=config.get("thinking_budgets"),
         retry_policy=api.get_service("retry_policy"),
     )
