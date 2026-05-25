@@ -1,6 +1,6 @@
 ---
 confidence: fact
-description: 'Verifier methodology: confirm a known fault injection materialised and emit the service-level fault-propagation graph with SQL evidence per hop.'
+description: 'Verifier methodology: confirm a known fault injection materialised and verify/supplement a candidate service-level fault-propagation graph against the data, reasoning from the fault mechanism.'
 name: verifier-methodology
 tags:
 - verifier
@@ -16,84 +16,81 @@ type: skill
 
 # Verifier Methodology
 
-You are not doing root-cause analysis. The root cause is given —
-`get_injection_spec` returns it. Verification asks two questions:
+You are not deriving a graph from scratch and you are not doing
+root-cause analysis. The root cause is given (`get_injection_spec`) and a
+candidate propagation graph (from the dataset's existing labels) is given
+in your first message. Your job: confirm the injection materialised, then
+**verify and supplement** the candidate graph against the data — keep the
+edges the data supports (查准), drop the ones it does not, and add the
+hops it is missing (查漏).
 
-1. **Did the injection actually materialise?** That is: do the
-   abnormal-window signals match what this fault kind should produce
-   on this target?
-2. **What is the full fault-propagation graph?** That is: every
-   service whose anomaly in the abnormal window can be traced back
-   to the injection target, plus every directed edge connecting
-   them. The output is a graph, not a list of examples — the impact
-   typically fans out through several hops (direct callers of the
-   target, then their callers, and so on) and you keep extending
-   until probes find no more candidates the evidence supports.
+## Reason from the fault mechanism, not from a signal checklist
 
-A propagation edge `from → to` is a *causal* claim: `from`'s
-anomaly causes `to`'s anomaly. Two parquet rows that both look
-abnormal in the same window are not, by themselves, a causal edge —
-co-occurrence is symmetric, causation is not. To justify direction
-you need either a timing argument (`from` shifts at-or-before `to`),
-a call-graph argument (a span shows `to` calling `from` and
-suffering), or a mechanistic argument grounded in what
-`get_injection_spec` says the fault does.
+Before judging any edge, build a causal model of the injection from
+`get_injection_spec` + `get_fault_kind_doc`:
 
-An edge you cannot back with re-executable SQL is an edge you must
-not emit. Evidence is what separates verification from speculation.
+1. What does this fault physically do to its target? (pod-failure = the
+   process is gone; cpu/mem stress = the target is starved/slow; network
+   delay/loss = the link degrades; jvm fault = a specific call throws or
+   stalls.)
+2. What would that look like on the target itself in traces / metrics /
+   logs?
+3. What does it then do to whoever DEPENDS on the target, and onward to
+   the user? Derive the expected downstream symptom from the mechanism —
+   then go check the data for THAT symptom.
 
-## What "downstream" means concretely
+Do not memorise a list of "valid signals". A fault kind the reference
+doesn't cover is reasoned out the same way: what does it break, what
+would that cause. The per-kind doc (`get_fault_kind_doc`) is your
+authority for how each fault propagates and what symptom to expect.
 
-After `get_injection_spec` returns the `fault_kind`, call
-`get_fault_kind_doc(fault_kind)` to read the per-kind reference:
-how the injection physically works, what signals it produces, and
-how it tends to propagate. Re-derive who is downstream *from that
-mechanism*, not from generic heuristics. The same observable
-("service X reports errors when calling service Y") admits
-different causal readings depending on whether the injection is on
-X, Y, the network between them, or a shared dependency — the
-mechanism doc disambiguates.
+## What an edge means
 
-## Edges around link-type faults
+`A → B` is a FAULT-IMPACT claim: A's fault causes B to degrade. This is
+about CAUSE, not about who calls whom. The request call usually runs the
+other way (B calls A) — expected, because a broken dependency A drags
+down its caller B. So impact `A → B` normally rides on a call `B → A`;
+the reversed call CONFIRMS the edge, it never refutes it.
 
-Some faults — the `network_*` family and the `http_*` family —
-are not inside a single service's process but on a *link* between
-two services. The chaos rule (tc netem, iptables, or an HTTP
-proxy) is installed at exactly one of the two endpoints; that
-endpoint is the rule-bearing side, and the peer at the other end
-of the link is observed to be unreachable / slow / malformed from
-its perspective. The injection spec records the rule-bearing side
-under `injection_point.source_service` (or `app_name` for the
-http_* variants); the peer is `target_service` (or
-`server_address`).
+## Judging a candidate edge A → B
 
-For these faults, write the link-spanning edge as `rule-bearing
-side → peer`. The rule-bearing side is the originator of the
-fault, the peer is the part of the world that side fails to
-communicate with. The cascade then continues from the
-rule-bearing side outward through its callers — same as for
-in-pod faults, with the link edge sitting at the head of the
-chain.
+Tell the causal story and check it with SQL: does A's fault,
+mechanism-propagated through the A–B connection, produce B's observed
+abnormal-window state? You need
 
-## What good evidence looks like
+- a direct call relationship between A and B (look in the NORMAL window,
+  EITHER direction — they just have to be wired together);
+- A is a fault source (an injection target, or already shown impacted, so
+  the chain runs through it);
+- B shows the abnormal-window symptom the mechanism PREDICTS (whatever it
+  is — throughput collapse, latency, errors, retries).
 
-`sql` is DuckDB SQL that runs against the case parquets and returns
-rows. `claim` is one sentence the rows justify. Specific is good
-("error rate 0% → 30% within the first minute of the abnormal
-window"); vague is not ("service degraded"). When citing magnitudes,
-cite both windows so the delta is visible.
+If the predicted consequence is there → keep the edge (write the SQL). If
+the data contradicts the mechanism → drop it. Co-occurrence alone (two
+services both look off but never call each other) is never an edge.
 
-## When to stop
+## Propagation is transitive
 
-You stop when you can no longer find a service whose
-abnormal-window anomaly is both real and traceable to a service
-already in the graph. Until then, every service you add becomes a
-new pivot — its callers and the services it calls are the next
-candidates to probe. Stopping at the first hop almost always
-under-reports; a typical attributed fault reaches several services
-through a chain.
+Impact spreads as a GROWING affected frontier, not a star around the
+injection target. Begin with the target as the only affected node;
+confirm each direct neighbour; then treat THAT neighbour as itself
+affected and look at ITS neighbours next. The `from` of an edge is
+whichever already-affected service sits on the dependency side of the
+hop — **not always the injection target**. A second- or third-hop `from`
+is normal; rejecting an edge merely because `from` is not the injection
+target is the most common mistake. Keep extending toward the user-facing
+entry tier until the mechanism's symptom no longer appears.
 
-Don't stretch the graph past what evidence supports — an
-under-claimed report you can defend beats a wide one you can't —
-but don't quit early either: missing the multi-hop fan-out is the
-more common failure mode.
+## Effectiveness, per injection
+
+When several faults were injected, judge each on its own signals. A weak
+or non-materialised injection (e.g. a CPU stress with no observed CPU
+rise and no downstream effect) did not engage and must NOT be a
+propagation source — leave its edges out even if the labels include them.
+
+## Evidence
+
+`sql` is DuckDB that runs against the case parquets and returns rows;
+`claim` is one sentence the rows justify. Cite both windows so the delta
+is visible. An edge you cannot back with re-executable SQL is one you
+must not emit.

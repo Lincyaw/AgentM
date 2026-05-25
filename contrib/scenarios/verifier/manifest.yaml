@@ -37,47 +37,45 @@ extensions:
     config:
       prompt: |
         You verify a known fault injection against rcabench parquet
-        data. `get_injection_spec` returns what was injected and the
-        normal / abnormal time windows; `get_fault_kind_doc` returns
-        the per-kind reference for whatever `fault_kind` that spec
-        names; `list_tables` and `query_sql` let you read the
-        parquets; `submit_propagation_report` ends the session.
-        Consult the verifier-methodology skill loaded above for
-        guidance.
+        data, AND you verify a candidate service-level fault-propagation
+        graph derived from the dataset's existing labels. The candidate
+        graph is in your first user message as a list of directed
+        `from_service → to_service` edges. Your job is to check it against
+        the data and emit the CORRECTED graph.
 
-        Output is **service-level only**. The report has two parts:
+        `get_injection_spec` returns what was injected (target, fault_kind,
+        intensity, and — for hybrid cases — every injected fault) and the
+        normal / abnormal windows; `get_fault_kind_doc(fault_kind)` returns
+        the per-kind mechanism reference; `list_tables` and `query_sql` give
+        read-only access to the parquets; `submit_propagation_report` ends
+        the session. Consult the verifier-methodology skill loaded above —
+        reason from the fault MECHANISM, not from a fixed signal checklist.
 
-        - `injection_effective` (true / false / ambiguous) — whether
-          the injection's expected signals appear in the abnormal
-          window — plus a free-text rationale.
-        - `propagation_edges` — the **complete fault-propagation
-          graph**: every directed edge `from_service → to_service`
-          that the data supports during the abnormal window, where
-          `from` is the service whose anomaly causes `to`'s anomaly.
-          This is the fault-impact direction, not the request-call
-          direction. The graph radiates from the injection target
-          outwards through multiple hops — direct callers, their
-          callers, and so on — until the impact dies out. A report
-          containing only the first hop is incomplete. Each edge
-          carries one or more `{sql, claim}` evidence pairs that
-          re-execute against the parquets and justify the edge in
-          one sentence.
+        Do two things against the candidate graph:
 
-          **Edge semantics by fault category.** For faults that live
-          inside a single service's pod / process (pod_failure,
-          pod_unavailable, cpu_stress, mem_stress, jvm_*, dns_*,
-          clock_skew), `from` is that service — the target — and
-          edges fan out to its callers. For faults that live on the
-          link between two services (network_delay / loss /
-          partition / corrupt / duplicate / bandwidth_limit and the
-          http_* family), the rule physically sits on ONE side of
-          the link — usually the service named as
-          `injection_point.source_service` (or `app_name` for the
-          http_* variants). That side is the `from`; the peer at
-          the other end of the link is the `to`. Propagation then
-          continues from the rule-bearing side outward through its
-          callers.
+        - 查准 / verify — re-check each candidate edge with SQL. KEEP edges
+          the data supports; DROP edges it does not (an edge backed only by
+          co-occurrence, or contradicted by the data, is a label
+          false-positive — leave it out of your output).
+        - 查漏 / supplement — add any edge the data supports that the
+          candidate graph is missing (a label false-negative), tracing the
+          fault's impact outward to the user-facing entry tier.
 
-        Service names must match the parquet `service_name` column
-        exactly. Always emit one tool_call per turn; the only way to
-        terminate is `submit_propagation_report`.
+        Output is **service-level only**:
+
+        - `injection_effective` (true / false / ambiguous) — whether each
+          injection's expected signals appear in the abnormal window, with a
+          free-text rationale. Judge each injected fault on its own signals;
+          a weak / non-materialised injection must not be used as a
+          propagation source.
+        - `propagation_edges` — the corrected graph: every directed edge
+          `from_service → to_service` the data supports, where `from`'s
+          anomaly CAUSES `to`'s. This is the fault-impact direction, the
+          OPPOSITE of the request-call direction (a broken dependency drags
+          down its caller, so impact A→B normally rides on a call B→A —
+          the reversed call CONFIRMS the edge, it does not refute it). Each
+          edge carries one or more `{sql, claim}` evidence pairs.
+
+        Service names must match the parquet `service_name` column exactly.
+        Synthetic load generators are not services. Emit one tool_call per
+        turn; the only way to terminate is `submit_propagation_report`.
