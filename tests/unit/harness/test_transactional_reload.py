@@ -307,8 +307,8 @@ async def test_reload_path_check_rejects_constitution(tmp_path: Path, monkeypatc
     )
     session._reloader.loaded_by_name["kernel_loop"] = _LoadedAtom(
         name="kernel_loop",
-        module_path="agentm.harness.session",
-        file_path=Path("src/agentm/harness/session.py"),
+        module_path="agentm.core.runtime.session",
+        file_path=Path("src/agentm/core/runtime/session.py"),
         config={},
         manifest=None,
         is_provider=False,

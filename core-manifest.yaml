@@ -7,19 +7,9 @@ constitution:
     - src/agentm/core/abi/**
     - src/agentm/core/lib/**
     - src/agentm/core/_internal/**
+    - src/agentm/core/runtime/**
     # Provider boundary
-    - src/agentm/llm/**
     - src/agentm/ai/**
-    # Harness orchestrator
-    - src/agentm/harness/session.py
-    - src/agentm/harness/extension.py
-    - src/agentm/harness/events.py
-    - src/agentm/harness/resource_writer.py
-    - src/agentm/harness/session_manager.py
-    - src/agentm/harness/resource_loader.py
-    - src/agentm/harness/session_runtime.py
-    - src/agentm/harness/session_services.py
-    - src/agentm/harness/session_cwd.py
     # Extension subsystem mechanism
     - src/agentm/extensions/loader.py
     - src/agentm/extensions/discover.py
@@ -35,9 +25,6 @@ constitution:
     # are intentionally bypass paths: they live inside the constitution layer
     # and ResourceWriter never sees them. See .claude/designs/self-modifiable-architecture.md.
     - .agentm/catalog/**
-    # Decision log — only tool_propose_change may append, mediated.
-    # See .claude/designs/per-task-evolution-loop.md §7.
-    - .agentm/decisions/**
     # The manifest itself — self-referential lock
     - core-manifest.yaml
 

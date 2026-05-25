@@ -43,10 +43,7 @@ from agentm.core.runtime.extension import (
 from agentm.core.runtime.provider_resolver import LastRegisteredWins
 from agentm.core.runtime.resource_loader import InMemoryResourceLoader, ResourceLoader
 from agentm.core.runtime.resource_writer import GitBackedResourceWriter
-from agentm.core.abi.session_config import (
-    AgentSessionConfig,
-    default_child_provider_factory,
-)
+from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session_helpers import (
     AtomSource,
     SessionView,
@@ -58,6 +55,26 @@ from agentm.core.runtime.session_manager import InMemorySessionManager, SessionM
 from agentm.core.runtime.session_runtime import SessionRuntime
 
 logger = logging.getLogger(__name__)
+
+
+def default_child_provider_factory(parent_provider: Any) -> tuple[str, dict[str, Any]]:
+    """Return the spec for whichever atom claims the ``PROVIDER_INHERITOR``
+    role. Looking up by role rather than by atom name lets a scenario ship
+    a customised provider-inheritor without editing the runtime.
+
+    Moved here from ``core.abi.session_config`` to avoid an ``extensions``
+    import in the ABI layer (recovery-floor violation).
+    """
+
+    from agentm.core.abi.roles import PARENT_PROVIDER_CONFIG_KEY, PROVIDER_INHERITOR
+
+    entry = discover_mod.discover_by_role().get(PROVIDER_INHERITOR)
+    if entry is None:
+        raise RuntimeError(
+            f"no atom claims the {PROVIDER_INHERITOR!r} role; cannot build "
+            "a child-session provider spec"
+        )
+    return (entry.module_path, {PARENT_PROVIDER_CONFIG_KEY: parent_provider})
 
 
 def apply_child_session_contributions(
