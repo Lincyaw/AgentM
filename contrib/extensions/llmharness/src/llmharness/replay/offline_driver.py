@@ -35,18 +35,47 @@ __all__ = [
     "AuditorSettings",
     "ExtractorSettings",
     "OfflineRunResult",
+    "SurfaceFiring",
     "replay_pipeline_over_trajectory",
 ]
 
 
+@dataclass(frozen=True)
+class SurfaceFiring:
+    """One auditor firing that surfaced a reminder during an offline replay.
+
+    Captured only when ``stop_on_first_surface=False`` (the fork-tree
+    driver's mode). ``turn_index`` is the *message* index the auditor
+    fired at (``len(prefix) - 1``); ``reminder_text`` is the surfaced
+    reminder; ``cumulative_snapshot`` is an independent deep copy of the
+    :class:`CumulativeAuditState` as of that firing, so a downstream fork
+    can seed from it without the continuing backbone replay mutating its
+    seed state out from under it.
+    """
+
+    turn_index: int
+    reminder_text: str
+    cumulative_snapshot: CumulativeAuditState
+
+
 @dataclass
 class OfflineRunResult:
-    """Outcome of one :func:`replay_pipeline_over_trajectory` invocation."""
+    """Outcome of one :func:`replay_pipeline_over_trajectory` invocation.
+
+    ``reminder`` / ``state`` / ``all_step_results`` are unchanged across
+    both ``stop_on_first_surface`` modes. ``surfaces`` is populated only
+    when ``stop_on_first_surface=False``: one :class:`SurfaceFiring` per
+    surfaced auditor firing, in trajectory order. Under
+    ``stop_on_first_surface=True`` the run halts on the first surface and
+    ``surfaces`` stays empty (the single surface is reported via
+    ``reminder``), preserving the legacy single-firing contract.
+    """
 
     reminder: Reminder | None
     state: CumulativeAuditState
     sidecar_path: Path | None
     all_step_results: list[StepResult] = field(default_factory=list)
+    surfaces: list[SurfaceFiring] = field(default_factory=list)
 
 
 def _turn_end_prefix_lengths(messages: list[AgentMessage]) -> list[int]:
@@ -157,6 +186,7 @@ async def replay_pipeline_over_trajectory(
     )
 
     all_steps: list[StepResult] = []
+    surfaces: list[SurfaceFiring] = []
     reminder: Reminder | None = None
     for turn_number, prefix_len in enumerate(
         _turn_end_prefix_lengths(messages), start=1
@@ -170,13 +200,32 @@ async def replay_pipeline_over_trajectory(
             messages[:prefix_len], turn_count=turn_number
         )
         all_steps.append(step)
-        if stop_on_first_surface and step.surfaced_reminder is not None:
-            reminder = step.surfaced_reminder
-            break
+        if step.surfaced_reminder is not None:
+            if stop_on_first_surface:
+                reminder = step.surfaced_reminder
+                break
+            # Full-tree mode: record the surface plus an independent deep
+            # snapshot of the cumulative state *as of this firing* so a
+            # forked child can seed from it. The snapshot must be taken
+            # here, inside the loop, because ``cumulative`` keeps mutating
+            # as the backbone replay continues past this turn.
+            turn_index = (
+                int(step.auditor_record.turn_index)
+                if step.auditor_record is not None
+                else prefix_len - 1
+            )
+            surfaces.append(
+                SurfaceFiring(
+                    turn_index=turn_index,
+                    reminder_text=step.surfaced_reminder.text,
+                    cumulative_snapshot=cumulative.snapshot(),
+                )
+            )
 
     return OfflineRunResult(
         reminder=reminder,
         state=cumulative,
         sidecar_path=sidecar_path,
         all_step_results=all_steps,
+        surfaces=surfaces,
     )

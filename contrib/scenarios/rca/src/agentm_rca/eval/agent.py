@@ -304,23 +304,27 @@ class AgentMAgent(BaseAgent):
     ) -> AgentResult:
         from llmharness import (
             AuditorSettings,
-            ChainSegmentPayload,
             ExtractorSettings,
-            run_chained_fork_experiment,
+            SessionPayload,
+            run_fork_tree_experiment,
         )
 
-        # Parallel side-table keyed by session_log_id so we can recover
-        # the full _SessionRun (and its AgentResult / metadata) for each
-        # segment after the experiment finishes. _SessionRun structurally
-        # matches ChainSegmentPayload (both have session_log_id +
-        # final_messages), so the factory returns it directly.
+        # The user-facing ``--ak chained_fork=true`` flag now drives the
+        # fork-tree engine; the linear chain is the degenerate
+        # ``max_surfaces_per_node=1`` policy. We run the full tree.
+        #
+        # Side-table keyed by session_log_id so we can recover the full
+        # _SessionRun (and its AgentResult / metadata) for each node after
+        # the experiment finishes. _SessionRun structurally matches
+        # SessionPayload (both have session_log_id + final_messages), so
+        # the factory returns it directly.
         session_runs: dict[str, _SessionRun] = {}
 
         async def factory(
             *,
             initial_messages: list[Any] | None,
             seed_reminder_text: str | None,
-        ) -> ChainSegmentPayload:
+        ) -> SessionPayload:
             run = await self._execute_session(
                 incident=incident if initial_messages is None else None,
                 data_dir=data_dir,
@@ -332,7 +336,7 @@ class AgentMAgent(BaseAgent):
             session_runs[run.session_log_id] = run
             return run  # type: ignore[return-value]  # structural match on Protocol
 
-        experiment = await run_chained_fork_experiment(
+        experiment = await run_fork_tree_experiment(
             session_factory=factory,
             cwd=os.getcwd(),
             provider=_build_provider(self._provider, self._model),
@@ -340,37 +344,48 @@ class AgentMAgent(BaseAgent):
             auditor_settings=AuditorSettings.default(),
             extractor_interval=5,
             audit_interval=5,
-            max_interventions=self._max_interventions,
+            # ``max_interventions`` historically capped the linear chain
+            # length; map it onto the tree's depth guard so an existing
+            # ``--ak max_interventions=N`` keeps bounding how deep
+            # interventions stack.
+            max_depth=self._max_interventions,
         )
 
-        final_run = session_runs[experiment.final.payload.session_log_id]
-        metadata = dict(final_run.result.metadata or {})
-        # Chain topology comes straight from the experiment header
-        # (matches the ``<sid>.chained.jsonl`` first-line bundle so
+        # The reported response is the ROOT/control node's submission: the
+        # baseline answer (no intervention) is what gets judged, so the
+        # control-vs-intervention comparison stays honest. Every node's
+        # submission + intervention path lives in metadata so a
+        # control-vs-leaf comparison is recoverable downstream.
+        root_run = session_runs[experiment.root.backbone_session_id]
+        metadata = dict(root_run.result.metadata or {})
+        # Tree topology comes straight from the experiment header (matches
+        # the ``<root_sid>.chained.jsonl`` first-line bundle so
         # rcabench-platform and downstream tools see the same shape).
         # Augment with presentational fields the sidecar doesn't carry:
-        # ``base_scenario``, ``chained_replay_path`` (string path), and
-        # per-segment ``run`` summaries from the rca eval driver.
-        chain_meta: dict[str, Any] = dict(experiment.header)
-        chain_meta["base_scenario"] = self._scenario
-        chain_meta["chained_replay_path"] = (
-            str(experiment.chained_replay_path)
-            if experiment.chained_replay_path is not None
+        # ``base_scenario``, ``forktree_replay_path`` (string path), and
+        # per-node ``run`` summaries from the rca eval driver.
+        tree_meta: dict[str, Any] = dict(experiment.header)
+        tree_meta["base_scenario"] = self._scenario
+        tree_meta["forktree_replay_path"] = (
+            str(experiment.forktree_replay_path)
+            if experiment.forktree_replay_path is not None
             else None
         )
-        chain_meta["segments"] = [
+        tree_meta["nodes"] = [
             {
-                **seg_header,
-                "run": _run_metadata(session_runs[seg_header["session_log_id"]]),
+                **node_header,
+                "run": _run_metadata(
+                    session_runs[node_header["backbone_session_id"]]
+                ),
             }
-            for seg_header in experiment.header["segments"]
+            for node_header in experiment.header["nodes"]
         ]
-        metadata["intervention_mode"] = "chained_fork"
-        metadata["chained_fork"] = chain_meta
+        metadata["intervention_mode"] = "fork_tree"
+        metadata["chained_fork"] = tree_meta
         return AgentResult(
-            response=final_run.result.response,
-            trajectory=final_run.result.trajectory,
-            trace_id=final_run.result.trace_id,
+            response=root_run.result.response,
+            trajectory=root_run.result.trajectory,
+            trace_id=root_run.result.trace_id,
             metadata=metadata,
         )
 

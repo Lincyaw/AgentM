@@ -673,47 +673,56 @@ requirements:
     depends_on: [REQ-019, REQ-034]
 
   - id: REQ-036
-    title: Chained-fork experiment orchestration
+    title: Fork-tree counterfactual experiment orchestration
     description: |
-      Own the host-side stitching of chained-fork experiments inside
-      llmharness so downstream eval drivers (rca, others) become thin
-      callers that supply only their session-factory policy.
+      Own the host-side stitching of fork-tree counterfactual
+      experiments inside llmharness so downstream eval drivers (rca,
+      others) become thin callers that supply only their session-factory
+      policy.
 
-      A chained-fork experiment repeatedly seeds the agent with each
-      surfaced reminder: segment 0 (the control) runs until the
-      auditor first surfaces a reminder, then each subsequent segment
-      forks from the prior segment's surfacing turn with the reminder
-      text seeded into the child session. The chain terminates on the
-      first segment whose auditor stays silent, or after
-      ``max_interventions`` branches.
+      A fork-tree experiment is a producer-consumer work queue. Each
+      surface point (an auditor firing with ``surface_reminder=True``) on
+      a backbone trajectory is a parallel-universe split: "don't
+      intervene" continues the backbone (free), "intervene" forks a NEW
+      child rollout at that point with the reminder seeded. Consuming one
+      :class:`ForkTask` produces a :class:`ForkNode` plus a child task per
+      surface, so the queue feeds itself and drains when every branch's
+      auditor goes silent. Degenerate policies fall out of the same
+      engine: ``max_surfaces_per_node=1`` ⇒ the old linear chain;
+      ``max_depth=1`` ⇒ a star; default (all surfaces, soft guards
+      ``max_depth=8`` / ``max_total_nodes=64``) ⇒ the full tree.
 
-      Two entry points:
+      Entry points:
 
-      - :func:`llmharness.run_chained_fork_experiment` — drives the
-        whole chain. Calls a host-supplied :data:`SessionFactory` to
-        obtain each segment's trajectory, then replays the cognitive-
-        audit pipeline offline against it with the prior segment's
-        :class:`CumulativeAuditState` seeded in via the
-        ``seed_cumulative`` / ``start_turn`` knobs of
-        :func:`replay_pipeline_over_trajectory`.
+      - :func:`llmharness.run_fork_tree_experiment` — drains the queue.
+        Calls a host-supplied :data:`SessionFactory` to obtain each
+        backbone trajectory, then replays the cognitive-audit pipeline
+        offline against it with ``stop_on_first_surface=False`` so EVERY
+        surface is captured (each carrying an independent deep snapshot of
+        :class:`CumulativeAuditState`), seeding the parent snapshot +
+        ``start_turn`` floor via :func:`replay_pipeline_over_trajectory`.
 
-      - :func:`llmharness.write_chained_replay` +
-        :func:`chained_replay_path` — materialise a single
-        ``<final_branch_session_log_id>.chained.jsonl`` sidecar
-        covering every segment's [turn_lo, turn_hi] window, rewriting
-        every record's ``root_session_id`` to the final branch's id so
-        the case viewer joins records to the right trajectory.
+      - :func:`llmharness.write_fork_tree_replay` +
+        :func:`forktree_replay_path` — materialise a single
+        ``<root_session_log_id>.chained.jsonl`` sidecar covering every
+        node's [turn_lo, +inf) window, tagging each record with its
+        ``node_id`` / ``parent_node_id`` and rewriting ``root_session_id``
+        to the root node's id. The first line is a
+        :data:`FORK_TREE_HEADER_KEY` topology bundle read back by
+        :func:`read_fork_tree_header`.
 
-      Fail-stop position: the cumulative-state threading across segment
-      boundaries. If ``seed_cumulative`` / ``start_turn`` are wrong, the
-      chained experiment compares apples to oranges (segment k+1's
-      auditor sees stale or missing prior verdicts).
+      Fail-stop positions: (1) per-surface cumulative snapshots must be
+      INDEPENDENT deep copies (a child fork must not have its seed mutated
+      by the continuing backbone); (2) ``seed_cumulative`` / ``start_turn``
+      threading — wrong values compare apples to oranges; (3) fan-out +
+      tree recoverability from ``parent_id``.
     priority: P1
     status: tested
     code:
-      - src/llmharness/replay/chained_fork.py
+      - src/llmharness/replay/fork_tree.py
+      - src/llmharness/replay/offline_driver.py
     tests:
-      - tests/replay/test_chained_fork.py
+      - tests/replay/test_fork_tree.py
     depends_on: [REQ-019, REQ-034, REQ-035]
 
   # ---------------------------------------------------------------------------

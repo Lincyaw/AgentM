@@ -150,10 +150,13 @@ def write_record(path: Path, record: ReplayRecord) -> None:
 def iter_records(path: Path) -> Iterator[ReplayRecord]:
     """Yield every record in a sidecar file. Skips malformed lines.
 
-    Skips chain-header lines (those carrying a ``__chain_header__`` key)
-    explicitly so a chained-fork sidecar reads cleanly through this
-    iterator. See :func:`llmharness.replay.chained_fork.read_chain_header`
-    for the matching reader of that header.
+    Skips any topology-header line — those carry an experiment-header key
+    (e.g. ``__fork_tree_header__``) and no ``phase`` key, so a fork-tree
+    sidecar reads cleanly through this iterator. The ``phase`` check is
+    header-key-agnostic on purpose: a missing ``phase`` is the single
+    discriminator between a record line and a header line. See
+    :func:`llmharness.replay.fork_tree.read_fork_tree_header` for the
+    matching reader of that header.
     """
     with path.open("r", encoding="utf-8") as fh:
         for line in fh:
@@ -166,7 +169,7 @@ def iter_records(path: Path) -> Iterator[ReplayRecord]:
                 continue
             if not isinstance(obj, dict):
                 continue
-            if "__chain_header__" in obj:
+            if "phase" not in obj:
                 continue
             try:
                 yield ReplayRecord.from_dict(obj)
