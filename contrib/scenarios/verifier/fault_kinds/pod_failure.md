@@ -7,36 +7,46 @@ duration. The pod object stays in the cluster but has no running
 process.
 
 ## What the data should show
-Span volume produced by the target drops sharply — usually to **zero** —
-across the abnormal window: the process is gone, so it emits no spans.
-That zero IS the injection materialising, not missing data or "no
-impact". The target's container restart-counter typically increments at
-the boundaries.
+For the configured window the target has no running process, so requests
+that arrive then cannot complete normally. How that surfaces depends on
+traffic volume and timing — read the WHOLE picture; do not expect one
+fixed signature:
 
-The dominant downstream signal is a **throughput / completed-span
-collapse**, NOT errors or latency. A caller's outbound calls to the dead
-target fail fast or never return, so the caller completes fewer of its
-own requests — its span volume drops too. Connection-refused /
-dial-timeout error spans MAY appear on callers, but frequently do NOT
-(the request is abandoned upstream before any error span is recorded),
-and latency usually does not rise (failing paths return fast). So:
-absence of 5xx / errors and absence of a latency increase are EXPECTED
-for this fault — do not read them as absence of impact. Look for the
-throughput drop.
+- requests that would have started during the dead window never do, so
+  the target's completed-span volume drops — toward **zero** under
+  steady traffic, or only **partially** under low / bursty traffic;
+- requests in flight when the pod dies, or that arrive and block trying
+  to reach it, hang until they time out or the pod returns — so the
+  target's (and its callers') **latency TAIL can explode** (e.g. p90/p99
+  jumping from milliseconds to tens of seconds), and connection-refused /
+  timeout **error spans** may appear.
+
+A near-total throughput collapse, a latency-tail explosion, and
+connection errors are all faces of the SAME kill; which dominates is a
+function of the case, not a fixed rule. In particular, a modest
+span-count dip COMBINED with a latency tail blowing up from ms to tens of
+seconds is the kill biting just as much as a clean drop to zero is — do
+NOT dismiss an injection as ineffective merely because spans did not fall
+to near-zero. The container's restart counter typically increments at the
+boundaries. Judge from what the data actually shows, across traces,
+metrics and logs.
 
 ## How the failure tends to propagate
 The impact runs UP the call graph — the OPPOSITE of the request-call
 direction (callers depend on the target, so the target's failure drags
-its callers down) — and it is **transitive**. The target's dependency
-vanishing throttles its direct callers' throughput; each throttled
-caller then completes fewer of the requests ITS callers depend on, so
-the collapse propagates another hop, attenuating outward until it
-reaches the user-facing entry tier or fades into noise.
+its callers down) — and it is **transitive**. A direct caller's calls to
+the dead dependency hang or fail, so the caller shows the same mix:
+fewer completed requests AND/OR a latency tail / connection errors on the
+calls that blocked. Each affected caller then drags ITS callers the same
+way, attenuating outward until it reaches the entry tier or fades into
+noise.
 
 Trace it as a **growing affected frontier, not a star around the
 target**: begin with the target as the only affected node; confirm each
-direct caller's throughput collapse; then treat THAT caller as itself
-affected and examine ITS callers next. The `from` of a propagation edge
+direct caller is genuinely affected (a throughput drop and/or a
+latency-tail / error spike on its calls to the dependency); then treat
+THAT caller as itself affected and examine ITS callers next. The `from`
+of a propagation edge
 is whichever already-affected service sits on the dependency side of the
 hop — it is **not always the injection target**. An edge whose `from` is
 a second- or third-hop service is normal and expected; rejecting an edge

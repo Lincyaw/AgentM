@@ -4,13 +4,15 @@ The verifier ends by calling ``submit_propagation_report``. Unlike the
 RCA scenario (which submits a guess at the unknown root cause), the
 verifier already knows what was injected — it submits:
 
-* ``injection_effective`` — did the injection actually materialize? One
-  of ``true`` / ``false`` / ``ambiguous`` (free-text rationale required,
-  citing the injection target's own normal-vs-abnormal symptom).
-* ``propagation_nodes`` — every service proven to have degraded. Each
-  node carries a ``symptom_sql`` that compares the normal and abnormal
-  windows (delta visible) plus a short ``claim``. A flat/improved metric
-  is not a symptom, so such a service is not a node.
+* ``injections`` — one verdict per injected fault (a case may have
+  several; judge each independently — all, some, or none may engage).
+  Each carries ``target_service``, ``fault_kind``, ``verdict``
+  (true/false/ambiguous) and a ``rationale`` citing the target's own
+  normal-vs-abnormal data.
+* ``propagation_nodes`` — every service judged to have degraded. Each
+  node carries ``symptom_evidence`` — 1..N SQL+claim pairs from diverse
+  signals (traces, metrics, logs) showing it got worse vs baseline. A
+  flat/improved metric is not a symptom, so such a service is not a node.
 * ``propagation_edges`` — directed fault-impact hops ``from_service`` →
   ``to_service`` between nodes. Each carries a ``relationship_sql``
   proving the two services are directly connected (trace parent/child
@@ -77,14 +79,43 @@ MANIFEST = ExtensionManifest(
 _STRICT = ConfigDict(extra="forbid")
 
 
-class PropagationNode(BaseModel):
-    """A service shown — by re-executable SQL — to carry a fault symptom in
-    the abnormal window.
+class SqlEvidence(BaseModel):
+    """One re-executable DuckDB SELECT plus the one-line claim it backs."""
 
-    The graph is built from queryable facts: every node is a service whose
-    symptom is proven by a single SQL that compares the NORMAL and ABNORMAL
-    windows. A flat or improved metric is NOT a symptom — such a service is
-    not a node.
+    model_config = _STRICT
+    sql: str = Field(
+        description="ONE DuckDB SELECT, re-executed after submission (must run "
+        "and return rows). Compare the NORMAL and ABNORMAL windows side by side "
+        "(e.g. UNION ALL) when showing a symptom delta."
+    )
+    claim: str = Field(description="<=25-word assertion the rows justify.")
+
+
+class InjectionVerdict(BaseModel):
+    """Per-injection effectiveness. A case may have several injections; judge
+    EACH independently — they can all engage, some, or none."""
+
+    model_config = _STRICT
+    target_service: str = Field(description="The injection target service.")
+    fault_kind: str = Field(description="The injected fault_kind for this entry.")
+    verdict: Literal["true", "false", "ambiguous"] = Field(
+        description="Did THIS injection materially engage, judged from its "
+        "target's own normal-vs-abnormal data?"
+    )
+    rationale: str = Field(
+        description="Why, citing the target's own evidence. An injection that "
+        "did not engage must not be used as a propagation source."
+    )
+
+
+class PropagationNode(BaseModel):
+    """A service you have JUDGED to be genuinely dragged down by the fault(s),
+    backed by one or more re-executable SQLs.
+
+    One fault can surface across several signals, so a node may carry MULTIPLE
+    evidence rows drawn from diverse sources (traces, metrics of various kinds,
+    logs). A service whose overall picture is unchanged or improved is not a
+    node, however much one cherry-picked metric dipped.
     """
 
     model_config = _STRICT
@@ -92,16 +123,11 @@ class PropagationNode(BaseModel):
         description="Bare service_name as in the parquet column. Not a "
         "synthetic load generator (loadgenerator, locust, wrk2, dsb-wrk2, k6)."
     )
-    symptom_sql: str = Field(
-        description="ONE DuckDB SELECT returning BOTH the normal and the "
-        "abnormal window side by side (e.g. UNION ALL of the two windows) so "
-        "the delta is visible. The rows must bear out your judgement — read as "
-        "a whole against baseline, the way the fault mechanism predicts — that "
-        "this service was genuinely dragged down. Not one cherry-picked metric: "
-        "a service whose overall behaviour is unchanged or improved is not a node."
-    )
-    claim: str = Field(
-        description="<=25-word delta the SQL shows, e.g. 'p99 0.15ms->0.25ms (+64%)'."
+    symptom_evidence: list[SqlEvidence] = Field(
+        description="1..N SQL+claim pairs showing this service degraded in the "
+        "abnormal window vs baseline, the way the mechanism predicts. Prefer "
+        "DIVERSE signals (trace latency/throughput/errors, metrics, logs) — one "
+        "fault often shows in several. Read the whole picture, not one metric."
     )
 
 
@@ -151,18 +177,17 @@ class VerifierReport(BaseModel):
     """
 
     model_config = _STRICT
-    injection_effective: Literal["true", "false", "ambiguous"]
-    effectiveness_rationale: str = Field(
-        description="Why effective / not / ambiguous, citing the abnormal "
-        "vs normal window comparison of the injection TARGET's own symptom."
+    injections: list[InjectionVerdict] = Field(
+        description="One verdict per injected fault (a case may have several). "
+        "Judge each independently — all, some, or none may have engaged."
     )
     propagation_nodes: list[PropagationNode] = Field(
-        description="Every service proven (by symptom_sql) to have degraded. "
-        "Empty list is acceptable when injection_effective='false'."
+        description="Every service judged to have degraded, each backed by "
+        "symptom_evidence. Empty when no injection engaged."
     )
     propagation_edges: list[PropagationEdge] = Field(
         description="Directed fault-impact hops between propagation_nodes. "
-        "Empty list is acceptable when injection_effective='false'."
+        "Empty when no injection engaged."
     )
 
     @model_validator(mode="after")
@@ -236,11 +261,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         FunctionTool(
             name="submit_propagation_report",
             description=(
-                "Submit the verifier's final report: an effectiveness "
-                "verdict on the injection plus an SQL-backed propagation "
-                "graph. propagation_nodes = every degraded service, each with "
-                "a symptom_sql comparing normal vs abnormal. propagation_edges "
-                "= directed fault-impact hops between those nodes, each with a "
+                "Submit the verifier's final report: a per-injection "
+                "effectiveness verdict (injections[]) plus an SQL-backed "
+                "propagation graph. propagation_nodes = every degraded service, "
+                "each with symptom_evidence (1..N SQLs over diverse signals) "
+                "comparing normal vs abnormal. propagation_edges = directed "
+                "fault-impact hops between those nodes, each with a "
                 "relationship_sql proving the two services are directly "
                 "connected. Every edge endpoint must also be a node. Service "
                 "names must match the parquet service_name column. Every SQL "

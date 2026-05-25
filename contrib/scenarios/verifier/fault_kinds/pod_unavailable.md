@@ -7,31 +7,39 @@ kubelet. The effect is a brief outage rather than the indefinite gap
 of `pod_failure`.
 
 ## What the data should show
-A sharp drop — often to zero — in the target's span volume across the
-abnormal window (recovery may begin once the container restarts). That
-near-zero IS the injection materialising, not missing data or "no
-impact". The container's restart counter increments.
+The container is gone for a brief window and then restarts in place, so
+requests arriving in that window cannot complete normally. How it
+surfaces depends on traffic and timing — read the WHOLE picture, do not
+expect one fixed signature:
 
-As with `pod_failure`, the dominant downstream signal is a **throughput
-/ completed-span collapse**, NOT errors or latency. Callers' calls to
-the unavailable target fail fast or never return, so the callers
-complete fewer requests and their own span volume drops. Transient
-connection errors MAY appear on callers but frequently do not, and
-latency usually does not rise — so absence of 5xx / errors and absence
-of a latency increase are EXPECTED, not evidence of no impact. Look for
-the throughput drop.
+- requests that would have started during the outage don't, so the
+  target's completed-span volume drops — toward **zero** under steady
+  traffic, only **partially** under low / bursty traffic;
+- requests in flight when the container dies, or that block trying to
+  reach it, hang until they time out or it restarts — so the target's
+  (and its callers') **latency TAIL can explode** (ms → tens of seconds)
+  and transient connection / timeout **errors** may appear.
+
+Throughput collapse, a latency-tail explosion, and connection errors are
+all faces of the SAME brief outage; which dominates depends on the case.
+A modest span-count dip COMBINED with a latency tail exploding from ms to
+tens of seconds is the outage biting just as much as a drop to zero — do
+NOT call it ineffective merely because spans did not reach near-zero. The
+container's restart counter increments. Judge from what the data actually
+shows, across traces, metrics and logs.
 
 ## How the failure tends to propagate
 Same shape as `pod_failure`: the impact runs UP the call graph (opposite
-to request-call direction) and is **transitive**. The unavailable target
-throttles its direct callers' throughput; each throttled caller then
-completes fewer of the requests ITS callers depend on, so the collapse
-propagates another hop, attenuating outward toward the user-facing entry
-tier.
+to request-call direction) and is **transitive**. A direct caller's calls
+to the unavailable target hang or fail, so the caller shows the same mix —
+fewer completed requests AND/OR a latency tail / connection errors — and
+each affected caller drags ITS callers the same way, attenuating outward.
 
 Trace it as a **growing affected frontier, not a star around the
-target**: confirm each direct caller's throughput collapse, then treat
-that caller as itself affected and examine ITS callers next. The `from`
+target**: confirm each direct caller is genuinely affected (throughput
+drop and/or latency-tail / error spike on its calls to the dependency),
+then treat that caller as itself affected and examine ITS callers next.
+The `from`
 of a propagation edge is whichever already-affected service sits on the
 dependency side of the hop — **not always the injection target**; a
 second- or third-hop `from` is normal. Rejecting an edge only because
