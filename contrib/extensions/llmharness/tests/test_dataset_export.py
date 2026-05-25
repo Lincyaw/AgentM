@@ -182,7 +182,8 @@ def _ok_extractor_replay_record(
     rec: dict = {
         "phase": "extractor",
         "status": "ok",
-        "root_session_id": "sess-x",
+        "session_id": "sess-x",
+        "trace_id": "trace-x",
         "turn_index": 4,
         "ts_ns": 1,
         "payload": {"new_turns": [], "recent_graph": []},

@@ -23,7 +23,8 @@ def _replay_record(
     phase: str,
     turn_index: int,
     ts_ns: int,
-    root_session_id: str,
+    session_id: str,
+    trace_id: str | None = None,
     compose_kwargs: dict[str, Any],
     payload: dict[str, Any],
     output: dict[str, Any] | None,
@@ -32,7 +33,8 @@ def _replay_record(
     return {
         "phase": phase,
         "turn_index": turn_index,
-        "root_session_id": root_session_id,
+        "session_id": session_id,
+        "trace_id": trace_id if trace_id is not None else f"trace-{session_id}",
         "ts_ns": ts_ns,
         "compose_kwargs": compose_kwargs,
         "payload": payload,
@@ -63,7 +65,7 @@ def sample_run(tmp_path: Path) -> tuple[Path, Path]:
             phase="extractor",
             turn_index=1,
             ts_ns=1_000_000_000,
-            root_session_id=sid,
+            session_id=sid,
             compose_kwargs={},
             payload={"new_turns": traj_snapshot[:1], "recent_graph": []},
             output={
@@ -78,7 +80,7 @@ def sample_run(tmp_path: Path) -> tuple[Path, Path]:
             phase="extractor",
             turn_index=2,
             ts_ns=2_000_000_000,
-            root_session_id=sid,
+            session_id=sid,
             compose_kwargs={},
             payload={"new_turns": traj_snapshot[1:], "recent_graph": []},
             output={
@@ -93,7 +95,7 @@ def sample_run(tmp_path: Path) -> tuple[Path, Path]:
             phase="auditor",
             turn_index=2,
             ts_ns=3_000_000_000,
-            root_session_id=sid,
+            session_id=sid,
             compose_kwargs={
                 "trajectory_snapshot": traj_snapshot,
                 "events": [],
@@ -124,7 +126,8 @@ def sample_run(tmp_path: Path) -> tuple[Path, Path]:
                 "sample_id": "rca-mysql-001",
                 "dataset_name": "rca-toy",
                 "dataset_path": "/data/rca.jsonl",
-                "root_session_id": sid,
+                "session_id": sid,
+                "trace_id": f"trace-{sid}",
             }
         ),
         encoding="utf-8",
@@ -136,6 +139,48 @@ def sample_run(tmp_path: Path) -> tuple[Path, Path]:
 # --- collector --------------------------------------------------------------
 
 
+def test_sidecar_and_meta_share_session_stem_and_join(
+    sample_run: tuple[Path, Path],
+) -> None:
+    """The core fix: a sidecar and its meta written for the same session
+    share the ``session_id`` stem, so the stem-paired collector joins the
+    meta onto the case.
+
+    Before the rename, the sidecar was keyed by ``session_id`` while the
+    meta was keyed by the OTel ``trace_id`` — the two stems diverged on
+    live runs and ``collect_case`` silently failed to attach sample_id /
+    dataset metadata. Here both files share ``sess-abc123`` and the join
+    succeeds.
+    """
+    replay_path, meta_path = sample_run
+    # Both artefacts are keyed by the SAME stem (the session_id).
+    assert replay_path.stem == meta_path.name.removesuffix(".meta.json")
+
+    case = collect_case(replay_path=replay_path, meta_path=meta_path)
+
+    # Meta joined: sample/dataset metadata propagated, and case_id derives
+    # from the sample id (not the bare session id).
+    assert case.meta.sample_id == "rca-mysql-001"
+    assert case.meta.dataset_name == "rca-toy"
+    assert case.meta.case_id == "rca-mysql-001"
+    # Both identity fields surface in the case meta with core's vocabulary.
+    assert case.meta.session_id == "sess-abc123"
+    assert case.meta.trace_id == "trace-sess-abc123"
+
+
+def test_case_meta_has_no_legacy_root_session_id(
+    sample_run: tuple[Path, Path],
+) -> None:
+    """The aggregate ``meta.json`` carries ``session_id`` + ``trace_id``,
+    never the removed ``root_session_id`` key."""
+    from dataclasses import asdict
+
+    replay_path, meta_path = sample_run
+    case = collect_case(replay_path=replay_path, meta_path=meta_path)
+    serialized = asdict(case.meta)
+    assert "root_session_id" not in serialized
+    assert serialized["session_id"] == "sess-abc123"
+    assert serialized["trace_id"] == "trace-sess-abc123"
 
 
 
@@ -204,7 +249,7 @@ def test_graph_snapshot_concatenates_globally_unique_ids(
             phase="extractor",
             turn_index=1,
             ts_ns=1,
-            root_session_id=sid,
+            session_id=sid,
             compose_kwargs={},
             payload={"new_turns": [], "recent_graph": []},
             output=fr1,
@@ -213,7 +258,7 @@ def test_graph_snapshot_concatenates_globally_unique_ids(
             phase="extractor",
             turn_index=3,
             ts_ns=2,
-            root_session_id=sid,
+            session_id=sid,
             compose_kwargs={},
             payload={"new_turns": [], "recent_graph": []},
             output=fr2,
@@ -247,7 +292,7 @@ def test_external_ref_resolves_to_cross_firing_edge_in_snapshot(
             phase="extractor",
             turn_index=1,
             ts_ns=1,
-            root_session_id=sid,
+            session_id=sid,
             compose_kwargs={},
             payload={"new_turns": [], "recent_graph": []},
             output={
@@ -268,7 +313,7 @@ def test_external_ref_resolves_to_cross_firing_edge_in_snapshot(
             phase="extractor",
             turn_index=3,
             ts_ns=2,
-            root_session_id=sid,
+            session_id=sid,
             compose_kwargs={},
             payload={"new_turns": [], "recent_graph": []},
             output={

@@ -1,9 +1,16 @@
 """Replay-record I/O.
 
 One JSONL line per phase invocation, written to
-``<cwd>/.agentm/audit_replay/<root_session_id>.jsonl`` during live runs.
+``<cwd>/.agentm/audit_replay/<session_id>.jsonl`` during live runs.
 Each line is self-contained: it carries every input needed to rebuild the
 extension list + payload, plus the recorded output for diffing.
+
+Identity vocabulary mirrors AgentM core (``agentm.core.abi.extension``):
+``session_id`` is the per-session id (= the OTel span_id of the
+session-root span, and the ``.agentm/observability/<session_id>.jsonl``
+filename) and is the sidecar/meta filename stem; ``trace_id`` is the
+whole-tree group id (= core's ``api.root_session_id`` / the OTel
+trace_id), shared by the root and all transitive children.
 """
 
 from __future__ import annotations
@@ -14,10 +21,25 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from agentm.core.abi.extension import ExtensionAPI
 
 Phase = Literal["extractor", "auditor"]
 Status = Literal["ok", "no_call", "spawn_error", "prompt_error"]
+
+__all__ = [
+    "Phase",
+    "ReplayRecord",
+    "Status",
+    "audit_session_id",
+    "iter_records",
+    "now_ns",
+    "read_records",
+    "replay_log_path",
+    "write_record",
+]
 
 
 @dataclass
@@ -32,7 +54,8 @@ class ReplayRecord:
 
     phase: Phase
     turn_index: int
-    root_session_id: str
+    session_id: str
+    trace_id: str
     ts_ns: int
     compose_kwargs: dict[str, Any]
     payload: dict[str, Any]
@@ -67,7 +90,8 @@ class ReplayRecord:
         return {
             "phase": self.phase,
             "turn_index": self.turn_index,
-            "root_session_id": self.root_session_id,
+            "session_id": self.session_id,
+            "trace_id": self.trace_id,
             "ts_ns": self.ts_ns,
             "compose_kwargs": self.compose_kwargs,
             "payload": self.payload,
@@ -84,7 +108,8 @@ class ReplayRecord:
         d: dict[str, Any] = {
             "phase": self.phase,
             "turn_index": self.turn_index,
-            "root_session_id": self.root_session_id,
+            "session_id": self.session_id,
+            "trace_id": self.trace_id,
             "ts_ns": self.ts_ns,
             "compose_kwargs": self.compose_kwargs,
             "payload": self.payload,
@@ -109,7 +134,8 @@ class ReplayRecord:
         return cls(
             phase=d["phase"],
             turn_index=int(d["turn_index"]),
-            root_session_id=str(d["root_session_id"]),
+            session_id=str(d["session_id"]),
+            trace_id=str(d["trace_id"]),
             ts_ns=int(d.get("ts_ns") or 0),
             compose_kwargs=dict(d.get("compose_kwargs") or {}),
             payload=dict(d.get("payload") or {}),
@@ -123,9 +149,38 @@ class ReplayRecord:
         )
 
 
-def replay_log_path(cwd: str | os.PathLike[str], root_session_id: str) -> Path:
-    """Canonical sidecar path for a given session tree."""
-    return Path(cwd) / ".agentm" / "audit_replay" / f"{root_session_id}.jsonl"
+def replay_log_path(cwd: str | os.PathLike[str], session_id: str) -> Path:
+    """Canonical sidecar path for a given session.
+
+    Keyed by ``session_id`` -- the per-session id that also names the
+    ``.agentm/observability/<session_id>.jsonl`` file -- so the sidecar
+    and its meta share a stem with the observability log.
+    """
+    return Path(cwd) / ".agentm" / "audit_replay" / f"{session_id}.jsonl"
+
+
+def audit_session_id(api: ExtensionAPI) -> str:
+    """The per-session id used to key sidecars: the persisted session_id,
+    falling back to the OTel trace_id for in-memory sessions.
+
+    Prefers ``api.session.get_session_id()`` (the persisted
+    ``SessionManager`` header id, which is also the on-disk JSONL file
+    name) so ``agent-from-reminder`` can relocate the source session.
+    Falls back to ``api.root_session_id`` (the OTel trace_id assigned at
+    session-construction time) when the session is in-memory /
+    unpersisted -- that branch keeps the existing behaviour for embedded
+    SDK callers who never write a session file at all.
+
+    This is the canonical helper shared by every atom that keys a
+    sidecar (``adapters.agentm``, ``distill.binding``); it lives in this
+    lib module so atoms never import one another (§11).
+    """
+    sid: str
+    try:
+        sid = api.session.get_session_id()
+    except AttributeError:
+        sid = ""
+    return sid or api.root_session_id
 
 
 def write_record(path: Path, record: ReplayRecord) -> None:

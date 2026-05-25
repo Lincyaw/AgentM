@@ -70,12 +70,12 @@ What each knob does:
 What you get under `$RUN_DIR/.agentm/audit_replay/`:
 
 ```
-<root_session_id>.jsonl       # replay records (one per phase invocation)
-<root_session_id>.meta.json   # sample_id binding (written by distill_binding)
+<session_id>.jsonl       # replay records (one per phase invocation)
+<session_id>.meta.json   # sample_id binding (written by distill_binding)
 ```
 
 Run as many samples as you want into the same `$RUN_DIR` — each
-session has its own `<root_session_id>`, so files don't collide.
+session has its own `<session_id>`, so files don't collide.
 
 ### Alternative: use the host scenario's eval runner
 

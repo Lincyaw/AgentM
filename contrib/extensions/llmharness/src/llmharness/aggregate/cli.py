@@ -103,10 +103,10 @@ def replay(
         Path,
         typer.Option("--out", help="Output cases/ root.", resolve_path=True),
     ],
-    root_session_id: Annotated[
+    session_id: Annotated[
         str | None,
         typer.Option(
-            "--root-session-id",
+            "--session-id",
             help="Aggregate only this session; default = every sidecar in --cwd.",
         ),
     ] = None,
@@ -117,7 +117,7 @@ def replay(
             help=(
                 "Override case sample_id (e.g. for rca llm-eval runs without "
                 "distill.binding). Applies to every aggregated session — pair "
-                "with --root-session-id for per-sample runs."
+                "with --session-id for per-sample runs."
             ),
         ),
     ] = None,
@@ -136,8 +136,8 @@ def replay(
         typer.echo(f"no replay dir at {replay_dir}; nothing to aggregate", err=True)
         raise typer.Exit(2)
 
-    if root_session_id:
-        candidate = replay_dir / f"{root_session_id}.jsonl"
+    if session_id:
+        candidate = replay_dir / f"{session_id}.jsonl"
         sessions = [candidate] if candidate.is_file() else []
     else:
         sessions = sorted(replay_dir.glob("*.jsonl"))

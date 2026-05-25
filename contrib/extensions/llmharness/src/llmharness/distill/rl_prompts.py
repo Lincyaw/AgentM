@@ -17,7 +17,7 @@ Stripped fields (would leak teacher behavior into the policy's input)::
     raw_assistant_messages    - teacher's content blocks
 
 Every other ReplayRecord field is preserved: ``phase``, ``turn_index``,
-``root_session_id``, ``ts_ns``, ``compose_kwargs``, ``payload``,
+``session_id``, ``trace_id``, ``ts_ns``, ``compose_kwargs``, ``payload``,
 ``provider``, ``extras``. The result is ready for
 ``ReplayRecord.from_dict(row)`` and is the **public contract** consumed by
 rca-autorl from this commit forward.

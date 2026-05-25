@@ -19,13 +19,14 @@ from llmharness.replay.record import ReplayRecord, write_record
 
 
 def _make_extractor_record(
-    *, tmp_path: Path, root_session_id: str, turn_index: int
+    *, tmp_path: Path, session_id: str, turn_index: int
 ) -> Path:
-    log = tmp_path / f"{root_session_id}.jsonl"
+    log = tmp_path / f"{session_id}.jsonl"
     rec = ReplayRecord(
         phase="extractor",
         turn_index=turn_index,
-        root_session_id=root_session_id,
+        session_id=session_id,
+        trace_id=f"trace-{session_id}",
         ts_ns=123_000_000_000 + turn_index,
         compose_kwargs={"base_prompt": "BE THE EXTRACTOR"},
         payload={"trigger": "tick", "new_turns": [{"id": "t1"}], "next_event_id": 7},
@@ -43,13 +44,14 @@ def _make_extractor_record(
 
 
 def _make_auditor_record(
-    *, tmp_path: Path, root_session_id: str, turn_index: int
+    *, tmp_path: Path, session_id: str, turn_index: int
 ) -> None:
-    log = tmp_path / f"{root_session_id}.jsonl"
+    log = tmp_path / f"{session_id}.jsonl"
     rec = ReplayRecord(
         phase="auditor",
         turn_index=turn_index,
-        root_session_id=root_session_id,
+        session_id=session_id,
+        trace_id=f"trace-{session_id}",
         ts_ns=456_000_000_000 + turn_index,
         compose_kwargs={"summary_threshold": 30},
         payload={"graph": {"nodes": []}, "recent_verdicts": []},
@@ -65,9 +67,9 @@ def test_rl_prompts_cli_emits_stripped_replay_records(tmp_path: Path) -> None:
     replay_dir.mkdir()
     out = tmp_path / "out" / "rl_prompts.jsonl"
 
-    _make_extractor_record(tmp_path=replay_dir, root_session_id="sess-a", turn_index=2)
-    _make_extractor_record(tmp_path=replay_dir, root_session_id="sess-b", turn_index=5)
-    _make_auditor_record(tmp_path=replay_dir, root_session_id="sess-b", turn_index=6)
+    _make_extractor_record(tmp_path=replay_dir, session_id="sess-a", turn_index=2)
+    _make_extractor_record(tmp_path=replay_dir, session_id="sess-b", turn_index=5)
+    _make_auditor_record(tmp_path=replay_dir, session_id="sess-b", turn_index=6)
 
     rc = cli_main(
         [
@@ -96,7 +98,9 @@ def test_rl_prompts_cli_emits_stripped_replay_records(tmp_path: Path) -> None:
         # Preserved fields must be present (the substrate the runner needs).
         assert "phase" in row
         assert "turn_index" in row
-        assert "root_session_id" in row
+        assert "session_id" in row
+        assert "trace_id" in row
+        assert "root_session_id" not in row
         assert "ts_ns" in row
         assert "compose_kwargs" in row
         assert "payload" in row

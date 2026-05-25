@@ -553,7 +553,8 @@ class SidecarWriter:
         *,
         phase: str,
         turn_index: int,
-        root_session_id: str,
+        session_id: str,
+        trace_id: str,
         compose_kwargs: dict[str, Any] | None,
         payload: dict[str, Any] | None,
         provider: tuple[str, dict[str, Any]] | None,
@@ -569,7 +570,8 @@ class SidecarWriter:
         rec = ReplayRecord(
             phase=phase,  # type: ignore[arg-type]
             turn_index=turn_index,
-            root_session_id=root_session_id,
+            session_id=session_id,
+            trace_id=trace_id,
             ts_ns=now_ns(),
             compose_kwargs=compose_kwargs or {},
             payload=payload or {},
@@ -770,7 +772,8 @@ class HarnessRunner:
         extractor_interval: int,
         audit_interval: int,
         enable_auditor: bool,
-        root_session_id: str,
+        session_id: str,
+        trace_id: str,
         provider_extractor: tuple[str, dict[str, Any]] | None,
         provider_auditor: tuple[str, dict[str, Any]] | None,
         # In P1 the live audit-check registry lives on the parent
@@ -797,7 +800,8 @@ class HarnessRunner:
         self._extractor_interval = max(1, int(extractor_interval))
         self._audit_interval = max(1, int(audit_interval))
         self._enable_auditor = enable_auditor
-        self._root_session_id = root_session_id
+        self._session_id = session_id
+        self._trace_id = trace_id
         self._provider_extractor = provider_extractor
         self._provider_auditor = provider_auditor
         self._audit_registry = audit_registry
@@ -958,7 +962,8 @@ class HarnessRunner:
             synth_record = ReplayRecord(
                 phase="extractor",
                 turn_index=window_hi_inclusive,
-                root_session_id=self._root_session_id,
+                session_id=self._session_id,
+                trace_id=self._trace_id,
                 ts_ns=now_ns(),
                 compose_kwargs=dict(replay_compose_kwargs),
                 payload=dict(payload),
@@ -979,7 +984,8 @@ class HarnessRunner:
             self._sidecar.record(
                 phase="extractor",
                 turn_index=window_hi_inclusive,
-                root_session_id=self._root_session_id,
+                session_id=self._session_id,
+                trace_id=self._trace_id,
                 compose_kwargs=replay_compose_kwargs,
                 payload=payload,
                 provider=self._provider_extractor,
@@ -1185,7 +1191,8 @@ class HarnessRunner:
                 self._sidecar.record(
                     phase="auditor",
                     turn_index=turn_index,
-                    root_session_id=self._root_session_id,
+                    session_id=self._session_id,
+                    trace_id=self._trace_id,
                     compose_kwargs=replay_compose_kwargs,
                     payload=replay_payload,
                     provider=self._provider_auditor,
@@ -1198,7 +1205,8 @@ class HarnessRunner:
             no_call_record = ReplayRecord(
                 phase="auditor",
                 turn_index=turn_index,
-                root_session_id=self._root_session_id,
+                session_id=self._session_id,
+                trace_id=self._trace_id,
                 ts_ns=now_ns(),
                 compose_kwargs=replay_compose_kwargs,
                 payload=replay_payload,
@@ -1224,7 +1232,8 @@ class HarnessRunner:
             self._sidecar.record(
                 phase="auditor",
                 turn_index=turn_index,
-                root_session_id=self._root_session_id,
+                session_id=self._session_id,
+                trace_id=self._trace_id,
                 compose_kwargs=replay_compose_kwargs,
                 payload=replay_payload,
                 provider=self._provider_auditor,
@@ -1236,7 +1245,8 @@ class HarnessRunner:
         ok_record = ReplayRecord(
             phase="auditor",
             turn_index=turn_index,
-            root_session_id=self._root_session_id,
+            session_id=self._session_id,
+            trace_id=self._trace_id,
             ts_ns=now_ns(),
             compose_kwargs=replay_compose_kwargs,
             payload=replay_payload,

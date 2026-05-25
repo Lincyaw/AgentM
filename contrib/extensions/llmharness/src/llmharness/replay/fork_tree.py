@@ -282,15 +282,15 @@ def _collect_surfaces(run_surfaces: list[SurfaceFiring]) -> list[Surface]:
     ]
 
 
-def _rebind_record(record: ReplayRecord, *, root_session_id: str) -> ReplayRecord:
-    """Return a copy of ``record`` re-keyed under a new root_session_id.
+def _rebind_record(record: ReplayRecord, *, session_id: str) -> ReplayRecord:
+    """Return a copy of ``record`` re-keyed under a new session_id.
 
     The fork-tree sidecar is keyed off the *root* backbone session id but
     composed from records produced under many different session ids (one
-    per node). Every entry's ``root_session_id`` is rewritten while
-    everything else (timing, payload, output) stays verbatim.
+    per node). Every entry's ``session_id`` is rewritten while everything
+    else (timing, payload, output) stays verbatim.
     """
-    return replace(record, root_session_id=root_session_id)
+    return replace(record, session_id=session_id)
 
 
 async def run_fork_tree_experiment(
@@ -382,7 +382,7 @@ async def run_fork_tree_experiment(
         run = await replay_pipeline_over_trajectory(
             messages=backbone.final_messages,
             cwd=cwd,
-            root_session_id=backbone.session_log_id,
+            session_id=backbone.session_log_id,
             provider=provider,
             extractor_settings=extractor_settings,
             auditor_settings=auditor_settings,
@@ -671,7 +671,7 @@ def write_fork_tree_replay(
                     },
                 )
                 write_record(
-                    out_path, _rebind_record(tagged, root_session_id=root_sid)
+                    out_path, _rebind_record(tagged, session_id=root_sid)
                 )
 
     return out_path

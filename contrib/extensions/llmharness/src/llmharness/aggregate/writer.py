@@ -101,7 +101,8 @@ def _build_readme(case: CaseData) -> str:
     lines = [
         f"# Case `{m.case_id}`",
         "",
-        f"- root_session_id: `{m.root_session_id}`",
+        f"- session_id: `{m.session_id}`",
+        f"- trace_id: `{m.trace_id or '—'}`",
         f"- sample_id: `{m.sample_id or '—'}`",
         f"- dataset: `{m.dataset_name or '—'}`",
         f"- main-agent messages: **{len(case.main_agent_messages)}**",

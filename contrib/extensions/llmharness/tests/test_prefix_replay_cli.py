@@ -68,12 +68,13 @@ def _make_source_session(
 
 
 def _write_audit_record(
-    *, sidecar_path: Path, root_session_id: str, turn: int, reminder: str
+    *, sidecar_path: Path, session_id: str, turn: int, reminder: str
 ) -> None:
     rec = ReplayRecord(
         phase="auditor",
         turn_index=turn,
-        root_session_id=root_session_id,
+        session_id=session_id,
+        trace_id=f"trace-{session_id}",
         ts_ns=int(time.time_ns()),
         compose_kwargs={},
         payload={},
@@ -110,7 +111,7 @@ def test_agent_from_reminder_branches_at_turn_and_prints_command(
     sidecar = audit_dir / f"{root_id}.jsonl"
     _write_audit_record(
         sidecar_path=sidecar,
-        root_session_id=root_id,
+        session_id=root_id,
         turn=target_turn,
         reminder=reminder_text,
     )

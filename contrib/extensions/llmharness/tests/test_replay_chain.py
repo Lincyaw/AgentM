@@ -21,7 +21,8 @@ def _rec(phase: str, turn: int) -> ReplayRecord:
     return ReplayRecord(
         phase=phase,  # type: ignore[arg-type]
         turn_index=turn,
-        root_session_id="trace-1",
+        session_id="sess-1",
+        trace_id="trace-1",
         ts_ns=0,
         compose_kwargs={},
         payload={},

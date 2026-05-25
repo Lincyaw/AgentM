@@ -89,7 +89,8 @@ class LabeledSample:
     """
 
     sample_id: str
-    root_session_id: str
+    session_id: str
+    trace_id: str
     turn_index: int
     input_payload: dict[str, Any]
     target_verdict: dict[str, Any]
@@ -103,7 +104,8 @@ class LabeledSample:
         return json.dumps(
             {
                 "sample_id": self.sample_id,
-                "root_session_id": self.root_session_id,
+                "session_id": self.session_id,
+                "trace_id": self.trace_id,
                 "turn_index": self.turn_index,
                 "input_payload": self.input_payload,
                 "target_verdict": self.target_verdict,
@@ -292,7 +294,8 @@ async def label_auditor_record(
 ) -> LabeledSample:
     snapshot = snapshot_from_replay(record)
     turn_index = snapshot.turn_index
-    root_session_id = str(record.get("root_session_id") or "")
+    session_id = str(record.get("session_id") or "")
+    trace_id = str(record.get("trace_id") or "")
     gt_meta = {"fault_type": gt.fault_type, "fault_category": gt.fault_category}
 
     # student-visible payload — explicitly NO GT, NO trajectory turns
@@ -307,7 +310,8 @@ async def label_auditor_record(
     if label is None:
         return LabeledSample(
             sample_id=sample_id,
-            root_session_id=root_session_id,
+            session_id=session_id,
+            trace_id=trace_id,
             turn_index=turn_index,
             input_payload=input_payload,
             target_verdict={},
@@ -328,7 +332,8 @@ async def label_auditor_record(
         }
         return LabeledSample(
             sample_id=sample_id,
-            root_session_id=root_session_id,
+            session_id=session_id,
+            trace_id=trace_id,
             turn_index=turn_index,
             input_payload=input_payload,
             target_verdict=target,
@@ -352,7 +357,8 @@ async def label_auditor_record(
     if rewrite is None:
         return LabeledSample(
             sample_id=sample_id,
-            root_session_id=root_session_id,
+            session_id=session_id,
+            trace_id=trace_id,
             turn_index=turn_index,
             input_payload=input_payload,
             target_verdict={},
@@ -371,7 +377,8 @@ async def label_auditor_record(
     if not rewrite.justifiable_from_graph:
         return LabeledSample(
             sample_id=sample_id,
-            root_session_id=root_session_id,
+            session_id=session_id,
+            trace_id=trace_id,
             turn_index=turn_index,
             input_payload=input_payload,
             target_verdict={},
@@ -401,7 +408,8 @@ async def label_auditor_record(
     }
     return LabeledSample(
         sample_id=sample_id,
-        root_session_id=root_session_id,
+        session_id=session_id,
+        trace_id=trace_id,
         turn_index=turn_index,
         input_payload=input_payload,
         target_verdict=target,

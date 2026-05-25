@@ -183,7 +183,7 @@ async def test_replay_pipeline_honors_seed_cumulative_and_start_turn(
     result = await replay_pipeline_over_trajectory(
         messages=messages,
         cwd=str(tmp_path),
-        root_session_id="node-x",
+        session_id="node-x",
         provider=None,
         extractor_settings=extractor_settings,
         auditor_settings=auditor_settings,
@@ -260,7 +260,7 @@ async def test_full_tree_run_captures_independent_surface_snapshots(
     result = await replay_pipeline_over_trajectory(
         messages=messages,
         cwd=str(tmp_path),
-        root_session_id="node-y",
+        session_id="node-y",
         provider=None,
         extractor_settings=ExtractorSettings(
             extensions=[(EXTRACTOR_TOOLS_MODULE, {})],
@@ -334,7 +334,7 @@ async def test_child_resume_past_boundary_skips_fork_turn_firing(
     result = await replay_pipeline_over_trajectory(
         messages=messages,
         cwd=str(tmp_path),
-        root_session_id="child",
+        session_id="child",
         provider=None,
         extractor_interval=5,
         audit_interval=5,
@@ -369,7 +369,7 @@ class _FakePayload:
 class _ScriptedReplay:
     """Drop-in replacement for ``replay_pipeline_over_trajectory``.
 
-    ``surfaces_by_session`` maps a backbone ``root_session_id`` to the
+    ``surfaces_by_session`` maps a backbone ``session_id`` to the
     list of ``(fork_message_index, reminder_text)`` surfaces the auditor
     produced on that backbone. Each surface carries a fresh, distinct
     ``CumulativeAuditState`` so identity-of-seed assertions are possible.
@@ -383,7 +383,7 @@ class _ScriptedReplay:
 
     async def __call__(self, **kwargs: Any) -> OfflineRunResult:
         self.calls_seen.append(kwargs)
-        sid = kwargs["root_session_id"]
+        sid = kwargs["session_id"]
         spec = self._surfaces.get(sid, [])
         surfaces: list[SurfaceFiring] = []
         snaps: list[CumulativeAuditState] = []
@@ -649,7 +649,8 @@ def _ext_step(turn: int, root_id: str) -> StepResult:
     rec = ReplayRecord(
         phase="extractor",
         turn_index=turn,
-        root_session_id=root_id,
+        session_id=root_id,
+        trace_id=f"trace-{root_id}",
         ts_ns=1_000_000_000 + turn,
         compose_kwargs={},
         payload={"graph": []},
@@ -670,7 +671,8 @@ def _aud_step(turn: int, root_id: str, *, surface: bool = False) -> StepResult:
     rec = ReplayRecord(
         phase="auditor",
         turn_index=turn,
-        root_session_id=root_id,
+        session_id=root_id,
+        trace_id=f"trace-{root_id}",
         ts_ns=1_000_000_000 + turn + 5_000,
         compose_kwargs={},
         payload={"graph": []},
@@ -717,7 +719,7 @@ def test_write_fork_tree_replay_filters_window_rebinds_and_tags(tmp_path: Path) 
 
     1. Emit only records inside each node's window
        (root: ``[0, +inf)``; child: ``[fork+1, +inf)``).
-    2. Rebind every record's root_session_id to the ROOT node's id.
+    2. Rebind every record's session_id to the ROOT node's id.
     3. Tag every record with its node_id / parent_node_id in extras.
     """
     root = _node(
@@ -752,7 +754,7 @@ def test_write_fork_tree_replay_filters_window_rebinds_and_tags(tmp_path: Path) 
     assert returned == out_path
     written = list(iter_records(out_path))
 
-    assert all(r.root_session_id == "sess-0" for r in written)
+    assert all(r.session_id == "sess-0" for r in written)
     pairs = [(r.phase, int(r.turn_index)) for r in written]
     assert pairs == [
         ("extractor", 0),
@@ -828,7 +830,7 @@ def test_fork_tree_header_first_line_and_records_intact(tmp_path: Path) -> None:
     assert read_fork_tree_header(out) == header
 
     recs = list(iter_records(out))
-    assert all(r.root_session_id == "ctl" for r in recs), "rebind to root sid"
+    assert all(r.session_id == "ctl" for r in recs), "rebind to root sid"
     assert sorted((r.phase, r.turn_index) for r in recs) == [
         ("auditor", 4), ("auditor", 9), ("extractor", 4), ("extractor", 9),
     ]
