@@ -20,6 +20,9 @@ extensions:
   # See ``.claude/designs/pluggable-architecture.md`` §3.2. ---
   - module: agentm.extensions.builtin.operations_local
 
+  # --- tool-result size cap: spill large outputs to disk ---
+  - module: agentm.extensions.builtin.tool_result_cap
+
   # --- file I/O: read whole files; edit by exact-match replace;
   # write whole files. ls/find/grep are intentionally absent —
   # delegated to ``bash`` so the agent composes shell commands. ---
