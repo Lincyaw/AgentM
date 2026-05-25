@@ -86,11 +86,25 @@ or adding a new one does **not** require any string-pattern update.
 
 ### Chained-fork intervention (`chained_fork`)
 
+> **Pair with an `opinions` variant, not the default `harness.sync`.**
+> `chained_fork` is an A/B counterfactual experiment: the control segment
+> must be a **clean baseline with no live reminder injection** so the
+> branches (which seed the reminder via `llmharness.replay.reminder_seed`)
+> are the only intervention. The default `rca:harness.sync` has
+> `enable_reminders: true` and therefore injects the auditor's first
+> surface into the control trajectory live — silently invalidating the
+> counterfactual. Use `rca:harness.sync.opinions` (5-turn) or
+> `rca:harness.sync.opinions10` (10-turn) instead; both set
+> `enable_reminders: false` so the auditor only writes opinions and
+> never mutates the control. See [`_VARIANTS.md`](_VARIANTS.md).
+
 When running the eval driver with `--ak chained_fork=true` (optionally
 `--ak max_interventions=N`, defaults to 10), the driver:
 
 1. Runs a **control** segment against the configured `scenario` —
-   no seeded reminder, no initial messages.
+   no seeded reminder, no initial messages. (See the warning above:
+   the configured `scenario` must have `enable_reminders: false`, else
+   the control is no longer a clean baseline.)
 2. Replays the cognitive-audit pipeline offline over the control
    trajectory with `stop_on_first_surface=True` to find the first
    auditor firing that surfaces a reminder.
