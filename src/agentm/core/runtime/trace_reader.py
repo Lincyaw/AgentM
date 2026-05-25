@@ -39,6 +39,7 @@ from agentm.core.runtime.otel_export import (
 __all__ = [
     "LogRecord",
     "Span",
+    "SessionIdentity",
     "TraceReader",
     "attr",
 ]
@@ -116,6 +117,27 @@ class LogRecord:
     time_unix_nano: int | None = None
     observed_time_unix_nano: int | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionIdentity:
+    """Topology identity of one session file, from its ``session.start`` record.
+
+    These are the fields that stitch many JSONL session files into a single
+    logical trace tree: ``trace_id`` is the OTel root/trace id shared across
+    the parent session and every spawned child; ``parent_session_id`` is the
+    edge back to the spawner (``None`` for the root); ``purpose`` distinguishes
+    the role (e.g. ``root`` / ``cognitive_audit_extractor`` /
+    ``cognitive_audit_auditor``). All values are pulled from the
+    ``agentm.session.start`` log record's body, falling back to the
+    OTel-prefixed attribute keys.
+    """
+
+    trace_id: str | None = None
+    session_id: str | None = None
+    parent_session_id: str | None = None
+    purpose: str | None = None
+    scenario: str | None = None
 
 
 def _span_from_raw(raw: dict[str, Any]) -> Span:
@@ -322,6 +344,55 @@ class TraceReader:
     # ------------------------------------------------------------------
     # Convenience accessors
     # ------------------------------------------------------------------
+
+    def first_session_identity(self) -> SessionIdentity | None:
+        """Return the topology identity from the first ``session.start`` record.
+
+        Reads ONLY the first ``agentm.session.start`` log record (one per
+        file, near the top), so it is cheap to call across a whole directory.
+        Returns ``None`` when the file carries no such record (partial writes,
+        extension-install-only traces from failed spawns, etc.) — callers
+        skip those exactly like the trace-map builder does.
+
+        Field provenance: the writer stamps the identity into the record's
+        ``body`` as plain keys (``session_id`` / ``root_session_id`` /
+        ``parent_session_id`` / ``purpose`` / ``scenario``); the same values
+        are mirrored into OTel-prefixed attributes (``agentm.session.root_id``
+        and friends). We prefer the body and fall back to attributes so the
+        helper stays robust across writer variants. Empty attribute strings
+        (the OTLP encoding of ``None``) are normalised back to ``None``.
+        """
+
+        def _norm(value: Any) -> str | None:
+            if value is None or value == "":
+                return None
+            return str(value)
+
+        for record in self.iter_log_records(name="agentm.session.start"):
+            body = record.body if isinstance(record.body, dict) else {}
+            attrs = record.attributes
+            return SessionIdentity(
+                trace_id=_norm(
+                    body.get("root_session_id")
+                    or attrs.get("agentm.session.root_id")
+                ),
+                session_id=_norm(
+                    body.get("session_id")
+                    or attrs.get("agentm.session.id")
+                    or record.span_id
+                ),
+                parent_session_id=_norm(
+                    body.get("parent_session_id")
+                    or attrs.get("agentm.session.parent_id")
+                ),
+                purpose=_norm(
+                    body.get("purpose") or attrs.get("agentm.session.purpose")
+                ),
+                scenario=_norm(
+                    body.get("scenario") or attrs.get("agentm.session.scenario")
+                ),
+            )
+        return None
 
     def load_session_header(self) -> dict[str, Any] | None:
         """Return the body of the latest ``agentm.session.header`` log record.
