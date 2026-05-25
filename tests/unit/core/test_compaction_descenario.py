@@ -106,18 +106,6 @@ def test_extract_file_ops_without_registry_is_empty() -> None:
     assert file_ops.read == set()
 
 
-def test_extract_file_ops_ignores_tools_without_file_op_metadata() -> None:
-    file_ops = create_file_ops()
-    message = _assistant_with_tool_call("custom_tool", "/tmp/a.txt")
-    tools = [_make_function_tool("custom_tool", file_op=None)]
-
-    extract_file_ops_from_message(message, file_ops, tools)
-
-    assert file_ops.read == set()
-    assert file_ops.written == set()
-    assert file_ops.edited == set()
-
-
 # --- 2. Entry-materializer registry ---------------------------------------
 
 

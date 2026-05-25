@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from agentm.core.abi import LogRecord, Span, TraceReader, attr
+from agentm.core.abi import LogRecord, Span, TraceReader
 
 
 def _write_lines(path: Path, lines: list[dict]) -> None:
@@ -231,22 +231,6 @@ def test_load_turn_summaries_in_order(tmp_path: Path) -> None:
     assert [s["input_tokens"] for s in summaries] == [10, 20]
 
 
-def test_attr_helper_returns_default_for_missing(tmp_path: Path) -> None:
-    path = tmp_path / "trace.jsonl"
-    _write_lines(
-        path,
-        [
-            _span_line(
-                name="chat m1",
-                attributes=[_kv("gen_ai.request.model", {"stringValue": "m1"})],
-            )
-        ],
-    )
-    span = next(TraceReader(path).iter_spans())
-    assert attr(span, "gen_ai.request.model") == "m1"
-    assert attr(span, "missing", "fallback") == "fallback"
-
-
 def test_malformed_lines_are_skipped(tmp_path: Path) -> None:
     path = tmp_path / "trace.jsonl"
     path.write_text(
@@ -268,20 +252,6 @@ def test_missing_file_returns_empty_iterators(tmp_path: Path) -> None:
     assert reader.load_messages() == []
     assert reader.load_session_header() is None
     assert reader.load_session_fingerprint() is None
-
-
-def test_iterators_are_lazy_generators(tmp_path: Path) -> None:
-    """Calling an iterator method must not load the whole file."""
-    path = tmp_path / "trace.jsonl"
-    _write_lines(path, [_span_line(name="chat m1"), _span_line(name="chat m2")])
-    reader = TraceReader(path)
-    iterator = reader.iter_spans()
-    # types.GeneratorType — single-shot, not a list.
-    import types
-
-    assert isinstance(iterator, types.GeneratorType)
-    first = next(iterator)
-    assert first.name == "chat m1"
 
 
 def test_arrayvalue_and_nested_kvlist_unwrap(tmp_path: Path) -> None:

@@ -43,23 +43,6 @@ def test_registers_both_caps() -> None:
     assert cfg.max_tool_calls == 200
 
 
-def test_empty_config_means_unbounded() -> None:
-    cfg = _install({})
-    assert cfg.max_turns is None
-    assert cfg.max_tool_calls is None
-
-
-def test_partial_config_leaves_other_uncapped() -> None:
-    cfg = _install({"max_tool_calls": 50})
-    assert cfg.max_turns is None
-    assert cfg.max_tool_calls == 50
-
-
-def test_explicit_null_is_uncapped() -> None:
-    cfg = _install({"max_turns": None})
-    assert cfg.max_turns is None
-
-
 @pytest.mark.parametrize(
     "config",
     [

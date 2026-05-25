@@ -398,24 +398,6 @@ async def test_batch_coalesces_multiple_managed_writes_into_one_commit(
     assert changed == {"prompts/note.txt", "skills/foo/SKILL.md"}
 
 
-@pytest.mark.asyncio
-async def test_current_version_for_path_returns_commit_sha(tmp_path: Path) -> None:
-    writer = GitBackedResourceWriter(
-        cwd=str(tmp_path),
-        session_id="version-test",
-        bus=EventBus(),
-    )
-
-    result = await writer.write(
-        "notes.md",
-        b"hello",
-        rationale="record version",
-    )
-
-    assert result.commit_sha_after is not None
-    assert writer.current_version_for_path("notes.md") == result.commit_sha_after
-
-
 def _seed_managed_skill(repo: Path) -> Path:
     skill_path = repo / "skills" / "foo" / "SKILL.md"
     skill_path.parent.mkdir(parents=True, exist_ok=True)

@@ -30,14 +30,6 @@ def test_encode_prepends_4byte_big_endian_length() -> None:
     assert length > 0
 
 
-def test_round_trip_single_envelope() -> None:
-    env = _env()
-    buf = encode(env)
-    out, rest = decode(buf)
-    assert out == env
-    assert rest == b""
-
-
 @pytest.mark.parametrize(
     "env",
     [

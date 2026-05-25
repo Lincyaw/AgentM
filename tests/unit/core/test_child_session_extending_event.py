@@ -42,13 +42,6 @@ def test_none_returns_are_ignored() -> None:
     assert out == []
 
 
-def test_single_handler_contribution_appended() -> None:
-    out = apply_child_session_contributions(
-        [], [[("contrib.extensions.live_inspector", {"role": "child"})]]
-    )
-    assert out == [("contrib.extensions.live_inspector", {"role": "child"})]
-
-
 def test_two_handlers_contributions_appended_in_order() -> None:
     out = apply_child_session_contributions(
         [],

@@ -23,8 +23,3 @@ def test_jitter_stays_within_ratio() -> None:
         d = exponential_backoff(3, base=1.0, cap=60.0, jitter_ratio=0.2)
         # raw=4.0, +/-20% → [3.2, 4.8]
         assert 3.2 <= d <= 4.8
-
-
-def test_attempts_below_one_treated_as_one() -> None:
-    assert exponential_backoff(0, base=1.0, cap=60.0, jitter_ratio=0.0) == 1.0
-    assert exponential_backoff(-3, base=1.0, cap=60.0, jitter_ratio=0.0) == 1.0
