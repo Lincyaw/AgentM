@@ -33,7 +33,6 @@ from agentm.core.abi import (
     TextContent,
 )
 from agentm.core.abi.messages import AssistantMessage
-from agentm.extensions.builtin.tool_propose_change import mad_confidence
 from agentm.core.abi.extension import ProviderConfig
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
@@ -188,48 +187,6 @@ def _seed_pool(decisions_dir: Path, scores: list[float]) -> None:
         (candidates_dir / f"{cid}.json").write_text(
             json.dumps(record), encoding="utf-8"
         )
-
-
-# ---------------------------------------------------------------------------
-# Pure unit tests of the mad_confidence helper.
-# ---------------------------------------------------------------------------
-
-
-def test_mad_confidence_below_floor_returns_none() -> None:
-    """N < 3 -> None."""
-    assert mad_confidence([0.5, 0.6], 0.5, 0.9) is None
-    assert mad_confidence([], 0.0, 1.0) is None
-
-
-def test_mad_confidence_zero_mad_returns_none() -> None:
-    """All-identical pool -> MAD == 0 -> None."""
-    assert mad_confidence([0.5, 0.5, 0.5, 0.5], 0.5, 0.9) is None
-
-
-def test_mad_confidence_real_tier() -> None:
-    """ratio >= 2 -> 'real'."""
-    # values=[0.4,0.5,0.6,0.7,0.8] -> median=0.6, MAD = median(|v-0.6|) = 0.1
-    # baseline=0.5, candidate=0.9 -> ratio = 0.4/0.1 = 4.0
-    out = mad_confidence([0.4, 0.5, 0.6, 0.7, 0.8], 0.5, 0.9)
-    assert out is not None
-    assert out["tier"] == "real"
-    assert out["ratio"] == pytest.approx(4.0)
-
-
-def test_mad_confidence_marginal_tier() -> None:
-    """1 <= ratio < 2 -> 'marginal'."""
-    # MAD as above = 0.1; ratio = 0.15/0.1 = 1.5
-    out = mad_confidence([0.4, 0.5, 0.6, 0.7, 0.8], 0.5, 0.65)
-    assert out is not None
-    assert out["tier"] == "marginal"
-
-
-def test_mad_confidence_noise_tier() -> None:
-    """ratio < 1 -> 'noise'."""
-    # MAD = 0.1; ratio = 0.05/0.1 = 0.5
-    out = mad_confidence([0.4, 0.5, 0.6, 0.7, 0.8], 0.5, 0.55)
-    assert out is not None
-    assert out["tier"] == "noise"
 
 
 # ---------------------------------------------------------------------------

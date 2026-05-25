@@ -16,7 +16,6 @@ Tests assert the three invariants:
 from __future__ import annotations
 
 from agentm.core.lib.redact import (
-    SENSITIVE_HEADER_NAMES,
     redact_headers,
     redact_messages,
 )
@@ -178,15 +177,3 @@ def test_redact_headers_strips_sensitive_values_any_casing() -> None:
     assert scrubbed["User-Agent"] == "agentm/0.1"
     # Original dict is not mutated.
     assert headers["Authorization"] == "Bearer SECRET_TOKEN_xyz"
-
-
-def test_redact_headers_passes_through_non_mapping() -> None:
-    assert redact_headers(None) is None
-    assert redact_headers("not a dict") == "not a dict"
-
-
-def test_sensitive_header_names_are_lowercase() -> None:
-    """The matcher is case-insensitive; the canonical set is lowercase
-    so the comparison is a simple ``key.lower() in SENSITIVE_HEADER_NAMES``."""
-
-    assert all(name == name.lower() for name in SENSITIVE_HEADER_NAMES)

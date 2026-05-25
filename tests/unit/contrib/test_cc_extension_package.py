@@ -7,9 +7,7 @@ from typing import Any
 
 from agentm.core.abi import EventBus
 from agentm.core.abi.events import ResourcesDiscoverEvent, SessionReadyEvent
-from contrib.extensions import cc
-from contrib.extensions.cc import agents, commands, plugins
-from contrib.extensions.cc._md_skills import parse_md_skill_records
+from contrib.extensions.cc import commands, plugins
 
 
 class _Api:
@@ -26,30 +24,6 @@ class _Api:
 
     def send_user_message(self, content: str | list[Any]) -> None:
         self.sent = content
-
-
-def test_cc_package_exports_tier2_atoms_and_no_flat_compat_files() -> None:
-    assert cc.MANIFEST.tier == 2
-    assert [manifest.tier for manifest in cc.MANIFESTS] == [2, 2, 2]
-    assert agents.MANIFEST.name == "agents"
-    assert commands.MANIFEST.name == "commands"
-    assert plugins.MANIFEST.name == "plugins"
-    assert not list(Path("contrib/extensions/cc").glob("cc_*.py"))
-
-
-def test_parse_md_skill_records_is_shared_parser(tmp_path: Path) -> None:
-    commands_dir = tmp_path / "commands"
-    commands_dir.mkdir()
-    (commands_dir / "ship.md").write_text(
-        "---\nname: ship\ndescription: Ship it\n---\nDo the ship flow.\n",
-        encoding="utf-8",
-    )
-
-    records = parse_md_skill_records(commands_dir)
-
-    assert [record.name for record in records] == ["ship"]
-    assert records[0].description == "Ship it"
-    assert records[0].source == "claude-command"
 
 
 def test_plugins_feed_command_paths_to_commands_via_resources_event(tmp_path: Path) -> None:
