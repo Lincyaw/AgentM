@@ -308,16 +308,12 @@ async def test_tier2_activate_is_deferred(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_write_rejects_decisions_path(tmp_path: Path) -> None:
+async def test_tool_write_rejects_constitution_path(tmp_path: Path) -> None:
     """End-to-end: ``tool_write`` invokes ResourceWriter; ResourceWriter
     refuses constitution paths. Asserts no file is created."""
 
-    # tmp_path lives under the worktree-root repo (the test runner's
-    # cwd) so paths INSIDE the repo classify against the repo manifest.
-    # We need a path that is_constitution_path actually flags as
-    # constitution. We use a path under the repo root rather than tmp.
     repo_root = Path(__file__).resolve().parents[2]
-    target = repo_root / ".agentm" / "decisions" / "_test_writeguard.jsonl"
+    target = repo_root / ".agentm" / "catalog" / "_test_writeguard.jsonl"
     if target.exists():
         target.unlink()
 

@@ -31,22 +31,6 @@ if TYPE_CHECKING:
     from agentm.core.runtime.session_manager import SessionManager
 
 
-def default_child_provider_factory(parent_provider: Any) -> tuple[str, dict[str, Any]]:
-    """Return the spec for whichever atom claims the ``PROVIDER_INHERITOR``
-    role. Looking up by role rather than by atom name lets a scenario ship
-    a customised provider-inheritor without editing the runtime."""
-
-    from agentm.core.abi.roles import PARENT_PROVIDER_CONFIG_KEY, PROVIDER_INHERITOR
-    from agentm.extensions.discover import discover_by_role
-
-    entry = discover_by_role().get(PROVIDER_INHERITOR)
-    if entry is None:
-        raise RuntimeError(
-            f"no atom claims the {PROVIDER_INHERITOR!r} role; cannot build "
-            "a child-session provider spec"
-        )
-    return (entry.module_path, {PARENT_PROVIDER_CONFIG_KEY: parent_provider})
-
 
 @dataclass
 class AgentSessionConfig:
@@ -178,4 +162,4 @@ class AgentSessionConfig:
         return replace(self, bus=bus)
 
 
-__all__ = ["AgentSessionConfig", "default_child_provider_factory"]
+__all__ = ["AgentSessionConfig"]
