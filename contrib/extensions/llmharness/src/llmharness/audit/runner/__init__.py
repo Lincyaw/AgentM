@@ -4,16 +4,18 @@ The internal layout retains a single module — :mod:`.runner` — that
 holds the :class:`HarnessRunner` class together with the dataclasses,
 Protocols, and serialization helpers it relies on. The reorg spec
 called for splitting these into ``settings.py``, ``cumulative_state.py``,
-``sidecar.py`` and ``runner.py``; that split was deferred because every
-candidate file kept a hard import dependency on a sibling (notably
-``HarnessRunner`` instantiates ``ExtractorSettings.default`` /
-``AuditorSettings.default`` and reads ``CumulativeAuditState``
-internals while keeping ``SidecarWriter`` as a fixed collaborator), so
-the file-level split would have produced four files with tight
-cyclical imports rather than four coherent modules. Re-exporting here
-preserves the spec's external surface: importers can write
-``from llmharness.audit.runner import HarnessRunner`` (new) or
-continue importing the same names via this package init.
+``sidecar.py`` and ``runner.py``; that split was deferred — out of
+scope for the pure-rename refactor, since moving the class bodies
+across files (and updating their internal references) is
+behavior-adjacent work. The dependency graph between
+``ExtractorSettings`` / ``AuditorSettings`` / ``CumulativeAuditState``
+/ ``StepResult`` / ``ChildRunner`` / ``OpSink`` / ``SidecarWriter`` and
+``HarnessRunner`` is a clean one-way DAG (runner depends on the
+others, never the reverse), so the split can be done cleanly in a
+follow-up. Re-exporting here preserves the spec's external surface:
+importers can write ``from llmharness.audit.runner import
+HarnessRunner`` (new) or continue importing the same names via this
+package init.
 """
 
 from __future__ import annotations
