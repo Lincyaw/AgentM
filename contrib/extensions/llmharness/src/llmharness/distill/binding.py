@@ -28,6 +28,8 @@ from typing import Any
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
+from ..replay.record import audit_session_id
+
 _logger = logging.getLogger(__name__)
 
 MANIFEST = ExtensionManifest(
@@ -56,9 +58,14 @@ _DATASET_NAME_ENV = "LLMHARNESS_DISTILL_DATASET_NAME"
 _DATASET_PATH_ENV = "LLMHARNESS_DISTILL_DATASET"
 
 
-def meta_path_for(cwd: str | os.PathLike[str], root_session_id: str) -> Path:
-    """Canonical sidecar path. Mirrors ``replay.record.replay_log_path``."""
-    return Path(cwd) / ".agentm" / "audit_replay" / f"{root_session_id}.meta.json"
+def meta_path_for(cwd: str | os.PathLike[str], session_id: str) -> Path:
+    """Canonical sidecar path. Mirrors ``replay.record.replay_log_path``.
+
+    Keyed by ``session_id`` so the meta shares a stem with the replay
+    sidecar and the ``.agentm/observability/<session_id>.jsonl`` log;
+    ``aggregate`` / ``distill label`` pair the two by file stem.
+    """
+    return Path(cwd) / ".agentm" / "audit_replay" / f"{session_id}.meta.json"
 
 
 @dataclass(frozen=True)
@@ -66,14 +73,16 @@ class SampleMeta:
     sample_id: str
     dataset_name: str
     dataset_path: str
-    root_session_id: str
+    session_id: str
+    trace_id: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "sample_id": self.sample_id,
             "dataset_name": self.dataset_name,
             "dataset_path": self.dataset_path,
-            "root_session_id": self.root_session_id,
+            "session_id": self.session_id,
+            "trace_id": self.trace_id,
         }
 
 
@@ -90,7 +99,8 @@ def read_sample_meta(path: Path) -> SampleMeta | None:
         sample_id=sample_id,
         dataset_name=str(raw.get("dataset_name") or ""),
         dataset_path=str(raw.get("dataset_path") or ""),
-        root_session_id=str(raw.get("root_session_id") or ""),
+        session_id=str(raw.get("session_id") or ""),
+        trace_id=str(raw.get("trace_id") or ""),
     )
 
 
@@ -107,13 +117,15 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     dataset_path = (
         config.get("dataset_path") or os.environ.get(_DATASET_PATH_ENV) or ""
     )
+    session_id = audit_session_id(api)
     meta = SampleMeta(
         sample_id=str(sample_id),
         dataset_name=str(dataset_name),
         dataset_path=str(dataset_path),
-        root_session_id=api.root_session_id,
+        session_id=session_id,
+        trace_id=api.root_session_id,
     )
-    path = meta_path_for(api.cwd, api.root_session_id)
+    path = meta_path_for(api.cwd, session_id)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(

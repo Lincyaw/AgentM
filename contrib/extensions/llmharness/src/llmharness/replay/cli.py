@@ -260,7 +260,8 @@ def _run_single(
             rec = ReplayRecord(
                 phase=rec.phase,
                 turn_index=rec.turn_index,
-                root_session_id=rec.root_session_id,
+                session_id=rec.session_id,
+                trace_id=rec.trace_id,
                 ts_ns=rec.ts_ns,
                 compose_kwargs=rec.compose_kwargs,
                 payload=rec.payload,
@@ -430,7 +431,7 @@ def agent_from_reminder(
         typer.Option(
             ...,
             "--audit-replay",
-            help="Path to .agentm/audit_replay/<root_session_id>.jsonl",
+            help="Path to .agentm/audit_replay/<session_id>.jsonl",
         ),
     ],
     turn: Annotated[

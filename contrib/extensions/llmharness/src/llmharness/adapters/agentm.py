@@ -109,7 +109,7 @@ from ..audit.runner import (
 from ..audit.seams.live import LiveChildRunner, LiveOpSink
 from ..audit.toolkit.reminder_format import REMINDER_PREAMBLE as _SHARED_REMINDER_PREAMBLE
 from ..audit.toolkit.reminder_format import build_reminder_message
-from ..replay.record import replay_log_path
+from ..replay.record import audit_session_id, replay_log_path
 from ..schema import Edge, Event, Phase, Reminder
 
 _logger = logging.getLogger(__name__)
@@ -232,7 +232,7 @@ MANIFEST = ExtensionManifest(
                 "type": "boolean",
                 "description": (
                     "Append each phase invocation to "
-                    "``<cwd>/.agentm/audit_replay/<root_session_id>.jsonl`` "
+                    "``<cwd>/.agentm/audit_replay/<session_id>.jsonl`` "
                     "for offline replay (default true). One record carries "
                     "the full compose-kwargs + payload + parsed output, so "
                     "``llmharness-replay {extractor|auditor} --record ...`` "
@@ -539,7 +539,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     enable_replay_log = bool(config.get("enable_replay_log", True))
 
     sidecar_path = (
-        replay_log_path(api.cwd, _audit_session_id(api)) if enable_replay_log else None
+        replay_log_path(api.cwd, audit_session_id(api)) if enable_replay_log else None
     )
     api.set_service(_REPLAY_LOG_PATH_SERVICE_KEY, sidecar_path)
 
@@ -568,7 +568,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         extractor_interval=extractor_k,
         audit_interval=k,
         enable_auditor=enable_auditor,
-        root_session_id=_audit_session_id(api),
+        session_id=audit_session_id(api),
+        trace_id=api.root_session_id,
         provider_extractor=extractor_provider,
         provider_auditor=auditor_provider,
         audit_registry=_resolve_registry(api),
@@ -785,26 +786,6 @@ def _replay_log_path_for(api: ExtensionAPI) -> Path | None:
     """Resolve the per-session replay sidecar path, or None if disabled."""
     path = api.get_service(_REPLAY_LOG_PATH_SERVICE_KEY)
     return path if isinstance(path, Path) else None
-
-
-def _audit_session_id(api: ExtensionAPI) -> str:
-    """The id used for the sidecar filename and ``ReplayRecord.root_session_id``.
-
-    Prefers ``api.session.get_session_id()`` (the persisted
-    ``SessionManager`` header id, which is also the on-disk JSONL file
-    name) so ``agent-from-reminder`` can relocate the source session.
-    Falls back to ``api.root_session_id`` (the OTel trace_id assigned at
-    session-construction time) when the session is in-memory /
-    unpersisted — that branch keeps the existing behaviour for embedded
-    SDK callers who never write a session file at all.
-    """
-    try:
-        sid = api.session.get_session_id()
-    except AttributeError:
-        sid = ""
-    if sid:
-        return sid
-    return api.root_session_id
 
 
 # Public aliases for downstream eval orchestrators that need to reconstruct

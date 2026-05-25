@@ -21,7 +21,8 @@ class CaseMeta:
     """Summary metadata written to ``meta.json`` for each case."""
 
     case_id: str
-    root_session_id: str
+    session_id: str
+    trace_id: str
     sample_id: str | None
     dataset_name: str | None
     dataset_path: str | None

@@ -3,7 +3,7 @@
 When you are iterating on auditor prompts or reminder shapes, you usually
 do not need to re-run the entire trajectory up to the verdict-firing turn.
 The cognitive-audit pipeline already wrote a full `ReplayRecord` to
-`.agentm/audit_replay/<root_session_id>.jsonl` for every auditor firing —
+`.agentm/audit_replay/<session_id>.jsonl` for every auditor firing —
 including the reminder text it produced. ``llmharness-replay
 agent-from-reminder`` lets you reuse that prefix and *only* re-run the
 post-reminder portion of the trajectory.
@@ -29,7 +29,7 @@ came from which source.
 ## Step-by-step
 
 1. **Locate the audit-replay sidecar.** Live sessions write to
-   `<cwd>/.agentm/audit_replay/<root_session_id>.jsonl`. Use
+   `<cwd>/.agentm/audit_replay/<session_id>.jsonl`. Use
    ``llmharness-replay list --record <path> --phase auditor`` to see
    which turns surfaced a reminder.
 

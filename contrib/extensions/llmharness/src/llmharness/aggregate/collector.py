@@ -268,10 +268,9 @@ def collect_case(
     """Build a :class:`CaseData` from one replay sidecar.
 
     Sample-id resolution precedence: explicit ``sample_id_override`` >
-    meta sidecar > ``None`` (case_id then derives from
-    ``root_session_id``). The overrides let the CLI inject case
-    metadata when the run did not mount ``llmharness.distill.binding``
-    (e.g. rca llm-eval runs).
+    meta sidecar > ``None`` (case_id then derives from ``session_id``).
+    The overrides let the CLI inject case metadata when the run did not
+    mount ``llmharness.distill.binding`` (e.g. rca llm-eval runs).
     """
     records = list(iter_records(replay_path))
     extractor_records = [r for r in records if r.phase == "extractor"]
@@ -305,8 +304,13 @@ def collect_case(
         else (meta_obj.dataset_path if meta_obj is not None else None)
     )
 
-    root_session_id = records[0].root_session_id if records else replay_path.stem
-    case_id = sample_id or root_session_id
+    session_id = records[0].session_id if records else replay_path.stem
+    trace_id = (
+        records[0].trace_id
+        if records
+        else (meta_obj.trace_id if meta_obj is not None else "")
+    )
+    case_id = sample_id or session_id
 
     ts_values = [r.ts_ns for r in records if r.ts_ns]
     started_at = min(ts_values) if ts_values else 0
@@ -318,7 +322,8 @@ def collect_case(
 
     meta = CaseMeta(
         case_id=case_id,
-        root_session_id=root_session_id,
+        session_id=session_id,
+        trace_id=trace_id,
         sample_id=sample_id,
         dataset_name=dataset_name,
         dataset_path=dataset_path,

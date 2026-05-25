@@ -100,9 +100,9 @@ def _extract_reminder_text(record: ReplayRecord) -> str | None:
 
 
 def locate_source_session_file(
-    *, session_dir: Path, root_session_id: str
+    *, session_dir: Path, session_id: str
 ) -> Path:
-    """Find the session JSONL whose id matches ``root_session_id``.
+    """Find the session JSONL whose id matches ``session_id``.
 
     Matches the ``JsonlSessionStore.open`` convention. Post single-event-
     log merge (.claude/designs/single-event-log.md) files are named
@@ -111,13 +111,13 @@ def locate_source_session_file(
     rename. Raises :class:`PrefixReplayError` if no match.
     """
 
-    direct = session_dir / f"{root_session_id}.jsonl"
+    direct = session_dir / f"{session_id}.jsonl"
     if direct.is_file():
         return direct
-    matches = sorted(session_dir.glob(f"*_{root_session_id}.jsonl"))
+    matches = sorted(session_dir.glob(f"*_{session_id}.jsonl"))
     if not matches:
         raise PrefixReplayError(
-            f"no session file matching {root_session_id} under {session_dir}"
+            f"no session file matching {session_id} under {session_dir}"
         )
     return matches[0]
 
@@ -185,7 +185,7 @@ def materialise_branched_session(
     """
     record = pick_auditor_reminder_record(audit_replay_path, turn=turn)
     source_file = locate_source_session_file(
-        session_dir=session_dir, root_session_id=record.root_session_id
+        session_dir=session_dir, session_id=record.session_id
     )
     source_mgr = SessionManager.open(source_file)
     leaf_entry = find_leaf_entry_for_turn(source_mgr, turn=turn)
@@ -258,7 +258,7 @@ def make_plan(
         reminder_text=reminder_text,
     )
     source_file = locate_source_session_file(
-        session_dir=session_dir, root_session_id=record.root_session_id
+        session_dir=session_dir, session_id=record.session_id
     )
     return PrefixReplayPlan(
         source_session_file=source_file,

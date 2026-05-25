@@ -633,7 +633,7 @@ requirements:
       - ``llmharness.tools.prefix_replay`` — orchestration helpers.
         Picks the auditor record at ``turn=t`` whose
         ``output.surface_reminder`` is set, locates the source session
-        file under ``<session-dir>/*_<root_session_id>.jsonl``, finds
+        file under ``<session-dir>/*_<session_id>.jsonl``, finds
         the leaf entry that ends turn ``t`` (the ``t``-th ``message``
         entry on the active branch — same indexing convention as
         ``adapters.agentm``), and calls
@@ -660,16 +660,27 @@ requirements:
       expected prefix length. Wrong → student model sees a different
       prefix at inference than at training, breaking the whole
       iteration loop's purpose.
+      Identity vocabulary note (v0.6.0): the source session is relocated
+      by ``ReplayRecord.session_id`` — the per-session id that also names
+      the persisted ``.agentm/observability/<session_id>.jsonl`` file.
+      This replaced the ambiguous ``root_session_id`` field, which the
+      meta sidecar had keyed by the OTel ``trace_id`` instead, breaking
+      stem-pairing on live runs. ``record.py`` now carries explicit
+      ``session_id`` + ``trace_id`` fields and the shared
+      ``audit_session_id(api)`` helper.
     priority: P1
     status: tested
     code:
       - src/llmharness/replay/reminder_seed.py
+      - src/llmharness/replay/record.py
       - src/llmharness/tools/prefix_replay.py
       - src/llmharness/replay/cli.py
       - src/llmharness/audit/toolkit/reminder_format.py
     tests:
       - tests/test_reminder_seed_atom.py
       - tests/test_prefix_replay_cli.py
+      - tests/test_replay_record.py
+      - tests/test_audit_session_id.py
     depends_on: [REQ-019, REQ-034]
 
   - id: REQ-036
@@ -706,7 +717,7 @@ requirements:
         :func:`forktree_replay_path` — materialise a single
         ``<root_session_log_id>.chained.jsonl`` sidecar covering every
         node's [turn_lo, +inf) window, tagging each record with its
-        ``node_id`` / ``parent_node_id`` and rewriting ``root_session_id``
+        ``node_id`` / ``parent_node_id`` and rewriting ``session_id``
         to the root node's id. The first line is a
         :data:`FORK_TREE_HEADER_KEY` topology bundle read back by
         :func:`read_fork_tree_header`.

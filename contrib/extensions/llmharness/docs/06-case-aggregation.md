@@ -6,7 +6,7 @@ and downstream training-data export.
 
 A **case** = one main-agent session run on one input. Identified by
 `sample_id` from the distill binding sidecar; falls back to
-`root_session_id` if no binding is present.
+`session_id` if no binding is present.
 
 ---
 
@@ -117,7 +117,8 @@ main-agent turn index it fired on.
 ```json
 {
   "case_id": "rca-mysql-001",
-  "root_session_id": "abc123def",
+  "session_id": "abc123def",
+  "trace_id": "def456abc",
   "sample_id": "rca-mysql-001",
   "dataset_name": "rca-openrca2-lite",
   "dataset_path": "/data/rca.jsonl",

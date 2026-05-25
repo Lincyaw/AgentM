@@ -29,7 +29,8 @@ from llmharness.replay.offline_driver import replay_pipeline_over_trajectory
 _REPLAY_RECORD_KEYS = {
     "phase",
     "turn_index",
-    "root_session_id",
+    "session_id",
+    "trace_id",
     "ts_ns",
     "compose_kwargs",
     "payload",
@@ -153,8 +154,6 @@ class _StubChildRunner:
         return AuditorChildResult(verdict=verdict, raw_blocks=[raw_block])
 
 
-
-
 class _SurfacingStubChildRunner(_StubChildRunner):
     """:class:`_StubChildRunner` variant whose auditor surfaces on the
     first firing.
@@ -222,7 +221,7 @@ async def test_replay_pipeline_breaks_on_first_surface(tmp_path: Path) -> None:
     result = await replay_pipeline_over_trajectory(
         messages=messages,
         cwd=str(tmp_path),
-        root_session_id="test-session",
+        session_id="test-session",
         provider=None,
         extractor_settings=extractor_settings,
         auditor_settings=auditor_settings,

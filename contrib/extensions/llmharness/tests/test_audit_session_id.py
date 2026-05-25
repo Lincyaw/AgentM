@@ -18,7 +18,7 @@ from agentm.core.abi import LoopConfig
 from agentm.core.runtime.session_helpers import SessionView
 from agentm.core.runtime.session_manager import SessionManager
 
-from llmharness.adapters.agentm import _audit_session_id
+from llmharness.replay.record import audit_session_id
 
 
 def _make_session_view(tmp_path: Path) -> tuple[SessionView, SessionManager]:
@@ -45,11 +45,9 @@ def test_audit_session_id_uses_manager_header_id_on_persisted_session(
     # Trace id deliberately different — it's what we'd otherwise miswrite.
     api.root_session_id = "deadbeef" * 4
 
-    chosen = _audit_session_id(api)
+    chosen = audit_session_id(api)
 
     assert chosen == persisted_id, (
         "audit_replay sidecar id must match the persisted SessionManager "
         "header id so agent-from-reminder can relocate the source session"
     )
-
-

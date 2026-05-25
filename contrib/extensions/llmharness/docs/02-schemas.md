@@ -133,14 +133,21 @@ the observability JSONL — no silent failures.
 
 ## 3. Replay sidecar JSONL
 
-Path: `<cwd>/.agentm/audit_replay/<root_session_id>.jsonl`.
+Path: `<cwd>/.agentm/audit_replay/<session_id>.jsonl`.
 One line per phase invocation. Source: `replay/record.py`.
+
+Identity fields mirror AgentM core: `session_id` is the per-session id
+(= the OTel span_id of the session-root span and the
+`.agentm/observability/<session_id>.jsonl` filename) and is the sidecar
+stem; `trace_id` is the whole-tree group id (= `api.root_session_id`),
+shared by the root and every transitive child.
 
 ```json
 {
   "phase": "extractor" | "auditor",
   "turn_index": 6,
-  "root_session_id": "abc123",
+  "session_id": "abc123",
+  "trace_id": "def456",
   "ts_ns": 1700000000000000000,
 
   "compose_kwargs": {
@@ -211,16 +218,18 @@ not duplicated here — they are reconstructable from `payload` and
 
 ## 4. Distill meta sidecar
 
-Path: `<cwd>/.agentm/audit_replay/<root_session_id>.meta.json`.
+Path: `<cwd>/.agentm/audit_replay/<session_id>.meta.json`.
 Written by the `distill_binding` §11 atom at install time on the
-main agent.
+main agent. Keyed by `session_id` so it shares a stem with the replay
+sidecar and the observability log — the labeler pairs them by stem.
 
 ```json
 {
   "sample_id": "ts0-mysql-corrupt-kwx8n5",
   "dataset_name": "rca-openrca2-lite",
   "dataset_path": "/path/to/data.jsonl",
-  "root_session_id": "abc123"
+  "session_id": "abc123",
+  "trace_id": "def456"
 }
 ```
 
@@ -233,13 +242,14 @@ schema agnostic to downstream use cases.
 
 ## 5. Distill labels JSONL (intermediate, Stage 1 output)
 
-Path: `<labels-dir>/<root_session_id>.labels.jsonl`. One row per
+Path: `<labels-dir>/<session_id>.labels.jsonl`. One row per
 auditor firing.
 
 ```json
 {
   "sample_id": "ts0-mysql-corrupt-kwx8n5",
-  "root_session_id": "abc123",
+  "session_id": "abc123",
+  "trace_id": "def456",
   "turn_index": 12,
 
   "input_payload": {                          // student-visible — NO GT
@@ -303,7 +313,7 @@ follows the OpenAI-compatible function-call convention
 {
   "phase": "extractor",
   "sample_id": "...",
-  "root_session_id": "...",
+  "session_id": "...",
   "turn_index": 6,
   "input": {
     "system": "<EXTRACTOR_SYSTEM_PROMPT verbatim>",
@@ -348,7 +358,7 @@ follows the OpenAI-compatible function-call convention
 {
   "phase": "auditor",
   "sample_id": "...",
-  "root_session_id": "...",
+  "session_id": "...",
   "turn_index": 12,
   "input": {
     "system": "<AUDITOR_SYSTEM_PROMPT verbatim>",

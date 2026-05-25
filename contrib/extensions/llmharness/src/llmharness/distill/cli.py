@@ -4,7 +4,7 @@ Two subcommands:
 
 * ``label`` — walks a replay-log directory, joins each session to its
   meta sidecar + dataset row, and runs the two-stage oracle/rewriter
-  per auditor record. Writes one ``<root_session_id>.labels.jsonl`` per
+  per auditor record. Writes one ``<session_id>.labels.jsonl`` per
   session under the output directory.
 
 * ``export`` — converts labels + replay logs into SFT JSONL. Produces
@@ -94,7 +94,8 @@ def _replay_record_dicts(path: Path) -> list[dict[str, Any]]:
         {
             "phase": r.phase,
             "turn_index": r.turn_index,
-            "root_session_id": r.root_session_id,
+            "session_id": r.session_id,
+            "trace_id": r.trace_id,
             "ts_ns": r.ts_ns,
             "compose_kwargs": r.compose_kwargs,
             "payload": r.payload,
@@ -123,7 +124,7 @@ async def _label_session(
     rewriter_provider: tuple[str, dict[str, Any]] | None,
 ) -> tuple[int, int]:
     """Label one session. Returns (kept, dropped)."""
-    root_session_id = replay_file.stem
+    session_id = replay_file.stem
     # ``replay_file`` is <cwd>/.agentm/audit_replay/<sid>.jsonl;
     # meta sidecar lives next to it as <sid>.meta.json.
     meta = read_sample_meta(replay_file.with_suffix(".meta.json"))
@@ -141,7 +142,7 @@ async def _label_session(
     records = _replay_record_dicts(replay_file)
     auditor_records = [r for r in records if r.get("phase") == "auditor"]
 
-    out_path = out_dir / f"{root_session_id}.labels.jsonl"
+    out_path = out_dir / f"{session_id}.labels.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     kept = 0
     dropped = 0

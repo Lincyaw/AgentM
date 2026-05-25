@@ -252,7 +252,8 @@ async def extract_trajectory(
     provider: tuple[str, dict[str, Any]] | None,
     base_prompt: str,
     window: int,
-    root_session_id: str,
+    session_id: str,
+    trace_id: str,
     sink_path: Path,
     compose_kwargs_for_record: dict[str, Any],
     graph_accumulator: list[dict[str, Any]] | None = None,
@@ -345,7 +346,8 @@ async def extract_trajectory(
         record = ReplayRecord(
             phase="extractor",
             turn_index=hi - 1,
-            root_session_id=root_session_id,
+            session_id=session_id,
+            trace_id=trace_id,
             ts_ns=ts_ns,
             compose_kwargs=compose_kwargs_for_record,
             payload=payload,
@@ -451,8 +453,13 @@ def _events_from_row(row: DBRow) -> list[dict[str, Any]]:
     )
 
 
-def _root_session_id_for(row: DBRow) -> str:
-    """Deterministic 32-hex id per row so reruns overwrite cleanly."""
+def _synthetic_session_id_for(row: DBRow) -> str:
+    """Deterministic 32-hex id per row so reruns overwrite cleanly.
+
+    The offline extract path has no real OTel trace; this single
+    synthetic id is used for BOTH ``session_id`` and ``trace_id`` so the
+    sidecar / meta / graph artefacts stay stem-paired and self-consistent.
+    """
     blob = f"evaldb|{row.exp_id}|{row.row_id}".encode()
     return hashlib.sha256(blob).hexdigest()[:32]
 
@@ -698,7 +705,8 @@ def extract(
                 provider=provider_tuple,
                 base_prompt=base_prompt,
                 window=window,
-                root_session_id=_root_session_id_for(row),
+                session_id=_synthetic_session_id_for(row),
+                trace_id=_synthetic_session_id_for(row),
                 sink_path=records_path,
                 compose_kwargs_for_record=compose_kwargs_for_record,
                 graph_accumulator=graph_firings,
@@ -714,7 +722,8 @@ def extract(
             graph_path.write_text(
                 json.dumps(
                     {
-                        "root_session_id": _root_session_id_for(row),
+                        "session_id": _synthetic_session_id_for(row),
+                        "trace_id": _synthetic_session_id_for(row),
                         "row_id": row.row_id,
                         "exp_id": row.exp_id,
                         "window": window,

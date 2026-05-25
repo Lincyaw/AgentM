@@ -27,7 +27,7 @@ Two outputs:
   ``<think>...</think>`` wrapper.
 
 Each SFT record carries enough provenance (``sample_id``,
-``root_session_id``, ``turn_index``) to back-trace.
+``session_id``, ``turn_index``) to back-trace.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ class SftRecord:
 
     phase: Phase
     sample_id: str
-    root_session_id: str
+    session_id: str
     turn_index: int
     input_system: str
     input_user: str
@@ -90,7 +90,7 @@ class SftRecord:
             {
                 "phase": self.phase,
                 "sample_id": self.sample_id,
-                "root_session_id": self.root_session_id,
+                "session_id": self.session_id,
                 "turn_index": self.turn_index,
                 "input": {"system": self.input_system, "user": self.input_user},
                 "target": {"messages": self.target_messages},
@@ -264,7 +264,7 @@ def extractor_records_from_replay(
         yield SftRecord(
             phase="extractor",
             sample_id=sample_id,
-            root_session_id=str(rec.get("root_session_id") or ""),
+            session_id=str(rec.get("session_id") or ""),
             turn_index=int(rec.get("turn_index") or 0),
             input_system=input_system,
             input_user=input_user,
@@ -322,7 +322,7 @@ def auditor_records_from_labels(
         yield SftRecord(
             phase="auditor",
             sample_id=str(row.get("sample_id") or ""),
-            root_session_id=str(row.get("root_session_id") or ""),
+            session_id=str(row.get("session_id") or ""),
             turn_index=int(row.get("turn_index") or 0),
             input_system=load_auditor_prompt(_AUDITOR_DEFAULT_PROMPT_NAME),
             input_user=json.dumps(
@@ -348,7 +348,7 @@ def dropped_records_from_labels(
             continue
         yield {
             "sample_id": row.get("sample_id"),
-            "root_session_id": row.get("root_session_id"),
+            "session_id": row.get("session_id"),
             "turn_index": row.get("turn_index"),
             "drop_reason": row.get("drop_reason"),
             "oracle": row.get("oracle"),
