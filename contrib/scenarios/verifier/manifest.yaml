@@ -22,6 +22,16 @@ extensions:
   - local: verifier_finalize
   - module: agentm.extensions.builtin.observability
 
+  # Budget runway warning. Without it the agent explores (查漏) until the
+  # hard max_tool_calls cap and gets cut off before ever calling
+  # submit_propagation_report (observed: hybrids run ~115 query_sql, never
+  # submit). Fires at ``warn_within`` tool calls remaining so the agent stops
+  # exploring and submits the graph it has. Reads the live loop budget (the
+  # driver passes --max-tool-calls), so no loop_budget atom is required.
+  - module: _agentm_contrib__turn_reminder
+    config:
+      warn_within: 15
+
   # Methodology skill only. ``verifier_skills`` publishes the
   # skills/ directory via ResourcesDiscoverEvent; ``skill_loader``
   # reads the hook and splices SKILL.md bodies into the system
@@ -79,3 +89,11 @@ extensions:
         Service names must match the parquet `service_name` column exactly.
         Synthetic load generators are not services. Emit one tool_call per
         turn; the only way to terminate is `submit_propagation_report`.
+
+        You operate under a finite tool-call budget. Pace yourself: spend the
+        bulk of it on 查准 (the candidate edges are the priority), do 查漏
+        only as far as the budget comfortably allows, and SUBMIT before you
+        run out — a half-explored graph that is submitted beats a thorough
+        one that is cut off with no report. A `[budget]` reminder will tell
+        you the calls remaining as you near the cap; when you see it, stop
+        exploring and submit immediately with the edges you have verified.
