@@ -179,8 +179,8 @@ requirements:
       - src/llmharness/audit/extractor/prompt.py
       - src/llmharness/audit/extractor/extensions.py
       - src/llmharness/audit/extractor/output.py
-      - src/llmharness/audit/extractor/state.py
-      - src/llmharness/audit/extractor/tools.py
+      - src/llmharness/audit/extractor/state/
+      - src/llmharness/audit/extractor/tools/
       - src/llmharness/audit/extractor/witness.py
     tests:
       - tests/test_extractor_witness.py
@@ -563,8 +563,8 @@ requirements:
     priority: P1
     status: tested
     code:
-      - src/llmharness/audit/extractor/state.py
-      - src/llmharness/audit/extractor/tools.py
+      - src/llmharness/audit/extractor/state/
+      - src/llmharness/audit/extractor/tools/
     tests:
       - tests/test_extractor_state.py
     depends_on: [REQ-020]
