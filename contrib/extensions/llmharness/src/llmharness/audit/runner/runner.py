@@ -58,6 +58,7 @@ from ..graph.phase import merge_to_phases
 from ..registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
 from ..registry import AuditCheckRegistry, CheckContext
 from ..seams.session import bind_extractor_state
+from ..toolkit.extractor_directive import build_extractor_directive
 
 _logger = logging.getLogger(__name__)
 
@@ -99,6 +100,7 @@ class ExtractorSettings:
         extensions = compose_extractor_extensions(
             base_prompt=effective_prompt,
             observability_config=ck.get("observability_config"),
+            tool_call_budget=ck.get("tool_call_budget"),
         )
         return cls(extensions=extensions, compose_kwargs=ck)
 
@@ -131,6 +133,7 @@ class ExtractorSettings:
         extensions = compose_extractor_extensions(
             base_prompt=base_prompt,
             observability_config={},
+            tool_call_budget=None,
         )
         return cls(extensions=extensions, compose_kwargs=compose_kwargs)
 
@@ -889,6 +892,11 @@ class HarnessRunner:
             "recent_graph": recent_graph_payload,
             "recent_edges": [ed.to_dict() for ed in edges_cum],
         }
+        tool_call_budget = self._extractor_settings.compose_kwargs.get(
+            "tool_call_budget"
+        )
+        if isinstance(tool_call_budget, int) and tool_call_budget > 0:
+            payload["tool_call_budget"] = tool_call_budget
 
         # Inject state into the per-firing extensions list. The base
         # list returned by ``compose_extractor_extensions`` is shared
@@ -1285,6 +1293,11 @@ class HarnessRunner:
         payload["graph"] = {"nodes": enriched_recent, "edges": list(recent_edges_raw)}
         payload["recent_graph"] = enriched_recent
         payload["recent_edges"] = list(recent_edges_raw)
+        tool_call_budget = self._extractor_settings.compose_kwargs.get(
+            "tool_call_budget"
+        )
+        if isinstance(tool_call_budget, int) and tool_call_budget > 0:
+            payload["tool_call_budget"] = tool_call_budget
         state.recent_graph = tuple(recent_events)
         state.recent_graph_dict = {e.id: e for e in recent_events}
 
@@ -1309,7 +1322,8 @@ class HarnessRunner:
             cwd=self._cwd,
             extensions=extensions,
             provider=self._provider_extractor,
-            payload=payload,
+            payload=build_extractor_directive(payload)
+            + json.dumps(payload, ensure_ascii=False, default=str),
             terminal_tool=FINALIZE_EXTRACTION_TOOL_NAME,
             purpose="cognitive_audit_extractor_replay",
         )

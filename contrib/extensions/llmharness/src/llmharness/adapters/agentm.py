@@ -133,6 +133,17 @@ MANIFEST = ExtensionManifest(
             "extractor_interval_turns": {"type": "integer", "minimum": 1},
             "audit_interval_turns": {"type": "integer", "minimum": 1},
             "audit_summary_threshold": {"type": "integer", "minimum": 0},
+            "extractor_tool_call_budget": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "description": (
+                    "Optional max tool-call budget for each extractor child "
+                    "firing. When set, the child mounts loop_budget and "
+                    "turn_reminder with this value, and the extractor "
+                    "directive tells the model to reserve one call for "
+                    "finalize_extraction."
+                ),
+            },
             "prompt_override_extractor": {"type": "string"},
             "prompt_override_auditor": {"type": "string"},
             "extractor_prompt": {
@@ -394,10 +405,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     extractor_extensions = compose_extractor_extensions(
         base_prompt=extractor_base_prompt,
         observability_config=obs_cfg,
+        tool_call_budget=config.get("extractor_tool_call_budget"),
     )
     extractor_compose_kwargs = {
         "base_prompt": extractor_base_prompt,
         "observability_config": obs_cfg,
+        "tool_call_budget": config.get("extractor_tool_call_budget"),
     }
     api.set_service(
         _EXTRACTOR_COMPOSE_KWARGS_SERVICE_KEY,
