@@ -47,8 +47,6 @@ def _mk_edge(src: int, dst: int) -> Edge:
     )
 
 
-
-
 def test_threshold_on_31_events_degraded_payload_strips_witness_fields() -> None:
     events = _mk_events(31)
     edges = (_mk_edge(1, 2),)
@@ -64,5 +62,3 @@ def test_threshold_on_31_events_degraded_payload_strips_witness_fields() -> None
     assert '"the widget"' not in prompt
     assert "degraded" in prompt.lower()
     assert "witness fields stripped" in prompt
-
-

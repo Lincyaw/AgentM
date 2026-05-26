@@ -74,17 +74,11 @@ def _make_bundle(
                                     "attributes": [
                                         {
                                             "key": "gen_ai.tool.name",
-                                            "value": {
-                                                "stringValue": "submit_final_report"
-                                            },
+                                            "value": {"stringValue": "submit_final_report"},
                                         },
                                         {
                                             "key": "gen_ai.tool.call.arguments",
-                                            "value": {
-                                                "stringValue": json.dumps(
-                                                    submission
-                                                )
-                                            },
+                                            "value": {"stringValue": json.dumps(submission)},
                                         },
                                     ],
                                     "status": {},
@@ -115,11 +109,7 @@ def test_annotate_full_hit(tmp_path: Path) -> None:
         datapack_name="dp-7",
         ground_truth=["checkoutservice"],
         fault_type="cpu_stress",
-        submission={
-            "root_causes": [
-                {"service": "checkoutservice", "fault_kind": "cpu_stress"}
-            ]
-        },
+        submission={"root_causes": [{"service": "checkoutservice", "fault_kind": "cpu_stress"}]},
     )
     rc = cli_main(["annotate-case-outcome", "--bundle", str(bundle)])
     assert rc == 0
@@ -130,9 +120,3 @@ def test_annotate_full_hit(tmp_path: Path) -> None:
     assert out["fault_kind_hit"] == 1.0
     assert abs(out["composite_score"] - 1.0) < 1e-9
     assert out["submission_seen"] is True
-
-
-
-
-
-

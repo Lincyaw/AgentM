@@ -76,9 +76,7 @@ def _thread_extractor_record(
     return replace(record, payload=new_payload)
 
 
-def _thread_auditor_record(
-    record: ReplayRecord, cumulative: CumulativeAuditState
-) -> ReplayRecord:
+def _thread_auditor_record(record: ReplayRecord, cumulative: CumulativeAuditState) -> ReplayRecord:
     """Return a copy of ``record`` whose payload AND compose_kwargs reflect ``cumulative``.
 
     :func:`replay_auditor_record` rebuilds the auditor's installed
@@ -107,9 +105,7 @@ def _thread_auditor_record(
     events, edges, phases = cumulative.graph_view()
     new_payload["graph"] = [e.to_dict() for e in events]
     new_payload["recent_verdicts"] = list(cumulative.recent_verdicts)
-    new_payload["continuation_notes_from_prior_firing"] = list(
-        cumulative.last_continuation_notes
-    )
+    new_payload["continuation_notes_from_prior_firing"] = list(cumulative.last_continuation_notes)
 
     new_compose = dict(record.compose_kwargs)
     new_compose["events"] = [e.to_dict() for e in events]
@@ -156,9 +152,7 @@ def _absorb_extractor_output(
     )
 
 
-def _absorb_auditor_output(
-    result: PhaseResult, cumulative: CumulativeAuditState
-) -> None:
+def _absorb_auditor_output(result: PhaseResult, cumulative: CumulativeAuditState) -> None:
     """Fold a chain-replayed auditor verdict back into cumulative state."""
     if result.status != "ok" or not isinstance(result.output, dict):
         return
@@ -169,9 +163,7 @@ def _absorb_auditor_output(
         verdict = Verdict.from_dict(raw_verdict)
     except (KeyError, TypeError, ValueError):
         return
-    cumulative.absorb_auditor_verdict(
-        verdict.to_dict(), is_silent=not verdict.surface_reminder
-    )
+    cumulative.absorb_auditor_verdict(verdict.to_dict(), is_silent=not verdict.surface_reminder)
 
 
 async def chain_replay(
@@ -205,9 +197,7 @@ async def chain_replay(
                 provider_override=provider_override,
                 prompt_override=prompt_override_extractor,
             )
-            _absorb_extractor_output(
-                result, cumulative, firing_cursor=record.turn_index
-            )
+            _absorb_extractor_output(result, cumulative, firing_cursor=record.turn_index)
         else:
             threaded = _thread_auditor_record(record, cumulative)
             result = await replay_auditor_record(

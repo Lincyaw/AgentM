@@ -37,8 +37,6 @@ def test_event_with_future_source_turns_is_dropped() -> None:
     assert kept_ids == {1}, "event referencing turn 7 must be masked at t=6"
 
 
-
-
 def test_edge_dropped_when_endpoint_event_dropped() -> None:
     events = [_ev(1, [2]), _ev(2, [9])]
     edges = [_edge(1, 2, (2,), (9,))]
@@ -63,10 +61,6 @@ def test_finding_referencing_dropped_event_is_dropped() -> None:
         Finding(category="repeated", description="d", related_event_ids=(1, 99)),
         Finding(category="open", description="d", related_event_ids=(1,)),
     ]
-    snap = causal_mask(
-        turn_index=5, events=events, edges=[], findings=findings, trajectory=[]
-    )
+    snap = causal_mask(turn_index=5, events=events, edges=[], findings=findings, trajectory=[])
     cats = [f.category for f in snap.findings]
     assert cats == ["open"], "finding citing a future event id must be dropped"
-
-

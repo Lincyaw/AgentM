@@ -118,9 +118,8 @@ class CaseLayout:
 
     def firing_path(self, phase: Phase, sequence: int, turn_index: int) -> Path:
         return (
-            (self.extractor_dir if phase == "extractor" else self.auditor_dir)
-            / f"{sequence:03d}_turn_{turn_index:03d}.json"
-        )
+            self.extractor_dir if phase == "extractor" else self.auditor_dir
+        ) / f"{sequence:03d}_turn_{turn_index:03d}.json"
 
     def snapshot_path(self, after_firing: int) -> Path:
         return self.graph_dir / f"after_extractor_{after_firing:03d}.json"

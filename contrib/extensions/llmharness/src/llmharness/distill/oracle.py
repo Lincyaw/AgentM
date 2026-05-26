@@ -225,20 +225,14 @@ async def run_oracle(
         purpose="distill_oracle",
     )
     if result.status != "ok" or not isinstance(result.output, dict):
-        _logger.warning(
-            "oracle phase non-ok: status=%s error=%s", result.status, result.error
-        )
+        _logger.warning("oracle phase non-ok: status=%s error=%s", result.status, result.error)
         return None
     args = result.output
     return OracleLabel(
-        selected_finding_indices=tuple(
-            int(i) for i in args.get("selected_finding_indices") or []
-        ),
+        selected_finding_indices=tuple(int(i) for i in args.get("selected_finding_indices") or []),
         matched_event_ids=tuple(int(i) for i in args.get("matched_event_ids") or []),
         rationale_with_gt=str(args.get("rationale_with_gt") or ""),
-        continuation_notes=tuple(
-            str(n) for n in args.get("continuation_notes") or []
-        ),
+        continuation_notes=tuple(str(n) for n in args.get("continuation_notes") or []),
     )
 
 
@@ -267,9 +261,7 @@ async def run_rewriter(
         purpose="distill_rewriter",
     )
     if result.status != "ok" or not isinstance(result.output, dict):
-        _logger.warning(
-            "rewriter phase non-ok: status=%s error=%s", result.status, result.error
-        )
+        _logger.warning("rewriter phase non-ok: status=%s error=%s", result.status, result.error)
         return None
     args = result.output
     return RewriterOutput(
@@ -304,9 +296,7 @@ async def label_auditor_record(
         "snapshot": snapshot.to_prompt_payload(),
     }
 
-    label = await run_oracle(
-        cwd=cwd, snapshot=snapshot, gt=gt, provider=oracle_provider
-    )
+    label = await run_oracle(cwd=cwd, snapshot=snapshot, gt=gt, provider=oracle_provider)
     if label is None:
         return LabeledSample(
             sample_id=sample_id,

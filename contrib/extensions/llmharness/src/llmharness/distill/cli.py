@@ -259,12 +259,8 @@ def _cmd_export(args: argparse.Namespace) -> int:
 
     if want_auditor:
         label_rows = list(_iter_label_rows(label_dir))
-        n_aud = write_jsonl(
-            out_dir / "auditor.jsonl", auditor_records_from_labels(label_rows)
-        )
-        n_drop = write_jsonl(
-            out_dir / "dropped.jsonl", dropped_records_from_labels(label_rows)
-        )
+        n_aud = write_jsonl(out_dir / "auditor.jsonl", auditor_records_from_labels(label_rows))
+        n_drop = write_jsonl(out_dir / "dropped.jsonl", dropped_records_from_labels(label_rows))
 
     print(f"extractor={n_ext} auditor={n_aud} dropped={n_drop} out={out_dir}")
     return 0
@@ -346,9 +342,7 @@ def _last_submit_final_report(main_jsonl: Path) -> dict[str, Any] | None:
     # OTLP/JSON shape: walk spans for execute_tool submit_final_report and
     # decode the JSON-encoded ``gen_ai.tool.call.arguments`` attribute via
     # :class:`TraceReader` (which already unwraps the tagged union).
-    for span in TraceReader(main_jsonl).iter_spans(
-        name="execute_tool submit_final_report"
-    ):
+    for span in TraceReader(main_jsonl).iter_spans(name="execute_tool submit_final_report"):
         raw = span.attributes.get("gen_ai.tool.call.arguments")
         if not isinstance(raw, str) or not raw:
             continue
@@ -376,10 +370,7 @@ def _last_submit_final_report(main_jsonl: Path) -> dict[str, Any] | None:
                 if not isinstance(rec, dict):
                     continue
                 # Legacy observability shape.
-                if (
-                    rec.get("kind") == "event.dispatch"
-                    and rec.get("name") == "emit:tool_call"
-                ):
+                if rec.get("kind") == "event.dispatch" and rec.get("name") == "emit:tool_call":
                     attrs = rec.get("attributes") or {}
                     if isinstance(attrs, dict):
                         event = attrs.get("event") or {}
@@ -421,9 +412,7 @@ def _grade_submission(
     have the submission args already in hand.
     """
     raw = json.dumps(args, ensure_ascii=False).lower()
-    service_hit = 1.0 if any(
-        isinstance(s, str) and s.lower() in raw for s in ground_truth
-    ) else 0.0
+    service_hit = 1.0 if any(isinstance(s, str) and s.lower() in raw for s in ground_truth) else 0.0
     ft = (fault_type or "").strip().lower()
     fault_kind_hit = 1.0 if ft and ft in raw else 0.0
     composite = 0.7 * service_hit + 0.3 * fault_kind_hit
@@ -455,9 +444,7 @@ def _annotate_one_bundle(
     fault_type = str(meta.get("fault_type") or "")
 
     main_jsonl = bundle_dir / "main.jsonl"
-    submission = (
-        _last_submit_final_report(main_jsonl) if main_jsonl.is_file() else None
-    )
+    submission = _last_submit_final_report(main_jsonl) if main_jsonl.is_file() else None
     submission_seen = submission is not None
 
     if submission_seen:
@@ -479,9 +466,7 @@ def _annotate_one_bundle(
         "submission_seen": submission_seen,
     }
     out_path = bundle_dir / "case_outcome.json"
-    out_path.write_text(
-        json.dumps(outcome, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    out_path.write_text(json.dumps(outcome, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return outcome
 
 
@@ -543,9 +528,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--labels", required=True)
     p_export.add_argument("--replay-dir", default=None)
     p_export.add_argument("--out", required=True)
-    p_export.add_argument(
-        "--phase", choices=("extractor", "auditor", "both"), default="both"
-    )
+    p_export.add_argument("--phase", choices=("extractor", "auditor", "both"), default="both")
     p_export.set_defaults(func=_cmd_export)
 
     p_rl = sub.add_parser(
@@ -554,9 +537,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_rl.add_argument("--replay-dir", required=True)
     p_rl.add_argument("--out", required=True)
-    p_rl.add_argument(
-        "--phase", choices=("extractor", "auditor", "both"), default="both"
-    )
+    p_rl.add_argument("--phase", choices=("extractor", "auditor", "both"), default="both")
     p_rl.set_defaults(func=_cmd_rl_prompts)
 
     p_oc = sub.add_parser(

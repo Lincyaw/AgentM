@@ -55,9 +55,7 @@ Phase = Literal["extractor", "auditor"]
 # v18 legacy tool names — if a replay record carries any of these, the
 # tool sequence is invalid under v19 and the record gets skipped (not
 # rebuilt) so we never train the student on a deleted tool surface.
-_LEGACY_BATCH_TOOL_NAMES = frozenset(
-    {"submit_events", "submit_events_batch"}
-)
+_LEGACY_BATCH_TOOL_NAMES = frozenset({"submit_events", "submit_events_batch"})
 
 
 @dataclass(frozen=True)
@@ -244,9 +242,7 @@ def extractor_records_from_replay(
             continue
         # Optional sanity: ignore steps that call unknown tool names so
         # a malformed sidecar can't slip through.
-        valid_steps = [
-            s for s in steps if s[1]["name"] in EXTRACTOR_TOOL_NAMES
-        ]
+        valid_steps = [s for s in steps if s[1]["name"] in EXTRACTOR_TOOL_NAMES]
         if not valid_steps:
             continue
         target_messages = [
@@ -325,9 +321,7 @@ def auditor_records_from_labels(
             session_id=str(row.get("session_id") or ""),
             turn_index=int(row.get("turn_index") or 0),
             input_system=load_auditor_prompt(_AUDITOR_DEFAULT_PROMPT_NAME),
-            input_user=json.dumps(
-                row.get("input_payload") or {}, ensure_ascii=False
-            ),
+            input_user=json.dumps(row.get("input_payload") or {}, ensure_ascii=False),
             target_messages=[
                 _assistant_message(
                     thinking_text="",

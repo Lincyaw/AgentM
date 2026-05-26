@@ -82,14 +82,10 @@ def causal_mask(
     )
 
     kept_findings = tuple(
-        f
-        for f in findings
-        if all(eid in kept_event_ids for eid in f.related_event_ids)
+        f for f in findings if all(eid in kept_event_ids for eid in f.related_event_ids)
     )
 
-    kept_trajectory = tuple(
-        t for t in trajectory if int(t.get("index", -1)) <= turn_index
-    )
+    kept_trajectory = tuple(t for t in trajectory if int(t.get("index", -1)) <= turn_index)
 
     return CausalSnapshot(
         turn_index=turn_index,

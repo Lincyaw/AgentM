@@ -114,9 +114,7 @@ class LiveChildRunner:
         payload = {
             "graph": [e.to_dict() for e in graph_events],
             "recent_verdicts": list(recent_verdicts),
-            "continuation_notes_from_prior_firing": list(
-                continuation_notes_from_prior_firing
-            ),
+            "continuation_notes_from_prior_firing": list(continuation_notes_from_prior_firing),
         }
         child_config = AgentSessionConfig(
             cwd=self._api.cwd,
@@ -139,9 +137,7 @@ class LiveChildRunner:
             )
 
         try:
-            messages = await child.prompt(
-                json.dumps(payload, ensure_ascii=False, default=str)
-            )
+            messages = await child.prompt(json.dumps(payload, ensure_ascii=False, default=str))
         except Exception as exc:
             err = str(exc)
             _record_failure(self._api, _et.AUDIT_ERROR, {"reason": err})
@@ -157,9 +153,7 @@ class LiveChildRunner:
 
         arguments = find_terminal_tool_arguments(messages, SUBMIT_VERDICT_TOOL_NAME)
         if arguments is None:
-            reason = (
-                f"child returned without calling {SUBMIT_VERDICT_TOOL_NAME}"
-            )
+            reason = f"child returned without calling {SUBMIT_VERDICT_TOOL_NAME}"
             _record_failure(self._api, _et.AUDIT_NO_CALL, {"reason": reason})
             return AuditorChildResult(
                 verdict=None,
@@ -256,9 +250,7 @@ class LiveOpSink:
         self._api.session.append_entry(_et.EXTRACTOR_PARTIAL, payload)
 
 
-def _record_failure(
-    api: ExtensionAPI, entry_type: str, payload: dict[str, Any]
-) -> None:
+def _record_failure(api: ExtensionAPI, entry_type: str, payload: dict[str, Any]) -> None:
     """Mirror of the legacy ``adapters.agentm._record_failure`` chokepoint.
 
     Persists a typed failure entry on the branch AND emits a
@@ -279,9 +271,7 @@ def _record_failure(
             ),
         )
     except Exception:
-        _logger.exception(
-            "llmharness audit diagnostic emit failed; suppressing."
-        )
+        _logger.exception("llmharness audit diagnostic emit failed; suppressing.")
 
 
 __all__ = ["LiveChildRunner", "LiveOpSink"]

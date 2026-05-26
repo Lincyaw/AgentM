@@ -249,9 +249,7 @@ class CumulativeAuditState:
     firing_id_counter: int = 0
     # Cached fold view; invalidated whenever ``len(ops)`` changes.
     _cached_len: int = -1
-    _cached_view: tuple[tuple[Event, ...], tuple[Edge, ...], tuple[Phase, ...]] | None = (
-        None
-    )
+    _cached_view: tuple[tuple[Event, ...], tuple[Edge, ...], tuple[Phase, ...]] | None = None
     # Phases live outside the op-log: they are produced by the mechanical
     # ``merge_to_phases`` pass per firing. We accumulate them so the
     # auditor sees the full phase history without re-reading the log.
@@ -296,9 +294,7 @@ class CumulativeAuditState:
             self.firing_id_counter = firing_id + 1
         self._invalidate_cache()
 
-    def absorb_auditor_verdict(
-        self, verdict: dict[str, Any], *, is_silent: bool
-    ) -> None:
+    def absorb_auditor_verdict(self, verdict: dict[str, Any], *, is_silent: bool) -> None:
         del is_silent  # currently informational only; both shapes append
         self.recent_verdicts.append(verdict)
         raw_notes = verdict.get("continuation_notes")
@@ -574,9 +570,7 @@ class StepResult:
 
 def _window_is_non_trivial(messages_slice: list[AgentMessage]) -> bool:
     """True iff the slice contains any AssistantMessage or ToolResultMessage."""
-    return any(
-        isinstance(msg, (AssistantMessage, ToolResultMessage)) for msg in messages_slice
-    )
+    return any(isinstance(msg, (AssistantMessage, ToolResultMessage)) for msg in messages_slice)
 
 
 def _render_message_text(msg: AgentMessage) -> str:
@@ -647,9 +641,7 @@ def _serialize_block(block: Any) -> dict[str, Any] | None:
     return {"type": getattr(block, "type", block.__class__.__name__), "repr": repr(block)}
 
 
-def _serialize_message_for_extractor(
-    msg: AgentMessage, *, index: int
-) -> dict[str, Any] | None:
+def _serialize_message_for_extractor(msg: AgentMessage, *, index: int) -> dict[str, Any] | None:
     content = getattr(msg, "content", None)
     if not isinstance(content, list):
         return None
@@ -802,8 +794,7 @@ class HarnessRunner:
         if auditor_due:
             if self._last_extractor_held_cursor:
                 _logger.debug(
-                    "HarnessRunner: skipping auditor — preceding extractor "
-                    "firing held the cursor"
+                    "HarnessRunner: skipping auditor — preceding extractor firing held the cursor"
                 )
             else:
                 audit_result = await self.fire_auditor_once(messages)
@@ -857,9 +848,7 @@ class HarnessRunner:
                 state.turn_texts[t] = _render_message_text(messages[t])
         state.recent_graph = events_cum
         state.recent_graph_dict = {e.id: e for e in events_cum}
-        state.recent_edges_dict = {
-            (ed.src, ed.dst, ed.kind.value): ed for ed in edges_cum
-        }
+        state.recent_edges_dict = {(ed.src, ed.dst, ed.kind.value): ed for ed in edges_cum}
         state._refold()
         state.next_event_id = self.cumulative.next_event_id()
 
@@ -875,9 +864,7 @@ class HarnessRunner:
         recent_graph_payload: list[dict[str, Any]] = []
         for e in events_cum:
             entry = e.to_dict()
-            entry["source_turn_texts"] = [
-                state.turn_texts.get(t, "") for t in e.source_turns
-            ]
+            entry["source_turn_texts"] = [state.turn_texts.get(t, "") for t in e.source_turns]
             recent_graph_payload.append(entry)
 
         payload = {
@@ -892,9 +879,7 @@ class HarnessRunner:
             "recent_graph": recent_graph_payload,
             "recent_edges": [ed.to_dict() for ed in edges_cum],
         }
-        tool_call_budget = self._extractor_settings.compose_kwargs.get(
-            "tool_call_budget"
-        )
+        tool_call_budget = self._extractor_settings.compose_kwargs.get("tool_call_budget")
         if isinstance(tool_call_budget, int) and tool_call_budget > 0:
             payload["tool_call_budget"] = tool_call_budget
 
@@ -913,9 +898,7 @@ class HarnessRunner:
         # writer is mounted. Offline chained-fork drivers depend on this
         # to assemble a multi-segment replay file without re-invoking
         # the runner.
-        replay_compose_kwargs: dict[str, Any] = dict(
-            self._extractor_settings.compose_kwargs
-        )
+        replay_compose_kwargs: dict[str, Any] = dict(self._extractor_settings.compose_kwargs)
         replay_extras: dict[str, Any] = {
             "turn_texts": {str(k): v for k, v in state.turn_texts.items()},
         }
@@ -923,9 +906,7 @@ class HarnessRunner:
         raw_assistant_messages: list[dict[str, Any]] = []
         synth_record: ReplayRecord | None = None
 
-        def _record(
-            status: str, output: dict[str, Any] | None, error: str | None = None
-        ) -> None:
+        def _record(status: str, output: dict[str, Any] | None, error: str | None = None) -> None:
             nonlocal synth_record
             synth_record = ReplayRecord(
                 phase="extractor",
@@ -977,24 +958,18 @@ class HarnessRunner:
                 {"reason": str(exc), "turn_window": turn_window},
             )
             _record("spawn_error", output=None, error=str(exc))
-            return _ExtractorFiringResult(
-                ok=False, cursor_advanced=False, record=synth_record
-            )
+            return _ExtractorFiringResult(ok=False, cursor_advanced=False, record=synth_record)
 
         if not terminator_called:
             self._sink.append_failure(
                 _et.EXTRACTOR_NO_CALL,
                 {
-                    "reason": (
-                        f"child returned without calling {FINALIZE_EXTRACTION_TOOL_NAME}"
-                    ),
+                    "reason": (f"child returned without calling {FINALIZE_EXTRACTION_TOOL_NAME}"),
                     "turn_window": turn_window,
                 },
             )
             _record("no_call", output=None)
-            return _ExtractorFiringResult(
-                ok=False, cursor_advanced=False, record=synth_record
-            )
+            return _ExtractorFiringResult(ok=False, cursor_advanced=False, record=synth_record)
 
         output = RawExtractorOutput.from_state(state)
         _record(
@@ -1011,19 +986,13 @@ class HarnessRunner:
 
         if not has_ops and not output.dropped_edges:
             if _window_is_non_trivial(window_messages):
-                self._sink.append_failure(
-                    _et.EXTRACTOR_EMPTY, {"turn_window": turn_window}
-                )
-                return _ExtractorFiringResult(
-                    ok=False, cursor_advanced=False, record=synth_record
-                )
+                self._sink.append_failure(_et.EXTRACTOR_EMPTY, {"turn_window": turn_window})
+                return _ExtractorFiringResult(ok=False, cursor_advanced=False, record=synth_record)
             # Truly trivial window: still advance the cursor so we don't
             # re-extract the same prefix forever.
             self._sink.append_cursor(last_turn_index=window_hi_inclusive)
             self.cumulative.cursor_last_turn_index = window_hi_inclusive
-            return _ExtractorFiringResult(
-                ok=True, cursor_advanced=True, record=synth_record
-            )
+            return _ExtractorFiringResult(ok=True, cursor_advanced=True, record=synth_record)
 
         firing_id = self.cumulative.firing_id_counter
         for op_index, op in enumerate(state.pending_ops):
@@ -1053,9 +1022,7 @@ class HarnessRunner:
             firing_phases=firing_phases,
         )
 
-        return _ExtractorFiringResult(
-            ok=True, cursor_advanced=True, record=synth_record
-        )
+        return _ExtractorFiringResult(ok=True, cursor_advanced=True, record=synth_record)
 
     # ----------------------------------------------------------------------
     # Phase 2 — auditor
@@ -1075,9 +1042,7 @@ class HarnessRunner:
                 ctx = CheckContext(events=events_tuple, edges=edges_tuple)
                 findings, check_errors = registry.run_all(ctx)
             except Exception:
-                _logger.exception(
-                    "audit-check registry run_all failed; using empty findings"
-                )
+                _logger.exception("audit-check registry run_all failed; using empty findings")
                 findings, check_errors = [], {}
 
         trajectory_snapshot = _serialize_full_trajectory(messages)
@@ -1175,9 +1140,7 @@ class HarnessRunner:
 
         verdict_dict = verdict.to_dict()
         self._sink.append_verdict(verdict_dict)
-        self.cumulative.absorb_auditor_verdict(
-            verdict_dict, is_silent=not verdict.surface_reminder
-        )
+        self.cumulative.absorb_auditor_verdict(verdict_dict, is_silent=not verdict.surface_reminder)
         if self._sidecar is not None:
             self._sidecar.record(
                 phase="auditor",
@@ -1216,9 +1179,7 @@ class HarnessRunner:
     # Single-firing replay (degenerate case of the runner — invariant #2)
     # ----------------------------------------------------------------------
 
-    async def fire_extractor_from_record(
-        self, record: ReplayRecord
-    ) -> PhaseResult:
+    async def fire_extractor_from_record(self, record: ReplayRecord) -> PhaseResult:
         """Replay one recorded extractor firing without windowing.
 
         Bypasses the ``messages → turn_window → payload`` construction
@@ -1237,13 +1198,10 @@ class HarnessRunner:
         from ..extractor.state import ExtractionState
 
         if record.phase != "extractor":
-            raise ValueError(
-                f"expected extractor record, got phase={record.phase!r}"
-            )
+            raise ValueError(f"expected extractor record, got phase={record.phase!r}")
         if self._cwd is None:
             raise ValueError(
-                "HarnessRunner.fire_extractor_from_record requires cwd to be "
-                "set at construction"
+                "HarnessRunner.fire_extractor_from_record requires cwd to be set at construction"
             )
 
         extras = record.extras or {}
@@ -1293,9 +1251,7 @@ class HarnessRunner:
         payload["graph"] = {"nodes": enriched_recent, "edges": list(recent_edges_raw)}
         payload["recent_graph"] = enriched_recent
         payload["recent_edges"] = list(recent_edges_raw)
-        tool_call_budget = self._extractor_settings.compose_kwargs.get(
-            "tool_call_budget"
-        )
+        tool_call_budget = self._extractor_settings.compose_kwargs.get("tool_call_budget")
         if isinstance(tool_call_budget, int) and tool_call_budget > 0:
             payload["tool_call_budget"] = tool_call_budget
         state.recent_graph = tuple(recent_events)
@@ -1309,14 +1265,10 @@ class HarnessRunner:
                 recent_edges.append(Edge.from_dict(entry))
             except (KeyError, ValueError, TypeError):
                 continue
-        state.recent_edges_dict = {
-            (ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges
-        }
+        state.recent_edges_dict = {(ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges}
         state._refold()
 
-        extensions = bind_extractor_state(
-            self._extractor_settings.extensions, state=state
-        )
+        extensions = bind_extractor_state(self._extractor_settings.extensions, state=state)
 
         result = await run_phase_standalone(
             cwd=self._cwd,
@@ -1343,9 +1295,7 @@ class HarnessRunner:
             )
         return result
 
-    async def fire_auditor_from_record(
-        self, record: ReplayRecord
-    ) -> PhaseResult:
+    async def fire_auditor_from_record(self, record: ReplayRecord) -> PhaseResult:
         """Replay one recorded auditor firing.
 
         Mirrors legacy ``replay_auditor_record``: composes auditor
@@ -1357,13 +1307,10 @@ class HarnessRunner:
         from ...schema import Finding
 
         if record.phase != "auditor":
-            raise ValueError(
-                f"expected auditor record, got phase={record.phase!r}"
-            )
+            raise ValueError(f"expected auditor record, got phase={record.phase!r}")
         if self._cwd is None:
             raise ValueError(
-                "HarnessRunner.fire_auditor_from_record requires cwd to be "
-                "set at construction"
+                "HarnessRunner.fire_auditor_from_record requires cwd to be set at construction"
             )
 
         ck = record.compose_kwargs or {}

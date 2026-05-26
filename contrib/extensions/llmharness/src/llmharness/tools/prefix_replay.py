@@ -49,9 +49,7 @@ class PrefixReplayError(RuntimeError):
 # --- record selection -------------------------------------------------------
 
 
-def pick_auditor_reminder_record(
-    audit_replay_path: Path, *, turn: int
-) -> ReplayRecord:
+def pick_auditor_reminder_record(audit_replay_path: Path, *, turn: int) -> ReplayRecord:
     """Return the auditor record at ``turn`` that carries a reminder.
 
     Selects the LAST matching auditor record (mirroring the existing
@@ -64,9 +62,7 @@ def pick_auditor_reminder_record(
         if rec.phase == "auditor" and rec.turn_index == turn:
             latest = rec
     if latest is None:
-        raise PrefixReplayError(
-            f"no auditor record with turn_index={turn} in {audit_replay_path}"
-        )
+        raise PrefixReplayError(f"no auditor record with turn_index={turn} in {audit_replay_path}")
     reminder_text = _extract_reminder_text(latest)
     if not reminder_text:
         raise PrefixReplayError(
@@ -99,9 +95,7 @@ def _extract_reminder_text(record: ReplayRecord) -> str | None:
 # --- session location -------------------------------------------------------
 
 
-def locate_source_session_file(
-    *, session_dir: Path, session_id: str
-) -> Path:
+def locate_source_session_file(*, session_dir: Path, session_id: str) -> Path:
     """Find the session JSONL whose id matches ``session_id``.
 
     Matches the ``JsonlSessionStore.open`` convention. Post single-event-
@@ -116,9 +110,7 @@ def locate_source_session_file(
         return direct
     matches = sorted(session_dir.glob(f"*_{session_id}.jsonl"))
     if not matches:
-        raise PrefixReplayError(
-            f"no session file matching {session_id} under {session_dir}"
-        )
+        raise PrefixReplayError(f"no session file matching {session_id} under {session_dir}")
     return matches[0]
 
 
@@ -184,9 +176,7 @@ def materialise_branched_session(
     side.
     """
     record = pick_auditor_reminder_record(audit_replay_path, turn=turn)
-    source_file = locate_source_session_file(
-        session_dir=session_dir, session_id=record.session_id
-    )
+    source_file = locate_source_session_file(session_dir=session_dir, session_id=record.session_id)
     source_mgr = SessionManager.open(source_file)
     leaf_entry = find_leaf_entry_for_turn(source_mgr, turn=turn)
     branched_path = source_mgr.create_branched_session(leaf_entry.id)
@@ -257,9 +247,7 @@ def make_plan(
         branched_session_id=branched_mgr.get_session_id(),
         reminder_text=reminder_text,
     )
-    source_file = locate_source_session_file(
-        session_dir=session_dir, session_id=record.session_id
-    )
+    source_file = locate_source_session_file(session_dir=session_dir, session_id=record.session_id)
     return PrefixReplayPlan(
         source_session_file=source_file,
         branched_session_file=branched_file,

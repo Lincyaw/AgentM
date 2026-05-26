@@ -107,16 +107,10 @@ def read_sample_meta(path: Path) -> SampleMeta | None:
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     sample_id = config.get("sample_id") or os.environ.get(_SAMPLE_ID_ENV) or ""
     if not sample_id:
-        _logger.debug(
-            "distill_binding mounted without sample_id; meta sidecar will not be written"
-        )
+        _logger.debug("distill_binding mounted without sample_id; meta sidecar will not be written")
         return
-    dataset_name = (
-        config.get("dataset_name") or os.environ.get(_DATASET_NAME_ENV) or ""
-    )
-    dataset_path = (
-        config.get("dataset_path") or os.environ.get(_DATASET_PATH_ENV) or ""
-    )
+    dataset_name = config.get("dataset_name") or os.environ.get(_DATASET_NAME_ENV) or ""
+    dataset_path = config.get("dataset_path") or os.environ.get(_DATASET_PATH_ENV) or ""
     session_id = audit_session_id(api)
     meta = SampleMeta(
         sample_id=str(sample_id),

@@ -121,9 +121,7 @@ class StandaloneChildRunner:
         payload: dict[str, Any] = {
             "graph": [e.to_dict() for e in graph_events],
             "recent_verdicts": list(recent_verdicts),
-            "continuation_notes_from_prior_firing": list(
-                continuation_notes_from_prior_firing
-            ),
+            "continuation_notes_from_prior_firing": list(continuation_notes_from_prior_firing),
         }
         result = await run_phase_standalone(
             cwd=self._cwd,

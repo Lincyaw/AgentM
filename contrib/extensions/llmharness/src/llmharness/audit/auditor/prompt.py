@@ -79,11 +79,7 @@ def build_auditor_system_prompt(
     framing tells the auditor to use drill-down tools; the ``minimal``
     framing tells it to reason from what is embedded).
     """
-    framing = (
-        base_prompt
-        if base_prompt is not None
-        else load_auditor_prompt(DEFAULT_PROMPT_NAME)
-    )
+    framing = base_prompt if base_prompt is not None else load_auditor_prompt(DEFAULT_PROMPT_NAME)
     degraded = len(events) > summary_threshold
 
     if degraded:

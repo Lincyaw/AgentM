@@ -32,8 +32,7 @@ def state_echo(state: ExtractionState) -> str:
         return ""
     last = state._events_pending[-1]
     return (
-        f"{n_nodes} node(s), {n_edges} edge(s); "
-        f"last accepted: id={last.id} kind={last.kind.value}"
+        f"{n_nodes} node(s), {n_edges} edge(s); last accepted: id={last.id} kind={last.kind.value}"
     )
 
 

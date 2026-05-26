@@ -126,9 +126,7 @@ class EdgeUpsert:
             dst=int(data["dst"]),
             kind=str(data["kind"]),
             reason=str(data.get("reason", "")),
-            cited_entities=tuple(
-                str(e) for e in (data.get("cited_entities") or [])
-            ),
+            cited_entities=tuple(str(e) for e in (data.get("cited_entities") or [])),
             cited_quote=str(data.get("cited_quote", "")),
             src_turns=tuple(int(t) for t in (data.get("src_turns") or [])),
             dst_turns=tuple(int(t) for t in (data.get("dst_turns") or [])),

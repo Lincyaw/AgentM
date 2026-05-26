@@ -276,12 +276,8 @@ def collect_case(
     extractor_records = [r for r in records if r.phase == "extractor"]
     auditor_records = [r for r in records if r.phase == "auditor"]
 
-    extractor_firings = [
-        _to_firing(r, seq) for seq, r in enumerate(extractor_records, start=1)
-    ]
-    auditor_firings = [
-        _to_firing(r, seq) for seq, r in enumerate(auditor_records, start=1)
-    ]
+    extractor_firings = [_to_firing(r, seq) for seq, r in enumerate(extractor_records, start=1)]
+    auditor_firings = [_to_firing(r, seq) for seq, r in enumerate(auditor_records, start=1)]
     auditor_firings = _attach_auditor_graph_refs(
         auditor_firings=auditor_firings,
         extractor_firings=extractor_firings,
@@ -306,9 +302,7 @@ def collect_case(
 
     session_id = records[0].session_id if records else replay_path.stem
     trace_id = (
-        records[0].trace_id
-        if records
-        else (meta_obj.trace_id if meta_obj is not None else "")
+        records[0].trace_id if records else (meta_obj.trace_id if meta_obj is not None else "")
     )
     case_id = sample_id or session_id
 

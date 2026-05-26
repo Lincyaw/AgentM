@@ -92,25 +92,13 @@ def test_repeated_actions_triggers_on_identical_act_summaries() -> None:
     assert f.related_event_ids == (1, 2, 3)
 
 
-
-
 # ---------------------------------------------------------------------------
 # check_open_branches
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
 # check_premature_conclusion
 
 
-
-
-
-
 # ---------------------------------------------------------------------------
 # Multi-atom mount
-
-
