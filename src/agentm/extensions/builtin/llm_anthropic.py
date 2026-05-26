@@ -114,7 +114,18 @@ def _is_anthropic_retryable(exc: BaseException) -> bool:
         import anthropic
     except ImportError:  # pragma: no cover - SDK dependency is optional here
         return False
-    return isinstance(exc, anthropic.RateLimitError)
+    # RateLimitError: server-side throttle. APIConnectionError /
+    # APITimeoutError: transport stalls surfaced by the finite read
+    # timeout set in ``_get_client`` — without retry they propagate up and
+    # fail the whole firing on a single half-dead connection. Build the
+    # tuple via getattr so a partial SDK / test double missing a name is
+    # tolerated (mirrors ``_is_openai_retryable``).
+    retryable_types = tuple(
+        err_type
+        for name in ("RateLimitError", "APIConnectionError", "APITimeoutError")
+        if isinstance((err_type := getattr(anthropic, name, None)), type)
+    )
+    return bool(retryable_types) and isinstance(exc, retryable_types)
 
 
 class _IdentityRetryPolicy:
@@ -399,6 +410,17 @@ class AnthropicStreamFn:
             # (e.g. ``User-Agent``) — used to present as a Claude-Code client to
             # Anthropic-compatible "coding" endpoints that gate on it.
             kwargs["default_headers"] = dict(self.default_headers)
+        # Without an explicit read timeout, a half-dead TCP connection
+        # (server accepts then stops streaming mid-response) leaves the
+        # request hanging forever — no exception is raised, so the retry
+        # layer never fires and a synchronous audit child wedges
+        # indefinitely. Mirror llm_openai: force a finite read timeout so
+        # stalls surface as anthropic.APITimeoutError (retryable above).
+        import httpx
+
+        kwargs["timeout"] = httpx.Timeout(
+            connect=30.0, read=180.0, write=60.0, pool=30.0
+        )
         self.client = _AsyncAnthropic(**kwargs)
         return self.client
 

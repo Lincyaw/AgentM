@@ -296,7 +296,8 @@ async def _rerun_one_row(
                 patched_record = ReplayRecord(
                     phase=record.phase,
                     turn_index=record.turn_index,
-                    root_session_id=record.root_session_id,
+                    session_id=record.session_id,
+                    trace_id=record.trace_id,
                     ts_ns=record.ts_ns,
                     compose_kwargs=record.compose_kwargs,
                     payload=rebuilt_payload,
@@ -317,7 +318,6 @@ async def _rerun_one_row(
                         provider_override=_provider_override_from_env(
                             record, max_output_tokens=max_output_tokens
                         ),
-                        witness_retry_budget=witness_retry_budget,
                     )
                     status = result.status
                     output = result.output
@@ -341,7 +341,8 @@ async def _rerun_one_row(
                 replacement = ReplayRecord(
                     phase=record.phase,
                     turn_index=record.turn_index,
-                    root_session_id=record.root_session_id,
+                    session_id=record.session_id,
+                    trace_id=record.trace_id,
                     ts_ns=record.ts_ns,
                     compose_kwargs=record.compose_kwargs,
                     payload=rebuilt_payload,
