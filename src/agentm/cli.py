@@ -27,6 +27,8 @@ from agentm.core.lib.render import final_summary
 from agentm.core.lib.user_config import ModelProfile, resolve_model_profile
 from agentm.core.abi.events import ExtensionInstallEvent
 
+from dataclasses import dataclass, field
+
 
 # Default scenario when the user does not pass ``--scenario`` and does
 # not opt out via ``--no-extensions``. Module-level constant so it can
@@ -34,6 +36,32 @@ from agentm.core.abi.events import ExtensionInstallEvent
 DEFAULT_SCENARIO = "general_purpose"
 
 _PACKAGE_WALK_DEPTH = 8
+
+
+@dataclass
+class CliRunConfig:
+    """Resolved CLI flags for session construction.
+
+    Bundles every knob that flows from ``run_cmd`` through ``run`` into
+    ``_build_session_config``, replacing the ~16-parameter signatures.
+    """
+
+    provider: str
+    model: str
+    cwd: str
+    prompt: str = ""
+    scenario: str | None = None
+    extra_extensions: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    no_extensions: bool = False
+    no_skills: bool = False
+    no_prompt_templates: bool = False
+    tool_allowlist: list[str] | None = None
+    quiet: bool = False
+    resume: str | None = None
+    continue_recent: bool = False
+    max_turns: int | None = None
+    max_tool_calls: int | None = None
+    profile: ModelProfile | None = None
 
 
 def autoload_dotenv(cwd: Path | None = None) -> None:
@@ -338,72 +366,51 @@ def _attach_default_diagnostics(bus: EventBus) -> dict[str, bool]:
 
 
 def _build_session_config(
+    config: CliRunConfig,
     *,
-    scenario: str | None,
-    extra_extensions: list[tuple[str, dict[str, Any]]],
-    no_extensions: bool,
-    no_skills: bool,
-    no_prompt_templates: bool,
-    tool_allowlist: list[str] | None,
-    provider: str,
-    model: str,
-    cwd: str,
     bus: EventBus,
-    resume: str | None = None,
-    continue_recent: bool = False,
     session_store: SessionStore | None = None,
     provider_registry: ProviderRegistry = DEFAULT_PROVIDER_REGISTRY,
     loop_config: LoopConfig | None = None,
-    profile: ModelProfile | None = None,
 ) -> tuple[Any, SessionState]:
     from agentm.core.abi.session_config import AgentSessionConfig
 
-    store = session_store or _make_default_session_store(cwd)
+    store = session_store or _make_default_session_store(config.cwd)
     session_state = _resolve_session_state(
-        cwd=cwd,
-        resume=resume,
-        continue_recent=continue_recent,
+        cwd=config.cwd,
+        resume=config.resume,
+        continue_recent=config.continue_recent,
         session_store=store,
     )
     try:
-        if profile is not None:
-            build_config: dict[str, Any] = {"model": profile.model}
-            if profile.base_url:
-                build_config["base_url"] = profile.base_url
-            if profile.api_key:
-                build_config["api_key"] = profile.api_key
-            if profile.name:
-                build_config["name"] = profile.name
-            if profile.context_window:
-                build_config["context_window"] = profile.context_window
-            if profile.max_output_tokens:
-                build_config["max_output_tokens"] = profile.max_output_tokens
-            provider_spec = provider_registry.build(provider, build_config)
+        if config.profile is not None:
+            provider_spec = provider_registry.build(
+                config.provider, config.profile.to_build_config()
+            )
         else:
-            provider_spec = provider_registry.build(provider, {"model": model})
+            provider_spec = provider_registry.build(
+                config.provider, {"model": config.model}
+            )
     except KeyError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    # CLI explicitly opts in to disk-resident project context (CLAUDE.md /
-    # AGENTS.md / skills / prompt templates). Embedded SDK callers get an
-    # empty resource loader by default — see session_factory.py.
     from agentm.core.runtime.resource_loader import DefaultResourceLoader
 
     resource_loader = DefaultResourceLoader(
-        cwd=Path(cwd),
-        no_skills=no_skills,
-        no_prompt_templates=no_prompt_templates,
+        cwd=Path(config.cwd),
+        no_skills=config.no_skills,
+        no_prompt_templates=config.no_prompt_templates,
     )
 
     return (
         AgentSessionConfig(
-            cwd=cwd,
+            cwd=config.cwd,
             provider=provider_spec,
-            scenario=scenario,
-            extra_extensions=extra_extensions,
-            no_extensions=no_extensions,
-            no_skills=no_skills,
-            no_prompt_templates=no_prompt_templates,
-            tool_allowlist=tool_allowlist,
+            scenario=config.scenario,
+            extra_extensions=config.extra_extensions,
+            no_extensions=config.no_extensions,
+            no_skills=config.no_skills,
+            no_prompt_templates=config.no_prompt_templates,
+            tool_allowlist=config.tool_allowlist,
             session_manager=cast(Any, session_state),
             resource_loader=resource_loader,
             bus=bus,
@@ -414,84 +421,44 @@ def _build_session_config(
 
 
 async def run(
+    config: CliRunConfig,
     *,
-    prompt: str,
-    scenario: str | None,
-    # NOTE: when ``prompt`` is empty we drive the session via
-    # ``AgentSession.tick`` instead of ``prompt``. The CLI layer enforces
-    # that this only happens when ``resume`` or ``continue_recent`` is set
-    # (a fresh session with no input is still rejected at parse time).
-    extra_extensions: list[tuple[str, dict[str, Any]]],
-    no_extensions: bool,
-    no_skills: bool,
-    no_prompt_templates: bool,
-    tool_allowlist: list[str] | None,
-    provider: str,
-    model: str,
-    cwd: str,
-    quiet: bool,
-    resume: str | None,
-    continue_recent: bool,
-    max_turns: int | None = None,
-    max_tool_calls: int | None = None,
     output: TextIO = sys.stdout,
-    profile: ModelProfile | None = None,
 ) -> int:
     from agentm.core.runtime.session import AgentSession
 
     bus = EventBus()
     diagnostic_state = _attach_default_diagnostics(bus)
-    if not quiet:
+    if not config.quiet:
         _attach_streaming_presenter(bus, output)
 
-    # Build an explicit loop_config only when the user actually passed a cap;
-    # otherwise leave it None so the scenario's ``loop_budget`` atom (or the
-    # LoopConfig default — no cap) decides. An explicit flag wins over the
-    # atom-registered budget wholesale (see session_factory precedence).
     loop_config = (
-        LoopConfig(max_turns=max_turns, max_tool_calls=max_tool_calls)
-        if (max_turns is not None or max_tool_calls is not None)
+        LoopConfig(max_turns=config.max_turns, max_tool_calls=config.max_tool_calls)
+        if (config.max_turns is not None or config.max_tool_calls is not None)
         else None
     )
 
-    config, session_manager = _build_session_config(
-        scenario=scenario,
-        extra_extensions=extra_extensions,
-        no_extensions=no_extensions,
-        no_skills=no_skills,
-        no_prompt_templates=no_prompt_templates,
-        tool_allowlist=tool_allowlist,
-        provider=provider,
-        model=model,
-        cwd=cwd,
-        bus=bus,
-        resume=resume,
-        continue_recent=continue_recent,
-        loop_config=loop_config,
-        profile=profile,
+    session_config, session_manager = _build_session_config(
+        config, bus=bus, loop_config=loop_config,
     )
-    if not quiet and session_manager.session_file is not None:
+    if not config.quiet and session_manager.session_file is not None:
         print(f"INFO: session log: {session_manager.session_file}", file=sys.stderr)
         print(f"INFO: session id: {session_manager.get_session_id()}", file=sys.stderr)
 
-    session = await AgentSession.create(config)
+    session = await AgentSession.create(session_config)
     try:
-        if prompt:
-            final = await session.prompt(prompt)
+        if config.prompt:
+            final = await session.prompt(config.prompt)
         else:
-            # Resume-without-prompt path: let any extension's
-            # decide_turn_action handler inject the first message; if
-            # nothing injects, ``tick`` returns the trajectory unchanged
-            # and emits AgentEnd(NoPendingInput).
             final = await session.tick()
         cost_service = session.get_service("cost_query")
         provider_name = session.model.provider if session.model is not None else None
-        if not quiet:
+        if not config.quiet:
             _print_final(final, cost_service=cost_service, provider=provider_name, output=output)
     finally:
         await session.shutdown()
 
-    if not quiet:
+    if not config.quiet:
         sid = session_manager.get_session_id()
         if sid:
             print(
@@ -674,21 +641,10 @@ def run_cmd(
     )
 
     extra_extensions = _parse_extensions(extension)
-    # No --scenario? Resolve via AGENTM_SCENARIO, falling back to the
-    # curated minimal set under ``contrib/scenarios/general_purpose/``
-    # rather than auto-discovering every builtin atom. Self-modify,
-    # evolution/query, and other specialised atoms live in dedicated
-    # scenarios that compose on top.
     if scenario is None and not no_extensions:
         scenario = os.environ.get("AGENTM_SCENARIO") or DEFAULT_SCENARIO
 
     if not prompt and not resume and not continue_recent:
-        # Fresh session with no input: still rejected. ``--resume`` /
-        # ``--continue`` are the only ways to legally omit the prompt —
-        # they let event-driven extensions (e.g. the prefix-replay
-        # ``reminder_seed`` atom) supply the first message via Inject on
-        # the synthetic ``decide_turn_action`` ``AgentSession.tick``
-        # fires.
         print(
             "ERROR: prompt is required for a fresh session.\n"
             "       Pass --resume <sid> (or --continue) to advance an existing\n"
@@ -706,24 +662,24 @@ def run_cmd(
         raise typer.Exit(code=2)
 
     rc = asyncio.run(
-        run(
+        run(CliRunConfig(
             prompt=prompt,
+            provider=provider,
+            model=model,
+            cwd=cwd,
             scenario=scenario,
             extra_extensions=extra_extensions,
             no_extensions=no_extensions,
             no_skills=no_skills,
             no_prompt_templates=no_prompt_templates,
             tool_allowlist=_parse_tools(tools),
-            provider=provider,
-            model=model,
-            cwd=cwd,
             quiet=quiet,
             resume=resume,
             continue_recent=continue_recent,
             max_turns=max_turns,
             max_tool_calls=max_tool_calls,
             profile=profile,
-        )
+        ))
     )
     raise typer.Exit(code=rc)
 

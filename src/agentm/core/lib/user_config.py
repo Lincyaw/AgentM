@@ -28,6 +28,21 @@ class ModelProfile:
     context_window: int | None = None
     max_output_tokens: int | None = None
 
+    def to_build_config(self) -> dict[str, Any]:
+        """Build the config dict for ``ProviderRegistry.build()``."""
+        config: dict[str, Any] = {"model": self.model}
+        if self.base_url:
+            config["base_url"] = self.base_url
+        if self.api_key:
+            config["api_key"] = self.api_key
+        if self.name:
+            config["name"] = self.name
+        if self.context_window:
+            config["context_window"] = self.context_window
+        if self.max_output_tokens:
+            config["max_output_tokens"] = self.max_output_tokens
+        return config
+
 
 @dataclass(frozen=True)
 class UserConfig:
