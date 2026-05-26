@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...schema import Edge, EdgeKind, Event, EventKind, ExternalRef
+from ...schema import EdgeKind, EventKind, ExternalRef
 
 
 @dataclass(frozen=True)
@@ -38,12 +38,9 @@ class NodeUpsert:
     is a tuple of absolute trajectory turn indices.
 
     ``external_refs`` carries cross-firing references from this event
-    back into the cumulative graph (see :class:`ExternalRef`). It must
-    survive the op-log/fold round-trip so the legacy
-    ``AUDIT_EVENT``-to-op translation in ``_scan_branch`` does not
-    drop them when reading prior-firing entries; the auditor and the
-    next firing's ``recent_graph`` payload both depend on them being
-    present on the folded :class:`Event`.
+    back into the cumulative graph (see :class:`ExternalRef`); the
+    auditor and the next firing's ``recent_graph`` payload both depend
+    on them being present on the folded :class:`Event`.
     """
 
     id: int
@@ -197,37 +194,6 @@ def parse_op(data: dict[str, Any]) -> GraphOp:
     return cls.from_dict(data)  # type: ignore[attr-defined,no-any-return]
 
 
-def op_from_event(ev: Event) -> NodeUpsert:
-    """Lift a finalised :class:`Event` into the :class:`NodeUpsert` that produced it.
-
-    Preserves ``external_refs`` so cross-firing connectivity survives the
-    round-trip — see
-    :meth:`llmharness.audit.runner.CumulativeAuditState.hydrate_from_session_log`
-    for the legacy-``AUDIT_EVENT`` translation contract.
-    """
-    return NodeUpsert(
-        id=ev.id,
-        kind=ev.kind.value,
-        summary=ev.summary,
-        source_turns=tuple(ev.source_turns),
-        external_refs=ev.external_refs,
-    )
-
-
-def op_from_edge(ed: Edge) -> EdgeUpsert:
-    """Lift a finalised :class:`Edge` into the :class:`EdgeUpsert` that produced it."""
-    return EdgeUpsert(
-        src=ed.src,
-        dst=ed.dst,
-        kind=ed.kind.value,
-        reason=ed.reason,
-        cited_entities=ed.cited_entities,
-        cited_quote=ed.cited_quote,
-        src_turns=ed.src_turns,
-        dst_turns=ed.dst_turns,
-    )
-
-
 def validate_node_upsert_kind(kind: str) -> bool:
     """True iff ``kind`` is a valid :class:`~llmharness.schema.EventKind` value."""
     try:
@@ -252,8 +218,6 @@ __all__ = [
     "GraphOp",
     "NodeDelete",
     "NodeUpsert",
-    "op_from_edge",
-    "op_from_event",
     "parse_op",
     "validate_edge_kind",
     "validate_node_upsert_kind",

@@ -80,7 +80,6 @@ from agentm.core.abi import (
 from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.messages import AgentMessage
-from agentm.core.abi.session import SessionEntry
 from agentm.extensions import ExtensionManifest
 
 from ..audit import entry_types as _et
@@ -88,13 +87,6 @@ from ..audit.auditor.profiles import resolve_tools as _resolve_auditor_tools
 from ..audit.auditor.prompt import load_auditor_prompt
 from ..audit.extractor import compose_extractor_extensions
 from ..audit.extractor.prompt import load_extractor_prompt
-from ..audit.graph.fold import fold_graph
-from ..audit.graph.ops import (
-    EdgeUpsert,
-    GraphOp,
-    NodeUpsert,
-    parse_op,
-)
 from ..audit.registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
 from ..audit.registry import AuditCheckRegistry
 from ..audit.runner import (
@@ -110,7 +102,7 @@ from ..audit.seams.live import LiveChildRunner, LiveOpSink
 from ..audit.toolkit.reminder_format import REMINDER_PREAMBLE as _SHARED_REMINDER_PREAMBLE
 from ..audit.toolkit.reminder_format import build_reminder_message
 from ..replay.record import audit_session_id, replay_log_path
-from ..schema import Edge, Event, Phase, Reminder
+from ..schema import Reminder
 
 _logger = logging.getLogger(__name__)
 
@@ -284,10 +276,7 @@ _DEFAULT_AUDIT_SUMMARY_THRESHOLD = 30
 _REMINDER_PREAMBLE = _SHARED_REMINDER_PREAMBLE
 
 # Entry-type bindings (every literal must come from entry_types.py).
-_AUDIT_EVENT_ENTRY_TYPE = _et.AUDIT_EVENT
-_AUDIT_EDGE_ENTRY_TYPE = _et.AUDIT_EDGE
 _AUDIT_GRAPH_OP_ENTRY_TYPE = _et.AUDIT_GRAPH_OP
-_AUDIT_PHASE_ENTRY_TYPE = _et.AUDIT_PHASE
 _VERDICT_ENTRY_TYPE = _et.VERDICT
 _EXTRACTOR_CURSOR_ENTRY_TYPE = _et.EXTRACTOR_CURSOR
 _REMINDER_DELIVERED_ENTRY_TYPE = _et.REMINDER_DELIVERED
@@ -307,112 +296,6 @@ _EXTRACTOR_COMPOSE_KWARGS_SERVICE_KEY: Final[str] = (
     "llmharness._extractor_compose_kwargs"
 )
 _REPLAY_LOG_PATH_SERVICE_KEY: Final[str] = "llmharness._replay_log_path"
-
-
-# --- branch state (legacy; kept for the scan-branch regression tests) -------
-
-
-@dataclass(frozen=True)
-class _BranchState:
-    """Snapshot of audit-relevant entries pulled from a single branch walk.
-
-    The runner now drives audit via :class:`CumulativeAuditState`; this
-    type is retained because ``test_scan_branch_regressions`` exercises
-    :func:`_scan_branch` directly to lock down the fold semantics over
-    legacy ``AUDIT_EVENT`` / ``AUDIT_EDGE`` entries and pure-delete ops.
-    """
-
-    cursor_last_turn_index: int
-    graph: list[Event]
-    edges: list[Edge]
-    phases: list[Phase]
-    recent_verdicts: list[dict[str, Any]]
-    last_continuation_notes: list[str]
-
-
-def _scan_branch(branch: list[SessionEntry], *, recent_verdicts_n: int) -> _BranchState:
-    """Single-pass extraction of cursor + graph + edges + phases + verdicts.
-
-    Mirror of the pre-P1 implementation; retained because
-    ``test_scan_branch_regressions`` imports it. The live install path
-    no longer calls this — see
-    :meth:`CumulativeAuditState.hydrate_from_session_log`.
-    """
-    cursor_last_turn_index = -1
-    ops: list[GraphOp] = []
-    phases: list[Phase] = []
-    verdicts: list[dict[str, Any]] = []
-
-    for entry in branch:
-        payload = entry.payload
-        if not isinstance(payload, dict):
-            continue
-        if entry.type == _AUDIT_GRAPH_OP_ENTRY_TYPE:
-            try:
-                ops.append(parse_op(payload))
-            except (KeyError, ValueError, TypeError):
-                continue
-        elif entry.type == _AUDIT_EVENT_ENTRY_TYPE:
-            try:
-                ev = Event.from_dict(payload)
-            except (KeyError, ValueError, TypeError):
-                continue
-            ops.append(
-                NodeUpsert(
-                    id=ev.id,
-                    kind=ev.kind.value,
-                    summary=ev.summary,
-                    source_turns=tuple(ev.source_turns),
-                    external_refs=ev.external_refs,
-                )
-            )
-        elif entry.type == _AUDIT_EDGE_ENTRY_TYPE:
-            try:
-                ed = Edge.from_dict(payload)
-            except (KeyError, ValueError, TypeError):
-                continue
-            ops.append(
-                EdgeUpsert(
-                    src=ed.src,
-                    dst=ed.dst,
-                    kind=ed.kind.value,
-                    reason=ed.reason,
-                    cited_entities=ed.cited_entities,
-                    cited_quote=ed.cited_quote,
-                    src_turns=ed.src_turns,
-                    dst_turns=ed.dst_turns,
-                )
-            )
-        elif entry.type == _AUDIT_PHASE_ENTRY_TYPE:
-            try:
-                phases.append(Phase.from_dict(payload))
-            except (KeyError, ValueError, TypeError):
-                continue
-        elif entry.type == _VERDICT_ENTRY_TYPE:
-            verdicts.append(payload)
-        elif entry.type == _EXTRACTOR_CURSOR_ENTRY_TYPE:
-            raw = payload.get("last_turn_index")
-            if isinstance(raw, int) and not isinstance(raw, bool):
-                cursor_last_turn_index = raw
-
-    folded = fold_graph(ops)
-    graph: list[Event] = folded.nodes_list()
-    edges: list[Edge] = folded.edges_list()
-
-    last_continuation_notes: list[str] = []
-    if verdicts:
-        raw_notes = verdicts[-1].get("continuation_notes")
-        if isinstance(raw_notes, list):
-            last_continuation_notes = [n for n in raw_notes if isinstance(n, str)]
-
-    return _BranchState(
-        cursor_last_turn_index=cursor_last_turn_index,
-        graph=graph,
-        edges=edges,
-        phases=phases,
-        recent_verdicts=verdicts[-recent_verdicts_n:] if recent_verdicts_n > 0 else [],
-        last_continuation_notes=last_continuation_notes,
-    )
 
 
 # --- jobs -------------------------------------------------------------------

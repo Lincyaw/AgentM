@@ -73,7 +73,8 @@ def test_chain_of_three_emits_warning() -> None:
 
 
 def test_finalize_succeeds_with_chain_warning() -> None:
-    """End-to-end: a chain submitted via commit_batch + finalize COMMITS.
+    """End-to-end: a chain built via apply_node_upsert + apply_edge_upsert
+    + finalize COMMITS.
 
     V4 contract: chain shape is acceptable. finalize returns None,
     state.committed flips to True, and the soft warning is surfaced
@@ -86,40 +87,43 @@ def test_finalize_succeeds_with_chain_warning() -> None:
             3: "charlie delta",
         }
     )
-    err = state.commit_batch(
-        [
-            {"id": 1, "kind": "task", "summary": "start", "source_turns": [1]},
-            {
-                "id": 2,
-                "kind": "act",
-                "summary": "middle",
-                "source_turns": [2],
-                "refs": [
-                    {
-                        "to": 1,
-                        "kind": "data",
-                        "reason": "r",
-                        "cited_entities": ["alpha"],
-                    }
-                ],
-            },
-            {
-                "id": 3,
-                "kind": "concl",
-                "summary": "end",
-                "source_turns": [3],
-                "refs": [
-                    {
-                        "to": 2,
-                        "kind": "data",
-                        "reason": "r",
-                        "cited_entities": ["charlie"],
-                    }
-                ],
-            },
-        ]
+    state.next_event_id = 1
+    assert isinstance(
+        state.apply_node_upsert(
+            {"id": 1, "kind": "task", "summary": "start", "source_turns": [1]}
+        ),
+        dict,
     )
-    assert err is None  # batch shape is fine
+    assert isinstance(
+        state.apply_node_upsert(
+            {"id": 2, "kind": "act", "summary": "middle", "source_turns": [2]}
+        ),
+        dict,
+    )
+    assert isinstance(
+        state.apply_node_upsert(
+            {"id": 3, "kind": "concl", "summary": "end", "source_turns": [3]}
+        ),
+        dict,
+    )
+    assert isinstance(
+        state.apply_edge_upsert(
+            {
+                "src": 1, "dst": 2, "kind": "data",
+                "reason": "r", "cited_entities": ["alpha"], "cited_quote": "",
+            }
+        ),
+        dict,
+    )
+    assert isinstance(
+        state.apply_edge_upsert(
+            {
+                "src": 2, "dst": 3, "kind": "data",
+                "reason": "r", "cited_entities": ["charlie"], "cited_quote": "",
+            }
+        ),
+        dict,
+    )
     final_err = state.finalize()
     assert final_err is None
     assert state.committed is True
