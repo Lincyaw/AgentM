@@ -48,8 +48,6 @@ them through the top-level surface.
 The runtime entry point is the AgentM extension at
 ``llmharness.adapters.agentm``, loaded via
 ``AgentSessionConfig(extensions=[("llmharness.adapters.agentm", {})])``.
-
-V2 breaking change (issue #134, 2026-05-10): ``DriftType`` is removed.
 """
 
 from .audit.auditor import (

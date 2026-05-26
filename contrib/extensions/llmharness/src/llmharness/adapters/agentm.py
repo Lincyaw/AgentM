@@ -1,4 +1,4 @@
-"""Adapter: AgentM bus -> two-phase cognitive audit (v3).
+"""Adapter: AgentM bus -> two-phase cognitive audit.
 
 See `.claude/designs/llmharness-cognitive-audit.md` for the full design.
 
@@ -7,19 +7,21 @@ Phase 1 (extractor) on the configured TurnEndEvent cadence:
 * Build a per-firing :class:`ExtractionState`, populate ``turn_texts``
   with rendered turn content (used by the witness pipeline).
 * Spawn an extractor child whose extensions list carries the state via
-  the ``state`` config knob. The child registers ``submit_events``
-  closed over that state (single-tool flow; one shot per firing).
-* After the child loop terminates, snapshot
-  :class:`RawExtractorOutput` from the state and write entries:
-  ``audit_event`` per accepted event, ``audit_edge`` per accepted edge,
-  ``extractor_partial`` once if any edges were dropped, and
-  ``extractor_cursor`` to mark the window consumed.
-* Failure modes use typed entries: ``extractor_no_call`` (terminator
-  never called), ``extractor_empty`` (terminator called but window had
-  no events on a non-trivial slice), ``extractor_error`` (spawn / prompt
-  / coercion crash). Cursor advances ONLY on success or partial.
+  the ``state`` config knob. The child incrementally maintains the graph
+  with ``upsert_node`` / ``upsert_edge`` / ``delete_node`` /
+  ``delete_edge`` / ``reset_extraction`` (each edit validated for witness
+  + id rules on the spot) and ends the firing with
+  ``finalize_extraction``.
+* After the child loop terminates, persist the accepted graph as
+  ``audit_graph_op`` entries plus an ``extractor_cursor`` marking the
+  window consumed.
+* Failure / edge-case entries: ``extractor_no_call`` (terminator never
+  called), ``extractor_empty`` (terminator called but the non-trivial
+  window produced no graph), ``extractor_partial`` (some ops rejected),
+  ``extractor_error`` (spawn / prompt / coercion crash). Cursor advances
+  ONLY on success or partial.
 
-Phase 2 (auditor) every k turns (v3, commit 4):
+Phase 2 (auditor) every k turns:
 * Walk the entry tree to assemble the live event + edge graph plus the
   most-recent verdict's continuation_notes.
 * Resolve ``llmharness.audit_registry`` from the parent ``ExtensionAPI``;
@@ -67,7 +69,6 @@ import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Final
 
 from agentm.core.abi import (
@@ -109,7 +110,7 @@ _logger = logging.getLogger(__name__)
 MANIFEST = ExtensionManifest(
     name="agentm",
     description=(
-        "Two-phase cognitive-audit adapter (v3): per-turn extractor (Phase 1) "
+        "Two-phase cognitive-audit adapter: per-turn extractor (Phase 1) "
         "with witness-based edge construction and an every-k-turns graph "
         "auditor (Phase 2). ``mode='async'`` (default) runs audit on a "
         "background worker so the main agent loop is never blocked; verdicts "
@@ -271,7 +272,6 @@ MANIFEST = ExtensionManifest(
 
 _DEFAULT_AUDIT_INTERVAL_TURNS = 3
 _DEFAULT_EXTRACTOR_INTERVAL_TURNS = 1
-_DEFAULT_RECENT_VERDICTS = _et.RECENT_VERDICTS_FOR_AUDITOR
 # 600s (10min) accommodates slow / proxied LLM endpoints (e.g. Warpgate-
 # fronted OpenAI-compatible servers at ~14s/call); a low default drops
 # audit jobs at session teardown. Override via ``shutdown_timeout_s``.
@@ -286,26 +286,16 @@ _DEFAULT_AUDIT_SUMMARY_THRESHOLD = 30
 # (test_reminder_injector) and call sites stable.
 _REMINDER_PREAMBLE = _SHARED_REMINDER_PREAMBLE
 
-# Entry-type bindings (every literal must come from entry_types.py).
-_AUDIT_GRAPH_OP_ENTRY_TYPE = _et.AUDIT_GRAPH_OP
-_VERDICT_ENTRY_TYPE = _et.VERDICT
-_EXTRACTOR_CURSOR_ENTRY_TYPE = _et.EXTRACTOR_CURSOR
+# Entry-type binding (the literal must come from entry_types.py). Failure /
+# op / cursor / verdict persistence reaches ``entry_types`` directly through
+# the sinks in ``audit/seams/``; only the reminder-delivered marker is written
+# from this module.
 _REMINDER_DELIVERED_ENTRY_TYPE = _et.REMINDER_DELIVERED
 
-_EXTRACTOR_NO_CALL_ENTRY = _et.EXTRACTOR_NO_CALL
-_EXTRACTOR_ERROR_ENTRY = _et.EXTRACTOR_ERROR
-_EXTRACTOR_EMPTY_ENTRY = _et.EXTRACTOR_EMPTY
-_EXTRACTOR_PARTIAL_ENTRY = _et.EXTRACTOR_PARTIAL
-_AUDIT_NO_CALL_ENTRY = _et.AUDIT_NO_CALL
-_AUDIT_ERROR_ENTRY = _et.AUDIT_ERROR
-
-# Adapter-internal ExtensionAPI service keys. The audit-check registry has
-# its own public key in ``audit/registry.py`` because external atoms need to
-# resolve it; these two are read only by helpers inside this module, so they
-# stay private to the adapter.
-_EXTRACTOR_COMPOSE_KWARGS_SERVICE_KEY: Final[str] = (
-    "llmharness._extractor_compose_kwargs"
-)
+# Adapter-internal ExtensionAPI service key. The audit-check registry has its
+# own public key in ``audit/registry.py`` because external atoms need to
+# resolve it; this one carries the per-session replay-sidecar path so external
+# replay orchestrators can locate the log.
 _REPLAY_LOG_PATH_SERVICE_KEY: Final[str] = "llmharness._replay_log_path"
 
 
@@ -338,15 +328,11 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     k = int(config.get("audit_interval_turns", _DEFAULT_AUDIT_INTERVAL_TURNS))
     if k < 1:
         k = _DEFAULT_AUDIT_INTERVAL_TURNS
-    extractor_k = int(
-        config.get("extractor_interval_turns", _DEFAULT_EXTRACTOR_INTERVAL_TURNS)
-    )
+    extractor_k = int(config.get("extractor_interval_turns", _DEFAULT_EXTRACTOR_INTERVAL_TURNS))
     if extractor_k < 1:
         extractor_k = _DEFAULT_EXTRACTOR_INTERVAL_TURNS
 
-    summary_threshold_raw = config.get(
-        "audit_summary_threshold", _DEFAULT_AUDIT_SUMMARY_THRESHOLD
-    )
+    summary_threshold_raw = config.get("audit_summary_threshold", _DEFAULT_AUDIT_SUMMARY_THRESHOLD)
     try:
         summary_threshold = int(summary_threshold_raw)
     except (TypeError, ValueError):
@@ -354,9 +340,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     if summary_threshold < 0:
         summary_threshold = _DEFAULT_AUDIT_SUMMARY_THRESHOLD
 
-    shutdown_timeout = float(
-        config.get("shutdown_timeout_s", _DEFAULT_SHUTDOWN_TIMEOUT_S)
-    )
+    shutdown_timeout = float(config.get("shutdown_timeout_s", _DEFAULT_SHUTDOWN_TIMEOUT_S))
     if shutdown_timeout < 0:
         shutdown_timeout = _DEFAULT_SHUTDOWN_TIMEOUT_S
 
@@ -368,9 +352,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     prompt_extractor_override = (
         prompt_extractor_raw if isinstance(prompt_extractor_raw, str) else None
     )
-    prompt_auditor_override = (
-        prompt_auditor_raw if isinstance(prompt_auditor_raw, str) else None
-    )
+    prompt_auditor_override = prompt_auditor_raw if isinstance(prompt_auditor_raw, str) else None
 
     extractor_prompt_name_raw = config.get("extractor_prompt")
     auditor_prompt_name_raw = config.get("auditor_prompt")
@@ -412,10 +394,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         "observability_config": obs_cfg,
         "tool_call_budget": config.get("extractor_tool_call_budget"),
     }
-    api.set_service(
-        _EXTRACTOR_COMPOSE_KWARGS_SERVICE_KEY,
-        extractor_compose_kwargs,
-    )
     extractor_settings = ExtractorSettings(
         extensions=extractor_extensions,
         compose_kwargs=extractor_compose_kwargs,
@@ -434,9 +412,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     enable_reminders = bool(config.get("enable_reminders", True))
     enable_replay_log = bool(config.get("enable_replay_log", True))
 
-    sidecar_path = (
-        replay_log_path(api.cwd, audit_session_id(api)) if enable_replay_log else None
-    )
+    sidecar_path = replay_log_path(api.cwd, audit_session_id(api)) if enable_replay_log else None
     api.set_service(_REPLAY_LOG_PATH_SERVICE_KEY, sidecar_path)
 
     # Publish the audit-check registry on the parent session. Atoms in
@@ -451,9 +427,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # cumulative state once from the existing session log so process
     # restarts pick up where they left off; thereafter the in-memory
     # state is authoritative (no per-firing re-reads).
-    cumulative = CumulativeAuditState.hydrate_from_session_log(
-        api.session.get_branch()
-    )
+    cumulative = CumulativeAuditState.hydrate_from_session_log(api.session.get_branch())
     runner = HarnessRunner(
         cumulative=cumulative,
         child=LiveChildRunner(api),
@@ -488,9 +462,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             # but before the first turn, so a None at install time
             # doesn't mean "no checks ever".
             runner.set_audit_registry(_resolve_registry(api))
-            step = await runner.on_trajectory_progress(
-                list(event.messages), turn_count=turn_count
-            )
+            step = await runner.on_trajectory_progress(list(event.messages), turn_count=turn_count)
             _drain_step_result(step.surfaced_reminder)
 
         api.on(TurnEndEvent.CHANNEL, _on_turn_end_sync)
@@ -675,17 +647,9 @@ async def _drain_queue(
             queue.task_done()
 
 
-# --- session id / replay path helpers ---------------------------------------
-
-
-def _replay_log_path_for(api: ExtensionAPI) -> Path | None:
-    """Resolve the per-session replay sidecar path, or None if disabled."""
-    path = api.get_service(_REPLAY_LOG_PATH_SERVICE_KEY)
-    return path if isinstance(path, Path) else None
-
-
-# Public aliases for downstream eval orchestrators that need to reconstruct
-# extractor/auditor inputs offline (e.g. agentm_rca baseline-fork mode).
+# Public re-exports of the trajectory-serialization helpers for external eval
+# orchestrators that reconstruct extractor/auditor inputs offline (rca-autorl).
+# Not used in-tree; kept stable as package API.
 flatten_assistant_blocks = _flatten_assistant_blocks
 serialize_full_trajectory = _serialize_full_trajectory
 
