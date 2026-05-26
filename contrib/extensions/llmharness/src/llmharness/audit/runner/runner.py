@@ -927,7 +927,14 @@ class HarnessRunner:
         payload = {
             "next_event_id": state.next_event_id,
             "new_turns": new_turn_window,
+            "graph": {
+                "nodes": recent_graph_payload,
+                "edges": [ed.to_dict() for ed in edges_cum],
+            },
+            # Back-compat for older extractor prompts / replay records. New code
+            # should read graph.{nodes,edges}.
             "recent_graph": recent_graph_payload,
+            "recent_edges": [ed.to_dict() for ed in edges_cum],
         }
 
         # Inject state into the per-firing extensions list. The base
@@ -1035,6 +1042,7 @@ class HarnessRunner:
                 "events": [e.to_dict() for e in output.events],
                 "edges": [ed.to_dict() for ed in output.edges],
                 "dropped_edges": list(output.dropped_edges),
+                "ops": [op.to_dict() for op in state.pending_ops],
             },
         )
 
@@ -1273,8 +1281,9 @@ class HarnessRunner:
 
         Bypasses the ``messages → turn_window → payload`` construction
         in :meth:`fire_extractor_once`; the record already carries a
-        finished ``payload`` (``recent_graph`` + ``next_event_id`` +
-        ``new_turns``). We rebuild an :class:`ExtractionState` from
+        finished ``payload`` (``graph.nodes`` / ``graph.edges``, plus
+        legacy ``recent_graph`` / ``recent_edges``, ``next_event_id``,
+        and ``new_turns``). We rebuild an :class:`ExtractionState` from
         ``payload`` + ``extras.turn_texts`` exactly as legacy
         ``replay_extractor_record`` did, then call
         :func:`run_phase_standalone` and snapshot
@@ -1319,7 +1328,9 @@ class HarnessRunner:
         # populate state.recent_graph so external_refs can be
         # witnessed against trajectory text.
         payload = dict(record.payload or {})
-        recent_graph_raw = payload.get("recent_graph") or []
+        graph_raw = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+        recent_graph_raw = graph_raw.get("nodes") or payload.get("recent_graph") or []
+        recent_edges_raw = graph_raw.get("edges") or payload.get("recent_edges") or []
         enriched_recent: list[dict[str, Any]] = []
         recent_events: list[Event] = []
         for entry in recent_graph_raw:
@@ -1336,8 +1347,24 @@ class HarnessRunner:
                 recent_events.append(Event.from_dict(entry))
             except (KeyError, ValueError, TypeError):
                 continue
+        payload["graph"] = {"nodes": enriched_recent, "edges": list(recent_edges_raw)}
         payload["recent_graph"] = enriched_recent
+        payload["recent_edges"] = list(recent_edges_raw)
         state.recent_graph = tuple(recent_events)
+        state.recent_graph_dict = {e.id: e for e in recent_events}
+
+        recent_edges: list[Edge] = []
+        for entry in recent_edges_raw:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                recent_edges.append(Edge.from_dict(entry))
+            except (KeyError, ValueError, TypeError):
+                continue
+        state.recent_edges_dict = {
+            (ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges
+        }
+        state._refold()
 
         extensions = bind_extractor_state(
             self._extractor_settings.extensions, state=state
@@ -1358,6 +1385,7 @@ class HarnessRunner:
                     "events": [e.to_dict() for e in snapshot.events],
                     "edges": [ed.to_dict() for ed in snapshot.edges],
                     "dropped_edges": list(snapshot.dropped_edges),
+                    "ops": [op.to_dict() for op in state.pending_ops],
                 },
                 status=result.status,
                 error=result.error,

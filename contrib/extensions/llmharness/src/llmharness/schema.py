@@ -85,8 +85,8 @@ class ExternalRef:
 
     Witnesses are validated by the live harness, same rules as in-firing
     refs: ``data`` requires non-empty ``cited_entities``; ``ref`` requires
-    a non-empty ``cited_quote``; both anchors must appear in BOTH the
-    source event's source-turns text and this event's source-turns text.
+    a non-empty ``cited_quote``; anchors must appear in at least one
+    endpoint's source-turns text.
     """
 
     to_recent_event_id: int  # global event id from a recent_graph[i].id

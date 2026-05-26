@@ -6,7 +6,7 @@ Both endpoint nodes must already exist in the current folded graph
 
 * ``kind='data'`` requires non-empty ``cited_entities``;
 * ``kind='ref'`` requires ``cited_quote`` to appear (case+whitespace
-  normalised substring) in BOTH the src and dst nodes' source_turns
+  normalised substring) in at least one endpoint node's source_turns
   text.
 
 This module is **not** an atom.
@@ -66,9 +66,9 @@ class UpsertEdgeArgs(BaseModel):
     )
     cited_quote: str = Field(
         description=(
-            "Verbatim substring of BOTH the src node's source_turns "
-            "text AND the dst node's source_turns text "
-            "(case+whitespace normalized). Required when kind='ref'. "
+            "Verbatim substring of at least one endpoint node's "
+            "source_turns text (case+whitespace normalized). "
+            "Required when kind='ref'. "
             "Paraphrasing or reformatting is rejected at op-build "
             "time. Pass \"\" when kind='data'."
         ),
@@ -91,7 +91,7 @@ def _attempt_echo(args: UpsertEdgeArgs) -> str:
 def build_upsert_edge_tool(state: ExtractionState) -> FunctionTool:
     @harness_tool(UPSERT_EDGE_TOOL_NAME)
     async def _upsert_edge(args: UpsertEdgeArgs, _ctx: Any) -> ToolResult:
-        """Insert or replace one witness-bearing edge keyed by (src, dst, kind). Both endpoint nodes must already exist in the current graph (this firing or any prior firing). kind='data' requires non-empty cited_entities; kind='ref' requires cited_quote to appear in BOTH endpoint nodes' source_turns text."""
+        """Insert or replace one witness-bearing edge keyed by (src, dst, kind). Both endpoint nodes must already exist in the current graph (this firing or any prior firing). kind='data' requires non-empty cited_entities; kind='ref' requires cited_quote to appear in at least one endpoint node's source_turns text."""
         raw = args.model_dump()
         result = state.apply_edge_upsert(raw)
         if isinstance(result, str):
@@ -100,7 +100,7 @@ def build_upsert_edge_tool(state: ExtractionState) -> FunctionTool:
             if args.kind == "ref":
                 options = [
                     "re-call upsert_edge with a cited_quote that is a verbatim "
-                    "substring of BOTH endpoints' source_turns text (after "
+                    "substring of at least one endpoint's source_turns text (after "
                     "case+whitespace normalisation)",
                     "switch to kind='data' if no shared literal quote exists, "
                     "and pass cited_entities=[<shared identifier>, ...]",
@@ -112,7 +112,7 @@ def build_upsert_edge_tool(state: ExtractionState) -> FunctionTool:
                     "entry must be a concrete identifier present in at least one "
                     "endpoint's source_turns text",
                     "switch to kind='ref' with cited_quote if a verbatim shared "
-                    "substring exists in BOTH endpoints",
+                    "substring exists in at least one endpoint",
                     f"verify src/dst are existing node ids — folded view contains {existing}",
                 ]
             return ToolResult(

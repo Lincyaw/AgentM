@@ -19,8 +19,7 @@ The validation pipeline runs inside :meth:`ExtractionState.commit`:
    ``data`` requires non-empty ``cited_entities``; ``ref`` requires
    non-empty ``cited_quote``.
 3. **witness**: each ref's witnesses must appear (case+ws normalized
-   substring) in BOTH the source-turn text of the referenced event and
-   the source-turn text of the citing event.
+   substring) in at least one endpoint's source-turn text.
 
 If any **event-shape** check fails the whole submission is rejected
 (LLM gets the error in the tool result and may retry, bounded by the
@@ -317,9 +316,9 @@ class ExtractionState:
         """Insert or replace one pending edge by (src, dst, kind).
 
         Witness rule: kind='ref' requires ``cited_quote`` to appear in
-        BOTH endpoints' source_turns text — same gate as the batch
-        path and :meth:`apply_edge_upsert`. The legacy path used to
-        skip this check, letting fabricated quotes through; closed
+        at least one endpoint's source_turns text — same gate as the
+        batch path and :meth:`apply_edge_upsert`. The legacy path used
+        to skip this check, letting fabricated quotes through; closed
         here so all three surfaces share one contract.
         """
         if self.committed:
@@ -549,12 +548,9 @@ class ExtractionState:
           time has historically been lax for this case because the
           downstream auditor still has the entities to work with).
         - ``kind='ref'``: ``cited_quote`` must appear (case+ws
-          normalised) as a substring of BOTH the src node's source-
-          turns text AND the dst node's source-turns text — same rule
-          as the batch path (:func:`witness_ref`). The atomic path
-          originally checked src only, letting a quote that exists
-          only in src text slip through; that divergence was a hole
-          the batch contract closed and we close here too.
+          normalised) as a substring of at least one endpoint's
+          source-turns text — same rule as the batch path
+          (:func:`witness_ref`).
         """
         if self.committed:
             return "apply_edge_upsert: firing already finalized"
@@ -596,11 +592,8 @@ class ExtractionState:
                 return (
                     "apply_edge_upsert: kind='ref' requires non-empty cited_quote"
                 )
-            # Witness validation for ref: the verbatim quote must appear
-            # in BOTH the src and dst nodes' source_turns text (same
-            # rule as :func:`witness_ref` in the batch path). Routing
-            # through that helper keeps the two contracts byte-identical
-            # so a quote accepted by one path is accepted by the other.
+            # Witness validation for ref: route through the same helper
+            # used by the batch path so both contracts stay identical.
             src_text = self._concat_turn_texts(src_event.source_turns)
             dst_text = self._concat_turn_texts(dst_event.source_turns)
             werr = witness_ref(cited_quote, src_text, dst_text)
@@ -806,9 +799,8 @@ class ExtractionState:
                     "recent_graph entry).\n"
                     f"Each ref needs: {{to:<earlier_id>, kind:'data'|'ref', "
                     "reason:<short>, and EITHER cited_entities:[...] OR "
-                    "cited_quote:'...'}}. Witnesses must appear in BOTH the "
-                    "cited event's source_turns text and this event's "
-                    "source_turns text."
+                    "cited_quote:'...'}}. Witnesses must appear in at least "
+                    "one endpoint's source_turns text."
                 )
             for ridx, raw_ref in enumerate(refs_raw):
                 if not isinstance(raw_ref, dict):

@@ -2,9 +2,9 @@
 
 This module is mechanism, not an atom. ``normalize`` lowercases and
 collapses runs of whitespace to a single space; ``witness_data`` and
-``witness_ref`` use it to verify that every cited entity / quote
-appears in BOTH the source-turn text and the destination-turn text of
-an edge. Validation is deterministic and reproducible without an LLM.
+``witness_ref`` use it to verify that every cited entity / quote appears
+in at least one endpoint's source-turn text. Validation is deterministic
+and reproducible without an LLM.
 
 Returns ``None`` on success and a structured error string on the first
 failure, so the caller (``extractor.tools.add_edge``) can echo the

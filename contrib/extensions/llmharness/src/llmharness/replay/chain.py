@@ -33,7 +33,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from ..audit.graph.ops import op_from_edge, op_from_event
+from ..audit.graph.ops import op_from_edge, op_from_event, parse_op
 from ..audit.runner import CumulativeAuditState
 from ..schema import Edge, Event, Verdict
 from ..tools.engine import PhaseResult
@@ -56,16 +56,22 @@ def _thread_extractor_record(
 ) -> ReplayRecord:
     """Return a copy of ``record`` whose payload reflects ``cumulative``.
 
-    Overrides ``recent_graph`` (from the cumulative event view) and
-    ``next_event_id`` so the replayed extractor firing produces
-    globally-consistent ids continuing the threaded counter. Other
-    payload fields (``new_turns`` in particular) are preserved
-    verbatim — the trajectory window is what the caller wanted to
-    replay against.
+    Overrides ``graph`` (plus legacy ``recent_graph`` / ``recent_edges``)
+    and ``next_event_id`` so the replayed extractor firing sees the
+    cumulative nodes+edges and produces globally-consistent ids continuing
+    the threaded counter. Other payload fields (``new_turns`` in
+    particular) are preserved verbatim — the trajectory window is what the
+    caller wanted to replay against.
     """
-    events, _edges, _phases = cumulative.graph_view()
+    events, edges, _phases = cumulative.graph_view()
     new_payload = dict(record.payload)
-    new_payload["recent_graph"] = [e.to_dict() for e in events]
+    nodes_payload = [e.to_dict() for e in events]
+    edges_payload = [ed.to_dict() for ed in edges]
+    new_payload["graph"] = {"nodes": nodes_payload, "edges": edges_payload}
+    # Back-compat for old prompts / sidecars that still read the legacy
+    # split fields. The canonical extractor payload is now graph.{nodes,edges}.
+    new_payload["recent_graph"] = nodes_payload
+    new_payload["recent_edges"] = edges_payload
     new_payload["next_event_id"] = cumulative.next_event_id()
     return replace(record, payload=new_payload)
 
@@ -120,7 +126,7 @@ def _thread_auditor_record(
 
 
 def _absorb_extractor_output(
-    result: PhaseResult, cumulative: CumulativeAuditState
+    result: PhaseResult, cumulative: CumulativeAuditState, *, firing_cursor: int
 ) -> None:
     """Fold a chain-replayed extractor output back into cumulative state.
 
@@ -135,6 +141,27 @@ def _absorb_extractor_output(
     """
     if result.status != "ok" or not isinstance(result.output, dict):
         return
+    raw_ops = result.output.get("ops") or result.output.get("graph_ops") or []
+    ops: list[Any] = []
+    for raw in raw_ops:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            ops.append(parse_op(raw))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if ops:
+        firing_id = cumulative.firing_id_counter
+        cumulative.absorb_extractor_firing(
+            firing_ops=ops,
+            firing_cursor=firing_cursor,
+            firing_id=firing_id,
+        )
+        return
+
+    # Legacy replay records predate the graph-op output. Fold the final
+    # events/edges as upserts so old sidecars remain usable, but note that
+    # pure historical edits (delete_node/delete_edge, old-edge rewrite) need ops.
     ops: list[Any] = []
     for raw in result.output.get("events") or []:
         if not isinstance(raw, dict):
@@ -153,11 +180,12 @@ def _absorb_extractor_output(
             continue
         ops.append(op_from_edge(ed))
     if not ops:
+        cumulative.absorb_legacy_only(firing_cursor=firing_cursor, firing_phases=())
         return
     firing_id = cumulative.firing_id_counter
     cumulative.absorb_extractor_firing(
         firing_ops=ops,
-        firing_cursor=cumulative.cursor_last_turn_index,
+        firing_cursor=firing_cursor,
         firing_id=firing_id,
     )
 
@@ -211,7 +239,9 @@ async def chain_replay(
                 provider_override=provider_override,
                 prompt_override=prompt_override_extractor,
             )
-            _absorb_extractor_output(result, cumulative)
+            _absorb_extractor_output(
+                result, cumulative, firing_cursor=record.turn_index
+            )
         else:
             threaded = _thread_auditor_record(record, cumulative)
             result = await replay_auditor_record(
