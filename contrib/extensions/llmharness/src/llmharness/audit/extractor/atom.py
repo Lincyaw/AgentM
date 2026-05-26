@@ -26,9 +26,9 @@ and the top-level :mod:`llmharness` package):
   the child loop emits when the model calls ``finalize_extraction``.
 
 §11 contract: single file, no atom-to-atom imports; the sibling tool
-modules (``upsert_node.py`` / ``upsert_edge.py`` / ...) and the
-``_state_echo.py`` / ``_tool_decorator.py`` / ``_witness_errors.py``
-helpers are NOT atoms — they expose pure builders this module imports.
+builders under ``tools/`` (``upsert_node.py`` / ``upsert_edge.py`` /
+...) and the ``state/`` extraction-state package are NOT atoms — they
+expose pure builders and dataclasses this module imports.
 """
 
 from __future__ import annotations
@@ -84,8 +84,7 @@ MANIFEST = ExtensionManifest(
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Tool names to mount; defaults to every "
-                    "EXTRACTOR_TOOL_NAMES entry."
+                    "Tool names to mount; defaults to every EXTRACTOR_TOOL_NAMES entry."
                 ),
             },
             "state": {"type": "object"},
@@ -122,9 +121,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "the adapter must supply one before mounting this extension."
         )
 
-    tools_raw = (
-        config.get("tools") if isinstance(config, dict) else None
-    )
+    tools_raw = config.get("tools") if isinstance(config, dict) else None
     if tools_raw is None:
         tools = list(EXTRACTOR_TOOL_NAMES)
     elif isinstance(tools_raw, (list, tuple)):

@@ -107,7 +107,6 @@ def compose_auditor_extensions(
     extensions = compose_audit_extensions(
         submit_tool_module=_AUDITOR_TOOLS_MODULE,
         default_prompt=prompt_text,
-        prompt_override=None,
         observability_config=observability_config,
         submit_tool_config=auditor_tools_cfg,
     )

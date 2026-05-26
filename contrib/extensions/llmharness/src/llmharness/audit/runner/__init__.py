@@ -1,21 +1,15 @@
-"""HarnessRunner package: settings, cumulative state, sidecar, runner.
+"""HarnessRunner package.
 
-The internal layout retains a single module — :mod:`.runner` — that
-holds the :class:`HarnessRunner` class together with the dataclasses,
-Protocols, and serialization helpers it relies on. The reorg spec
-called for splitting these into ``settings.py``, ``cumulative_state.py``,
-``sidecar.py`` and ``runner.py``; that split was deferred — out of
-scope for the pure-rename refactor, since moving the class bodies
-across files (and updating their internal references) is
-behavior-adjacent work. The dependency graph between
-``ExtractorSettings`` / ``AuditorSettings`` / ``CumulativeAuditState``
-/ ``StepResult`` / ``ChildRunner`` / ``OpSink`` / ``SidecarWriter`` and
-``HarnessRunner`` is a clean one-way DAG (runner depends on the
-others, never the reverse), so the split can be done cleanly in a
-follow-up. Re-exporting here preserves the spec's external surface:
-importers can write ``from llmharness.audit.runner import
-HarnessRunner`` (new) or continue importing the same names via this
-package init.
+A single module — :mod:`.runner` — holds :class:`HarnessRunner` together
+with the settings dataclasses, cumulative state, Protocols, and
+serialization helpers it depends on (a one-way DAG: the runner depends on
+them, never the reverse). This init re-exports the public surface so
+importers can write ``from llmharness.audit.runner import HarnessRunner``.
+
+``_flatten_assistant_blocks`` / ``_serialize_full_trajectory`` are
+re-exported because the live/offline seams and the adapter import them by
+this path; the remaining serialization helpers stay private to
+:mod:`.runner`.
 """
 
 from __future__ import annotations
@@ -38,11 +32,7 @@ from .runner import (
     SidecarWriter,
     StepResult,
     _flatten_assistant_blocks,
-    _render_message_text,
-    _serialize_block,
     _serialize_full_trajectory,
-    _serialize_message_for_extractor,
-    _window_is_non_trivial,
 )
 
 __all__ = [
@@ -63,9 +53,5 @@ __all__ = [
     "SidecarWriter",
     "StepResult",
     "_flatten_assistant_blocks",
-    "_render_message_text",
-    "_serialize_block",
     "_serialize_full_trajectory",
-    "_serialize_message_for_extractor",
-    "_window_is_non_trivial",
 ]

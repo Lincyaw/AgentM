@@ -19,9 +19,6 @@ from typing import Any
 
 from ..seams.compose import UNSET, compose_audit_extensions
 from ..toolkit.atom_constants import (
-    EXTRACTOR_STATE_SERVICE_KEY,
-)
-from ..toolkit.atom_constants import (
     EXTRACTOR_TOOLS_MODULE as _EXTRACTOR_TOOLS_MODULE,
 )
 from .prompt import DEFAULT_PROMPT_NAME, load_extractor_prompt
@@ -45,15 +42,10 @@ def compose_extractor_extensions(
     Pass ``None`` for ``observability_config`` to drop that extension;
     ``extractor_tools`` and ``system_prompt`` always survive.
     """
-    framing = (
-        base_prompt
-        if base_prompt is not None
-        else load_extractor_prompt(DEFAULT_PROMPT_NAME)
-    )
+    framing = base_prompt if base_prompt is not None else load_extractor_prompt(DEFAULT_PROMPT_NAME)
     extensions = compose_audit_extensions(
         submit_tool_module=_EXTRACTOR_TOOLS_MODULE,
         default_prompt=framing,
-        prompt_override=None,
         observability_config=observability_config,
         submit_tool_config=None,
     )
@@ -74,7 +66,4 @@ def compose_extractor_extensions(
     return extensions
 
 
-__all__ = [
-    "EXTRACTOR_STATE_SERVICE_KEY",
-    "compose_extractor_extensions",
-]
+__all__ = ["compose_extractor_extensions"]

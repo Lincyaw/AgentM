@@ -1,7 +1,7 @@
 """Single source of truth for audit atom module names + service keys.
 
-Centralizing these strings here keeps ``_session_helpers`` and
-``_compose`` from drifting against the extractor atom, and avoids the
+Centralizing these strings here keeps ``seams.session`` and
+``seams.compose`` from drifting against the extractor atom, and avoids the
 helper module reaching into ``audit.extractor.extensions`` to import a
 SERVICE_KEY constant (cross-atom import).
 
@@ -16,9 +16,9 @@ from __future__ import annotations
 
 from typing import Final
 
-# llmharness extractor atom — service key registered by
-# ``audit.extractor.extensions`` and consumed by both ``_session_helpers``
-# (host→child propagation) and the extractor tool implementations.
+# llmharness extractor-state service key — set per-firing by
+# ``seams.session.bind_extractor_state`` (as a ``config['state']``
+# fallback) and read by the extractor atom's tool implementations.
 EXTRACTOR_STATE_SERVICE_KEY: Final[str] = "llmharness.extractor_state"
 
 # llmharness atom dotted module names referenced by the composers.
