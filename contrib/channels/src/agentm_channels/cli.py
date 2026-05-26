@@ -200,18 +200,9 @@ def _build_session_factory(
             cwd=cwd, resume=resume, continue_recent=False, session_store=store
         )
         if profile is not None:
-            build_config: dict[str, Any] = {"model": profile.model}
-            if profile.base_url:
-                build_config["base_url"] = profile.base_url
-            if profile.api_key:
-                build_config["api_key"] = profile.api_key
-            if profile.name:
-                build_config["name"] = profile.name
-            if profile.context_window:
-                build_config["context_window"] = profile.context_window
-            if profile.max_output_tokens:
-                build_config["max_output_tokens"] = profile.max_output_tokens
-            provider_spec = DEFAULT_PROVIDER_REGISTRY.build(provider, build_config)
+            provider_spec = DEFAULT_PROVIDER_REGISTRY.build(
+                provider, profile.to_build_config()
+            )
         else:
             provider_spec = DEFAULT_PROVIDER_REGISTRY.build(provider, {"model": model})
         config = AgentSessionConfig(
