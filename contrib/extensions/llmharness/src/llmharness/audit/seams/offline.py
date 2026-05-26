@@ -68,7 +68,7 @@ class StandaloneChildRunner:
     ) -> tuple[bool, list[dict[str, Any]]]:
         """Run one extractor firing as a top-level session.
 
-        The four-step directive preamble is built here via
+        The directive preamble is built here via
         :func:`build_extractor_directive` and prepended to the JSON
         payload before being passed to :func:`run_phase_standalone` as
         a verbatim string. :func:`run_phase_standalone` no longer

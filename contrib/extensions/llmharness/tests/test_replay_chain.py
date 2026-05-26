@@ -7,6 +7,7 @@ record order, and threads prompt overrides through to the right phase.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -259,7 +260,18 @@ def test_extractor_record_replay_hydrates_recent_edges_into_state(
         for module, cfg in kwargs["extensions"]:
             if module == EXTRACTOR_TOOLS_MODULE:
                 captured["state"] = cfg[EXTRACTOR_STATE_SERVICE_KEY]
-        captured["payload"] = kwargs["payload"]
+            if module == "agentm.extensions.builtin.loop_budget":
+                captured["loop_budget"] = cfg
+            if module == "contrib.extensions.turn_reminder":
+                captured["turn_reminder"] = cfg
+        captured["payload_text"] = kwargs["payload"]
+        raw_payload = kwargs["payload"]
+        if isinstance(raw_payload, str):
+            captured["payload"] = json.loads(
+                raw_payload[raw_payload.index('{"next_event_id"') :]
+            )
+        else:
+            captured["payload"] = raw_payload
         return PhaseResult(
             output=None,
             status="no_call",
@@ -278,7 +290,7 @@ def test_extractor_record_replay_hydrates_recent_edges_into_state(
         sink=NoopSink(),
         sidecar=None,
         extractor_settings=ExtractorSettings.from_compose_kwargs(
-            {}, prompt_override="test prompt"
+            {"tool_call_budget": 10}, prompt_override="test prompt"
         ),
         auditor_settings=AuditorSettings.empty(),
         extractor_interval=1,
@@ -314,6 +326,11 @@ def test_extractor_record_replay_hydrates_recent_edges_into_state(
     asyncio.run(runner.fire_extractor_from_record(record))
 
     state = captured["state"]
+    assert captured["loop_budget"] == {"max_tool_calls": 10}
+    assert captured["turn_reminder"] == {"warn_within": 10}
+    assert "at most 10 total tool calls" in captured["payload_text"]
+    assert "MUST reserve the final tool call for finalize_extraction" in captured["payload_text"]
+    assert "Spend at most 9 calls on graph edits" in captured["payload_text"]
     assert set(state.recent_graph_dict) == {1, 2}
     assert set(state.recent_edges_dict) == {(2, 1, "data")}
     assert set(state.pending_graph.nodes) == {1, 2}
