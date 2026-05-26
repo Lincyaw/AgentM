@@ -219,9 +219,25 @@ subscriber writing OTel-flavored JSONL to
 
 ```bash
 uv sync
-export ANTHROPIC_API_KEY="..."
 uv run agentm "list files in src/"
 ```
+
+Model provider settings can be supplied through environment variables or
+profiles in `~/.agentm/config.toml` (`$AGENTM_HOME/config.toml` overrides
+the directory). A minimal config profile:
+
+```toml
+default_model = "my-model"
+
+[models.my-model]
+provider = "openai"
+model = "gpt-4o"
+base_url = "https://api.openai.com/v1"
+api_key = "..."
+```
+
+Select a profile with `uv run agentm --model my-model "..."`; if
+`default_model` is set, the bare `uv run agentm "..."` path uses it.
 
 Programmatic:
 

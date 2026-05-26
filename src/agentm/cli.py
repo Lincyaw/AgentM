@@ -541,11 +541,9 @@ def run_cmd(
         typer.Option(
             "--provider",
             help=(
-                "LLM provider to register. Defaults (via AGENTM_PROVIDER or "
-                "the provider registry) include 'anthropic' (respects "
-                "ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY) or 'openai' (respects "
-                "OPENAI_BASE_URL/OPENAI_API_KEY plus WARPGATE_TICKET and "
-                "OPENAI_VERIFY_SSL for self-signed gateways like Warpgate)."
+                "LLM provider to register. Defaults via AGENTM_PROVIDER, "
+                "~/.agentm/config.toml profiles, or the provider registry. "
+                "Built-ins include 'anthropic' and 'openai'."
             ),
         ),
     ] = None,
@@ -554,10 +552,9 @@ def run_cmd(
         typer.Option(
             "--model",
             help=(
-                "Model id passed to the active provider. Defaults (via "
-                "AGENTM_MODEL or the registry's default_model for the "
-                "resolved provider) include 'claude-sonnet-4-6' / 'gpt-4o'; "
-                "override for alternates (e.g. 'Kimi-K2', 'deepseek-chat')."
+                "Model id or ~/.agentm/config.toml profile name. Defaults "
+                "via AGENTM_MODEL, config.toml default_model, or the "
+                "registry default_model for the resolved provider."
             ),
         ),
     ] = None,

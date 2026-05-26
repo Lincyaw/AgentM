@@ -14,8 +14,9 @@ description: |
     - ``uvx`` on PATH (ships with ``uv``).
     - First invocation downloads ``mcp-server-fetch`` (~5s); subsequent
       runs are warm.
-    - An LLM provider configured via ``AGENTM_PROVIDER`` / model env
-      (this scenario inherits the default provider resolution).
+    - An LLM provider configured via ``~/.agentm/config.toml`` profiles
+      or ``AGENTM_PROVIDER`` / model env (this scenario inherits the
+      default provider resolution).
 
   Alternative servers (swap the ``servers:`` entry below):
 
