@@ -259,12 +259,17 @@ The full env-var contract:
 | `AGENTM_AGENT_ENV_POOL_REF`           | `operations_agent_env` install (legacy)           | — (one of image / pool_ref required) |
 | `AGENTM_AGENT_ENV_GATEWAY_URL`        | `operations_agent_env` install       | `http://localhost:8080`  |
 | `AGENTM_AGENT_ENV_NAMESPACE`          | `operations_agent_env` install       | `default`                |
-| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | AgentM provider atoms               | — (one is required)      |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | AgentM provider atoms               | Required only when the active model profile does not provide `api_key` |
 
 Manifest-config and env-vars are merged at install time, with **atom config
 winning** — useful when the scenario pins an image but you want to retarget
 the gateway from the shell. When both `image` and `pool_ref` are resolved,
 `image` wins and the atom uses `ManagedSession`.
+
+Provider/model credentials may also live in `~/.agentm/config.toml`
+(`$AGENTM_HOME/config.toml` overrides the directory). If `default_model`
+or `--model <profile>` resolves to a profile with `api_key`, no provider
+API-key env var is needed.
 
 ### 7. Run a one-shot prompt
 

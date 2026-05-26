@@ -117,7 +117,10 @@ uv run agentm-gateway --cwd ./workspace --scenario general_purpose
 ```
 
 `.env` in the cwd or AgentM workspace root is auto-loaded
-(`AGENTM_PROVIDER` / `AGENTM_MODEL` / `OPENAI_API_KEY` etc).
+(`AGENTM_PROVIDER` / `AGENTM_MODEL` / `OPENAI_API_KEY` etc). Long-lived
+model settings can also live in `~/.agentm/config.toml`
+(`$AGENTM_HOME/config.toml` overrides the directory), so channel processes
+do not need provider/model/API-key env vars when `default_model` is set.
 
 ## Run (config file)
 

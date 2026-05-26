@@ -17,9 +17,25 @@ mechanism; every policy is a replaceable atom. Boundary contract in
   over hand-parsing `.agentm/observability/*.jsonl`.
 - Channel CLIs: `agentm-gateway`, `agentm-worker`, `agentm-terminal`,
   `agentm-feishu`.
-- Shared `AGENTM_*` env namespace; `.env` autoloaded; precedence
-  flag > env > `.env` > default. Per-CLI prefixes (`AGENTM_GATEWAY_*`)
-  are **not** supported. Run `<cli> --help` for flags.
+- Shared `AGENTM_*` env namespace; `.env` autoloaded. Long-lived model
+  settings can live in `~/.agentm/config.toml` instead of env vars
+  (`$AGENTM_HOME/config.toml` overrides the directory). Precedence:
+  CLI flag > shell env / `.env` > `config.toml` profile/default_model >
+  provider default. Per-CLI prefixes (`AGENTM_GATEWAY_*`) are **not**
+  supported. Minimal config:
+  ```toml
+  default_model = "doubao"
+
+  [models.doubao]
+  provider = "openai"
+  model = "doubao-seed-2-0-pro-260215"
+  base_url = "https://ark.cn-beijing.volces.com/api/v3"
+  api_key = "..."
+  context_window = 131072
+  ```
+  Select a profile with `agentm --model doubao`; if `default_model` is set,
+  no env vars are needed for the default provider/model/key. Run
+  `<cli> --help` for flags.
 - Optional extra: `uv sync --extra agent-env` installs `arl-env` for the
   `operations_agent_env` atom (ARL-sandboxed Operations).
 

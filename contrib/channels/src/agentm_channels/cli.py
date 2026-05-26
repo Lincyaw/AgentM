@@ -528,7 +528,8 @@ def cli(
             "--provider",
             envvar="AGENTM_PROVIDER",
             help=(
-                "LLM provider id. Default: SDK default. Env: AGENTM_PROVIDER."
+                "LLM provider id. Default: config.toml profile/default or "
+                "SDK default. Env: AGENTM_PROVIDER."
             ),
         ),
     ] = None,
@@ -537,7 +538,10 @@ def cli(
         typer.Option(
             "--model",
             envvar="AGENTM_MODEL",
-            help="LLM model id. Default: provider default. Env: AGENTM_MODEL.",
+            help=(
+                "LLM model id or config.toml profile name. Default: "
+                "config.toml default_model or provider default. Env: AGENTM_MODEL."
+            ),
         ),
     ] = None,
     log_level: Annotated[
