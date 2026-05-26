@@ -52,37 +52,43 @@ mkdir -p "$out_dir"
 # case directory is keyed by the dataset case name rather than the bare
 # session id.
 #
-# WARNING — identity mismatch: ``evaluation_data.trace_id`` stores the
-# OTel *trace_id* (= ``session.root_session_id``), but the replay sidecar
-# is named ``.agentm/audit_replay/<session_id>.jsonl`` where session_id =
-# ``session.session_manager.get_session_id()`` (see
-# agentm_rca/eval/agent.py:554,571). The two differ for a real root
-# session, so a trace_id cannot locate the sidecar. The per-row
-# session_id is persisted in the trajectory metadata as
-# ``session_log_id``; we extract it from the ``trajectories`` JSON column
-# (falling back to ``trace_id`` only for legacy rows where the two
-# coincide). ``--session-id`` then receives the correct sidecar stem.
+# Identity bridge: ``evaluation_data.trace_id`` stores the OTel *trace_id*
+# (= ``session.root_session_id``), but the replay sidecar is keyed by the
+# main agent's *session_id* (``.agentm/audit_replay/<session_id>.jsonl``,
+# = the ``.agentm/observability/<session_id>.jsonl`` filename). The two
+# differ for a real root session and eval.db does NOT persist the
+# session_id, so we recover it from the observability log: every session's
+# ``session.start`` record carries both ids. ``TraceReader.first_session_identity``
+# is the in-process form of the ``agentm trace index`` verb (CLI form:
+# ``agentm trace index --format ndjson | jq 'select(.trace_id==…)'``).
 mapfile -t pairs < <(
-  uv run --no-sync python - <<PY "$exp_id"
-import sys, sqlite3, json
-exp_id = sys.argv[1]
+  uv run --no-sync python - <<PY "$exp_id" "$repo_root"
+import sys, sqlite3
+from pathlib import Path
+from agentm.core.abi import TraceReader
+
+exp_id, repo_root = sys.argv[1], sys.argv[2]
+
+# Build trace_id -> main session_id from the observability tree (the only
+# place both ids coexist). purpose "root"/None is the main agent session;
+# spawned extractor/auditor children share the trace_id but are not it.
+sid_of_trace: dict[str, str] = {}
+obs_dir = Path(repo_root) / ".agentm" / "observability"
+for p in obs_dir.glob("*.jsonl"):
+    ident = TraceReader(p).first_session_identity()
+    if ident and ident.trace_id and ident.purpose in (None, "root"):
+        sid_of_trace[ident.trace_id] = ident.session_id or ""
+
 con = sqlite3.connect("eval.db")
-for trace_id, trajectories, source in con.execute(
-    "select trace_id, trajectories, source from evaluation_data "
+for trace_id, source in con.execute(
+    "select trace_id, source from evaluation_data "
     "where exp_id=? and stage='rolled_out' and trace_id is not null",
     (exp_id,),
 ):
-    session_id = ""
-    if trajectories:
-        try:
-            meta = (json.loads(trajectories) or {}).get("metadata") or {}
-            session_id = meta.get("session_log_id") or ""
-        except (json.JSONDecodeError, TypeError, AttributeError):
-            session_id = ""
-    # Legacy rows that predate session_log_id metadata fall back to the
-    # trace_id; aggregation then skips them via the sidecar-exists guard
-    # below rather than crashing.
-    print(f"{session_id or trace_id}\t{source}")
+    # Fall back to the trace_id only if the bridge missed (observability
+    # pruned); the sidecar-exists guard below then skips it rather than
+    # aggregating the wrong file.
+    print(f"{sid_of_trace.get(trace_id) or trace_id}\t{source}")
 PY
 )
 
@@ -99,7 +105,7 @@ for line in "${pairs[@]}"; do
         echo "  skip $case_name — no replay sidecar at .agentm/audit_replay/${session_id}.jsonl" >&2
         continue
     fi
-    uv run --no-sync llmharness-aggregate \
+    uv run --no-sync llmharness-aggregate replay \
         --cwd "$repo_root" \
         --session-id "$session_id" \
         --sample-id "$case_name" \
