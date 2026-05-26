@@ -1,19 +1,21 @@
-"""HarnessRunner: single driver for the cognitive-audit pipeline.
+"""HarnessRunner: single driver for the live cognitive-audit pipeline.
 
-P1 of the refactor described in
-``.claude/designs/harness-runner.md``. This module lands the in-memory
-:class:`CumulativeAuditState`, the :class:`ChildRunner` / :class:`OpSink`
-:class:`typing.Protocol` boundaries, the :class:`SidecarWriter` helper,
-and the :class:`HarnessRunner` itself. The live adapter
-(:mod:`llmharness.adapters.agentm`) is the only consumer in P1 — offline
-seams (``StandaloneChildRunner``, ``InMemorySink``,
-``replay_pipeline_over_trajectory``) land in P2.
+Holds the in-memory :class:`CumulativeAuditState`, the
+:class:`ChildRunner` / :class:`OpSink` :class:`typing.Protocol`
+boundaries, the :class:`SidecarWriter` helper, and the
+:class:`HarnessRunner` itself. Two backends satisfy the Protocols: the
+live adapter (:mod:`llmharness.adapters.agentm`) wires in
+:mod:`llmharness.audit.seams.live`; offline full-trajectory replay
+drivers wire in :mod:`llmharness.audit.seams.offline`
+(``StandaloneChildRunner`` / ``InMemorySink``). Single-firing replay of
+one recorded firing needs none of this machinery and lives in
+:mod:`llmharness.replay.runner`.
 
-Invariants P1 must preserve (cf. design §4):
+Invariants (cf. design §4):
 
-* Sidecar shape (``ReplayRecord``) is byte-identical to pre-refactor
-  modulo ``ts_ns`` / ``extraction_run_id`` UUID / non-canonical provider
-  ``config`` / LLM nondeterminism.
+* Sidecar shape (``ReplayRecord``) is stable modulo ``ts_ns`` /
+  ``extraction_run_id`` UUID / non-canonical provider ``config`` / LLM
+  nondeterminism.
 * Cumulative state is hydrated on adapter ``install`` from the live
   session log; thereafter the in-memory copy is authoritative — no
   re-reading of the session log per firing.
@@ -39,7 +41,6 @@ from agentm.core.abi.session import SessionEntry
 
 from ...replay.record import ReplayRecord, now_ns, write_record
 from ...schema import Edge, Event, Phase, Reminder, Verdict
-from ...tools.engine import PhaseResult, run_phase_standalone
 from .. import entry_types as _et
 from ..auditor import (
     SUBMIT_VERDICT_TOOL_NAME,
@@ -58,7 +59,6 @@ from ..graph.phase import merge_to_phases
 from ..registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
 from ..registry import AuditCheckRegistry, CheckContext
 from ..seams.session import bind_extractor_state
-from ..toolkit.extractor_directive import build_extractor_directive
 
 _logger = logging.getLogger(__name__)
 
@@ -176,22 +176,6 @@ class AuditorSettings:
             observability_config=ck.get("observability_config"),
             summary_threshold=int(ck.get("summary_threshold", 30)),
             tools=tools_tuple,
-        )
-
-    @classmethod
-    def empty(cls) -> AuditorSettings:
-        """Sentinel settings for paths that don't fire the auditor.
-
-        Used by :func:`replay_extractor_record`, which constructs a
-        :class:`HarnessRunner` purely for its extractor seam — the
-        auditor settings are never consulted but the runner's
-        constructor demands a value.
-        """
-        return cls(
-            base_prompt="",
-            observability_config=None,
-            summary_threshold=30,
-            tools=(SUBMIT_VERDICT_TOOL_NAME,),
         )
 
     @classmethod
@@ -365,11 +349,12 @@ class CumulativeAuditState:
         for v in verdicts_all[-_DEFAULT_RECENT_VERDICTS:]:
             recent.append(v)
 
-        # TODO(harness-runner-p2): legacy adapter installed
-        # ``firing_counter = [0]`` unconditionally, so on session restart a
-        # colliding firing_id was possible. P1 is a pure refactor — keep
-        # that exact (broken) behaviour here; the collision-on-restart fix
-        # belongs in a separate P2 change.
+        # Known limitation: ``firing_id_counter`` resets to 0 on every
+        # hydrate, so after a session restart a new firing can reuse a
+        # firing_id already present in the persisted ops. firing_id is not
+        # part of the atom hash or evidence attribution, so the collision
+        # is currently benign; seeding the counter from the max persisted
+        # firing_id is a separate behavior change.
         state = cls(
             ops=ops,
             cursor_last_turn_index=cursor_last_turn_index,
@@ -724,20 +709,10 @@ class HarnessRunner:
         trace_id: str,
         provider_extractor: tuple[str, dict[str, Any]] | None,
         provider_auditor: tuple[str, dict[str, Any]] | None,
-        # In P1 the live audit-check registry lives on the parent
-        # ExtensionAPI; passing it in keeps the runner independent of
-        # ExtensionAPI so the (P2) offline driver can supply a synthetic
-        # registry or ``None``.
+        # The live audit-check registry lives on the parent ExtensionAPI;
+        # passing it in keeps the runner independent of ExtensionAPI so an
+        # offline driver can supply a synthetic registry or ``None``.
         audit_registry: AuditCheckRegistry | None = None,
-        # ``cwd`` is only consulted by the single-firing replay seams
-        # (``fire_extractor_from_record`` / ``fire_auditor_from_record``)
-        # which spawn standalone sessions directly. Live + trajectory-
-        # driven paths route through the ``child`` :class:`ChildRunner`
-        # and never read this field — pass ``None`` for those callers.
-        # Passing an explicit ``""`` was a footgun: empty-string ``cwd``
-        # flows into ``AgentSessionConfig(cwd="")`` and silently writes
-        # to the process CWD.
-        cwd: str | None = None,
     ) -> None:
         self.cumulative = cumulative
         self._child = child
@@ -753,7 +728,6 @@ class HarnessRunner:
         self._provider_extractor = provider_extractor
         self._provider_auditor = provider_auditor
         self._audit_registry = audit_registry
-        self._cwd = cwd
         # Track whether the most recent extractor firing held the cursor;
         # mirrors ``_drain_queue``'s ``_last_extractor_held_cursor`` so
         # the auditor doesn't fire on top of stale state.
@@ -823,8 +797,12 @@ class HarnessRunner:
     ) -> _ExtractorFiringResult:
         """Run one extractor firing against the current cumulative state.
 
-        Mirrors the legacy ``_drain_extractor`` exactly (windowing,
-        payload composition, replay snapshot, cursor handling).
+        Slices the trajectory window since the cursor, builds the
+        per-firing payload + :class:`ExtractionState`, spawns the child
+        via the :class:`ChildRunner`, then persists ops + cursor and
+        advances cumulative state. Records a per-firing
+        :class:`ReplayRecord` regardless of whether the sidecar is
+        mounted.
         """
         window_lo = max(self.cumulative.cursor_last_turn_index + 1, 0)
         window_hi_inclusive = len(messages) - 1
@@ -1175,183 +1153,6 @@ class HarnessRunner:
         )
         return _AuditorFiringResult(verdict=verdict, record=ok_record)
 
-    # ----------------------------------------------------------------------
-    # Single-firing replay (degenerate case of the runner — invariant #2)
-    # ----------------------------------------------------------------------
-
-    async def fire_extractor_from_record(self, record: ReplayRecord) -> PhaseResult:
-        """Replay one recorded extractor firing without windowing.
-
-        Bypasses the ``messages → turn_window → payload`` construction
-        in :meth:`fire_extractor_once`; the record already carries a
-        finished ``payload`` (``graph.nodes`` / ``graph.edges``, plus
-        legacy ``recent_graph`` / ``recent_edges``, ``next_event_id``,
-        and ``new_turns``). We rebuild an :class:`ExtractionState` from
-        ``payload`` + ``extras.turn_texts`` exactly as legacy
-        ``replay_extractor_record`` did, then call
-        :func:`run_phase_standalone` and snapshot
-        :class:`RawExtractorOutput` from the bound state. The returned
-        :class:`PhaseResult` schema (with ``events`` / ``edges`` /
-        ``dropped_edges`` on success) is byte-identical to the legacy
-        wrapper output — many tests pin this.
-        """
-        from ..extractor.state import ExtractionState
-
-        if record.phase != "extractor":
-            raise ValueError(f"expected extractor record, got phase={record.phase!r}")
-        if self._cwd is None:
-            raise ValueError(
-                "HarnessRunner.fire_extractor_from_record requires cwd to be set at construction"
-            )
-
-        extras = record.extras or {}
-        state = ExtractionState()
-        # next_event_id: record payload carries the firing's id cursor.
-        nxt = (record.payload or {}).get("next_event_id")
-        if isinstance(nxt, int) and nxt >= 1:
-            state.next_event_id = nxt
-
-        # JSON-loaded turn_texts has string keys; ExtractionState
-        # expects ints.
-        for k, v in (extras.get("turn_texts") or {}).items():
-            with contextlib.suppress(TypeError, ValueError):
-                state.turn_texts[int(k)] = str(v)
-        # Union in any prior-firing turn texts the caller supplied
-        # (the CLI computes this from earlier records in the sidecar so
-        # external_refs can be witnessed during replay — the live
-        # adapter does the same enrichment at firing time).
-        for k, v in (extras.get("prior_turn_texts") or {}).items():
-            with contextlib.suppress(TypeError, ValueError):
-                state.turn_texts.setdefault(int(k), str(v))
-
-        # Enrich recent_graph entries with source_turn_texts and
-        # populate state.recent_graph so external_refs can be
-        # witnessed against trajectory text.
-        payload = dict(record.payload or {})
-        graph_obj = payload.get("graph")
-        graph_raw: dict[str, Any] = graph_obj if isinstance(graph_obj, dict) else {}
-        recent_graph_raw = graph_raw.get("nodes") or payload.get("recent_graph") or []
-        recent_edges_raw = graph_raw.get("edges") or payload.get("recent_edges") or []
-        enriched_recent: list[dict[str, Any]] = []
-        recent_events: list[Event] = []
-        for entry in recent_graph_raw:
-            if not isinstance(entry, dict):
-                continue
-            copy = dict(entry)
-            copy["source_turn_texts"] = [
-                state.turn_texts.get(int(t), "")
-                for t in (entry.get("source_turns") or [])
-                if isinstance(t, int)
-            ]
-            enriched_recent.append(copy)
-            try:
-                recent_events.append(Event.from_dict(entry))
-            except (KeyError, ValueError, TypeError):
-                continue
-        payload["graph"] = {"nodes": enriched_recent, "edges": list(recent_edges_raw)}
-        payload["recent_graph"] = enriched_recent
-        payload["recent_edges"] = list(recent_edges_raw)
-        tool_call_budget = self._extractor_settings.compose_kwargs.get("tool_call_budget")
-        if isinstance(tool_call_budget, int) and tool_call_budget > 0:
-            payload["tool_call_budget"] = tool_call_budget
-        state.recent_graph = tuple(recent_events)
-        state.recent_graph_dict = {e.id: e for e in recent_events}
-
-        recent_edges: list[Edge] = []
-        for entry in recent_edges_raw:
-            if not isinstance(entry, dict):
-                continue
-            try:
-                recent_edges.append(Edge.from_dict(entry))
-            except (KeyError, ValueError, TypeError):
-                continue
-        state.recent_edges_dict = {(ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges}
-        state._refold()
-
-        extensions = bind_extractor_state(self._extractor_settings.extensions, state=state)
-
-        result = await run_phase_standalone(
-            cwd=self._cwd,
-            extensions=extensions,
-            provider=self._provider_extractor,
-            payload=build_extractor_directive(payload)
-            + json.dumps(payload, ensure_ascii=False, default=str),
-            terminal_tool=FINALIZE_EXTRACTION_TOOL_NAME,
-            purpose="cognitive_audit_extractor_replay",
-        )
-        if result.status == "ok":
-            snapshot = RawExtractorOutput.from_state(state)
-            result = PhaseResult(
-                output={
-                    "events": [e.to_dict() for e in snapshot.events],
-                    "edges": [ed.to_dict() for ed in snapshot.edges],
-                    "dropped_edges": list(snapshot.dropped_edges),
-                    "ops": [op.to_dict() for op in state.pending_ops],
-                },
-                status=result.status,
-                error=result.error,
-                latency_ms=result.latency_ms,
-                messages=result.messages,
-            )
-        return result
-
-    async def fire_auditor_from_record(self, record: ReplayRecord) -> PhaseResult:
-        """Replay one recorded auditor firing.
-
-        Mirrors legacy ``replay_auditor_record``: composes auditor
-        extensions from ``record.compose_kwargs`` (events / edges /
-        phases / findings / continuation_notes / tools) and calls
-        :func:`run_phase_standalone` with ``record.payload`` as the
-        user message verbatim.
-        """
-        from ...schema import Finding
-
-        if record.phase != "auditor":
-            raise ValueError(f"expected auditor record, got phase={record.phase!r}")
-        if self._cwd is None:
-            raise ValueError(
-                "HarnessRunner.fire_auditor_from_record requires cwd to be set at construction"
-            )
-
-        ck = record.compose_kwargs or {}
-        s = self._auditor_settings
-        extensions = compose_auditor_extensions(
-            base_prompt=s.base_prompt or None,
-            observability_config=s.observability_config,
-            trajectory_snapshot=ck.get("trajectory_snapshot"),
-            events=tuple(_coerce_schema_list(Event, ck.get("events") or [])),
-            edges=tuple(_coerce_schema_list(Edge, ck.get("edges") or [])),
-            phases=tuple(_coerce_schema_list(Phase, ck.get("phases") or [])),
-            findings=_coerce_schema_list(Finding, ck.get("findings") or []),
-            check_errors=dict(ck.get("check_errors") or {}),
-            continuation_notes=list(ck.get("continuation_notes") or []),
-            summary_threshold=s.summary_threshold,
-            tools=s.tools or None,
-        )
-        return await run_phase_standalone(
-            cwd=self._cwd,
-            extensions=extensions,
-            provider=self._provider_auditor,
-            payload=record.payload or {},
-            terminal_tool=SUBMIT_VERDICT_TOOL_NAME,
-            purpose="cognitive_audit_auditor_replay",
-        )
-
-
-def _coerce_schema_list(cls: Any, items: Any) -> list[Any]:
-    """Best-effort dict-to-dataclass coercion for replay-record schema fields."""
-    out: list[Any] = []
-    if not isinstance(items, list):
-        return out
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        try:
-            out.append(cls.from_dict(item))
-        except (KeyError, TypeError, ValueError):
-            continue
-    return out
-
 
 # Re-exported helpers — the adapter imports these so they stay in one place.
 __all__ = [
@@ -1372,9 +1173,5 @@ __all__ = [
     "SidecarWriter",
     "StepResult",
     "_flatten_assistant_blocks",
-    "_render_message_text",
-    "_serialize_block",
     "_serialize_full_trajectory",
-    "_serialize_message_for_extractor",
-    "_window_is_non_trivial",
 ]

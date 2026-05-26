@@ -13,20 +13,14 @@ from typing import Any
 
 import pytest
 
-from llmharness.audit.runner import (
-    AuditorSettings,
-    CumulativeAuditState,
-    ExtractorSettings,
-    HarnessRunner,
-)
-from llmharness.audit.runner import runner as runner_module
-from llmharness.audit.seams.offline import NoopSink
 from llmharness.audit.toolkit.atom_constants import (
     EXTRACTOR_STATE_SERVICE_KEY,
     EXTRACTOR_TOOLS_MODULE,
 )
 from llmharness.replay import chain as chain_module
+from llmharness.replay import runner as replay_runner_module
 from llmharness.replay.record import ReplayRecord, write_record
+from llmharness.replay.runner import replay_extractor_record
 from llmharness.tools.engine import PhaseResult
 
 EVENT_1 = {
@@ -280,33 +274,15 @@ def test_extractor_record_replay_hydrates_recent_edges_into_state(
             messages=[],
         )
 
-    monkeypatch.setattr(runner_module, "run_phase_standalone", fake_run_phase_standalone)
+    monkeypatch.setattr(replay_runner_module, "run_phase_standalone", fake_run_phase_standalone)
 
-    runner = HarnessRunner(
-        cumulative=CumulativeAuditState.fresh(),
-        child=None,  # type: ignore[arg-type]
-        sink=NoopSink(),
-        sidecar=None,
-        extractor_settings=ExtractorSettings.from_compose_kwargs(
-            {"tool_call_budget": 10}, prompt_override="test prompt"
-        ),
-        auditor_settings=AuditorSettings.empty(),
-        extractor_interval=1,
-        audit_interval=1,
-        enable_auditor=False,
-        session_id="sess-1",
-        trace_id="trace-1",
-        provider_extractor=None,
-        provider_auditor=None,
-        cwd=str(tmp_path),
-    )
     record = ReplayRecord(
         phase="extractor",
         turn_index=1,
         session_id="sess-1",
         trace_id="trace-1",
         ts_ns=0,
-        compose_kwargs={},
+        compose_kwargs={"tool_call_budget": 10},
         payload={
             "next_event_id": 3,
             "new_turns": [],
@@ -321,7 +297,7 @@ def test_extractor_record_replay_hydrates_recent_edges_into_state(
 
     import asyncio
 
-    asyncio.run(runner.fire_extractor_from_record(record))
+    asyncio.run(replay_extractor_record(record, cwd=str(tmp_path), prompt_override="test prompt"))
 
     state = captured["state"]
     assert captured["loop_budget"] == {"max_tool_calls": 10}

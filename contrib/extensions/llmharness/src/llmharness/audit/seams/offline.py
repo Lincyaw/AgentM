@@ -6,8 +6,9 @@ the audit pipeline without a parent :class:`ExtensionAPI`:
 * :class:`StandaloneChildRunner` — spawns a top-level audit child via
   :func:`llmharness.tools.engine.run_phase_standalone` (no
   ``api.spawn_child_session``). Used by
-  :mod:`llmharness.replay.offline_driver` (P2) and the planned thin
-  wrapper around single-firing replay (P3).
+  :mod:`llmharness.replay.offline_driver` for full-trajectory offline
+  replay. (Single-firing replay calls ``run_phase_standalone`` directly
+  in :mod:`llmharness.replay.runner` and does not use this seam.)
 
 * :class:`InMemorySink` — drops every persisted entry into a Python list
   instead of the AgentM session log. Used by offline drivers and tests
@@ -48,11 +49,10 @@ _logger = logging.getLogger(__name__)
 class StandaloneChildRunner:
     """:class:`ChildRunner` impl driven by :func:`run_phase_standalone`.
 
-    Mirrors :class:`llmharness.audit.seams.live.LiveChildRunner` shape
-    for shape — same return signatures, same failure routing — but
-    spawns a top-level session per phase. There is no parent
-    ``ExtensionAPI``; ``cwd`` is the working directory the child
-    sessions execute in.
+    Same return signatures and failure routing as
+    :class:`llmharness.audit.seams.live.LiveChildRunner`, but spawns a
+    top-level session per phase. There is no parent ``ExtensionAPI``;
+    ``cwd`` is the working directory the child sessions execute in.
     """
 
     def __init__(self, cwd: str) -> None:
@@ -211,37 +211,4 @@ class InMemorySink:
         self.partials.append(dict(payload))
 
 
-class NoopSink:
-    """:class:`OpSink` impl that drops every persisted entry.
-
-    Used by single-firing replay (:func:`replay_extractor_record` /
-    :func:`replay_auditor_record`) where the runner is constructed
-    purely to host one fire-from-record call. No session log, no
-    in-memory inspection — the caller cares only about the returned
-    :class:`PhaseResult`.
-    """
-
-    def append_op(
-        self,
-        op: GraphOp,
-        *,
-        firing_id: int,
-        op_index: int,
-        turn_window: list[int],
-    ) -> None:
-        return
-
-    def append_cursor(self, *, last_turn_index: int) -> None:
-        return
-
-    def append_verdict(self, verdict: dict[str, Any]) -> None:
-        return
-
-    def append_failure(self, entry_type: str, payload: dict[str, Any]) -> None:
-        return
-
-    def append_partial(self, payload: dict[str, Any]) -> None:
-        return
-
-
-__all__ = ["InMemorySink", "NoopSink", "StandaloneChildRunner"]
+__all__ = ["InMemorySink", "StandaloneChildRunner"]
