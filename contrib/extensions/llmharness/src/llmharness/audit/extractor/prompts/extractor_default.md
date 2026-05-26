@@ -92,6 +92,9 @@ Follow these steps in order.
      refuted, abandoned, or resolved.
    - Merge duplicate nodes when two ids describe the same semantic
      event.
+   - Merge low-information nodes into a neighboring node when they are
+     merely setup, retry, parameter variation, or a small detail of the
+     same investigation line.
    - Delete a node when it only exists because an earlier firing split a
      linear block too aggressively.
    - Split a broad prior node by deleting it and creating more precise
@@ -155,6 +158,52 @@ When narration is absent, hypotheses can still appear in the shape of
 choices. Filtering to one target where the agent could have surveyed
 broadly is a choice-shaped `hyp`, witnessed by the chosen target token.
 
+
+## Merge triggers
+
+Merge is the normal repair for over-cut graphs. If a node does not
+carry independent semantic value for the auditor, fold it into the
+nearest node that already represents the same line of work.
+
+Prefer merging a node when most of these are true:
+
+- It has one incoming edge and one outgoing edge, and both neighbors are
+  on the same investigation line.
+- It does not introduce a new hypothesis, decision, target switch,
+  contradiction, or conclusion.
+- It is a tool syntax fix, schema/table listing, retry after a trivial
+  error, parameter tweak, pagination/window variation, or small
+  exploratory query.
+- Later turns show that the node was only a supporting detail inside a
+  larger `act`, not a branch the agent reasoned from independently.
+- A later conclusion would not need to cite this node separately if the
+  same fact were summarized inside its neighboring `act`.
+
+How to merge:
+
+1. Pick the canonical node id that should survive.
+2. `upsert_node` that id with a summary covering the merged detail and
+   a contiguous `source_turns` range.
+3. `delete_node` the absorbed node ids.
+4. Recreate only the dependency edges that still represent real causal
+   structure. Do not preserve adjacency edges just because they existed.
+
+Do not merge a node when it is a branch point or independent audit
+signal:
+
+- a `hyp` that later evidence confirms or refutes;
+- a `dec` where the agent changes plan, target, or search strategy;
+- evidence that rules out an alternative root cause;
+- an `act` later cited directly by a conclusion;
+- a node whose source turns are not part of the same contiguous
+  semantic block unless the intervening turns also belong in the merged
+  block.
+
+The goal is not fewer nodes at any cost. The goal is that every
+remaining node answers: "What semantic move would the auditor lose if
+this node disappeared?"
+
+---
 
 ## Witnesses
 
