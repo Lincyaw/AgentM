@@ -12,7 +12,7 @@ A **case** = one main-agent session run on one input. Identified by
 
 ## 1. CLI
 
-Three input layouts via subcommands; every command writes the same
+Two input layouts via subcommands; every command writes the same
 canonical case-directory shape.
 
 ### `replay` — live-run sidecars
@@ -54,27 +54,6 @@ llmharness-aggregate replay \
 
 The overrides win over any meta sidecar — useful when re-tagging a
 session whose binding was forgotten.
-
-### `eval-db` — output of `llmharness adapter eval-db extract`
-
-```bash
-llmharness-aggregate eval-db \
-  --src runs/eval_db/openrca-2-lite-n500-t20 \
-  --out ./cases
-```
-
-Walks every `<row_id>/records.jsonl` under `--src` (a ReplayRecord
-stream, same shape as live-run sidecars) and writes one case per row.
-Each row's `meta.json` supplies `exp_id` / `row_id` / `dataset` for
-sample-id derivation; the default template is `{exp_id}-row{row_id}`.
-
-Slice for spot-checking:
-
-```bash
-llmharness-aggregate eval-db --src ... --out ./cases \
-  --id 1 --id 7 --id 42         # specific rows only
-llmharness-aggregate eval-db --src ... --out ./cases --limit 5
-```
 
 ### `one` — a single replay-format JSONL file
 
@@ -283,34 +262,14 @@ materialisation. Add new exports (e.g. an HTML viewer) on top of
 ## 6. Serving cases over HTTP
 
 For remote review (multiple humans pointing a browser at the same
-cases root), expose the directory with the bundled read-only server:
+cases set), upload the `cases/` tree to a blob bucket and point the
+viewer at the bucket prefix:
 
 ```bash
-llmharness serve --root ./cases --host 0.0.0.0 --port 8765
+aegisctl blob mirror ./cases/ shared:cases/<iter-name>/
 ```
 
-Read-only, stdlib-only, CORS-enabled. The companion frontend lives in
-`aegis-ui`'s `Case Review` sub-app (`/cases` → Connection settings →
-paste the URL). Each browser instance configures its own backend URL
-in the sub-app's settings; the host shell stays oblivious to where
-the data lives.
-
-### API surface
-
-| Method | Path | Returns |
-|---|---|---|
-| `GET` | `/api/health` | `{root, case_count, version}` |
-| `GET` | `/api/cases` | `{cases: [{case_id, meta}, ...]}` |
-| `GET` | `/api/cases/<id>/meta` | `meta.json` |
-| `GET` | `/api/cases/<id>/main_agent` | `main_agent.jsonl` (NDJSON) |
-| `GET` | `/api/cases/<id>/verdicts` | `verdicts.jsonl` (NDJSON) |
-| `GET` | `/api/cases/<id>/trajectory` | `trajectory.jsonl` (NDJSON) |
-| `GET` | `/api/cases/<id>/firings/<phase>` | `{files: [...]}` |
-| `GET` | `/api/cases/<id>/firings/<phase>/<file>` | one firing JSON |
-| `GET` | `/api/cases/<id>/snapshots/<seq>` | `event_graph/after_extractor_<seq:03d>.json` |
-
-`<phase>` is `extractor` or `auditor`. Missing snapshots return 404
-with a JSON body (the UI treats that as "firing did not advance the
-graph"). Path traversal is rejected at the regex level
-(`^[A-Za-z0-9_.-]+$` for case ids, `^\d+_turn_\d+\.json$` for firing
-file names).
+The companion frontend lives in `aegis-ui`'s `Case Review` sub-app
+(`/cases` → Connection settings → paste the bucket / prefix). Each
+browser instance configures its own backend URL in the sub-app's
+settings.

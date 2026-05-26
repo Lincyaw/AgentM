@@ -33,9 +33,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from ..audit.graph.ops import op_from_edge, op_from_event, parse_op
+from ..audit.graph.ops import parse_op
 from ..audit.runner import CumulativeAuditState
-from ..schema import Edge, Event, Verdict
+from ..schema import Verdict
 from ..tools.engine import PhaseResult
 from .record import Phase, ReplayRecord, iter_records
 from .runner import replay_auditor_record, replay_extractor_record
@@ -130,14 +130,10 @@ def _absorb_extractor_output(
 ) -> None:
     """Fold a chain-replayed extractor output back into cumulative state.
 
-    Mirrors :meth:`CumulativeAuditState.hydrate_from_session_log` 's
-    legacy-AUDIT_EVENT / AUDIT_EDGE → :class:`NodeUpsert` /
-    :class:`EdgeUpsert` translation: chain replay only has the
-    high-level ``Event`` / ``Edge`` view to work with (the op-log is
-    not in the sidecar), so we synthesise ops on the same shape the
-    hydrate path uses. Best-effort: malformed entries are silently
-    skipped — chain replay is a diagnostic tool, not a correctness
-    gate.
+    Reads ``output.ops`` (the v4 op log) and replays them through
+    :meth:`CumulativeAuditState.absorb_extractor_firing`. Malformed ops
+    are silently skipped — chain replay is a diagnostic tool, not a
+    correctness gate.
     """
     if result.status != "ok" or not isinstance(result.output, dict):
         return
@@ -150,37 +146,7 @@ def _absorb_extractor_output(
             ops.append(parse_op(raw))
         except (KeyError, TypeError, ValueError):
             continue
-    if ops:
-        firing_id = cumulative.firing_id_counter
-        cumulative.absorb_extractor_firing(
-            firing_ops=ops,
-            firing_cursor=firing_cursor,
-            firing_id=firing_id,
-        )
-        return
-
-    # Legacy replay records predate the graph-op output. Fold the final
-    # events/edges as upserts so old sidecars remain usable, but note that
-    # pure historical edits (delete_node/delete_edge, old-edge rewrite) need ops.
-    ops: list[Any] = []
-    for raw in result.output.get("events") or []:
-        if not isinstance(raw, dict):
-            continue
-        try:
-            ev = Event.from_dict(raw)
-        except (KeyError, TypeError, ValueError):
-            continue
-        ops.append(op_from_event(ev))
-    for raw in result.output.get("edges") or []:
-        if not isinstance(raw, dict):
-            continue
-        try:
-            ed = Edge.from_dict(raw)
-        except (KeyError, TypeError, ValueError):
-            continue
-        ops.append(op_from_edge(ed))
     if not ops:
-        cumulative.absorb_legacy_only(firing_cursor=firing_cursor, firing_phases=())
         return
     firing_id = cumulative.firing_id_counter
     cumulative.absorb_extractor_firing(

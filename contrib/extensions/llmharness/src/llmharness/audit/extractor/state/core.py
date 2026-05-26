@@ -43,13 +43,11 @@ from ...graph.ops import (
     NodeUpsert,
 )
 from ...validation.enum_schema import EDGE_KIND_VALUES
-from ..witness import witness_data, witness_ref
+from ..witness import witness_ref
 from .validate import (
     _coerce_int,
     _compute_degree_warning,
     _validate_event_shape,
-    _validate_external_ref_shape,
-    _validate_ref_shape,
 )
 
 
@@ -146,23 +144,6 @@ class ExtractionState:
     # ------------------------------------------------------------------
     # Public mutators
 
-    def commit_batch(self, events_payload: list[dict[str, Any]]) -> str | None:
-        """Validate one batch and append to pending on success.
-
-        The batch is validated against (already-accepted pending events
-        + this batch). Hard errors (event-shape, id-sequence, ref-shape)
-        leave the pending state untouched — the LLM may retry the batch.
-        Witness failures drop the offending refs into ``_dropped_pending``
-        and accept the events as in v3.1.
-
-        The cross-graph degree invariant is NOT checked here; that runs
-        in :meth:`finalize`. This lets the LLM submit events in chunks
-        without paying for a global re-validation per chunk.
-        """
-        if self.committed:
-            return "submit_events_batch: firing already finalized; no further batches accepted"
-        return self._validate_and_append(events_payload)
-
     def finalize(self) -> str | None:
         """Freeze pending state and commit.
 
@@ -257,146 +238,16 @@ class ExtractionState:
         self.pending_ops = []
         self._refold()
 
-    def upsert_node(self, raw: dict[str, Any]) -> dict[str, Any] | str:
-        """Insert or replace one pending event node by id.
-
-        Legacy in-firing-only contract: ids must occupy a fresh slice
-        starting at ``next_event_id`` — no cross-firing edits. Use
-        :meth:`apply_node_upsert` for the event-sourcing surface that
-        accepts edits targeting prior-firing nodes.
-        """
-        if self.committed:
-            return "upsert_node: firing already finalized"
-        err, ev = _validate_event_shape(len(self._events_pending), raw)
-        if err is not None:
-            return err.replace("submit_events", "upsert_node", 1)
-        assert ev is not None
-        idx, current = self._pending_event(ev.id)
-        if current is None:
-            min_id = (
-                self._events_pending[-1].id + 1
-                if self._events_pending
-                else self.next_event_id
-            )
-            if ev.id < min_id:
-                return f"upsert_node: node id {ev.id} must be >= {min_id}"
-            self._events_pending.append(ev)
-        else:
-            self._events_pending[idx] = ev
-        # Mirror into the op log so commit() can emit AUDIT_GRAPH_OP
-        # entries for the firing.
-        self.pending_ops.append(
-            NodeUpsert(
-                id=ev.id,
-                kind=ev.kind.value,
-                summary=ev.summary,
-                source_turns=tuple(ev.source_turns),
-            )
-        )
-        self._refold()
-        return self._edit_digest("upsert_node")
-
-    def delete_node(self, node_id: int) -> dict[str, Any] | str:
-        """Delete one pending event node and all pending edges touching it."""
-        if self.committed:
-            return "delete_node: firing already finalized"
-        idx, current = self._pending_event(node_id)
-        if current is None:
-            return f"delete_node: unknown node_id {node_id}"
-        del self._events_pending[idx]
-        self._edges_pending = [
-            e for e in self._edges_pending if e.src != node_id and e.dst != node_id
-        ]
-        self._external_refs_pending.pop(node_id, None)
-        self.pending_ops.append(NodeDelete(id=node_id))
-        self._refold()
-        return self._edit_digest("delete_node")
-
-    def upsert_edge(self, raw: dict[str, Any]) -> dict[str, Any] | str:
-        """Insert or replace one pending edge by (src, dst, kind).
-
-        Witness rule: kind='ref' requires ``cited_quote`` to appear in
-        at least one endpoint's source_turns text — same gate as the
-        batch path and :meth:`apply_edge_upsert`. The legacy path used
-        to skip this check, letting fabricated quotes through; closed
-        here so all three surfaces share one contract.
-        """
-        if self.committed:
-            return "upsert_edge: firing already finalized"
-        err, edge = self._build_pending_edge(raw)
-        if err is not None:
-            return err
-        assert edge is not None
-        if edge.kind is EdgeKind.REF:
-            src_text = self._concat_turn_texts(edge.src_turns)
-            dst_text = self._concat_turn_texts(edge.dst_turns)
-            werr = witness_ref(edge.cited_quote, src_text, dst_text)
-            if werr is not None:
-                return f"upsert_edge: {werr}"
-        selector = {"src": edge.src, "dst": edge.dst, "kind": edge.kind.value}
-        idx = self._pending_edge_index(selector)
-        if idx is None:
-            self._edges_pending.append(edge)
-        else:
-            self._edges_pending[idx] = edge
-        self.pending_ops.append(
-            EdgeUpsert(
-                src=edge.src,
-                dst=edge.dst,
-                kind=edge.kind.value,
-                reason=edge.reason,
-                cited_entities=edge.cited_entities,
-                cited_quote=edge.cited_quote,
-                src_turns=edge.src_turns,
-                dst_turns=edge.dst_turns,
-            )
-        )
-        self._refold()
-        return self._edit_digest("upsert_edge")
-
-    def delete_edge(self, selector: dict[str, Any]) -> dict[str, Any] | str:
-        """Delete one pending edge selected by ``(src, dst, kind)``.
-
-        ``kind`` is **mandatory** — the op-log contract requires the
-        full triple because the same ``(src, dst)`` pair may carry
-        both a ``data`` and a ``ref`` edge. The original kind-less
-        behaviour (first-match-in-pending-order) lost replay
-        determinism: which edge got the EdgeDelete depended on
-        insertion order, not on the selector.
-        """
-        if self.committed:
-            return "delete_edge: firing already finalized"
-        kind_raw = selector.get("kind")
-        if not isinstance(kind_raw, str) or not kind_raw:
-            return (
-                "delete_edge: 'kind' is required. The op-log selector "
-                "needs the full (src, dst, kind) triple — (src, dst) "
-                "alone is ambiguous when both 'data' and 'ref' edges "
-                "exist between the same pair."
-            )
-        idx = self._pending_edge_index(selector)
-        if idx is None:
-            return "delete_edge: edge not found"
-        edge = self._edges_pending[idx]
-        del self._edges_pending[idx]
-        self.pending_ops.append(
-            EdgeDelete(src=edge.src, dst=edge.dst, kind=edge.kind.value)
-        )
-        self._refold()
-        return self._edit_digest("delete_edge")
-
     # ------------------------------------------------------------------
-    # Event-sourcing apply_* surface (2026-05-22 refactor).
+    # Event-sourcing apply_* surface.
     #
     # Each ``apply_*`` validates against the folded view
     # ``recent (union pending_graph)``, appends a :class:`GraphOp` to
     # ``pending_ops``, refolds ``pending_graph``, and returns a digest
-    # dict on success or a string error on rejection. Unlike the legacy
-    # ``upsert_node`` / ``delete_node`` / ``upsert_edge`` / ``delete_edge``
-    # methods, these accept edits that target nodes from prior firings
-    # (anything in ``recent_graph_dict``) — that is the whole point of
-    # the event-sourcing refactor: the graph maintainer can revise
-    # stale nodes and merge duplicates across firings.
+    # dict on success or a string error on rejection. Edits may target
+    # nodes from prior firings (anything in ``recent_graph_dict``): the
+    # graph maintainer revises stale nodes and merges duplicates across
+    # firings.
 
     def _refold(self) -> None:
         """Recompute ``pending_graph`` from recent + pending_ops.
@@ -480,7 +331,7 @@ class ExtractionState:
             return "apply_node_upsert: firing already finalized"
         err, ev = _validate_event_shape(0, raw)
         if err is not None:
-            return err.replace("submit_events", "apply_node_upsert", 1)
+            return err
         assert ev is not None
 
         nodes, _edges = self._folded_view()
@@ -655,277 +506,6 @@ class ExtractionState:
 
     # ------------------------------------------------------------------
     # Legacy single-shot API (kept for v17 tests and direct callers).
-
-    def commit(self, events_payload: list[dict[str, Any]]) -> str | None:
-        """Legacy one-shot commit — validate, append, freeze in one call.
-
-        Kept for the v17 test suite and direct callers. Skips the
-        ``finalize`` degree check (passthrough rejection) — that's only
-        enforced via the new ``commit_batch`` + ``finalize`` flow used
-        by ``submit_events_batch``. Calling ``commit`` twice returns
-        the "already committed" error as it did in v17.
-        """
-        if self.committed:
-            return "submit_events: already committed; one submission per firing"
-        err = self._validate_and_append(events_payload)
-        if err is not None:
-            return err
-        # Freeze without the cross-graph degree check — preserves the
-        # v17 contract that ``commit`` accepts any chain-shaped graph.
-        finalized: list[Event] = [
-            Event(
-                id=w.id,
-                kind=w.kind,
-                summary=w.summary,
-                source_turns=w.source_turns,
-                external_refs=tuple(self._external_refs_pending.get(w.id, [])),
-            )
-            for w in self._events_pending
-        ]
-        self.events = tuple(finalized)
-        self.edges = tuple(self._edges_pending)
-        self.dropped_edges = tuple(self._dropped_pending)
-        self.committed = True
-        return None
-
-    # ------------------------------------------------------------------
-    # Shared validation core
-
-    def _validate_and_append(
-        self, events_payload: list[dict[str, Any]]
-    ) -> str | None:
-        """Validate one batch and (atomically) append to pending lists.
-
-        Ref targets may point at events from previous batches (already
-        in ``_events_pending``) OR earlier events in this same batch.
-        Witness failures drop the offending ref into ``_dropped_pending``
-        and accept the event. Any hard-reject error (shape, id-sequence,
-        ref-shape) returns without mutating pending state — the LLM may
-        resubmit only the rejected batch on retry.
-        """
-        # Pass 1: validate event shapes + collect into a working list.
-        if not isinstance(events_payload, list):
-            return "submit_events: 'events' must be an array"
-        working: list[Event] = []
-        for idx, raw in enumerate(events_payload):
-            if not isinstance(raw, dict):
-                return f"submit_events: events[{idx}] must be an object"
-            err, ev = _validate_event_shape(idx, raw)
-            if err is not None:
-                return err
-            assert ev is not None
-            working.append(ev)
-
-        # Pass 2: cross-event id check. Ids are global — must continue
-        # the sequence from the highest id we've already accepted (or
-        # from next_event_id if no prior batch landed), and strictly
-        # increasing within the batch.
-        cursor_start = (
-            self._events_pending[-1].id
-            if self._events_pending
-            else self.next_event_id - 1
-        )
-        prev_id = cursor_start
-        for idx, ev in enumerate(working):
-            if ev.id <= cursor_start and not self._events_pending:
-                return (
-                    f"submit_events: events[{idx}].id={ev.id} is below "
-                    f"next_event_id={self.next_event_id}. This firing's events "
-                    "must continue the global id sequence — start at "
-                    f"{self.next_event_id} and increment from there."
-                )
-            if ev.id <= prev_id:
-                return (
-                    f"submit_events: events[{idx}].id={ev.id} is not strictly "
-                    f"greater than the previous event's id ({prev_id}). Ids "
-                    "must be strictly increasing in submission order so that "
-                    "refs.to references resolve unambiguously to earlier "
-                    "events."
-                )
-            prev_id = ev.id
-
-        # Events by id covers BOTH prior batches and this batch — refs
-        # can point to either.
-        events_by_id: dict[int, Event] = {ev.id: ev for ev in self._events_pending}
-        for ev in working:
-            events_by_id[ev.id] = ev
-
-        # Pass 3: refs + external_refs.
-        accepted_edges: list[Edge] = []
-        accepted_external: dict[int, list[ExternalRef]] = {ev.id: [] for ev in working}
-        dropped: list[dict[str, Any]] = []
-        recent_n = len(self.recent_graph)
-        recent_ids: set[int] = {e.id for e in self.recent_graph}
-        for idx, (raw_event, ev) in enumerate(
-            zip(events_payload, working, strict=True)
-        ):
-            refs_raw = raw_event.get("refs", [])
-            if refs_raw is None:
-                refs_raw = []
-            if not isinstance(refs_raw, list):
-                return f"submit_events: events[{idx}].refs must be an array"
-            ext_raw = raw_event.get("external_refs", [])
-            if ext_raw is None:
-                ext_raw = []
-            if not isinstance(ext_raw, list):
-                return (
-                    f"submit_events: events[{idx}].external_refs must be an array"
-                )
-            # Connection check: every non-genesis event must cite at
-            # least one parent. "Genesis" means the very first event of
-            # the whole case — no prior batches AND no recent_graph.
-            has_priors = (
-                idx >= 1
-                or len(self._events_pending) > 0
-                or len(self.recent_graph) > 0
-            )
-            if has_priors and not refs_raw and not ext_raw:
-                candidates_list = list(self._events_pending) + [
-                    w for w in working if w.id < ev.id
-                ]
-                candidates = ", ".join(
-                    f"{{id:{c.id}, kind:{c.kind.value}, summary:{c.summary[:60]!r}}}"
-                    for c in candidates_list
-                )
-                return (
-                    f"submit_events: events[{idx}] (id={ev.id}) has no refs "
-                    "and no external_refs. The genesis exemption only applies "
-                    "to the very first event of the whole case (firing 1, "
-                    "first event, empty recent_graph). Every other event must "
-                    "cite at least one earlier event.\n"
-                    f"Earlier-event candidates: [{candidates}].\n"
-                    f"recent_graph has {recent_n} prior event(s) available via "
-                    "external_refs[].to_recent_event_id (the .id field of a "
-                    "recent_graph entry).\n"
-                    f"Each ref needs: {{to:<earlier_id>, kind:'data'|'ref', "
-                    "reason:<short>, and EITHER cited_entities:[...] OR "
-                    "cited_quote:'...'}}. Witnesses must appear in at least "
-                    "one endpoint's source_turns text."
-                )
-            for ridx, raw_ref in enumerate(refs_raw):
-                if not isinstance(raw_ref, dict):
-                    return (
-                        f"submit_events: events[id={ev.id}].refs[{ridx}] must be "
-                        "an object"
-                    )
-                err = _validate_ref_shape(ev.id, ridx, raw_ref, events_by_id)
-                if err is not None:
-                    return err
-                src_event = events_by_id[int(raw_ref["to"])]
-                kind = EdgeKind(raw_ref["kind"])
-                src_text = self._concat_turn_texts(src_event.source_turns)
-                dst_text = self._concat_turn_texts(ev.source_turns)
-                cited_entities = list(raw_ref.get("cited_entities", []) or [])
-                cited_quote = str(raw_ref.get("cited_quote", "") or "")
-                if kind is EdgeKind.DATA:
-                    werr = witness_data(cited_entities, src_text, dst_text)
-                else:
-                    werr = witness_ref(cited_quote, src_text, dst_text)
-                if werr is not None:
-                    dropped.append(
-                        {
-                            "src": src_event.id,
-                            "dst": ev.id,
-                            "kind": kind.value,
-                            "last_error": werr,
-                        }
-                    )
-                    continue
-                accepted_edges.append(
-                    Edge(
-                        src=src_event.id,
-                        dst=ev.id,
-                        kind=kind,
-                        reason=str(raw_ref.get("reason", "")),
-                        src_turns=tuple(src_event.source_turns),
-                        dst_turns=tuple(ev.source_turns),
-                        cited_entities=tuple(cited_entities),
-                        cited_quote=cited_quote,
-                    )
-                )
-
-            for ridx, raw_ref in enumerate(ext_raw):
-                if not isinstance(raw_ref, dict):
-                    return (
-                        f"submit_events: events[id={ev.id}].external_refs"
-                        f"[{ridx}] must be an object"
-                    )
-                err = _validate_external_ref_shape(ev.id, ridx, raw_ref, recent_ids)
-                if err is not None:
-                    return err
-                ext_event_id = int(raw_ref["to_recent_event_id"])
-                src_ext = next(
-                    (e for e in self.recent_graph if e.id == ext_event_id),
-                    None,
-                )
-                assert src_ext is not None  # validator above guarantees membership
-                kind = EdgeKind(raw_ref["kind"])
-                src_text = self._concat_turn_texts(src_ext.source_turns)
-                dst_text = self._concat_turn_texts(ev.source_turns)
-                cited_entities = list(raw_ref.get("cited_entities", []) or [])
-                cited_quote = str(raw_ref.get("cited_quote", "") or "")
-                if kind is EdgeKind.DATA:
-                    werr = witness_data(cited_entities, src_text, dst_text)
-                else:
-                    werr = witness_ref(cited_quote, src_text, dst_text)
-                if werr is not None:
-                    dropped.append(
-                        {
-                            "src": f"recent_graph_event#{ext_event_id}",
-                            "dst": ev.id,
-                            "kind": kind.value,
-                            "last_error": werr,
-                        }
-                    )
-                    continue
-                accepted_external[ev.id].append(
-                    ExternalRef(
-                        to_recent_event_id=ext_event_id,
-                        kind=kind,
-                        reason=str(raw_ref.get("reason", "")),
-                        cited_entities=tuple(cited_entities),
-                        cited_quote=cited_quote,
-                    )
-                )
-
-        # Atomically extend pending state — all-or-nothing per batch.
-        self._events_pending.extend(working)
-        self._edges_pending.extend(accepted_edges)
-        for eid, refs in accepted_external.items():
-            self._external_refs_pending.setdefault(eid, []).extend(refs)
-        self._dropped_pending.extend(dropped)
-        # Mirror the batch into the op log so commit() can persist
-        # AUDIT_GRAPH_OP entries even when the LLM used the legacy
-        # ``submit_events_batch`` flow. external_refs are folded onto
-        # each event's NodeUpsert so the op-log round-trip preserves
-        # cross-firing connectivity — matches the eventual
-        # ``finalize()`` Event(...) construction (line ~273 in this
-        # file) that attaches them as event-level fields.
-        for ev in working:
-            self.pending_ops.append(
-                NodeUpsert(
-                    id=ev.id,
-                    kind=ev.kind.value,
-                    summary=ev.summary,
-                    source_turns=tuple(ev.source_turns),
-                    external_refs=tuple(accepted_external.get(ev.id, [])),
-                )
-            )
-        for ed in accepted_edges:
-            self.pending_ops.append(
-                EdgeUpsert(
-                    src=ed.src,
-                    dst=ed.dst,
-                    kind=ed.kind.value,
-                    reason=ed.reason,
-                    cited_entities=ed.cited_entities,
-                    cited_quote=ed.cited_quote,
-                    src_turns=ed.src_turns,
-                    dst_turns=ed.dst_turns,
-                )
-            )
-        self._refold()
-        return None
 
     def _concat_turn_texts(self, turn_indices: list[int] | tuple[int, ...]) -> str:
         # Missing turn texts contribute the empty string — the witness

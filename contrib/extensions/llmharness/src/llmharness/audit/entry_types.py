@@ -1,12 +1,12 @@
 """Shared entry-type constants for cognitive-audit session entries.
 
-Both the runtime adapter (``llmharness.adapters.agentm``) and the offline
-inspector / dataset exporter (``llmharness.cli``) read and write these
-``SessionEntry.type`` strings. Centralising them prevents silent drift
-between the writer and the readers.
+The runtime adapter (``llmharness.adapters.agentm``) writes these
+``SessionEntry.type`` strings into the AgentM session log; the offline
+hydration path and dataset exporter read them back. Centralising the
+literals prevents silent drift between the writer and the readers.
 
 Entry types:
-- ``AUDIT_EVENT`` / ``AUDIT_EDGE`` / ``VERDICT`` / ``EXTRACTOR_CURSOR`` /
+- ``AUDIT_GRAPH_OP`` / ``VERDICT`` / ``EXTRACTOR_CURSOR`` /
   ``REMINDER_DELIVERED`` — successful-path entries that form the
   durable audit graph.
 - ``EXTRACTOR_NO_CALL`` / ``EXTRACTOR_ERROR`` / ``EXTRACTOR_EMPTY``
@@ -14,43 +14,19 @@ Entry types:
   entries.
 - ``AUDIT_NO_CALL`` / ``AUDIT_ERROR`` — Phase 2 typed-failure entries.
 - ``MESSAGE`` — echoed message-record type from the AgentM session JSONL.
-
-V3 (issue #134, 2026-05-10):
-- ``EXTRACTOR_INVALID`` is removed; the graph validator goes away in
-  commit 2 in favour of the witness-pipeline at edge-construction time.
-- ``EXTRACTOR_PARTIAL`` records a firing where the extractor committed
-  some events but had to drop one or more edges after exhausting the
-  witness retry budget. Payload:
-  ``{"dropped_edges": list[dict], "turn_window": [int, int]}``.
-- ``AUDIT_EDGE`` records one accepted edge. Payload is
-  :meth:`llmharness.schema.Edge.to_dict`.
 """
 
 from __future__ import annotations
 
-# Successful-path entries — make up the durable audit graph.
-AUDIT_EVENT = "llmharness.audit_event"
-# One accepted Edge record. Payload: ``Edge.to_dict()``. Persisted
-# alongside ``AUDIT_EVENT`` entries so graph traversal can replay both.
-AUDIT_EDGE = "llmharness.audit_edge"
-# One graph op produced by an extractor firing under the event-sourcing
-# refactor (2026-05-22). Payload is the result of
+# One graph op produced by an extractor firing. Payload is the result of
 # ``llmharness.audit.graph.ops.GraphOp.to_dict()`` — i.e. an ``"op"``
 # discriminator (``node_upsert`` / ``node_delete`` / ``edge_upsert`` /
 # ``edge_delete``) plus the op-specific fields, augmented with firing
 # metadata: ``firing_id`` (int), ``op_index`` (int — the op's position
 # inside its firing), and ``caused_by_turn_window`` (``[lo, hi]``
 # inclusive trajectory range of the new-turn window the firing
-# consumed). The legacy ``AUDIT_EVENT`` / ``AUDIT_EDGE`` entries are
-# still written alongside ops for back-compat with existing readers;
-# scanners translate them into ops in branch order.
+# consumed).
 AUDIT_GRAPH_OP = "llmharness.audit_graph_op"
-# One Phase record produced by the mechanical merger
-# (``audit.graph.phase.merge_to_phases``). Persisted after the raw events of
-# a successful firing so the auditor can read a coalesced "basic block"
-# view of the trajectory and drill back to raw events via
-# ``get_event_detail``. Payload: ``Phase.to_dict()``.
-AUDIT_PHASE = "llmharness.audit_phase"
 VERDICT = "llmharness.verdict"
 EXTRACTOR_CURSOR = "llmharness.extractor_cursor"
 REMINDER_DELIVERED = "llmharness.reminder_delivered"

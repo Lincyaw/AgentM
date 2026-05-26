@@ -22,7 +22,7 @@ from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolCallBlock
 from agentm.core.abi.session_config import AgentSessionConfig
 
-from ...schema import Edge, Event, Phase
+from ...schema import Event
 from .. import entry_types as _et
 from ..auditor import (
     SUBMIT_VERDICT_TOOL_NAME,
@@ -253,18 +253,7 @@ class LiveOpSink:
         _record_failure(self._api, entry_type, payload)
 
     def append_partial(self, payload: dict[str, Any]) -> None:
-        # Legacy ``_drain_extractor`` wrote EXTRACTOR_PARTIAL with a plain
-        # ``append_entry`` — no DiagnosticEvent. Keep that exact shape.
         self._api.session.append_entry(_et.EXTRACTOR_PARTIAL, payload)
-
-    def append_legacy_event(self, ev: Event) -> None:
-        self._api.session.append_entry(_et.AUDIT_EVENT, ev.to_dict())
-
-    def append_legacy_edge(self, ed: Edge) -> None:
-        self._api.session.append_entry(_et.AUDIT_EDGE, ed.to_dict())
-
-    def append_legacy_phase(self, ph: Phase) -> None:
-        self._api.session.append_entry(_et.AUDIT_PHASE, ph.to_dict())
 
 
 def _record_failure(

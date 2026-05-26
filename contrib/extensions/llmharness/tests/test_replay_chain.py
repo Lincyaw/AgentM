@@ -18,16 +18,15 @@ from llmharness.audit.runner import (
     ExtractorSettings,
     HarnessRunner,
 )
+from llmharness.audit.runner import runner as runner_module
 from llmharness.audit.seams.offline import NoopSink
 from llmharness.audit.toolkit.atom_constants import (
     EXTRACTOR_STATE_SERVICE_KEY,
     EXTRACTOR_TOOLS_MODULE,
 )
-from llmharness.audit.runner import runner as runner_module
 from llmharness.replay import chain as chain_module
 from llmharness.replay.record import ReplayRecord, write_record
 from llmharness.tools.engine import PhaseResult
-
 
 EVENT_1 = {
     "id": 1,
