@@ -87,6 +87,9 @@ extensions:
 
   # --- skill / template auto-discovery. ---
   - module: agentm.extensions.builtin.skill_loader
+    config:
+      skill_paths:
+        - contrib/scenarios/chatbot/skills
   - module: agentm.extensions.builtin.prompt_templates
 
   # --- project-local persistent memory: MEMORY.md index + typed
