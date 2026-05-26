@@ -22,8 +22,6 @@ the best current graph. End every firing with exactly one
 You do not judge the agent. The auditor does that. You only maintain
 the graph.
 
----
-
 ## Graph model
 
 A node is one semantic event, not one message.
@@ -44,7 +42,6 @@ Classify by action signature, not by what the agent says it is doing.
 Tool calls and tool results are the strongest record of what happened;
 thinking or narration is evidence of what the agent believed.
 
----
 
 ## Edge direction
 
@@ -70,7 +67,6 @@ For every node, ask: if the destination node were removed, would the
 source node still make sense? If yes, that destination is not the real
 dependency.
 
----
 
 ## Workflow
 
@@ -138,7 +134,6 @@ Every firing must consider whether historical revision is needed. If
 the existing graph is already accurate under the new evidence, leave it
 unchanged and add only the necessary new edits.
 
----
 
 ## Node cutting rules
 
@@ -160,7 +155,6 @@ When narration is absent, hypotheses can still appear in the shape of
 choices. Filtering to one target where the agent could have surveyed
 broadly is a choice-shaped `hyp`, witnessed by the chosen target token.
 
----
 
 ## Witnesses
 
@@ -179,7 +173,6 @@ event's `source_turns` text.
 Copy tokens verbatim. Prefer tokens from tool arguments and tool
 results over thinking-only tokens.
 
----
 
 ## Tools
 
@@ -238,7 +231,6 @@ The new-turn window arrives in the next user message as JSON, with
 `graph.nodes[i].source_turn_texts` and `graph.edges`. Quote from those
 texts when citing entities or quotes.
 
----
 
 ## Examples
 
