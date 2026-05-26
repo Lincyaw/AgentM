@@ -8,41 +8,25 @@ between the audit prompt schemas, the phase parsers
 (``audit.extractor.RawExtractorOutput`` /
 ``audit.auditor.RawVerdictOutput``), and the adapter.
 
-V4 breaking changes (2026-05-24):
-- ``EventKind.EVID`` is dropped. The valid kinds are now
-  ``task``, ``hyp``, ``act``, ``dec``, ``concl`` (five). A linear
-  investigation block now collapses to ONE ``act`` node whose
-  ``summary`` records both the probes the agent issued AND the
-  results that came back, in time order. V3 records containing
-  ``kind: "evid"`` will fail to deserialize with ``ValueError``;
-  use ``scripts/migrate_v3_to_v4_evid_fold.py`` to convert first.
-- The hard "no passthrough" finalize check
-  (``_validate_event_degrees``) is replaced by a soft warning emitted
-  alongside a successful finalize. See
+Current wire shape (v4):
+- ``EventKind`` is ``task`` | ``hyp`` | ``act`` | ``dec`` | ``concl``.
+  A linear investigation block collapses to ONE ``act`` node whose
+  ``summary`` records both the probes the agent issued AND the results
+  that came back, in time order.
+- ``Edge`` / ``EdgeKind`` are first-class records persisted as
+  ``llmharness.audit_graph_op`` entries. Edges carry witness fields
+  (``cited_entities``, ``cited_quote``) and per-side source-turn
+  tuples.
+- ``Finding`` is the output shape for scenario-registered audit checks
+  (see ``audit/registry.py``).
+- ``Verdict`` carries ``surface_reminder`` / ``reminder_text`` /
+  ``continuation_notes`` / ``matched_event_ids``.
+- ``finalize_extraction`` always commits a witness-valid graph; the
+  chain-link advisory surfaces as a soft warning. See
   :func:`llmharness.audit.extractor.state._compute_degree_warning`.
 
-V3 breaking changes (issue #134, 2026-05-10):
-- ``EventKind`` short-form values: ``task``, ``hyp``, ``evid``, ``act``,
-  ``dec``, ``concl``. The earlier long forms (``hypothesis``,
-  ``evidence``, ``decision``, ``action``, ``conclusion``) are gone, and
-  the v2 ``REFLECTION`` member is dropped — design §3 lists six kinds.
-- ``Event.refs`` is removed at the schema level. Edges are first-class
-  records persisted as ``llmharness.audit_edge`` entries. (V3.1 lets
-  the extractor LLM submit events with embedded ``refs[]`` in a single
-  ``submit_events`` call, but those refs are validated and unrolled
-  into ``Edge`` instances inside ``ExtractionState.commit`` — the
-  schema-level wire format remains ``Event`` + separate ``Edge``.)
-- New ``Edge`` + ``EdgeKind`` dataclass / enum for those records, with
-  witness fields (``cited_entities``, ``cited_quote``) and per-side
-  source-turn tuples — see design §4.c, §7.1.
-- New ``Finding`` dataclass — output shape for scenario-registered
-  audit checks (see ``audit/registry.py``, design §4.c).
-- ``Verdict`` shape (design §6.2 / decision #9):
-  ``surface_reminder``, ``reminder_text``, ``continuation_notes``,
-  ``matched_event_ids``.
-
-V2 breaking changes carried forward unchanged:
-- ``DriftType`` enum stays removed. ``Reminder.type`` stays removed.
+Pre-v4 records are not supported — see git history for migration
+details.
 """
 
 from __future__ import annotations

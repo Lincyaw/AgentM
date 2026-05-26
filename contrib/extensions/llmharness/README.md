@@ -281,24 +281,21 @@ to the wrong graph version.
 
 | Script | Purpose |
 |---|---|
-| `llmharness` | one-shot session demo (see `cli.py`) |
-| `llmharness-replay {extractor,auditor}` | replay a recorded phase with a different provider/prompt for A/B |
+| `llmharness-replay extractor` / `llmharness-replay auditor` | replay one recorded phase with a different provider/prompt (A/B bisection) |
+| `llmharness-replay chain` | bulk-replay every record in order; threads cumulative graph state across firings |
+| `llmharness-replay list` | index records in a sidecar by phase / turn / status / latency |
 | `llmharness-replay agent-from-reminder` | branch a main-agent session at the end of turn t and emit a resume command that seeds the recorded auditor reminder (see [docs/07-prefix-replay.md](docs/07-prefix-replay.md)) |
+| `llmharness-aggregate replay` / `llmharness-aggregate one` | fold replay sidecar(s) into per-case directories for review and training-data export |
 | `llmharness-distill {label,export}` | distill pipeline driver |
-| `llmharness-aggregate` | replay sidecar → per-case directories for review + training-data export |
+
+There is no top-level `llmharness` console-script. Cases are exported
+via `llmharness-aggregate` and consumed by downstream tools
+(`aegisctl blob` for sharing, the aegis-ui Case Review sub-app for
+human review).
 
 ## Schema stability
 
 `src/llmharness/schema.py` is the public contract for downstream
 consumers (e.g. rca-autorl). Breaking changes bump the package
-version in `pyproject.toml`. The v3 and v4 schema breaks are
-documented in that module's docstring.
-
-**v4 (2026-05-24, package 0.4.0)** — the `evid` event kind is gone.
-Linear investigation blocks now collapse to ONE `act` node whose
-`summary` records both the probes the agent issued AND the results
-that came back, in time order. The hard "no passthrough" check on
-finalize is replaced by a soft warning attached to a successful
-finalize; the model is trusted to maintain a compact graph and only
-nudged when consecutive chain links are detected. Migration helper
-for existing run jsonl: `scripts/migrate_v3_to_v4_evid_fold.py`.
+version in `pyproject.toml`; the module docstring lists the current
+v4 wire shape. Pre-v4 records are not supported.

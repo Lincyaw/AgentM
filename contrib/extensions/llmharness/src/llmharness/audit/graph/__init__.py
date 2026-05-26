@@ -9,8 +9,6 @@ from .ops import (
     GraphOp,
     NodeDelete,
     NodeUpsert,
-    op_from_edge,
-    op_from_event,
     parse_op,
 )
 from .phase import merge_to_phases
@@ -24,7 +22,5 @@ __all__ = [
     "NodeUpsert",
     "fold_graph",
     "merge_to_phases",
-    "op_from_edge",
-    "op_from_event",
     "parse_op",
 ]

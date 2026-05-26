@@ -53,7 +53,7 @@ from ..extractor import (
     RawExtractorOutput,
 )
 from ..graph.fold import fold_graph
-from ..graph.ops import GraphOp, op_from_edge, op_from_event, parse_op
+from ..graph.ops import GraphOp, parse_op
 from ..graph.phase import merge_to_phases
 from ..registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
 from ..registry import AuditCheckRegistry, CheckContext
@@ -231,9 +231,10 @@ def _bool_safe_int(raw: Any) -> int | None:
 class CumulativeAuditState:
     """Event-sourced graph state + auditor side-channel state.
 
-    Single source of truth for the cumulative view; replaces both the
-    live ``_scan_branch`` re-read-each-firing pattern and the (planned,
-    P2) offline fold inside ``run_offline_auditor_over_control``.
+    Single source of truth for the cumulative view: ops accumulate across
+    firings; :meth:`graph_view` folds them on demand into the
+    ``(events, edges, phases)`` tuple consumed by the auditor and by the
+    extractor's ``recent_graph`` payload.
     """
 
     ops: list[GraphOp] = field(default_factory=list)
@@ -292,23 +293,6 @@ class CumulativeAuditState:
             self.firing_id_counter = firing_id + 1
         self._invalidate_cache()
 
-    def absorb_legacy_only(
-        self,
-        *,
-        firing_cursor: int,
-        firing_phases: Sequence[Phase],
-    ) -> None:
-        """Absorb a firing that produced legacy-only output (no maintainer ops).
-
-        The cumulative ``ops`` log doesn't grow, but ``_phases`` does — so
-        the fold cache (keyed on ``len(ops)``) would happily return a
-        stale phases tuple on the next ``graph_view()``. Invalidate it
-        explicitly.
-        """
-        self.cursor_last_turn_index = firing_cursor
-        self._phases.extend(firing_phases)
-        self._invalidate_cache()
-
     def absorb_auditor_verdict(
         self, verdict: dict[str, Any], *, is_silent: bool
     ) -> None:
@@ -339,22 +323,18 @@ class CumulativeAuditState:
 
     @classmethod
     def hydrate_from_session_log(cls, branch: list[SessionEntry]) -> CumulativeAuditState:
-        """Live-mode seed: walk session entries, populate ops + verdicts + phases.
+        """Live-mode seed: walk session entries, populate ops + verdicts + cursor.
 
-        Mirrors the legacy ``_scan_branch`` accumulator so behaviour is
-        unchanged on session restart. We collect:
+        Reads the v4 entry shape only:
 
-        * ``AUDIT_GRAPH_OP`` entries → :func:`parse_op`-decoded :class:`GraphOp`.
-        * Legacy ``AUDIT_EVENT`` → synthesized :class:`NodeUpsert` so a
-          mixed pre-/post-event-sourcing session folds correctly.
-        * Legacy ``AUDIT_EDGE`` → synthesized :class:`EdgeUpsert`.
-        * ``AUDIT_PHASE`` → :class:`Phase` (kept in a parallel list; not
-          part of the op log).
+        * ``AUDIT_GRAPH_OP`` → :func:`parse_op`-decoded :class:`GraphOp`.
         * ``VERDICT`` → recent-verdicts deque (bounded).
         * ``EXTRACTOR_CURSOR`` → ``cursor_last_turn_index``.
+
+        Phases are not persisted to the entry tree — they are derived at
+        ``graph_view()`` time from the folded ops.
         """
         ops: list[GraphOp] = []
-        phases: list[Phase] = []
         verdicts_all: list[dict[str, Any]] = []
         cursor_last_turn_index = -1
 
@@ -365,23 +345,6 @@ class CumulativeAuditState:
             if entry.type == _et.AUDIT_GRAPH_OP:
                 try:
                     ops.append(parse_op(payload))
-                except (KeyError, ValueError, TypeError):
-                    continue
-            elif entry.type == _et.AUDIT_EVENT:
-                try:
-                    ev = Event.from_dict(payload)
-                except (KeyError, ValueError, TypeError):
-                    continue
-                ops.append(op_from_event(ev))
-            elif entry.type == _et.AUDIT_EDGE:
-                try:
-                    ed = Edge.from_dict(payload)
-                except (KeyError, ValueError, TypeError):
-                    continue
-                ops.append(op_from_edge(ed))
-            elif entry.type == _et.AUDIT_PHASE:
-                try:
-                    phases.append(Phase.from_dict(payload))
                 except (KeyError, ValueError, TypeError):
                     continue
             elif entry.type == _et.VERDICT:
@@ -415,7 +378,6 @@ class CumulativeAuditState:
             last_continuation_notes=last_notes,
             firing_id_counter=0,
         )
-        state._phases = phases
         return state
 
 
@@ -515,15 +477,6 @@ class OpSink(Protocol):
         :meth:`append_failure`.
         """
         ...
-
-    # Legacy compatibility writes — preserved for P1 so the auditor /
-    # viewer / aggregate pipelines that still read AUDIT_EVENT /
-    # AUDIT_EDGE / AUDIT_PHASE keep working. Offline sinks no-op these.
-    def append_legacy_event(self, ev: Event) -> None: ...
-
-    def append_legacy_edge(self, ed: Edge) -> None: ...
-
-    def append_legacy_phase(self, ph: Phase) -> None: ...
 
 
 class ExtractorSpawnError(RuntimeError):
@@ -1046,10 +999,9 @@ class HarnessRunner:
             },
         )
 
-        has_legacy_output = bool(output.events or output.edges or output.dropped_edges)
         has_ops = bool(state.pending_ops)
 
-        if not has_legacy_output and not has_ops:
+        if not has_ops and not output.dropped_edges:
             if _window_is_non_trivial(window_messages):
                 self._sink.append_failure(
                     _et.EXTRACTOR_EMPTY, {"turn_window": turn_window}
@@ -1074,14 +1026,7 @@ class HarnessRunner:
                 turn_window=list(turn_window),
             )
 
-        # Legacy entries — the auditor / aggregate / viewer still read these.
-        for ev in output.events:
-            self._sink.append_legacy_event(ev)
-        for ed in output.edges:
-            self._sink.append_legacy_edge(ed)
         firing_phases = list(merge_to_phases(output.events))
-        for ph in firing_phases:
-            self._sink.append_legacy_phase(ph)
 
         if output.dropped_edges:
             self._sink.append_partial(
@@ -1093,23 +1038,12 @@ class HarnessRunner:
 
         self._sink.append_cursor(last_turn_index=window_hi_inclusive)
 
-        # Mutate cumulative in-memory state. ``firing_id`` is bumped only
-        # when the firing actually produced ops (matches the legacy
-        # ``firing_counter`` invariant).
-        if has_ops:
-            self.cumulative.absorb_extractor_firing(
-                firing_ops=list(state.pending_ops),
-                firing_cursor=window_hi_inclusive,
-                firing_id=firing_id,
-                firing_phases=firing_phases,
-            )
-        else:
-            # Legacy-only output (no maintainer ops). Still advance the
-            # cursor + accumulate phases so subsequent firings see them.
-            self.cumulative.absorb_legacy_only(
-                firing_cursor=window_hi_inclusive,
-                firing_phases=firing_phases,
-            )
+        self.cumulative.absorb_extractor_firing(
+            firing_ops=list(state.pending_ops),
+            firing_cursor=window_hi_inclusive,
+            firing_id=firing_id,
+            firing_phases=firing_phases,
+        )
 
         return _ExtractorFiringResult(
             ok=True, cursor_advanced=True, record=synth_record
@@ -1328,7 +1262,8 @@ class HarnessRunner:
         # populate state.recent_graph so external_refs can be
         # witnessed against trajectory text.
         payload = dict(record.payload or {})
-        graph_raw = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+        graph_obj = payload.get("graph")
+        graph_raw: dict[str, Any] = graph_obj if isinstance(graph_obj, dict) else {}
         recent_graph_raw = graph_raw.get("nodes") or payload.get("recent_graph") or []
         recent_edges_raw = graph_raw.get("edges") or payload.get("recent_edges") or []
         enriched_recent: list[dict[str, Any]] = []

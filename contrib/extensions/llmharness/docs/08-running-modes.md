@@ -54,23 +54,6 @@ Produces `<RUN_DIR>/.agentm/audit_replay/<sid>.jsonl` containing only
 `phase: "extractor"` records, plus `audit_event` / `audit_edge` /
 `extractor_cursor` entries on the session entry tree.
 
-### Offline from a legacy eval.db row
-
-`adapters/eval_db.py` is the host-side driver — folds a langgraph
-event stream into the same `new_turns` shape and runs the extractor as
-a top-level session. Same composer, same prompt, same witness pipeline.
-
-```bash
-python -m llmharness.adapters.eval_db extract \
-    --db    path/to/eval.db \
-    --out-dir runs/eval_db/<exp-id> \
-    --window 0                          # 0 = whole trajectory single-shot
-```
-
-Both formats end up emitting `ReplayRecord(phase="extractor", ...)` to
-the same sidecar shape, so downstream (auditor replay, distill,
-aggregate) doesn't care where the graph came from.
-
 ### Bisect a specific extractor firing
 
 ```bash
@@ -85,8 +68,7 @@ llmharness-replay extractor \
 ## 3. Run auditor only
 
 The auditor is graph-in / verdict-out, so anything that produced an
-extractor sidecar can feed it — there is no separate "auditor input
-adapter" for eval.db.
+extractor sidecar can feed it.
 
 ```bash
 llmharness-replay auditor \
@@ -232,8 +214,10 @@ llmharness-replay extractor --record <sidecar> --turn <t> \
     --provider 'agentm.extensions.builtin.llm_openai:{"model":"sft-4b","base_url":"http://vllm:8000"}'
 ```
 
-The extractor SFT contract is `{system, user} → submit_events_batch(events[...])`.
-The auditor SFT contract is `{system, user} → submit_verdict(...)`. If
+The extractor SFT contract is `{system, user} → ordered stream of
+upsert_node / upsert_edge / delete_node / delete_edge ops terminated
+by finalize_extraction`. The auditor SFT contract is
+`{system, user} → submit_verdict(...)`. If
 the SFT'd model's tool-call name or schema drifts, the replay record's
 `status` flips to `no_call`. Run a small sample with the existing
 sidecar before launching a full eval:
@@ -255,7 +239,6 @@ re-run output next to the original sidecar for diff inspection.
 |---|---|---|
 | Live agent with supervision (default) | all defaults | this doc §5 |
 | Collect SFT data live | `enable_reminders=false`, distill binding mounted | `03-distill-recipe.md` |
-| Build extractor graphs from legacy traces | n/a — use `adapters.eval_db extract` | this doc §2 |
 | A/B an extractor prompt or model | n/a — `llmharness-replay extractor` | `05-profiles-and-prompts.md` |
 | A/B an auditor prompt, profile, or model | n/a — `llmharness-replay auditor` | `05-profiles-and-prompts.md` |
 | See what an agent does if you seed a reminder at turn t | n/a — `llmharness-replay agent-from-reminder` | `07-prefix-replay.md` |

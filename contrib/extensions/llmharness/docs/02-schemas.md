@@ -27,9 +27,6 @@ V4 short-form kinds: `task`, `hyp`, `act`, `dec`, `concl` (five).
 V3 also defined `evid` as a separate kind; v4 folds it into `act`
 — every linear investigation block is now a single `act` whose
 `summary` records both the probe AND the result in time order.
-To migrate v3 records into v4, run
-`scripts/migrate_v3_to_v4_evid_fold.py <input.jsonl>` — the script
-merges each `evid` into its preceding `act` and rewrites edge refs.
 The v2 long forms (`hypothesis`, `evidence`, …) and `REFLECTION`
 are gone.
 

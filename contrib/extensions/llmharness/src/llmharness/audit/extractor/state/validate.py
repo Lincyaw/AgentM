@@ -1,18 +1,16 @@
-"""Module-level shape + degree validators extracted from extractor state.
+"""Module-level shape + degree validators for the extractor state.
 
-These were defined as private helpers next to :class:`ExtractionState`
-in the pre-reorg ``extractor/state.py``. They are still private to the
-extractor — no behavior change, only physical relocation so the
-1200-line god-file shrinks. The class's commit / apply methods import
-them from here.
+Used by the event-sourcing ``apply_*`` surface in
+:class:`llmharness.audit.extractor.state.ExtractionState` and by
+:meth:`ExtractionState.compute_degree_warning`.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from ....schema import Edge, EdgeKind, Event, EventKind
-from ...validation.enum_schema import EDGE_KIND_VALUES, EVENT_KIND_VALUES
+from ....schema import Edge, Event, EventKind
+from ...validation.enum_schema import EVENT_KIND_VALUES
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -24,29 +22,35 @@ def _coerce_int(value: Any) -> int | None:
 
 
 def _validate_event_shape(idx: int, raw: dict[str, Any]) -> tuple[str | None, Event | None]:
+    """Validate one node payload from ``upsert_node`` / ``apply_node_upsert``.
+
+    ``idx`` is the per-firing node-index used only for human-readable
+    error messages; the v4 tools call this with ``0`` because they
+    submit one node at a time.
+    """
     eid_raw = raw.get("id")
     kind_raw = raw.get("kind")
     summary_raw = raw.get("summary")
     source_turns_raw = raw.get("source_turns")
 
     if isinstance(eid_raw, bool) or not isinstance(eid_raw, int):
-        return f"submit_events: events[{idx}].id must be an integer", None
+        return f"upsert_node: events[{idx}].id must be an integer", None
     if eid_raw < 1:
-        return f"submit_events: events[{idx}].id must be >= 1; got {eid_raw}", None
+        return f"upsert_node: events[{idx}].id must be >= 1; got {eid_raw}", None
     if not isinstance(kind_raw, str):
-        return f"submit_events: events[{idx}].kind must be a string", None
+        return f"upsert_node: events[{idx}].kind must be a string", None
     try:
         kind = EventKind(kind_raw)
     except ValueError:
         return (
-            f"submit_events: events[{idx}].kind {kind_raw!r} not in {EVENT_KIND_VALUES}",
+            f"upsert_node: events[{idx}].kind {kind_raw!r} not in {EVENT_KIND_VALUES}",
             None,
         )
     if not isinstance(summary_raw, str) or not summary_raw.strip():
-        return f"submit_events: events[{idx}].summary must be a non-empty string", None
+        return f"upsert_node: events[{idx}].summary must be a non-empty string", None
     if not isinstance(source_turns_raw, list) or not source_turns_raw:
         return (
-            f"submit_events: events[{idx}].source_turns must be a non-empty "
+            f"upsert_node: events[{idx}].source_turns must be a non-empty "
             "array of integers",
             None,
         )
@@ -54,143 +58,12 @@ def _validate_event_shape(idx: int, raw: dict[str, Any]) -> tuple[str | None, Ev
     for t in source_turns_raw:
         if isinstance(t, bool) or not isinstance(t, int):
             return (
-                f"submit_events: events[{idx}].source_turns contains "
+                f"upsert_node: events[{idx}].source_turns contains "
                 f"non-integer entry {t!r}",
                 None,
             )
         source_turns.append(t)
     return None, Event(id=eid_raw, kind=kind, summary=summary_raw, source_turns=source_turns)
-
-
-def _validate_ref_shape(
-    self_event_id: int,
-    ridx: int,
-    raw: dict[str, Any],
-    events_by_id: dict[int, Event],
-) -> str | None:
-    to_raw = raw.get("to")
-    kind_raw = raw.get("kind")
-
-    if isinstance(to_raw, bool) or not isinstance(to_raw, int):
-        return (
-            f"submit_events: events[id={self_event_id}].refs[{ridx}].to must be "
-            "an integer"
-        )
-    if to_raw not in events_by_id:
-        return (
-            f"submit_events: events[id={self_event_id}].refs[{ridx}].to={to_raw} "
-            "does not reference any submitted event id"
-        )
-    if to_raw >= self_event_id:
-        return (
-            f"submit_events: events[id={self_event_id}].refs[{ridx}].to={to_raw} "
-            f"must reference an EARLIER event (< {self_event_id}); refs only flow "
-            "forward in time"
-        )
-    if not isinstance(kind_raw, str):
-        return (
-            f"submit_events: events[id={self_event_id}].refs[{ridx}].kind must "
-            "be a string"
-        )
-    try:
-        kind = EdgeKind(kind_raw)
-    except ValueError:
-        return (
-            f"submit_events: events[id={self_event_id}].refs[{ridx}].kind "
-            f"{kind_raw!r} not in {EDGE_KIND_VALUES}"
-        )
-
-    cited_entities = raw.get("cited_entities", [])
-    cited_quote = raw.get("cited_quote", "")
-    if kind is EdgeKind.DATA:
-        if not isinstance(cited_entities, list) or not cited_entities:
-            return (
-                f"submit_events: events[id={self_event_id}].refs[{ridx}] kind="
-                "'data' requires non-empty cited_entities"
-            )
-        for e in cited_entities:
-            if not isinstance(e, str) or not e:
-                return (
-                    f"submit_events: events[id={self_event_id}].refs[{ridx}]."
-                    "cited_entities must be non-empty strings"
-                )
-    else:  # EdgeKind.REF
-        if not isinstance(cited_quote, str) or not cited_quote:
-            return (
-                f"submit_events: events[id={self_event_id}].refs[{ridx}] kind="
-                "'ref' requires non-empty cited_quote"
-            )
-    reason = raw.get("reason", "")
-    if not isinstance(reason, str):
-        return (
-            f"submit_events: events[id={self_event_id}].refs[{ridx}].reason "
-            "must be a string"
-        )
-    return None
-
-
-def _validate_external_ref_shape(
-    self_event_id: int,
-    ridx: int,
-    raw: dict[str, Any],
-    recent_ids: set[int],
-) -> str | None:
-    to_raw = raw.get("to_recent_event_id")
-    kind_raw = raw.get("kind")
-
-    if isinstance(to_raw, bool) or not isinstance(to_raw, int):
-        return (
-            f"submit_events: events[id={self_event_id}].external_refs[{ridx}]"
-            ".to_recent_event_id must be an integer"
-        )
-    if to_raw not in recent_ids:
-        sorted_ids = sorted(recent_ids)
-        return (
-            f"submit_events: events[id={self_event_id}].external_refs[{ridx}]"
-            f".to_recent_event_id={to_raw} not found in recent_graph "
-            f"(available ids: {sorted_ids}). Copy the .id field of a "
-            "recent_graph entry verbatim — not its array position."
-        )
-    if not isinstance(kind_raw, str):
-        return (
-            f"submit_events: events[id={self_event_id}].external_refs[{ridx}]"
-            ".kind must be a string"
-        )
-    try:
-        kind = EdgeKind(kind_raw)
-    except ValueError:
-        return (
-            f"submit_events: events[id={self_event_id}].external_refs[{ridx}]"
-            f".kind {kind_raw!r} not in {EDGE_KIND_VALUES}"
-        )
-
-    cited_entities = raw.get("cited_entities", [])
-    cited_quote = raw.get("cited_quote", "")
-    if kind is EdgeKind.DATA:
-        if not isinstance(cited_entities, list) or not cited_entities:
-            return (
-                f"submit_events: events[id={self_event_id}].external_refs"
-                f"[{ridx}] kind='data' requires non-empty cited_entities"
-            )
-        for e in cited_entities:
-            if not isinstance(e, str) or not e:
-                return (
-                    f"submit_events: events[id={self_event_id}].external_refs"
-                    f"[{ridx}].cited_entities must be non-empty strings"
-                )
-    else:
-        if not isinstance(cited_quote, str) or not cited_quote:
-            return (
-                f"submit_events: events[id={self_event_id}].external_refs"
-                f"[{ridx}] kind='ref' requires non-empty cited_quote"
-            )
-    reason = raw.get("reason", "")
-    if not isinstance(reason, str):
-        return (
-            f"submit_events: events[id={self_event_id}].external_refs"
-            f"[{ridx}].reason must be a string"
-        )
-    return None
 
 
 def _compute_degree_warning(
@@ -256,6 +129,4 @@ __all__ = [
     "_coerce_int",
     "_compute_degree_warning",
     "_validate_event_shape",
-    "_validate_external_ref_shape",
-    "_validate_ref_shape",
 ]

@@ -23,7 +23,7 @@ import json
 import logging
 from typing import Any
 
-from ...schema import Edge, Event, Phase
+from ...schema import Event
 from ...tools.engine import run_phase_standalone
 from ..auditor import (
     SUBMIT_VERDICT_TOOL_NAME,
@@ -189,9 +189,6 @@ class InMemorySink:
         self.verdicts: list[dict[str, Any]] = []
         self.failures: list[tuple[str, dict[str, Any]]] = []
         self.partials: list[dict[str, Any]] = []
-        self.legacy_events: list[Event] = []
-        self.legacy_edges: list[Edge] = []
-        self.legacy_phases: list[Phase] = []
 
     def append_op(
         self,
@@ -214,15 +211,6 @@ class InMemorySink:
 
     def append_partial(self, payload: dict[str, Any]) -> None:
         self.partials.append(dict(payload))
-
-    def append_legacy_event(self, ev: Event) -> None:
-        self.legacy_events.append(ev)
-
-    def append_legacy_edge(self, ed: Edge) -> None:
-        self.legacy_edges.append(ed)
-
-    def append_legacy_phase(self, ph: Phase) -> None:
-        self.legacy_phases.append(ph)
 
 
 class NoopSink:
@@ -255,15 +243,6 @@ class NoopSink:
         return
 
     def append_partial(self, payload: dict[str, Any]) -> None:
-        return
-
-    def append_legacy_event(self, ev: Event) -> None:
-        return
-
-    def append_legacy_edge(self, ed: Edge) -> None:
-        return
-
-    def append_legacy_phase(self, ph: Phase) -> None:
         return
 
 
