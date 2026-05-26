@@ -21,10 +21,13 @@ from ..seams.compose import UNSET, compose_audit_extensions
 from ..toolkit.atom_constants import (
     EXTRACTOR_TOOLS_MODULE as _EXTRACTOR_TOOLS_MODULE,
 )
+from ..toolkit.atom_constants import (
+    LOOP_BUDGET_MODULE as _LOOP_BUDGET_MODULE,
+)
+from ..toolkit.atom_constants import (
+    TURN_REMINDER_MODULE as _TURN_REMINDER_MODULE,
+)
 from .prompt import DEFAULT_PROMPT_NAME, load_extractor_prompt
-
-_LOOP_BUDGET_MODULE = "agentm.extensions.builtin.loop_budget"
-_TURN_REMINDER_MODULE = "contrib.extensions.turn_reminder"
 
 
 def compose_extractor_extensions(
