@@ -38,12 +38,6 @@ class _RaisingCheck:
         raise RuntimeError(self._msg)
 
 
-
-
-
-
-
-
 def test_run_all_captures_raising_check_other_checks_still_run() -> None:
     """A check that raises is captured into errors-by-name; others still run."""
 
@@ -56,7 +50,3 @@ def test_run_all_captures_raising_check_other_checks_still_run() -> None:
     findings, errors = reg.run_all(_empty_ctx())
     assert findings == [f_ok]
     assert errors == {"boom": "kaboom"}
-
-
-
-

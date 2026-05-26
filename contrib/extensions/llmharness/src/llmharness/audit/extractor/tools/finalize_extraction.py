@@ -35,9 +35,7 @@ def build_finalize_extraction_tool(state: ExtractionState) -> FunctionTool:
     """Mint a :class:`FunctionTool` closing over ``state``."""
 
     @harness_tool(FINALIZE_EXTRACTION_TOOL_NAME, terminates=True)
-    async def _finalize(
-        _args: FinalizeExtractionArgs, _ctx: Any
-    ) -> ToolTerminate | ToolResult:
+    async def _finalize(_args: FinalizeExtractionArgs, _ctx: Any) -> ToolTerminate | ToolResult:
         """Terminate the extractor firing. Call this AFTER emitting every node/edge with upsert_node / upsert_edge (and any merges via delete_node / delete_edge). The handler commits the witness-valid graph and ends the firing. A soft warning about chain-link nodes may be appended to the success result — it's a hint for the NEXT firing, NOT a rejection of this one."""
         err = state.finalize()
         if err is not None:
@@ -54,11 +52,7 @@ def build_finalize_extraction_tool(state: ExtractionState) -> FunctionTool:
             f'"dropped": {len(state.dropped_edges)}}}'
         )
         warning = state.compute_degree_warning()
-        text = (
-            "Graph committed. Note: " + warning + "\n\n" + digest
-            if warning
-            else digest
-        )
+        text = "Graph committed. Note: " + warning + "\n\n" + digest if warning else digest
         return ToolTerminate(
             result=ToolResult(content=[TextContent(type="text", text=text)]),
             reason=FINALIZE_EXTRACTION_REASON,

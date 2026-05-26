@@ -33,9 +33,7 @@ async def test_finalize_extraction_happy_path_terminates() -> None:
     state = ExtractionState()
     # Inject a one-event firing directly into the legacy snapshot. A
     # single-event graph has no chain links so no advisory is attached.
-    state._events_pending = [
-        Event(id=1, kind=EventKind.TASK, summary="root", source_turns=(0,))
-    ]
+    state._events_pending = [Event(id=1, kind=EventKind.TASK, summary="root", source_turns=(0,))]
     tool = build_finalize_extraction_tool(state)
 
     outcome = await tool.fn({})
@@ -46,5 +44,3 @@ async def test_finalize_extraction_happy_path_terminates() -> None:
     assert len(state.events) == 1
     text = outcome.result.content[0].text  # type: ignore[union-attr]
     assert "Note:" not in text  # no chain-link advisory on a clean graph
-
-

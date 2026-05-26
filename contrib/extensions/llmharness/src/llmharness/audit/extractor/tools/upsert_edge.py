@@ -35,8 +35,7 @@ class UpsertEdgeArgs(BaseModel):
 
     src: int = Field(
         description=(
-            "Source node id — must exist in the current graph (this "
-            "firing or any prior firing)."
+            "Source node id — must exist in the current graph (this firing or any prior firing)."
         ),
     )
     dst: int = Field(
@@ -82,10 +81,7 @@ def _attempt_echo(args: UpsertEdgeArgs) -> str:
             f"cited_entities={args.cited_entities!r})"
         )
     quote_preview = args.cited_quote[:60] + ("..." if len(args.cited_quote) > 60 else "")
-    return (
-        f"upsert_edge(src={args.src}, dst={args.dst}, kind=ref, "
-        f"cited_quote={quote_preview!r})"
-    )
+    return f"upsert_edge(src={args.src}, dst={args.dst}, kind=ref, cited_quote={quote_preview!r})"
 
 
 def build_upsert_edge_tool(state: ExtractionState) -> FunctionTool:

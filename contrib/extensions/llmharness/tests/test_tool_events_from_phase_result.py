@@ -45,9 +45,7 @@ def _tool_result(call_id: str, text: str, *, is_error: bool = False) -> ToolResu
 
 
 def _phase_result(messages: list) -> PhaseResult:
-    return PhaseResult(
-        output=None, status="ok", error=None, latency_ms=0, messages=messages
-    )
+    return PhaseResult(output=None, status="ok", error=None, latency_ms=0, messages=messages)
 
 
 def test_two_calls_two_results_paired_by_id() -> None:
@@ -66,11 +64,3 @@ def test_two_calls_two_results_paired_by_id() -> None:
     assert events[0]["error_text"] is None
     assert events[1]["tool_name"] == "finalize_extraction"
     assert events[1]["is_error"] is False
-
-
-
-
-
-
-
-

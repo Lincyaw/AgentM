@@ -80,9 +80,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     async def _submit(args: dict[str, Any]) -> ToolTerminate:
         del args
         return ToolTerminate(
-            result=ToolResult(
-                content=[TextContent(type="text", text="oracle label submitted")]
-            ),
+            result=ToolResult(content=[TextContent(type="text", text="oracle label submitted")]),
             reason="llmharness.distill:submit_oracle_label",
         )
 

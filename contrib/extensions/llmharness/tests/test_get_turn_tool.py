@@ -35,8 +35,6 @@ def _get_turn_fn(snapshot: list[dict[str, Any]]) -> Any:
 # ---------------------------------------------------------------------------
 
 
-
-
 class TestGetTurnOutOfRange:
     """get_turn with out-of-range idx returns is_error=True, does not raise."""
 
@@ -55,12 +53,6 @@ class TestGetTurnOutOfRange:
         assert "out of range" in body.lower() or "range" in body.lower()
 
 
-
-
-
-
 # ---------------------------------------------------------------------------
 # Scenario G integration test (simplified compose assertion)
 # ---------------------------------------------------------------------------
-
-

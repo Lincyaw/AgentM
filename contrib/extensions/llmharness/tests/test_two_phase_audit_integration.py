@@ -207,9 +207,7 @@ class _V31StubProvider:
                         "cited_quote": _GOOD_QUOTE,
                     },
                 ),
-                _tool_call_message(
-                    "finalize-1", FINALIZE_EXTRACTION_TOOL_NAME, {}
-                ),
+                _tool_call_message("finalize-1", FINALIZE_EXTRACTION_TOOL_NAME, {}),
             ]
 
         if self.mode == "partial":
@@ -253,9 +251,7 @@ class _V31StubProvider:
                         "cited_quote": _BAD_QUOTE,
                     },
                 ),
-                _tool_call_message(
-                    "finalize-2", FINALIZE_EXTRACTION_TOOL_NAME, {}
-                ),
+                _tool_call_message("finalize-2", FINALIZE_EXTRACTION_TOOL_NAME, {}),
             ]
 
         raise AssertionError(f"unknown stub mode {self.mode!r}")
@@ -264,9 +260,7 @@ class _V31StubProvider:
         yield MessageEnd(message=_submit_verdict_call())
 
 
-def _tool_call_message(
-    call_id: str, name: str, arguments: dict[str, Any]
-) -> AssistantMessage:
+def _tool_call_message(call_id: str, name: str, arguments: dict[str, Any]) -> AssistantMessage:
     """One assistant turn whose content is a single tool_call block."""
     return AssistantMessage(
         role="assistant",
@@ -381,8 +375,6 @@ def _entries(session: AgentSession, entry_type: str) -> list[Any]:
     return [e for e in session.session_manager.get_active_branch() if e.type == entry_type]
 
 
-
-
 # --- Scenario 1: happy path ------------------------------------------------
 
 
@@ -413,9 +405,7 @@ async def test_happy_path_writes_event_edge_and_cursor(tmp_path: Path) -> None:
     partial = _entries(session, EXTRACTOR_PARTIAL)
     cursors = _entries(session, EXTRACTOR_CURSOR)
 
-    op_kinds = [
-        e.payload.get("op") if isinstance(e.payload, dict) else None for e in ops
-    ]
+    op_kinds = [e.payload.get("op") if isinstance(e.payload, dict) else None for e in ops]
     node_upserts = sum(1 for k in op_kinds if k == "node_upsert")
     edge_upserts = sum(1 for k in op_kinds if k == "edge_upsert")
     assert node_upserts == 2, f"expected 2 node_upsert ops, got {node_upserts}: {ops}"
@@ -456,8 +446,6 @@ async def test_happy_path_writes_event_edge_and_cursor(tmp_path: Path) -> None:
 # --- Scenario 2: partial (witness retry exhausted) -------------------------
 
 
-
-
 # --- Scenario 3: no-call ---------------------------------------------------
 
 
@@ -466,9 +454,7 @@ async def test_no_call_path_records_extractor_no_call_and_holds_cursor(
     tmp_path: Path,
 ) -> None:
     provider = _V31StubProvider(mode="no_call")
-    provider_module = _install_provider_module(
-        "tests._fake_v31_no_call_provider", provider
-    )
+    provider_module = _install_provider_module("tests._fake_v31_no_call_provider", provider)
 
     session = await AgentSession.create(
         _build_session_config(cwd=str(tmp_path), provider_module=provider_module)
@@ -490,5 +476,3 @@ async def test_no_call_path_records_extractor_no_call_and_holds_cursor(
 
 
 # --- Scenario 4: empty (terminator called with empty events) ---------------
-
-

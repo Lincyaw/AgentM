@@ -96,9 +96,7 @@ def _turn_end_prefix_lengths(messages: list[AgentMessage]) -> list[int]:
     the live path (the chained-fork fork-slicing + every sidecar consumer
     depend on that being a message index, not a turn ordinal).
     """
-    assistant_idxs = [
-        i for i, m in enumerate(messages) if isinstance(m, AssistantMessage)
-    ]
+    assistant_idxs = [i for i, m in enumerate(messages) if isinstance(m, AssistantMessage)]
     if not assistant_idxs:
         # No assistant turn (e.g. a bare seeded prefix). Step once over the
         # whole list rather than zero times, so a degenerate trajectory
@@ -162,9 +160,7 @@ async def replay_pipeline_over_trajectory(
     ``sink`` / ``child`` are exposed for tests that want to inject
     stubs while still exercising the real :class:`HarnessRunner`.
     """
-    cumulative = (
-        seed_cumulative if seed_cumulative is not None else CumulativeAuditState.fresh()
-    )
+    cumulative = seed_cumulative if seed_cumulative is not None else CumulativeAuditState.fresh()
     sink_used = sink if sink is not None else InMemorySink()
     child_used = child if child is not None else StandaloneChildRunner(cwd)
     sidecar = SidecarWriter(sidecar_path) if sidecar_path is not None else None
@@ -189,17 +185,13 @@ async def replay_pipeline_over_trajectory(
     all_steps: list[StepResult] = []
     surfaces: list[SurfaceFiring] = []
     reminder: Reminder | None = None
-    for turn_number, prefix_len in enumerate(
-        _turn_end_prefix_lengths(messages), start=1
-    ):
+    for turn_number, prefix_len in enumerate(_turn_end_prefix_lengths(messages), start=1):
         # ``start_turn`` is a message-index floor; skip turns whose
         # trajectory ends before it (already replayed under the parent
         # segment / arriving via ``seed_cumulative``).
         if prefix_len < start_turn:
             continue
-        step = await runner.on_trajectory_progress(
-            messages[:prefix_len], turn_count=turn_number
-        )
+        step = await runner.on_trajectory_progress(messages[:prefix_len], turn_count=turn_number)
         all_steps.append(step)
         if step.surfaced_reminder is not None:
             if stop_on_first_surface:

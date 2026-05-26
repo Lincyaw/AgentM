@@ -112,9 +112,7 @@ class ExtractionState:
     # legacy ``commit`` / ``commit_batch`` callers that never had a
     # cumulative graph to start from.
     recent_graph_dict: dict[int, Event] = field(default_factory=dict)
-    recent_edges_dict: dict[tuple[int, int, str], Edge] = field(
-        default_factory=dict
-    )
+    recent_edges_dict: dict[tuple[int, int, str], Edge] = field(default_factory=dict)
     pending_ops: list[GraphOp] = field(default_factory=list)
     pending_graph: Graph = field(default_factory=Graph)
 
@@ -128,11 +126,7 @@ class ExtractionState:
             self.recent_graph_dict = {ev.id: ev for ev in self.recent_graph}
         # First fold: the only ops at this point are the recent prefix,
         # so the result equals the recent graph view.
-        if (
-            self.recent_graph_dict
-            or self.recent_edges_dict
-            or self.pending_ops
-        ):
+        if self.recent_graph_dict or self.recent_edges_dict or self.pending_ops:
             self._refold()
         # ``next_event_id`` intentionally NOT auto-derived from
         # ``recent_graph_dict``: legacy callers and tests rely on the
@@ -171,18 +165,13 @@ class ExtractionState:
         # via ``recent_graph_dict`` don't get re-emitted as fresh audit
         # entries).
         if not self._events_pending and self.pending_ops:
-            firing_node_ids = {
-                op.id for op in self.pending_ops if isinstance(op, NodeUpsert)
-            }
-            firing_node_ids -= {
-                op.id for op in self.pending_ops if isinstance(op, NodeDelete)
-            }
+            firing_node_ids = {op.id for op in self.pending_ops if isinstance(op, NodeUpsert)}
+            firing_node_ids -= {op.id for op in self.pending_ops if isinstance(op, NodeDelete)}
             nodes, edges_view = self._folded_view()
-            firing_events = [
-                nodes[nid] for nid in sorted(firing_node_ids) if nid in nodes
-            ]
+            firing_events = [nodes[nid] for nid in sorted(firing_node_ids) if nid in nodes]
             firing_edges = [
-                ed for (src, dst, _kind), ed in edges_view.items()
+                ed
+                for (src, dst, _kind), ed in edges_view.items()
                 if src in firing_node_ids or dst in firing_node_ids
             ]
             self.events = tuple(firing_events)
@@ -302,9 +291,7 @@ class ExtractionState:
         """
         return self.pending_graph.nodes, self.pending_graph.edges
 
-    def _witness_in_turn_texts(
-        self, quote: str, turn_indices: tuple[int, ...] | list[int]
-    ) -> bool:
+    def _witness_in_turn_texts(self, quote: str, turn_indices: tuple[int, ...] | list[int]) -> bool:
         """Substring-check ``quote`` against concatenated ``turn_texts``.
 
         Uses the same case+whitespace normalisation as :mod:`witness` so
@@ -335,9 +322,7 @@ class ExtractionState:
         assert ev is not None
 
         nodes, _edges = self._folded_view()
-        deleted_in_firing = {
-            op.id for op in self.pending_ops if isinstance(op, NodeDelete)
-        }
+        deleted_in_firing = {op.id for op in self.pending_ops if isinstance(op, NodeDelete)}
         # Largest seen id includes recent_graph_dict (which seeded
         # pending_graph via _refold), pending NodeUpsert ids, and the
         # explicitly-deleted ids — so the LLM cannot "skip" over a
@@ -429,20 +414,13 @@ class ExtractionState:
         cited_quote = str(raw.get("cited_quote", "") or "")
         if kind is EdgeKind.DATA:
             if not isinstance(cited_entities_raw, list) or not cited_entities_raw:
-                return (
-                    "apply_edge_upsert: kind='data' requires non-empty "
-                    "cited_entities"
-                )
+                return "apply_edge_upsert: kind='data' requires non-empty cited_entities"
             if any(not isinstance(e, str) or not e for e in cited_entities_raw):
-                return (
-                    "apply_edge_upsert: cited_entities must be non-empty strings"
-                )
+                return "apply_edge_upsert: cited_entities must be non-empty strings"
             cited_entities = tuple(str(e) for e in cited_entities_raw)
         else:
             if not cited_quote:
-                return (
-                    "apply_edge_upsert: kind='ref' requires non-empty cited_quote"
-                )
+                return "apply_edge_upsert: kind='ref' requires non-empty cited_quote"
             # Witness validation for ref: route through the same helper
             # used by the batch path so both contracts stay identical.
             src_text = self._concat_turn_texts(src_event.source_turns)
@@ -450,9 +428,7 @@ class ExtractionState:
             werr = witness_ref(cited_quote, src_text, dst_text)
             if werr is not None:
                 return f"apply_edge_upsert: {werr}"
-            cited_entities = tuple(
-                str(e) for e in (cited_entities_raw or [])
-            )
+            cited_entities = tuple(str(e) for e in (cited_entities_raw or []))
 
         reason = raw.get("reason", "")
         if not isinstance(reason, str):
@@ -497,8 +473,7 @@ class ExtractionState:
         _nodes, edges = self._folded_view()
         if (src, dst, kind_raw) not in edges:
             return (
-                f"apply_edge_delete: edge ({src}, {dst}, {kind_raw}) not "
-                "found in the folded graph"
+                f"apply_edge_delete: edge ({src}, {dst}, {kind_raw}) not found in the folded graph"
             )
         self.pending_ops.append(EdgeDelete(src=src, dst=dst, kind=kind_raw))
         self._refold()
@@ -578,7 +553,6 @@ class ExtractionState:
             "pending_edges": len(self._edges_pending),
             "pending_dropped": len(self._dropped_pending),
         }
-
 
 
 __all__ = ["ExtractionState"]

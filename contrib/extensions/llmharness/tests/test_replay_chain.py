@@ -106,11 +106,15 @@ def test_chain_replays_in_record_order(tmp_path: Path, monkeypatch: pytest.Monke
 
     async def fake_extractor(record: ReplayRecord, **_: Any) -> PhaseResult:
         seen.append((record.phase, record.turn_index))
-        return PhaseResult(output={"replayed": True}, status="ok", error=None, latency_ms=1, messages=[])
+        return PhaseResult(
+            output={"replayed": True}, status="ok", error=None, latency_ms=1, messages=[]
+        )
 
     async def fake_auditor(record: ReplayRecord, **_: Any) -> PhaseResult:
         seen.append((record.phase, record.turn_index))
-        return PhaseResult(output={"replayed": True}, status="ok", error=None, latency_ms=2, messages=[])
+        return PhaseResult(
+            output={"replayed": True}, status="ok", error=None, latency_ms=2, messages=[]
+        )
 
     monkeypatch.setattr(chain_module, "replay_extractor_record", fake_extractor)
     monkeypatch.setattr(chain_module, "replay_auditor_record", fake_auditor)
@@ -140,9 +144,7 @@ def test_chain_phase_filter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(chain_module, "replay_extractor_record", fake_extractor)
     monkeypatch.setattr(chain_module, "replay_auditor_record", fake_auditor)
 
-    chain_module.chain_replay_sync(
-        _seed_sidecar(tmp_path), cwd=str(tmp_path), phase="auditor"
-    )
+    chain_module.chain_replay_sync(_seed_sidecar(tmp_path), cwd=str(tmp_path), phase="auditor")
     # Three extractor records + two auditor records; phase=auditor must
     # skip the extractors entirely — that's the whole point of the filter.
     assert calls == {"extractor": 0, "auditor": 2}
@@ -267,9 +269,7 @@ def test_extractor_record_replay_hydrates_recent_edges_into_state(
         captured["payload_text"] = kwargs["payload"]
         raw_payload = kwargs["payload"]
         if isinstance(raw_payload, str):
-            captured["payload"] = json.loads(
-                raw_payload[raw_payload.index('{"next_event_id"') :]
-            )
+            captured["payload"] = json.loads(raw_payload[raw_payload.index('{"next_event_id"') :])
         else:
             captured["payload"] = raw_payload
         return PhaseResult(
@@ -280,9 +280,7 @@ def test_extractor_record_replay_hydrates_recent_edges_into_state(
             messages=[],
         )
 
-    monkeypatch.setattr(
-        runner_module, "run_phase_standalone", fake_run_phase_standalone
-    )
+    monkeypatch.setattr(runner_module, "run_phase_standalone", fake_run_phase_standalone)
 
     runner = HarnessRunner(
         cumulative=CumulativeAuditState.fresh(),
