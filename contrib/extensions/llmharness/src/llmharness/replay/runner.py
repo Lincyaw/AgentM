@@ -152,17 +152,8 @@ async def replay_extractor_record(
         terminal_tool=FINALIZE_EXTRACTION_TOOL_NAME,
         purpose="cognitive_audit_extractor_replay",
     )
-    # Commit-on-stop, mirroring the live HarnessRunner: the graph is
-    # whatever the child applied to the op log, independent of whether it
-    # called finalize_extraction. ``state.finalize()`` is idempotent and
-    # reads pending_ops back into events/edges when the terminator never
-    # fired. Snapshotting on ops (not on the terminal-tool status) keeps
-    # the design's live === offline invariant intact after the live-side
-    # fix; without this, a no_call firing here discards real ops.
-    if not state.committed:
-        state.finalize()
+    snapshot = RawExtractorOutput.salvage(state)
     if state.pending_ops:
-        snapshot = RawExtractorOutput.from_state(state)
         result = PhaseResult(
             output={
                 "events": [e.to_dict() for e in snapshot.events],
