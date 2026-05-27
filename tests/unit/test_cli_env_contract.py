@@ -16,9 +16,36 @@ table in CLAUDE.md is silently a lie.
 from __future__ import annotations
 
 
+import pytest
+import typer
+
 from agentm.cli import (
+    _parse_set_overrides,
     _resolve_provider_model_cwd,
 )
+
+
+def test_parse_set_overrides_groups_by_atom_and_keeps_raw_value() -> None:
+    out = _parse_set_overrides(
+        ["cost_budget.limit=5", "cost_budget.currency=eur", 'permission.deny=["bash"]']
+    )
+    assert out == {
+        "cost_budget": {"limit": "5", "currency": "eur"},
+        "permission": {"deny": '["bash"]'},
+    }
+
+
+def test_parse_set_overrides_trims_whitespace_on_atom_and_key() -> None:
+    # "a.b = c" must key on "b", not "b " — value stays raw.
+    assert _parse_set_overrides(["cost_budget.limit = 5"]) == {
+        "cost_budget": {"limit": " 5"}
+    }
+
+
+def test_parse_set_overrides_rejects_missing_dot_or_equals() -> None:
+    for bad in ["cost_budget.limit", "limit=5", "=5", "cost_budget.=5"]:
+        with pytest.raises(typer.BadParameter):
+            _parse_set_overrides([bad])
 
 
 

@@ -335,6 +335,20 @@ Live under `src/agentm/extensions/scenarios/<name>.yaml`. Each lists the atoms t
 
 Loading: `load_scenario(name)` reads the YAML, returns `list[tuple[module_path, config]]`. Caller concatenates with their own extensions.
 
+#### Config resolution (manifest · env · `--set`)
+
+An atom declares the config it accepts once, in `MANIFEST.config_schema` (JSON-Schema). That single declaration drives three input sources, merged by `resolve_atom_configs` (`core.lib.atom_config`) at the session-factory load seam — after the full `(module, config)` list is assembled, before `sort_extensions_by_requires`. Precedence, highest wins:
+
+```
+--set <atom>.<key>=<value>   >   env AGENTM_<ATOM>_<KEY>   >   manifest config:
+```
+
+- **env** names are *generated* from each schema key (`cost_budget` + `limit` → `AGENTM_COST_BUDGET_LIMIT`), never reverse-parsed, so underscores are unambiguous; only declared keys are bound.
+- **`--set`** (CLI, repeatable) keys by `MANIFEST.name`; string values are coerced to the key's declared `type` (JSON for `array`/`object`; a malformed value emits a diagnostic and the manifest config stands). Keys with no declared type — undeclared `additionalProperties` keys, or a property lacking `type` — keep the raw string: free text stays text rather than being silently re-typed.
+- Defaults are **not** injected — an atom's own `config.get(key, default)` stays the single place defaults live.
+
+This is pure mechanism on the per-atom config dict that already flows to `install`; core never grows a privileged top-level config field, and special needs are composed by setting the relevant atom's declared keys rather than special-casing the loader.
+
 ### 7.3 LLM providers (separate top-level package, also extension-shaped)
 
 | Module | Purpose |

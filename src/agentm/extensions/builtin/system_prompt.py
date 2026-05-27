@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from agentm.core.abi.roles import SYSTEM_PROMPT_PROVIDER
@@ -12,14 +13,25 @@ from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(
     name="system_prompt",
-    description="Prepends configured prompt text to the system prompt.",
+    description=(
+        "Prepends configured prompt text to the system prompt. The text is "
+        "supplied inline via ``prompt`` or read from a file via "
+        "``prompt_file`` (useful when an orchestrator stages a long prompt on "
+        "disk and configures the atom with ``-e system_prompt:{\"prompt_file\""
+        ":\"/path\"}``). ``prompt_file`` wins when both are set."
+    ),
     registers=("event:before_agent_start",),
+    # Neither key is top-level ``required``: the skip-when-unconfigured filter
+    # (session_helpers.missing_required_fields) only understands a flat
+    # ``required`` list and would otherwise reject a ``prompt_file``-only
+    # config as "missing prompt". install() instead resolves whichever source
+    # is present and contributes nothing when neither yields text.
     config_schema={
         "type": "object",
         "properties": {
             "prompt": {"type": "string"},
+            "prompt_file": {"type": "string"},
         },
-        "required": ["prompt"],
         "additionalProperties": False,
     },
     requires=(),  # Leaf atom: prepends configured prompt text only.
@@ -27,10 +39,25 @@ MANIFEST = ExtensionManifest(
 )
 
 
+def _resolve_prompt(config: dict[str, Any]) -> str:
+    """Resolve the prompt text from config: ``prompt_file`` (read) or ``prompt``.
+
+    A non-empty ``prompt_file`` takes precedence over inline ``prompt``. A
+    missing file raises (surfaced as an install diagnostic by the session
+    factory) rather than silently producing no prompt.
+    """
+    prompt_file = config.get("prompt_file")
+    if prompt_file:
+        return Path(str(prompt_file)).read_text(encoding="utf-8")
+    return str(config.get("prompt", ""))
+
+
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    # ``prompt`` is required by MANIFEST.config_schema; the discovery
-    # filter skips this atom when configured with ``{}``.
-    prompt = str(config["prompt"])
+    prompt = _resolve_prompt(config)
+    # Empty config (e.g. the auto-discovery floor's {"prompt": ""}) contributes
+    # nothing — register no handler rather than prepend stray separators.
+    if not prompt:
+        return
 
     def before_agent_start(event: BeforeAgentStartEvent) -> dict[str, str]:
         current = str(event.system or "")

@@ -5,8 +5,10 @@ Two load-bearing paths:
 
 * **happy (clean graph)** — finalize returns ToolTerminate carrying
   the agreed reason string, with a digest payload and NO advisory
-  note. Without this, the audit child loop never knows the firing
-  is done and the adapter records a no-call failure.
+  note. ``finalize_extraction`` is now an OPTIONAL fast-exit (the
+  runner commits on stop from the op log regardless), so this path
+  pins its still-supported early-termination contract, not a commit
+  gate.
 
 * **happy (chain shape)** — finalize still returns ToolTerminate
   (NOT a blocking ToolResult), and the success text carries a

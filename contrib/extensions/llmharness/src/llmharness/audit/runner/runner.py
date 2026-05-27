@@ -882,18 +882,48 @@ class HarnessRunner:
             _record("spawn_error", output=None, error=str(exc))
             return _ExtractorFiringResult(ok=False, cursor_advanced=False, record=synth_record)
 
-        if not terminator_called:
-            self._sink.append_failure(
-                _et.EXTRACTOR_NO_CALL,
-                {
-                    "reason": (f"child returned without calling {FINALIZE_EXTRACTION_TOOL_NAME}"),
-                    "turn_window": turn_window,
-                },
-            )
-            _record("no_call", output=None)
-            return _ExtractorFiringResult(ok=False, cursor_advanced=False, record=synth_record)
+        # Commit-on-stop: the child loop terminates naturally on
+        # ModelEndTurn or tool-call budget regardless of whether the
+        # optional ``finalize_extraction`` terminator fired. Every
+        # ``apply_node_upsert`` / ``apply_edge_upsert`` already recorded
+        # its op into ``state.pending_ops``, so freeze the state and
+        # commit from whatever ops were applied. ``finalize`` is
+        # idempotent (no-op when the terminator already finalized) and
+        # its ``not self._events_pending and pending_ops`` branch reads
+        # the op log back into ``events``/``edges`` even when the
+        # terminator was never called.
+        if not state.committed:
+            state.finalize()
 
         output = RawExtractorOutput.from_state(state)
+        has_ops = bool(state.pending_ops)
+
+        if not has_ops and not output.dropped_edges:
+            # Genuinely empty firing: no graph work to salvage. Only here
+            # does the terminator matter, and only for failure-entry
+            # attribution.
+            if _window_is_non_trivial(window_messages):
+                failure_kind = (
+                    _et.EXTRACTOR_NO_CALL if not terminator_called else _et.EXTRACTOR_EMPTY
+                )
+                reason = (
+                    f"child returned without calling {FINALIZE_EXTRACTION_TOOL_NAME} "
+                    "and applied no graph ops"
+                    if not terminator_called
+                    else "extractor committed an empty graph"
+                )
+                self._sink.append_failure(
+                    failure_kind,
+                    {"reason": reason, "turn_window": turn_window},
+                )
+                _record("no_call" if not terminator_called else "empty", output=None)
+                return _ExtractorFiringResult(ok=False, cursor_advanced=False, record=synth_record)
+            # Truly trivial window: still advance the cursor so we don't
+            # re-extract the same prefix forever.
+            self._sink.append_cursor(last_turn_index=window_hi_inclusive)
+            self.cumulative.cursor_last_turn_index = window_hi_inclusive
+            return _ExtractorFiringResult(ok=True, cursor_advanced=True, record=synth_record)
+
         _record(
             "ok",
             output={
@@ -903,18 +933,6 @@ class HarnessRunner:
                 "ops": [op.to_dict() for op in state.pending_ops],
             },
         )
-
-        has_ops = bool(state.pending_ops)
-
-        if not has_ops and not output.dropped_edges:
-            if _window_is_non_trivial(window_messages):
-                self._sink.append_failure(_et.EXTRACTOR_EMPTY, {"turn_window": turn_window})
-                return _ExtractorFiringResult(ok=False, cursor_advanced=False, record=synth_record)
-            # Truly trivial window: still advance the cursor so we don't
-            # re-extract the same prefix forever.
-            self._sink.append_cursor(last_turn_index=window_hi_inclusive)
-            self.cumulative.cursor_last_turn_index = window_hi_inclusive
-            return _ExtractorFiringResult(ok=True, cursor_advanced=True, record=synth_record)
 
         firing_id = self.cumulative.firing_id_counter
         for op_index, op in enumerate(state.pending_ops):
