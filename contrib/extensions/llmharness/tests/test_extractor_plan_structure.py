@@ -44,12 +44,6 @@ def _edge(src: int, dst: int) -> Edge:
     )
 
 
-
-
-
-
-
-
 def test_chain_of_three_emits_warning() -> None:
     """1 -> 2 -> 3: event 2 has in=1, out=1 — soft warning expected."""
     warn = _compute_degree_warning(
@@ -62,14 +56,6 @@ def test_chain_of_three_emits_warning() -> None:
     # endpoints 1 and 3 are NOT named as offenders
     assert "event[1] kind=" not in warn
     assert "event[3] kind=" not in warn
-
-
-
-
-
-
-
-
 
 
 def test_finalize_succeeds_with_chain_warning() -> None:
@@ -89,28 +75,26 @@ def test_finalize_succeeds_with_chain_warning() -> None:
     )
     state.next_event_id = 1
     assert isinstance(
-        state.apply_node_upsert(
-            {"id": 1, "kind": "task", "summary": "start", "source_turns": [1]}
-        ),
+        state.apply_node_upsert({"id": 1, "kind": "task", "summary": "start", "source_turns": [1]}),
         dict,
     )
     assert isinstance(
-        state.apply_node_upsert(
-            {"id": 2, "kind": "act", "summary": "middle", "source_turns": [2]}
-        ),
+        state.apply_node_upsert({"id": 2, "kind": "act", "summary": "middle", "source_turns": [2]}),
         dict,
     )
     assert isinstance(
-        state.apply_node_upsert(
-            {"id": 3, "kind": "concl", "summary": "end", "source_turns": [3]}
-        ),
+        state.apply_node_upsert({"id": 3, "kind": "concl", "summary": "end", "source_turns": [3]}),
         dict,
     )
     assert isinstance(
         state.apply_edge_upsert(
             {
-                "src": 1, "dst": 2, "kind": "data",
-                "reason": "r", "cited_entities": ["alpha"], "cited_quote": "",
+                "src": 1,
+                "dst": 2,
+                "kind": "data",
+                "reason": "r",
+                "cited_entities": ["alpha"],
+                "cited_quote": "",
             }
         ),
         dict,
@@ -118,8 +102,12 @@ def test_finalize_succeeds_with_chain_warning() -> None:
     assert isinstance(
         state.apply_edge_upsert(
             {
-                "src": 2, "dst": 3, "kind": "data",
-                "reason": "r", "cited_entities": ["charlie"], "cited_quote": "",
+                "src": 2,
+                "dst": 3,
+                "kind": "data",
+                "reason": "r",
+                "cited_entities": ["charlie"],
+                "cited_quote": "",
             }
         ),
         dict,
@@ -131,5 +119,3 @@ def test_finalize_succeeds_with_chain_warning() -> None:
     warning = state.compute_degree_warning()
     assert warning is not None
     assert "event[2]" in warning
-
-

@@ -54,10 +54,7 @@ def _firing_summary(fr: FiringRecord) -> str:
         )
     out = fr.output or {}
     surface = "REMIND" if out.get("surface_reminder") else "silent"
-    return (
-        f"auditor#{fr.sequence} turn={fr.turn_index} status={fr.status} "
-        f"verdict={surface}"
-    )
+    return f"auditor#{fr.sequence} turn={fr.turn_index} status={fr.status} verdict={surface}"
 
 
 def _build_trajectory(case: CaseData, layout: CaseLayout) -> list[dict[str, Any]]:

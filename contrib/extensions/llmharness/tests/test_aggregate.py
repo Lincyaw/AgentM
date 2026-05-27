@@ -69,9 +69,7 @@ def sample_run(tmp_path: Path) -> tuple[Path, Path]:
             compose_kwargs={},
             payload={"new_turns": traj_snapshot[:1], "recent_graph": []},
             output={
-                "events": [
-                    {"id": 1, "kind": "task", "summary": "go", "source_turns": [0]}
-                ],
+                "events": [{"id": 1, "kind": "task", "summary": "go", "source_turns": [0]}],
                 "edges": [],
                 "dropped_edges": [],
             },
@@ -84,9 +82,7 @@ def sample_run(tmp_path: Path) -> tuple[Path, Path]:
             compose_kwargs={},
             payload={"new_turns": traj_snapshot[1:], "recent_graph": []},
             output={
-                "events": [
-                    {"id": 2, "kind": "hyp", "summary": "h", "source_turns": [1]}
-                ],
+                "events": [{"id": 2, "kind": "hyp", "summary": "h", "source_turns": [1]}],
                 "edges": [],
                 "dropped_edges": [],
             },
@@ -183,31 +179,7 @@ def test_case_meta_has_no_legacy_root_session_id(
     assert serialized["trace_id"] == "trace-sess-abc123"
 
 
-
-
-
-
-
-
-
-
-
-
 # --- writer ----------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_graph_snapshot_concatenates_globally_unique_ids(

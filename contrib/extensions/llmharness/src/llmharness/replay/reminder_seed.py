@@ -85,9 +85,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     """
     text_raw = config.get("text")
     if not isinstance(text_raw, str) or not text_raw.strip():
-        raise ValueError(
-            "replay_reminder_seed: config['text'] must be a non-empty string"
-        )
+        raise ValueError("replay_reminder_seed: config['text'] must be a non-empty string")
     text: str = text_raw
 
     # ``fired`` is a list-of-one to keep the closure mutable from inside
@@ -121,17 +119,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         try:
             api.session.append_entry(REMINDER_DELIVERED, {"text": text})
         except Exception:
-            _logger.exception(
-                "replay_reminder_seed: failed to persist reminder_delivered entry"
-            )
+            _logger.exception("replay_reminder_seed: failed to persist reminder_delivered entry")
         fired[0] = True
         if unsubscribe:
             try:
                 unsubscribe[0]()
             except Exception:
-                _logger.exception(
-                    "replay_reminder_seed: unsubscribe callback raised; ignoring"
-                )
+                _logger.exception("replay_reminder_seed: unsubscribe callback raised; ignoring")
         return Inject(messages=[message])
 
     unsubscribe.append(api.on(DecideTurnActionEvent.CHANNEL, _on_decide))

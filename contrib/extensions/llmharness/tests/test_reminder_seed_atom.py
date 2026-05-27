@@ -59,10 +59,6 @@ def _make_api() -> tuple[MagicMock, list[Any]]:
     return api, captured
 
 
-
-
-
-
 def test_final_cause_stop_leaves_seed_armed() -> None:
     """Mirror live adapter: final-cause stop ignores overrides; do not pop seed."""
     api, captured = _make_api()
@@ -77,9 +73,3 @@ def test_final_cause_stop_leaves_seed_armed() -> None:
     delivered = handler(_make_event(Step()))
     assert isinstance(delivered, Inject)
     assert "still pending" in str(delivered.messages[0])
-
-
-
-
-
-

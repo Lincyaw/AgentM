@@ -18,9 +18,7 @@ from llmharness.distill.rl_prompts import STRIPPED_FIELDS, hydrate_row
 from llmharness.replay.record import ReplayRecord, write_record
 
 
-def _make_extractor_record(
-    *, tmp_path: Path, session_id: str, turn_index: int
-) -> Path:
+def _make_extractor_record(*, tmp_path: Path, session_id: str, turn_index: int) -> Path:
     log = tmp_path / f"{session_id}.jsonl"
     rec = ReplayRecord(
         phase="extractor",
@@ -43,9 +41,7 @@ def _make_extractor_record(
     return log
 
 
-def _make_auditor_record(
-    *, tmp_path: Path, session_id: str, turn_index: int
-) -> None:
+def _make_auditor_record(*, tmp_path: Path, session_id: str, turn_index: int) -> None:
     log = tmp_path / f"{session_id}.jsonl"
     rec = ReplayRecord(
         phase="auditor",
@@ -120,5 +116,3 @@ def test_rl_prompts_cli_emits_stripped_replay_records(tmp_path: Path) -> None:
         # both to feed replay_*_record.
         assert rec.payload == row["payload"]
         assert rec.compose_kwargs == row["compose_kwargs"]
-
-

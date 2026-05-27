@@ -51,8 +51,6 @@ def test_raw_verdict_surface_reminder_true_empty_text() -> None:
         )
 
 
-
-
 def test_raw_verdict_continuation_notes_not_list_of_strings() -> None:
     """continuation_notes containing non-strings raises AuditorOutputError."""
     with pytest.raises(AuditorOutputError, match="continuation_notes"):
@@ -66,15 +64,3 @@ def test_raw_verdict_continuation_notes_not_list_of_strings() -> None:
                 }
             }
         )
-
-
-
-
-
-
-
-
-
-
-
-

@@ -51,9 +51,7 @@ def build_reset_extraction_tool(state: ExtractionState) -> FunctionTool:
                 is_error=True,
             )
         state.reset_pending()
-        return ToolResult(
-            content=[TextContent(type="text", text='{"ok": true, "reset": true}')]
-        )
+        return ToolResult(content=[TextContent(type="text", text='{"ok": true, "reset": true}')])
 
     return _reset_extraction
 

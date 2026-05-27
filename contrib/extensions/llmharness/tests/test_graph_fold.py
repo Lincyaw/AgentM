@@ -28,7 +28,9 @@ from llmharness.audit.graph.ops import (
 from llmharness.schema import EventKind
 
 
-def _nu(eid: int, *, kind: str = "act", summary: str = "x", turns: tuple[int, ...] = (1,)) -> NodeUpsert:
+def _nu(
+    eid: int, *, kind: str = "act", summary: str = "x", turns: tuple[int, ...] = (1,)
+) -> NodeUpsert:
     return NodeUpsert(id=eid, kind=kind, summary=summary, source_turns=turns)
 
 
@@ -54,8 +56,6 @@ def test_empty_op_list_yields_empty_graph() -> None:
     assert g.edges == {}
     assert g.nodes_list() == []
     assert g.edges_list() == []
-
-
 
 
 def test_repeated_node_upsert_is_last_write_wins() -> None:
@@ -99,10 +99,6 @@ def test_edge_delete_removes_only_the_keyed_edge() -> None:
     ]
     g = fold_graph(ops)
     assert set(g.edges.keys()) == {(1, 2, "ref")}
-
-
-
-
 
 
 def test_fold_is_associative_against_concatenation() -> None:
@@ -161,14 +157,6 @@ def test_nodes_and_edges_iterate_in_insertion_order() -> None:
 # --- round-trip ------------------------------------------------------------
 
 
-
-
 def test_parse_op_rejects_unknown_discriminator() -> None:
     with pytest.raises(ValueError):
         parse_op({"op": "not_a_real_op", "id": 1})
-
-
-
-
-
-

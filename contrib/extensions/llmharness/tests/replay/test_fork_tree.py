@@ -159,9 +159,7 @@ async def test_replay_pipeline_honors_seed_cumulative_and_start_turn(
 
     seeded = CumulativeAuditState.fresh()
     seeded.absorb_extractor_firing(
-        firing_ops=[
-            NodeUpsert(id=1, kind="task", summary="prior-node", source_turns=(0, 1, 2))
-        ],
+        firing_ops=[NodeUpsert(id=1, kind="task", summary="prior-node", source_turns=(0, 1, 2))],
         firing_cursor=5,
         firing_id=0,
     )
@@ -295,9 +293,7 @@ async def test_full_tree_run_captures_independent_surface_snapshots(
     assert snap_sizes[0] < snap_sizes[-1]
     first_snap = result.surfaces[0].cumulative_snapshot
     before = len(first_snap.ops)
-    result.state.ops.append(
-        NodeUpsert(id=999, kind="task", summary="late", source_turns=(0,))
-    )
+    result.state.ops.append(NodeUpsert(id=999, kind="task", summary="late", source_turns=(0,)))
     assert len(first_snap.ops) == before, "snapshot must be independent of live state"
 
 
@@ -411,15 +407,11 @@ def _factory_recording(factory_calls: list[dict[str, Any]], *, msgs_len: int = 3
         counter["i"] += 1
         factory_calls.append(
             {
-                "initial_messages_len": (
-                    len(initial_messages) if initial_messages else None
-                ),
+                "initial_messages_len": (len(initial_messages) if initial_messages else None),
                 "seed_reminder_text": seed_reminder_text,
             }
         )
-        return _FakePayload(
-            session_log_id=f"sess-{i}", final_messages=_make_trajectory(msgs_len)
-        )
+        return _FakePayload(session_log_id=f"sess-{i}", final_messages=_make_trajectory(msgs_len))
 
     return factory
 
@@ -502,9 +494,7 @@ async def test_silent_backbone_produces_no_children(
 
 
 @pytest.mark.asyncio
-async def test_max_depth_halts_deepening(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_max_depth_halts_deepening(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every backbone surfaces once, each surface strictly forward of the
     child's fork floor (so the non-progressing guard never drops it);
     without a depth guard this would deepen forever. ``max_depth=2`` must
@@ -512,9 +502,7 @@ async def test_max_depth_halts_deepening(
     """
     # sess-0 surfaces at 4 → child forks at floor 4, must surface > 4;
     # sess-1 surfaces at 9 → grandchild forks at floor 9, must surface > 9.
-    scripted = _ScriptedReplay(
-        {f"sess-{i}": [(4 + 5 * i, f"r{i}")] for i in range(10)}
-    )
+    scripted = _ScriptedReplay({f"sess-{i}": [(4 + 5 * i, f"r{i}")] for i in range(10)})
     factory_calls: list[dict[str, Any]] = []
     factory = _factory_recording(factory_calls)
 
@@ -527,15 +515,11 @@ async def test_max_depth_halts_deepening(
 
 
 @pytest.mark.asyncio
-async def test_max_total_nodes_halts_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_max_total_nodes_halts_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A fan-out-3-per-node tree, capped at 5 total nodes, must emit no
     more than 5 nodes.
     """
-    scripted = _ScriptedReplay(
-        {f"sess-{i}": [(4, "a"), (9, "b"), (14, "c")] for i in range(20)}
-    )
+    scripted = _ScriptedReplay({f"sess-{i}": [(4, "a"), (9, "b"), (14, "c")] for i in range(20)})
     factory_calls: list[dict[str, Any]] = []
     factory = _factory_recording(factory_calls)
 
@@ -723,8 +707,12 @@ def test_write_fork_tree_replay_filters_window_rebinds_and_tags(tmp_path: Path) 
     3. Tag every record with its node_id / parent_node_id in extras.
     """
     root = _node(
-        "n0", None, "sess-0",
-        fork_turn_index=None, depth=0, path=(),
+        "n0",
+        None,
+        "sess-0",
+        fork_turn_index=None,
+        depth=0,
+        path=(),
         surfaces=[
             Surface(
                 fork_message_index=4,
@@ -739,8 +727,12 @@ def test_write_fork_tree_replay_filters_window_rebinds_and_tags(tmp_path: Path) 
         ],
     )
     child = _node(
-        "n1", "n0", "sess-1",
-        fork_turn_index=4, depth=1, path=("r1",),
+        "n1",
+        "n0",
+        "sess-1",
+        fork_turn_index=4,
+        depth=1,
+        path=("r1",),
         surfaces=[],
         steps=[
             _ext_step(3, "sess-1"),  # below fork floor (turn_lo=5) → filtered.
@@ -782,24 +774,36 @@ def test_fork_tree_header_first_line_and_records_intact(tmp_path: Path) -> None:
     below. iter_records skips the header; read_fork_tree_header returns it.
     """
     root = _node(
-        "n0", None, "ctl",
-        fork_turn_index=None, depth=0, path=(),
+        "n0",
+        None,
+        "ctl",
+        fork_turn_index=None,
+        depth=0,
+        path=(),
         surfaces=[],
         steps=[
             StepResult(
-                fired_extractor=True, fired_auditor=True, surfaced_reminder=None,
+                fired_extractor=True,
+                fired_auditor=True,
+                surfaced_reminder=None,
                 extractor_record=_ext_step(4, "ctl").extractor_record,
                 auditor_record=_aud_step(4, "ctl", surface=True).auditor_record,
             )
         ],
     )
     child = _node(
-        "n1", "n0", "b1",
-        fork_turn_index=4, depth=1, path=("r1",),
+        "n1",
+        "n0",
+        "b1",
+        fork_turn_index=4,
+        depth=1,
+        path=("r1",),
         surfaces=[],
         steps=[
             StepResult(
-                fired_extractor=True, fired_auditor=True, surfaced_reminder=None,
+                fired_extractor=True,
+                fired_auditor=True,
+                surfaced_reminder=None,
                 extractor_record=_ext_step(9, "b1").extractor_record,
                 auditor_record=_aud_step(9, "b1").auditor_record,
             )
@@ -814,10 +818,22 @@ def test_fork_tree_header_first_line_and_records_intact(tmp_path: Path) -> None:
         "max_depth": 8,
         "max_total_nodes": 64,
         "nodes": [
-            {"node_id": "n0", "parent_id": None, "depth": 0, "is_control": True,
-             "path": [], "backbone_session_id": "ctl"},
-            {"node_id": "n1", "parent_id": "n0", "depth": 1, "is_control": False,
-             "path": ["r1"], "backbone_session_id": "b1"},
+            {
+                "node_id": "n0",
+                "parent_id": None,
+                "depth": 0,
+                "is_control": True,
+                "path": [],
+                "backbone_session_id": "ctl",
+            },
+            {
+                "node_id": "n1",
+                "parent_id": "n0",
+                "depth": 1,
+                "is_control": False,
+                "path": ["r1"],
+                "backbone_session_id": "b1",
+            },
         ],
     }
     write_fork_tree_replay([root, child], out_path=out, header=header)
@@ -832,7 +848,10 @@ def test_fork_tree_header_first_line_and_records_intact(tmp_path: Path) -> None:
     recs = list(iter_records(out))
     assert all(r.session_id == "ctl" for r in recs), "rebind to root sid"
     assert sorted((r.phase, r.turn_index) for r in recs) == [
-        ("auditor", 4), ("auditor", 9), ("extractor", 4), ("extractor", 9),
+        ("auditor", 4),
+        ("auditor", 9),
+        ("extractor", 4),
+        ("extractor", 9),
     ]
 
 

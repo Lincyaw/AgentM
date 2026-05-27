@@ -19,10 +19,13 @@ from typing import Any
 
 from ..seams.compose import UNSET, compose_audit_extensions
 from ..toolkit.atom_constants import (
-    EXTRACTOR_STATE_SERVICE_KEY,
+    EXTRACTOR_TOOLS_MODULE as _EXTRACTOR_TOOLS_MODULE,
 )
 from ..toolkit.atom_constants import (
-    EXTRACTOR_TOOLS_MODULE as _EXTRACTOR_TOOLS_MODULE,
+    LOOP_BUDGET_MODULE as _LOOP_BUDGET_MODULE,
+)
+from ..toolkit.atom_constants import (
+    TURN_REMINDER_MODULE as _TURN_REMINDER_MODULE,
 )
 from .prompt import DEFAULT_PROMPT_NAME, load_extractor_prompt
 
@@ -31,6 +34,7 @@ def compose_extractor_extensions(
     *,
     base_prompt: str | None = None,
     observability_config: dict[str, Any] | None = UNSET,
+    tool_call_budget: int | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     """Default order: observability -> extractor_tools -> system_prompt.
 
@@ -41,21 +45,28 @@ def compose_extractor_extensions(
     Pass ``None`` for ``observability_config`` to drop that extension;
     ``extractor_tools`` and ``system_prompt`` always survive.
     """
-    framing = (
-        base_prompt
-        if base_prompt is not None
-        else load_extractor_prompt(DEFAULT_PROMPT_NAME)
-    )
-    return compose_audit_extensions(
+    framing = base_prompt if base_prompt is not None else load_extractor_prompt(DEFAULT_PROMPT_NAME)
+    extensions = compose_audit_extensions(
         submit_tool_module=_EXTRACTOR_TOOLS_MODULE,
         default_prompt=framing,
-        prompt_override=None,
         observability_config=observability_config,
         submit_tool_config=None,
     )
+    if tool_call_budget is not None:
+        budget = int(tool_call_budget)
+        extensions.extend(
+            [
+                (
+                    _LOOP_BUDGET_MODULE,
+                    {"max_tool_calls": budget},
+                ),
+                (
+                    _TURN_REMINDER_MODULE,
+                    {"warn_within": budget},
+                ),
+            ]
+        )
+    return extensions
 
 
-__all__ = [
-    "EXTRACTOR_STATE_SERVICE_KEY",
-    "compose_extractor_extensions",
-]
+__all__ = ["compose_extractor_extensions"]

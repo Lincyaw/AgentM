@@ -40,10 +40,6 @@ def _edge(src: int, dst: int) -> Edge:
     )
 
 
-
-
-
-
 def test_negative_id_returns_structured_error() -> None:
     fn = _install_and_capture(events=[_ev(1)], edges=[])
 
@@ -52,7 +48,3 @@ def test_negative_id_returns_structured_error() -> None:
     assert isinstance(result, ToolResult)
     assert result.is_error is True
     assert "negative id" in result.content[0].text
-
-
-
-
