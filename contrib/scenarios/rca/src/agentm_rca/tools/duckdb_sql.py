@@ -135,6 +135,50 @@ def _table_name(filename: str) -> str:
     return Path(filename).stem
 
 
+def _error_hint(msg: str) -> str | None:
+    """Map a DuckDB error to a one-line, actionable recovery hint.
+
+    The dominant failure modes when an LLM drives this tool are dotted
+    OTLP column names used unquoted (``attr.status_code``), guessed
+    table/column names, and unqualified columns in JOINs. DuckDB already
+    appends "Candidate bindings:" to binder errors; this adds the fix.
+    """
+    low = msg.lower()
+    if "referenced column" in low or "referenced table" in low:
+        return (
+            'Call list_tables for exact names. Dotted OTLP columns must be '
+            'double-quoted, e.g. "attr.status_code", "attr.k8s.node.name".'
+        )
+    if "ambiguous reference" in low:
+        return "Qualify the column with its table alias (e.g. child.service_name)."
+    if "does not exist" in low and "function" in low:
+        return (
+            "No such function. Percentiles: use p50/p90/p95/p99(col) or "
+            "quantile_cont(col, 0.99). Avoid backtick identifiers; use \"...\"."
+        )
+    return None
+
+
+# Percentile aliases agents habitually reach for (``p99(duration)``) that
+# DuckDB has no scalar/aggregate function for — without these every such
+# call costs a wasted "function does not exist" round-trip. Each macro
+# expands to ``quantile_cont`` and works in aggregate / GROUP BY context.
+_HELPER_MACROS = (
+    "CREATE OR REPLACE MACRO p50(x) AS quantile_cont(x, 0.5)",
+    "CREATE OR REPLACE MACRO p90(x) AS quantile_cont(x, 0.9)",
+    "CREATE OR REPLACE MACRO p95(x) AS quantile_cont(x, 0.95)",
+    "CREATE OR REPLACE MACRO p99(x) AS quantile_cont(x, 0.99)",
+)
+
+
+def _install_helper_macros(conn: duckdb.DuckDBPyConnection) -> None:
+    for stmt in _HELPER_MACROS:
+        try:
+            conn.execute(stmt)
+        except duckdb.Error:  # pragma: no cover - macro already present / engine drift
+            pass
+
+
 class _DuckDBState:
     def __init__(
         self,
@@ -156,6 +200,7 @@ class _DuckDBState:
         if self.conn is not None:
             return self.conn
         conn = duckdb.connect(":memory:")
+        _install_helper_macros(conn)
         files = sorted(
             f.name
             for f in self.data_dir.iterdir()
@@ -275,7 +320,11 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 for r in cur.fetchall()
             ]
         except duckdb.Error as exc:
-            return _err(f"query failed: {exc}", sql=sql)
+            hint = _error_hint(str(exc))
+            extra: dict[str, Any] = {"sql": sql}
+            if hint:
+                extra["hint"] = hint
+            return _err(f"query failed: {exc}", **extra)
 
         rows = _compact_ids(rows, cols)
         body = json.dumps(
@@ -313,7 +362,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "Run a single read-only DuckDB SQL statement (SELECT / WITH / "
                 "EXPLAIN / DESCRIBE / SHOW / SUMMARIZE) against the parquet "
                 "views. SELECTs are auto-wrapped with a LIMIT; results are "
-                "JSON-serialised and capped by a token budget."
+                "JSON-serialised and capped by a token budget. "
+                'Double-quote dotted OTLP columns ("attr.status_code", '
+                '"attr.k8s.node.name"). Percentile helpers p50/p90/p95/p99(col) '
+                "are predefined (aliases for quantile_cont)."
             ),
             parameters={
                 "type": "object",

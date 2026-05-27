@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -82,6 +83,8 @@ def get_relationships(data_dir: Path) -> list[Rel]:
             "JOIN normal_metrics b "
             "  ON a.\"attr.k8s.node.name\" = b.\"attr.k8s.node.name\" "
             "WHERE a.service_name < b.service_name "
+            "  AND a.service_name <> '' AND b.service_name <> '' "
+            "  AND a.service_name IS NOT NULL AND b.service_name IS NOT NULL "
             "  AND a.\"attr.k8s.node.name\" IS NOT NULL"
         ).fetchall()
         for _node, svc_a, svc_b in dep_rows:
@@ -107,6 +110,111 @@ def _build_neighbor_graph(
             seen.add(key)
             graph[svc_a].append((svc_b, rel, weight))
     return dict(graph)
+
+
+# Uninstrumented backing components (DB / cache / broker) emit no spans
+# of their own, so they never appear as a trace ``service_name`` — only
+# in metrics. A node present in metrics but absent from traces in BOTH
+# windows is infra; a node absent from *abnormal* traces only is a
+# crashed-but-instrumented service (e.g. a PodFailure'd app), not infra.
+_DB_INFRA = re.compile(r"mysql|mariadb|postgres|sqlserver|oracle|cockroach", re.I)
+# Known uninstrumented backing components. A metrics-only node is treated as
+# infra only if its name matches one of these — otherwise a real but idle
+# (un-exercised in this case) service would be mislabelled as infra.
+_INFRA_NAME = re.compile(
+    r"mysql|mariadb|postgres|sqlserver|oracle|cockroach|mongo|redis|"
+    r"memcached|rabbitmq|kafka|consul|etcd|zookeeper|nacos|elasticsearch|"
+    r"cassandra|clickhouse|minio",
+    re.I,
+)
+# SQL/ORM client span-name shapes that mark a span as a database call.
+_DBOP_SPAN_SQL = (
+    "(span_name LIKE 'SELECT%' OR span_name LIKE 'INSERT%' "
+    "OR span_name LIKE 'UPDATE%' OR span_name LIKE 'DELETE%' "
+    "OR span_name LIKE 'Transaction%' OR span_name LIKE 'COMMIT%' "
+    "OR span_name LIKE 'Session%' OR span_name LIKE '%Repository%')"
+)
+
+
+def _trace_services(conn) -> set[str]:  # noqa: ANN001
+    out: set[str] = set()
+    for tbl in ("normal_traces", "abnormal_traces"):
+        try:
+            rows = conn.execute(f"SELECT DISTINCT service_name FROM {tbl}").fetchall()
+        except Exception:  # noqa: BLE001 - table may be absent
+            continue
+        out.update(r[0] for r in rows if r[0])
+    return out
+
+
+def get_infra_nodes(data_dir: Path) -> set[str]:
+    """Backing components present in metrics but never in traces.
+
+    These are the nodes the trace-only relationship graph is structurally
+    blind to (``mysql``, ``rabbitmq``, ``mongodb-*``, ``memcached-*`` …).
+    """
+    conn = _duckdb_conn(data_dir)
+    try:
+        metric_svcs = {
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT service_name FROM normal_metrics"
+            ).fetchall()
+            if r[0]
+        }
+    except Exception:  # noqa: BLE001
+        conn.close()
+        return set()
+    infra = {
+        s
+        for s in metric_svcs - _trace_services(conn)
+        if s not in SYNTHETIC and _INFRA_NAME.search(s)
+    }
+    conn.close()
+    return infra
+
+
+def get_infra_edges(data_dir: Path, infra_nodes: set[str]) -> list[Rel]:
+    """Link each infra node to the services that depend on it.
+
+    SQL databases are linked from every service emitting Client DB-op
+    spans (the DB call lives inside the *caller*). Named per-service
+    backends (``mongodb-profile``, ``memcached-rate-1``) are linked to the
+    service whose name is a token of the backend name.
+    """
+    if not infra_nodes:
+        return []
+    conn = _duckdb_conn(data_dir)
+    rels: list[Rel] = []
+
+    db_callers: list[str] = []
+    try:
+        db_callers = [
+            r[0]
+            for r in conn.execute(
+                "SELECT service_name, COUNT(*) AS c FROM normal_traces "
+                f"WHERE \"attr.span_kind\" = 'Client' AND {_DBOP_SPAN_SQL} "
+                "GROUP BY 1 HAVING COUNT(*) >= 5"
+            ).fetchall()
+            if r[0] and r[0] not in SYNTHETIC
+        ]
+    except Exception:  # noqa: BLE001
+        pass
+
+    trace_svcs = _trace_services(conn)
+    conn.close()
+
+    for node in infra_nodes:
+        if _DB_INFRA.search(node):
+            callers = db_callers
+        else:
+            # mongodb-profile / memcached-rate-1 -> match the owning service
+            tokens = set(node.replace("_", "-").split("-"))
+            callers = [s for s in trace_svcs if s in tokens or s in node]
+        for svc in callers:
+            rels.append((svc, node, "infra_dependency", 1))
+            rels.append((node, svc, "infra_dependency", 1))
+    return rels
 
 
 def get_injections(data_dir: Path) -> list[dict[str, str]]:
@@ -181,11 +289,34 @@ def get_target_evidence(data_dir: Path, target: str) -> dict[str, object]:
     return {}
 
 
+# chaos_type names whose doc filename abbreviates differently than a plain
+# normalization would catch (same fault, shorter slug).
+_FAULT_DOC_ALIAS = {"memorystress": "memstress"}
+
+
+def _norm_fault(name: str) -> str:
+    """Lowercase, strip non-alphanumerics — so ``NetworkLoss`` matches
+    ``network_loss``, ``PodFailure`` matches ``pod_failure``, etc."""
+    key = re.sub(r"[^a-z0-9]", "", name.lower())
+    return _FAULT_DOC_ALIAS.get(key, key)
+
+
 def _load_fault_doc(fault_kind: str) -> str:
-    """Read the per-fault-kind reference doc, or return empty."""
+    """Read the per-fault-kind reference doc, or return empty.
+
+    chaos_type arrives CamelCase (``NetworkLoss``) while the docs are
+    snake_case (``network_loss.md``); match on a normalized name so the
+    reference actually loads instead of silently missing.
+    """
+    if not fault_kind:
+        return ""
     p = FAULT_KINDS_DIR / f"{fault_kind}.md"
     if p.is_file():
         return p.read_text().strip()
+    target = _norm_fault(fault_kind)
+    for doc in FAULT_KINDS_DIR.glob("*.md"):
+        if _norm_fault(doc.stem) == target:
+            return doc.read_text().strip()
     return ""
 
 
@@ -201,6 +332,9 @@ _REL_DESCRIPTIONS = {
                         "payloads or timeouts.",
     "co_deployed": "{frm} and {to} share a k8s node — resource contention "
                    "(CPU/memory/disk) from one can degrade the other.",
+    "infra_dependency": "{frm} depends on the backing component {to} "
+                        "(database/cache/broker). {to} is uninstrumented: it "
+                        "has NO spans of its own — its calls live inside {frm}.",
 }
 
 
@@ -251,6 +385,7 @@ def run_hop(
     out_dir: Path,
     budget: int,
     timeout: int,
+    is_infra: bool = False,
 ) -> dict | None:
     """Run one hop-agent and return its verdict dict (or None)."""
     hop_dir = out_dir / "hops" / f"{from_service}__{to_service}"
@@ -267,6 +402,25 @@ def run_hop(
     ]
     if fault_doc:
         parts.append(f"\n## Fault reference ({fault_kind})\n{fault_doc}")
+    if is_infra:
+        parts.append(
+            f"\n## {to_service} is an uninstrumented backing component\n"
+            f"`{to_service}` has NO spans of its own — `service_name = "
+            f"'{to_service}'` returns nothing in *_traces. Verify it via:\n"
+            f"- (A) the Client DB/cache spans **inside {from_service}**: "
+            f"`WHERE service_name = '{from_service}' AND "
+            f"\"attr.span_kind\" = 'Client'` with SQL/ORM span_name shapes "
+            f"(SELECT/INSERT/UPDATE/DELETE/Transaction/Session/%Repository%). "
+            f"Compare normal vs abnormal latency and error rate.\n"
+            f"- (B) `{to_service}`'s own resource metrics: `*_metrics` tables "
+            f"`WHERE service_name = '{to_service}'`.\n"
+            f"Judge by fault type: a JVM/JDBC fault leaves the DB itself "
+            f"healthy (the wait is in {from_service}'s client code — do NOT "
+            f"count {to_service} as degraded); a Network fault "
+            f"(loss/partition/delay) on the {from_service}↔{to_service} "
+            f"path genuinely breaks the dependency (DB-call spans "
+            f"error/time out — count it degraded)."
+        )
     parts.append(
         f"\nDetermine whether {to_service} is genuinely degraded due to "
         f"this relationship with {from_service}. Query normal_* vs "
@@ -294,7 +448,7 @@ def run_hop(
     try:
         with open(hop_dir / "stdout.log", "w") as fout, \
              open(hop_dir / "stderr.log", "w") as ferr:
-            r = subprocess.run(
+            subprocess.run(
                 cmd, env=env, stdout=fout, stderr=ferr, timeout=timeout,
             )
     except subprocess.TimeoutExpired:
@@ -339,6 +493,7 @@ def propagate(
     budget: int,
     parallel: int,
     timeout: int,
+    infra_nodes: set[str] | None = None,
 ) -> dict:
     """Producer-consumer fault propagation.
 
@@ -348,6 +503,7 @@ def propagate(
       - not yet confirmed → run a hop agent (may confirm the node)
     No edge is skipped; no node agent runs twice.
     """
+    infra_nodes = infra_nodes or set()
     confirmed: set[str] = set()
     agent_checked: set[str] = set()
     checked_edges: set[tuple[str, str]] = set()
@@ -359,6 +515,12 @@ def propagate(
     fault_kind = injections[0]["chaos_type"] if injections else "unknown"
     inj_target = injections[0]["target"] if injections else "unknown"
 
+    # Per-branch fault context: each node carries the (fault_kind, target)
+    # of the seed it descends from, so a hop reached from the NetworkLoss
+    # seed is judged as NetworkLoss — not as injections[0]'s fault. Without
+    # this, every hop in a multi-injection case is told the wrong fault.
+    node_fault: dict[str, tuple[str, str]] = {}
+
     for inj in injections:
         target = inj["target"]
         if target and target not in SYNTHETIC:
@@ -367,6 +529,7 @@ def propagate(
             agent_checked.add(target)
             queue.append(target)
             node_evidence[target] = {"source": "injection_target", **ev}
+            node_fault[target] = (inj["chaos_type"], target)
 
     round_n = 0
     while queue:
@@ -412,15 +575,20 @@ def propagate(
             print(f"  round {round_n}: {len(need_agent)} agents, "
                   f"{len(sql_edges)} SQL edges")
             with ThreadPoolExecutor(max_workers=parallel) as pool:
-                futures = {
-                    pool.submit(
+                futures = {}
+                for to_svc, froms in need_agent.items():
+                    hop_fk, hop_target = node_fault.get(
+                        froms[0][0], (fault_kind, inj_target)
+                    )
+                    hop_doc = _load_fault_doc(hop_fk) or fault_doc
+                    fut = pool.submit(
                         run_hop, data_dir,
                         froms[0][0], to_svc, froms[0][1],
-                        fault_kind, fault_doc, inj_target,
+                        hop_fk, hop_doc, hop_target,
                         out_dir, budget, timeout,
-                    ): (to_svc, froms)
-                    for to_svc, froms in need_agent.items()
-                }
+                        to_svc in infra_nodes,
+                    )
+                    futures[fut] = (to_svc, froms)
                 for future in as_completed(futures):
                     to_svc, froms = futures[future]
                     agent_checked.add(to_svc)
@@ -437,7 +605,16 @@ def propagate(
                         node_evidence[to_svc] = {
                             "source": "hop_agent", **(result or {}),
                         }
-                        queue.append(to_svc)
+                        # inherit the producer's fault context for the next hop
+                        if froms[0][0] in node_fault:
+                            node_fault[to_svc] = node_fault[froms[0][0]]
+                        # Infra nodes (mysql, redis…) are propagation SINKS: a
+                        # localized fault on ONE service's path to the DB does
+                        # not degrade every other consumer of that DB. Confirm
+                        # the edge into it, but do not fan out from it (which
+                        # would falsely implicate all DB users via starvation).
+                        if to_svc not in infra_nodes:
+                            queue.append(to_svc)
                         edges.append((froms[0][0], to_svc))
                         for other_from, _other_rel in froms[1:]:
                             if _verify_edge_sql(
@@ -517,6 +694,8 @@ def main() -> int:
     fault_doc = _load_fault_doc(fault_kind)
 
     rels = get_relationships(data_dir)
+    infra_nodes = get_infra_nodes(data_dir)
+    rels.extend(get_infra_edges(data_dir, infra_nodes))
     neighbor_graph = _build_neighbor_graph(rels)
     (out / "relationships.json").write_text(json.dumps(
         [{"a": a, "b": b, "rel": r, "weight": w} for a, b, r, w in rels],
@@ -529,10 +708,12 @@ def main() -> int:
           f"({fault_kind})")
     print(f"Relationship graph: {total_edges} directed edges "
           f"({len(neighbor_graph)} services)")
+    print(f"Infra nodes (metrics-only): {sorted(infra_nodes)}")
 
     result = propagate(
         data_dir, injections, neighbor_graph, fault_doc, out,
         budget=args.budget, parallel=args.parallel, timeout=args.timeout,
+        infra_nodes=infra_nodes,
     )
     (out / "propagation_trace.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False, default=str)

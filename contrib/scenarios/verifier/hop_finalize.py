@@ -58,6 +58,13 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
     except ImportError:
         return []
     conn = duckdb.connect(":memory:")
+    # Mirror the percentile helpers the query_sql tool registers, so SQL the
+    # agent validated there (p50/p90/p95/p99) also passes verdict validation.
+    for pct in (("p50", "0.5"), ("p90", "0.9"), ("p95", "0.95"), ("p99", "0.99")):
+        try:
+            conn.execute(f"CREATE OR REPLACE MACRO {pct[0]}(x) AS quantile_cont(x, {pct[1]})")
+        except duckdb.Error:
+            pass
     for f in sorted(data_dir.iterdir()):
         if f.is_file() and f.suffix == ".parquet" and f.name != "conclusion.parquet":
             path = f.as_posix().replace("'", "''")
