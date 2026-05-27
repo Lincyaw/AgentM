@@ -2,27 +2,27 @@
 
 These functions scrape a result out of a ``list[AgentMessage]`` produced
 by driving a nested :class:`AgentSession` to completion. They have no I/O
-and no side effects, and import only :mod:`agentm.core.abi.messages`, so
-they are atom-safe and shared by every "spawn a child, collect its
-result" path (the live llmharness adapter, the embedded llmharness
-host-driver, and the sub-agent dispatcher).
+and no side effects, importing only :mod:`agentm.core.abi.messages`.
+
+They are llmharness-internal: the three audit paths that consume them
+(:class:`~llmharness.audit.seams.live.LiveChildRunner`, the embedded
+:func:`~llmharness.tools.engine.run_phase_standalone`, and the runner's
+trajectory serializer) all live in this package. They are deliberately
+NOT in the agentm core tree — llmharness is their sole consumer, and they
+are composed entirely from the public ``core.abi`` surface, so the "keep
+core small; compose existing ABI in contrib" rule applies. Promote to a
+core-tree module (or a registered service) only when a second package
+genuinely needs them.
 
 The two result shapes are:
 
 * a **terminal tool-call's arguments** — what the cognitive-audit
   extractor / auditor children produce (:func:`terminal_tool_arguments`);
-* the child's **final free text** — what a sub-agent task produces
-  (:func:`final_assistant_text`).
-
-They live under ``agentm.extensions`` (allow-listed by the §11 import
-validator) rather than ``core.lib``: ``core.lib`` is the *leaf* utility
-layer (no ``core.abi`` reach), and these helpers depend on
-``core.abi.messages``, so this is their honest home next to
-:mod:`agentm.extensions.child_task`.
+* the child's **final free text** (:func:`final_assistant_text`).
 
 :func:`flatten_assistant_blocks` (via :func:`serialize_block`) produces
 the raw per-block view that the replay sidecar stores verbatim;
-:func:`serialize_block` is public so the llmharness trajectory serializer
+:func:`serialize_block` is public so the runner's trajectory serializer
 shares the single block-shape definition rather than copying it.
 """
 
@@ -103,9 +103,7 @@ def flatten_assistant_blocks(messages: list[AgentMessage]) -> list[dict[str, Any
     return blocks
 
 
-def terminal_tool_arguments(
-    messages: list[AgentMessage], tool_name: str
-) -> dict[str, Any] | None:
+def terminal_tool_arguments(messages: list[AgentMessage], tool_name: str) -> dict[str, Any] | None:
     """Last-match-wins scan for a ``tool_name`` tool-call's arguments.
 
     Reverse-iteration is deliberate: if a child session somehow emitted
