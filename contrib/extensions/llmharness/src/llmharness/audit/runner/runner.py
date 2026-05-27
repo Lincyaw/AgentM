@@ -122,9 +122,7 @@ class ExtractorSettings:
         writes OTLP/JSON ndjson to ``<cwd>/.agentm/observability/<sid>.jsonl``
         just like the live path does, so downstream consumers see
         symmetric traces for live and offline runs. Passing ``None``
-        suppresses the atom entirely, which was the historical default
-        and broke offline-trace parity — see commit log for the
-        ``chained_fork`` investigation that surfaced this.
+        suppresses the atom entirely and breaks offline-trace parity.
         """
         from ..extractor import compose_extractor_extensions
         from ..extractor.prompt import load_extractor_prompt
@@ -144,11 +142,7 @@ class ExtractorSettings:
 
 @dataclass(frozen=True)
 class AuditorSettings:
-    """Per-install knobs for assembling a per-firing auditor extension list.
-
-    Mirrors the live adapter's ``_AuditorSettings`` exactly; field-for-field
-    identical so behaviour matches byte-for-byte.
-    """
+    """Per-install knobs for assembling a per-firing auditor extension list."""
 
     base_prompt: str
     observability_config: dict[str, Any] | None
@@ -434,8 +428,8 @@ class ChildRunner(Protocol):
 class OpSink(Protocol):
     """Where ops + cursor + verdict entries are persisted.
 
-    The live path appends to the AgentM session log; the (P2) offline
-    path is a no-op.
+    The live path appends to the AgentM session log; the offline path
+    captures entries in memory (:class:`InMemorySink`).
     """
 
     def append_op(
@@ -456,13 +450,12 @@ class OpSink(Protocol):
     def append_partial(self, payload: dict[str, Any]) -> None:
         """Persist an ``EXTRACTOR_PARTIAL`` entry without emitting a diagnostic.
 
-        Distinct from :meth:`append_failure` because the legacy
-        ``_drain_extractor`` wrote ``EXTRACTOR_PARTIAL`` via a plain
-        ``api.session.append_entry`` — no ``DiagnosticEvent``. The other
-        failure entries (``EXTRACTOR_NO_CALL`` / ``EXTRACTOR_ERROR`` /
-        ``EXTRACTOR_EMPTY`` / ``AUDIT_NO_CALL`` / ``AUDIT_ERROR``) all
-        kept their diagnostic emission in legacy, so they stay on
-        :meth:`append_failure`.
+        Distinct from :meth:`append_failure`, which co-emits a
+        ``DiagnosticEvent``: a partial commit (some refs dropped on
+        witness failure) is not a failure, so it carries no diagnostic.
+        The genuine failure entries (``EXTRACTOR_NO_CALL`` /
+        ``EXTRACTOR_ERROR`` / ``EXTRACTOR_EMPTY`` / ``AUDIT_NO_CALL`` /
+        ``AUDIT_ERROR``) route through :meth:`append_failure`.
         """
         ...
 
@@ -477,8 +470,6 @@ class ExtractorSpawnError(RuntimeError):
 class SidecarWriter:
     """Wraps :func:`write_record` for a fixed sidecar path.
 
-    Behaviour matches the legacy ``_record_replay_at`` chokepoint
-    byte-for-byte (modulo non-deterministic fields like ``ts_ns``).
     Passing ``path=None`` short-circuits every call.
     """
 
@@ -672,9 +663,8 @@ class HarnessRunner:
         self._provider_extractor = provider_extractor
         self._provider_auditor = provider_auditor
         self._audit_registry = audit_registry
-        # Track whether the most recent extractor firing held the cursor;
-        # mirrors ``_drain_queue``'s ``_last_extractor_held_cursor`` so
-        # the auditor doesn't fire on top of stale state.
+        # Track whether the most recent extractor firing held the cursor,
+        # so the auditor doesn't fire on top of stale state.
         self._last_extractor_held_cursor: bool = False
 
     def set_audit_registry(self, registry: AuditCheckRegistry | None) -> None:
@@ -796,8 +786,6 @@ class HarnessRunner:
                 "nodes": recent_graph_payload,
                 "edges": [ed.to_dict() for ed in edges_cum],
             },
-            # Back-compat for older extractor prompts / replay records. New code
-            # should read graph.{nodes,edges}.
             "recent_graph": recent_graph_payload,
             "recent_edges": [ed.to_dict() for ed in edges_cum],
         }
@@ -882,20 +870,7 @@ class HarnessRunner:
             _record("spawn_error", output=None, error=str(exc))
             return _ExtractorFiringResult(ok=False, cursor_advanced=False, record=synth_record)
 
-        # Commit-on-stop: the child loop terminates naturally on
-        # ModelEndTurn or tool-call budget regardless of whether the
-        # optional ``finalize_extraction`` terminator fired. Every
-        # ``apply_node_upsert`` / ``apply_edge_upsert`` already recorded
-        # its op into ``state.pending_ops``, so freeze the state and
-        # commit from whatever ops were applied. ``finalize`` is
-        # idempotent (no-op when the terminator already finalized) and
-        # its ``not self._events_pending and pending_ops`` branch reads
-        # the op log back into ``events``/``edges`` even when the
-        # terminator was never called.
-        if not state.committed:
-            state.finalize()
-
-        output = RawExtractorOutput.from_state(state)
+        output = RawExtractorOutput.salvage(state)
         has_ops = bool(state.pending_ops)
 
         if not has_ops and not output.dropped_edges:

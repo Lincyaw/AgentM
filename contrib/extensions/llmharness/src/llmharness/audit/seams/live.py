@@ -165,8 +165,7 @@ class LiveOpSink:
 
     All entry-type literals come from :mod:`llmharness.audit.entry_types`;
     failure entries route through :func:`_record_failure` so a
-    :class:`DiagnosticEvent` is co-emitted (matches the legacy
-    ``_record_failure`` chokepoint).
+    :class:`DiagnosticEvent` is co-emitted.
     """
 
     def __init__(self, api: ExtensionAPI) -> None:
@@ -206,11 +205,10 @@ class LiveOpSink:
 
 
 def _record_failure(api: ExtensionAPI, entry_type: str, payload: dict[str, Any]) -> None:
-    """Mirror of the legacy ``adapters.agentm._record_failure`` chokepoint.
+    """Persist a typed failure entry on the branch and emit a diagnostic.
 
-    Persists a typed failure entry on the branch AND emits a
-    :class:`DiagnosticEvent` so the failure shows up in the OTel jsonl.
-    Never raises.
+    Appends the entry AND emits a :class:`DiagnosticEvent` so the failure
+    shows up in the OTel jsonl. Never raises.
     """
     api.session.append_entry(entry_type, payload)
     reason_raw = payload.get("reason") if isinstance(payload, dict) else None

@@ -28,16 +28,13 @@ shares the single block-shape definition rather than copying it.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, Final
 
 from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolCallBlock
 
-# Empty-turn nudge: a reasoning-heavy child can end its turn emitting only
-# prose (zero tool calls), so nothing is recorded. Both child-running seams
-# (live ``run_child_task``, offline ``run_phase_standalone``) re-prompt the
-# SAME session at most this many times with :func:`build_empty_turn_nudge`
-# until at least one tool call appears. Kept here so both seams share one
-# constant and one message — the design's live ≡ offline invariant.
+# Maximum re-prompts :func:`nudge_until_tool_call` issues to a child that
+# emitted zero tool calls. See that helper for the full WHY.
 MAX_EMPTY_TURN_NUDGES: Final = 1
 
 
@@ -139,6 +136,36 @@ def has_any_tool_call(messages: list[AgentMessage]) -> bool:
     return any(block.get("type") == "tool_call" for block in flatten_assistant_blocks(messages))
 
 
+async def nudge_until_tool_call(
+    prompt_fn: Callable[[str], Awaitable[list[AgentMessage]]],
+    messages: list[AgentMessage],
+    terminal_tool: str,
+) -> list[AgentMessage]:
+    """Re-prompt a child that emitted zero tool calls, up to the bound.
+
+    A reasoning-heavy child can end its turn producing only prose (zero
+    tool calls), so nothing is recorded and the firing reports
+    ``no_call``. While the collected ``messages`` carry no tool call,
+    re-prompt the SAME session (``prompt_fn`` is the child's / session's
+    ``prompt`` — the conversation persists across calls) with
+    :func:`build_empty_turn_nudge`, bounded by :data:`MAX_EMPTY_TURN_NUDGES`,
+    and append the returned messages. A ``prompt_fn`` exception breaks the
+    loop and returns whatever messages exist — a nudge must never turn a
+    result into a hard error. Shared by both child-running seams (live
+    ``run_child_task``, offline ``run_phase_standalone``) so the design's
+    live ≡ offline invariant holds.
+    """
+    for _ in range(MAX_EMPTY_TURN_NUDGES):
+        if has_any_tool_call(messages):
+            break
+        try:
+            nudged = await prompt_fn(build_empty_turn_nudge(terminal_tool))
+        except Exception:
+            break
+        messages = messages + nudged
+    return messages
+
+
 def terminal_tool_arguments(messages: list[AgentMessage], tool_name: str) -> dict[str, Any] | None:
     """Last-match-wins scan for a ``tool_name`` tool-call's arguments.
 
@@ -186,6 +213,7 @@ __all__: Final = [
     "final_assistant_text",
     "flatten_assistant_blocks",
     "has_any_tool_call",
+    "nudge_until_tool_call",
     "serialize_block",
     "terminal_tool_arguments",
 ]

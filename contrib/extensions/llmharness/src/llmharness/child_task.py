@@ -41,10 +41,8 @@ from agentm.core.abi.messages import AgentMessage
 from agentm.core.abi.session_config import AgentSessionConfig
 
 from .child_collect import (
-    MAX_EMPTY_TURN_NUDGES,
-    build_empty_turn_nudge,
     final_assistant_text,
-    has_any_tool_call,
+    nudge_until_tool_call,
     terminal_tool_arguments,
 )
 
@@ -130,23 +128,8 @@ async def run_child_task(
             latency_ms=_elapsed_ms(),
         )
 
-    # Empty-turn nudge: a reasoning-heavy child can end its turn emitting
-    # only prose (zero tool calls), so nothing is recorded and the firing
-    # reports ``no_call``. When a terminal tool is expected, re-prompt the
-    # SAME live session (the conversation persists across ``prompt()``
-    # calls) until at least one tool call appears, bounded by
-    # ``MAX_EMPTY_TURN_NUDGES``. A nudge exception breaks the loop and
-    # falls through with whatever messages exist — it must not turn a
-    # result into a hard error.
     if terminal_tool is not None:
-        for _ in range(MAX_EMPTY_TURN_NUDGES):
-            if has_any_tool_call(messages):
-                break
-            try:
-                nudged = await child.prompt(build_empty_turn_nudge(terminal_tool))
-            except Exception:
-                break
-            messages = messages + nudged
+        messages = await nudge_until_tool_call(child.prompt, messages, terminal_tool)
 
     await _safe_shutdown(child)
     latency_ms = _elapsed_ms()

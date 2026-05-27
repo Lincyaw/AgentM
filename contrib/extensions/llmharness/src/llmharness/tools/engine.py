@@ -35,12 +35,7 @@ from agentm.core.runtime.session import AgentSession
 from agentm.core.runtime.session_factory import create_agent_session
 
 from ..audit.seams.session import safe_shutdown
-from ..child_collect import (
-    MAX_EMPTY_TURN_NUDGES,
-    build_empty_turn_nudge,
-    has_any_tool_call,
-    terminal_tool_arguments,
-)
+from ..child_collect import nudge_until_tool_call, terminal_tool_arguments
 from ..replay.record import Status
 
 
@@ -114,21 +109,7 @@ async def run_phase_standalone(
             messages=[],
         )
 
-    # Empty-turn nudge — mirror of ``run_child_task`` so the offline /
-    # replay seam stays behaviourally identical to the live seam: a child
-    # that ends its turn with zero tool calls is re-prompted on the SAME
-    # session (bounded by ``MAX_EMPTY_TURN_NUDGES``) until a tool call
-    # appears. A nudge exception breaks the loop and falls through with
-    # whatever messages exist rather than failing the phase.
-    if terminal_tool is not None:
-        for _ in range(MAX_EMPTY_TURN_NUDGES):
-            if has_any_tool_call(messages):
-                break
-            try:
-                nudged = await session.prompt(build_empty_turn_nudge(terminal_tool))
-            except Exception:
-                break
-            messages = messages + nudged
+    messages = await nudge_until_tool_call(session.prompt, messages, terminal_tool)
 
     await safe_shutdown(session)
     latency_ms = int((time.monotonic() - t0) * 1000)

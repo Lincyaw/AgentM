@@ -972,8 +972,19 @@ requirements:
     depends_on: [REQ-001]
 
   - id: REQ-038
-    title: Fixed-window extractor replay (--window) + cumulative graph dump (--dump-graph)
+    title: Fixed-window extractor replay (--window) + cumulative graph dump (--dump-graph) (CANCELLED)
     description: |
+      CANCELLED 2026-05-27 (consolidation pass): the ``--window`` /
+      ``--dump-graph`` bolt-ons were removed. Re-windowed full-trajectory
+      replay is owned by ``replay_pipeline_over_trajectory`` (REQ-035),
+      which reuses the HarnessRunner's windowing — a second slicer in
+      ``chain`` was a duplicate path. Sidecar emission during replay is the
+      Sink's job (``replay_pipeline_over_trajectory(..., sidecar_path=...)``)
+      and a cumulative-graph view belongs with aggregate, not the bisection
+      command. ``chain`` is back to the diff-bisection tool only.
+
+      Historical description follows.
+
       ``llmharness-replay chain`` gains two diagnostic knobs for iterating
       the extractor over a captured trajectory without re-running the main
       agent:
@@ -1000,9 +1011,7 @@ requirements:
       ``replay_extractor_record`` / ``_absorb_extractor_output`` path; no
       dedicated fail-stop test per the package's fail-stop-only test policy.
     priority: P1
-    status: implemented
-    code:
-      - src/llmharness/replay/chain.py
-      - src/llmharness/replay/cli.py
+    status: deprecated
+    code: []
     tests: []
     depends_on: [REQ-024]

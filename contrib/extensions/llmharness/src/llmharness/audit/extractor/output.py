@@ -35,5 +35,28 @@ class RawExtractorOutput:
             dropped_edges=tuple(state.dropped_edges),
         )
 
+    @classmethod
+    def salvage(cls, state: ExtractionState) -> RawExtractorOutput:
+        """Commit-on-stop chokepoint: finalize if needed, then snapshot.
+
+        The single owner of commit-on-stop for every extractor path —
+        live :meth:`HarnessRunner.fire_extractor_once`, offline
+        full-trajectory replay (same method via the offline seam), and
+        single-firing replay (:func:`replay_extractor_record`). The child
+        loop terminates on ModelEndTurn or the tool-call budget regardless
+        of whether the optional ``finalize_extraction`` terminator fired;
+        every ``apply_node_upsert`` / ``apply_edge_upsert`` already
+        appended its op to ``state.pending_ops``, so freezing the state
+        commits from whatever ops were applied. :meth:`ExtractionState.finalize`
+        is idempotent (no-op when the terminator already finalized) and its
+        ``not _events_pending and pending_ops`` branch reads the op log back
+        into ``events`` / ``edges`` even when the terminator was never
+        called. Reading ops back here keeps the design's live ≡ offline
+        invariant intact.
+        """
+        if not state.committed:
+            state.finalize()
+        return cls.from_state(state)
+
 
 __all__ = ["RawExtractorOutput"]

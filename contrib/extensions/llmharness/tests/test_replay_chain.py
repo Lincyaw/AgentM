@@ -247,6 +247,66 @@ def test_chain_applies_extractor_ops_for_pure_historical_edits(
     assert payloads[2]["graph"]["edges"] == []
 
 
+def test_single_firing_replay_commits_on_stop_without_terminator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-stop (single-firing replay home of commit-on-stop): a child that
+    applies ops but never calls ``finalize_extraction`` is committed.
+
+    The stub mutates the bound ``ExtractionState.pending_ops`` and then
+    returns ``status="no_call"`` (terminator never fired). The shared
+    commit-on-stop chokepoint (``RawExtractorOutput.salvage``) must freeze
+    the state and promote the result to ``ok`` carrying the salvaged op —
+    so single-firing replay matches the live ``HarnessRunner`` path.
+    """
+
+    async def fake_run_phase_standalone(**kwargs: Any) -> PhaseResult:
+        for module, cfg in kwargs["extensions"]:
+            if module == EXTRACTOR_TOOLS_MODULE:
+                state = cfg[EXTRACTOR_STATE_SERVICE_KEY]
+                state.apply_node_upsert(
+                    {
+                        "id": state.next_event_id,
+                        "kind": "task",
+                        "summary": "salvaged node",
+                        "source_turns": [0],
+                    }
+                )
+        return PhaseResult(
+            output=None,
+            status="no_call",
+            error="terminal tool was not called",
+            latency_ms=0,
+            messages=[],
+        )
+
+    monkeypatch.setattr(replay_runner_module, "run_phase_standalone", fake_run_phase_standalone)
+
+    record = ReplayRecord(
+        phase="extractor",
+        turn_index=0,
+        session_id="sess-1",
+        trace_id="trace-1",
+        ts_ns=0,
+        compose_kwargs={},
+        payload={"next_event_id": 1, "new_turns": [], "graph": {"nodes": [], "edges": []}},
+        provider=None,
+        output=None,
+        status="ok",
+        latency_ms=0,
+        extras={"turn_texts": {"0": "salvaged node"}},
+    )
+
+    import asyncio
+
+    result = asyncio.run(replay_extractor_record(record, cwd=str(tmp_path)))
+
+    assert result.status == "ok", "commit-on-stop must promote a no_call firing with ops to ok"
+    assert isinstance(result.output, dict)
+    assert len(result.output["ops"]) == 1
+    assert result.output["events"][0]["summary"] == "salvaged node"
+
+
 def test_extractor_record_replay_hydrates_recent_edges_into_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -479,80 +479,10 @@ class ExtractionState:
         self._refold()
         return self._ops_digest("edge_delete")
 
-    # ------------------------------------------------------------------
-    # Legacy single-shot API (kept for v17 tests and direct callers).
-
     def _concat_turn_texts(self, turn_indices: list[int] | tuple[int, ...]) -> str:
         # Missing turn texts contribute the empty string — the witness
         # check will then naturally fail rather than KeyError out.
         return " ".join(self.turn_texts.get(idx, "") for idx in turn_indices)
-
-    def _pending_event(self, event_id: int) -> tuple[int, Event | None]:
-        for idx, event in enumerate(self._events_pending):
-            if event.id == event_id:
-                return idx, event
-        return -1, None
-
-    def _pending_edge_index(self, selector: dict[str, Any]) -> int | None:
-        src = _coerce_int(selector.get("src"))
-        dst = _coerce_int(selector.get("dst"))
-        kind = selector.get("kind")
-        for idx, edge in enumerate(self._edges_pending):
-            if src is not None and edge.src != src:
-                continue
-            if dst is not None and edge.dst != dst:
-                continue
-            if kind is not None and edge.kind.value != str(kind):
-                continue
-            return idx
-        return None
-
-    def _build_pending_edge(self, raw: dict[str, Any]) -> tuple[str | None, Edge | None]:
-        src = _coerce_int(raw.get("src"))
-        dst = _coerce_int(raw.get("dst"))
-        kind_raw = raw.get("kind")
-        if src is None or dst is None:
-            return "upsert_edge: 'src' and 'dst' must be integers", None
-        src_event = self._pending_event(src)[1]
-        dst_event = self._pending_event(dst)[1]
-        if src_event is None or dst_event is None:
-            return f"upsert_edge: src={src} and dst={dst} must both be pending nodes", None
-        try:
-            kind = EdgeKind(kind_raw)
-        except ValueError:
-            return f"upsert_edge: kind {kind_raw!r} not in {EDGE_KIND_VALUES}", None
-        cited_entities = raw.get("cited_entities", [])
-        cited_quote = str(raw.get("cited_quote", "") or "")
-        if kind is EdgeKind.DATA:
-            if not isinstance(cited_entities, list) or not cited_entities:
-                return "upsert_edge: kind='data' requires non-empty cited_entities", None
-            if any(not isinstance(e, str) or not e for e in cited_entities):
-                return "upsert_edge: cited_entities must be non-empty strings", None
-        else:
-            if not cited_quote:
-                return "upsert_edge: kind='ref' requires non-empty cited_quote", None
-        reason = raw.get("reason", "")
-        if not isinstance(reason, str):
-            return "upsert_edge: reason must be a string", None
-        return None, Edge(
-            src=src,
-            dst=dst,
-            kind=kind,
-            reason=reason,
-            src_turns=tuple(src_event.source_turns),
-            dst_turns=tuple(dst_event.source_turns),
-            cited_entities=tuple(cited_entities or []),
-            cited_quote=cited_quote,
-        )
-
-    def _edit_digest(self, op: str) -> dict[str, Any]:
-        return {
-            "ok": True,
-            "op": op,
-            "pending_nodes": len(self._events_pending),
-            "pending_edges": len(self._edges_pending),
-            "pending_dropped": len(self._dropped_pending),
-        }
 
 
 __all__ = ["ExtractionState"]
