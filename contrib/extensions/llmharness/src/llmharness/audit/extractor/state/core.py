@@ -1,31 +1,31 @@
-"""Per-firing in-memory ``ExtractionState`` for the v3 extractor.
+"""Per-firing in-memory ``ExtractionState`` for the v4 extractor.
 
-V3.1 (events-only single-tool flow): one ``submit_events`` call carries
-the entire graph as a list of events with embedded ``refs[]``. The
-state IS the output: the adapter constructs one ``ExtractionState`` per
-firing, hands it to ``build_extractor_tools`` so the tool callback
-closes over it, and reads ``events`` / ``edges`` / ``dropped_edges``
-back after the child loop terminates.
+Event-sourced incremental flow: each firing edits the graph through the
+``apply_node_upsert`` / ``apply_node_delete`` / ``apply_edge_upsert`` /
+``apply_edge_delete`` surface, which appends a :class:`GraphOp` to
+``pending_ops`` and refolds ``pending_graph``. The state IS the output:
+the adapter constructs one ``ExtractionState`` per firing, binds it into
+the extractor tools, and reads ``events`` / ``edges`` / ``dropped_edges``
+back after :meth:`ExtractionState.finalize` (called explicitly by the
+``finalize_extraction`` terminator or on commit-on-stop).
 
-The validation pipeline runs inside :meth:`ExtractionState.commit`:
+Per-op validation:
 
-1. **events shape**: ``id`` is an int >= ``next_event_id`` (the global
-   cursor the adapter passed in), strictly increasing in submission
-   order, and disjoint from any ``recent_graph`` entry's id. Each
-   ``kind`` is a valid ``EventKind``, ``summary`` non-empty,
-   ``source_turns`` non-empty.
-2. **refs shape**: ``to`` must reference an earlier event id (``< self.id``,
-   guaranteeing no cycles + time-order); ``kind`` is a valid ``EdgeKind``;
-   ``data`` requires non-empty ``cited_entities``; ``ref`` requires
-   non-empty ``cited_quote``.
-3. **witness**: each ref's witnesses must appear (case+ws normalized
-   substring) in at least one endpoint's source-turn text.
+1. **node shape** (:func:`_validate_event_shape`): ``id`` is an int >= 1,
+   resolving against the folded view to an existing node, a node deleted
+   in this firing, or the next free id. ``kind`` is a valid ``EventKind``,
+   ``summary`` non-empty, ``source_turns`` non-empty.
+2. **edge shape**: endpoints must exist in the folded view; ``kind`` is a
+   valid ``EdgeKind``; ``data`` requires non-empty ``cited_entities``;
+   ``ref`` requires a ``cited_quote`` that passes witness.
+3. **witness** (:func:`witness_ref`): a ``ref`` edge's quote must appear
+   (case+ws normalized substring) in at least one endpoint's source-turn
+   text.
 
-If any **event-shape** check fails the whole submission is rejected
-(LLM gets the error in the tool result and may retry, bounded by the
-caller's attempt budget). If shape is fine but some **refs** fail
-witness, those refs are recorded into ``dropped_edges`` and the events
-+ surviving refs are accepted (design §4.f partial-success path).
+A failing op is rejected (the LLM gets the error in the tool result and
+may retry, bounded by the caller's budget); accepted ops accumulate in
+the op log. ``finalize`` reads this firing's emitted nodes + edges back
+out of the folded view.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ....schema import Edge, EdgeKind, Event, ExternalRef
+from ....schema import Edge, EdgeKind, Event
 from ...graph.fold import Graph, fold_graph
 from ...graph.ops import (
     EdgeDelete,
@@ -78,21 +78,11 @@ class ExtractionState:
     # prior history).
     next_event_id: int = 1
 
-    # Frozen results — populated by ``finalize`` (or by the legacy
-    # one-shot ``commit`` for backwards compatibility with the v17 tests).
+    # Frozen results — populated by ``finalize`` from the op log.
     events: tuple[Event, ...] = ()
     edges: tuple[Edge, ...] = ()
     dropped_edges: tuple[dict[str, Any], ...] = ()
     committed: bool = False
-
-    # Pending accumulators for the multi-batch v18 flow. Each successful
-    # ``commit_batch`` appends to these; ``finalize`` runs the
-    # cross-graph degree check on the accumulated pending state and then
-    # freezes them into the public ``events`` / ``edges`` tuples.
-    _events_pending: list[Event] = field(default_factory=list)
-    _edges_pending: list[Edge] = field(default_factory=list)
-    _external_refs_pending: dict[int, list[ExternalRef]] = field(default_factory=dict)
-    _dropped_pending: list[dict[str, Any]] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Event-sourcing op log (2026-05-22 refactor).
@@ -108,20 +98,18 @@ class ExtractionState:
     #
     # ``recent_graph_dict`` / ``recent_edges_dict`` carry the prior-
     # firings view; the adapter populates them in branch order from the
-    # scanned op log. Defaults are empty for first-firing tests and the
-    # legacy ``commit`` / ``commit_batch`` callers that never had a
-    # cumulative graph to start from.
+    # scanned op log. Defaults are empty for the first firing, which has
+    # no cumulative graph to start from.
     recent_graph_dict: dict[int, Event] = field(default_factory=dict)
     recent_edges_dict: dict[tuple[int, int, str], Edge] = field(default_factory=dict)
     pending_ops: list[GraphOp] = field(default_factory=list)
     pending_graph: Graph = field(default_factory=Graph)
 
     def __post_init__(self) -> None:
-        # Seed ``recent_graph_dict`` from the legacy ``recent_graph``
-        # tuple when callers passed only the tuple (every existing test
-        # does this; the adapter populates the dict directly). Keeps
-        # the two views consistent so the new ``apply_*`` surface sees
-        # the same nodes the legacy ``commit`` path does.
+        # Seed ``recent_graph_dict`` from the ``recent_graph`` tuple when
+        # callers passed only the tuple (tests do this; the adapter
+        # populates the dict directly). Keeps the two views consistent so
+        # the ``apply_*`` surface sees the same nodes.
         if self.recent_graph and not self.recent_graph_dict:
             self.recent_graph_dict = {ev.id: ev for ev in self.recent_graph}
         # First fold: the only ops at this point are the recent prefix,
@@ -129,11 +117,9 @@ class ExtractionState:
         if self.recent_graph_dict or self.recent_edges_dict or self.pending_ops:
             self._refold()
         # ``next_event_id`` intentionally NOT auto-derived from
-        # ``recent_graph_dict``: legacy callers and tests rely on the
-        # default of 1 even when ``recent_graph`` is non-empty (the
-        # legacy validation rule didn't reject id collisions with
-        # recent). The adapter sets next_event_id explicitly for live
-        # sessions; tests can override per case.
+        # ``recent_graph_dict``: it defaults to 1 even when
+        # ``recent_graph`` is non-empty. The adapter sets next_event_id
+        # explicitly for live sessions; tests can override per case.
 
     # ------------------------------------------------------------------
     # Public mutators
@@ -157,48 +143,24 @@ class ExtractionState:
         if self.committed:
             return "finalize: firing already finalized"
 
-        # v19 path. The new tool surface (apply_node_upsert /
-        # apply_edge_upsert) only writes to the op log; ``_events_pending``
-        # / ``_edges_pending`` stay empty. Read this firing's emitted
-        # nodes + edges back out of the folded view, scoped to ops the
-        # firing actually appended (so prior-firing nodes that arrived
-        # via ``recent_graph_dict`` don't get re-emitted as fresh audit
-        # entries).
-        if not self._events_pending and self.pending_ops:
-            firing_node_ids = {op.id for op in self.pending_ops if isinstance(op, NodeUpsert)}
-            firing_node_ids -= {op.id for op in self.pending_ops if isinstance(op, NodeDelete)}
-            nodes, edges_view = self._folded_view()
-            firing_events = [nodes[nid] for nid in sorted(firing_node_ids) if nid in nodes]
-            firing_edges = [
-                ed
-                for (src, dst, _kind), ed in edges_view.items()
-                if src in firing_node_ids or dst in firing_node_ids
-            ]
-            self.events = tuple(firing_events)
-            self.edges = tuple(firing_edges)
-            self.dropped_edges = ()
-            self.committed = True
-            return None
-
-        if not self._events_pending:
-            self.events = ()
-            self.edges = ()
-            self.dropped_edges = ()
-            self.committed = True
-            return None
-        finalized: list[Event] = [
-            Event(
-                id=w.id,
-                kind=w.kind,
-                summary=w.summary,
-                source_turns=w.source_turns,
-                external_refs=tuple(self._external_refs_pending.get(w.id, [])),
-            )
-            for w in self._events_pending
+        # The tool surface (apply_node_upsert / apply_edge_upsert) writes
+        # only to the op log. Read this firing's emitted nodes + edges
+        # back out of the folded view, scoped to ops the firing actually
+        # appended (so prior-firing nodes that arrived via
+        # ``recent_graph_dict`` don't get re-emitted as fresh audit
+        # entries). An empty op log commits an empty graph.
+        firing_node_ids = {op.id for op in self.pending_ops if isinstance(op, NodeUpsert)}
+        firing_node_ids -= {op.id for op in self.pending_ops if isinstance(op, NodeDelete)}
+        nodes, edges_view = self._folded_view()
+        firing_events = [nodes[nid] for nid in sorted(firing_node_ids) if nid in nodes]
+        firing_edges = [
+            ed
+            for (src, dst, _kind), ed in edges_view.items()
+            if src in firing_node_ids or dst in firing_node_ids
         ]
-        self.events = tuple(finalized)
-        self.edges = tuple(self._edges_pending)
-        self.dropped_edges = tuple(self._dropped_pending)
+        self.events = tuple(firing_events)
+        self.edges = tuple(firing_edges)
+        self.dropped_edges = ()
         self.committed = True
         return None
 
@@ -214,16 +176,13 @@ class ExtractionState:
         return _compute_degree_warning(list(self.events), list(self.edges))
 
     def reset_pending(self) -> None:
-        """Drop pending batches so the LLM can re-submit from scratch.
+        """Drop this firing's ops so the LLM can re-submit from scratch.
 
         Used by the ``reset_extraction`` tool when the LLM decides its
-        accumulated graph is unrecoverable (e.g. a finalize rejection
-        on degree check that can't be fixed by appending more events).
+        accumulated graph is unrecoverable. Clears ``pending_ops`` and
+        refolds back to the recent-graph prefix; prior-firing state
+        (``recent_graph_dict`` / ``recent_edges_dict``) is untouched.
         """
-        self._events_pending = []
-        self._edges_pending = []
-        self._external_refs_pending = {}
-        self._dropped_pending = []
         self.pending_ops = []
         self._refold()
 
@@ -290,19 +249,6 @@ class ExtractionState:
         is kept in sync via :meth:`_refold` after every accepted op.
         """
         return self.pending_graph.nodes, self.pending_graph.edges
-
-    def _witness_in_turn_texts(self, quote: str, turn_indices: tuple[int, ...] | list[int]) -> bool:
-        """Substring-check ``quote`` against concatenated ``turn_texts``.
-
-        Uses the same case+whitespace normalisation as :mod:`witness` so
-        the gate here is identical to the one applied to in-firing refs
-        in :meth:`_validate_and_append`. Missing turn texts contribute
-        the empty string — the check then naturally fails.
-        """
-        from ..witness import normalize as _normalize
-
-        concat = " ".join(self.turn_texts.get(t, "") for t in turn_indices)
-        return _normalize(quote) in _normalize(concat)
 
     def apply_node_upsert(self, raw: dict[str, Any]) -> dict[str, Any] | str:
         """Validate + apply one ``NodeUpsert`` against the folded view.

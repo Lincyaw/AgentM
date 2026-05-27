@@ -1,14 +1,10 @@
-"""Small helpers that build the state-echo + option suggestions for the
-extractor's three-section error / advisory templates.
+"""Build the state-echo line for the extractor's three-section error /
+advisory templates.
 
 Kept beside the tool files (not promoted to the shared ``audit/``
-namespace) because every shape here is extractor-specific:
-``ExtractionState`` internals, ``EdgeKind`` enum text, the chain-link
-recovery recipe. V4 (2026-05-24): the chain-neighbours helper still
-ships because the soft degree warning surfaced via
-:meth:`ExtractionState.compute_degree_warning` may want to name the
-in/out neighbours of a flagged chain-link node. Used for ADVISORY
-rendering only — never to gate finalize.
+namespace) because the shape here is extractor-specific:
+``ExtractionState`` internals. Used for ADVISORY rendering only — never
+to gate finalize.
 
 Not an atom — pure functions, no MANIFEST, no install hook.
 """
@@ -19,45 +15,26 @@ from .state import ExtractionState
 
 
 def state_echo(state: ExtractionState) -> str:
-    """One-line summary of the currently-accepted (pending) graph.
+    """One-line summary of the currently-folded graph for this firing.
 
-    Lists pending node count, pending edge count, and the last accepted
-    node so the model can locate itself in the trajectory of edits.
-    Returns an empty string when nothing has been accepted yet — the
+    Reads the folded view (recent prefix + this firing's ``pending_ops``)
+    so the model can locate itself in the trajectory of edits: node
+    count, edge count, and the highest-id node currently in the graph.
+    Returns an empty string when this firing has applied no ops — the
     helper renders that as ``(empty)`` per the three-section template.
     """
-    n_nodes = len(state._events_pending)
-    n_edges = len(state._edges_pending)
-    if n_nodes == 0:
+    if not state.pending_ops:
         return ""
-    last = state._events_pending[-1]
+    nodes = state.pending_graph.nodes
+    edges = state.pending_graph.edges
+    if not nodes:
+        return ""
+    last_id = max(nodes)
+    last = nodes[last_id]
     return (
-        f"{n_nodes} node(s), {n_edges} edge(s); last accepted: id={last.id} kind={last.kind.value}"
+        f"{len(nodes)} node(s), {len(edges)} edge(s); "
+        f"last accepted: id={last.id} kind={last.kind.value}"
     )
 
 
-def chain_neighbours(state: ExtractionState, event_id: int) -> tuple[int | None, int | None]:
-    """Return ``(in_neighbour_id, out_neighbour_id)`` for a chain-link node.
-
-    A chain-link event has exactly one predecessor and one successor in
-    the pending in-firing graph; this returns those ids so the advisory
-    text can name them. Returns ``(None, None)`` when the event is not
-    in the pending graph or is not a chain link.
-    """
-    in_neighbour: int | None = None
-    out_neighbour: int | None = None
-    in_count = 0
-    out_count = 0
-    for ed in state._edges_pending:
-        if ed.dst == event_id:
-            in_count += 1
-            in_neighbour = ed.src
-        if ed.src == event_id:
-            out_count += 1
-            out_neighbour = ed.dst
-    if in_count == 1 and out_count == 1:
-        return in_neighbour, out_neighbour
-    return None, None
-
-
-__all__ = ["chain_neighbours", "state_echo"]
+__all__ = ["state_echo"]
