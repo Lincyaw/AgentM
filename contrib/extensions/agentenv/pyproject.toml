@@ -1,0 +1,44 @@
+[project]
+name = "agentm-agentenv"
+version = "0.1.0"
+description = "AgentM ⟷ ARL agent-env sandbox integration (operations_agent_env atom + agent_env_repo scenario), published as entry-point plugins."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "AgentM contributors" }]
+# `agentm` is supplied by the parent workspace (path install) and intentionally
+# omitted to avoid a circular edge, like the other workspace members.
+# `arl-env` is a HARD dependency here: this package *is* the agent-env
+# integration. The "optional" boundary is whether you install THIS package
+# (via `agentm[agent-env]`), not an extra inside it.
+dependencies = [
+    "arl-env>=0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+
+# === The consistent "publish a plugin" surface ===
+# Any installed distribution registers atoms / scenarios under these groups;
+# AgentM discovers them by name from a wheel (discover.discover_entrypoint_atoms,
+# loader._resolve_scenario_entrypoint). Mirrors the existing agentm.subcommands
+# group used by agentm-channels.
+[project.entry-points."agentm.atoms"]
+operations_agent_env = "agentm_agentenv.operations_agent_env"
+
+[project.entry-points."agentm.scenarios"]
+agent_env_repo = "agentm_agentenv.agent_env_repo"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentm_agentenv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra"]

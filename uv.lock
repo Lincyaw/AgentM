@@ -16,6 +16,7 @@ resolution-markers = [
 [manifest]
 members = [
     "agentm",
+    "agentm-agentenv",
     "agentm-channels",
     "agentm-feishu",
     "agentm-mcp-bridge",
@@ -46,7 +47,7 @@ dependencies = [
 
 [package.optional-dependencies]
 agent-env = [
-    { name = "arl-env" },
+    { name = "agentm-agentenv" },
 ]
 
 [package.dev-dependencies]
@@ -62,8 +63,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agentm-agentenv", marker = "extra == 'agent-env'", editable = "contrib/extensions/agentenv" },
     { name = "anthropic", specifier = ">=0.86.0" },
-    { name = "arl-env", marker = "extra == 'agent-env'", specifier = ">=0.2.0" },
     { name = "openai", specifier = ">=1.50.0" },
     { name = "opentelemetry-api", specifier = ">=1.30.0" },
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.30.0" },
@@ -87,6 +88,28 @@ dev = [
     { name = "types-pyyaml", specifier = ">=6.0.12.20250915" },
     { name = "types-tqdm", specifier = ">=4.66.0.20240417" },
 ]
+
+[[package]]
+name = "agentm-agentenv"
+version = "0.1.0"
+source = { editable = "contrib/extensions/agentenv" }
+dependencies = [
+    { name = "arl-env" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "arl-env", specifier = ">=0.2.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "agentm-channels"

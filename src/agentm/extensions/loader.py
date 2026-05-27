@@ -116,6 +116,60 @@ def _resolve_scenario_manifest(name_or_path: str, relative: Path) -> Path:
     )
 
 
+def _resolve_scenario_entrypoint(name: str) -> Path | None:
+    """Resolve a scenario *name* to an on-disk ``manifest.yaml`` via an
+    installed package's ``agentm.scenarios`` entry point.
+
+    Convention (mirrors the ``agentm.subcommands`` / ``agentm.atoms`` groups):
+
+        [project.entry-points."agentm.scenarios"]
+        my_scenario = "my_pkg.scenarios.my_scenario"   # package holding manifest.yaml
+
+    The entry-point *name* is the scenario name; the *value* is an importable
+    package whose directory contains ``manifest.yaml`` (and whose final path
+    component equals the scenario name, satisfying the dir-name == scenario-name
+    contract). This lets a scenario ship as a pip package and resolve by name
+    from a wheel — no source checkout, no ``AGENTM_PROJECT_ROOT``, no path.
+
+    Returns the manifest ``Path`` (filesystem-backed; scenarios need a real
+    directory for sibling ``local:`` atoms and import roots), or ``None`` when
+    no entry point matches or it cannot be made concrete.
+    """
+
+    try:
+        from importlib.metadata import entry_points
+        from importlib.resources import files
+    except Exception:  # noqa: BLE001 — importlib always present on 3.12; defensive
+        return None
+
+    try:
+        eps = entry_points(group="agentm.scenarios")
+    except Exception:  # noqa: BLE001 — never let discovery break loading
+        return None
+
+    for ep in eps:
+        if ep.name != name:
+            continue
+        try:
+            manifest = files(ep.value) / "manifest.yaml"
+        except (ModuleNotFoundError, TypeError):
+            continue
+        # Scenarios require a real on-disk directory (sibling ``local:`` atoms,
+        # import roots), so demand a filesystem-backed resource: os.fspath()
+        # succeeds for unpacked installs (the only kind AgentM supports) and
+        # raises for zipped ones, which we skip rather than hand back an
+        # unusable path. (No ``as_file`` — its temp extraction would be
+        # deleted on context exit, and a single file can't satisfy a
+        # scenario's sibling-file needs anyway.)
+        try:
+            concrete = Path(os.fspath(manifest))
+        except TypeError:
+            continue
+        if concrete.is_file():
+            return concrete
+    return None
+
+
 def load_scenario(name_or_path: str) -> list[tuple[str, dict[str, Any]]]:
     """Resolve and parse a scenario manifest.
 
@@ -151,21 +205,34 @@ def load_scenario_with_meta(
                 ),
             )
     else:
-        if ":" in name_or_path:
-            base, _, variant = name_or_path.rpartition(":")
-            if not base or not variant:
-                raise ScenarioLoadError(
-                    name_or_path,
-                    ValueError(
-                        f"scenario variant must be '<name>:<variant>'; got {name_or_path!r}"
-                    ),
-                )
-            relative = Path("contrib") / "scenarios" / base / f"manifest.{variant}.yaml"
+        # Prefer an installed plugin's ``agentm.scenarios`` entry point (the
+        # canonical "publish a scenario as a pip package" path — works from a
+        # wheel with no source checkout). Variants (``name:variant``) remain
+        # path-only. Fall back to the on-disk contrib/scenarios roots so
+        # in-repo scenarios keep resolving unchanged.
+        ep_manifest = (
+            _resolve_scenario_entrypoint(name_or_path)
+            if ":" not in name_or_path
+            else None
+        )
+        if ep_manifest is not None:
+            manifest_path = ep_manifest
         else:
-            relative = (
-                Path("contrib") / "scenarios" / name_or_path / "manifest.yaml"
-            )
-        manifest_path = _resolve_scenario_manifest(name_or_path, relative)
+            if ":" in name_or_path:
+                base, _, variant = name_or_path.rpartition(":")
+                if not base or not variant:
+                    raise ScenarioLoadError(
+                        name_or_path,
+                        ValueError(
+                            f"scenario variant must be '<name>:<variant>'; got {name_or_path!r}"
+                        ),
+                    )
+                relative = Path("contrib") / "scenarios" / base / f"manifest.{variant}.yaml"
+            else:
+                relative = (
+                    Path("contrib") / "scenarios" / name_or_path / "manifest.yaml"
+                )
+            manifest_path = _resolve_scenario_manifest(name_or_path, relative)
 
     extensions = _load_from_path(manifest_path)
     try:

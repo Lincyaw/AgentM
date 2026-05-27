@@ -25,6 +25,9 @@ _MOD_PATH = (
     Path(__file__).resolve().parents[3]
     / "contrib"
     / "extensions"
+    / "agentenv"
+    / "src"
+    / "agentm_agentenv"
     / "operations_agent_env.py"
 )
 
