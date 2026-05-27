@@ -38,6 +38,7 @@ from typing import Any, Final, Protocol
 
 from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolResultMessage
 from agentm.core.abi.session import SessionEntry
+from agentm.core.lib.child_collect import flatten_assistant_blocks as _flatten_assistant_blocks
 
 from ...replay.record import ReplayRecord, now_ns, write_record
 from ...schema import Edge, Event, Phase, Reminder, Verdict
@@ -647,21 +648,6 @@ def _serialize_full_trajectory(messages: list[AgentMessage]) -> list[dict[str, A
         if serialized is not None:
             out.append(serialized)
     return out
-
-
-def _flatten_assistant_blocks(messages: list[AgentMessage]) -> list[dict[str, Any]]:
-    blocks: list[dict[str, Any]] = []
-    for msg in messages:
-        if not isinstance(msg, AssistantMessage):
-            continue
-        content = getattr(msg, "content", None)
-        if not isinstance(content, list):
-            continue
-        for blk in content:
-            serialized = _serialize_block(blk)
-            if serialized is not None:
-                blocks.append(serialized)
-    return blocks
 
 
 # --- runner -----------------------------------------------------------------

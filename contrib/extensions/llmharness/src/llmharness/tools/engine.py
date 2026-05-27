@@ -5,9 +5,11 @@ Replay path: this module creates a brand-new top-level session with the
 same extensions and pumps the recorded payload through it.
 
 Both paths share :mod:`llmharness.audit.{extractor,auditor}.extensions`
-composers and the helpers in :mod:`llmharness.audit.seams.session`,
-so the system prompt, tool surface, and payload shape are identical to
-a live firing.
+composers, the terminal-tool scraper in
+:mod:`agentm.core.lib.child_collect`, and the shutdown helper in
+:mod:`llmharness.audit.seams.session`, so the system prompt, tool
+surface, payload shape, and collect contract are identical to a live
+firing.
 
 Boundary: this module is a host-side driver (not a §11 atom — no
 ``MANIFEST`` / ``install`` pair, never named in a scenario manifest), so
@@ -25,6 +27,7 @@ from typing import Any
 
 from agentm.core.abi.messages import AgentMessage
 from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.lib.child_collect import terminal_tool_arguments
 
 # Both imports are runtime-required: ``AgentSession`` is passed as a
 # positional argument to ``create_agent_session(AgentSession, config)``,
@@ -32,7 +35,7 @@ from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
 from agentm.core.runtime.session_factory import create_agent_session
 
-from ..audit.seams.session import find_terminal_tool_arguments, safe_shutdown
+from ..audit.seams.session import safe_shutdown
 from ..replay.record import Status
 
 
@@ -109,7 +112,7 @@ async def run_phase_standalone(
     await safe_shutdown(session)
     latency_ms = int((time.monotonic() - t0) * 1000)
 
-    args = find_terminal_tool_arguments(messages, terminal_tool)
+    args = terminal_tool_arguments(messages, terminal_tool)
     if args is None:
         return PhaseResult(
             output=None,

@@ -1,20 +1,17 @@
 """Session-orchestration utilities shared by the live adapter and the
 offline replay runner.
 
-The two paths spawn audit children with the same extension list and
-drive them to the same terminal tool — the only difference is that the
-live adapter calls ``api.spawn_child_session`` (bus-parented) while
-replay calls ``create_agent_session`` (top-level). Extension binding,
-terminal-tool lookup, and shutdown semantics are identical between
-them, so they live here.
+Terminal-tool argument scraping now lives in
+:func:`agentm.core.lib.child_collect.terminal_tool_arguments` (shared
+across the live and embedded paths); this module keeps the
+extractor-state binding and the best-effort child-shutdown helper used
+by the embedded host-driver.
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Any
-
-from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolCallBlock
 
 from ..extractor.state import ExtractionState
 from ..toolkit.atom_constants import (
@@ -23,24 +20,6 @@ from ..toolkit.atom_constants import (
 )
 
 _logger = logging.getLogger(__name__)
-
-
-def find_terminal_tool_arguments(
-    messages: list[AgentMessage], tool_name: str
-) -> dict[str, Any] | None:
-    """Last-match-wins scan for a ``tool_name`` ToolCallBlock's arguments.
-
-    Reverse-iteration matches the live adapter's choice — if a child
-    session somehow emitted the terminal tool twice (kernel re-issue,
-    flaky stream), we want the *latest* submission.
-    """
-    for msg in reversed(messages):
-        if not isinstance(msg, AssistantMessage):
-            continue
-        for block in reversed(msg.content):
-            if isinstance(block, ToolCallBlock) and block.name == tool_name:
-                return dict(block.arguments)
-    return None
 
 
 async def safe_shutdown(session: Any) -> None:
