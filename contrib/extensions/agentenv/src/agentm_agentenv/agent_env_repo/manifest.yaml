@@ -20,7 +20,7 @@ description: |
 extensions:
   # Sandbox-backed Operations bundle (bash + file I/O against /workspace),
   # with bidirectional host-repo sync turned on.
-  - module: _agentm_contrib__operations_agent_env
+  - module: agentm_agentenv.operations_agent_env
     config:
       # image / experiment_id / gateway_url / namespace fall back to env vars
       # (AGENTM_AGENT_ENV_*) exactly as in the agent_env scenario.

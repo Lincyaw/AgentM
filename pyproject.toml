@@ -29,10 +29,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Backs the ``operations_agent_env`` atom with the ARL agent-env Python SDK.
-# Install with: ``uv sync --extra agent-env``.
+# Pulls in the ``agentm-agentenv`` plugin distribution, which carries the ARL
+# agent-env SDK dependency (arl-env) AND registers the ``operations_agent_env``
+# atom + ``agent_env_repo`` scenario via entry points. Install with
+# ``uv sync --extra agent-env`` (workspace) or ``pip install agentm[agent-env]``.
 agent-env = [
-    "arl-env>=0.2.0",
+    "agentm-agentenv",
 ]
 
 [dependency-groups]
@@ -53,14 +55,12 @@ agentm = "agentm:main"
 requires = ["uv_build>=0.10.9,<0.11.0"]
 build-backend = "uv_build"
 
-[tool.setuptools.package-data]
-agentm = ["py.typed"]
-
 [tool.uv.workspace]
 # Explicitly list nested projects under contrib/. Other contrib/scenarios/*
 # entries are pure manifests with no pyproject.toml and must NOT be picked
 # up as workspace members.
 members = [
+    "contrib/extensions/agentenv",
     "contrib/extensions/llmharness",
     "contrib/extensions/mcp_bridge",
     "contrib/scenarios/rca",
@@ -70,6 +70,11 @@ members = [
     "contrib/channels-clients/feishu",
     "contrib/channels-clients/worker",
 ]
+
+# Resolve the agent-env plugin to the in-workspace member (editable) for dev;
+# a published wheel takes over transparently outside the workspace.
+[tool.uv.sources]
+agentm-agentenv = { workspace = true }
 
 [tool.pytest.ini_options]
 # UI tests exercise the Textual TUI; they pass but don't map to any
@@ -84,7 +89,7 @@ markers = [
 # Nested workspace projects own their own tests/ trees and pyproject. The
 # top-level pytest must not recurse into them — both define a ``tests``
 # package and the import paths collide.
-addopts = "-m 'not ui' --ignore=contrib/extensions/llmharness --ignore=contrib/extensions/mcp_bridge --ignore=contrib/scenarios/rca --ignore=contrib/scenarios/rca_hfsm --ignore=contrib/channels --ignore=contrib/channels-clients"
+addopts = "-m 'not ui' --ignore=contrib/extensions/agentenv --ignore=contrib/extensions/llmharness --ignore=contrib/extensions/mcp_bridge --ignore=contrib/scenarios/rca --ignore=contrib/scenarios/rca_hfsm --ignore=contrib/channels --ignore=contrib/channels-clients"
 
 [tool.mypy]
 python_version = "3.12"

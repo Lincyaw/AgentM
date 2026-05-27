@@ -29,7 +29,7 @@ extensions:
   # --- environment ports: swap the default operations_local for a
   # sandbox-backed bundle. Bash and file I/O both target /workspace
   # inside the warm pod. ---
-  - module: _agentm_contrib__operations_agent_env
+  - module: agentm_agentenv.operations_agent_env
     config:
       # Default path: managed pool. The gateway provisions and scales the pod
       # from ``image`` automatically — no pre-applied WarmPool required.

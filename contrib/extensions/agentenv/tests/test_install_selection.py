@@ -99,7 +99,7 @@ def _load_atom() -> Any:
     # The contrib/extensions package is on sys.path via the project's pytest
     # config; importing by dotted name keeps mypy/ruff happy.
     return importlib.import_module(
-        "contrib.extensions.operations_agent_env"
+        "agentm_agentenv.operations_agent_env"
     )
 
 
