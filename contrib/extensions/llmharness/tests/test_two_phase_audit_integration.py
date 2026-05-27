@@ -68,7 +68,7 @@ from llmharness.audit.extractor import FINALIZE_EXTRACTION_TOOL_NAME
 # --- shared constants -------------------------------------------------------
 
 _EXTRACTOR_PROMPT_NEEDLE = "cognitive-audit graph maintainer"
-_AUDITOR_PROMPT_NEEDLE = "cognitive-audit *auditor*"
+_AUDITOR_PROMPT_NEEDLE = "cognitive-audit auditor"
 
 # Witnessable quote — the parent's reply embeds this fixed phrase so a
 # ``ref`` ref using it as ``cited_quote`` will pass the witness check.
