@@ -50,16 +50,14 @@ def _validate_event_shape(idx: int, raw: dict[str, Any]) -> tuple[str | None, Ev
         return f"upsert_node: events[{idx}].summary must be a non-empty string", None
     if not isinstance(source_turns_raw, list) or not source_turns_raw:
         return (
-            f"upsert_node: events[{idx}].source_turns must be a non-empty "
-            "array of integers",
+            f"upsert_node: events[{idx}].source_turns must be a non-empty array of integers",
             None,
         )
     source_turns: list[int] = []
     for t in source_turns_raw:
         if isinstance(t, bool) or not isinstance(t, int):
             return (
-                f"upsert_node: events[{idx}].source_turns contains "
-                f"non-integer entry {t!r}",
+                f"upsert_node: events[{idx}].source_turns contains non-integer entry {t!r}",
                 None,
             )
         source_turns.append(t)
@@ -100,14 +98,11 @@ def _compute_degree_warning(
             in_deg[ed.dst] += 1
         if ed.src in out_deg:
             out_deg[ed.src] += 1
-    chain_links: list[Event] = [
-        ev for ev in events if in_deg[ev.id] == 1 and out_deg[ev.id] == 1
-    ]
+    chain_links: list[Event] = [ev for ev in events if in_deg[ev.id] == 1 and out_deg[ev.id] == 1]
     if not chain_links:
         return None
     lines = [
-        f"  event[{ev.id}] kind={ev.kind.value} "
-        f"'{ev.summary[:70]}': in=1, out=1"
+        f"  event[{ev.id}] kind={ev.kind.value} '{ev.summary[:70]}': in=1, out=1"
         for ev in chain_links
     ]
     return (
@@ -120,8 +115,7 @@ def _compute_degree_warning(
         "you didn't emit a node for it, add one in a follow-up "
         "firing. Aim for compact graphs but do NOT fabricate refs "
         "just to satisfy this heuristic.\n"
-        "Chain-link events:\n"
-        + "\n".join(lines)
+        "Chain-link events:\n" + "\n".join(lines)
     )
 
 

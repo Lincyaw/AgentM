@@ -128,8 +128,10 @@ repair the old graph before adding new nodes.
    old node boundary is wrong.
 
 4. Extract any new semantic events from the new window.
-   Coalesce straight-line work into one `act` node when it serves one
-   purpose. Split nodes only when:
+   Coalesce straight-line work into one `act` node only when it stays on
+   the same target, asks the same local question, and uses the same
+   evidence type. A broad task such as "investigate the outage" or
+   "debug the failure" is not a local question. Split nodes when:
    - a new hypothesis is formed;
    - the plan or target changes;
    - the agent changes service, file, data class, or investigation
@@ -161,13 +163,14 @@ unchanged and add only the necessary new edits.
 
 ## Node cutting rules
 
-Carve at branch points and coalesce linear stretches.
+Carve at branch points and coalesce local linear stretches.
 
 A branch point is a semantic reasoning move: a `hyp` is formed, a `dec`
 is made, or a `concl` is reached. Between branch points, the agent may
-run several tool calls in service of one bet. Collapse that whole
-stretch into one `act` node whose `summary` records the probes and
-results in time order.
+run several tool calls in service of one local bet. Collapse that stretch
+into one `act` node only when the target, question, and evidence type do
+not change. The user task is not itself the bet; it is the umbrella under
+which smaller bets are made.
 
 Parameter variation on the same target is not a new act. Three queries
 against `ts-consign` over three time windows are one `act` listing each
@@ -199,9 +202,11 @@ Use these meanings consistently:
 
 ## Merge triggers
 
-Merge is the normal repair for over-cut graphs. If a node does not
-carry independent semantic value for the auditor, fold it into the
-nearest node that already represents the same line of work.
+Merge is a repair for over-cut graphs, not a preference for fewer nodes.
+If a node does not carry independent semantic value for the auditor, fold
+it into the nearest node that already represents the same line of work.
+If a node would still be useful as a parent of a later `hyp`, `dec`, or
+`concl`, keep it separate.
 
 Prefer merging a node when most of these are true:
 
@@ -385,52 +390,83 @@ texts when citing entities or quotes.
 ## Examples
 
 <examples>
-<example name="coalesce linear tool use">
-If turns 10, 11, and 12 are three searches against the same file for the
-same purpose, create one `act` node with `source_turns: [10, 11, 12]`.
-Its summary should list each query and the key result. Do not create
-three separate `act` nodes unless the target or reasoning branch changed.
-</example>
+<example name="RCA case with both merge and split">
+Input pattern:
+- turns first list available Parquet tables, inspect
+  `abnormal_traces.parquet`, run one query that fails because dotted
+  column names were not quoted, then rerun the same query successfully;
+- the successful trace query finds `search` has a 427x slowdown and
+  `frontend` has a 213x slowdown;
+- later turns compare normal vs abnormal CPU for `search` and find only
+  a minimal CPU difference;
+- later turns compare `search` client spans with `rate` server spans and
+  find the `search` side of `rate.Rate/GetRates` is much slower.
 
-<example name="merge setup and retry details">
-If one node only lists available Parquet tables, the next node is a
-failed query caused by using file paths instead of table names, and the
-next node reruns the same query successfully with corrected table names,
-merge those details into one `act` unless a later branch cites the
-listing or syntax error independently. The surviving summary should say
-the agent listed the tables, hit the table-name syntax error, and then
-retried successfully. Do not keep the table listing or syntax retry as
-standalone nodes merely because they happened in separate turns.
-</example>
+Graph cut:
+- merge the table listing, schema inspection, failed query, and corrected
+  retry into the affected-service trace `act`;
+- keep the affected-service trace evidence as one `act`;
+- keep the CPU comparison as a separate `act`;
+- keep the `search` to `rate` span comparison as a separate `act` or
+  `hyp`, depending on whether the agent only observes the span gap or
+  commits to a network-delay explanation.
 
-<example name="do not merge exclusion evidence">
-If one `act` checks CPU, another checks DB connection pool metrics, and
-the final conclusion says CPU and DB pool saturation are not root causes,
-do not merge those acts away as generic resource checks. They are
-independent exclusion evidence and the `concl` should cite each
-substantive exclusion branch.
+Why:
+The setup and retry turns are mechanics inside the trace probe: same
+target, same local question, same evidence type. The CPU comparison and
+the cross-service span comparison answer different local questions with
+different evidence types. They may become separate parents of a later
+root-cause conclusion, so folding them into the affected-service trace
+`act` would lose semantic structure.
 </example>
 
 <example name="revise old hypothesis">
-If `graph.nodes` has node 4 as `hyp`: "The bug is likely in auth.py",
-and the new turns inspect `auth.py` and find no relevant code, revise
-node 4 if the hypothesis is now known to be refuted or abandoned. Then
-add an edge from the new inspection `act` to node 4 with a reason such
-as "refutes the auth.py hypothesis".
+Input pattern:
+- `graph.nodes` has node 4 as `hyp`: "The bug is likely in auth.py";
+- the new turns inspect `auth.py` and find no relevant code.
+
+Graph cut:
+- revise node 4 if the hypothesis is now known to be refuted or
+  abandoned;
+- add an edge from the new inspection `act` to node 4 with a reason such
+  as "refutes the auth.py hypothesis".
+
+Why:
+The old hypothesis remains a semantic branch. Later evidence changes its
+status; it should not be deleted as if the branch never existed.
 </example>
 
 <example name="rewrite bad historical cut">
-If an earlier firing created three adjacent `act` nodes for one linear
-investigation, and the new window makes clear they were one uninterrupted
-probe, delete the extra nodes, upsert the canonical `act` with a summary
-covering the whole stretch, and recreate only the dependency edges that
-still represent real causal structure.
+Input pattern:
+- an earlier firing created three adjacent `act` nodes;
+- all three nodes inspect the same target with the same evidence type;
+- the new window makes clear they were one uninterrupted probe.
+
+Graph cut:
+- delete the extra nodes;
+- upsert the canonical `act` with a summary covering the whole stretch;
+- recreate only the dependency edges that still represent real causal
+  structure.
+
+Why:
+This is over-cut execution detail. The auditor would not lose a distinct
+branch if the three nodes became one.
 </example>
 
 <example name="multi-parent conclusion">
-If the final answer depends on the user task, a narrowed hypothesis, a
-filesystem search, and a test result, create one `concl` node and add
-edges from that `concl` to each substantive parent. Do not connect the
-conclusion only to the immediately previous test result.
+Input pattern:
+- the final answer depends on the user task;
+- it relies on a narrowed hypothesis;
+- it cites a filesystem search and a test result.
+
+Graph cut:
+- create one `concl` node;
+- add edges from that `concl` to each substantive parent;
+- do not connect the conclusion only to the immediately previous test
+  result.
+
+Why:
+The conclusion depends on multiple semantic branches, not just transcript
+adjacency.
 </example>
 </examples>

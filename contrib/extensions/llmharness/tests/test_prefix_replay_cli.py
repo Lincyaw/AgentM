@@ -71,15 +71,13 @@ def _make_source_session(
             },
         )
         if i < n_turns - 1:
-            mgr.append(message_entry(text_message(f"user {i+1}"), mgr.get_leaf_id()))
+            mgr.append(message_entry(text_message(f"user {i + 1}"), mgr.get_leaf_id()))
     session_file = mgr.session_file
     assert session_file is not None
     return mgr, session_file
 
 
-def _write_audit_record(
-    *, sidecar_path: Path, session_id: str, turn: int, reminder: str
-) -> None:
+def _write_audit_record(*, sidecar_path: Path, session_id: str, turn: int, reminder: str) -> None:
     rec = ReplayRecord(
         phase="auditor",
         turn_index=turn,
@@ -108,9 +106,7 @@ def test_agent_from_reminder_branches_at_turn_and_prints_command(
     audit_dir = tmp_path / ".agentm" / "audit_replay"
     audit_dir.mkdir(parents=True)
 
-    source_mgr, source_file = _make_source_session(
-        session_dir=session_dir, cwd=cwd, n_turns=5
-    )
+    source_mgr, source_file = _make_source_session(session_dir=session_dir, cwd=cwd, n_turns=5)
     root_id = source_mgr.get_session_id()
 
     # turn=3 means the auditor record was emitted at trajectory index 3
@@ -190,7 +186,3 @@ def test_agent_from_reminder_branches_at_turn_and_prints_command(
     assert "llmharness.replay.reminder_seed" in result.stdout
     assert "llmharness.adapters.agentm" in result.stdout
     assert "enable_reminders" in result.stdout
-
-
-
-

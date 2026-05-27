@@ -106,9 +106,7 @@ def _parse_provider(spec: str | None) -> tuple[str, dict[str, Any]] | None:
         try:
             cfg = json.loads(payload)
         except json.JSONDecodeError as exc:
-            raise typer.BadParameter(
-                f"--provider config is not valid JSON: {exc}"
-            ) from exc
+            raise typer.BadParameter(f"--provider config is not valid JSON: {exc}") from exc
         if not isinstance(cfg, dict):
             raise typer.BadParameter("--provider config JSON must be an object")
         return module.strip(), cfg
@@ -140,9 +138,7 @@ def _load_prompt_override(path: str | None) -> str | None:
     return p.read_text(encoding="utf-8")
 
 
-def _pick_record(
-    path: Path, *, phase: Phase, turn: int | None, index: int | None
-) -> ReplayRecord:
+def _pick_record(path: Path, *, phase: Phase, turn: int | None, index: int | None) -> ReplayRecord:
     # When --turn is given we only need the last match — stream-iterate
     # to avoid loading the entire sidecar (tens of MB on a 50-case run).
     if turn is not None:
@@ -151,9 +147,7 @@ def _pick_record(
             if rec.phase == phase and rec.turn_index == turn:
                 latest = rec
         if latest is None:
-            typer.echo(
-                f"no {phase} record with turn_index={turn} in {path}", err=True
-            )
+            typer.echo(f"no {phase} record with turn_index={turn} in {path}", err=True)
             raise typer.Exit(code=1)
         return latest
 
@@ -181,9 +175,7 @@ def _print_result(result: PhaseResult, recorded: ReplayRecord, *, diff: bool) ->
         typer.echo(json.dumps(result.output, ensure_ascii=False, indent=2, default=str))
     if diff:
         typer.echo("\n--- recorded output ---")
-        typer.echo(
-            json.dumps(recorded.output or {}, ensure_ascii=False, indent=2, default=str)
-        )
+        typer.echo(json.dumps(recorded.output or {}, ensure_ascii=False, indent=2, default=str))
 
 
 # --- shared option type aliases --------------------------------------------
@@ -191,19 +183,13 @@ def _print_result(result: PhaseResult, recorded: ReplayRecord, *, diff: bool) ->
 # default values (the form ruff flags as B008) while staying compatible
 # with typer's annotation reader.
 
-_RecordOpt = Annotated[
-    Path, typer.Option(..., "--record", help="Path to audit_replay/<id>.jsonl")
-]
+_RecordOpt = Annotated[Path, typer.Option(..., "--record", help="Path to audit_replay/<id>.jsonl")]
 _TurnOpt = Annotated[
     int | None,
     typer.Option("--turn", help="Pick by turn_index (last match wins)"),
 ]
-_IndexOpt = Annotated[
-    int | None, typer.Option("--index", help="Pick by 0-based filtered index")
-]
-_CwdOpt = Annotated[
-    Path, typer.Option("--cwd", help="Working directory for the replay session")
-]
+_IndexOpt = Annotated[int | None, typer.Option("--index", help="Pick by 0-based filtered index")]
+_CwdOpt = Annotated[Path, typer.Option("--cwd", help="Working directory for the replay session")]
 _ProviderOpt = Annotated[
     str | None,
     typer.Option(
@@ -215,9 +201,7 @@ _PromptOverrideOpt = Annotated[
     str | None,
     typer.Option("--prompt-override", help="Path to system-prompt override"),
 ]
-_DiffOpt = Annotated[
-    bool, typer.Option("--diff", help="Also print recorded output for comparison")
-]
+_DiffOpt = Annotated[bool, typer.Option("--diff", help="Also print recorded output for comparison")]
 
 
 # --- commands ----------------------------------------------------------------
@@ -348,13 +332,9 @@ def list_records(
     if not rows:
         typer.echo(f"no matching records in {record}", err=True)
         raise typer.Exit(code=1)
-    typer.echo(
-        f"{'idx':>4}  {'phase':<10}  {'turn':>4}  {'status':<12}  {'latency_ms':>10}"
-    )
+    typer.echo(f"{'idx':>4}  {'phase':<10}  {'turn':>4}  {'status':<12}  {'latency_ms':>10}")
     for i, ph, turn_idx, status, latency in rows:
-        typer.echo(
-            f"{i:>4}  {ph:<10}  {turn_idx:>4}  {status:<12}  {latency:>10}"
-        )
+        typer.echo(f"{i:>4}  {ph:<10}  {turn_idx:>4}  {status:<12}  {latency:>10}")
 
 
 @app.command()
@@ -436,9 +416,7 @@ def agent_from_reminder(
     ],
     turn: Annotated[
         int,
-        typer.Option(
-            ..., "--turn", help="turn_index of the auditor record carrying the reminder"
-        ),
+        typer.Option(..., "--turn", help="turn_index of the auditor record carrying the reminder"),
     ],
     session_dir: Annotated[
         Path | None,
@@ -513,10 +491,7 @@ def agent_from_reminder(
         return
     resolved_out_dir = out_dir if out_dir is not None else audit_replay.parent
     resolved_out_dir.mkdir(parents=True, exist_ok=True)
-    script_path = (
-        resolved_out_dir
-        / f"replay-{plan.branched_session_id}-t{turn}.sh"
-    )
+    script_path = resolved_out_dir / f"replay-{plan.branched_session_id}-t{turn}.sh"
     script_path.write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n" + plan.command + "\n",
         encoding="utf-8",

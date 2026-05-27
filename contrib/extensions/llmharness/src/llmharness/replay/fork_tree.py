@@ -209,17 +209,10 @@ def forktree_replay_path(cwd: str | Path, root_session_log_id: str) -> Path:
     suffix so the existing case-viewer discovery (via the root run's
     ``audit_replay_path`` metadata) keeps finding it.
     """
-    return (
-        Path(cwd)
-        / ".agentm"
-        / "audit_replay"
-        / f"{root_session_log_id}.chained.jsonl"
-    )
+    return Path(cwd) / ".agentm" / "audit_replay" / f"{root_session_log_id}.chained.jsonl"
 
 
-def _fork_prefix(
-    parent_messages: list[AgentMessage], turn_index: int
-) -> list[AgentMessage]:
+def _fork_prefix(parent_messages: list[AgentMessage], turn_index: int) -> list[AgentMessage]:
     """Return the parent-trajectory prefix that ends *cleanly* at ``turn_index``.
 
     The auditor's cadence (``turn_count % audit_interval == 0``) is
@@ -248,18 +241,12 @@ def _fork_prefix(
 
     current = parent_messages[turn_index]
     following = parent_messages[cut]
-    if isinstance(current, AssistantMessage) and isinstance(
-        following, ToolResultMessage
-    ):
+    if isinstance(current, AssistantMessage) and isinstance(following, ToolResultMessage):
         assistant_call_ids = {
-            block.id
-            for block in current.content
-            if isinstance(block, ToolCallBlock)
+            block.id for block in current.content if isinstance(block, ToolCallBlock)
         }
         result_call_ids = {
-            block.tool_call_id
-            for block in following.content
-            if hasattr(block, "tool_call_id")
+            block.tool_call_id for block in following.content if hasattr(block, "tool_call_id")
         }
         if assistant_call_ids and assistant_call_ids & result_call_ids:
             cut += 1
@@ -375,8 +362,11 @@ async def run_fork_tree_experiment(
         )
         _logger.info(
             "fork_tree: node=%s parent=%s depth=%d session=%s msgs=%d seed=%s",
-            task.node_id, task.parent_id, task.depth,
-            backbone.session_log_id, len(backbone.final_messages),
+            task.node_id,
+            task.parent_id,
+            task.depth,
+            backbone.session_log_id,
+            len(backbone.final_messages),
             "None" if task.seed_reminder is None else "set",
         )
         run = await replay_pipeline_over_trajectory(
@@ -401,9 +391,7 @@ async def run_fork_tree_experiment(
             # child's ``recent_verdicts``, and surface a duplicate reminder
             # that the non-progressing floor below then discards. The root
             # (no boundary to skip) starts at ``fork_turn`` == 1.
-            start_turn=(
-                task.fork_turn if task.parent_id is None else task.fork_turn + 1
-            ),
+            start_turn=(task.fork_turn if task.parent_id is None else task.fork_turn + 1),
         )
         surfaces = _collect_surfaces(run.surfaces)
         # Defence-in-depth: ignore any surface at or before the fork floor.
@@ -411,14 +399,13 @@ async def run_fork_tree_experiment(
         # surface on the boundary turn it just resumed from; forking there
         # would re-fork at the same point and never make progress.
         floor = task.fork_turn - 1
-        forward_surfaces = [
-            s for s in surfaces if s.fork_message_index > floor
-        ]
+        forward_surfaces = [s for s in surfaces if s.fork_message_index > floor]
         if len(forward_surfaces) != len(surfaces):
             _logger.warning(
-                "fork_tree: node=%s dropped %d non-progressing surface(s) "
-                "at/below fork floor=%d",
-                task.node_id, len(surfaces) - len(forward_surfaces), floor,
+                "fork_tree: node=%s dropped %d non-progressing surface(s) at/below fork floor=%d",
+                task.node_id,
+                len(surfaces) - len(forward_surfaces),
+                floor,
             )
 
         node = ForkNode(
@@ -445,14 +432,12 @@ async def run_fork_tree_experiment(
         for surface in selected:
             if state["emitted"] >= max_total_nodes:
                 _logger.warning(
-                    "fork_tree: max_total_nodes=%d reached; not enqueuing "
-                    "further children", max_total_nodes,
+                    "fork_tree: max_total_nodes=%d reached; not enqueuing further children",
+                    max_total_nodes,
                 )
                 break
             state["emitted"] += 1
-            child_prefix = _fork_prefix(
-                backbone.final_messages, surface.fork_message_index
-            )
+            child_prefix = _fork_prefix(backbone.final_messages, surface.fork_message_index)
             queue.put_nowait(
                 ForkTask(
                     node_id=_next_node_id(),
@@ -497,9 +482,7 @@ async def run_fork_tree_experiment(
         max_total_nodes=max_total_nodes,
     )
     sidecar = write_fork_tree_replay(nodes, out_path=resolved_out, header=header)
-    return ForkTreeExperiment(
-        nodes=nodes, forktree_replay_path=sidecar, header=header
-    )
+    return ForkTreeExperiment(nodes=nodes, forktree_replay_path=sidecar, header=header)
 
 
 FORK_TREE_HEADER_KEY = "__fork_tree_header__"
@@ -670,8 +653,6 @@ def write_fork_tree_replay(
                         "parent_node_id": node.parent_id,
                     },
                 )
-                write_record(
-                    out_path, _rebind_record(tagged, session_id=root_sid)
-                )
+                write_record(out_path, _rebind_record(tagged, session_id=root_sid))
 
     return out_path

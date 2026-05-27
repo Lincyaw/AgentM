@@ -44,10 +44,7 @@ def _otlp_value(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return {
             "kvlistValue": {
-                "values": [
-                    {"key": str(k), "value": _otlp_value(v)}
-                    for k, v in value.items()
-                ]
+                "values": [{"key": str(k), "value": _otlp_value(v)} for k, v in value.items()]
             }
         }
     if isinstance(value, list):
@@ -66,11 +63,7 @@ def _otlp_message_log(entry: dict[str, Any]) -> dict[str, Any]:
     """
 
     return {
-        "resource": {
-            "attributes": [
-                {"key": "service.name", "value": {"stringValue": "agentm"}}
-            ]
-        },
+        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "agentm"}}]},
         "scopeLogs": [
             {
                 "scope": {"name": "agentm", "version": "0.1.0"},
@@ -167,10 +160,6 @@ def _verdict(surface_reminder: bool, reminder_text: str = "") -> dict:
     }
 
 
-
-
-
-
 # --- SFT distill export (extractor_records_from_replay) ----------------------
 
 
@@ -188,9 +177,7 @@ def _ok_extractor_replay_record(
         "ts_ns": 1,
         "payload": {"new_turns": [], "recent_graph": []},
         "output": {
-            "events": [
-                {"id": 1, "kind": "task", "summary": "go", "source_turns": [0]}
-            ],
+            "events": [{"id": 1, "kind": "task", "summary": "go", "source_turns": [0]}],
             "edges": [],
             "dropped_edges": [],
         },
@@ -198,10 +185,6 @@ def _ok_extractor_replay_record(
     if raw_assistant_messages is not None:
         rec["raw_assistant_messages"] = raw_assistant_messages
     return rec
-
-
-
-
 
 
 def test_dataset_export_skips_legacy_batch_replays() -> None:
@@ -224,5 +207,3 @@ def test_dataset_export_skips_legacy_batch_replays() -> None:
     )
     assert list(extractor_records_from_replay([legacy_rec], sample_id="s-1")) == []
     assert legacy_batch_replay_count([legacy_rec]) == 1
-
-

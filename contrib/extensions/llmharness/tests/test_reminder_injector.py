@@ -52,8 +52,6 @@ def _make_api() -> MagicMock:
     return api
 
 
-
-
 def test_step_default_with_reminder_injects() -> None:
     api = _make_api()
     pending = [Reminder(text="check baseline traces")]
@@ -66,10 +64,6 @@ def test_step_default_with_reminder_injects() -> None:
     api.session.append_entry.assert_called_once()
 
 
-
-
-
-
 def test_final_stop_leaves_reminder_pending() -> None:
     """MaxTurnsExhausted is final; kernel ignores overrides — preserve queue."""
     api = _make_api()
@@ -79,5 +73,3 @@ def test_final_stop_leaves_reminder_pending() -> None:
     assert result is None
     assert pending == [Reminder(text="too late")]
     api.session.append_entry.assert_not_called()
-
-

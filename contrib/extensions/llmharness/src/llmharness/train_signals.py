@@ -113,11 +113,7 @@ def extractor_process_reward(
     witness_pass_rate = _success_rate(tool_events)
     finalize_success = float(_terminal_success(tool_events, _EXTRACTOR_FINALIZE_TOOL))
     efficiency_penalty = _efficiency_penalty(tool_events, max_steps_budget)
-    reward = (
-        0.5 * finalize_success
-        + 0.3 * witness_pass_rate
-        - 0.2 * efficiency_penalty
-    )
+    reward = 0.5 * finalize_success + 0.3 * witness_pass_rate - 0.2 * efficiency_penalty
     return {
         "reward": reward,
         "witness_pass_rate": witness_pass_rate,
@@ -155,11 +151,7 @@ def auditor_process_reward(
     schema_valid_rate = _success_rate(tool_events)
     verdict_submitted = float(_terminal_success(tool_events, _AUDITOR_SUBMIT_TOOL))
     efficiency_penalty = _efficiency_penalty(tool_events, max_steps_budget)
-    reward = (
-        0.7 * verdict_submitted
-        + 0.2 * schema_valid_rate
-        - 0.1 * efficiency_penalty
-    )
+    reward = 0.7 * verdict_submitted + 0.2 * schema_valid_rate - 0.1 * efficiency_penalty
     return {
         "reward": reward,
         "schema_valid_rate": schema_valid_rate,

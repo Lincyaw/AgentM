@@ -60,9 +60,7 @@ def _resolve_path(domain: str, name_or_path: str, *, filename_prefix: str) -> Pa
             return path
 
     available = sorted(p.name for p in base.glob("*.md"))
-    raise FileNotFoundError(
-        f"unknown {domain} prompt {candidate!r}; available: {available}"
-    )
+    raise FileNotFoundError(f"unknown {domain} prompt {candidate!r}; available: {available}")
 
 
 @lru_cache(maxsize=64)

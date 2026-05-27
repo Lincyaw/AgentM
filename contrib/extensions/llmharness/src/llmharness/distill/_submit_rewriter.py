@@ -49,8 +49,7 @@ SUBMIT_REWRITE_PARAMETERS: dict[str, Any] = {
         "drop_reason": {
             "type": "string",
             "description": (
-                "When justifiable_from_graph=false, a one-sentence reason. "
-                "Empty otherwise."
+                "When justifiable_from_graph=false, a one-sentence reason. Empty otherwise."
             ),
         },
         "matched_event_ids": {
@@ -78,9 +77,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     async def _submit(args: dict[str, Any]) -> ToolTerminate:
         del args
         return ToolTerminate(
-            result=ToolResult(
-                content=[TextContent(type="text", text="rewrite submitted")]
-            ),
+            result=ToolResult(content=[TextContent(type="text", text="rewrite submitted")]),
             reason="llmharness.distill:submit_rewrite",
         )
 

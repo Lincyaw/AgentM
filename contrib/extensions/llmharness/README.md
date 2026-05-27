@@ -276,6 +276,7 @@ to the wrong graph version.
 | [docs/06-case-aggregation.md](docs/06-case-aggregation.md) | Per-case directory layout produced by `llmharness-aggregate`. Read this for human review of a run or before exporting trajectories. |
 | [docs/07-prefix-replay.md](docs/07-prefix-replay.md) | Iterate on auditor / reminder behaviour without re-running the whole trajectory: branch a session at the verdict-firing turn and replay only the tail. |
 | [docs/08-running-modes.md](docs/08-running-modes.md) | How extractor / auditor / reminder injection decouple and recombine, and where to plug an SFT-trained model in (live + offline). Start here if you want to run the pieces separately. |
+| [docs/09-extractor-strategy-iteration.md](docs/09-extractor-strategy-iteration.md) | Fixed workflow for extractor prompt/model strategy iteration: threaded replay, aggregate conversion, blob upload, and `aegis-ui` review. |
 
 ## CLI entry points
 

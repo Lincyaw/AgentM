@@ -26,7 +26,6 @@ def compose_audit_extensions(
     *,
     submit_tool_module: str,
     default_prompt: str,
-    prompt_override: str | None,
     observability_config: dict[str, Any] | None,
     submit_tool_config: dict[str, Any] | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
@@ -48,15 +47,8 @@ def compose_audit_extensions(
     # a silent no-op.
     out.append((OPERATIONS_MODULE, {}))
 
-    out.append(
-        (submit_tool_module, dict(submit_tool_config) if submit_tool_config else {})
-    )
-    out.append(
-        (
-            SYSTEM_PROMPT_MODULE,
-            {"prompt": prompt_override if prompt_override is not None else default_prompt},
-        )
-    )
+    out.append((submit_tool_module, dict(submit_tool_config) if submit_tool_config else {}))
+    out.append((SYSTEM_PROMPT_MODULE, {"prompt": default_prompt}))
     return out
 
 

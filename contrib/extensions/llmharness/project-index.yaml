@@ -184,7 +184,7 @@ requirements:
       - src/llmharness/audit/extractor/witness.py
     tests:
       - tests/test_extractor_witness.py
-      - tests/test_extractor_state.py
+      - tests/test_extractor_plan_structure.py
     depends_on: [REQ-001, REQ-016, REQ-023]
 
   - id: REQ-021
@@ -541,6 +541,16 @@ requirements:
   - id: REQ-033
     title: Extractor refs are required (genesis exception for id=1)
     description: |
+      SUPERSEDED BY v4 (2026-05): the hard-reject below was softened to
+      an advisory. v4 replaced the ``submit_events`` / ``commit`` flow
+      with incremental ``upsert_node`` / ``upsert_edge`` ops, and
+      ``finalize_extraction`` now COMMITS a witness-valid graph while
+      surfacing chain-link (disconnected-event) cases as a SOFT warning
+      rather than rejecting them — so connectivity is encouraged, not
+      enforced. Kept for history; needs a supersede/rewrite decision.
+
+      --- original v3.1 requirement ---
+
       Tighten the v3.1 single-tool extractor contract so the auditor
       always receives a connected graph from each firing.
 
@@ -566,7 +576,7 @@ requirements:
       - src/llmharness/audit/extractor/state/
       - src/llmharness/audit/extractor/tools/
     tests:
-      - tests/test_extractor_state.py
+      - tests/test_extractor_plan_structure.py
     depends_on: [REQ-020]
 
   - id: REQ-034

@@ -18,5 +18,6 @@ extensions:
       mode: sync
       extractor_interval_turns: 5
       audit_interval_turns: 5
+      extractor_tool_call_budget: 10
       enable_auditor: false
       enable_reminders: false

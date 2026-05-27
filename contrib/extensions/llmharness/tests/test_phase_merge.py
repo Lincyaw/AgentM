@@ -21,10 +21,6 @@ def _ev(eid: int, kind: EventKind, summary: str = "", turns: list[int] | None = 
     )
 
 
-
-
-
-
 def test_consecutive_act_run_collapses_into_one_phase() -> None:
     events = [
         _ev(1, EventKind.ACT, "tool_call list_tables"),
@@ -38,11 +34,3 @@ def test_consecutive_act_run_collapses_into_one_phase() -> None:
     assert p.kind == "act_run"
     assert p.member_event_ids == (1, 2, 3, 4)
     assert p.summary.count(" | ") == 3  # four pieces joined by separator
-
-
-
-
-
-
-
-

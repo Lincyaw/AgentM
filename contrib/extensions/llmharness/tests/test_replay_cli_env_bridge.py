@@ -19,12 +19,8 @@ def test_parse_provider_explicit_json_skips_env_bridge(
 ) -> None:
     """``module:{json}`` wins outright; env knobs do not leak in."""
     monkeypatch.setenv("OPENAI_BASE_URL", "https://should-not-appear/")
-    spec = _parse_provider(
-        'agentm.extensions.builtin.llm_openai:{"model":"sft-4b"}'
-    )
+    spec = _parse_provider('agentm.extensions.builtin.llm_openai:{"model":"sft-4b"}')
     assert spec is not None
     module, cfg = spec
     assert module == "agentm.extensions.builtin.llm_openai"
     assert cfg == {"model": "sft-4b"}
-
-

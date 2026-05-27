@@ -16,16 +16,12 @@ def test_normalize_is_case_and_whitespace_insensitive() -> None:
     assert normalize("\tFoo\n\nBar  Baz") == "foo bar baz"
 
 
-
-
 def test_witness_data_fails_when_entity_not_in_texts() -> None:
     """`bar` is in neither text → non-None error mentioning the entity."""
 
     err = witness_data(["bar"], src_text="alpha foo", dst_text="gamma foo")
     assert err is not None
     assert "bar" in err
-
-
 
 
 def test_witness_ref_fails_when_quote_absent() -> None:

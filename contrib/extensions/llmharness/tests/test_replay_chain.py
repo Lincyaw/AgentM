@@ -7,25 +7,20 @@ record order, and threads prompt overrides through to the right phase.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from llmharness.audit.runner import (
-    AuditorSettings,
-    CumulativeAuditState,
-    ExtractorSettings,
-    HarnessRunner,
-)
-from llmharness.audit.runner import runner as runner_module
-from llmharness.audit.seams.offline import NoopSink
 from llmharness.audit.toolkit.atom_constants import (
     EXTRACTOR_STATE_SERVICE_KEY,
     EXTRACTOR_TOOLS_MODULE,
 )
 from llmharness.replay import chain as chain_module
+from llmharness.replay import runner as replay_runner_module
 from llmharness.replay.record import ReplayRecord, write_record
+from llmharness.replay.runner import replay_extractor_record
 from llmharness.tools.engine import PhaseResult
 
 EVENT_1 = {
@@ -105,11 +100,15 @@ def test_chain_replays_in_record_order(tmp_path: Path, monkeypatch: pytest.Monke
 
     async def fake_extractor(record: ReplayRecord, **_: Any) -> PhaseResult:
         seen.append((record.phase, record.turn_index))
-        return PhaseResult(output={"replayed": True}, status="ok", error=None, latency_ms=1, messages=[])
+        return PhaseResult(
+            output={"replayed": True}, status="ok", error=None, latency_ms=1, messages=[]
+        )
 
     async def fake_auditor(record: ReplayRecord, **_: Any) -> PhaseResult:
         seen.append((record.phase, record.turn_index))
-        return PhaseResult(output={"replayed": True}, status="ok", error=None, latency_ms=2, messages=[])
+        return PhaseResult(
+            output={"replayed": True}, status="ok", error=None, latency_ms=2, messages=[]
+        )
 
     monkeypatch.setattr(chain_module, "replay_extractor_record", fake_extractor)
     monkeypatch.setattr(chain_module, "replay_auditor_record", fake_auditor)
@@ -139,9 +138,7 @@ def test_chain_phase_filter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(chain_module, "replay_extractor_record", fake_extractor)
     monkeypatch.setattr(chain_module, "replay_auditor_record", fake_auditor)
 
-    chain_module.chain_replay_sync(
-        _seed_sidecar(tmp_path), cwd=str(tmp_path), phase="auditor"
-    )
+    chain_module.chain_replay_sync(_seed_sidecar(tmp_path), cwd=str(tmp_path), phase="auditor")
     # Three extractor records + two auditor records; phase=auditor must
     # skip the extractors entirely — that's the whole point of the filter.
     assert calls == {"extractor": 0, "auditor": 2}
@@ -259,7 +256,16 @@ def test_extractor_record_replay_hydrates_recent_edges_into_state(
         for module, cfg in kwargs["extensions"]:
             if module == EXTRACTOR_TOOLS_MODULE:
                 captured["state"] = cfg[EXTRACTOR_STATE_SERVICE_KEY]
-        captured["payload"] = kwargs["payload"]
+            if module == "agentm.extensions.builtin.loop_budget":
+                captured["loop_budget"] = cfg
+            if module == "contrib.extensions.turn_reminder":
+                captured["turn_reminder"] = cfg
+        captured["payload_text"] = kwargs["payload"]
+        raw_payload = kwargs["payload"]
+        if isinstance(raw_payload, str):
+            captured["payload"] = json.loads(raw_payload[raw_payload.index('{"next_event_id"') :])
+        else:
+            captured["payload"] = raw_payload
         return PhaseResult(
             output=None,
             status="no_call",
@@ -268,35 +274,15 @@ def test_extractor_record_replay_hydrates_recent_edges_into_state(
             messages=[],
         )
 
-    monkeypatch.setattr(
-        runner_module, "run_phase_standalone", fake_run_phase_standalone
-    )
+    monkeypatch.setattr(replay_runner_module, "run_phase_standalone", fake_run_phase_standalone)
 
-    runner = HarnessRunner(
-        cumulative=CumulativeAuditState.fresh(),
-        child=None,  # type: ignore[arg-type]
-        sink=NoopSink(),
-        sidecar=None,
-        extractor_settings=ExtractorSettings.from_compose_kwargs(
-            {}, prompt_override="test prompt"
-        ),
-        auditor_settings=AuditorSettings.empty(),
-        extractor_interval=1,
-        audit_interval=1,
-        enable_auditor=False,
-        session_id="sess-1",
-        trace_id="trace-1",
-        provider_extractor=None,
-        provider_auditor=None,
-        cwd=str(tmp_path),
-    )
     record = ReplayRecord(
         phase="extractor",
         turn_index=1,
         session_id="sess-1",
         trace_id="trace-1",
         ts_ns=0,
-        compose_kwargs={},
+        compose_kwargs={"tool_call_budget": 10},
         payload={
             "next_event_id": 3,
             "new_turns": [],
@@ -311,9 +297,14 @@ def test_extractor_record_replay_hydrates_recent_edges_into_state(
 
     import asyncio
 
-    asyncio.run(runner.fire_extractor_from_record(record))
+    asyncio.run(replay_extractor_record(record, cwd=str(tmp_path), prompt_override="test prompt"))
 
     state = captured["state"]
+    assert captured["loop_budget"] == {"max_tool_calls": 10}
+    assert captured["turn_reminder"] == {"warn_within": 10}
+    assert "at most 10 total tool calls" in captured["payload_text"]
+    assert "MUST reserve the final tool call for finalize_extraction" in captured["payload_text"]
+    assert "Spend at most 9 calls on graph edits" in captured["payload_text"]
     assert set(state.recent_graph_dict) == {1, 2}
     assert set(state.recent_edges_dict) == {(2, 1, "data")}
     assert set(state.pending_graph.nodes) == {1, 2}

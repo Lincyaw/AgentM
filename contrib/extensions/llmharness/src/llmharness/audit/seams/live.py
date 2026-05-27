@@ -2,11 +2,10 @@
 
 Wraps a parent :class:`ExtensionAPI` so the runner's :class:`ChildRunner`
 and :class:`OpSink` protocols can be satisfied against the live AgentM
-session. Bodies of :class:`LiveChildRunner` are lifted verbatim from the
-legacy ``_spawn_extractor_child`` / ``_run_auditor`` in
-``adapters/agentm.py``; :class:`LiveOpSink` is a thin wrapper over
-``api.session.append_entry`` + a :class:`DiagnosticEvent` emit on
-failures (matching ``_record_failure``).
+session. :class:`LiveChildRunner` spawns extractor / auditor children
+via ``api.spawn_child_session``; :class:`LiveOpSink` is a thin wrapper
+over ``api.session.append_entry`` plus a :class:`DiagnosticEvent` emit
+on failures.
 """
 
 from __future__ import annotations
@@ -63,7 +62,6 @@ class LiveChildRunner:
     ) -> tuple[bool, list[dict[str, Any]]]:
         """Spawn the extractor child, drive it, return ``(terminator_called, raw_blocks)``.
 
-        Body lifted verbatim from the legacy ``_spawn_extractor_child``.
         Spawn / prompt failures raise :class:`ExtractorSpawnError` so the
         runner can route them to ``EXTRACTOR_ERROR`` + sidecar.
         """
@@ -102,21 +100,18 @@ class LiveChildRunner:
         recent_verdicts: list[dict[str, Any]],
         continuation_notes_from_prior_firing: list[str],
     ) -> AuditorChildResult:
-        """Run one auditor firing; mirror of the legacy ``_run_auditor``.
+        """Run one auditor firing.
 
         Returns an :class:`AuditorChildResult` with ``verdict=None`` for
-        spawn / prompt / no-call / malformed paths. Failures are
-        recorded via ``api.session.append_entry`` + a
-        :class:`DiagnosticEvent`, matching the legacy ``_record_failure``
-        chokepoint. ``latency_ms`` / ``error`` are propagated so the
-        runner can surface them on the synthetic auditor record.
+        spawn / prompt / no-call / malformed paths. Failures are recorded
+        via ``api.session.append_entry`` plus a :class:`DiagnosticEvent`.
+        ``latency_ms`` / ``error`` are propagated so the runner can
+        surface them on the synthetic auditor record.
         """
         payload = {
             "graph": [e.to_dict() for e in graph_events],
             "recent_verdicts": list(recent_verdicts),
-            "continuation_notes_from_prior_firing": list(
-                continuation_notes_from_prior_firing
-            ),
+            "continuation_notes_from_prior_firing": list(continuation_notes_from_prior_firing),
         }
         child_config = AgentSessionConfig(
             cwd=self._api.cwd,
@@ -139,9 +134,7 @@ class LiveChildRunner:
             )
 
         try:
-            messages = await child.prompt(
-                json.dumps(payload, ensure_ascii=False, default=str)
-            )
+            messages = await child.prompt(json.dumps(payload, ensure_ascii=False, default=str))
         except Exception as exc:
             err = str(exc)
             _record_failure(self._api, _et.AUDIT_ERROR, {"reason": err})
@@ -157,9 +150,7 @@ class LiveChildRunner:
 
         arguments = find_terminal_tool_arguments(messages, SUBMIT_VERDICT_TOOL_NAME)
         if arguments is None:
-            reason = (
-                f"child returned without calling {SUBMIT_VERDICT_TOOL_NAME}"
-            )
+            reason = f"child returned without calling {SUBMIT_VERDICT_TOOL_NAME}"
             _record_failure(self._api, _et.AUDIT_NO_CALL, {"reason": reason})
             return AuditorChildResult(
                 verdict=None,
@@ -256,9 +247,7 @@ class LiveOpSink:
         self._api.session.append_entry(_et.EXTRACTOR_PARTIAL, payload)
 
 
-def _record_failure(
-    api: ExtensionAPI, entry_type: str, payload: dict[str, Any]
-) -> None:
+def _record_failure(api: ExtensionAPI, entry_type: str, payload: dict[str, Any]) -> None:
     """Mirror of the legacy ``adapters.agentm._record_failure`` chokepoint.
 
     Persists a typed failure entry on the branch AND emits a
@@ -279,9 +268,7 @@ def _record_failure(
             ),
         )
     except Exception:
-        _logger.exception(
-            "llmharness audit diagnostic emit failed; suppressing."
-        )
+        _logger.exception("llmharness audit diagnostic emit failed; suppressing.")
 
 
 __all__ = ["LiveChildRunner", "LiveOpSink"]
