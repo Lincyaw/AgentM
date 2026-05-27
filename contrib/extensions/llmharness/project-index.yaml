@@ -970,3 +970,39 @@ requirements:
     code: []
     tests: []
     depends_on: [REQ-001]
+
+  - id: REQ-038
+    title: Fixed-window extractor replay (--window) + cumulative graph dump (--dump-graph)
+    description: |
+      ``llmharness-replay chain`` gains two diagnostic knobs for iterating
+      the extractor over a captured trajectory without re-running the main
+      agent:
+
+      - ``--window N`` re-slices the trajectory into FIXED N-turn extractor
+        windows instead of replaying each recorded firing's verbatim window.
+        Recorded windows balloon when the original live run stalled (the
+        extractor cursor only advances on a committing firing, so repeated
+        ``no_call`` firings grow the next window), and ``chain`` replays them
+        as-is — useless for evaluating a new model/prompt. ``--window``
+        reconstructs the full trajectory from the union of every recorded
+        ``new_turns`` (keyed by global turn ``index``, deduping the overlaps),
+        re-slices into fixed windows decoupled from per-firing success, and
+        threads the replayed cumulative graph forward. Extractor-only.
+        Validated on a real glm-5.1 trajectory: ``--window 10`` flipped the
+        replay from 11-12/13 ``no_call`` (ballooned windows) to 12/13 ``ok``,
+        confirming the cascade was a windowing artifact, not a model limit.
+      - ``--dump-graph`` folds every firing's committed ops into the final
+        cumulative graph and prints its nodes + edges, so graph quality
+        (branch/merge topology) is readable directly from the CLI instead of
+        forensically reconstructed from scattered replay session logs.
+
+      Diagnostic tooling layered on the already-tested
+      ``replay_extractor_record`` / ``_absorb_extractor_output`` path; no
+      dedicated fail-stop test per the package's fail-stop-only test policy.
+    priority: P1
+    status: implemented
+    code:
+      - src/llmharness/replay/chain.py
+      - src/llmharness/replay/cli.py
+    tests: []
+    depends_on: [REQ-024]
