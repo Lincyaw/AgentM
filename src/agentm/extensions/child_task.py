@@ -8,7 +8,7 @@ validator) but is **not** an atom: it has no ``MANIFEST`` / ``install``
 pair and is not under ``builtin/``, so it is never auto-discovered.
 
 It imports only :mod:`agentm.core.abi` (``ExtensionAPI``,
-``AgentSessionConfig``, messages) and :mod:`agentm.core.lib.child_collect`
+``AgentSessionConfig``, messages) and :mod:`agentm.extensions.child_collect`
 — never :mod:`agentm.core.runtime`. The caller supplies the policy
 (which extensions / provider / persona, free-text vs. terminal-tool
 collect); this helper only composes the config, runs the child, always
@@ -25,12 +25,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.messages import AgentMessage
 from agentm.core.abi.session_config import AgentSessionConfig
-from agentm.core.lib.child_collect import (
+from agentm.extensions.child_collect import (
     final_assistant_text,
     terminal_tool_arguments,
 )
@@ -40,10 +40,11 @@ from agentm.core.lib.child_collect import (
 class ChildTaskResult:
     """Outcome of one :func:`run_child_task` invocation.
 
-    ``messages`` is the full child trajectory. Exactly one of
-    ``final_text`` / ``terminal_args`` is populated by the happy path,
-    keyed off whether ``terminal_tool`` was supplied. ``error`` is set
-    (and the result fields left empty) when spawn / prompt raised.
+    ``messages`` is the full child trajectory. On the happy path
+    ``run_child_task`` populates ``final_text`` when ``terminal_tool`` is
+    ``None``, else ``terminal_args`` (with ``terminal_called`` recording
+    whether the terminal call was seen). ``error`` is set (and the result
+    fields left empty) when spawn / prompt raised.
     """
 
     messages: list[AgentMessage]
@@ -140,4 +141,4 @@ async def run_child_task(
     )
 
 
-__all__ = ["ChildTaskResult", "run_child_task"]
+__all__: Final = ["ChildTaskResult", "run_child_task"]

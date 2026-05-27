@@ -14,18 +14,26 @@ The two result shapes are:
 * the child's **final free text** — what a sub-agent task produces
   (:func:`final_assistant_text`).
 
-:func:`flatten_assistant_blocks` produces the raw per-block view that the
-replay sidecar stores verbatim.
+They live under ``agentm.extensions`` (allow-listed by the §11 import
+validator) rather than ``core.lib``: ``core.lib`` is the *leaf* utility
+layer (no ``core.abi`` reach), and these helpers depend on
+``core.abi.messages``, so this is their honest home next to
+:mod:`agentm.extensions.child_task`.
+
+:func:`flatten_assistant_blocks` (via :func:`serialize_block`) produces
+the raw per-block view that the replay sidecar stores verbatim;
+:func:`serialize_block` is public so the llmharness trajectory serializer
+shares the single block-shape definition rather than copying it.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolCallBlock
 
 
-def _serialize_block(block: Any) -> dict[str, Any] | None:
+def serialize_block(block: Any) -> dict[str, Any] | None:
     """Serialize one content block into the replay-sidecar block shape.
 
     Recognises text, tool-call, and tool-result blocks; anything else is
@@ -89,7 +97,7 @@ def flatten_assistant_blocks(messages: list[AgentMessage]) -> list[dict[str, Any
         if not isinstance(content, list):
             continue
         for blk in content:
-            serialized = _serialize_block(blk)
+            serialized = serialize_block(blk)
             if serialized is not None:
                 blocks.append(serialized)
     return blocks
@@ -138,8 +146,9 @@ def final_assistant_text(messages: list[AgentMessage]) -> str | None:
     return None
 
 
-__all__ = [
+__all__: Final = [
     "final_assistant_text",
     "flatten_assistant_blocks",
+    "serialize_block",
     "terminal_tool_arguments",
 ]

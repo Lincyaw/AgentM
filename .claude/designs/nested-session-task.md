@@ -55,8 +55,13 @@ in the agentm core tree**, not contrib.
 This does not violate "no policy in core". The shared piece is pure
 **mechanism** — compose `ExtensionAPI` + scrape messages. Policy (which
 extensions/persona/provider, free-text vs. terminal-tool collect) stays
-in the calling atoms. `core.lib` is the sanctioned "pure-mechanism
-utilities atoms compose" layer (cf. `pydantic_to_openai_tool_schema`).
+in the calling atoms.
+
+Within the core tree there are two allow-listed homes; pick by leaf-purity
+(see §3.1): `core.lib` is the *leaf* utility layer for helpers that reach
+no further than stdlib/pydantic (cf. `pydantic_to_openai_tool_schema`);
+`agentm.extensions` is for non-atom mechanism that composes `core.abi`.
+Both new modules touch `core.abi`, so both live under `agentm.extensions`.
 
 The boundary splits by **who is §11-constrained**, which inverts the
 intuition:
@@ -71,25 +76,42 @@ live in core and do not move.
 
 ## 3. Design
 
-### 3.1 Pure collect helpers — `agentm.core.lib.child_collect`
+### 3.1 Pure collect helpers — `agentm.extensions.child_collect`
 
 Pure functions over `list[AgentMessage]`, no I/O, atom-safe:
 
 - `flatten_assistant_blocks(messages) -> list[dict]`
 - `terminal_tool_arguments(messages, tool_name) -> dict | None`
 - `final_assistant_text(messages) -> str | None`
+- `serialize_block(block) -> dict | None` (the single block-shape
+  definition; `flatten_assistant_blocks` and the llmharness trajectory
+  serializer both use it, so the replay-sidecar block shape lives in one
+  place)
 
 These are lifted verbatim from llmharness
-(`audit/seams/session.py`, `audit/runner/runner.py`) — they are already
-pure and already shared inside llmharness; they just move up one level so
+(`audit/seams/session.py`, `audit/runner/runner.py`) — already pure and
+already shared inside llmharness; they move into the agentm core tree so
 `sub_agent` can use them too.
+
+**Home: `agentm.extensions`, not `core.lib`.** Both are allow-listed and
+atom-safe, so either satisfies §11. The deciding factor is leaf-purity:
+`core.lib` is the *leaf* utility layer (`redact`, `serialization`,
+`tool_schema` reach no further than stdlib/pydantic), but these helpers
+import `core.abi.messages`, which transitively runs the `core.abi`
+package `__init__` (→ `core.runtime.otel_export` → back to
+`core.lib.to_jsonable`). Putting them in `core.lib` made a bare
+`import agentm.core.lib` race that re-entrant chain during package init.
+`agentm.extensions` is the namespace where non-atom helpers that compose
+`core.abi` already live (it sits *above* `core.lib`/`core.abi`), so
+`child_collect` belongs next to `child_task` — no `core.lib` special-casing,
+no import-order fragility.
 
 ### 3.2 Live orchestration helper — `agentm.extensions.child_task`
 
 A non-atom module under the `agentm.extensions` namespace (allow-listed;
 NOT under `builtin/`, so not auto-discovered as an atom and not subject to
 the atom-to-atom ban). Atom-safe: imports only `core.abi`
-(`ExtensionAPI`, `AgentSessionConfig`, messages) + `core.lib.child_collect`.
+(`ExtensionAPI`, `AgentSessionConfig`, messages) + `agentm.extensions.child_collect`.
 It does **not** import `core.runtime`.
 
 ```python
@@ -127,8 +149,8 @@ structured tool-call args). Both come back on the same `ChildTaskResult`.
 
 `llmharness tools.engine.run_phase_standalone` keeps using
 `create_agent_session` (it is a host-driver, not an atom). It is refactored
-only to **reuse the `core.lib.child_collect` pure helpers** instead of its
-private copies, so the collect contract is identical to the live path.
+only to **reuse the `agentm.extensions.child_collect` pure helpers** instead
+of its private copies, so the collect contract is identical to the live path.
 
 ### 3.4 Consumers refactor onto the mechanism
 
@@ -140,7 +162,7 @@ private copies, so the collect contract is identical to the live path.
   keeps its own task-manager, persona resolution (`ResolveSubagentEvent`),
   parallelism, `inject_instruction`, abort — that is its policy, unchanged.
 
-Net core change: **two new allow-listed modules** (`core.lib.child_collect`,
+Net core change: **two new allow-listed modules** (`agentm.extensions.child_collect`,
 `agentm.extensions.child_task`), both pure mechanism. No change to
 `core.runtime`, the `SUB_AGENT_RUNTIME` role, `ResolveSubagentEvent`, or the
 session factory.
@@ -159,7 +181,7 @@ session factory.
 
 ## 5. Phasing (each phase is a dev-worker unit, independently verifiable)
 
-1. **Foundation + first consumer.** Add `core.lib.child_collect` +
+1. **Foundation + first consumer.** Add `agentm.extensions.child_collect` +
    `agentm.extensions.child_task.run_child_task`. Refactor llmharness
    `LiveChildRunner` and `run_phase_standalone` onto them. Verify: llmharness
    `pytest`/`mypy`/`ruff` green; a real-provider live + replay run still
@@ -177,11 +199,14 @@ phase 1.
 
 ## 6. Acceptance
 
-- Boundary: `agentm.extensions.child_task` passes the §11 import validator
-  (only `core.abi` / `core.lib` imports); both `sub_agent` and `llmharness`
-  atoms import it without a validator violation.
+- Boundary: `agentm.extensions.child_collect` and `child_task` pass the §11
+  import validator (only `core.abi` / `core.lib` imports) AND a full
+  `validate_atom_file` run (e.g. `__all__: Final`); both `sub_agent` and
+  `llmharness` import them without a validator violation.
 - Behaviour: llmharness sidecar `ReplayRecord` shape unchanged; the
   extractor directive stays byte-identical; sub_agent `dispatch_agent` /
   `check_tasks` / `wait_subagent` results unchanged.
-- No duplication: `flatten_assistant_blocks` / terminal-arg scraping exist
-  in exactly one place.
+- No duplication: `flatten_assistant_blocks`, `serialize_block`, and
+  terminal-arg scraping exist in exactly one place (`child_collect`); the
+  llmharness trajectory serializer imports `serialize_block` rather than
+  copying it.

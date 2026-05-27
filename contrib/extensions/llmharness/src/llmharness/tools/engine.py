@@ -6,7 +6,7 @@ same extensions and pumps the recorded payload through it.
 
 Both paths share :mod:`llmharness.audit.{extractor,auditor}.extensions`
 composers, the terminal-tool scraper in
-:mod:`agentm.core.lib.child_collect`, and the shutdown helper in
+:mod:`agentm.extensions.child_collect`, and the shutdown helper in
 :mod:`llmharness.audit.seams.session`, so the system prompt, tool
 surface, payload shape, and collect contract are identical to a live
 firing.
@@ -27,13 +27,13 @@ from typing import Any
 
 from agentm.core.abi.messages import AgentMessage
 from agentm.core.abi.session_config import AgentSessionConfig
-from agentm.core.lib.child_collect import terminal_tool_arguments
 
 # Both imports are runtime-required: ``AgentSession`` is passed as a
 # positional argument to ``create_agent_session(AgentSession, config)``,
 # so it cannot be hidden behind ``TYPE_CHECKING``.
 from agentm.core.runtime.session import AgentSession
 from agentm.core.runtime.session_factory import create_agent_session
+from agentm.extensions.child_collect import terminal_tool_arguments
 
 from ..audit.seams.session import safe_shutdown
 from ..replay.record import Status
