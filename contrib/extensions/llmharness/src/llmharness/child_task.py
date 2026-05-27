@@ -1,18 +1,27 @@
-"""Live orchestration helper: spawn a child :class:`AgentSession`, drive
-it to completion, collect its result.
+"""Single-shot orchestration helper: spawn a child :class:`AgentSession`,
+send it one prompt, drive it to completion, collect its result.
 
-This is the shared mechanism behind every "an atom spawns a nested
-session and reads back one result" path. It lives under the
-``agentm.extensions`` namespace (allow-listed by the §11 import
-validator) but is **not** an atom: it has no ``MANIFEST`` / ``install``
-pair and is not under ``builtin/``, so it is never auto-discovered.
+This is a thin convenience over the ``api.spawn_child_session`` ABI seam —
+the one place AgentM exposes nested-session creation. It is **not** an
+atom (no ``MANIFEST`` / ``install``, never auto-discovered) and **not** a
+core module: its sole consumer is llmharness's
+:class:`~llmharness.audit.seams.live.LiveChildRunner` (extractor +
+auditor), so it lives here in contrib rather than the core tree. It is a
+*convenience layer*, not a new pluggability axis — the axis is
+``spawn_child_session`` itself. Should a second in-session consumer with a
+genuine need to swap child-running strategy appear, promote it to a
+registered service (consumed via ``api.get_service``, no cross-package
+import) instead of moving the function.
 
 It imports only :mod:`agentm.core.abi` (``ExtensionAPI``,
-``AgentSessionConfig``, messages) and :mod:`agentm.extensions.child_collect`
-— never :mod:`agentm.core.runtime`. The caller supplies the policy
-(which extensions / provider / persona, free-text vs. terminal-tool
-collect); this helper only composes the config, runs the child, always
-shuts it down, and scrapes the result.
+``AgentSessionConfig``, messages) and the sibling
+:mod:`llmharness.child_collect` — never :mod:`agentm.core.runtime`. The
+caller supplies the policy (which extensions / provider, free-text vs.
+terminal-tool collect); this helper only composes the config, runs the
+child, always shuts it down, and scrapes the result. It does NOT support
+multi-turn / mid-flight instruction injection — a consumer that needs
+that (e.g. the interactive ``sub_agent`` dispatcher) drives its own loop
+over ``spawn_child_session`` directly.
 
 The single knob that unifies the two collect modes is ``terminal_tool``:
 when ``None`` the child's final free text is collected into
@@ -30,10 +39,8 @@ from typing import Any, Final
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.messages import AgentMessage
 from agentm.core.abi.session_config import AgentSessionConfig
-from agentm.extensions.child_collect import (
-    final_assistant_text,
-    terminal_tool_arguments,
-)
+
+from .child_collect import final_assistant_text, terminal_tool_arguments
 
 
 @dataclass(frozen=True)
