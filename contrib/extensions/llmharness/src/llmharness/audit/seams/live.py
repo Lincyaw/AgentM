@@ -17,9 +17,9 @@ from typing import Any, Final, Literal
 
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.core.abi.extension import ExtensionAPI
-from agentm.extensions.child_collect import flatten_assistant_blocks
-from agentm.extensions.child_task import run_child_task
 
+from ...child_collect import flatten_assistant_blocks
+from ...child_task import run_child_task
 from ...schema import Event
 from .. import entry_types as _et
 from ..auditor import (

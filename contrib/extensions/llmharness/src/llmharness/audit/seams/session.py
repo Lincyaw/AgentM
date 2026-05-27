@@ -2,7 +2,7 @@
 offline replay runner.
 
 Terminal-tool argument scraping now lives in
-:func:`agentm.extensions.child_collect.terminal_tool_arguments` (shared
+:func:`llmharness.child_collect.terminal_tool_arguments` (shared
 across the live and embedded paths); this module keeps the
 extractor-state binding and the best-effort child-shutdown helper used
 by the embedded host-driver.
