@@ -175,7 +175,8 @@ interactive driver. The shared seam it already uses is the right one:
   sibling `child_collect`, never `core.runtime`.
 - No duplication: `flatten_assistant_blocks`, `serialize_block`, and
   terminal-arg scraping exist in exactly one place (`llmharness.child_collect`).
-- Behaviour: llmharness sidecar `ReplayRecord` shape and the extractor
-  directive are byte-identical; `sub_agent` is untouched.
+- Behaviour: the relocated scrapers' output is byte-identical (only source
+  formatting moved), so the llmharness sidecar `ReplayRecord` block shape and
+  the extractor directive are unchanged; `sub_agent` is untouched.
 - Core stays minimal: zero speculative generic child-task modules in the
   core tree; the seam (`spawn_child_session`) is the only core surface.
