@@ -45,9 +45,10 @@ can.
 - the new turn window — the latest raw turns.
 - `next_event_id` — the id for your first new node.
 
-The graph commits from whatever you have emitted when your turn ends; no
-terminator is needed. `finalize_extraction` is an optional early-exit that
-returns a chain-link hint for the next firing.
+The graph is built ONLY through tool calls — a turn of reasoning or prose with
+no tool call records nothing. The graph commits from whatever you have emitted
+when your turn ends; no terminator is needed. `finalize_extraction` is an
+optional early-exit that returns a chain-link hint for the next firing.
 
 ## Nodes and edges
 

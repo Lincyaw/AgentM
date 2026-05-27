@@ -171,6 +171,45 @@ class _V31StubProvider:
         if self.mode == "no_call":
             return []
 
+        if self.mode == "nudge":
+            # First turn is prose only (zero tool calls) → the child-task
+            # empty-turn nudge must re-prompt the SAME session. The nudge
+            # turn then walks the happy node+edge+finalize script, so the
+            # firing lands events/edges/cursor exactly like ``happy``
+            # despite the wasted first turn. Proves the nudge converts a
+            # would-be ``no_call`` into a recorded firing.
+            return [
+                AssistantMessage(
+                    role="assistant",
+                    content=[TextContent(type="text", text="thinking out loud, no tool yet")],
+                    timestamp=250.0,
+                    stop_reason="end_turn",
+                ),
+                _tool_call_message(
+                    "nudge-node-1",
+                    "upsert_node",
+                    {"id": 1, "kind": "act", "summary": "event 1", "source_turns": [0, 1]},
+                ),
+                _tool_call_message(
+                    "nudge-node-2",
+                    "upsert_node",
+                    {"id": 2, "kind": "act", "summary": "event 2", "source_turns": [0, 1]},
+                ),
+                _tool_call_message(
+                    "nudge-edge-1",
+                    "upsert_edge",
+                    {
+                        "src": 1,
+                        "dst": 2,
+                        "kind": "ref",
+                        "reason": "synthetic ref",
+                        "cited_entities": [],
+                        "cited_quote": _GOOD_QUOTE,
+                    },
+                ),
+                _tool_call_message("nudge-finalize", FINALIZE_EXTRACTION_TOOL_NAME, {}),
+            ]
+
         if self.mode == "empty":
             # Empty firing under v19 = jump straight to finalize_extraction.
             return [_tool_call_message("finalize-empty", FINALIZE_EXTRACTION_TOOL_NAME, {})]
@@ -537,6 +576,49 @@ async def test_salvage_path_commits_ops_without_terminator(tmp_path: Path) -> No
     assert node_upserts >= 1, f"expected salvaged node_upsert op(s), got {ops}"
     assert len(cursors) >= 1, "cursor must advance when ops were salvaged"
     assert no_call == [], "no EXTRACTOR_NO_CALL when ops were salvaged from the op log"
+
+
+# --- Scenario 3c: empty-turn nudge (zero tool calls → re-prompt) -----------
+
+
+@pytest.mark.asyncio
+async def test_empty_turn_nudge_converts_no_call_into_recorded_firing(
+    tmp_path: Path,
+) -> None:
+    """A firing whose FIRST turn emits zero tool calls is re-prompted.
+
+    The ``nudge`` stub returns prose only on its first extractor turn —
+    which, without the empty-turn nudge, would commit nothing and record
+    an ``extractor_no_call``. The nudge in ``run_child_task`` re-prompts
+    the same child; the nudge turn walks the happy node+edge+finalize
+    script, so the firing instead lands two node upserts, one edge upsert,
+    and a cursor — and NO ``extractor_no_call``.
+    """
+    provider = _V31StubProvider(mode="nudge")
+    provider_module = _install_provider_module("tests._fake_v31_nudge_provider", provider)
+
+    session = await AgentSession.create(
+        _build_session_config(cwd=str(tmp_path), provider_module=provider_module)
+    )
+    await session.prompt("user turn 1")
+    await session.shutdown()
+
+    ops = _entries(session, AUDIT_GRAPH_OP)
+    cursors = _entries(session, EXTRACTOR_CURSOR)
+    no_call = _entries(session, EXTRACTOR_NO_CALL)
+
+    op_kinds = [e.payload.get("op") if isinstance(e.payload, dict) else None for e in ops]
+    node_upserts = sum(1 for k in op_kinds if k == "node_upsert")
+    edge_upserts = sum(1 for k in op_kinds if k == "edge_upsert")
+    assert node_upserts == 2, f"nudge turn must land 2 node_upsert ops, got {node_upserts}: {ops}"
+    assert edge_upserts == 1, f"nudge turn must land 1 edge_upsert op, got {edge_upserts}: {ops}"
+    assert len(cursors) == 1, f"cursor must advance after the nudge firing, got {len(cursors)}"
+    assert no_call == [], "the nudge converted the empty first turn into a recorded firing"
+    # The wasted first turn + the nudge turn means the extractor child was
+    # prompted at least twice for the single firing.
+    assert provider.extractor_calls >= 2, (
+        f"expected >=2 extractor provider calls (initial + nudge), got {provider.extractor_calls}"
+    )
 
 
 # --- Scenario 4: empty (terminator called with empty events) ---------------

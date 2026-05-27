@@ -30,7 +30,7 @@ import typer
 
 from ..tools.engine import PhaseResult
 from ..tools.prefix_replay import PrefixReplayError, make_plan
-from .chain import ChainResult, chain_replay_sync
+from .chain import ChainResult, chain_replay_sync, fixed_window_extractor_replay_sync
 from .record import Phase, ReplayRecord, iter_records
 from .runner import replay_auditor_record, replay_extractor_record
 
@@ -367,6 +367,27 @@ def chain(
             help="Print only records where replay output differs from recorded",
         ),
     ] = False,
+    window: Annotated[
+        int,
+        typer.Option(
+            "--window",
+            help=(
+                "Re-slice the trajectory into FIXED N-turn extractor windows "
+                "instead of replaying the recorded (possibly ballooned) windows. "
+                "Extractor-only; 0 = off (default record-by-record replay)."
+            ),
+        ),
+    ] = 0,
+    dump_graph: Annotated[
+        bool,
+        typer.Option(
+            "--dump-graph",
+            help=(
+                "After replay, fold every firing's ops into the final cumulative "
+                "graph and print its nodes + edges (extractor phase only)."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Bulk-replay every record (in file order); flag diffs vs recorded."""
     if phase not in ("extractor", "auditor", "both"):
@@ -386,15 +407,27 @@ def chain(
             f"latency_ms={cr.result.latency_ms}"
         )
 
-    results = chain_replay_sync(
-        record,
-        cwd=str(cwd),
-        phase=phase,  # type: ignore[arg-type]
-        provider_override=provider_tuple,
-        prompt_override_extractor=extractor_prompt,
-        prompt_override_auditor=auditor_prompt,
-        on_progress=_on_progress,
-    )
+    if window > 0:
+        if phase == "auditor":
+            raise typer.BadParameter("--window is extractor-only; use --phase extractor")
+        results = fixed_window_extractor_replay_sync(
+            record,
+            window=window,
+            cwd=str(cwd),
+            provider_override=provider_tuple,
+            prompt_override=extractor_prompt,
+            on_progress=_on_progress,
+        )
+    else:
+        results = chain_replay_sync(
+            record,
+            cwd=str(cwd),
+            phase=phase,  # type: ignore[arg-type]
+            provider_override=provider_tuple,
+            prompt_override_extractor=extractor_prompt,
+            prompt_override_auditor=auditor_prompt,
+            on_progress=_on_progress,
+        )
 
     diffs = sum(1 for cr in results if cr.result.output != cr.record.output)
     errors = sum(1 for cr in results if cr.result.status != "ok")
@@ -402,6 +435,43 @@ def chain(
         f"\n# chain: {len(results)} records replayed, "
         f"{diffs} outputs differ, {errors} replay failures"
     )
+
+    if dump_graph:
+        _dump_cumulative_graph(results)
+
+
+def _dump_cumulative_graph(results: list[ChainResult]) -> None:
+    """Fold every firing's ops into the final cumulative graph and print it.
+
+    Each extractor firing's ``result.output["ops"]`` is the op-log delta it
+    committed; replaying them in firing order through :func:`fold_graph`
+    reconstructs the same cumulative graph the live pipeline would hold.
+    """
+    from ..audit.graph.fold import fold_graph
+    from ..audit.graph.ops import parse_op
+
+    ops = []
+    for cr in results:
+        out = cr.result.output
+        if not isinstance(out, dict):
+            continue
+        for raw in out.get("ops") or []:
+            if isinstance(raw, dict):
+                try:
+                    ops.append(parse_op(raw))
+                except (KeyError, TypeError, ValueError):
+                    continue
+    graph = fold_graph(ops)
+    nodes = graph.nodes_list()
+    edges = graph.edges_list()
+    typer.echo(f"\n# cumulative graph: {len(nodes)} nodes, {len(edges)} edges")
+    typer.echo("# nodes:")
+    for n in nodes:
+        summary = n.summary if len(n.summary) <= 90 else n.summary[:87] + "..."
+        typer.echo(f"  [{n.id}] {n.kind.value:<5} turns={list(n.source_turns)}  {summary}")
+    typer.echo("# edges (src -> dst):")
+    for e in edges:
+        typer.echo(f"  {e.src} -> {e.dst} [{e.kind.value}]  {e.reason}")
 
 
 @app.command(name="agent-from-reminder")

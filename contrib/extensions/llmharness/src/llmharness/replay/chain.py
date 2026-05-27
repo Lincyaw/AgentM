@@ -241,3 +241,121 @@ def chain_replay_sync(
         return out
 
     return asyncio.run(_collect())
+
+
+def _union_new_turns(records: list[ReplayRecord]) -> dict[int, dict[str, Any]]:
+    """Reconstruct the full trajectory from every firing's recorded window.
+
+    Recorded windows overlap (a stalled live firing made the next window
+    grow), so key by each turn's global ``index`` and dedup — the union is
+    the complete ordered trajectory regardless of how the original run
+    happened to slice it.
+    """
+    by_idx: dict[int, dict[str, Any]] = {}
+    for r in records:
+        for t in (r.payload or {}).get("new_turns") or []:
+            i = t.get("index")
+            if isinstance(i, int):
+                by_idx[i] = t
+    return by_idx
+
+
+def _union_turn_texts(records: list[ReplayRecord]) -> dict[int, str]:
+    out: dict[int, str] = {}
+    for r in records:
+        for k, v in (r.extras.get("turn_texts") or {}).items():
+            try:
+                out[int(k)] = str(v)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+async def fixed_window_extractor_replay(
+    records_path: Path,
+    *,
+    window: int,
+    cwd: str,
+    provider_override: tuple[str, dict[str, Any]] | None = None,
+    prompt_override: str | None = None,
+    on_progress: Callable[[int, ChainResult], None] | None = None,
+) -> AsyncIterator[ChainResult]:
+    """Replay the extractor over FIXED ``window``-turn slices of the trajectory.
+
+    Unlike :func:`chain_replay` — which replays each recorded firing's exact
+    (possibly ballooned) window verbatim — this reconstructs the full
+    trajectory from all recorded windows, re-slices it into fresh,
+    fixed-size windows, and threads the replayed cumulative graph forward.
+    Window size is decoupled from per-firing success, so one stalled firing
+    cannot snowball the next window. Extractor-only; the first recorded
+    firing's ``compose_kwargs`` (tool surface / settings) is reused as a
+    template.
+    """
+    if window < 1:
+        raise ValueError("window must be >= 1")
+    records = [r for r in iter_records(records_path) if r.phase == "extractor"]
+    if not records:
+        return
+    template = records[0]
+    turns = _union_new_turns(records)
+    turn_texts = _union_turn_texts(records)
+    ordered_idx = sorted(turns)
+
+    cumulative = CumulativeAuditState.fresh()
+    for idx, start in enumerate(range(0, len(ordered_idx), window)):
+        slice_idx = ordered_idx[start : start + window]
+        new_turns = [turns[i] for i in slice_idx]
+        events, edges, _phases = cumulative.graph_view()
+        payload: dict[str, Any] = {
+            "new_turns": new_turns,
+            "recent_graph": [e.to_dict() for e in events],
+            "recent_edges": [ed.to_dict() for ed in edges],
+            "next_event_id": cumulative.next_event_id(),
+        }
+        rec = replace(
+            template,
+            payload=payload,
+            extras={"turn_texts": turn_texts},
+            turn_index=slice_idx[-1],
+            output=None,
+            status="ok",
+            error=None,
+        )
+        result = await replay_extractor_record(
+            rec,
+            cwd=cwd,
+            provider_override=provider_override,
+            prompt_override=prompt_override,
+        )
+        _absorb_extractor_output(result, cumulative, firing_cursor=slice_idx[-1])
+        cr = ChainResult(record=rec, result=result)
+        if on_progress is not None:
+            on_progress(idx, cr)
+        yield cr
+
+
+def fixed_window_extractor_replay_sync(
+    records_path: Path,
+    *,
+    window: int,
+    cwd: str,
+    provider_override: tuple[str, dict[str, Any]] | None = None,
+    prompt_override: str | None = None,
+    on_progress: Callable[[int, ChainResult], None] | None = None,
+) -> list[ChainResult]:
+    """Eager sync wrapper for :func:`fixed_window_extractor_replay`."""
+
+    async def _collect() -> list[ChainResult]:
+        out: list[ChainResult] = []
+        async for cr in fixed_window_extractor_replay(
+            records_path,
+            window=window,
+            cwd=cwd,
+            provider_override=provider_override,
+            prompt_override=prompt_override,
+            on_progress=on_progress,
+        ):
+            out.append(cr)
+        return out
+
+    return asyncio.run(_collect())
