@@ -16,13 +16,19 @@ scenarios cover the load-bearing transitions:
    dropped tuple), and one ``extractor_cursor`` — cursor advances per
    design §6 because the firing wrote events.
 
-3. **No-call** — child returns without ever calling ``submit_events``.
-   Adapter MUST persist one ``extractor_no_call`` entry; cursor must
-   NOT advance.
+3. **No-call (empty)** — child returns without ever applying a graph op
+   and without calling the terminator on a non-trivial window. Commit-on-
+   stop has nothing to salvage, so the adapter MUST persist one
+   ``extractor_no_call`` entry; cursor must NOT advance.
 
-4. **Empty** — child calls ``submit_events`` immediately with an empty
-   events list on a non-trivial window. Adapter MUST persist one
-   ``extractor_empty`` entry; cursor unchanged.
+3b. **Salvage (no-call with ops)** — child applies graph ops but its turn
+   ends WITHOUT calling ``finalize_extraction``. Commit-on-stop MUST
+   persist the accumulated ops as ``audit_graph_op`` entries and advance
+   the cursor; NO ``extractor_no_call`` entry is recorded.
+
+4. **Empty** — child calls the terminator immediately with no ops applied
+   on a non-trivial window. Adapter MUST persist one ``extractor_empty``
+   entry; cursor unchanged.
 
 Phase 2 (auditor) is out of scope here — ``audit_interval_turns`` is
 set high enough that the auditor never fires.
@@ -61,8 +67,8 @@ from llmharness.audit.extractor import FINALIZE_EXTRACTION_TOOL_NAME
 
 # --- shared constants -------------------------------------------------------
 
-_EXTRACTOR_PROMPT_NEEDLE = "cognitive-audit **extractor**"
-_AUDITOR_PROMPT_NEEDLE = "cognitive-audit *auditor*"
+_EXTRACTOR_PROMPT_NEEDLE = "cognitive-audit graph maintainer"
+_AUDITOR_PROMPT_NEEDLE = "cognitive-audit auditor"
 
 # Witnessable quote — the parent's reply embeds this fixed phrase so a
 # ``ref`` ref using it as ``cited_quote`` will pass the witness check.
@@ -168,6 +174,37 @@ class _V31StubProvider:
         if self.mode == "empty":
             # Empty firing under v19 = jump straight to finalize_extraction.
             return [_tool_call_message("finalize-empty", FINALIZE_EXTRACTION_TOOL_NAME, {})]
+
+        if self.mode == "salvage":
+            # One node + one edge applied, then the turn ends WITHOUT
+            # calling finalize_extraction. Commit-on-stop must salvage the
+            # accumulated ops: persist them and advance the cursor even
+            # though the optional terminator never fired. The two events
+            # form a (0,1)/(1,0) degree pair like the happy path.
+            return [
+                _tool_call_message(
+                    "salvage-node-1",
+                    "upsert_node",
+                    {"id": 1, "kind": "act", "summary": "event 1", "source_turns": [0, 1]},
+                ),
+                _tool_call_message(
+                    "salvage-node-2",
+                    "upsert_node",
+                    {"id": 2, "kind": "act", "summary": "event 2", "source_turns": [0, 1]},
+                ),
+                _tool_call_message(
+                    "salvage-edge-1",
+                    "upsert_edge",
+                    {
+                        "src": 1,
+                        "dst": 2,
+                        "kind": "ref",
+                        "reason": "synthetic ref",
+                        "cited_entities": [],
+                        "cited_quote": _GOOD_QUOTE,
+                    },
+                ),
+            ]
 
         if self.mode == "happy":
             # Walks: upsert two evid nodes, link them with a ref edge
@@ -378,18 +415,6 @@ def _entries(session: AgentSession, entry_type: str) -> list[Any]:
 # --- Scenario 1: happy path ------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Pre-existing failure: the happy-path stub provider only delivers "
-        "ONE assistant turn under the current child-session loop, so the "
-        "scripted upsert_node sequence never reaches finalize_extraction "
-        "and the firing is recorded as EXTRACTOR_NO_CALL. Bug existed "
-        "before the v4 cleanup (verified via `git stash` rerun). Reopen "
-        "as a follow-up: either rewrite the stub to drain the script on "
-        "a single yield or fix the live child-loop to keep iterating."
-    ),
-    strict=True,
-)
 @pytest.mark.asyncio
 async def test_happy_path_writes_event_edge_and_cursor(tmp_path: Path) -> None:
     provider = _V31StubProvider(mode="happy")
@@ -446,13 +471,20 @@ async def test_happy_path_writes_event_edge_and_cursor(tmp_path: Path) -> None:
 # --- Scenario 2: partial (witness retry exhausted) -------------------------
 
 
-# --- Scenario 3: no-call ---------------------------------------------------
+# --- Scenario 3: no-call (genuinely empty) ---------------------------------
 
 
 @pytest.mark.asyncio
 async def test_no_call_path_records_extractor_no_call_and_holds_cursor(
     tmp_path: Path,
 ) -> None:
+    """A no-call firing that applied ZERO ops still holds the cursor.
+
+    Commit-on-stop only salvages a firing when ops were actually applied.
+    A child that ends its turn without applying any op AND without calling
+    the terminator has nothing to commit on a non-trivial window, so the
+    cursor must stay held and an ``extractor_no_call`` failure is recorded.
+    """
     provider = _V31StubProvider(mode="no_call")
     provider_module = _install_provider_module("tests._fake_v31_no_call_provider", provider)
 
@@ -467,12 +499,44 @@ async def test_no_call_path_records_extractor_no_call_and_holds_cursor(
     ops = _entries(session, AUDIT_GRAPH_OP)
 
     assert len(no_call) == 1, f"expected exactly 1 extractor_no_call, got {len(no_call)}"
-    assert len(cursors) == 0, "cursor must NOT advance when the terminator was never called"
+    assert len(cursors) == 0, "cursor must NOT advance on an empty no-call firing"
     assert ops == []
 
     payload = no_call[0].payload
     assert isinstance(payload, dict)
     assert "turn_window" in payload
+
+
+# --- Scenario 3b: salvage (ops applied, terminator never called) -----------
+
+
+@pytest.mark.asyncio
+async def test_salvage_path_commits_ops_without_terminator(tmp_path: Path) -> None:
+    """Commit-on-stop: ops applied + terminator NOT called ⇒ commit.
+
+    The child applies a node upsert and ends its turn without calling
+    ``finalize_extraction``. The runner must freeze the state, persist
+    every accumulated op as an ``audit_graph_op`` entry, advance the
+    cursor, and NOT record an ``extractor_no_call`` failure.
+    """
+    provider = _V31StubProvider(mode="salvage")
+    provider_module = _install_provider_module("tests._fake_v31_salvage_provider", provider)
+
+    session = await AgentSession.create(
+        _build_session_config(cwd=str(tmp_path), provider_module=provider_module)
+    )
+    await session.prompt("user turn 1")
+    await session.shutdown()
+
+    ops = _entries(session, AUDIT_GRAPH_OP)
+    cursors = _entries(session, EXTRACTOR_CURSOR)
+    no_call = _entries(session, EXTRACTOR_NO_CALL)
+
+    op_kinds = [e.payload.get("op") if isinstance(e.payload, dict) else None for e in ops]
+    node_upserts = sum(1 for k in op_kinds if k == "node_upsert")
+    assert node_upserts >= 1, f"expected salvaged node_upsert op(s), got {ops}"
+    assert len(cursors) >= 1, "cursor must advance when ops were salvaged"
+    assert no_call == [], "no EXTRACTOR_NO_CALL when ops were salvaged from the op log"
 
 
 # --- Scenario 4: empty (terminator called with empty events) ---------------
