@@ -12,14 +12,13 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 import uuid
 from typing import Any, Final, Literal
 
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolCallBlock
-from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.lib.child_collect import flatten_assistant_blocks
+from agentm.extensions.child_task import run_child_task
 
 from ...schema import Event
 from .. import entry_types as _et
@@ -33,10 +32,8 @@ from ..graph.ops import GraphOp
 from ..runner import (
     AuditorChildResult,
     ExtractorSpawnError,
-    _flatten_assistant_blocks,
 )
 from ..toolkit.extractor_directive import build_extractor_directive
-from .session import find_terminal_tool_arguments, safe_shutdown
 
 _logger = logging.getLogger(__name__)
 
@@ -66,30 +63,19 @@ class LiveChildRunner:
         runner can route them to ``EXTRACTOR_ERROR`` + sidecar.
         """
         del turn_window  # surfaced by the runner via append_failure context
-        child_config = AgentSessionConfig(
-            cwd=self._api.cwd,
-            provider=provider,
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+        directive = build_extractor_directive(payload)
+        result = await run_child_task(
+            self._api,
             extensions=extensions,
+            provider=provider,
+            prompt=directive + payload_json,
             purpose="cognitive_audit_extractor",
+            terminal_tool=FINALIZE_EXTRACTION_TOOL_NAME,
         )
-        try:
-            child = await self._api.spawn_child_session(child_config)
-        except Exception as exc:
-            raise ExtractorSpawnError(str(exc)) from exc
-
-        try:
-            payload_json = json.dumps(payload, ensure_ascii=False, default=str)
-            directive = build_extractor_directive(payload)
-            messages = await child.prompt(directive + payload_json)
-        except Exception as exc:
-            await safe_shutdown(child)
-            raise ExtractorSpawnError(str(exc)) from exc
-
-        await safe_shutdown(child)
-        return (
-            _has_tool_call(messages, FINALIZE_EXTRACTION_TOOL_NAME),
-            _flatten_assistant_blocks(messages),
-        )
+        if result.error is not None:
+            raise ExtractorSpawnError(result.error)
+        return (result.terminal_called, flatten_assistant_blocks(result.messages))
 
     async def run_auditor(
         self,
@@ -113,42 +99,24 @@ class LiveChildRunner:
             "recent_verdicts": list(recent_verdicts),
             "continuation_notes_from_prior_firing": list(continuation_notes_from_prior_firing),
         }
-        child_config = AgentSessionConfig(
-            cwd=self._api.cwd,
-            provider=provider,
+        result = await run_child_task(
+            self._api,
             extensions=extensions,
+            provider=provider,
+            prompt=json.dumps(payload, ensure_ascii=False, default=str),
             purpose="cognitive_audit_auditor",
+            terminal_tool=SUBMIT_VERDICT_TOOL_NAME,
         )
-        t0 = time.monotonic()
+        latency_ms = result.latency_ms
 
-        def _elapsed_ms() -> int:
-            return int((time.monotonic() - t0) * 1000)
-
-        try:
-            child = await self._api.spawn_child_session(child_config)
-        except Exception as exc:
-            err = str(exc)
+        if result.error is not None:
+            err = result.error
             _record_failure(self._api, _et.AUDIT_ERROR, {"reason": err})
-            return AuditorChildResult(
-                verdict=None, raw_blocks=[], error=err, latency_ms=_elapsed_ms()
-            )
+            return AuditorChildResult(verdict=None, raw_blocks=[], error=err, latency_ms=latency_ms)
 
-        try:
-            messages = await child.prompt(json.dumps(payload, ensure_ascii=False, default=str))
-        except Exception as exc:
-            err = str(exc)
-            _record_failure(self._api, _et.AUDIT_ERROR, {"reason": err})
-            await safe_shutdown(child)
-            return AuditorChildResult(
-                verdict=None, raw_blocks=[], error=err, latency_ms=_elapsed_ms()
-            )
+        raw_blocks = flatten_assistant_blocks(result.messages)
 
-        await safe_shutdown(child)
-
-        raw_blocks = _flatten_assistant_blocks(messages)
-        latency_ms = _elapsed_ms()
-
-        arguments = find_terminal_tool_arguments(messages, SUBMIT_VERDICT_TOOL_NAME)
+        arguments = result.terminal_args
         if arguments is None:
             reason = f"child returned without calling {SUBMIT_VERDICT_TOOL_NAME}"
             _record_failure(self._api, _et.AUDIT_NO_CALL, {"reason": reason})
@@ -187,16 +155,6 @@ class LiveChildRunner:
                 error=err,
                 latency_ms=latency_ms,
             )
-
-
-def _has_tool_call(messages: list[AgentMessage], tool_name: str) -> bool:
-    for msg in messages:
-        if not isinstance(msg, AssistantMessage):
-            continue
-        for block in msg.content:
-            if isinstance(block, ToolCallBlock) and block.name == tool_name:
-                return True
-    return False
 
 
 # --- op sink ----------------------------------------------------------------
