@@ -38,7 +38,10 @@ from typing import Any, Final, Protocol
 
 from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolResultMessage
 from agentm.core.abi.session import SessionEntry
-from agentm.core.lib.child_collect import flatten_assistant_blocks as _flatten_assistant_blocks
+from agentm.extensions.child_collect import (
+    flatten_assistant_blocks as _flatten_assistant_blocks,
+)
+from agentm.extensions.child_collect import serialize_block as _serialize_block
 
 from ...replay.record import ReplayRecord, now_ns, write_record
 from ...schema import Edge, Event, Phase, Reminder, Verdict
@@ -580,51 +583,6 @@ def _render_message_text(msg: AgentMessage) -> str:
                 with contextlib.suppress(TypeError, ValueError):
                     parts.append(json.dumps(args, ensure_ascii=False, default=str))
     return " ".join(parts)
-
-
-def _serialize_block(block: Any) -> dict[str, Any] | None:
-    """Mirror of the live ``_serialize_block``."""
-    text = getattr(block, "text", None)
-    if isinstance(text, str) and text:
-        block_type = getattr(block, "type", None)
-        return {
-            "type": block_type if isinstance(block_type, str) and block_type else "text",
-            "text": text,
-        }
-
-    name = getattr(block, "name", None)
-    arguments = getattr(block, "arguments", None)
-    if isinstance(name, str) and isinstance(arguments, dict):
-        return {
-            "type": "tool_call",
-            "id": getattr(block, "id", None),
-            "name": name,
-            "arguments": dict(arguments),
-        }
-
-    tool_call_id = getattr(block, "tool_call_id", None)
-    inner_content = getattr(block, "content", None)
-    if isinstance(tool_call_id, str) and isinstance(inner_content, list):
-        inner_blocks: list[dict[str, Any]] = []
-        for inner in inner_content:
-            inner_text = getattr(inner, "text", None)
-            if isinstance(inner_text, str):
-                inner_blocks.append({"type": "text", "text": inner_text})
-            else:
-                inner_blocks.append(
-                    {
-                        "type": getattr(inner, "type", inner.__class__.__name__),
-                        "repr": repr(inner),
-                    }
-                )
-        return {
-            "type": "tool_result",
-            "tool_call_id": tool_call_id,
-            "content": inner_blocks,
-            "is_error": bool(getattr(block, "is_error", False)),
-        }
-
-    return {"type": getattr(block, "type", block.__class__.__name__), "repr": repr(block)}
 
 
 def _serialize_message_for_extractor(msg: AgentMessage, *, index: int) -> dict[str, Any] | None:

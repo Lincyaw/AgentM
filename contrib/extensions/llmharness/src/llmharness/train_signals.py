@@ -175,9 +175,8 @@ def tool_events_from_phase_result(result: PhaseResult) -> list[ToolEvent]:
     ``error_text=None`` so the rollout's step count stays honest.
 
     The pairing strategy intentionally mirrors what the live audit loop
-    does — see :func:`find_terminal_tool_arguments` in
-    ``audit/_session_helpers.py``; here we keep every tool_call, not
-    just the terminal one.
+    does — see :func:`agentm.extensions.child_collect.terminal_tool_arguments`;
+    here we keep every tool_call, not just the terminal one.
     """
     # Local import: keeping ``agentm.core.abi`` out of module-load time
     # so train_signals stays cheap to import in the trainer's hot path.
