@@ -38,11 +38,11 @@ from typing import Any, Final, Protocol
 
 from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolResultMessage
 from agentm.core.abi.session import SessionEntry
-from agentm.extensions.child_collect import (
+
+from ...child_collect import (
     flatten_assistant_blocks as _flatten_assistant_blocks,
 )
-from agentm.extensions.child_collect import serialize_block as _serialize_block
-
+from ...child_collect import serialize_block as _serialize_block
 from ...replay.record import ReplayRecord, now_ns, write_record
 from ...schema import Edge, Event, Phase, Reminder, Verdict
 from .. import entry_types as _et
