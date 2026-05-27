@@ -759,6 +759,47 @@ requirements:
       - tests/replay/test_fork_tree.py
     depends_on: [REQ-019, REQ-034, REQ-035]
 
+  - id: REQ-037
+    title: Empty-turn nudge — re-prompt a child that emitted zero tool calls
+    description: |
+      A reasoning-heavy child (e.g. glm-5.1) can end its turn producing
+      only prose — ZERO tool calls — so the terminal tool
+      (``finalize_extraction`` / ``submit_verdict``) is never called and
+      nothing is recorded; the firing reports ``no_call``. Commit-on-stop
+      (REQ-022 / REQ-024) salvages a firing that applied ops without the
+      terminator, but cannot help when NO tool call was emitted at all.
+
+      Both "run a child to completion" seams gain a bounded empty-turn
+      nudge so they stay behaviourally identical (the design's
+      live ≡ offline invariant): after the initial ``prompt(...)`` returns
+      and before the terminal-args scrape, if the child made zero tool
+      calls across all collected messages
+      (:func:`llmharness.child_collect.has_any_tool_call`) and a terminal
+      tool is expected, the SAME live session is re-prompted with
+      :func:`build_empty_turn_nudge` (parametrised on the terminal tool
+      name) and the returned messages appended. Bounded by the shared
+      constant ``MAX_EMPTY_TURN_NUDGES = 1``; a nudge ``prompt()``
+      exception breaks the loop and falls through with whatever messages
+      exist (a nudge never turns a result into a hard error). The
+      extractor prompt also states explicitly that the graph is built
+      ONLY through tool calls and a reasoning-only turn records nothing.
+
+      Fail-stop positions: (1) the nudge converts a would-be ``no_call``
+      first turn into a recorded firing when the nudge turn emits the
+      terminal tool; (2) a genuinely-empty firing (zero tool calls even
+      after the nudge) still records ``no_call`` — the bound holds; (3)
+      both seams construct the same nudge text from the same helper.
+    priority: P1
+    status: tested
+    code:
+      - src/llmharness/child_collect.py
+      - src/llmharness/child_task.py
+      - src/llmharness/tools/engine.py
+      - src/llmharness/audit/extractor/prompts/extractor_default.md
+    tests:
+      - tests/test_two_phase_audit_integration.py
+    depends_on: [REQ-019, REQ-020, REQ-022, REQ-024]
+
   # ---------------------------------------------------------------------------
   # Removed in the 2026-05-08 SDK-native cleanup. Kept here for traceability;
   # downstream consumers should depend on REQ-017 / REQ-018 / REQ-001 instead.
