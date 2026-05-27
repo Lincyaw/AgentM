@@ -1463,7 +1463,15 @@ class EventBus:
 # at the top of the file free of transport concerns. ``opentelemetry`` is a
 # substrate dependency (PR-A landed it) so the import is free at module load.
 from opentelemetry._logs import SeverityNumber  # noqa: E402
-from opentelemetry.trace import SpanKind, Status, StatusCode, set_span_in_context  # noqa: E402
+from opentelemetry.trace import (  # noqa: E402
+    NonRecordingSpan,
+    SpanContext,
+    SpanKind,
+    Status,
+    StatusCode,
+    TraceFlags,
+    set_span_in_context,
+)
 
 from .messages import ToolCallBlock  # noqa: E402
 
@@ -1477,6 +1485,38 @@ _SPAN_CHAT = "chat"
 _SPAN_EXECUTE_TOOL = "execute_tool"
 
 
+def _remote_parent_context(root_session_id: str, parent_session_id: str) -> Any:
+    """Build an OTel context whose current span is a *remote* parent carrying
+    ``trace_id=root_session_id`` and ``span_id=parent_session_id``.
+
+    A span started within this context joins the caller's trace (e.g. a
+    workbuddy dispatch that handed AgentM a ``TRACEPARENT``) and nests under the
+    caller's span — so AgentM's whole span tree shows up inside the caller's
+    trace in Jaeger/Tempo, not just correlatable by a ``root_id`` attribute.
+
+    Returns ``None`` (→ fresh trace, prior behaviour) unless BOTH ids are valid
+    lowercase hex of OTel width (trace_id 32, span_id 16) and non-zero.
+    """
+    if not root_session_id or not parent_session_id:
+        return None
+    if len(root_session_id) != 32 or len(parent_session_id) != 16:
+        return None
+    try:
+        trace_id = int(root_session_id, 16)
+        span_id = int(parent_session_id, 16)
+    except (ValueError, TypeError):
+        return None
+    if trace_id == 0 or span_id == 0:
+        return None
+    parent = SpanContext(
+        trace_id=trace_id,
+        span_id=span_id,
+        is_remote=True,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+    )
+    return set_span_in_context(NonRecordingSpan(parent))
+
+
 def _before_agent_start_to_otel(
     self: "BeforeAgentStartEvent", telemetry: "SessionTelemetry"
 ) -> None:
@@ -1485,6 +1525,11 @@ def _before_agent_start_to_otel(
     Preempts any previous still-open span under the same session id (matches
     the legacy writer's behaviour for retries that didn't get a clean
     ``AgentEndEvent``); the preempted span is closed with status UNSET.
+
+    When the session was handed a caller trace (root/parent session id, e.g.
+    from a ``TRACEPARENT``), the span is started under a remote parent context
+    so AgentM's spans share the caller's OTel trace_id and nest under the
+    caller's span. Otherwise it roots a fresh trace as before.
     """
     session_id = telemetry.session_id
     preempted = telemetry.pop_span(_SPAN_INVOKE_AGENT, session_id)
@@ -1492,8 +1537,12 @@ def _before_agent_start_to_otel(
         preempted.set_status(Status(StatusCode.UNSET, "preempted by new run"))
         preempted.end()
     scenario_label = telemetry.obs_scenario or telemetry.obs_purpose or "agent"
+    parent_ctx = _remote_parent_context(
+        telemetry.obs_root_session_id, telemetry.obs_parent_session_id
+    )
     span = telemetry.tracer.start_span(
         f"invoke_agent {scenario_label}",
+        context=parent_ctx,  # None → current context (fresh trace), as before
         kind=SpanKind.INTERNAL,
         attributes={
             "gen_ai.operation.name": "invoke_agent",

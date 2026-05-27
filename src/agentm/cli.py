@@ -61,6 +61,7 @@ class CliRunConfig:
     continue_recent: bool = False
     max_turns: int | None = None
     max_tool_calls: int | None = None
+    atom_config_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     profile: ModelProfile | None = None
 
 
@@ -142,6 +143,36 @@ def _parse_tools(value: str | None) -> list[str] | None:
     return [t.strip() for t in value.split(",") if t.strip()]
 
 
+def _parse_traceparent(value: str | None) -> tuple[str, str] | None:
+    """Parse a W3C ``traceparent`` header into ``(trace_id, span_id)``.
+
+    Format: ``<version>-<trace-id:32hex>-<parent-id:16hex>-<flags:2hex>``.
+    Returns ``None`` for absent/malformed/all-zero values so the caller falls
+    back to a fresh trace. Used to continue a parent trace handed to AgentM via
+    the ``TRACEPARENT`` env var (e.g. by a workbuddy dispatch) so AgentM's spans
+    land in the SAME OTel trace as the caller — root_session_id maps to the OTel
+    trace_id and parent_session_id to the caller's span_id.
+    """
+    if not value:
+        return None
+    parts = value.strip().split("-")
+    if len(parts) != 4:
+        return None
+    _version, trace_id, span_id, _flags = parts
+    trace_id = trace_id.lower()
+    span_id = span_id.lower()
+    if len(trace_id) != 32 or len(span_id) != 16:
+        return None
+    try:
+        int(trace_id, 16)
+        int(span_id, 16)
+    except ValueError:
+        return None
+    if trace_id == "0" * 32 or span_id == "0" * 16:
+        return None
+    return trace_id, span_id
+
+
 def _parse_extensions(values: list[str] | None) -> list[tuple[str, dict[str, Any]]]:
     """Parse repeated ``--extension MODULE[:JSON]`` flags.
 
@@ -180,6 +211,41 @@ def _parse_extensions(values: list[str] | None) -> list[tuple[str, dict[str, Any
         if not module:
             raise typer.BadParameter(f"--extension {raw!r}: module path is empty")
         out.append((module, cfg))
+    return out
+
+
+def _parse_set_overrides(values: list[str] | None) -> dict[str, dict[str, Any]]:
+    """Parse repeated ``--set <atom>.<key>=<value>`` flags.
+
+    Returns ``{atom_name: {key: raw_value}}``. Values stay as raw strings —
+    type coercion is deferred to ``resolve_atom_configs``, which reads the
+    atom's ``config_schema`` (the single source of truth for key types). The
+    value split is on the first ``=`` so values may themselves contain ``=``.
+    Atom names are ``[a-z_]+`` (no dots, per the MANIFEST contract), so the
+    atom/key split is on the first ``.`` and the key is everything after it;
+    surrounding whitespace on atom and key is trimmed so ``a.b = c`` keys on
+    ``b`` rather than ``b ``.
+    """
+
+    if not values:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for raw in values:
+        spec = raw.strip()
+        if not spec:
+            continue
+        lhs, sep, value = spec.partition("=")
+        if not sep:
+            raise typer.BadParameter(
+                f"--set {raw!r}: expected '<atom>.<key>=<value>'"
+            )
+        atom, dot, key = lhs.partition(".")
+        atom, key = atom.strip(), key.strip()
+        if not dot or not atom or not key:
+            raise typer.BadParameter(
+                f"--set {raw!r}: left of '=' must be '<atom>.<key>'"
+            )
+        out.setdefault(atom, {})[key] = value
     return out
 
 
@@ -401,12 +467,23 @@ def _build_session_config(
         no_prompt_templates=config.no_prompt_templates,
     )
 
+    # Continue a caller-supplied OTel trace (e.g. a workbuddy dispatch) when a
+    # W3C TRACEPARENT is present in the env: root_session_id == OTel trace_id so
+    # AgentM's spans land in the caller's trace; parent_session_id == the
+    # caller's span_id. Absent/malformed → fresh trace (root/parent left None).
+    root_session_id: str | None = None
+    parent_session_id: str | None = None
+    traceparent = _parse_traceparent(os.environ.get("TRACEPARENT"))
+    if traceparent is not None:
+        root_session_id, parent_session_id = traceparent
+
     return (
         AgentSessionConfig(
             cwd=config.cwd,
             provider=provider_spec,
             scenario=config.scenario,
             extra_extensions=config.extra_extensions,
+            atom_config_overrides=config.atom_config_overrides,
             no_extensions=config.no_extensions,
             no_skills=config.no_skills,
             no_prompt_templates=config.no_prompt_templates,
@@ -415,6 +492,8 @@ def _build_session_config(
             resource_loader=resource_loader,
             bus=bus,
             loop_config=loop_config,
+            root_session_id=root_session_id,
+            parent_session_id=parent_session_id,
         ),
         session_state,
     )
@@ -619,6 +698,21 @@ def run_cmd(
             ),
         ),
     ] = None,
+    set_config: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--set",
+            "-S",
+            help=(
+                "Override one atom config key. Repeatable. Form: "
+                "'<atom>.<key>=<value>' where <atom> is the atom's "
+                "MANIFEST.name. The value is coerced to the key's declared "
+                "type from config_schema (JSON for array/object). Wins over "
+                "AGENTM_<ATOM>_<KEY> env and the scenario's config:. Example: "
+                "-S cost_budget.limit=5 -S permission.deny='[\"bash\"]'."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Send a single prompt and print the agent's final text."""
 
@@ -675,6 +769,7 @@ def run_cmd(
             continue_recent=continue_recent,
             max_turns=max_turns,
             max_tool_calls=max_tool_calls,
+            atom_config_overrides=_parse_set_overrides(set_config),
             profile=profile,
         ))
     )
