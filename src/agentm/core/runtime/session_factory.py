@@ -678,8 +678,31 @@ async def _resolve_extensions(
         ):
             to_load.insert(0, (system_prompt_module, {"prompt": ""}))
 
+        from agentm.core.lib.atom_config import (
+            AtomConfigError,
+            resolve_atom_configs,
+        )
         from agentm.extensions.loader import sort_extensions_by_requires
 
+        # Bind env (AGENTM_<ATOM>_<KEY>) and --set overrides on top of the
+        # manifest-supplied config before install. Done once here so every
+        # presenter (CLI, channels, embedded SDK) gets identical semantics.
+        # A malformed value degrades like a scenario-load failure: emit a
+        # diagnostic and fall back to the manifest configs rather than
+        # aborting the whole session build.
+        try:
+            to_load = resolve_atom_configs(
+                to_load, overrides=config.atom_config_overrides
+            )
+        except AtomConfigError as exc:
+            await bus.emit(
+                DiagnosticEvent.CHANNEL,
+                DiagnosticEvent(
+                    level="error",
+                    source="atom_config",
+                    message=str(exc),
+                ),
+            )
         to_load = sort_extensions_by_requires(to_load, source="session extensions")
     return to_load
 

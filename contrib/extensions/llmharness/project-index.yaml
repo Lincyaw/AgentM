@@ -275,32 +275,38 @@ requirements:
     depends_on: [REQ-001]
 
   - id: REQ-024
-    title: V3 fail-stop integration test — Phase 1 happy/partial/no_call/empty
+    title: V3 fail-stop integration test — Phase 1 happy/no_call/salvage/empty
     description: |
       ``tests/test_two_phase_audit_integration.py`` drives the v3
       Phase 1 flow against a stub provider through the public
-      ``AgentSession`` API and asserts the four load-bearing
-      transitions of the witness pipeline:
+      ``AgentSession`` API and asserts the load-bearing transitions of
+      the witness pipeline under commit-on-stop semantics:
 
-      1. Happy — ``register_event``×N + ``add_edge`` (witness passes)
-         + ``submit_extraction`` ⇒ N ``audit_event`` + 1 ``audit_edge``
-         + 1 ``extractor_cursor``, no ``extractor_partial``.
-      2. Partial — same shape but the same ``(src, dst, kind)`` tuple
-         is replayed three times with a non-witnessable quote ⇒ tuple
-         dropped, 0 ``audit_edge``, 1 ``extractor_partial`` carrying
-         the dropped tuple, cursor still advances per design §6.
-      3. No-call — child returns without calling
-         ``submit_extraction`` ⇒ 1 ``extractor_no_call`` entry, cursor
+      1. Happy — ``upsert_node``×N + ``upsert_edge`` (witness passes)
+         + ``finalize_extraction`` ⇒ N ``audit_graph_op`` node upserts
+         + 1 edge upsert + 1 ``extractor_cursor``, no
+         ``extractor_partial``.
+      3. No-call (empty) — child ends its turn without applying any op
+         AND without calling the terminator on a non-trivial window ⇒
+         nothing to salvage, so 1 ``extractor_no_call`` entry, cursor
          held.
-      4. Empty — child calls ``submit_extraction`` immediately on a
-         non-trivial window ⇒ 1 ``extractor_empty`` entry, cursor
-         held.
+      3b. Salvage (no-call with ops) — child applies graph ops but its
+         turn ends WITHOUT calling ``finalize_extraction``. Commit-on-
+         stop persists the accumulated ops as ``audit_graph_op`` entries
+         and advances the cursor; NO ``extractor_no_call`` entry is
+         recorded. The terminator is an optional fast-exit, not a commit
+         gate.
+      4. Empty — child calls the terminator immediately with no ops on a
+         non-trivial window ⇒ 1 ``extractor_empty`` entry, cursor held.
 
       Phase 2 (auditor) is out of scope for this test; commit 4 of
       the v3 plan adds matching auditor coverage.
     priority: P0
     status: tested
-    code: [src/llmharness/adapters/agentm.py]
+    code:
+      - src/llmharness/adapters/agentm.py
+      - src/llmharness/audit/runner/runner.py
+      - src/llmharness/audit/extractor/prompts/extractor_default.md
     tests: [tests/test_two_phase_audit_integration.py]
     depends_on: [REQ-019, REQ-020, REQ-021, REQ-022, REQ-030]
 
@@ -543,11 +549,18 @@ requirements:
     description: |
       SUPERSEDED BY v4 (2026-05): the hard-reject below was softened to
       an advisory. v4 replaced the ``submit_events`` / ``commit`` flow
-      with incremental ``upsert_node`` / ``upsert_edge`` ops, and
-      ``finalize_extraction`` now COMMITS a witness-valid graph while
-      surfacing chain-link (disconnected-event) cases as a SOFT warning
-      rather than rejecting them — so connectivity is encouraged, not
-      enforced. Kept for history; needs a supersede/rewrite decision.
+      with incremental ``upsert_node`` / ``upsert_edge`` ops.
+
+      v4.1 (2026-05-27) commit-on-stop: ``finalize_extraction`` is no
+      longer a commit gate. The runner commits whatever ops the firing
+      accumulated in ``state.pending_ops`` whenever the extractor child's
+      turn ends (ModelEndTurn or tool-call budget), regardless of whether
+      the terminator fired. ``finalize_extraction`` is an OPTIONAL fast-
+      exit that ends the firing early and surfaces the chain-link
+      (disconnected-event) advisory as a SOFT warning. A firing is only
+      discarded (cursor held) when zero ops were applied; chain-link is
+      encouraged, not enforced. Kept for history; needs a supersede/
+      rewrite decision.
 
       --- original v3.1 requirement ---
 
