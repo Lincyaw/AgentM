@@ -32,6 +32,30 @@ from typing import Any, Final
 
 from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolCallBlock
 
+# Empty-turn nudge: a reasoning-heavy child can end its turn emitting only
+# prose (zero tool calls), so nothing is recorded. Both child-running seams
+# (live ``run_child_task``, offline ``run_phase_standalone``) re-prompt the
+# SAME session at most this many times with :func:`build_empty_turn_nudge`
+# until at least one tool call appears. Kept here so both seams share one
+# constant and one message — the design's live ≡ offline invariant.
+MAX_EMPTY_TURN_NUDGES: Final = 1
+
+
+def build_empty_turn_nudge(terminal_tool: str) -> str:
+    """The nudge message sent to a child that produced zero tool calls.
+
+    Parametrised on the terminal tool name so the same text serves the
+    extractor (``finalize_extraction``) and the auditor (``submit_verdict``).
+    """
+    return (
+        "You ended your turn without calling any tool. Your output is recorded "
+        "ONLY through tool calls — prose and reasoning alone change nothing. Emit "
+        "your work as tool calls now (for the graph: upsert_node / upsert_edge / "
+        f"delete_node / delete_edge; then call {terminal_tool} when done). If there "
+        f"is genuinely nothing to record, call {terminal_tool} with an empty result "
+        "to end cleanly."
+    )
+
 
 def serialize_block(block: Any) -> dict[str, Any] | None:
     """Serialize one content block into the replay-sidecar block shape.
@@ -103,6 +127,18 @@ def flatten_assistant_blocks(messages: list[AgentMessage]) -> list[dict[str, Any
     return blocks
 
 
+def has_any_tool_call(messages: list[AgentMessage]) -> bool:
+    """True iff any assistant block in ``messages`` is a tool call.
+
+    Reuses :func:`flatten_assistant_blocks`, whose serialized blocks tag
+    tool calls with ``"type": "tool_call"`` — the same shape the replay
+    sidecar stores. Used by both child-running seams to detect a
+    genuinely-empty turn (zero tool calls) that warrants an empty-turn
+    nudge before the terminal-args scrape.
+    """
+    return any(block.get("type") == "tool_call" for block in flatten_assistant_blocks(messages))
+
+
 def terminal_tool_arguments(messages: list[AgentMessage], tool_name: str) -> dict[str, Any] | None:
     """Last-match-wins scan for a ``tool_name`` tool-call's arguments.
 
@@ -145,8 +181,11 @@ def final_assistant_text(messages: list[AgentMessage]) -> str | None:
 
 
 __all__: Final = [
+    "MAX_EMPTY_TURN_NUDGES",
+    "build_empty_turn_nudge",
     "final_assistant_text",
     "flatten_assistant_blocks",
+    "has_any_tool_call",
     "serialize_block",
     "terminal_tool_arguments",
 ]
