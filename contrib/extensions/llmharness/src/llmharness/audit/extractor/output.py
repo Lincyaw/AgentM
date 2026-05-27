@@ -48,11 +48,10 @@ class RawExtractorOutput:
         every ``apply_node_upsert`` / ``apply_edge_upsert`` already
         appended its op to ``state.pending_ops``, so freezing the state
         commits from whatever ops were applied. :meth:`ExtractionState.finalize`
-        is idempotent (no-op when the terminator already finalized) and its
-        ``not _events_pending and pending_ops`` branch reads the op log back
-        into ``events`` / ``edges`` even when the terminator was never
-        called. Reading ops back here keeps the design's live ≡ offline
-        invariant intact.
+        is idempotent (no-op when the terminator already finalized) and
+        reads the op log back into ``events`` / ``edges`` even when the
+        terminator was never called. Reading ops back here keeps the
+        design's live ≡ offline invariant intact.
         """
         if not state.committed:
             state.finalize()
