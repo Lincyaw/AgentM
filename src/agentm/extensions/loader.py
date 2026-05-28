@@ -162,7 +162,12 @@ def _resolve_scenario_entrypoint(name: str) -> Path | None:
         # deleted on context exit, and a single file can't satisfy a
         # scenario's sibling-file needs anyway.)
         try:
-            concrete = Path(os.fspath(manifest))
+            # ``Traversable`` is not statically declared as ``os.PathLike``
+            # but unpacked-install implementations (``PosixPath`` /
+            # ``WindowsPath``) satisfy it at runtime — the ``except
+            # TypeError`` above is the explicit fallback for the zipped
+            # case where ``os.fspath`` legitimately refuses.
+            concrete = Path(os.fspath(manifest))  # type: ignore[call-overload]
         except TypeError:
             continue
         if concrete.is_file():

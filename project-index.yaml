@@ -184,6 +184,7 @@ requirements:
       - path: .claude/tasks/2026-05-09-issue-87-builtin-atoms-extension-api.md
     depends_on:
       - REQ-086-atom-rework-infra
+      - REQ-176-background-tasks-registry
 
   - id: REQ-088-builtin-atom-hygiene
     title: Builtin atom requires, schema, and diagnostic hygiene
@@ -587,3 +588,98 @@ requirements:
       - REQ-086-atom-rework-infra
     depends_on:
       - REQ-086-atom-rework-infra
+
+  - id: REQ-176-session-inbox
+    title: SessionInbox spine + persistent driver
+    description: >
+      The runtime owns a per-session FIFO ``SessionInbox`` (substrate, not
+      atom) that is the single entry point for messages reaching the loop —
+      user prompts and atom-pushed items (background completions, monitor
+      fires, sub_agent findings). A persistent driver task is the SOLE
+      caller of ``_loop.run``; ``prompt`` and ``tick`` push to the inbox and
+      wait on the next ``agent_end``. The runtime registers two handlers
+      (``context`` drain + ``decide_turn_action`` keep-alive floor) that
+      generalize the legacy per-atom completion-injection paths. Concurrent
+      ``prompt`` callers FIFO-serialize through an ``asyncio.Lock``.
+    priority: P0
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/runtime/session_inbox.py
+      - path: src/agentm/core/runtime/session.py
+      - path: src/agentm/core/lib/shutdown.py
+    tests:
+      - path: tests/unit/core/test_session_inbox.py
+    docs:
+      - path: .claude/designs/session-inbox.md
+      - path: .claude/plans/2026-05-28-session-inbox.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
+  - id: REQ-176-background-tasks-registry
+    title: Generic background-task registry for detached asyncio units
+    description: >
+      ``core.lib.background_tasks`` exposes a generic ``BackgroundTaskRegistry``
+      shared by every atom that runs work in a detached ``asyncio.Task`` while
+      the agent keeps taking turns. Bounded (``max_workers=N``) and unbounded
+      (``max_workers=None``) contracts: the unbounded mode short-circuits all
+      slot accounting; the bounded mode raises ``SlotLimitReached`` at N+1.
+      Today consumed by ``sub_agent`` (bounded) and ``background_exec``
+      (unbounded).
+    priority: P0
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/lib/background_tasks.py
+    tests:
+      - path: tests/unit/core/lib/test_background_tasks.py
+    docs:
+      - path: .claude/designs/session-inbox.md
+    depends_on:
+      - REQ-086-atom-rework-infra
+
+  - id: REQ-176-background-exec-atom
+    title: Builtin background_exec atom — auto-background overran tool calls
+    description: >
+      The ``background_exec`` atom wraps every registered tool in an auto-bg
+      shim: fast calls return unchanged, overruns move to a detached task and
+      return a ticket plus inbox-driven progress reports (ticker + completion
+      milestone). Companion tools ``check_background`` / ``wait_background``
+      / ``cancel_background`` poll the registry; a session_shutdown handler
+      drains running tasks under a configurable grace.
+    priority: P0
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/extensions/builtin/background_exec.py
+    tests:
+      - path: tests/unit/extensions/test_background_exec.py
+    docs:
+      - path: .claude/designs/session-inbox.md
+      - path: .claude/plans/2026-05-28-session-inbox.md
+    depends_on:
+      - REQ-176-session-inbox
+      - REQ-176-background-tasks-registry
+
+  - id: REQ-176-monitor-atom
+    title: Builtin monitor atom — agent-defined wakeups + channel subscriptions
+    description: >
+      The ``monitor`` atom exposes ``schedule_wakeup`` (one-shot timer →
+      inbox push at now+delay) and ``create_monitor`` (bus channel
+      subscription → inbox push on each fire under a stable dedup_key).
+      ``create_monitor`` refuses kernel-control channels at the call site
+      (denylist of channels like ``context`` / ``decide_turn_action`` that
+      would create an unbreakable inbox/loop spin). Per-session in-memory
+      state only; a restart regenerates monitors via re-prompting.
+    priority: P0
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/extensions/builtin/monitor.py
+    tests:
+      - path: tests/unit/extensions/test_monitor.py
+    docs:
+      - path: .claude/designs/session-inbox.md
+      - path: .claude/plans/2026-05-28-session-inbox.md
+    depends_on:
+      - REQ-176-session-inbox

@@ -35,6 +35,7 @@ from agentm.core.runtime.extension import (
     _ExtensionAPIImpl,
     build_extension_api_scope,
 )
+from agentm.core.runtime.session_inbox import SessionInbox
 from agentm.core.runtime.session_manager import (
     _entry_to_record,
     _header_to_record,
@@ -80,7 +81,7 @@ def _build_api(tmp_path: Path, *, session_id: str = "sess-semconv") -> _Extensio
         commands={},
         providers={},
         renderers={},
-        pending_user_messages=[],
+        inbox=SessionInbox(),
         model_getter=lambda: None,
         provider_getter=lambda: None,
     )

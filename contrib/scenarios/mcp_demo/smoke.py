@@ -34,6 +34,7 @@ from agentm.core.runtime.extension import (  # noqa: E402
     _ExtensionAPIImpl,
     build_extension_api_scope,
 )
+from agentm.core.runtime.session_inbox import SessionInbox  # noqa: E402
 
 from contrib.extensions.mcp_bridge import install  # noqa: E402
 from contrib.extensions.mcp_bridge.client import MCPSessionManager  # noqa: E402
@@ -79,7 +80,7 @@ async def main() -> int:
         commands={},
         providers={},
         renderers={},
-        pending_user_messages=[],
+        inbox=SessionInbox(),
         model_getter=lambda: None,
         provider_getter=lambda: None,
     )

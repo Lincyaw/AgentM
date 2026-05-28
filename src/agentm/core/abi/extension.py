@@ -369,6 +369,31 @@ class ExtensionAPI(Protocol):
     def register_tool_renderer(self, tool_name: str, renderer: Renderer) -> None: ...
 
     # --- Actions ------------------------------------------------------------
+    def post_inbox(
+        self,
+        *,
+        source: str,
+        payload: Any,
+        dedup_key: str | None = None,
+    ) -> None:
+        """Push an item onto the session inbox — the generic producer entry.
+
+        ``source`` is the mechanism-level routing tag (``"user"`` /
+        ``"background"`` / ``"ticker"`` / ``"monitor"`` / ``"subagent"``) that
+        decides how the item is rendered at the next turn boundary (see
+        ``SessionInbox.render_item``). ``payload`` is rendered per ``source``.
+        A producer that supersedes its own prior, not-yet-drained item passes a
+        stable ``dedup_key``: a later push with the same key replaces the
+        earlier item in place rather than stacking (e.g. a background ticker's
+        rolling status line).
+
+        :meth:`send_user_message` is the ``source="user"`` sugar over this; new
+        producers (``background_exec``, ``monitor``, the future ``sub_agent``
+        rewrite) post through ``post_inbox`` directly. See
+        ``.claude/designs/session-inbox.md`` (step-3 design decisions).
+        """
+        ...
+
     def send_user_message(self, content: str | list[Any]) -> None: ...
     async def spawn_child_session(
         self, config: Any | None = None, **kwargs: Any

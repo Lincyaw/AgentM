@@ -55,6 +55,7 @@ from agentm.core.abi.operations import (
 )
 from agentm.core.abi.project_layout import ProjectLayout
 from agentm.core.abi.resource import ResourceWriter
+from agentm.core.runtime.session_inbox import InboxItem, SessionInbox
 from agentm.core.runtime.otel_export import (
     SessionTelemetry,
     setup_session_telemetry,
@@ -301,7 +302,7 @@ class ExtensionAPIScope:
     commands: dict[str, CommandSpec]
     providers: dict[str, ProviderConfig]
     renderers: dict[str, Renderer]
-    pending_user_messages: list[str | list[Any]]
+    inbox: SessionInbox
     model_getter: Any
     provider_getter: Any
     gateway: _SessionGateway
@@ -328,7 +329,7 @@ def build_extension_api_scope(
     commands: dict[str, CommandSpec],
     providers: dict[str, ProviderConfig],
     renderers: dict[str, Renderer],
-    pending_user_messages: list[str | list[Any]],
+    inbox: SessionInbox,
     model_getter: Any,
     provider_getter: Any,
     gateway: _SessionGateway | None = None,
@@ -365,7 +366,7 @@ def build_extension_api_scope(
         commands=commands,
         providers=providers,
         renderers=renderers,
-        pending_user_messages=pending_user_messages,
+        inbox=inbox,
         model_getter=model_getter,
         provider_getter=provider_getter,
         gateway=gateway or _NoopSessionGateway(),
@@ -412,7 +413,7 @@ class _ExtensionAPIImpl:
         self._commands = scope.commands
         self._providers = scope.providers
         self._renderers = scope.renderers
-        self._pending_user_messages = scope.pending_user_messages
+        self._inbox = scope.inbox
         self._model_getter = scope.model_getter
         self._provider_getter = scope.provider_getter
         self._gateway: _SessionGateway = scope.gateway
@@ -518,12 +519,39 @@ class _ExtensionAPIImpl:
 
     # --- Actions -----------------------------------------------------------
 
-    def send_user_message(self, content: str | list[Any]) -> None:
-        """Queue a user message to be prepended to the next ``prompt`` turn."""
+    def post_inbox(
+        self,
+        *,
+        source: str,
+        payload: Any,
+        dedup_key: str | None = None,
+    ) -> None:
+        """Push an item onto the session inbox — the generic producer entry.
+
+        Thin wrapper over :meth:`SessionInbox.push`. The runtime-owned
+        ``context`` handler drains the inbox at the next turn boundary and
+        renders each item per its ``source``, so a posted item surfaces on the
+        very next turn. ``dedup_key`` makes a later same-key push replace the
+        earlier undrained item in place (no stacking). See
+        ``.claude/designs/session-inbox.md`` (step-3 design decisions).
+        """
         self._assert_active()
+        self._inbox.push(
+            InboxItem(source=source, payload=payload, dedup_key=dedup_key)
+        )
+
+    def send_user_message(self, content: str | list[Any]) -> None:
+        """Push a user message onto the session inbox for the next turn.
+
+        Sugar over :meth:`post_inbox` (``source="user"``). The runtime-owned
+        ``context`` handler drains the inbox at the next turn boundary, so
+        content surfaces on the very next turn — the same observable behaviour
+        the old ``pending_user_messages`` queue had, now riding the single
+        session-inbox entry point.
+        """
         from agentm.core.abi.events import ApiSendUserMessageEvent
 
-        self._pending_user_messages.append(content)
+        self.post_inbox(source="user", payload=content)
         self._bus.emit_sync(
             ApiSendUserMessageEvent.CHANNEL,
             ApiSendUserMessageEvent(
