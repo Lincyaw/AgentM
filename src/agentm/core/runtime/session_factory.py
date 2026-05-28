@@ -51,6 +51,7 @@ from agentm.core.runtime.session_helpers import (
     ensure_floor_atom,
     resolve_provider_config,
 )
+from agentm.core.runtime.session_inbox import SessionInbox
 from agentm.core.runtime.session_manager import InMemorySessionManager, SessionManager
 from agentm.core.runtime.session_runtime import SessionRuntime
 
@@ -146,7 +147,7 @@ async def create_agent_session(
     commands: dict[str, CommandSpec] = {}
     providers: dict[str, ProviderConfig] = {}
     renderers: dict[str, Renderer] = {}
-    pending_user_messages: list[str | list[Any]] = []
+    inbox = SessionInbox()
     apis: dict[str, _ExtensionAPIImpl] = {}
     services: dict[str, Any] = {}
 
@@ -306,7 +307,7 @@ async def create_agent_session(
         commands=commands,
         providers=providers,
         renderers=renderers,
-        pending_user_messages=pending_user_messages,
+        inbox=inbox,
         model_getter=_model_getter,
         provider_getter=_provider_getter,
         gateway=reloader,
@@ -480,7 +481,7 @@ async def create_agent_session(
         apis=apis,
         services=services,
         reloader=reloader,
-        pending_user_messages=pending_user_messages,
+        inbox=inbox,
     )
     instance = session_cls(
         cwd=config.cwd,

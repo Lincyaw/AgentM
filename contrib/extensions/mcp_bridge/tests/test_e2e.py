@@ -26,6 +26,7 @@ from agentm.core.runtime.extension import (
     _ExtensionAPIImpl,
     build_extension_api_scope,
 )
+from agentm.core.runtime.session_inbox import SessionInbox
 
 from contrib.extensions.mcp_bridge import MANIFEST, install
 from contrib.extensions.mcp_bridge.client import (
@@ -125,7 +126,7 @@ def _make_api(tmp_path: Path, tools: list[Any]) -> _ExtensionAPIImpl:
         commands={},
         providers={},
         renderers={},
-        pending_user_messages=[],
+        inbox=SessionInbox(),
         model_getter=lambda: None,
         provider_getter=lambda: None,
     )
