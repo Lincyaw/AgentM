@@ -81,7 +81,17 @@ to step 5 (host). `wait_nonempty` is implemented now but unused by step 1.
    (idle auto-wakeup = step 5); `cancel_background` is the first `registry.cancel`
    caller; `render_item` gains `source="background"`; terminal-from-background
    simplified (deferred to step 5); **existing tool tests must stay green**.
-4. `monitor` atom: `schedule_wakeup` / `create_monitor` / `list_monitors` / `cancel_monitor`.
+4. `monitor` atom: `schedule_wakeup(delay)` (one-shot asyncio.sleep →
+   `post_inbox(source="monitor", dedup_key=monitor_id)`), `create_monitor(watch=…)`
+   subscribing to a bus channel (on fire → `post_inbox`), `list_monitors`,
+   `cancel_monitor` (per-monitor cancel; MUST NOT touch the shared session
+   `signal` — same discipline as step-3 Major 2). `render_item` gains
+   `source="monitor"`. **Lifecycle from day 1** (don't repeat step-3 Major 1):
+   `SessionShutdownEvent` handler cancels every monitor task + clears
+   subscriptions; `post_inbox` wrapped in `ExtensionStaleError` guard (step-3
+   Major 3). Per-session in-memory state (transient — restart regenerates, per
+   step-1 decision #5). Condition-polling form of `create_monitor` is deferred
+   (MVP supports bus-channel subscription only).
 5. Long-lived host driver loop + interrupt-and-resume (abort turn via `signal`,
    preserve context, resume with new inbox input); validate on one channel first.
 
@@ -95,6 +105,26 @@ to step 5 (host). `wait_nonempty` is implemented now but unused by step 1.
   passed. Nits deferred: Nit2 (`_now` function-local import) → fold into step 2;
   Nit1 (tests reach `session._apis` for `send_user_message`) → step 5 once a public
   push handle lands.
+
+- **Step 2 DONE (2026-05-28).** Merged FF to `feat/session-inbox` as `5bd02259`.
+  reviewer CLEAN (0 blocker / 0 major; 2 take-or-leave nits: `cancel()` had zero
+  callers — step 3 became its first; docstring ratio acceptable as boundary-contract
+  doc). Re-verified on HEAD: 7 passed targeted (registry + sub_agent lifecycle);
+  ruff/mypy clean.
+
+- **Step 3 DONE (2026-05-28).** Merged FF to `feat/session-inbox` as `685998be`.
+  Initial commit `9491700b` → review found 0 blocker / **4 major** (shutdown leak,
+  cancel over-cancels under host signal, unhandled producer exceptions, slot
+  invariant). Worker fix `52f5c9c6` → re-review found **1 new major** (refusal branch
+  itself leaked the inner task in the shutdown race; masked by a cooperative-only
+  test stub). Worker fix `685998be` adds bounded-grace-then-cancel + a
+  non-cooperative-inner test. Final: 100 passed, ruff/mypy clean. New fail-stop
+  tests: signal-isolated cancel under host signal, slot-non-negative, shutdown
+  drain, stale-doesn't-crash, double-show-suppressed, wrap idempotency across two
+  `agent_start` cycles, non-cooperative-inner refusal terminates. **Lessons carried
+  to step 4**: lifecycle (SessionShutdownEvent handler) from day 1; cancel must
+  never touch the shared kernel signal; producer paths must guard
+  `ExtensionStaleError`.
 
 ## Step-order refinement (decided 2026-05-28)
 
